@@ -212,7 +212,7 @@ async def speak_in_user_voice_channel(message: discord.Message, text: str) -> No
         await message.reply("❌ O Discord bloqueou minha entrada na call (permissão insuficiente).")
         return
     except Exception as e:
-        await message.reply(f"❌ Não consegui entrar na call. Erro: `{type(e).__name__}`")
+        await message.reply(f"❌ Não consegui entrar na call. Erro: `{type(e).__name__}` — `{e}`")
         print(f"Erro ao conectar/mover: {repr(e)}")
         return
 
