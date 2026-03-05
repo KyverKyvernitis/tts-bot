@@ -1,118 +1,84 @@
 import os
-import time
 import asyncio
+import threading
+from flask import Flask
 import discord
-from db import cooldowns, ensure_indexes
+from discord.ext import commands
 
-TOKEN = os.getenv("DISCORD_TOKEN", "YOUR_BOT_TOKEN")
-ROLE_ID = int(os.getenv("ROLE_ID", "123456789012345678"))
-COOLDOWN_SECONDS = 4 * 60 * 60
+# ---- ENV ----
+TOKEN = os.getenv("DISCORD_TOKEN")
+TARGET_ROLE_ID = int(os.getenv("ROLE_ID", "0"))
+DISABLE_TIME = int(os.getenv("DISABLE_TIME", "14400"))
+PORT = int(os.getenv("PORT", "10000"))  # Render sets PORT for web services
 
+# ---- WEB SERVER ----
+app = Flask(__name__)
+
+@app.get("/")
+def home():
+    return "OK", 200
+
+@app.get("/health")
+def health():
+    return "healthy", 200
+
+def run_web():
+    # host must be 0.0.0.0 on Render
+    app.run(host="0.0.0.0", port=PORT)
+
+# ---- DISCORD BOT ----
 intents = discord.Intents.default()
-intents.guilds = True
-intents.messages = True
 intents.message_content = True
+intents.guilds = True
 
-client = discord.Client(intents=intents)
-scheduled_tasks: dict[tuple[int, int], asyncio.Task] = {}
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-async def get_active_cooldown(guild_id: int, role_id: int, now: int):
-    return await cooldowns.find_one(
-        {"guild_id": guild_id, "role_id": role_id, "ends_at": {"$gt": now}}
-    )
+cooldown_active = False
 
-async def set_cooldown(guild_id: int, role_id: int, ends_at: int):
-    await cooldowns.update_one(
-        {"guild_id": guild_id, "role_id": role_id},
-        {"$set": {"ends_at": ends_at}},
-        upsert=True,
-    )
-
-async def clear_cooldown(guild_id: int, role_id: int):
-    await cooldowns.delete_one({"guild_id": guild_id, "role_id": role_id})
-
-async def schedule_reenable(guild_id: int, role_id: int):
-    key = (guild_id, role_id)
-    t = scheduled_tasks.get(key)
-    if t and not t.done():
-        return
-
-    async def runner():
-        try:
-            while True:
-                doc = await cooldowns.find_one({"guild_id": guild_id, "role_id": role_id})
-                if not doc:
-                    return
-                ends_at = int(doc["ends_at"])
-                now = int(time.time())
-                remaining = ends_at - now
-                if remaining > 0:
-                    await asyncio.sleep(min(remaining, 3600))
-                    continue
-
-                guild = client.get_guild(guild_id)
-                if not guild:
-                    await asyncio.sleep(10)
-                    continue
-
-                role = guild.get_role(role_id)
-                if not role:
-                    await clear_cooldown(guild_id, role_id)
-                    return
-
-                try:
-                    await role.edit(mentionable=True, reason="Role mention cooldown ended")
-                finally:
-                    await clear_cooldown(guild_id, role_id)
-                return
-        except asyncio.CancelledError:
-            return
-
-    scheduled_tasks[key] = asyncio.create_task(runner())
-
-@client.event
+@bot.event
 async def on_ready():
-    await ensure_indexes()
-    now = int(time.time())
-    async for doc in cooldowns.find({"ends_at": {"$gt": now}}):
-        guild_id = int(doc["guild_id"])
-        role_id = int(doc["role_id"])
+    print(f"Logged in as {bot.user} (id: {bot.user.id})")
 
-        guild = client.get_guild(guild_id)
-        if guild:
-            role = guild.get_role(role_id)
-            if role and role.mentionable:
-                try:
-                    await role.edit(mentionable=False, reason="Restored active cooldown on restart")
-                except Exception:
-                    pass
-
-        await schedule_reenable(guild_id, role_id)
-
-@client.event
+@bot.event
 async def on_message(message: discord.Message):
+    global cooldown_active
+
     if message.author.bot or not message.guild:
         return
 
-    guild = message.guild
-    role = guild.get_role(ROLE_ID)
-    if not role:
-        return
+    role = message.guild.get_role(TARGET_ROLE_ID)
 
-    if role not in message.role_mentions:
-        return
+    # Only trigger once while cooldown is active (no reset/extend)
+    if role and role in message.role_mentions and not cooldown_active:
+        cooldown_active = True
 
-    now = int(time.time())
-    if await get_active_cooldown(guild.id, role.id, now):
-        return
+        try:
+            if role.mentionable:
+                await role.edit(mentionable=False, reason="Role mentioned; auto-disable mentions")
+        except discord.Forbidden:
+            print("Missing permissions to edit role (Manage Roles / role hierarchy).")
+        except discord.HTTPException as e:
+            print(f"Failed to edit role: {e}")
 
-    ends_at = now + COOLDOWN_SECONDS
-    await set_cooldown(guild.id, role.id, ends_at)
+        await asyncio.sleep(DISABLE_TIME)
 
-    if role.mentionable:
-        await role.edit(mentionable=False, reason="Role mentioned - starting 4h cooldown")
+        role = message.guild.get_role(TARGET_ROLE_ID)
+        if role:
+            try:
+                await role.edit(mentionable=True, reason="Cooldown finished; auto re-enable mentions")
+            except Exception as e:
+                print(f"Failed to re-enable role mentions: {e}")
 
-    await schedule_reenable(guild.id, role.id)
+        cooldown_active = False
 
-async def start_discord():
-    await client.start(TOKEN) 
+    await bot.process_commands(message)
+
+def main():
+    # Start Flask in a separate thread so discord.py can run normally
+    threading.Thread(target=run_web, daemon=True).start()
+    bot.run(TOKEN)
+
+if __name__ == "__main__":
+    if not TOKEN or TARGET_ROLE_ID == 0:
+        raise RuntimeError("Missing env vars: DISCORD_TOKEN and/or ROLE_ID")
+    main()
