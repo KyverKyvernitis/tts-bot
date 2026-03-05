@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import tempfile
 from typing import Optional, Dict, Any
 
 from flask import Flask
@@ -10,6 +11,7 @@ from discord.ext import commands
 from discord import app_commands
 
 from motor.motor_asyncio import AsyncIOMotorClient
+from gtts import gTTS
 
 # -------------------------
 # VARIÁVEIS DE AMBIENTE
@@ -24,6 +26,9 @@ DISABLE_TIME = int(os.getenv("DISABLE_TIME", "14400"))
 TRIGGER_WORD = os.getenv("TRIGGER_WORD", "").lower().strip()               # palavra que desconecta
 MUTE_TOGGLE_WORD = os.getenv("MUTE_TOGGLE_WORD", "rola").lower().strip()   # palavra que mute/desmute (toggle)
 TARGET_USER_ID = int(os.getenv("TARGET_USER_ID", "0"))                     # ID do usuário alvo
+
+# TTS por vírgula (liga/desliga por env)
+TTS_ENABLED = os.getenv("TTS_ENABLED", "true").lower().strip() in ("1", "true", "yes", "y", "on")
 
 # Porta HTTP (a Render costuma fornecer PORT automaticamente)
 PORT = int(os.getenv("PORT", "10000"))
@@ -70,6 +75,7 @@ def run_web():
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
+intents.voice_states = True  # necessário para detectar gente saindo/entrando de call
 
 
 class MyBot(commands.Bot):
@@ -86,6 +92,9 @@ class MyBot(commands.Bot):
         # Cache em memória das configurações por servidor:
         # { guild_id: {"anti_mzk_enabled": bool} }
         self.guild_settings: Dict[int, Dict[str, Any]] = {}
+
+        # Lock pra evitar TTS simultâneo (por guild)
+        self.tts_locks: Dict[int, asyncio.Lock] = {}
 
     async def setup_hook(self) -> None:
         # 1) Conectar no MongoDB
@@ -140,6 +149,12 @@ class MyBot(commands.Bot):
             upsert=True,
         )
 
+    def get_tts_lock(self, guild_id: int) -> asyncio.Lock:
+        """Um lock por servidor para evitar áudio sobreposto."""
+        if guild_id not in self.tts_locks:
+            self.tts_locks[guild_id] = asyncio.Lock()
+        return self.tts_locks[guild_id]
+
 
 bot = MyBot()
 
@@ -155,6 +170,62 @@ async def get_target_member(guild: discord.Guild, user_id: int) -> Optional[disc
         return None
 
 
+async def speak_in_user_voice_channel(message: discord.Message, text: str) -> None:
+    """
+    Entra no canal de voz do autor e fala o texto usando gTTS em português.
+    Requer ffmpeg disponível no ambiente.
+    """
+    if not message.guild:
+        return
+
+    voice_state = getattr(message.author, "voice", None)
+    if not voice_state or not voice_state.channel:
+        return  # autor não está em call
+
+    channel: discord.VoiceChannel = voice_state.channel
+
+    vc = message.guild.voice_client
+    if vc is None:
+        vc = await channel.connect()
+    elif vc.channel and vc.channel.id != channel.id:
+        await vc.move_to(channel)
+
+    lock = bot.get_tts_lock(message.guild.id)
+
+    async with lock:
+        if vc.is_playing():
+            vc.stop()
+
+        # Limite simples pra evitar abuso
+        text = text.strip()
+        if not text:
+            return
+        if len(text) > 250:
+            text = text[:250]
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+                tmp_path = fp.name
+
+            # Voz Google (gTTS) em português
+            tts = gTTS(text=text, lang="pt", tld="com.br")
+            tts.save(tmp_path)
+
+            audio = discord.FFmpegPCMAudio(tmp_path)
+            vc.play(audio)
+
+            while vc.is_playing():
+                await asyncio.sleep(0.2)
+
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+
 @bot.event
 async def on_ready():
     print(f"Logado como {bot.user} (id: {bot.user.id})")
@@ -166,7 +237,6 @@ async def on_ready():
 @bot.tree.command(name="antimzk", description="Ativa/desativa a censura anti-mzk (voz).")
 @app_commands.checks.has_permissions(move_members=True)
 async def antimzk(interaction: discord.Interaction):
-    # Garante que está em um servidor
     if interaction.guild is None:
         await interaction.response.send_message("Use esse comando em um servidor.", ephemeral=True)
         return
@@ -174,7 +244,6 @@ async def antimzk(interaction: discord.Interaction):
     gid = interaction.guild.id
     novo_valor = not bot.is_anti_mzk_enabled(gid)
 
-    # Persistir no Mongo
     try:
         await bot.set_anti_mzk_enabled(gid, novo_valor)
     except Exception as e:
@@ -185,7 +254,6 @@ async def antimzk(interaction: discord.Interaction):
         )
         return
 
-    # Resposta em embed
     embed = discord.Embed(
         description="✅ Censura anti-mzk ativada" if novo_valor else "❌ Censura anti-mzk desativada",
         color=ON_COLOR if novo_valor else OFF_COLOR,
@@ -210,6 +278,32 @@ async def antimzk_error(interaction: discord.Interaction, error: app_commands.Ap
 
 
 # -------------------------
+# SAIR DA CALL QUANDO FICAR SOZINHO (sem humanos)
+# -------------------------
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    # Se o bot não estiver conectado em voice nesse servidor, não faz nada
+    guild = member.guild
+    vc = guild.voice_client
+    if vc is None or vc.channel is None:
+        return
+
+    channel = vc.channel
+    # Conta apenas humanos (não-bots)
+    humans = [m for m in channel.members if not m.bot]
+
+    # Se não tem humanos, o bot sai
+    if len(humans) == 0:
+        try:
+            # Se estiver tocando, para antes de sair
+            if vc.is_playing():
+                vc.stop()
+            await vc.disconnect()
+        except Exception as e:
+            print(f"Falha ao desconectar por estar sozinho: {e}")
+
+
+# -------------------------
 # EVENTO: ao receber mensagem
 # -------------------------
 @bot.event
@@ -217,7 +311,21 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
+    # -------------------------
+    # 0) TTS por vírgula: ",texto"
+    # -------------------------
+    if TTS_ENABLED and message.content.startswith(","):
+        text = message.content[1:].strip()
+        if text:
+            try:
+                await speak_in_user_voice_channel(message, text)
+            except Exception as e:
+                print(f"Erro no TTS: {e}")
+        return
+
+    # -------------------------
     # 1) Função original: ao mencionar um cargo, desativa menção por um tempo
+    # -------------------------
     role = message.guild.get_role(TARGET_ROLE_ID)
 
     if role and role in message.role_mentions and not bot.cooldown_active:
@@ -247,7 +355,9 @@ async def on_message(message: discord.Message):
 
         bot.cooldown_active = False
 
+    # -------------------------
     # 2) Gatilhos de voz (anti-mzk), apenas se estiver ativado no servidor
+    # -------------------------
     if (
         bot.is_anti_mzk_enabled(message.guild.id)
         and TARGET_USER_ID
@@ -286,7 +396,6 @@ async def on_message(message: discord.Message):
 
 
 def main():
-    # Inicia o Flask em thread separada e roda o bot normalmente
     threading.Thread(target=run_web, daemon=True).start()
     bot.run(TOKEN)
 
