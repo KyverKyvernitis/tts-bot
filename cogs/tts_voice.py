@@ -3,9 +3,16 @@ import asyncio
 import tempfile
 import discord
 from discord.ext import commands
-from gtts import gTTS
 
-from config import TTS_ENABLED, BLOCK_VOICE_BOT_ID
+import edge_tts
+
+from config import (
+    TTS_ENABLED,
+    BLOCK_VOICE_BOT_ID,
+    TTS_VOICE,
+    TTS_RATE,
+    TTS_VOLUME,
+)
 
 
 class TtsVoiceCog(commands.Cog):
@@ -19,12 +26,7 @@ class TtsVoiceCog(commands.Cog):
         return self.locks[guild_id]
 
     async def _reply_temp_error(self, message: discord.Message, content: str, delay: int = 7):
-        """
-        Responde com uma mensagem temporária e tenta apagar:
-        - a mensagem do usuário que causou o erro
-        - a resposta do bot
-        após 'delay' segundos.
-        """
+        """Responde e apaga a msg do usuário + resposta do bot após alguns segundos."""
         try:
             bot_msg = await message.reply(content)
         except Exception:
@@ -32,20 +34,29 @@ class TtsVoiceCog(commands.Cog):
 
         async def _cleanup():
             await asyncio.sleep(delay)
-
-            # apagar resposta do bot
             try:
                 await bot_msg.delete()
             except Exception:
                 pass
-
-            # apagar mensagem do usuário
             try:
                 await message.delete()
             except Exception:
                 pass
 
         asyncio.create_task(_cleanup())
+
+    async def _synthesize_edge_tts(self, text: str, out_path: str):
+        """
+        Gera áudio usando edge-tts.
+        O output é mp3 por padrão.
+        """
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=TTS_VOICE,
+            rate=TTS_RATE,
+            volume=TTS_VOLUME,
+        )
+        await communicate.save(out_path)
 
     async def speak(self, message: discord.Message, text: str):
         if not message.guild:
@@ -58,12 +69,12 @@ class TtsVoiceCog(commands.Cog):
 
         channel: discord.VoiceChannel = vs.channel
 
-        # bloqueia entrar se o ID informado estiver no canal
+        # Bloqueia entrar se o bot específico estiver na call
         if BLOCK_VOICE_BOT_ID and any(m.id == BLOCK_VOICE_BOT_ID for m in channel.members):
             await self._reply_temp_error(message, "❌ Já existe um bot de voz nesta call")
             return
 
-        # permissões no canal de voz (connect/speak)
+        # Permissões
         me = message.guild.me or message.guild.get_member(self.bot.user.id)
         perms = channel.permissions_for(me)
         if not perms.connect:
@@ -73,7 +84,6 @@ class TtsVoiceCog(commands.Cog):
             await self._reply_temp_error(message, "❌ Eu não tenho permissão **Falar** nesse canal de voz.")
             return
 
-        # conectar/mover
         vc = message.guild.voice_client
         try:
             if vc is None:
@@ -81,10 +91,7 @@ class TtsVoiceCog(commands.Cog):
             elif vc.channel and vc.channel.id != channel.id:
                 await vc.move_to(channel)
         except Exception as e:
-            await self._reply_temp_error(
-                message,
-                f"❌ Não consegui entrar na call. Erro: `{type(e).__name__}` — `{e}`"
-            )
+            await self._reply_temp_error(message, f"❌ Não consegui entrar na call. Erro: `{type(e).__name__}` — `{e}`")
             return
 
         async with self._lock(message.guild.id):
@@ -100,22 +107,21 @@ class TtsVoiceCog(commands.Cog):
 
             tmp = None
             try:
+                # edge-tts gera mp3
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
                     tmp = fp.name
 
                 try:
-                    gTTS(text=text, lang="pt", tld="com.br").save(tmp)
-                except Exception:
-                    await self._reply_temp_error(message, "❌ Falhei ao gerar a voz (gTTS).")
+                    await self._synthesize_edge_tts(text, tmp)
+                except Exception as e:
+                    await self._reply_temp_error(message, f"❌ Falhei ao gerar a voz (edge-tts). Erro: `{type(e).__name__}`")
+                    print(f"edge-tts erro: {repr(e)}")
                     return
 
                 try:
                     vc.play(discord.FFmpegPCMAudio(tmp))
                 except Exception as e:
-                    await self._reply_temp_error(
-                        message,
-                        f"❌ Não consegui tocar o áudio. Erro: `{type(e).__name__}` — `{e}`"
-                    )
+                    await self._reply_temp_error(message, f"❌ Não consegui tocar o áudio. Erro: `{type(e).__name__}` — `{e}`")
                     return
 
                 while vc.is_playing():
