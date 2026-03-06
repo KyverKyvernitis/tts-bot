@@ -101,7 +101,9 @@ class TtsVoiceCog(commands.Cog):
 
         channel: discord.VoiceChannel = vs.channel
 
-        if BLOCK_VOICE_BOT_ID and any(m.id == BLOCK_VOICE_BOT_ID for m in channel.members):
+        block_enabled = self.bot.settings_db.block_voice_bot_enabled(message.guild.id)
+
+        if block_enabled and BLOCK_VOICE_BOT_ID and any(m.id == BLOCK_VOICE_BOT_ID for m in channel.members):
             await self._reply_temp_error(message, "❌ Já existe um bot de voz nesta call")
             return
 
@@ -272,6 +274,29 @@ class TtsVoiceCog(commands.Cog):
         )
 
         await self._reply(interaction, msg, ephemeral=True)
+
+    @app_commands.command(name="toggle_block_voice_bot", description="Ativa/desativa o bloqueio por outro bot de voz.")
+    async def toggle_block_voice_bot(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await self._reply(interaction, "❌ Use em um servidor.", ephemeral=True)
+            return
+
+        if not self._kick_check(interaction):
+            await self._reply(
+                interaction,
+                "❌ Você não tem permissão (precisa de **Expulsar membros**).",
+                ephemeral=True,
+            )
+            return
+
+        current = self.bot.settings_db.block_voice_bot_enabled(interaction.guild.id)
+        new_value = not current
+        await self.bot.settings_db.set_block_voice_bot_enabled(interaction.guild.id, new_value)
+
+        if new_value:
+            await self._reply(interaction, "✅ Bloqueio por bot de voz ativado.", ephemeral=True)
+        else:
+            await self._reply(interaction, "❌ Bloqueio por bot de voz desativado.", ephemeral=True)
 
     @app_commands.command(name="set_tts_engine", description="Define seu motor de TTS: gtts ou edge-tts.")
     @app_commands.describe(engine="Escolha entre gtts e edge")
@@ -463,12 +488,28 @@ class TtsVoiceCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        vc = member.guild.voice_client
+        guild = member.guild
+        vc = guild.voice_client
+
         if vc is None or vc.channel is None:
             return
 
         humans = [m for m in vc.channel.members if not m.bot]
         if len(humans) == 0:
+            try:
+                if vc.is_playing():
+                    vc.stop()
+                await vc.disconnect()
+            except Exception:
+                pass
+            return
+
+        block_enabled = self.bot.settings_db.block_voice_bot_enabled(guild.id)
+        if not block_enabled or not BLOCK_VOICE_BOT_ID:
+            return
+
+        # se o bot bloqueado estiver no mesmo canal do nosso bot, sai
+        if any(m.id == BLOCK_VOICE_BOT_ID for m in vc.channel.members):
             try:
                 if vc.is_playing():
                     vc.stop()
