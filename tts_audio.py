@@ -99,18 +99,6 @@ class TTSAudioMixin:
 
         return f"{sign}{number}Hz"
 
-    def _voice_channel_has_only_bots_or_is_empty(self, guild: discord.Guild) -> bool:
-        vc = guild.voice_client
-        if vc is None or not vc.is_connected() or vc.channel is None:
-            return True
-
-        members = list(getattr(vc.channel, "members", []))
-        if not members:
-            return True
-
-        humans = [member for member in members if not member.bot]
-        return len(humans) == 0
-
     async def _generate_gtts_file(self, text: str, language: str) -> str:
         language = (language or GTTS_DEFAULT_LANGUAGE).strip().lower()
         print(f"[tts_voice] gTTS synth | language={language!r} text={text[:80]!r}")
@@ -204,32 +192,22 @@ class TTSAudioMixin:
 
         def _after_playback(error: Optional[Exception]) -> None:
             if error:
-                if not finished.done():
-                    loop.call_soon_threadsafe(finished.set_exception, error)
+                loop.call_soon_threadsafe(finished.set_exception, error)
             else:
-                if not finished.done():
-                    loop.call_soon_threadsafe(finished.set_result, None)
+                loop.call_soon_threadsafe(finished.set_result, None)
 
         source = discord.FFmpegPCMAudio(path)
         vc.play(source, after=_after_playback)
         await finished
 
-    async def _disconnect_idle(self, guild: discord.Guild) -> bool:
+    async def _disconnect_idle(self, guild: discord.Guild) -> None:
         vc = guild.voice_client
-        if vc is None or not vc.is_connected():
-            return True
-
-        if not self._voice_channel_has_only_bots_or_is_empty(guild):
-            print(f"[tts_voice] Idle timeout ignorado | ainda há humanos na call | guild={guild.id}")
-            return False
-
-        try:
-            await vc.disconnect(force=False)
-            print(f"[tts_voice] Desconectado por inatividade | sozinho ou só com bots | guild={guild.id}")
-            return True
-        except Exception as e:
-            print(f"[tts_voice] Erro ao desconectar por inatividade na guild {guild.id}: {e}")
-            return False
+        if vc and vc.is_connected():
+            try:
+                await vc.disconnect(force=False)
+                print(f"[tts_voice] Desconectado por inatividade | guild={guild.id}")
+            except Exception as e:
+                print(f"[tts_voice] Erro ao desconectar por inatividade na guild {guild.id}: {e}")
 
     async def _worker_loop(self, guild_id: int) -> None:
         state = self._get_state(guild_id)
@@ -247,10 +225,8 @@ class TTSAudioMixin:
                         timeout=TTS_IDLE_DISCONNECT_SECONDS,
                     )
                 except asyncio.TimeoutError:
-                    disconnected = await self._disconnect_idle(guild)
-                    if disconnected:
-                        return
-                    continue
+                    await self._disconnect_idle(guild)
+                    return
 
                 try:
                     if hasattr(self, "_should_block_for_voice_bot"):
@@ -268,9 +244,8 @@ class TTSAudioMixin:
                                     await self._maybe_await(self._disconnect_if_blocked(guild))
                                 continue
 
-                    target_channel = guild.get_channel(item.channel_id)
                     vc = await self._maybe_await(
-                        self._ensure_connected(guild, target_channel)
+                        self._ensure_connected(guild, guild.get_channel(item.channel_id))
                     )
                     if vc is None:
                         print(
