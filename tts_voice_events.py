@@ -5,12 +5,12 @@ from discord.ext import commands
 
 from config import BLOCK_VOICE_BOT_ID, TTS_ENABLED
 from tts_audio import QueueItem
-from tts_helpers import clean_text, validate_engine, validate_pitch, validate_rate, validate_voice, EDGE_DEFAULT_VOICE
-
+from tts_helpers import EDGE_DEFAULT_VOICE, GTTS_DEFAULT_LANGUAGE, clean_text, validate_engine, validate_language, validate_pitch, validate_rate, validate_voice
 
 class TTSVoiceEventsMixin:
     bot: commands.Bot
     edge_voice_names: set[str]
+    gtts_languages: dict[str, str]
 
     def _is_voice_bot_blocking(self, guild: discord.Guild, voice_channel: discord.VoiceChannel | discord.StageChannel) -> bool:
         if not BLOCK_VOICE_BOT_ID:
@@ -24,10 +24,7 @@ class TTSVoiceEventsMixin:
         db = getattr(self.bot, "settings_db", None)
         if db is None:
             return False
-        enabled = db.block_voice_bot_enabled(guild.id)
-        if not enabled:
-            return False
-        return self._is_voice_bot_blocking(guild, voice_channel)
+        return db.block_voice_bot_enabled(guild.id) and self._is_voice_bot_blocking(guild, voice_channel)
 
     async def _disconnect_if_blocked(self, guild: discord.Guild):
         vc = guild.voice_client
@@ -36,8 +33,7 @@ class TTSVoiceEventsMixin:
         channel = vc.channel
         if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
             return
-        blocked = await self._should_block_for_voice_bot(guild, channel)
-        if blocked:
+        if await self._should_block_for_voice_bot(guild, channel):
             await self._disconnect_and_clear(guild)
 
     async def _disconnect_and_clear(self, guild: discord.Guild):
@@ -69,10 +65,8 @@ class TTSVoiceEventsMixin:
                 await vc.move_to(voice_channel)
                 return vc
             except Exception:
-                try:
-                    await vc.disconnect(force=True)
-                except Exception:
-                    pass
+                try: await vc.disconnect(force=True)
+                except Exception: pass
         try:
             return await voice_channel.connect(self_deaf=True)
         except Exception as e:
@@ -96,6 +90,7 @@ class TTSVoiceEventsMixin:
             text=text,
             engine=validate_engine(resolved.get("engine", "gtts")),
             voice=validate_voice(resolved.get("voice", EDGE_DEFAULT_VOICE), self.edge_voice_names),
+            language=validate_language(resolved.get("language", GTTS_DEFAULT_LANGUAGE), self.gtts_languages),
             rate=validate_rate(resolved.get("rate", "+0%")),
             pitch=validate_pitch(resolved.get("pitch", "+0Hz")),
         )
@@ -106,11 +101,7 @@ class TTSVoiceEventsMixin:
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not TTS_ENABLED:
-            return
-        if message.author.bot or not message.guild:
-            return
-        if not message.content or "," not in message.content:
+        if not TTS_ENABLED or message.author.bot or not message.guild or not message.content or "," not in message.content:
             return
         author_voice = getattr(message.author, "voice", None)
         if not author_voice or not author_voice.channel:
@@ -118,8 +109,7 @@ class TTSVoiceEventsMixin:
         voice_channel = author_voice.channel
         if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
             return
-        blocked = await self._should_block_for_voice_bot(message.guild, voice_channel)
-        if blocked:
+        if await self._should_block_for_voice_bot(message.guild, voice_channel):
             await self._disconnect_if_blocked(message.guild)
             return
         await self._enqueue_message(message, voice_channel)
@@ -136,9 +126,7 @@ class TTSVoiceEventsMixin:
                 await self._disconnect_and_clear(guild)
                 print(f"[tts_voice] Saindo da call na guild {guild.id} por não haver humanos no canal.")
                 return
-        if not BLOCK_VOICE_BOT_ID:
-            return
-        if member.id != BLOCK_VOICE_BOT_ID:
+        if not BLOCK_VOICE_BOT_ID or member.id != BLOCK_VOICE_BOT_ID:
             return
         db = getattr(self.bot, "settings_db", None)
         if db is None or not db.block_voice_bot_enabled(guild.id):
