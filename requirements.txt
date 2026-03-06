@@ -1,4 +1,0 @@
-discord.py[voice]
-flask
-motor
-gTTS
