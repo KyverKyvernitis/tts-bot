@@ -18,32 +18,62 @@ class TtsVoiceCog(commands.Cog):
             self.locks[guild_id] = asyncio.Lock()
         return self.locks[guild_id]
 
+    async def _reply_temp_error(self, message: discord.Message, content: str, delay: int = 7):
+        """
+        Responde com uma mensagem temporária e tenta apagar:
+        - a mensagem do usuário que causou o erro
+        - a resposta do bot
+        após 'delay' segundos.
+        """
+        try:
+            bot_msg = await message.reply(content)
+        except Exception:
+            return
+
+        async def _cleanup():
+            await asyncio.sleep(delay)
+
+            # apagar resposta do bot
+            try:
+                await bot_msg.delete()
+            except Exception:
+                pass
+
+            # apagar mensagem do usuário
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+        asyncio.create_task(_cleanup())
+
     async def speak(self, message: discord.Message, text: str):
         if not message.guild:
             return
 
         vs = getattr(message.author, "voice", None)
         if not vs or not vs.channel:
-            await message.reply("⚠️ Você precisa estar em um canal de voz para eu falar.")
+            await self._reply_temp_error(message, "⚠️ Você precisa estar em um canal de voz para eu falar.")
             return
 
         channel: discord.VoiceChannel = vs.channel
 
-        # ✅ ALTERADO: bloqueia entrar se o ID informado estiver no canal
+        # bloqueia entrar se o ID informado estiver no canal
         if BLOCK_VOICE_BOT_ID and any(m.id == BLOCK_VOICE_BOT_ID for m in channel.members):
-            await message.reply("❌ Já existe um bot de voz nesta call")
+            await self._reply_temp_error(message, "❌ Já existe um bot de voz nesta call")
             return
 
-        # permissões
+        # permissões no canal de voz (connect/speak)
         me = message.guild.me or message.guild.get_member(self.bot.user.id)
         perms = channel.permissions_for(me)
         if not perms.connect:
-            await message.reply("❌ Eu não tenho permissão **Conectar** nesse canal de voz.")
+            await self._reply_temp_error(message, "❌ Eu não tenho permissão **Conectar** nesse canal de voz.")
             return
         if not perms.speak:
-            await message.reply("❌ Eu não tenho permissão **Falar** nesse canal de voz.")
+            await self._reply_temp_error(message, "❌ Eu não tenho permissão **Falar** nesse canal de voz.")
             return
 
+        # conectar/mover
         vc = message.guild.voice_client
         try:
             if vc is None:
@@ -51,7 +81,10 @@ class TtsVoiceCog(commands.Cog):
             elif vc.channel and vc.channel.id != channel.id:
                 await vc.move_to(channel)
         except Exception as e:
-            await message.reply(f"❌ Não consegui entrar na call. Erro: `{type(e).__name__}` — `{e}`")
+            await self._reply_temp_error(
+                message,
+                f"❌ Não consegui entrar na call. Erro: `{type(e).__name__}` — `{e}`"
+            )
             return
 
         async with self._lock(message.guild.id):
@@ -60,7 +93,7 @@ class TtsVoiceCog(commands.Cog):
 
             text = (text or "").strip()
             if not text:
-                await message.reply("⚠️ Escreva algo depois da vírgula. Ex: `,olá`")
+                await self._reply_temp_error(message, "⚠️ Escreva algo depois da vírgula. Ex: `,olá`")
                 return
             if len(text) > 250:
                 text = text[:250]
@@ -73,12 +106,21 @@ class TtsVoiceCog(commands.Cog):
                 try:
                     gTTS(text=text, lang="pt", tld="com.br").save(tmp)
                 except Exception:
-                    await message.reply("❌ Falhei ao gerar a voz (gTTS).")
+                    await self._reply_temp_error(message, "❌ Falhei ao gerar a voz (gTTS).")
                     return
 
-                vc.play(discord.FFmpegPCMAudio(tmp))
+                try:
+                    vc.play(discord.FFmpegPCMAudio(tmp))
+                except Exception as e:
+                    await self._reply_temp_error(
+                        message,
+                        f"❌ Não consegui tocar o áudio. Erro: `{type(e).__name__}` — `{e}`"
+                    )
+                    return
+
                 while vc.is_playing():
                     await asyncio.sleep(0.2)
+
             finally:
                 if tmp:
                     try:
