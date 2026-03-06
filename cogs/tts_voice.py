@@ -171,9 +171,6 @@ class TTSVoice(commands.Cog, TTSAudioMixin):
         if not message.content:
             return
 
-        if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
-            return
-
         if not message.content.startswith(","):
             return
 
@@ -193,14 +190,14 @@ class TTSVoice(commands.Cog, TTSAudioMixin):
             print("[tts_voice] settings_db indisponível")
             return
 
-        resolved = db.resolve_tts(message.guild.id, message.author.id)
+        resolved = await db.resolve_tts(message.guild.id, message.author.id)
 
         text = message.content[1:].strip()
         if not text:
             return
 
         state = self._get_state(message.guild.id)
-        state.last_text_channel_id = message.channel.id
+        state.last_text_channel_id = getattr(message.channel, "id", None)
 
         from tts_audio import QueueItem
 
@@ -221,6 +218,7 @@ class TTSVoice(commands.Cog, TTSAudioMixin):
         print(
             f"[tts_voice] Mensagem enfileirada | "
             f"guild={message.guild.id} user={message.author.id} "
+            f"msg_channel={getattr(message.channel, 'id', None)} "
             f"canal_voz={voice_channel.id} engine={resolved['engine']} texto={text!r}"
         )
 
