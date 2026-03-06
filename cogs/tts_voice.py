@@ -7,6 +7,7 @@ from gtts import gTTS
 
 from config import TTS_ENABLED, BLOCK_VOICE_BOT_ID
 
+
 class TtsVoiceCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -28,8 +29,8 @@ class TtsVoiceCog(commands.Cog):
 
         channel: discord.VoiceChannel = vs.channel
 
-        # bloqueio se existir outro bot específico
-        if BLOCK_VOICE_BOT_ID and any(m.bot and m.id == BLOCK_VOICE_BOT_ID for m in channel.members):
+        # ✅ ALTERADO: bloqueia entrar se o ID informado estiver no canal
+        if BLOCK_VOICE_BOT_ID and any(m.id == BLOCK_VOICE_BOT_ID for m in channel.members):
             await message.reply("❌ Já existe um bot de voz nesta call")
             return
 
@@ -110,6 +111,7 @@ class TtsVoiceCog(commands.Cog):
                 await vc.disconnect()
             except Exception:
                 pass
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(TtsVoiceCog(bot))
