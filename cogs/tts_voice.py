@@ -72,7 +72,7 @@ class TtsVoiceCog(commands.Cog):
 
         asyncio.create_task(cleanup())
 
-    async def _synthesize_edge(self, text: str, out_path: str, *, voice: str, rate: str, pitch: str):
+    async def _synthesize_edge(self, text: str, out_path: str, voice: str, rate: str, pitch: str):
         communicate = edge_tts.Communicate(
             text=text,
             voice=voice,
@@ -160,7 +160,7 @@ class TtsVoiceCog(commands.Cog):
                 if engine == "gtts":
                     await self._synthesize_gtts(text, tmp)
                 else:
-                    await self._synthesize_edge(text, tmp, voice=voice, rate=rate, pitch=pitch)
+                    await self._synthesize_edge(text, tmp, voice, rate, pitch)
 
                 vc.play(discord.FFmpegPCMAudio(tmp))
 
@@ -193,7 +193,7 @@ class TtsVoiceCog(commands.Cog):
         text = message.content[1:]
         await self._speak_from_message(message, text)
 
-    async def _reply(self, interaction: discord.Interaction, content: str, *, ephemeral: bool = True):
+    async def _reply(self, interaction: discord.Interaction, content: str, ephemeral: bool = True):
         if interaction.response.is_done():
             await interaction.followup.send(content, ephemeral=ephemeral)
         else:
@@ -258,7 +258,9 @@ class TtsVoiceCog(commands.Cog):
             return
 
         shown = names[:40]
-        extra = f"\n… e mais **{len(names) - len(shown)}**." if len(names) > len(shown) else ""
+        extra = ""
+        if len(names) > len(shown):
+            extra = f"\n… e mais **{len(names) - len(shown)}**."
 
         msg = (
             f"**{title}**\n```"
