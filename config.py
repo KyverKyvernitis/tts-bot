@@ -10,7 +10,9 @@ MUTE_TOGGLE_WORD = os.getenv("MUTE_TOGGLE_WORD", "rola").lower().strip()
 TARGET_USER_ID = int(os.getenv("TARGET_USER_ID", "0"))
 
 TTS_ENABLED = os.getenv("TTS_ENABLED", "true").lower().strip() in ("1", "true", "yes", "y", "on")
-BLOCK_VOICE_BOT_ID = int(os.getenv("BLOCK_VOICE_BOT_ID", "0"))
+
+# ✅ ALTERADO: tira espaços e evita virar 0 por string vazia
+BLOCK_VOICE_BOT_ID = int((os.getenv("BLOCK_VOICE_BOT_ID", "0") or "0").strip())
 
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -23,6 +25,5 @@ GUILD_IDS = [
     1349910251117350923,
 ]
 
-# Cores dos embeds (hex)
 ON_COLOR = 0x57F287
 OFF_COLOR = 0xED4245
