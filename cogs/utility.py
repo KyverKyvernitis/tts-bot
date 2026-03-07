@@ -2,109 +2,88 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-import config
-
 
 class Utility(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    def _get_db(self):
-        return getattr(self.bot, "settings_db", None)
+    @app_commands.command(name="ping", description="Mostra o status atual e a latência do bot")
+    async def ping(self, interaction: discord.Interaction):
+        import os
+        import time
+        import psutil
 
-    async def _maybe_await(self, value):
-        import inspect
-        if inspect.isawaitable(value):
-            return await value
-        return value
+        start = time.perf_counter()
+        await interaction.response.defer(ephemeral=True)
 
-    def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
-        return discord.Embed(
-            title=title,
-            description=description,
-            color=discord.Color.green() if ok else discord.Color.red(),
-        )
+        ws_ping = round(self.bot.latency * 1000)
+        response_ping = round((time.perf_counter() - start) * 1000)
 
-    async def _respond(
-        self,
-        interaction: discord.Interaction,
-        *,
-        content: str | None = None,
-        embed: discord.Embed | None = None,
-        ephemeral: bool = True,
-    ):
-        if interaction.response.is_done():
-            await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+        now = discord.utils.utcnow()
+        started_at = getattr(self.bot, "started_at", None)
+        if started_at is None:
+            uptime_text = "Desconhecido"
         else:
-            await interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+            delta = now - started_at
+            total_seconds = int(delta.total_seconds())
+            days, rem = divmod(total_seconds, 86400)
+            hours, rem = divmod(rem, 3600)
+            minutes, seconds = divmod(rem, 60)
+            parts = []
+            if days:
+                parts.append(f"{days}d")
+            if hours:
+                parts.append(f"{hours}h")
+            if minutes:
+                parts.append(f"{minutes}m")
+            if seconds or not parts:
+                parts.append(f"{seconds}s")
+            uptime_text = " ".join(parts)
 
-    @app_commands.command(
-        name="set_only_tts_user",
-        description="Ativa ou desativa o modo em que o bot só responde um membro específico",
-    )
-    @app_commands.describe(enabled="true para ativar, false para desativar")
-    async def set_only_tts_user(self, interaction: discord.Interaction, enabled: bool):
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=False)
+        shard_id = getattr(interaction.guild, "shard_id", None)
+        shard_text = str(shard_id) if shard_id is not None else "Único"
 
-        if not interaction.guild:
-            await self._respond(
-                interaction,
-                content="Esse comando só pode ser usado em servidor.",
-                ephemeral=False,
-            )
-            return
+        db = getattr(self.bot, "settings_db", None)
+        db_status = "🟢 Online" if db is not None else "🔴 Offline"
 
-        if not interaction.user.guild_permissions.kick_members:
-            await self._respond(
-                interaction,
-                embed=self._make_embed(
-                    "Sem permissão",
-                    "Você precisa da permissão `Expulsar Membros` para usar esse comando.",
-                    ok=False,
-                ),
-                ephemeral=False,
-            )
-            return
+        process = psutil.Process(os.getpid())
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        cpu_percent = psutil.cpu_percent(interval=0.2)
 
-        db = self._get_db()
-        if db is None:
-            await self._respond(
-                interaction,
-                content="Banco de dados indisponível.",
-                ephemeral=False,
-            )
-            return
-
-        await self._maybe_await(
-            db.set_guild_tts_defaults(
-                interaction.guild.id,
-                only_target_user=bool(enabled),
-            )
-        )
-
-        target_user_id = getattr(config, "ONLY_TTS_USER_ID", 0)
-
-        if enabled:
-            desc = (
-                "Só a Cuca pode falar nesse caralho, fodasse os betas.\n\n"
-                f"ID alvo da env: `{target_user_id}`"
-            )
+        if ws_ping < 120:
+            status_text = "🟢 Excelente"
+            color = discord.Color.green()
+        elif ws_ping < 250:
+            status_text = "🟡 Boa"
+            color = discord.Color.gold()
+        elif ws_ping < 400:
+            status_text = "🟠 Instável"
+            color = discord.Color.orange()
         else:
-            desc = (
-                "Agora os betinhas podem usar também.\n\n"
-                f"ID alvo da env: `{target_user_id}`"
-            )
+            status_text = "🔴 Alta"
+            color = discord.Color.red()
 
-        await self._respond(
-            interaction,
-            embed=self._make_embed(
-                "Modo de membro específico atualizado",
-                desc,
-                ok=True,
-            ),
-            ephemeral=False,
+        embed = discord.Embed(
+            title="🏓 Pong!",
+            description="Status atual do bot em tempo real.",
+            color=color,
         )
+
+        embed.add_field(name="Latência WebSocket", value=f"`{ws_ping}ms`", inline=True)
+        embed.add_field(name="Resposta do comando", value=f"`{response_ping}ms`", inline=True)
+        embed.add_field(name="Status geral", value=status_text, inline=True)
+        embed.add_field(name="Uptime", value=f"`{uptime_text}`", inline=True)
+        embed.add_field(name="Banco de dados", value=db_status, inline=True)
+        embed.add_field(name="Shard", value=f"`{shard_text}`", inline=True)
+        embed.add_field(name="Uso de memória", value=f"`{memory_mb:.2f} MB`", inline=True)
+        embed.add_field(name="Uso de CPU", value=f"`{cpu_percent:.1f}%`", inline=True)
+        embed.add_field(name="Servidores", value=f"`{len(self.bot.guilds)}`", inline=True)
+
+        if self.bot.user and self.bot.user.display_avatar:
+            embed.set_thumbnail(url=self.bot.user.display_avatar.url)
+
+        embed.set_footer(text="Atualizado no momento do comando")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
