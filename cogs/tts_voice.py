@@ -218,7 +218,6 @@ class TTSVoice(TTSAudioMixin, commands.Cog):
             return
 
         voice_channel = author_voice.channel
-
         only_target_enabled = await self._only_target_user_enabled(message.guild.id)
         target_user_id = getattr(config, "ONLY_TTS_USER_ID", 0)
 
@@ -660,56 +659,6 @@ class TTSVoice(TTSAudioMixin, commands.Cog):
 
         await self._respond(interaction, embed=embed)
 
-
-    @app_commands.command(
-        name="set_only_tts_user",
-        description="Ativa ou desativa o modo em que o bot só responde um membro específico"
-    )
-    @app_commands.describe(enabled="true para ativar, false para desativar")
-    async def set_only_tts_user(self, interaction: discord.Interaction, enabled: bool):
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=False)
-
-        if not interaction.guild:
-            await self._respond(interaction, content="Esse comando só pode ser usado em servidor.", ephemeral=False)
-            return
-
-        if not interaction.user.guild_permissions.kick_members:
-            await self._respond(
-                interaction,
-                embed=self._make_embed(
-                    "Sem permissão",
-                    "Você precisa da permissão `Expulsar Membros` para usar esse comando.",
-                    ok=False,
-                ),
-                ephemeral=False,
-            )
-            return
-
-        db = self._get_db()
-        if db is None:
-            await self._respond(interaction, content="Banco de dados indisponível.", ephemeral=False)
-            return
-
-        await self._maybe_await(
-            db.set_guild_tts_defaults(interaction.guild.id, only_target_user=bool(enabled))
-        )
-
-        target_user_id = getattr(config, "ONLY_TTS_USER_ID", 0)
-        desc = (
-            f"O modo de responder apenas ao membro configurado agora está em `{enabled}`.\n\n"
-            f"ID alvo da env: `{target_user_id}`"
-        )
-
-        await self._respond(
-            interaction,
-            embed=self._make_embed(
-                "Modo de membro específico atualizado",
-                desc,
-                ok=True,
-            ),
-            ephemeral=False,
-        )
 
 
 async def setup(bot: commands.Bot):
