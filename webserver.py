@@ -1,18 +1,14 @@
 import os
 from flask import Flask
 
+app = Flask(__name__)
 
-def create_app() -> Flask:
-    app = Flask(__name__)
+@app.get("/")
+def home():
+    return "OK", 200
 
-    @app.route("/", methods=["GET", "HEAD"])
-    def home():
-        return "OK", 200
-
-    return app
-
-
-if __name__ == "__main__":
-    app = create_app()
+def run_webserver():
     port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    print("WEB SERVER INICIANDO")
+    print(f"[webserver] usando porta {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)

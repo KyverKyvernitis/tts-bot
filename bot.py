@@ -1,5 +1,6 @@
 import asyncio
 import os
+import threading
 from datetime import datetime, timezone
 
 import discord
@@ -7,6 +8,7 @@ from discord.ext import commands
 
 import config
 from db import SettingsDB
+from webserver import run_webserver
 
 
 print("BOT.PY INICIOU")
@@ -101,6 +103,10 @@ class BotLocal(commands.Bot):
 
 async def main():
     print("MAIN INICIOU")
+
+    web_thread = threading.Thread(target=run_webserver, daemon=True)
+    web_thread.start()
+
     bot = BotLocal()
     await bot.start(config.TOKEN)
 
