@@ -26,6 +26,8 @@ class _BaseTTSView(discord.ui.View):
         self.message: discord.Message | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id == 0:
+            return True
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message(
                 embed=self.cog._make_embed(
@@ -69,8 +71,8 @@ class _BaseTTSView(discord.ui.View):
 
 
 class _SimpleSelectView(_BaseTTSView):
-    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, title: str, description: str, select: discord.ui.Select):
-        super().__init__(cog, owner_id, guild_id)
+    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, title: str, description: str, select: discord.ui.Select, *, timeout: float = 180):
+        super().__init__(cog, owner_id, guild_id, timeout=timeout)
         self.title = title
         self.description = description
         self.add_item(select)
@@ -292,9 +294,12 @@ class TTSPrefixModal(discord.ui.Modal, title="Alterar prefixo do TTS"):
 
 
 class TTSMainPanelView(_BaseTTSView):
-    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, server: bool = False):
-        super().__init__(cog, owner_id, guild_id)
+    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180):
+        super().__init__(cog, owner_id, guild_id, timeout=timeout)
         self.server = server
+
+    def _target_owner(self, interaction: discord.Interaction) -> int:
+        return interaction.user.id if self.owner_id == 0 else self.owner_id
         if not server:
             self.remove_item(self.bot_prefix_button)
             self.remove_item(self.tts_prefix_button)
@@ -302,37 +307,37 @@ class TTSMainPanelView(_BaseTTSView):
     @discord.ui.button(label="Modo", style=discord.ButtonStyle.secondary, emoji="🎛️", row=0)
     async def mode_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] mode_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await _SimpleSelectView(self.cog, self.owner_id, self.guild_id, "Escolha o modo", "Selecione como a fala vai funcionar.", ModeSelect(self.cog, server=self.server)).send(interaction)
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o modo", "Selecione como a fala vai funcionar.", ModeSelect(self.cog, server=self.server)).send(interaction)
 
     @discord.ui.button(label="Voz", style=discord.ButtonStyle.secondary, emoji="🎙️", row=0)
     async def voice_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] voice_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        view = _SimpleSelectView(self.cog, self.owner_id, self.guild_id, "Escolha a região da voz", "Primeiro escolha a região, depois selecione a voz.", VoiceRegionSelect(self.cog, server=self.server))
+        view = _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha a região da voz", "Primeiro escolha a região, depois selecione a voz.", VoiceRegionSelect(self.cog, server=self.server))
         await view.send(interaction)
 
     @discord.ui.button(label="Idioma", style=discord.ButtonStyle.secondary, emoji="🌐", row=0)
     async def language_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] language_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await _SimpleSelectView(self.cog, self.owner_id, self.guild_id, "Escolha o idioma", "Selecione o idioma usado no modo gtts.", LanguageSelect(self.cog, server=self.server)).send(interaction)
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o idioma", "Selecione o idioma usado no modo gtts.", LanguageSelect(self.cog, server=self.server)).send(interaction)
 
     @discord.ui.button(label="Velocidade", style=discord.ButtonStyle.secondary, emoji="⏩", row=1)
     async def speed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] speed_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await _SimpleSelectView(self.cog, self.owner_id, self.guild_id, "Escolha a velocidade", "Selecione uma velocidade pronta para o modo edge.", SpeedSelect(self.cog, server=self.server)).send(interaction)
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha a velocidade", "Selecione uma velocidade pronta para o modo edge.", SpeedSelect(self.cog, server=self.server)).send(interaction)
 
     @discord.ui.button(label="Tom", style=discord.ButtonStyle.secondary, emoji="🎚️", row=1)
     async def pitch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] pitch_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await _SimpleSelectView(self.cog, self.owner_id, self.guild_id, "Escolha o tom", "Selecione um tom pronto para o modo edge.", PitchSelect(self.cog, server=self.server)).send(interaction)
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o tom", "Selecione um tom pronto para o modo edge.", PitchSelect(self.cog, server=self.server)).send(interaction)
 
 
     @discord.ui.button(label="Prefixo do bot", style=discord.ButtonStyle.secondary, emoji="🤖", row=2)
     async def bot_prefix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BotPrefixModal(self.cog, interaction.message, self.owner_id, self.guild_id))
+        await interaction.response.send_modal(BotPrefixModal(self.cog, interaction.message, self._target_owner(interaction), self.guild_id))
 
     @discord.ui.button(label="Prefixo do TTS", style=discord.ButtonStyle.secondary, emoji="🔊", row=2)
     async def tts_prefix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(TTSPrefixModal(self.cog, interaction.message, self.owner_id, self.guild_id))
+        await interaction.response.send_modal(TTSPrefixModal(self.cog, interaction.message, self._target_owner(interaction), self.guild_id))
 
     @discord.ui.button(label="Entrar na call", style=discord.ButtonStyle.secondary, emoji="📥", row=2)
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -344,13 +349,18 @@ class TTSMainPanelView(_BaseTTSView):
 
 
 class TTSTogglePanelView(_BaseTTSView):
+    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 180):
+        super().__init__(cog, owner_id, guild_id, timeout=timeout)
+
+    def _target_owner(self, interaction: discord.Interaction) -> int:
+        return interaction.user.id if self.owner_id == 0 else self.owner_id
     @discord.ui.button(label="Bloqueio por outro bot", style=discord.ButtonStyle.secondary, emoji="🤖", row=0)
     async def block_voice_bot_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _SimpleSelectView(self.cog, self.owner_id, self.guild_id, "Bloqueio por outro bot", "Escolha se o bot deve sair ou bloquear quando o outro bot de voz entrar na call.", ToggleSelect(self.cog, "block_voice_bot")).send(interaction)
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Bloqueio por outro bot", "Escolha se o bot deve sair ou bloquear quando o outro bot de voz entrar na call.", ToggleSelect(self.cog, "block_voice_bot")).send(interaction)
 
     @discord.ui.button(label="Modo Cuca", style=discord.ButtonStyle.secondary, emoji="👑", row=0)
     async def only_target_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _SimpleSelectView(self.cog, self.owner_id, self.guild_id, "Modo Cuca", "Quando ativado, a Cuca continua normal e os outros usuários são forçados para gtts.", ToggleSelect(self.cog, "only_target_user")).send(interaction)
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Modo Cuca", "Quando ativado, a Cuca continua normal e os outros usuários são forçados para gtts.", ToggleSelect(self.cog, "only_target_user")).send(interaction)
 
 
 def get_gtts_languages() -> dict[str, str]:
@@ -730,11 +740,37 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         bot_prefix = str((guild_defaults or {}).get("bot_prefix", "_") or "_")
 
         lowered = message.content.strip().lower()
+        server_aliases = {
+            f"{bot_prefix}panel_server", f"{bot_prefix}panel-server", f"{bot_prefix}panelserver",
+            f"{bot_prefix}server_panel", f"{bot_prefix}server-panel", f"{bot_prefix}serverpanel",
+            f"{bot_prefix}painel_server", f"{bot_prefix}painel-server", f"{bot_prefix}painelserver",
+            f"{bot_prefix}servidor_panel", f"{bot_prefix}servidor-panel", f"{bot_prefix}servidorpanel",
+        }
+        toggle_aliases = {
+            f"{bot_prefix}panel_toggle", f"{bot_prefix}panel-toggle", f"{bot_prefix}paneltoggle",
+            f"{bot_prefix}panel_toggles", f"{bot_prefix}panel-toggles", f"{bot_prefix}paneltoggles",
+            f"{bot_prefix}toggle_panel", f"{bot_prefix}toggle-panel", f"{bot_prefix}togglepanel",
+            f"{bot_prefix}toggles_panel", f"{bot_prefix}toggles-panel", f"{bot_prefix}togglespanel",
+        }
+        panel_aliases = {f"{bot_prefix}panel", f"{bot_prefix}painel"}
+
         if lowered == f"{bot_prefix}clear":
             await self._prefix_clear(message)
             return
         if lowered == f"{bot_prefix}leave":
             await self._prefix_leave(message)
+            return
+        if lowered == f"{bot_prefix}join":
+            await self._prefix_join(message)
+            return
+        if lowered in panel_aliases:
+            await self._send_prefix_panel(message, panel_type="user")
+            return
+        if lowered in server_aliases:
+            await self._send_prefix_panel(message, panel_type="server")
+            return
+        if lowered in toggle_aliases:
+            await self._send_prefix_panel(message, panel_type="toggle")
             return
 
         if not message.content.startswith(tts_prefix):
@@ -974,11 +1010,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
 
 
-    def _build_panel_view(self, owner_id: int, guild_id: int, *, server: bool = False) -> discord.ui.View:
-        return TTSMainPanelView(self, owner_id, guild_id, server=server)
+    def _build_panel_view(self, owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180) -> discord.ui.View:
+        return TTSMainPanelView(self, owner_id, guild_id, server=server, timeout=timeout)
 
-    def _build_toggle_view(self, owner_id: int, guild_id: int) -> discord.ui.View:
-        return TTSTogglePanelView(self, owner_id, guild_id)
+    def _build_toggle_view(self, owner_id: int, guild_id: int, *, timeout: float = 180) -> discord.ui.View:
+        return TTSTogglePanelView(self, owner_id, guild_id, timeout=timeout)
 
 
     async def _announce_panel_change(
@@ -1555,7 +1591,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         )
 
 
-    async def _clear_queue_only(self, guild: discord.Guild | None) -> int:
+
+    async def _clear_queue_only(self, guild: discord.Guild | None, *, stop_playback: bool = True) -> int:
         if guild is None:
             return 0
 
@@ -1570,6 +1607,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             except Exception:
                 break
 
+        vc = self._get_voice_client_for_guild(guild)
+        if stop_playback and vc and vc.is_connected():
+            try:
+                if vc.is_playing() or vc.is_paused():
+                    vc.stop()
+            except Exception:
+                pass
+
+        task = getattr(state, "worker_task", None)
+        if task and not task.done():
+            task.cancel()
+            state.worker_task = None
+
         return cleared
 
     async def _prefix_leave(self, message: discord.Message):
@@ -1577,7 +1627,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         vc = self._get_voice_client_for_guild(message.guild)
-        await self._clear_queue_only(message.guild)
+        await self._clear_queue_only(message.guild, stop_playback=True)
 
         if vc and vc.is_connected():
             try:
@@ -1596,7 +1646,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if not message.guild:
             return
 
-        await self._clear_queue_only(message.guild)
+        await self._clear_queue_only(message.guild, stop_playback=True)
 
         try:
             await message.add_reaction("<:r_dot:1480307087522140331>")
@@ -1606,6 +1656,55 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             except Exception:
                 pass
 
+    async def _prefix_join(self, message: discord.Message):
+        if not message.guild:
+            return
+
+        author_voice = getattr(message.author, "voice", None)
+        if author_voice is None or author_voice.channel is None:
+            embed = self._make_embed("Entre em uma call", "Você precisa estar em uma call para usar esse comando", ok=False)
+            await message.channel.send(embed=embed)
+            return
+
+        blocked = await self._should_block_for_voice_bot(message.guild, author_voice.channel)
+        if blocked:
+            embed = self._make_embed("Entrada bloqueada", "Não posso entrar porque o outro bot de voz já está nessa call", ok=False)
+            await message.channel.send(embed=embed)
+            return
+
+        vc = await self._ensure_connected(message.guild, author_voice.channel)
+        if vc is None or not vc.is_connected():
+            embed = self._make_embed("Falha ao conectar", "Não consegui entrar na call agora", ok=False)
+            await message.channel.send(embed=embed)
+            return
+
+        embed = self._make_embed("Entrei na call com sucesso", f"Entrei na call `{author_voice.channel.name}`", ok=True)
+        await message.channel.send(embed=embed)
+
+    async def _send_prefix_panel(self, message: discord.Message, *, panel_type: str):
+        if not message.guild:
+            return
+
+        if panel_type == "server":
+            if not message.author.guild_permissions.kick_members:
+                embed = self._make_embed("Sem permissão", "Você precisa da permissão `Expulsar Membros` para abrir o painel do servidor", ok=False)
+                await message.channel.send(embed=embed)
+                return
+            embed = await self._build_settings_embed(message.guild.id, message.author.id, server=True, panel_kind="server")
+            view = self._build_panel_view(0, message.guild.id, server=True, timeout=300)
+        elif panel_type == "toggle":
+            if not message.author.guild_permissions.kick_members:
+                embed = self._make_embed("Sem permissão", "Você precisa da permissão `Expulsar Membros` para abrir o painel de toggles", ok=False)
+                await message.channel.send(embed=embed)
+                return
+            embed = await self._build_toggle_embed(message.guild.id, message.author.id)
+            view = self._build_toggle_view(0, message.guild.id, timeout=300)
+        else:
+            embed = await self._build_settings_embed(message.guild.id, message.author.id, server=False, panel_kind="user")
+            view = self._build_panel_view(0, message.guild.id, server=False, timeout=300)
+
+        sent = await message.channel.send(embed=embed, view=view)
+        view.message = sent
     async def _leave_from_panel(self, interaction: discord.Interaction):
         vc = self._get_voice_client_for_guild(interaction.guild)
         if vc is None or not vc.is_connected():
