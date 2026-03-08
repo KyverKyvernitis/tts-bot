@@ -80,9 +80,9 @@ class SettingsDB:
     def get_guild_tts_defaults(self, guild_id: int) -> Dict[str, Any]:
         g = self.guild_cache.get(guild_id, {})
         tts = g.get("tts_defaults", {}) or {}
-        return {"engine": str(tts.get("engine", "") or ""), "voice": str(tts.get("voice", "") or ""), "language": str(tts.get("language", "") or ""), "rate": str(tts.get("rate", "") or ""), "pitch": str(tts.get("pitch", "") or ""), "block_voice_bot": bool(g.get("block_voice_bot_enabled", True)), "only_target_user": bool(g.get("only_target_user_enabled", False))}
+        return {"engine": str(tts.get("engine", "") or ""), "voice": str(tts.get("voice", "") or ""), "language": str(tts.get("language", "") or ""), "rate": str(tts.get("rate", "") or ""), "pitch": str(tts.get("pitch", "") or ""), "bot_prefix": str(g.get("bot_prefix", "!") or "!"), "tts_prefix": str(g.get("tts_prefix", ",") or ","), "block_voice_bot": bool(g.get("block_voice_bot_enabled", True)), "only_target_user": bool(g.get("only_target_user_enabled", False))}
 
-    async def set_guild_tts_defaults(self, guild_id: int, *, engine: Optional[str] = None, voice: Optional[str] = None, language: Optional[str] = None, rate: Optional[str] = None, pitch: Optional[str] = None, block_voice_bot: Optional[bool] = None, only_target_user: Optional[bool] = None):
+    async def set_guild_tts_defaults(self, guild_id: int, *, engine: Optional[str] = None, voice: Optional[str] = None, language: Optional[str] = None, rate: Optional[str] = None, pitch: Optional[str] = None, bot_prefix: Optional[str] = None, tts_prefix: Optional[str] = None, block_voice_bot: Optional[bool] = None, only_target_user: Optional[bool] = None):
         doc = self._get_guild_doc(guild_id)
         tts = doc.get("tts_defaults", {}) or {}
         if engine is not None: tts["engine"] = engine
@@ -90,6 +90,8 @@ class SettingsDB:
         if language is not None: tts["language"] = language
         if rate is not None: tts["rate"] = rate
         if pitch is not None: tts["pitch"] = pitch
+        if bot_prefix is not None: doc["bot_prefix"] = str(bot_prefix or "!")[:8]
+        if tts_prefix is not None: doc["tts_prefix"] = str(tts_prefix or ",")[:8]
         if block_voice_bot is not None: doc["block_voice_bot_enabled"] = bool(block_voice_bot)
         if only_target_user is not None: doc["only_target_user_enabled"] = bool(only_target_user)
         doc["tts_defaults"] = tts
@@ -109,6 +111,8 @@ class SettingsDB:
         if language is not None: tts["language"] = language
         if rate is not None: tts["rate"] = rate
         if pitch is not None: tts["pitch"] = pitch
+        if bot_prefix is not None: doc["bot_prefix"] = str(bot_prefix or "!")[:8]
+        if tts_prefix is not None: doc["tts_prefix"] = str(tts_prefix or ",")[:8]
         doc["type"] = "user"; doc["guild_id"] = guild_id; doc["user_id"] = user_id; doc["tts"] = tts
         self.user_cache[key] = doc
         await self.coll.update_one({"type": "user", "guild_id": guild_id, "user_id": user_id}, {"$set": doc}, upsert=True)
@@ -119,7 +123,7 @@ class SettingsDB:
             return (user.get(key) or "").strip() or (guild.get(key) or "").strip() or fallback
         engine = pick("engine", "gtts").lower()
         if engine not in ("edge", "gtts"): engine = "gtts"
-        return {"engine": engine, "voice": pick("voice", "pt-BR-FranciscaNeural"), "language": pick("language", "pt-br"), "rate": pick("rate", "+0%"), "pitch": pick("pitch", "+0Hz")}
+        return {"engine": engine, "voice": pick("voice", "pt-BR-FranciscaNeural"), "language": pick("language", "pt-br"), "rate": pick("rate", "+0%"), "pitch": pick("pitch", "+0Hz"), "bot_prefix": str(guild.get("bot_prefix", "!") or "!"), "tts_prefix": str(guild.get("tts_prefix", ",") or ",")}
 
     def get_panel_history(self, guild_id: int, user_id: int) -> Dict[str, str]:
         guild_doc = self.guild_cache.get(guild_id, {})
