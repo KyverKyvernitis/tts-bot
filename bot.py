@@ -31,7 +31,10 @@ class BotLocal(commands.Bot):
         intents.messages = True
 
         super().__init__(
-            command_prefix=commands.when_mentioned_or("!"),
+            command_prefix=commands.when_mentioned_or(
+                getattr(config, "BOT_PREFIX", "_"),
+                getattr(config, "PREFIX", "_"),
+            ),
             intents=intents,
             help_command=None,
         )
@@ -43,8 +46,8 @@ class BotLocal(commands.Bot):
         print("SETUP_HOOK INICIOU")
 
         mongo_uri = _cfg("MONGODB_URI", "MONGO_URI")
-        mongo_db_name = _cfg("MONGO_DB_NAME", "MONGODB_DB_NAME", default="chat_revive")
-        mongo_collection_name = _cfg("MONGO_COLLECTION_NAME", "MONGODB_COLLECTION_NAME", default="settings")
+        mongo_db_name = _cfg("MONGODB_DB", "MONGO_DB_NAME", "MONGODB_DB_NAME", default="chat_revive")
+        mongo_collection_name = _cfg("MONGODB_COLLECTION", "MONGO_COLLECTION_NAME", "MONGODB_COLLECTION_NAME", default="settings")
 
         if not mongo_uri:
             raise RuntimeError("Nenhuma URI do MongoDB encontrada no config.py (MONGODB_URI/MONGO_URI).")
@@ -70,11 +73,15 @@ class BotLocal(commands.Bot):
                 print(f"[bot] falha ao carregar {ext}: {e}")
                 raise
 
-        synced = await self.tree.sync()
-        print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced)}")
-        for cmd in synced:
-            name = getattr(cmd, "name", None) or str(cmd)
-            print(f"[SYNC] /{name}")
+        should_sync = str(os.getenv("SYNC_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        if should_sync:
+            synced = await self.tree.sync()
+            print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced)}")
+            for cmd in synced:
+                name = getattr(cmd, "name", None) or str(cmd)
+                print(f"[SYNC] /{name}")
+        else:
+            print("[SYNC] Pulado no boot (defina SYNC_SLASH_COMMANDS=true para sincronizar no startup)")
 
     async def on_ready(self):
         print(f"Logado como {self.user} (id: {self.user.id})")
