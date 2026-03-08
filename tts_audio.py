@@ -400,7 +400,17 @@ class TTSAudioMixin:
                     if prefetched_item is None:
                         prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
                     try:
-                        await self._play_file(vc, current_path)
+                        try:
+                            await self._play_file(vc, current_path)
+                        except Exception as play_err:
+                            msg = str(play_err).lower()
+                            if "not connected to voice" in msg or "voice" in msg and "not connected" in msg:
+                                vc = await self._ensure_connected_fast(guild, item)
+                                if vc is None:
+                                    raise
+                                await self._play_file(vc, current_path)
+                            else:
+                                raise
                     finally:
                         if should_cleanup:
                             try:
