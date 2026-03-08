@@ -25,6 +25,34 @@ class TTSVoiceEventsMixin:
     edge_voice_names: set[str]
     gtts_languages: dict[str, str]
 
+    def _get_warm_connect_tasks(self) -> dict[int, asyncio.Task]:
+        tasks = getattr(self, "_warm_connect_tasks", None)
+        if tasks is None:
+            tasks = {}
+            setattr(self, "_warm_connect_tasks", tasks)
+        return tasks
+
+    def _cleanup_warm_connect_task(self, guild_id: int) -> None:
+        self._get_warm_connect_tasks().pop(guild_id, None)
+
+    def _schedule_warm_connect(
+        self,
+        guild: discord.Guild,
+        voice_channel: discord.VoiceChannel | discord.StageChannel,
+    ) -> None:
+        tasks = self._get_warm_connect_tasks()
+        current = tasks.get(guild.id)
+        if current is not None and not current.done():
+            return
+
+        async def _runner():
+            try:
+                await self._ensure_connected(guild, voice_channel)
+            finally:
+                self._cleanup_warm_connect_task(guild.id)
+
+        tasks[guild.id] = asyncio.create_task(_runner())
+
     def _get_recent_message_cache(self) -> dict[int, float]:
         cache = getattr(self, "_recent_event_message_ids", None)
         if cache is None:
@@ -101,10 +129,10 @@ class TTSVoiceEventsMixin:
     async def _ensure_connected(self, guild: discord.Guild, voice_channel: discord.VoiceChannel | discord.StageChannel) -> discord.VoiceClient | None:
         vc = guild.voice_client
 
-        if vc and vc.channel and vc.channel.id == voice_channel.id and vc.is_connected():
+        if vc and vc.is_connected() and vc.channel and vc.channel.id == voice_channel.id:
             return vc
 
-        if vc and vc.channel and vc.channel.id != voice_channel.id:
+        if vc and vc.is_connected() and vc.channel and vc.channel.id != voice_channel.id:
             try:
                 await vc.move_to(voice_channel)
                 print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
@@ -120,9 +148,10 @@ class TTSVoiceEventsMixin:
             print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
             return connected
         except Exception as e:
-            msg = str(e).lower()
+            msg = str(e).lower().strip()
             current = guild.voice_client
-            if "already connected" in msg and current and current.is_connected():
+
+            if current and current.is_connected():
                 if current.channel and current.channel.id == voice_channel.id:
                     return current
                 try:
@@ -131,6 +160,10 @@ class TTSVoiceEventsMixin:
                     return current
                 except Exception:
                     pass
+
+            if "already connected" in msg and current and current.is_connected():
+                return current
+
             print(f"[tts_voice] Erro ao conectar na call da guild {guild.id}: {e}")
             return None
 
@@ -191,7 +224,15 @@ class TTSVoiceEventsMixin:
         guild_defaults = db.get_guild_tts_defaults(message.guild.id)
         tts_prefix = str((guild_defaults or {}).get("tts_prefix", ",") or ",")
 
+        if not tts_prefix:
+            tts_prefix = ","
+
+        # fast reject before doing anything heavier
         if not message.content.startswith(tts_prefix):
+            return
+
+        raw_text = message.content[len(tts_prefix):].strip()
+        if not raw_text:
             return
 
         author_voice = getattr(message.author, "voice", None)
@@ -206,14 +247,12 @@ class TTSVoiceEventsMixin:
             await self._disconnect_if_blocked(message.guild)
             return
 
-        raw_text = message.content[len(tts_prefix):].strip()
-        if not raw_text:
-            return
-
         resolved = db.resolve_tts(message.guild.id, message.author.id)
 
         try:
-            asyncio.create_task(self._ensure_connected(message.guild, voice_channel))
+            vc = message.guild.voice_client
+            if not (vc and vc.is_connected() and vc.channel and vc.channel.id == voice_channel.id):
+                self._schedule_warm_connect(message.guild, voice_channel)
         except Exception:
             pass
 
