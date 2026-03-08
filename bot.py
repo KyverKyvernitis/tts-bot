@@ -1,102 +1,119 @@
-from __future__ import annotations
-
 import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
 import threading
-import traceback
-
-print("BOT.PY INICIOU")
 
 import discord
 from discord.ext import commands
 
 import config
 from db import SettingsDB
-from webserver import create_app
-
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-intents.voice_states = True
-intents.members = True
 
 
-class MyBot(commands.Bot):
+def _cfg(*names, default=None):
+    for name in names:
+        if hasattr(config, name):
+            value = getattr(config, name)
+            if value is not None:
+                return value
+    return default
+
+
+def _start_webserver_if_available():
+    try:
+        import webserver
+
+        if hasattr(webserver, "keep_alive"):
+            threading.Thread(target=webserver.keep_alive, daemon=True).start()
+            print("WEB SERVER INICIANDO")
+            return
+
+        if hasattr(webserver, "run"):
+            threading.Thread(target=webserver.run, daemon=True).start()
+            print("WEB SERVER INICIANDO")
+            return
+    except Exception as e:
+        print(f"[bot] webserver indisponível: {e}")
+
+
+class ChatReviveBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
-        self.settings_db: SettingsDB | None = None
-        self.started_at = None
+        intents = discord.Intents.default()
+        intents.guilds = True
+        intents.guild_messages = True
+        intents.message_content = True
+        intents.members = True
+        intents.voice_states = True
+
+        super().__init__(command_prefix=_cfg("PREFIX", default="!"), intents=intents)
+        self.started_at = datetime.now(timezone.utc)
+        self.settings_db = None
 
     async def setup_hook(self):
         print("SETUP_HOOK INICIOU")
-        self.started_at = discord.utils.utcnow()
 
-        if not config.MONGODB_URI:
-            raise RuntimeError("Faltou MONGODB_URI")
+        mongo_uri = _cfg("MONGO_URI", "MONGODB_URI", "MONGO_URL")
+        db_name = _cfg("DB_NAME", "MONGO_DB_NAME", "MONGODB_DB_NAME", default="chat_revive")
+        coll_name = _cfg("SETTINGS_COLLECTION", "SETTINGS_COLL_NAME", "SETTINGS_COLLECTION_NAME", default="settings")
 
-        self.settings_db = SettingsDB(
-            config.MONGODB_URI,
-            config.MONGODB_DB,
-            config.MONGODB_COLLECTION,
-        )
-        await self.settings_db.init()
+        if mongo_uri:
+            try:
+                self.settings_db = SettingsDB(mongo_uri, db_name, coll_name)
+                await self.settings_db.init()
+            except Exception as e:
+                print(f"[bot] falha ao iniciar SettingsDB: {e}")
+                self.settings_db = None
+        else:
+            print("[bot] MONGO_URI/MONGODB_URI não configurado; SettingsDB desativado.")
 
         print("Carregando cogs...")
-        await self.load_extension("cogs.role_cooldown")
-        await self.load_extension("cogs.antimzk")
-        await self.load_extension("cogs.tts_voice")
-        await self.load_extension("cogs.utility")
-
-        if config.GUILD_IDS:
-            for gid in config.GUILD_IDS:
-                guild_obj = discord.Object(id=gid)
-                self.tree.copy_global_to(guild=guild_obj)
-                await self.tree.sync(guild=guild_obj)
-                print(f"[SYNC] Slash commands sincronizados na guild {gid}")
+        cogs_dir = Path("cogs")
+        loaded = []
+        if cogs_dir.exists():
+            for file in sorted(cogs_dir.glob("*.py")):
+                if file.name.startswith("_"):
+                    continue
+                ext = f"cogs.{file.stem}"
+                try:
+                    await self.load_extension(ext)
+                    loaded.append(ext)
+                except Exception as e:
+                    print(f"[bot] falha ao carregar {ext}: {e}")
+                    raise
         else:
-            await self.tree.sync()
-            print("[SYNC] Slash commands sincronizados globalmente")
+            print("[bot] pasta cogs não encontrada.")
 
+        try:
+            synced = await self.tree.sync()
+            print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced)}")
+            for cmd in synced:
+                print(f"[SYNC] /{cmd.qualified_name}")
+        except Exception as e:
+            print(f"[bot] falha ao sincronizar slash commands: {e}")
+            raise
 
-bot = MyBot()
+    async def on_ready(self):
+        print(f"Logado como {self.user} (id: {self.user.id})")
+        print(f"Em {len(self.guilds)} servidor(es)")
 
-
-@bot.tree.error
-async def on_app_command_error(
-    interaction: discord.Interaction,
-    error: discord.app_commands.AppCommandError,
-):
-    print("[APP_COMMAND_ERROR]", repr(error))
-    traceback.print_exception(type(error), error, error.__traceback__)
-
-    msg = f"Erro ao executar o comando: `{error}`"
-    try:
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
-    except Exception as followup_error:
-        print("[APP_COMMAND_ERROR] Falha ao responder ao usuário:", repr(followup_error))
-
-
-def run_web():
-    print("WEB SERVER INICIANDO")
-    app = create_app()
-    app.run(host="0.0.0.0", port=config.PORT)
-
-
-@bot.event
-async def on_ready():
-    print(f"Logado como {bot.user} (id: {bot.user.id})")
-    print(f"Em {len(bot.guilds)} servidor(es)")
+    async def on_app_command_error(self, interaction: discord.Interaction, error):
+        print(f"[APP_COMMAND_ERROR] {error!r}")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("Ocorreu um erro.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Ocorreu um erro.", ephemeral=True)
+        except Exception as e:
+            print(f"[APP_COMMAND_ERROR] Falha ao responder ao usuário: {e!r}")
 
 
 async def main():
     print("MAIN INICIOU")
-    threading.Thread(target=run_web, daemon=True).start()
+    _start_webserver_if_available()
+    bot = ChatReviveBot()
     await bot.start(config.TOKEN)
 
 
 if __name__ == "__main__":
-    if not config.TOKEN:
-        raise RuntimeError("Faltou DISCORD_TOKEN")
+    print("BOT.PY INICIOU")
     asyncio.run(main())
