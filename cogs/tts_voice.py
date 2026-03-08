@@ -244,7 +244,7 @@ class ToggleSelect(discord.ui.Select):
 class BotPrefixModal(discord.ui.Modal, title="Alterar prefixo do bot"):
     new_prefix = discord.ui.TextInput(
         label="Novo prefixo do bot",
-        placeholder="Ex.: !",
+        placeholder="Ex.: _",
         required=True,
         min_length=1,
         max_length=8,
@@ -1082,7 +1082,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         embed.add_field(name="Velocidade ativa", value=f"`{resolved.get('rate', '+0%')}`", inline=True)
         embed.add_field(name="Tom ativo", value=f"`{resolved.get('pitch', '+0Hz')}`", inline=True)
         if server:
-            embed.add_field(name="Prefixo do bot", value=f"`{guild_defaults.get('bot_prefix', '!')}`", inline=True)
+            embed.add_field(name="Prefixo do bot", value=f"`{guild_defaults.get('bot_prefix', '_')}`", inline=True)
             embed.add_field(name="Prefixo do TTS", value=f"`{guild_defaults.get('tts_prefix', ',')}`", inline=True)
         if last_change:
             embed.add_field(name="Última alteração", value=last_change, inline=False)
@@ -1130,11 +1130,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         if prefix_kind == "bot":
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, bot_prefix=cleaned))
-            desc = f"O prefixo do bot do servidor agora é `{cleaned}`."
+            desc = f"O prefixo do bot do servidor agora é `{cleaned}`"
             title = "Prefixo do bot atualizado"
         else:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, tts_prefix=cleaned))
-            desc = f"O prefixo do TTS do servidor agora é `{cleaned}`."
+            desc = f"O prefixo do TTS do servidor agora é `{cleaned}`
             title = "Prefixo do TTS atualizado"
 
         await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
