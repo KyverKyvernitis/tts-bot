@@ -915,8 +915,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await self._defer_ephemeral(interaction)
         if not await self._require_guild(interaction):
             return
-        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id)
-        await self._respond(interaction, embed=embed, view=self._build_panel_view(interaction.user.id, interaction.guild.id, server=False), ephemeral=True)
+        embed = await self._build_settings_embed(
+            interaction.guild.id,
+            interaction.user.id,
+            server=False,
+            panel_kind="user",
+        )
+        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=False)
+        msg = await self._respond(interaction, embed=embed, view=view, ephemeral=True)
+        view.message = msg
 
 
 
@@ -1482,8 +1489,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await self._defer_ephemeral(interaction)
         if not await self._require_guild(interaction):
             return
+        if not await self._require_kick_members(interaction):
+            return
         embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id)
-        await self._respond(interaction, embed=embed, view=TTSTogglePanelView(self, interaction.user.id, interaction.guild.id), ephemeral=True)
+        view = self._build_toggle_view(interaction.user.id, interaction.guild.id)
+        msg = await self._respond(interaction, embed=embed, view=view, ephemeral=True)
+        view.message = msg
 
 
     @app_commands.describe(enabled="true para ativar, false para desativar")
