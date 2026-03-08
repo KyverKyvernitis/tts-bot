@@ -208,10 +208,64 @@ class ToggleSelect(discord.ui.Select):
             await self.cog._apply_block_voice_bot_from_panel(interaction, enabled)
 
 
+
+class BotPrefixModal(discord.ui.Modal, title="Alterar prefixo do bot"):
+    new_prefix = discord.ui.TextInput(
+        label="Novo prefixo do bot",
+        placeholder="Ex.: !",
+        required=True,
+        min_length=1,
+        max_length=8,
+    )
+
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message, owner_id: int, guild_id: int):
+        super().__init__()
+        self.cog = cog
+        self.panel_message = panel_message
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog._apply_server_prefix_from_modal(
+            interaction,
+            prefix_kind="bot",
+            prefix=str(self.new_prefix),
+            panel_message=self.panel_message,
+        )
+
+
+class TTSPrefixModal(discord.ui.Modal, title="Alterar prefixo do TTS"):
+    new_prefix = discord.ui.TextInput(
+        label="Novo prefixo do TTS",
+        placeholder="Ex.: ,",
+        required=True,
+        min_length=1,
+        max_length=8,
+    )
+
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message, owner_id: int, guild_id: int):
+        super().__init__()
+        self.cog = cog
+        self.panel_message = panel_message
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog._apply_server_prefix_from_modal(
+            interaction,
+            prefix_kind="tts",
+            prefix=str(self.new_prefix),
+            panel_message=self.panel_message,
+        )
+
+
 class TTSMainPanelView(_BaseTTSView):
     def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, server: bool = False):
         super().__init__(cog, owner_id, guild_id)
         self.server = server
+        if not server:
+            self.remove_item(self.bot_prefix_button)
+            self.remove_item(self.tts_prefix_button)
 
     @discord.ui.button(label="Modo", style=discord.ButtonStyle.secondary, emoji="🎛️", row=0)
     async def mode_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -233,6 +287,15 @@ class TTSMainPanelView(_BaseTTSView):
     @discord.ui.button(label="Tom", style=discord.ButtonStyle.secondary, emoji="🎚️", row=1)
     async def pitch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _SimpleSelectView(self.cog, self.owner_id, self.guild_id, "Escolha o tom", "Selecione um tom pronto para o modo edge.", PitchSelect(self.cog, server=self.server)).send(interaction)
+
+
+    @discord.ui.button(label="Prefixo do bot", style=discord.ButtonStyle.secondary, emoji="🤖", row=2)
+    async def bot_prefix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(BotPrefixModal(self.cog, interaction.message, self.owner_id, self.guild_id))
+
+    @discord.ui.button(label="Prefixo do TTS", style=discord.ButtonStyle.secondary, emoji="🔊", row=2)
+    async def tts_prefix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TTSPrefixModal(self.cog, interaction.message, self.owner_id, self.guild_id))
 
     @discord.ui.button(label="Entrar na call", style=discord.ButtonStyle.secondary, emoji="📥", row=2)
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -620,7 +683,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     async def on_message(self, message: discord.Message):
         if not getattr(config, "TTS_ENABLED", True):
             return
-        if message.author.bot or not message.guild or not message.content or not message.content.startswith(","):
+        if message.author.bot or not message.guild or not message.content:
+            return
+
+        db = self._get_db()
+        guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(message.guild.id)) if db else {}
+        tts_prefix = str((guild_defaults or {}).get("tts_prefix", ",") or ",")
+
+        if not message.content.startswith(tts_prefix):
             return
         if self._was_tts_message_seen(message.id):
             return
@@ -659,7 +729,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             resolved["pitch"] = "+0Hz"
             forced_gtts = True
 
-        text = message.content[1:].strip()
+        text = message.content[len(tts_prefix):].strip()
         if not text:
             print("[tts_voice] ignorado | texto vazio após prefixo")
             return
@@ -967,11 +1037,86 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         embed.add_field(name="Idioma gTTS ativo", value=f"`{resolved.get('language', 'Não definido')}`", inline=True)
         embed.add_field(name="Velocidade ativa", value=f"`{resolved.get('rate', '+0%')}`", inline=True)
         embed.add_field(name="Tom ativo", value=f"`{resolved.get('pitch', '+0Hz')}`", inline=True)
+        if server:
+            embed.add_field(name="Prefixo do bot", value=f"`{guild_defaults.get('bot_prefix', '!')}`", inline=True)
+            embed.add_field(name="Prefixo do TTS", value=f"`{guild_defaults.get('tts_prefix', ',')}`", inline=True)
         if last_change:
             embed.add_field(name="Última alteração", value=last_change, inline=False)
 
         embed.set_footer(text="As alterações feitas por menus também ficam salvas no banco.")
         return embed
+
+
+    async def _apply_server_prefix_from_modal(
+        self,
+        interaction: discord.Interaction,
+        *,
+        prefix_kind: str,
+        prefix: str,
+        panel_message: discord.Message,
+    ):
+        if not interaction.user.guild_permissions.kick_members:
+            await interaction.response.send_message(
+                embed=self._make_embed(
+                    "Sem permissão",
+                    "Você precisa da permissão `Expulsar Membros` para alterar os prefixos do servidor por esse painel.",
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        db = self._get_db()
+        if db is None:
+            await interaction.response.send_message(
+                embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        cleaned = (prefix or "").strip()
+        if not cleaned:
+            await interaction.response.send_message(
+                embed=self._make_embed("Prefixo inválido", "O prefixo não pode ficar vazio.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        cleaned = cleaned[:8]
+
+        if prefix_kind == "bot":
+            await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, bot_prefix=cleaned))
+            desc = f"O prefixo do bot do servidor agora é `{cleaned}`."
+            title = "Prefixo do bot atualizado"
+        else:
+            await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, tts_prefix=cleaned))
+            desc = f"O prefixo do TTS do servidor agora é `{cleaned}`."
+            title = "Prefixo do TTS atualizado"
+
+        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+        embed = await self._build_settings_embed(
+            interaction.guild.id,
+            interaction.user.id,
+            server=True,
+            panel_kind="server",
+            last_change=desc,
+        )
+        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=True)
+        view.message = panel_message
+        try:
+            await panel_message.edit(embed=embed, view=view)
+        except Exception:
+            pass
+
+        await interaction.response.send_message(
+            embed=self._make_embed(title, desc, ok=True),
+            ephemeral=True,
+        )
+        await self._announce_panel_change(
+            interaction,
+            title=title,
+            description=desc,
+        )
 
     async def _apply_mode_from_panel(self, interaction: discord.Interaction, mode: str, *, server: bool):
         if server and not interaction.user.guild_permissions.kick_members:
@@ -1001,8 +1146,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, engine=value))
             desc = f"O seu modo de TTS agora é `{value}`."
 
-        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=server, last_change=desc)
-        await interaction.response.edit_message(embed=embed, view=interaction.message.components and self._build_panel_view(interaction.user.id, interaction.guild.id, server=server))
+        if server:
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+        else:
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, desc))
+        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=server, panel_kind="server" if server else "user", last_change=desc)
+        await interaction.response.edit_message(embed=embed, view=self._build_panel_view(interaction.user.id, interaction.guild.id, server=server))
+        await self._announce_panel_change(interaction, title="Modo atualizado", description=desc)
 
     async def _apply_voice_from_panel(self, interaction: discord.Interaction, voice: str, *, server: bool):
         if server and not interaction.user.guild_permissions.kick_members:
@@ -1332,7 +1482,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await self._defer_ephemeral(interaction)
         if not await self._require_guild(interaction):
             return
-        embed = await self._build_settings_embed(interaction.guild.id, interaction.user.id, server=False, panel_kind="user")
+        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id)
         await self._respond(interaction, embed=embed, view=TTSTogglePanelView(self, interaction.user.id, interaction.guild.id), ephemeral=True)
 
 
