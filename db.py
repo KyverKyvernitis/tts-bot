@@ -87,7 +87,7 @@ class SettingsDB:
             "language": str(tts.get("language", "") or ""),
             "rate": str(tts.get("rate", "") or ""),
             "pitch": str(tts.get("pitch", "") or ""),
-            "bot_prefix": str(g.get("bot_prefix", "!") or "!"),
+            "bot_prefix": str(g.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(g.get("tts_prefix", ",") or ","),
             "block_voice_bot": bool(g.get("block_voice_bot_enabled", True)),
             "only_target_user": bool(g.get("only_target_user_enabled", False)),
@@ -121,7 +121,7 @@ class SettingsDB:
         if pitch is not None:
             tts["pitch"] = pitch
         if bot_prefix is not None:
-            doc["bot_prefix"] = str(bot_prefix or "!")[:8]
+            doc["bot_prefix"] = str(bot_prefix or "_")[:8]
         if tts_prefix is not None:
             doc["tts_prefix"] = str(tts_prefix or ",")[:8]
         if block_voice_bot is not None:
@@ -197,7 +197,7 @@ class SettingsDB:
             "language": pick("language", "pt-br"),
             "rate": pick("rate", "+0%"),
             "pitch": pick("pitch", "+0Hz"),
-            "bot_prefix": str(guild.get("bot_prefix", "!") or "!"),
+            "bot_prefix": str(guild.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(guild.get("tts_prefix", ",") or ","),
         }
 
