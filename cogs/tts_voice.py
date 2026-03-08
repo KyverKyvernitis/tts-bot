@@ -307,6 +307,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self.edge_voice_names: set[str] = set()
         self.gtts_languages: dict[str, str] = get_gtts_languages()
         self._recent_tts_message_ids: dict[int, float] = {}
+        self._voice_connect_locks: dict[int, asyncio.Lock] = {}
 
     async def cog_load(self):
         await self._load_edge_voices()
@@ -318,6 +319,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if inspect.isawaitable(value):
             return await value
         return value
+
+    def _get_voice_connect_lock(self, guild_id: int) -> asyncio.Lock:
+        lock = self._voice_connect_locks.get(guild_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._voice_connect_locks[guild_id] = lock
+        return lock
 
     def _mark_tts_message_seen(self, message_id: int) -> None:
         now = time.monotonic()
@@ -523,20 +531,65 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if voice_channel is None:
             print(f"[tts_voice] _ensure_connected recebeu canal None | guild={guild.id}")
             return None
-        vc = guild.voice_client
-        if vc and vc.channel and vc.channel.id == voice_channel.id and vc.is_connected():
-            return vc
-        try:
-            if vc and vc.is_connected():
-                await vc.move_to(voice_channel)
-                print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+
+        lock = self._get_voice_connect_lock(guild.id)
+        async with lock:
+            vc = guild.voice_client
+
+            if vc and vc.is_connected() and vc.channel and vc.channel.id == voice_channel.id:
                 return vc
-            new_vc = await voice_channel.connect(self_deaf=True)
-            print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
-            return new_vc
-        except Exception as e:
-            print(f"[tts_voice] Erro ao conectar na guild {guild.id}: {e}")
-            return None
+
+            async def _fresh_connect() -> Optional[discord.VoiceClient]:
+                new_vc = await voice_channel.connect(self_deaf=True)
+                print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
+                return new_vc
+
+            try:
+                if vc and vc.is_connected():
+                    try:
+                        await vc.move_to(voice_channel)
+                        print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+                        return vc
+                    except Exception as move_err:
+                        msg = str(move_err).lower()
+                        if "closing transport" in msg or "not connected to voice" in msg:
+                            try:
+                                await vc.disconnect(force=True)
+                            except Exception:
+                                pass
+                            return await _fresh_connect()
+                        raise
+
+                return await _fresh_connect()
+
+            except Exception as e:
+                msg = str(e).lower()
+                current_vc = guild.voice_client
+
+                if "already connected" in msg and current_vc and current_vc.is_connected():
+                    if current_vc.channel and current_vc.channel.id == voice_channel.id:
+                        return current_vc
+                    try:
+                        await current_vc.move_to(voice_channel)
+                        print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+                        return current_vc
+                    except Exception:
+                        pass
+
+                if "closing transport" in msg or "not connected to voice" in msg:
+                    try:
+                        if current_vc:
+                            await current_vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                    try:
+                        return await _fresh_connect()
+                    except Exception as retry_err:
+                        print(f"[tts_voice] Erro ao reconectar na guild {guild.id}: {retry_err}")
+                        return None
+
+                print(f"[tts_voice] Erro ao conectar na guild {guild.id}: {e}")
+                return None
 
     def _chunk_lines(self, lines: list[str], max_chars: int = 3500) -> list[str]:
         chunks, current, size = [], [], 0
