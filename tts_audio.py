@@ -421,6 +421,8 @@ class TTSAudioMixin:
                         state.warmed_until = time.monotonic() + TTS_WARM_HOLD_SECONDS
                     if prefetched_item is None and not state.queue.empty():
                         prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
+                except asyncio.CancelledError:
+                    return
                 except Exception as e:
                     print(f"[tts_voice] Erro no worker da guild {guild_id}: {e}")
                 finally:
