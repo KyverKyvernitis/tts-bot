@@ -1,4 +1,5 @@
 import inspect
+import time
 from typing import Optional
 
 import discord
@@ -305,6 +306,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self.edge_voice_cache: list[str] = []
         self.edge_voice_names: set[str] = set()
         self.gtts_languages: dict[str, str] = get_gtts_languages()
+        self._recent_tts_message_ids: dict[int, float] = {}
 
     async def cog_load(self):
         await self._load_edge_voices()
@@ -316,6 +318,23 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if inspect.isawaitable(value):
             return await value
         return value
+
+    def _mark_tts_message_seen(self, message_id: int) -> None:
+        now = time.monotonic()
+        self._recent_tts_message_ids[message_id] = now
+        cutoff = now - 30.0
+        stale = [mid for mid, ts in self._recent_tts_message_ids.items() if ts < cutoff]
+        for mid in stale:
+            self._recent_tts_message_ids.pop(mid, None)
+
+    def _was_tts_message_seen(self, message_id: int) -> bool:
+        ts = self._recent_tts_message_ids.get(message_id)
+        if ts is None:
+            return False
+        if time.monotonic() - ts > 30.0:
+            self._recent_tts_message_ids.pop(message_id, None)
+            return False
+        return True
 
     async def _load_edge_voices(self):
         try:
@@ -545,11 +564,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        print(f"[tts_voice] on_message recebido | guild={getattr(message.guild, 'id', None)} channel_type={type(message.channel).__name__} user={getattr(message.author, 'id', None)} raw={message.content!r}")
         if not getattr(config, "TTS_ENABLED", True):
             return
         if message.author.bot or not message.guild or not message.content or not message.content.startswith(","):
             return
+        if self._was_tts_message_seen(message.id):
+            return
+        self._mark_tts_message_seen(message.id)
         author_voice = getattr(message.author, "voice", None)
         if author_voice is None or author_voice.channel is None:
             print("[tts_voice] ignorado | autor não está em call")
@@ -592,7 +613,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = getattr(message.channel, "id", None)
         await state.queue.put(QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"]))
-        print(f"[tts_voice] Mensagem enfileirada | guild={message.guild.id} user={message.author.id} msg_channel={getattr(message.channel, 'id', None)} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts} texto={text!r}")
+        print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
+        print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
         self._ensure_worker(message.guild.id)
 
     @commands.Cog.listener()
