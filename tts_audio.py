@@ -287,12 +287,52 @@ class TTSAudioMixin:
         if target_channel is None:
             self._log_debug(f"[tts_voice] Canal de voz não encontrado | guild={guild.id} channel={item.channel_id}")
             return None
+
         vc = guild.voice_client
-        if vc is not None and vc.is_connected() and vc.channel is not None and vc.channel.id == item.channel_id:
-            state.last_channel_id = item.channel_id
-            return vc
-        vc = await self._maybe_await(self._ensure_connected(guild, target_channel))
         if vc is not None and vc.is_connected():
+            if vc.channel is not None and vc.channel.id == item.channel_id:
+                state.last_channel_id = item.channel_id
+                return vc
+            try:
+                await vc.move_to(target_channel)
+                state.last_channel_id = item.channel_id
+                return vc
+            except Exception:
+                pass
+
+        try:
+            vc = await self._maybe_await(self._ensure_connected(guild, target_channel))
+        except Exception as e:
+            msg = str(e).lower()
+            vc = guild.voice_client
+            if "already connected" in msg and vc is not None and vc.is_connected():
+                if vc.channel is not None and vc.channel.id == item.channel_id:
+                    state.last_channel_id = item.channel_id
+                    return vc
+                try:
+                    await vc.move_to(target_channel)
+                    state.last_channel_id = item.channel_id
+                    return vc
+                except Exception:
+                    pass
+            print(f"[tts_voice] Erro ao conectar na guild {guild.id}: {e}")
+            return None
+
+        if vc is None:
+            vc = guild.voice_client
+            if vc is not None and vc.is_connected():
+                if vc.channel is not None and vc.channel.id == item.channel_id:
+                    state.last_channel_id = item.channel_id
+                    return vc
+                try:
+                    await vc.move_to(target_channel)
+                    state.last_channel_id = item.channel_id
+                    return vc
+                except Exception:
+                    pass
+            return None
+
+        if vc.is_connected():
             state.last_channel_id = item.channel_id
         return vc
 
