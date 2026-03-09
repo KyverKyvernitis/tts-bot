@@ -71,14 +71,14 @@ class AntiMzkCog(commands.Cog):
     async def antimzk(
         self,
         interaction: discord.Interaction,
-        action: app_commands.Choice[str],
+        action: str,
         role_id: str | None = None,
     ):
         if await self._reject_if_not_allowed_guild(interaction):
             return
 
         guild = interaction.guild
-        chosen = action.value
+        chosen = action
 
         if chosen == "toggle":
             current = self.db.anti_mzk_enabled(guild.id)
