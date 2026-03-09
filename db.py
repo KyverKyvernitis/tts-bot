@@ -242,23 +242,42 @@ class SettingsDB:
             "tts_prefix": str(guild.get("tts_prefix", ",") or ","),
         }
 
-    def get_panel_history(self, guild_id: int, user_id: int) -> Dict[str, str]:
+    def get_panel_history(self, guild_id: int, user_id: int) -> Dict[str, Any]:
         guild_doc = self.guild_cache.get(guild_id, {})
         guild_panel = guild_doc.get("panel_history", {}) or {}
         user_doc = self.user_cache.get((guild_id, user_id), {})
         user_panel = user_doc.get("panel_history", {}) or {}
 
+        user_last_changes = [str(x) for x in (user_panel.get("last_changes", []) or []) if str(x or "")]
+        server_last_changes = [str(x) for x in (guild_panel.get("server_last_changes", []) or []) if str(x or "")]
+        toggle_last_changes = [str(x) for x in (guild_panel.get("toggle_last_changes", []) or []) if str(x or "")]
+
+        if not user_last_changes and user_panel.get("last_change"):
+            user_last_changes = [str(user_panel.get("last_change") or "")]
+        if not server_last_changes and guild_panel.get("server_last_change"):
+            server_last_changes = [str(guild_panel.get("server_last_change") or "")]
+        if not toggle_last_changes and guild_panel.get("toggle_last_change"):
+            toggle_last_changes = [str(guild_panel.get("toggle_last_change") or "")]
+
         return {
-            "user_last_change": str(user_panel.get("last_change", "") or ""),
-            "server_last_change": str(guild_panel.get("server_last_change", "") or ""),
-            "toggle_last_change": str(guild_panel.get("toggle_last_change", "") or ""),
+            "user_last_change": user_last_changes[-1] if user_last_changes else "",
+            "server_last_change": server_last_changes[-1] if server_last_changes else "",
+            "toggle_last_change": toggle_last_changes[-1] if toggle_last_changes else "",
+            "user_last_changes": user_last_changes,
+            "server_last_changes": server_last_changes,
+            "toggle_last_changes": toggle_last_changes,
         }
 
     async def set_user_panel_last_change(self, guild_id: int, user_id: int, text: str):
         key = (guild_id, user_id)
         doc = self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id})
         panel = doc.get("panel_history", {}) or {}
-        panel["last_change"] = str(text or "")
+        text = str(text or "")
+        last_changes = [str(x) for x in (panel.get("last_changes", []) or []) if str(x or "")]
+        if text:
+            last_changes.append(text)
+        panel["last_change"] = text
+        panel["last_changes"] = last_changes[-3:]
         doc["type"] = "user"
         doc["guild_id"] = guild_id
         doc["user_id"] = user_id
@@ -275,9 +294,19 @@ class SettingsDB:
         panel = doc.get("panel_history", {}) or {}
 
         if server_last_change is not None:
-            panel["server_last_change"] = str(server_last_change or "")
+            text = str(server_last_change or "")
+            server_last_changes = [str(x) for x in (panel.get("server_last_changes", []) or []) if str(x or "")]
+            if text:
+                server_last_changes.append(text)
+            panel["server_last_change"] = text
+            panel["server_last_changes"] = server_last_changes[-3:]
         if toggle_last_change is not None:
-            panel["toggle_last_change"] = str(toggle_last_change or "")
+            text = str(toggle_last_change or "")
+            toggle_last_changes = [str(x) for x in (panel.get("toggle_last_changes", []) or []) if str(x or "")]
+            if text:
+                toggle_last_changes.append(text)
+            panel["toggle_last_change"] = text
+            panel["toggle_last_changes"] = toggle_last_changes[-3:]
 
         doc["panel_history"] = panel
         await self._save_guild_doc(guild_id, doc)
