@@ -1394,20 +1394,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         )
         view = self._build_panel_view(0 if getattr(panel_message, "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id, server=True)
         view.message = panel_message
+        edited = False
         try:
-            target_message = getattr(interaction, "message", None) or panel_message
-            await target_message.edit(embed=embed, view=view)
-        except discord.NotFound:
-            print("[tts_panel] painel antigo não existe mais; seguindo sem editar")
+            if getattr(interaction, "message", None) is not None and getattr(interaction.message, "id", None) == getattr(panel_message, "id", None):
+                await interaction.response.edit_message(embed=embed, view=view)
+                edited = True
+            else:
+                await panel_message.edit(embed=embed, view=view)
+                edited = True
         except discord.NotFound:
             print("[tts_panel] painel antigo não existe mais; seguindo sem editar")
         except Exception as e:
             print(f"[tts_panel] falha ao editar painel: {e!r}")
 
-        await interaction.response.send_message(
-            embed=self._make_embed(title, desc, ok=True),
-            ephemeral=True,
-        )
+        if edited:
+            await interaction.followup.send(
+                embed=self._make_embed(title, desc, ok=True),
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                embed=self._make_embed(title, desc, ok=True),
+                ephemeral=True,
+            )
         await self._announce_panel_change(
             interaction,
             title=title,
@@ -1423,24 +1432,39 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         title: str,
         description: str,
     ):
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True, thinking=False)
+        edited = False
 
         try:
             if hasattr(interaction, "message") and interaction.message is not None:
                 if hasattr(view, "message"):
                     view.message = interaction.message
-                await interaction.message.edit(embed=embed, view=view)
+                if not interaction.response.is_done():
+                    await interaction.response.edit_message(embed=embed, view=view)
+                else:
+                    await interaction.message.edit(embed=embed, view=view)
+                edited = True
         except discord.NotFound:
             print("[tts_panel] painel antigo não existe mais; seguindo sem editar")
         except Exception as e:
             print(f"[tts_panel] falha ao editar painel: {e!r}")
 
         try:
-            await interaction.followup.send(
-                embed=self._make_embed(title, description, ok=True),
-                ephemeral=True,
-            )
+            if edited:
+                await interaction.followup.send(
+                    embed=self._make_embed(title, description, ok=True),
+                    ephemeral=True,
+                )
+            else:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        embed=self._make_embed(title, description, ok=True),
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.followup.send(
+                        embed=self._make_embed(title, description, ok=True),
+                        ephemeral=True,
+                    )
         except Exception as e:
             print(f"[tts_panel] falha ao responder followup: {e!r}")
 
