@@ -438,12 +438,50 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._voice_connect_locks: dict[int, asyncio.Lock] = {}
         self._prefix_panel_cooldowns: dict[tuple[int, int, str], float] = {}
         self._active_prefix_panels: dict[tuple[int, int, str], tuple[discord.Message, discord.ui.View]] = {}
+        self._public_panel_states: dict[int, dict] = {}
 
     async def cog_load(self):
         await self._load_edge_voices()
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
+
+    def _panel_actor_name(self, interaction: discord.Interaction) -> str:
+        return getattr(interaction.user, "display_name", None) or getattr(interaction.user, "name", "Usuário")
+
+    def _quote_value(self, value: str) -> str:
+        return f'"{value}"'
+
+    def _format_history_entries(self, entries: list[str]) -> str:
+        entries = [str(x) for x in (entries or []) if str(x or "").strip()]
+        if not entries:
+            return ""
+        lines = []
+        for idx, entry in enumerate(entries):
+            safe = entry.replace("`", "'")
+            line = f"`{safe}`"
+            if idx == len(entries) - 1:
+                line = f"**{line}**"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _get_public_panel_history(self, message_id: int | None) -> list[str]:
+        if not message_id:
+            return []
+        state = self._public_panel_states.get(message_id, {}) or {}
+        return [str(x) for x in (state.get("history", []) or []) if str(x or "").strip()]
+
+    def _append_public_panel_history(self, message_id: int | None, text: str):
+        if not message_id:
+            return
+        state = self._public_panel_states.get(message_id)
+        if state is None:
+            state = {"history": []}
+            self._public_panel_states[message_id] = state
+        history = [str(x) for x in (state.get("history", []) or []) if str(x or "").strip()]
+        if text:
+            history.append(str(text))
+        state["history"] = history[-3:]
 
     async def _maybe_await(self, value):
         if inspect.isawaitable(value):
@@ -1185,18 +1223,31 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             print(f"[tts_voice] Falha ao anunciar alteração do painel: {e}")
 
 
+    def _user_history_text(self, interaction: discord.Interaction, what: str, value: str) -> str:
+        return f"{self._panel_actor_name(interaction)} mudou {what} para {value}"
+
+    def _server_history_text(self, interaction: discord.Interaction, what: str, value: str) -> str:
+        return f"{self._panel_actor_name(interaction)} alterou {what} para {value}"
+
+    def _toggle_history_text(self, interaction: discord.Interaction, text: str) -> str:
+        return f"{self._panel_actor_name(interaction)} {text}"
+
+
     async def _build_toggle_embed(
         self,
         guild_id: int,
         user_id: int,
         *,
-        last_change: str | None = None,
+        last_changes: list[str] | None = None,
     ) -> discord.Embed:
         db = self._get_db()
         panel_history = await self._maybe_await(db.get_panel_history(guild_id, user_id)) if db and hasattr(db, "get_panel_history") else {}
-        stored_last_change = str((panel_history or {}).get("toggle_last_change", "") or "")
-        if last_change is None:
-            last_change = stored_last_change
+        stored_last_changes = list((panel_history or {}).get("toggle_last_changes", []) or [])
+        if not stored_last_changes:
+            stored_last = str((panel_history or {}).get("toggle_last_change", "") or "")
+            stored_last_changes = [stored_last] if stored_last else []
+        if last_changes is None:
+            last_changes = stored_last_changes
 
         guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild_id)) if db else {}
         guild_defaults = guild_defaults or {}
@@ -1216,8 +1267,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             value="`Ativado`" if bool(guild_defaults.get("only_target_user", False)) else "`Desativado`",
             inline=True,
         )
-        if last_change:
-            embed.add_field(name="Última alteração", value=last_change, inline=False)
+        history_text = self._format_history_entries(last_changes or [])
+        if history_text:
+            embed.add_field(name="Últimas alterações", value=history_text, inline=False)
         embed.set_footer(text="As alterações feitas por menus também ficam salvas no banco.")
         return embed
 
@@ -1228,7 +1280,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         *,
         server: bool = False,
         panel_kind: str = "user",
-        last_change: str | None = None,
+        last_changes: list[str] | None = None,
+        message_id: int | None = None,
     ) -> discord.Embed:
         db = self._get_db()
         guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild_id)) if db else {}
@@ -1240,19 +1293,22 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         resolved = resolved or {}
 
         panel_history = await self._maybe_await(db.get_panel_history(guild_id, user_id)) if db and hasattr(db, "get_panel_history") else {}
-        stored_last_change = ""
+        stored_last_changes: list[str] = []
         if panel_kind == "server":
-            stored_last_change = str((panel_history or {}).get("server_last_change", "") or "")
+            stored_last_changes = list((panel_history or {}).get("server_last_changes", []) or [])
+            if not stored_last_changes:
+                stored_last = str((panel_history or {}).get("server_last_change", "") or "")
+                stored_last_changes = [stored_last] if stored_last else []
         elif panel_kind == "toggle":
-            stored_last_change = str((panel_history or {}).get("toggle_last_change", "") or "")
+            stored_last_changes = list((panel_history or {}).get("toggle_last_changes", []) or [])
+            if not stored_last_changes:
+                stored_last = str((panel_history or {}).get("toggle_last_change", "") or "")
+                stored_last_changes = [stored_last] if stored_last else []
         else:
-            stored_last_change = str((panel_history or {}).get("user_last_change", "") or "")
+            stored_last_changes = self._get_public_panel_history(message_id) if message_id else []
 
-        if last_change is None:
-            last_change = stored_last_change
-
-        target_user_id = getattr(config, "ONLY_TTS_USER_ID", 0)
-        only_target_user = bool(guild_defaults.get("only_target_user", False))
+        if last_changes is None:
+            last_changes = stored_last_changes
 
         title = "Painel de TTS do servidor" if server else "Painel de TTS"
         description = (
@@ -1270,10 +1326,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if server:
             embed.add_field(name="Prefixo do bot", value=f"`{guild_defaults.get('bot_prefix', '_')}`", inline=True)
             embed.add_field(name="Prefixo do TTS", value=f"`{guild_defaults.get('tts_prefix', ',')}`", inline=True)
-        if last_change:
-            embed.add_field(name="Última alteração", value=last_change, inline=False)
+        history_text = self._format_history_entries(last_changes or [])
+        if history_text:
+            embed.add_field(name="Últimas alterações", value=history_text, inline=False)
 
-        embed.set_footer(text="As alterações feitas por menus também ficam salvas no banco.")
+        embed.set_footer(text="As alterações feitas por menus também ficam salvas no banco." if server or panel_kind == "toggle" else "As alterações desse painel valem só para esta mensagem.")
         return embed
 
 
@@ -1317,21 +1374,25 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if prefix_kind == "bot":
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, bot_prefix=cleaned))
             desc = f"O prefixo do bot do servidor agora é `{cleaned}`"
+            history_entry = self._server_history_text(interaction, "o prefixo dos comandos", self._quote_value(cleaned))
             title = "Prefixo do bot atualizado"
         else:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, tts_prefix=cleaned))
             desc = f"O prefixo do TTS do servidor agora é `{cleaned}`"
+            history_entry = self._server_history_text(interaction, "o prefixo do TTS", self._quote_value(cleaned))
             title = "Prefixo do TTS atualizado"
 
-        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+        last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         embed = await self._build_settings_embed(
             interaction.guild.id,
             interaction.user.id,
             server=True,
             panel_kind="server",
-            last_change=desc,
+            last_changes=last_changes,
+            message_id=getattr(panel_message, "id", None),
         )
-        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=True)
+        view = self._build_panel_view(0 if getattr(panel_message, "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id, server=True)
         view.message = panel_message
         try:
             target_message = getattr(interaction, "message", None) or panel_message
@@ -1406,23 +1467,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         value = validate_mode(mode)
+        message_id = getattr(getattr(interaction, "message", None), "id", None)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, engine=value))
             desc = f"O modo padrão do servidor agora é `{value}`."
-            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+            history_entry = self._server_history_text(interaction, "o modo padrão do servidor", value)
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, engine=value))
             desc = f"O seu modo de TTS agora é `{value}`."
-            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, desc))
+            history_entry = self._user_history_text(interaction, "o próprio modo", value)
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = self._get_public_panel_history(message_id)
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
             interaction.user.id,
             server=server,
             panel_kind="server" if server else "user",
-            last_change=desc,
+            last_changes=last_changes,
+            message_id=message_id,
         )
-        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=server)
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server)
         await self._panel_update_after_change(
             interaction,
             embed=embed,
@@ -1460,23 +1527,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             return
 
+        message_id = getattr(getattr(interaction, "message", None), "id", None)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, voice=voice))
             desc = f"A voz padrão do servidor agora é `{voice}`."
-            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+            history_entry = self._server_history_text(interaction, "a voz padrão do servidor", voice)
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, voice=voice))
             desc = f"A sua voz do Edge agora é `{voice}`."
-            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, desc))
+            history_entry = self._user_history_text(interaction, "a própria voz", voice)
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = self._get_public_panel_history(message_id)
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
             interaction.user.id,
             server=server,
             panel_kind="server" if server else "user",
-            last_change=desc,
+            last_changes=last_changes,
+            message_id=message_id,
         )
-        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=server)
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server)
         await self._panel_update_after_change(
             interaction,
             embed=embed,
@@ -1507,23 +1580,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             return
 
+        message_id = getattr(getattr(interaction, "message", None), "id", None)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, language=language))
             desc = f"O idioma padrão do servidor agora é `{language}`."
-            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+            history_entry = self._server_history_text(interaction, "o idioma padrão do servidor", language)
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, language=language))
             desc = f"O seu idioma do gtts agora é `{language}`."
-            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, desc))
+            history_entry = self._user_history_text(interaction, "o próprio idioma", language)
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = self._get_public_panel_history(message_id)
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
             interaction.user.id,
             server=server,
             panel_kind="server" if server else "user",
-            last_change=desc,
+            last_changes=last_changes,
+            message_id=message_id,
         )
-        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=server)
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server)
         await self._panel_update_after_change(
             interaction,
             embed=embed,
@@ -1554,23 +1633,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             return
 
+        message_id = getattr(getattr(interaction, "message", None), "id", None)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, rate=speed))
             desc = f"A velocidade padrão do servidor agora é `{speed}`."
-            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+            history_entry = self._server_history_text(interaction, "a velocidade padrão do servidor", speed)
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, rate=speed))
             desc = f"A sua velocidade agora é `{speed}`."
-            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, desc))
+            history_entry = self._user_history_text(interaction, "a própria velocidade", speed)
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = self._get_public_panel_history(message_id)
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
             interaction.user.id,
             server=server,
             panel_kind="server" if server else "user",
-            last_change=desc,
+            last_changes=last_changes,
+            message_id=message_id,
         )
-        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=server)
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server)
         await self._panel_update_after_change(
             interaction,
             embed=embed,
@@ -1601,23 +1686,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             return
 
+        message_id = getattr(getattr(interaction, "message", None), "id", None)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, pitch=pitch))
             desc = f"O tom padrão do servidor agora é `{pitch}`."
-            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=desc))
+            history_entry = self._server_history_text(interaction, "o tom padrão do servidor", pitch)
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, pitch=pitch))
             desc = f"O seu tom agora é `{pitch}`."
-            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, desc))
+            history_entry = self._user_history_text(interaction, "o próprio tom", pitch)
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = self._get_public_panel_history(message_id)
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
             interaction.user.id,
             server=server,
             panel_kind="server" if server else "user",
-            last_change=desc,
+            last_changes=last_changes,
+            message_id=message_id,
         )
-        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=server)
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server)
         await self._panel_update_after_change(
             interaction,
             embed=embed,
@@ -1650,9 +1741,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, only_target_user=bool(enabled)))
         desc = "Modo Cuca ativado." if enabled else "Modo Cuca desativado."
-        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=desc))
-        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_change=desc)
-        view = self._build_toggle_view(interaction.user.id, interaction.guild.id)
+        history_entry = self._toggle_history_text(interaction, "ativou o Modo Cuca" if enabled else "desativou o Modo Cuca")
+        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
+        last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("toggle_last_changes", []) or [])
+        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes)
+        view = self._build_toggle_view(0 if getattr(getattr(interaction, "message", None), "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id)
         await self._panel_update_after_change(
             interaction,
             embed=embed,
@@ -1685,9 +1778,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, block_voice_bot=bool(enabled)))
         desc = f"Bloqueio por outro bot {'ativado' if enabled else 'desativado'}."
-        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=desc))
-        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_change=desc)
-        view = self._build_toggle_view(interaction.user.id, interaction.guild.id)
+        history_entry = self._toggle_history_text(interaction, "ativou o Bloqueio por outro bot" if enabled else "desativou o Bloqueio por outro bot")
+        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
+        last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("toggle_last_changes", []) or [])
+        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes)
+        view = self._build_toggle_view(0 if getattr(getattr(interaction, "message", None), "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id)
         await self._panel_update_after_change(
             interaction,
             embed=embed,
