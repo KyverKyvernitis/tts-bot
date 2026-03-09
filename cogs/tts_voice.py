@@ -1521,7 +1521,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             title="Modo atualizado",
             description=desc,
         )
-        await self._announce_panel_change(interaction, title="Modo atualizado", description=desc)
+        if server:
+            await self._announce_panel_change(interaction, title="Modo atualizado", description=desc)
 
 
     async def _apply_voice_from_panel(self, interaction: discord.Interaction, voice: str, *, server: bool):
@@ -1581,7 +1582,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             title="Configuração de TTS atualizada",
             description=desc,
         )
-        await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
+        if server:
+            await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
 
     async def _apply_language_from_panel(self, interaction: discord.Interaction, language: str, *, server: bool):
@@ -1634,7 +1636,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             title="Configuração de TTS atualizada",
             description=desc,
         )
-        await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
+        if server:
+            await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
 
     async def _apply_speed_from_panel(self, interaction: discord.Interaction, speed: str, *, server: bool):
@@ -1687,7 +1690,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             title="Configuração de TTS atualizada",
             description=desc,
         )
-        await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
+        if server:
+            await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
 
     async def _apply_pitch_from_panel(self, interaction: discord.Interaction, pitch: str, *, server: bool):
@@ -1740,7 +1744,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             title="Configuração de TTS atualizada",
             description=desc,
         )
-        await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
+        if server:
+            await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
 
     async def _apply_only_target_from_panel(self, interaction: discord.Interaction, enabled: bool):
