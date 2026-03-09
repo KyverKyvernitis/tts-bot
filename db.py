@@ -83,6 +83,42 @@ class SettingsDB:
         doc["anti_mzk_enabled"] = bool(value)
         await self._save_guild_doc(guild_id, doc)
 
+    def get_anti_mzk_role_ids(self, guild_id: int) -> list[int]:
+        g = self.guild_cache.get(guild_id, {})
+        raw = g.get("anti_mzk_role_ids", []) or []
+        result: list[int] = []
+        for value in raw:
+            try:
+                result.append(int(value))
+            except (TypeError, ValueError):
+                pass
+        return result
+
+    async def add_anti_mzk_role_id(self, guild_id: int, role_id: int) -> bool:
+        doc = self._get_guild_doc(guild_id)
+        role_ids = self.get_anti_mzk_role_ids(guild_id)
+
+        role_id = int(role_id)
+        if role_id in role_ids:
+            return False
+
+        role_ids.append(role_id)
+        doc["anti_mzk_role_ids"] = role_ids
+        await self._save_guild_doc(guild_id, doc)
+        return True
+
+    async def remove_anti_mzk_role_id(self, guild_id: int, role_id: int) -> bool:
+        doc = self._get_guild_doc(guild_id)
+        role_ids = self.get_anti_mzk_role_ids(guild_id)
+
+        role_id = int(role_id)
+        if role_id not in role_ids:
+            return False
+
+        doc["anti_mzk_role_ids"] = [rid for rid in role_ids if rid != role_id]
+        await self._save_guild_doc(guild_id, doc)
+        return True
+
     def get_guild_tts_defaults(self, guild_id: int) -> Dict[str, Any]:
         g = self.guild_cache.get(guild_id, {})
         tts = g.get("tts_defaults", {}) or {}
