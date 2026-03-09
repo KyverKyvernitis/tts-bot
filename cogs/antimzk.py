@@ -35,9 +35,9 @@ class AntiMzkCog(commands.Cog):
             return False
 
         if interaction.response.is_done():
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, delete_after=10)
         else:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed, delete_after=10)
         return True
 
     def _anti_mzk_only_kick_members(self, guild_id: int) -> bool:
@@ -118,7 +118,7 @@ class AntiMzkCog(commands.Cog):
                 f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
                 ok=new_value,
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed, delete_after=10)
             return
 
         if chosen == "toggle_kick_only":
@@ -131,7 +131,7 @@ class AntiMzkCog(commands.Cog):
                 f"Agora o anti-mzk está **{'limitado a quem tem Expulsar Membros' if new_value else 'liberado para qualquer membro da call disparar'}**",
                 ok=True,
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed, delete_after=10)
             return
 
         if chosen == "list":
@@ -144,7 +144,7 @@ class AntiMzkCog(commands.Cog):
                     f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
                     ok=False,
                 )
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+                await interaction.response.send_message(embed=embed, delete_after=10)
                 return
 
             lines = []
@@ -159,7 +159,7 @@ class AntiMzkCog(commands.Cog):
                 + f"\nModo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
                 ok=True,
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed, delete_after=10)
             return
 
         if not role_id:
@@ -168,7 +168,7 @@ class AntiMzkCog(commands.Cog):
                 "Você precisa informar o **ID da role** para essa ação",
                 ok=False,
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed, delete_after=10)
             return
 
         try:
@@ -179,7 +179,7 @@ class AntiMzkCog(commands.Cog):
                 "Envie um **ID de role válido**",
                 ok=False,
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed, delete_after=10)
             return
 
         role = guild.get_role(parsed_role_id)
@@ -191,7 +191,7 @@ class AntiMzkCog(commands.Cog):
                     f"Não encontrei nenhuma role com o ID `{parsed_role_id}` neste servidor",
                     ok=False,
                 )
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+                await interaction.response.send_message(embed=embed, delete_after=10)
                 return
 
             added = await self.db.add_anti_mzk_role_id(guild.id, parsed_role_id)
@@ -201,7 +201,7 @@ class AntiMzkCog(commands.Cog):
                     f"A role {role.mention} já está cadastrada no anti-mzk",
                     ok=False,
                 )
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+                await interaction.response.send_message(embed=embed, delete_after=10)
                 return
 
             total = len(self.db.get_anti_mzk_role_ids(guild.id))
@@ -211,7 +211,7 @@ class AntiMzkCog(commands.Cog):
                 f"Agora há **{total}** role(s) cadastrada(s)\n"
                 f"Status: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**",
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed, delete_after=10)
             return
 
         if chosen == "remove":
@@ -222,7 +222,7 @@ class AntiMzkCog(commands.Cog):
                     f"A role com ID `{parsed_role_id}` não está cadastrada no anti-mzk",
                     ok=False,
                 )
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+                await interaction.response.send_message(embed=embed, delete_after=10)
                 return
 
             role_text = role.mention if role else f"`{parsed_role_id}`"
@@ -234,7 +234,7 @@ class AntiMzkCog(commands.Cog):
                 f"Status: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**",
                 ok=True,
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed, delete_after=10)
             return
 
     @antimzk.error
@@ -254,9 +254,9 @@ class AntiMzkCog(commands.Cog):
 
         try:
             if interaction.response.is_done():
-                await interaction.followup.send(embed=embed, ephemeral=True)
+                await interaction.followup.send(embed=embed, delete_after=10)
             else:
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+                await interaction.response.send_message(embed=embed, delete_after=10)
         except Exception:
             pass
 
