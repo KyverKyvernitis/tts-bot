@@ -47,9 +47,6 @@ class AntiMzkCog(commands.Cog):
             return []
 
         for member in voice_channel.members:
-            if member.bot:
-                continue
-
             member_role_ids = {role.id for role in getattr(member, "roles", [])}
             if member_role_ids & role_ids:
                 targets[member.id] = member
@@ -233,7 +230,6 @@ class AntiMzkCog(commands.Cog):
                 "roles": [role.id for role in getattr(member, "roles", [])],
             }
             for member in message.channel.members
-            if not member.bot
         ]
 
         print(
