@@ -278,6 +278,97 @@ class ToggleSelect(discord.ui.Select):
 
 
 
+
+class LanguageCodeModal(discord.ui.Modal, title="Selecionar idioma"):
+    language_code = discord.ui.TextInput(
+        label="Digite um dos códigos",
+        placeholder="pt-br, en, es, fr, ja",
+        required=True,
+        min_length=2,
+        max_length=10,
+    )
+
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool):
+        super().__init__()
+        self.cog = cog
+        self.panel_message = panel_message
+        self.server = server
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog._apply_language_from_panel(
+            interaction,
+            str(self.language_code).strip(),
+            server=self.server,
+            source_panel_message=self.panel_message,
+        )
+
+
+class LanguageHelpView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "TTSVoice",
+        owner_id: int,
+        guild_id: int,
+        *,
+        server: bool = False,
+        source_panel_message: discord.Message | None = None,
+        timeout: float = 180,
+    ):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.server = server
+        self.source_panel_message = source_panel_message
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        target_owner = interaction.user.id if self.owner_id == 0 else self.owner_id
+        if interaction.user.id != target_owner:
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Sem permissão", "Esse painel pertence a outro usuário.", ok=False),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Ver lista de idiomas", style=discord.ButtonStyle.secondary, emoji="📚", row=0)
+    async def list_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        items = sorted(self.cog.gtts_languages.items())
+        if not items:
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Idiomas disponíveis", "Nenhum idioma encontrado.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        chunk_size = 20
+        embeds: list[discord.Embed] = []
+        for i in range(0, len(items), chunk_size):
+            part = items[i:i + chunk_size]
+            body = "\n".join(f"`{code}` — {name}" for code, name in part)
+            embed = discord.Embed(
+                title="Idiomas disponíveis",
+                description=body,
+                color=discord.Color.green(),
+            )
+            embed.set_footer(text=f"Página {(i // chunk_size) + 1}/{((len(items) - 1) // chunk_size) + 1}")
+            embeds.append(embed)
+
+        await interaction.response.send_message(embed=embeds[0], ephemeral=True)
+        for embed in embeds[1:]:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Selecionar idioma", style=discord.ButtonStyle.primary, emoji="🌐", row=0)
+    async def select_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            LanguageCodeModal(
+                self.cog,
+                self.source_panel_message,
+                server=self.server,
+            )
+        )
+
+
 class BotPrefixModal(discord.ui.Modal, title="Alterar prefixo do bot"):
     new_prefix = discord.ui.TextInput(
         label="Novo prefixo do bot",
@@ -354,7 +445,23 @@ class TTSMainPanelView(_BaseTTSView):
     @discord.ui.button(label="Idioma", style=discord.ButtonStyle.secondary, emoji="🌐", row=0)
     async def language_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] language_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o idioma", "Selecione o idioma usado no modo gtts.", LanguageSelect(self.cog, server=self.server), source_panel_message=interaction.message).send(interaction)
+        embed = discord.Embed(
+            title="Escolha o idioma",
+            description="Você pode digitar o código do idioma aqui. Exemplos: `pt-br`, `en`, `es`, `fr`, `ja`",
+            color=discord.Color.green(),
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=LanguageHelpView(
+                self.cog,
+                self._target_owner(interaction),
+                self.guild_id,
+                server=self.server,
+                source_panel_message=interaction.message,
+            ),
+            ephemeral=True,
+        )
+
 
     @discord.ui.button(label="Velocidade", style=discord.ButtonStyle.secondary, emoji="⏩", row=1)
     async def speed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1091,7 +1198,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
         value = str(language or "").strip().lower()
         if value not in self.gtts_languages:
-            await self._respond(interaction, embed=self._make_embed("Idioma inválido", "Esse idioma não foi encontrado na lista do gTTS. Use `/tts voices gtts` para ver as opções.", ok=False), ephemeral=True)
+            await self._respond(interaction, embed=self._make_embed("Idioma inválido", "Esse código não foi encontrado na lista do gTTS. Toque em **Ver lista de idiomas** ou tente um destes exemplos: `pt-br`, `en`, `es`, `fr`, `ja`.", ok=False), ephemeral=True)
             return
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, language=value))
