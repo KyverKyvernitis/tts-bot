@@ -227,9 +227,19 @@ class AntiMzkCog(commands.Cog):
         content = (message.content or "").lower()
         targets = self._iter_target_members(message.guild, message.channel)
 
+        member_debug = [
+            {
+                "id": member.id,
+                "roles": [role.id for role in getattr(member, "roles", [])],
+            }
+            for member in message.channel.members
+            if not member.bot
+        ]
+
         print(
             f"[antimzk] guild={message.guild.id} "
             f"role_ids={self.db.get_anti_mzk_role_ids(message.guild.id)} "
+            f"members={member_debug} "
             f"targets={[m.id for m in targets]}"
         )
 
