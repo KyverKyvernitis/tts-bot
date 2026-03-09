@@ -59,121 +59,125 @@ class AntiMzkCog(commands.Cog):
         return list(targets.values())
 
     @_guild_scoped()
-    @app_commands.command(name="antimzk", description="Ativa ou desativa a censura anti-mzk (voz)")
+    @app_commands.command(name="antimzk", description="Gerencia as roles alvo do anti-mzk")
+    @app_commands.describe(
+        action="Escolha o que fazer",
+        role_id="ID da role para adicionar ou remover",
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Adicionar role", value="add"),
+        app_commands.Choice(name="Remover role", value="remove"),
+        app_commands.Choice(name="Listar roles", value="list"),
+    ])
     @app_commands.checks.has_permissions(kick_members=True)
-    async def antimzk(self, interaction: discord.Interaction):
+    async def antimzk(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        role_id: str | None = None,
+    ):
         if await self._reject_if_not_allowed_guild(interaction):
             return
 
-        gid = interaction.guild.id
-        new_value = not self.db.anti_mzk_enabled(gid)
-        await self.db.set_anti_mzk_enabled(gid, new_value)
+        guild = interaction.guild
+        chosen = action.value
 
-        role_ids = self.db.get_anti_mzk_role_ids(gid)
-        extra = f"\nRoles alvo cadastradas: **{len(role_ids)}**" if role_ids else ""
+        if chosen == "list":
+            role_ids = self.db.get_anti_mzk_role_ids(guild.id)
+            if not role_ids:
+                embed = self._make_embed(
+                    "Sem roles cadastradas",
+                    "Nenhuma role está cadastrada no anti-mzk no momento",
+                    ok=False,
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
 
-        embed = self._make_embed(
-            "Anti-mzk atualizado",
-            ("✅ Censura anti-mzk ativada" if new_value else "❌ Censura anti-mzk desativada") + extra,
-            ok=new_value,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+            lines = []
+            for rid in role_ids:
+                role = guild.get_role(rid)
+                lines.append(role.mention if role else f"`{rid}`")
 
-    @_guild_scoped()
-    @app_commands.command(name="antimzk_add_role", description="Adiciona uma role alvo por ID para o anti-mzk")
-    @app_commands.checks.has_permissions(kick_members=True)
-    async def antimzk_add_role(self, interaction: discord.Interaction, role_id: str):
-        if await self._reject_if_not_allowed_guild(interaction):
+            embed = self._make_embed(
+                "Roles do anti-mzk",
+                "\n".join(lines) + f"\n\nStatus: **{'Ativado' if len(role_ids) > 0 else 'Desativado'}**",
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        if not role_id:
+            embed = self._make_embed(
+                "ID obrigatório",
+                "Você precisa informar o **ID da role** para essa ação",
+                ok=False,
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         try:
             parsed_role_id = int(role_id.strip())
         except (TypeError, ValueError):
-            await interaction.response.send_message(
-                embed=self._make_embed("ID inválido", "Envie um ID de role válido", ok=False),
-                ephemeral=True,
+            embed = self._make_embed(
+                "ID inválido",
+                "Envie um **ID de role válido**",
+                ok=False,
             )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
-        role = interaction.guild.get_role(parsed_role_id)
-        if role is None:
-            await interaction.response.send_message(
-                embed=self._make_embed("Role não encontrada", f"Não encontrei nenhuma role com o ID `{parsed_role_id}` neste servidor", ok=False),
-                ephemeral=True,
+        role = guild.get_role(parsed_role_id)
+
+        if chosen == "add":
+            if role is None:
+                embed = self._make_embed(
+                    "Role não encontrada",
+                    f"Não encontrei nenhuma role com o ID `{parsed_role_id}` neste servidor",
+                    ok=False,
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+            added = await self.db.add_anti_mzk_role_id(guild.id, parsed_role_id)
+            if not added:
+                embed = self._make_embed(
+                    "Role já cadastrada",
+                    f"A role {role.mention} já está cadastrada no anti-mzk",
+                    ok=False,
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+            total = len(self.db.get_anti_mzk_role_ids(guild.id))
+            embed = self._make_embed(
+                "Role adicionada",
+                f"✅ Role {role.mention} adicionada ao anti-mzk\n\nAgora há **{total}** role(s) cadastrada(s)",
             )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
-        added = await self.db.add_anti_mzk_role_id(interaction.guild.id, parsed_role_id)
-        if not added:
-            await interaction.response.send_message(
-                embed=self._make_embed("Role já cadastrada", f"A role {role.mention} já está cadastrada no anti-mzk", ok=False),
-                ephemeral=True,
+        if chosen == "remove":
+            removed = await self.db.remove_anti_mzk_role_id(guild.id, parsed_role_id)
+            if not removed:
+                embed = self._make_embed(
+                    "Role não cadastrada",
+                    f"A role com ID `{parsed_role_id}` não está cadastrada no anti-mzk",
+                    ok=False,
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+            role_text = role.mention if role else f"`{parsed_role_id}`"
+            total = len(self.db.get_anti_mzk_role_ids(guild.id))
+            status = "Ativado" if total > 0 else "Desativado"
+
+            embed = self._make_embed(
+                "Role removida",
+                f"✅ Role {role_text} removida do anti-mzk\n\nRoles restantes: **{total}**\nStatus: **{status}**",
             )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-
-        await interaction.response.send_message(
-            embed=self._make_embed("Role adicionada", f"✅ Role {role.mention} adicionada ao anti-mzk"),
-            ephemeral=True,
-        )
-
-    @_guild_scoped()
-    @app_commands.command(name="antimzk_remove_role", description="Remove uma role alvo por ID do anti-mzk")
-    @app_commands.checks.has_permissions(kick_members=True)
-    async def antimzk_remove_role(self, interaction: discord.Interaction, role_id: str):
-        if await self._reject_if_not_allowed_guild(interaction):
-            return
-
-        try:
-            parsed_role_id = int(role_id.strip())
-        except (TypeError, ValueError):
-            await interaction.response.send_message(
-                embed=self._make_embed("ID inválido", "Envie um ID de role válido", ok=False),
-                ephemeral=True,
-            )
-            return
-
-        removed = await self.db.remove_anti_mzk_role_id(interaction.guild.id, parsed_role_id)
-        if not removed:
-            await interaction.response.send_message(
-                embed=self._make_embed("Role não cadastrada", f"A role com ID `{parsed_role_id}` não está cadastrada no anti-mzk", ok=False),
-                ephemeral=True,
-            )
-            return
-
-        role = interaction.guild.get_role(parsed_role_id)
-        role_text = role.mention if role else f"`{parsed_role_id}`"
-        await interaction.response.send_message(
-            embed=self._make_embed("Role removida", f"✅ Role {role_text} removida do anti-mzk"),
-            ephemeral=True,
-        )
-
-    @_guild_scoped()
-    @app_commands.command(name="antimzk_list_roles", description="Mostra as roles alvo cadastradas no anti-mzk")
-    @app_commands.checks.has_permissions(kick_members=True)
-    async def antimzk_list_roles(self, interaction: discord.Interaction):
-        if await self._reject_if_not_allowed_guild(interaction):
-            return
-
-        role_ids = self.db.get_anti_mzk_role_ids(interaction.guild.id)
-        if not role_ids:
-            await interaction.response.send_message(
-                embed=self._make_embed("Sem roles", "Nenhuma role cadastrada no anti-mzk", ok=False),
-                ephemeral=True,
-            )
-            return
-
-        lines = []
-        for role_id in role_ids:
-            role = interaction.guild.get_role(role_id)
-            lines.append(role.mention if role else f"`{role_id}`")
-
-        embed = self._make_embed("Roles do anti-mzk", "\n".join(lines))
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @antimzk.error
-    @antimzk_add_role.error
-    @antimzk_remove_role.error
-    @antimzk_list_roles.error
     async def antimzk_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         print(f"Erro no anti-mzk: {repr(error)}")
 
@@ -206,7 +210,10 @@ class AntiMzkCog(commands.Cog):
         if GUILD_IDS and message.guild.id not in GUILD_IDS:
             return
 
-        if not self.db.anti_mzk_enabled(message.guild.id):
+        role_ids = self.db.get_anti_mzk_role_ids(message.guild.id)
+        anti_mzk_active = len(role_ids) > 0 or bool(TARGET_USER_ID)
+
+        if not anti_mzk_active:
             return
 
         if not TRIGGER_WORD and not MUTE_TOGGLE_WORD:
