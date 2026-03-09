@@ -341,24 +341,26 @@ class LanguageHelpView(discord.ui.View):
             )
             return
 
-        chunk_size = 20
-        embeds: list[discord.Embed] = []
-        for i in range(0, len(items), chunk_size):
-            part = items[i:i + chunk_size]
-            body = "\n".join(f"`{code}` — {name}" for code, name in part)
-            embed = discord.Embed(
-                title="Idiomas disponíveis",
-                description=body,
-                color=discord.Color.green(),
-            )
-            embed.set_footer(text=f"Página {(i // chunk_size) + 1}/{((len(items) - 1) // chunk_size) + 1}")
-            embeds.append(embed)
+        rows = []
+        for i in range(0, len(items), 2):
+            left_code, left_name = items[i]
+            left = f"`{left_code}` — {left_name}"
+            if i + 1 < len(items):
+                right_code, right_name = items[i + 1]
+                right = f"`{right_code}` — {right_name}"
+                rows.append(f"{left}  |  {right}")
+            else:
+                rows.append(left)
 
-        await interaction.response.send_message(embed=embeds[0], ephemeral=True)
-        for embed in embeds[1:]:
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        description = "\n".join(rows)
+        embed = discord.Embed(
+            title="Idiomas disponíveis",
+            description=description,
+            color=discord.Color.red(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Selecionar idioma", style=discord.ButtonStyle.primary, emoji="🌐", row=0)
+    @discord.ui.button(label="Selecionar idioma", style=discord.ButtonStyle.secondary, emoji="🌐", row=0)
     async def select_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(
             LanguageCodeModal(
@@ -448,7 +450,7 @@ class TTSMainPanelView(_BaseTTSView):
         embed = discord.Embed(
             title="Escolha o idioma",
             description="Você pode digitar o código do idioma aqui. Exemplos: `pt-br`, `en`, `es`, `fr`, `ja`",
-            color=discord.Color.green(),
+            color=discord.Color.red(),
         )
         await interaction.response.send_message(
             embed=embed,
