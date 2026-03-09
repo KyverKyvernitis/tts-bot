@@ -19,11 +19,12 @@ class AntiMzkCog(commands.Cog):
         self.db = db
 
     def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
-        return discord.Embed(
+        embed = discord.Embed(
             title=title,
             description=description,
             color=discord.Color(ON_COLOR) if ok else discord.Color(OFF_COLOR),
         )
+        return embed
 
     async def _reject_if_not_allowed_guild(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
@@ -54,7 +55,7 @@ class AntiMzkCog(commands.Cog):
         return list(targets.values())
 
     @_guild_scoped()
-    @app_commands.command(name="antimzk", description="Gerencia as roles alvo do anti-mzk")
+    @app_commands.command(name="antimzk", description="Gerencia as roles e modos do anti-mzk")
     @app_commands.describe(
         action="Escolha o que fazer",
         role_id="ID da role para adicionar ou remover",
@@ -63,6 +64,8 @@ class AntiMzkCog(commands.Cog):
         app_commands.Choice(name="Adicionar role", value="add"),
         app_commands.Choice(name="Remover role", value="remove"),
         app_commands.Choice(name="Listar roles", value="list"),
+        app_commands.Choice(name="Ativar ou desativar", value="toggle"),
+        app_commands.Choice(name="Ativar ou desativar só para staff", value="toggle_kick_only"),
     ])
     @app_commands.checks.has_permissions(kick_members=True)
     async def antimzk(
@@ -77,12 +80,43 @@ class AntiMzkCog(commands.Cog):
         guild = interaction.guild
         chosen = action.value
 
+        if chosen == "toggle":
+            current = self.db.anti_mzk_enabled(guild.id)
+            new_value = not current
+            await self.db.set_anti_mzk_enabled(guild.id, new_value)
+
+            role_total = len(self.db.get_anti_mzk_role_ids(guild.id))
+            embed = self._make_embed(
+                "Anti-mzk atualizado",
+                f"Status: **{'Ativado' if new_value else 'Desativado'}**\n"
+                f"Roles cadastradas: **{role_total}**\n"
+                f"Modo só para staff: **{'Ativado' if self.db.anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
+                ok=new_value,
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        if chosen == "toggle_kick_only":
+            current = self.db.anti_mzk_only_kick_members(guild.id)
+            new_value = not current
+            await self.db.set_anti_mzk_only_kick_members(guild.id, new_value)
+
+            embed = self._make_embed(
+                "Modo só para staff atualizado",
+                f"Agora o anti-mzk está **{'limitado a quem tem Expulsar Membros' if new_value else 'liberado para qualquer membro da call disparar'}**",
+                ok=True,
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
         if chosen == "list":
             role_ids = self.db.get_anti_mzk_role_ids(guild.id)
             if not role_ids:
                 embed = self._make_embed(
                     "Sem roles cadastradas",
-                    "Nenhuma role está cadastrada no anti-mzk no momento",
+                    f"Nenhuma role está cadastrada no anti-mzk no momento\n\n"
+                    f"Status: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**\n"
+                    f"Modo só para staff: **{'Ativado' if self.db.anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
                     ok=False,
                 )
                 await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -95,7 +129,10 @@ class AntiMzkCog(commands.Cog):
 
             embed = self._make_embed(
                 "Roles do anti-mzk",
-                "\n".join(lines) + f"\n\nStatus: **{'Ativado' if len(role_ids) > 0 else 'Desativado'}**",
+                "\n".join(lines)
+                + f"\n\nStatus: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**"
+                + f"\nModo só para staff: **{'Ativado' if self.db.anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
+                ok=True,
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
@@ -145,7 +182,9 @@ class AntiMzkCog(commands.Cog):
             total = len(self.db.get_anti_mzk_role_ids(guild.id))
             embed = self._make_embed(
                 "Role adicionada",
-                f"✅ Role {role.mention} adicionada ao anti-mzk\n\nAgora há **{total}** role(s) cadastrada(s)",
+                f"✅ Role {role.mention} adicionada ao anti-mzk\n\n"
+                f"Agora há **{total}** role(s) cadastrada(s)\n"
+                f"Status: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**",
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
@@ -163,19 +202,18 @@ class AntiMzkCog(commands.Cog):
 
             role_text = role.mention if role else f"`{parsed_role_id}`"
             total = len(self.db.get_anti_mzk_role_ids(guild.id))
-            status = "Ativado" if total > 0 else "Desativado"
-
             embed = self._make_embed(
                 "Role removida",
-                f"✅ Role {role_text} removida do anti-mzk\n\nRoles restantes: **{total}**\nStatus: **{status}**",
+                f"✅ Role {role_text} removida do anti-mzk\n\n"
+                f"Roles restantes: **{total}**\n"
+                f"Status: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**",
+                ok=True,
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
     @antimzk.error
     async def antimzk_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        print(f"Erro no anti-mzk: {repr(error)}")
-
         if isinstance(error, app_commands.MissingPermissions):
             embed = self._make_embed(
                 "Sem permissão",
@@ -194,8 +232,8 @@ class AntiMzkCog(commands.Cog):
                 await interaction.followup.send(embed=embed, ephemeral=True)
             else:
                 await interaction.response.send_message(embed=embed, ephemeral=True)
-        except Exception as followup_error:
-            print(f"Falha ao responder erro do anti-mzk: {repr(followup_error)}")
+        except Exception:
+            pass
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -205,11 +243,13 @@ class AntiMzkCog(commands.Cog):
         if GUILD_IDS and message.guild.id not in GUILD_IDS:
             return
 
-        role_ids = self.db.get_anti_mzk_role_ids(message.guild.id)
-        anti_mzk_active = len(role_ids) > 0
-
-        if not anti_mzk_active:
+        if not self.db.anti_mzk_enabled(message.guild.id):
             return
+
+        if self.db.anti_mzk_only_kick_members(message.guild.id):
+            perms = getattr(message.author, "guild_permissions", None)
+            if perms is None or not perms.kick_members:
+                return
 
         if not TRIGGER_WORD and not MUTE_TOGGLE_WORD:
             return
@@ -224,21 +264,6 @@ class AntiMzkCog(commands.Cog):
         content = (message.content or "").lower()
         targets = self._iter_target_members(message.guild, message.channel)
 
-        member_debug = [
-            {
-                "id": member.id,
-                "roles": [role.id for role in getattr(member, "roles", [])],
-            }
-            for member in message.channel.members
-        ]
-
-        print(
-            f"[antimzk] guild={message.guild.id} "
-            f"role_ids={self.db.get_anti_mzk_role_ids(message.guild.id)} "
-            f"members={member_debug} "
-            f"targets={[m.id for m in targets]}"
-        )
-
         if not targets:
             return
 
@@ -246,19 +271,17 @@ class AntiMzkCog(commands.Cog):
             for target in targets:
                 if target.voice and target.voice.channel:
                     try:
-                        print(f"[antimzk] disconnect target={target.id}")
                         await target.move_to(None, reason="anti-mzk disconnect")
-                    except Exception as e:
-                        print(f"[antimzk] failed disconnect target={target.id} error={e!r}")
+                    except Exception:
+                        pass
 
         if MUTE_TOGGLE_WORD and MUTE_TOGGLE_WORD in content:
             for target in targets:
                 if target.voice and target.voice.channel:
                     try:
-                        print(f"[antimzk] toggle mute target={target.id}")
                         await target.edit(mute=not bool(target.voice.mute), reason="anti-mzk toggle mute")
-                    except Exception as e:
-                        print(f"[antimzk] failed mute target={target.id} error={e!r}")
+                    except Exception:
+                        pass
 
 
 async def setup(bot: commands.Bot):
