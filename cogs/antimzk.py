@@ -2,7 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import GUILD_IDS, MUTE_TOGGLE_WORD, OFF_COLOR, ON_COLOR, TARGET_USER_ID, TRIGGER_WORD
+from config import GUILD_IDS, MUTE_TOGGLE_WORD, OFF_COLOR, ON_COLOR, TRIGGER_WORD
 from db import SettingsDB
 
 
@@ -41,19 +41,17 @@ class AntiMzkCog(commands.Cog):
 
     def _iter_target_members(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> list[discord.Member]:
         targets: dict[int, discord.Member] = {}
-
         role_ids = set(self.db.get_anti_mzk_role_ids(guild.id))
-        if role_ids:
-            for member in voice_channel.members:
-                if member.bot:
-                    continue
-                member_role_ids = {role.id for role in getattr(member, "roles", [])}
-                if member_role_ids & role_ids:
-                    targets[member.id] = member
 
-        if TARGET_USER_ID:
-            member = guild.get_member(TARGET_USER_ID)
-            if member and member.voice and member.voice.channel and member.voice.channel.id == voice_channel.id:
+        if not role_ids:
+            return []
+
+        for member in voice_channel.members:
+            if member.bot:
+                continue
+
+            member_role_ids = {role.id for role in getattr(member, "roles", [])}
+            if member_role_ids & role_ids:
                 targets[member.id] = member
 
         return list(targets.values())
@@ -211,7 +209,7 @@ class AntiMzkCog(commands.Cog):
             return
 
         role_ids = self.db.get_anti_mzk_role_ids(message.guild.id)
-        anti_mzk_active = len(role_ids) > 0 or bool(TARGET_USER_ID)
+        anti_mzk_active = len(role_ids) > 0
 
         if not anti_mzk_active:
             return
@@ -229,6 +227,12 @@ class AntiMzkCog(commands.Cog):
         content = (message.content or "").lower()
         targets = self._iter_target_members(message.guild, message.channel)
 
+        print(
+            f"[antimzk] guild={message.guild.id} "
+            f"role_ids={self.db.get_anti_mzk_role_ids(message.guild.id)} "
+            f"targets={[m.id for m in targets]}"
+        )
+
         if not targets:
             return
 
@@ -236,17 +240,19 @@ class AntiMzkCog(commands.Cog):
             for target in targets:
                 if target.voice and target.voice.channel:
                     try:
+                        print(f"[antimzk] disconnect target={target.id}")
                         await target.move_to(None, reason="anti-mzk disconnect")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[antimzk] failed disconnect target={target.id} error={e!r}")
 
         if MUTE_TOGGLE_WORD and MUTE_TOGGLE_WORD in content:
             for target in targets:
                 if target.voice and target.voice.channel:
                     try:
+                        print(f"[antimzk] toggle mute target={target.id}")
                         await target.edit(mute=not bool(target.voice.mute), reason="anti-mzk toggle mute")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[antimzk] failed mute target={target.id} error={e!r}")
 
 
 async def setup(bot: commands.Bot):
