@@ -40,6 +40,31 @@ class AntiMzkCog(commands.Cog):
             await interaction.response.send_message(embed=embed, ephemeral=True)
         return True
 
+    def _anti_mzk_only_kick_members(self, guild_id: int) -> bool:
+        guild_cache = getattr(self.db, "guild_cache", {}) or {}
+        guild_doc = guild_cache.get(guild_id, {}) or {}
+        return bool(guild_doc.get("anti_mzk_only_kick_members", False))
+
+    async def _set_anti_mzk_only_kick_members(self, guild_id: int, value: bool):
+        if hasattr(self.db, "_get_guild_doc") and hasattr(self.db, "_save_guild_doc"):
+            doc = self.db._get_guild_doc(guild_id)
+            doc["anti_mzk_only_kick_members"] = bool(value)
+            await self.db._save_guild_doc(guild_id, doc)
+            return
+
+        guild_cache = getattr(self.db, "guild_cache", None)
+        coll = getattr(self.db, "coll", None)
+        if guild_cache is not None:
+            doc = guild_cache.get(guild_id, {"type": "guild", "guild_id": guild_id})
+            doc["anti_mzk_only_kick_members"] = bool(value)
+            guild_cache[guild_id] = doc
+            if coll is not None:
+                await coll.update_one(
+                    {"type": "guild", "guild_id": guild_id},
+                    {"$set": doc},
+                    upsert=True,
+                )
+
     def _iter_target_members(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> list[discord.Member]:
         targets: dict[int, discord.Member] = {}
         role_ids = set(self.db.get_anti_mzk_role_ids(guild.id))
@@ -90,16 +115,16 @@ class AntiMzkCog(commands.Cog):
                 "Anti-mzk atualizado",
                 f"Status: **{'Ativado' if new_value else 'Desativado'}**\n"
                 f"Roles cadastradas: **{role_total}**\n"
-                f"Modo só para staff: **{'Ativado' if self.db.anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
+                f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
                 ok=new_value,
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         if chosen == "toggle_kick_only":
-            current = self.db.anti_mzk_only_kick_members(guild.id)
+            current = self._anti_mzk_only_kick_members(guild.id)
             new_value = not current
-            await self.db.set_anti_mzk_only_kick_members(guild.id, new_value)
+            await self._set_anti_mzk_only_kick_members(guild.id, new_value)
 
             embed = self._make_embed(
                 "Modo só para staff atualizado",
@@ -116,7 +141,7 @@ class AntiMzkCog(commands.Cog):
                     "Sem roles cadastradas",
                     f"Nenhuma role está cadastrada no anti-mzk no momento\n\n"
                     f"Status: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**\n"
-                    f"Modo só para staff: **{'Ativado' if self.db.anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
+                    f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
                     ok=False,
                 )
                 await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -131,7 +156,7 @@ class AntiMzkCog(commands.Cog):
                 "Roles do anti-mzk",
                 "\n".join(lines)
                 + f"\n\nStatus: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**"
-                + f"\nModo só para staff: **{'Ativado' if self.db.anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
+                + f"\nModo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
                 ok=True,
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -246,7 +271,7 @@ class AntiMzkCog(commands.Cog):
         if not self.db.anti_mzk_enabled(message.guild.id):
             return
 
-        if self.db.anti_mzk_only_kick_members(message.guild.id):
+        if self._anti_mzk_only_kick_members(message.guild.id):
             perms = getattr(message.author, "guild_permissions", None)
             if perms is None or not perms.kick_members:
                 return
