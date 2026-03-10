@@ -584,7 +584,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return getattr(self.bot, "settings_db", None)
 
     def _panel_actor_name(self, interaction: discord.Interaction) -> str:
-        return getattr(interaction.user, "display_name", None) or getattr(interaction.user, "name", "Usuário")
+        member = getattr(interaction, "user", None)
+        mention = getattr(member, "mention", None)
+        if mention:
+            return mention
+        return getattr(member, "display_name", None) or getattr(member, "name", "Usuário")
 
     def _quote_value(self, value: str) -> str:
         return f'"{value}"'
