@@ -11,7 +11,11 @@ class Utility(commands.Cog):
     async def ping(self, interaction: discord.Interaction):
         import os
         import time
-        import psutil
+
+        try:
+            import psutil
+        except Exception:
+            psutil = None
 
         start = time.perf_counter()
         await interaction.response.defer(ephemeral=True)
@@ -41,9 +45,12 @@ class Utility(commands.Cog):
         db = getattr(self.bot, "settings_db", None)
         db_status = "🟢 Online" if db is not None else "🔴 Offline"
 
-        process = psutil.Process(os.getpid())
-        memory_mb = process.memory_info().rss / 1024 / 1024
-        cpu_percent = psutil.cpu_percent(interval=0.2)
+        memory_mb = 0.0
+        cpu_percent = 0.0
+        if psutil is not None:
+            process = psutil.Process(os.getpid())
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            cpu_percent = psutil.cpu_percent(interval=None)
 
         if ws_ping < 120:
             status_text, color = "🟢 Excelente", discord.Color.green()
