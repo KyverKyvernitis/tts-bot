@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import time
+import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
@@ -23,11 +24,14 @@ TTS_AUDIO_CACHE_SIZE = int(getattr(config, "TTS_AUDIO_CACHE_SIZE", 128))
 TTS_AUDIO_CACHE_TTL_SECONDS = int(getattr(config, "TTS_AUDIO_CACHE_TTL_SECONDS", 900))
 TTS_DEBUG_LOGS = bool(getattr(config, "TTS_DEBUG_LOGS", False))
 TTS_WARM_HOLD_SECONDS = float(getattr(config, "TTS_WARM_HOLD_SECONDS", 15))
+TTS_QUEUE_MAXSIZE = max(1, int(getattr(config, "TTS_QUEUE_MAXSIZE", 20)))
 TTS_FFMPEG_BEFORE_OPTIONS = getattr(config, "TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin")
 TTS_FFMPEG_OPTIONS = getattr(config, "TTS_FFMPEG_OPTIONS", "-vn -loglevel error")
 
 _CACHE_DIR = os.path.join(tempfile.gettempdir(), "chat_revive_tts_cache")
 os.makedirs(_CACHE_DIR, exist_ok=True)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -56,14 +60,53 @@ class GuildTTSState:
 class TTSAudioMixin:
     def _log_debug(self, text: str) -> None:
         if TTS_DEBUG_LOGS:
-            print(text)
+            logger.debug(text)
 
     def _get_state(self, guild_id: int) -> GuildTTSState:
         state = self.guild_states.get(guild_id)
         if state is None:
-            state = GuildTTSState(queue=asyncio.Queue())
+            state = GuildTTSState(queue=asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE))
             self.guild_states[guild_id] = state
         return state
+
+
+    def _cleanup_guild_state_if_idle(self, guild_id: int) -> bool:
+        state = self.guild_states.get(guild_id)
+        if state is None:
+            return True
+
+        task = getattr(state, "worker_task", None)
+        if task is not None and not task.done():
+            return False
+
+        if not state.queue.empty():
+            return False
+
+        self.guild_states.pop(guild_id, None)
+
+        cleanup = getattr(self, "_cleanup_guild_runtime_state", None)
+        if cleanup is not None:
+            try:
+                cleanup(guild_id)
+            except Exception:
+                logger.exception("[tts_voice] Falha ao limpar estado runtime da guild=%s", guild_id)
+
+        return True
+
+    async def _enqueue_tts_item(self, guild_id: int, item: QueueItem) -> tuple[bool, int]:
+        state = self._get_state(guild_id)
+        dropped = 0
+
+        while state.queue.full():
+            try:
+                state.queue.get_nowait()
+                state.queue.task_done()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+
+        await state.queue.put(item)
+        return dropped == 0, dropped
 
     def _ensure_worker(self, guild_id: int) -> None:
         state = self._get_state(guild_id)
@@ -231,7 +274,7 @@ class TTSAudioMixin:
             try:
                 return await self._generate_edge_file(item.text, item.voice, item.rate, item.pitch)
             except Exception as e:
-                print(f"[tts_voice] Edge falhou, usando gTTS. Guild {item.guild_id}: {e}")
+                logger.warning("[tts_voice] Edge falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
                 return await self._generate_gtts_file(item.text, item.language or GTTS_DEFAULT_LANGUAGE)
 
         return await self._generate_gtts_file(item.text, item.language or GTTS_DEFAULT_LANGUAGE)
@@ -288,10 +331,10 @@ class TTSAudioMixin:
 
         try:
             await vc.disconnect(force=False)
-            print(f"[tts_voice] Desconectado por inatividade | guild={guild.id}")
+            logger.info("[tts_voice] Desconectado por inatividade | guild=%s", guild.id)
             return True
         except Exception as e:
-            print(f"[tts_voice] Erro ao desconectar por inatividade na guild {guild.id}: {e}")
+            logger.warning("[tts_voice] Erro ao desconectar por inatividade | guild=%s erro=%s", guild.id, e)
             return False
 
     async def _ensure_connected_fast(self, guild: discord.Guild, item: QueueItem):
@@ -382,17 +425,14 @@ class TTSAudioMixin:
                         if target_channel is not None:
                             blocked = await self._maybe_await(self._should_block_for_voice_bot(guild, target_channel))
                             if blocked:
-                                print(
-                                    f"[tts_voice] Worker bloqueado por outro bot de voz | "
-                                    f"guild={guild_id} channel={item.channel_id}"
-                                )
+                                logger.info("[tts_voice] Worker bloqueado por outro bot de voz | guild=%s channel=%s", guild_id, item.channel_id)
                                 if hasattr(self, "_disconnect_if_blocked"):
                                     await self._maybe_await(self._disconnect_if_blocked(guild))
                                 continue
 
                     vc = await self._ensure_connected_fast(guild, item)
                     if vc is None:
-                        print(f"[tts_voice] Worker não conseguiu conectar | guild={guild_id} channel={item.channel_id}")
+                        logger.warning("[tts_voice] Worker não conseguiu conectar | guild=%s channel=%s", guild_id, item.channel_id)
                         continue
 
                     if audio_task is None:
@@ -417,9 +457,10 @@ class TTSAudioMixin:
                         prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
 
                 except Exception as e:
-                    print(f"[tts_voice] Erro no worker da guild {guild_id}: {e}")
+                    logger.exception("[tts_voice] Erro no worker da guild %s: %s", guild_id, e)
                 finally:
                     if fetched_from_queue:
                         state.queue.task_done()
         finally:
             state.worker_task = None
+            self._cleanup_guild_state_if_idle(guild_id)
