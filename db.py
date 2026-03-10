@@ -221,6 +221,20 @@ class SettingsDB:
             upsert=True,
         )
 
+    async def reset_user_tts(self, guild_id: int, user_id: int):
+        key = (guild_id, user_id)
+        doc = self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id})
+        doc["type"] = "user"
+        doc["guild_id"] = guild_id
+        doc["user_id"] = user_id
+        doc["tts"] = {}
+        self.user_cache[key] = doc
+        await self.coll.update_one(
+            {"type": "user", "guild_id": guild_id, "user_id": user_id},
+            {"$set": doc},
+            upsert=True,
+        )
+
     def resolve_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
         user = self.get_user_tts(guild_id, user_id)
         guild = self.get_guild_tts_defaults(guild_id)
