@@ -18,13 +18,24 @@ def _shorten(text: str, limit: int = 100) -> str:
 
 
 class _BaseTTSView(discord.ui.View):
-    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 180):
+    def __init__(
+        self,
+        cog: "TTSVoice",
+        owner_id: int,
+        guild_id: int,
+        *,
+        timeout: float = 180,
+        target_user_id: int | None = None,
+        target_user_name: str | None = None,
+    ):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.owner_id = owner_id
         self.guild_id = guild_id
         self.message: discord.Message | None = None
         self.panel_kind: str = "user"
+        self.target_user_id: int | None = target_user_id
+        self.target_user_name: str | None = target_user_name
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.owner_id == 0:
@@ -88,14 +99,29 @@ class _BaseTTSView(discord.ui.View):
 
 
 class _SimpleSelectView(_BaseTTSView):
-    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, title: str, description: str, select: discord.ui.Select, *, timeout: float = 180, source_panel_message: discord.Message | None = None):
-        super().__init__(cog, owner_id, guild_id, timeout=timeout)
+    def __init__(
+        self,
+        cog: "TTSVoice",
+        owner_id: int,
+        guild_id: int,
+        title: str,
+        description: str,
+        select: discord.ui.Select,
+        *,
+        timeout: float = 180,
+        source_panel_message: discord.Message | None = None,
+        target_user_id: int | None = None,
+        target_user_name: str | None = None,
+    ):
+        super().__init__(cog, owner_id, guild_id, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
         self.title = title
         self.description = description
         self.source_panel_message: discord.Message | None = source_panel_message
         try:
             select.guild_id = guild_id
             select.owner_id = owner_id
+            select.target_user_id = target_user_id
+            select.target_user_name = target_user_name
         except Exception:
             pass
         self.add_item(select)
@@ -116,6 +142,8 @@ class ModeSelect(discord.ui.Select):
     def __init__(self, cog: "TTSVoice", *, server: bool):
         self.cog = cog
         self.server = server
+        self.target_user_id = target_user_id
+        self.target_user_name = target_user_name
         options = [
             discord.SelectOption(label="gtts", description="Mais simples e compatível", value="gtts", emoji="🗣️"),
             discord.SelectOption(label="edge", description="Voz natural com voice, speed e pitch", value="edge", emoji="✨"),
@@ -129,7 +157,7 @@ class ModeSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
-        await self.cog._apply_mode_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message)
+        await self.cog._apply_mode_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message, target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None), target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None))
 
 
 class LanguageSelect(discord.ui.Select):
@@ -154,7 +182,7 @@ class LanguageSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
-        await self.cog._apply_language_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message)
+        await self.cog._apply_language_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message, target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None), target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None))
 
 
 class SpeedSelect(discord.ui.Select):
@@ -176,7 +204,7 @@ class SpeedSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
-        await self.cog._apply_speed_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message)
+        await self.cog._apply_speed_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message, target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None), target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None))
 
 
 class PitchSelect(discord.ui.Select):
@@ -198,7 +226,7 @@ class PitchSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
-        await self.cog._apply_pitch_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message)
+        await self.cog._apply_pitch_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message, target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None), target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None))
 
 
 class VoiceRegionSelect(discord.ui.Select):
@@ -234,6 +262,8 @@ class VoiceRegionSelect(discord.ui.Select):
             "Escolha a voz",
             f"Região selecionada: `{region}`",
             VoiceSelect(self.cog, server=self.server, voices=voices),
+            target_user_id=getattr(getattr(self, "view", None), "target_user_id", None),
+            target_user_name=getattr(getattr(self, "view", None), "target_user_name", None),
         )
         try:
             view.source_panel_message = getattr(self.view, "source_panel_message", None)
@@ -262,7 +292,7 @@ class VoiceSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
-        await self.cog._apply_voice_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message)
+        await self.cog._apply_voice_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message, target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None), target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None))
 
 
 class ToggleSelect(discord.ui.Select):
@@ -296,7 +326,7 @@ class LanguageCodeModal(discord.ui.Modal, title="Selecionar idioma"):
         max_length=10,
     )
 
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool):
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None):
         super().__init__()
         self.cog = cog
         self.panel_message = panel_message
@@ -308,6 +338,8 @@ class LanguageCodeModal(discord.ui.Modal, title="Selecionar idioma"):
             str(self.language_code).strip(),
             server=self.server,
             source_panel_message=self.panel_message,
+            target_user_id=self.target_user_id,
+            target_user_name=self.target_user_name,
         )
 
 
@@ -321,6 +353,8 @@ class LanguageHelpView(discord.ui.View):
         server: bool = False,
         source_panel_message: discord.Message | None = None,
         timeout: float = 180,
+        target_user_id: int | None = None,
+        target_user_name: str | None = None,
     ):
         super().__init__(timeout=timeout)
         self.cog = cog
@@ -328,6 +362,8 @@ class LanguageHelpView(discord.ui.View):
         self.guild_id = guild_id
         self.server = server
         self.source_panel_message = source_panel_message
+        self.target_user_id = target_user_id
+        self.target_user_name = target_user_name
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         target_owner = interaction.user.id if self.owner_id == 0 else self.owner_id
@@ -375,6 +411,8 @@ class LanguageHelpView(discord.ui.View):
                 self.cog,
                 self.source_panel_message,
                 server=self.server,
+                target_user_id=self.target_user_id,
+                target_user_name=self.target_user_name,
             )
         )
 
@@ -430,8 +468,8 @@ class TTSPrefixModal(discord.ui.Modal, title="Alterar prefixo do TTS"):
 
 
 class TTSMainPanelView(_BaseTTSView):
-    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180):
-        super().__init__(cog, owner_id, guild_id, timeout=timeout)
+    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None):
+        super().__init__(cog, owner_id, guild_id, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
         self.server = server
         self.panel_kind = "server" if server else "user"
         if not self.server:
@@ -444,12 +482,12 @@ class TTSMainPanelView(_BaseTTSView):
     @discord.ui.button(label="Modo", style=discord.ButtonStyle.secondary, emoji="🎛️", row=0)
     async def mode_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] mode_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o modo", "Selecione como a fala vai funcionar.", ModeSelect(self.cog, server=self.server), source_panel_message=interaction.message).send(interaction)
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o modo", "Selecione como a fala vai funcionar.", ModeSelect(self.cog, server=self.server), source_panel_message=interaction.message, target_user_id=self.target_user_id, target_user_name=self.target_user_name).send(interaction)
 
     @discord.ui.button(label="Voz", style=discord.ButtonStyle.secondary, emoji="🎙️", row=0)
     async def voice_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] voice_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        view = _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha a região da voz", "Primeiro escolha a região, depois selecione a voz.", VoiceRegionSelect(self.cog, server=self.server), source_panel_message=interaction.message)
+        view = _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha a região da voz", "Primeiro escolha a região, depois selecione a voz.", VoiceRegionSelect(self.cog, server=self.server), source_panel_message=interaction.message, target_user_id=self.target_user_id, target_user_name=self.target_user_name)
         await view.send(interaction)
 
     @discord.ui.button(label="Idioma", style=discord.ButtonStyle.secondary, emoji="🌐", row=0)
@@ -468,6 +506,8 @@ class TTSMainPanelView(_BaseTTSView):
                 self.guild_id,
                 server=self.server,
                 source_panel_message=interaction.message,
+                target_user_id=self.target_user_id,
+                target_user_name=self.target_user_name,
             ),
             ephemeral=True,
         )
@@ -476,12 +516,12 @@ class TTSMainPanelView(_BaseTTSView):
     @discord.ui.button(label="Velocidade", style=discord.ButtonStyle.secondary, emoji="⏩", row=1)
     async def speed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] speed_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha a velocidade", "Selecione uma velocidade pronta para o modo edge.", SpeedSelect(self.cog, server=self.server), source_panel_message=interaction.message).send(interaction)
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha a velocidade", "Selecione uma velocidade pronta para o modo edge.", SpeedSelect(self.cog, server=self.server), source_panel_message=interaction.message, target_user_id=self.target_user_id, target_user_name=self.target_user_name).send(interaction)
 
     @discord.ui.button(label="Tom", style=discord.ButtonStyle.secondary, emoji="🎚️", row=1)
     async def pitch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] pitch_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o tom", "Selecione um tom pronto para o modo edge.", PitchSelect(self.cog, server=self.server), source_panel_message=interaction.message).send(interaction)
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o tom", "Selecione um tom pronto para o modo edge.", PitchSelect(self.cog, server=self.server), source_panel_message=interaction.message, target_user_id=self.target_user_id, target_user_name=self.target_user_name).send(interaction)
 
 
     @discord.ui.button(label="Prefixo do bot", style=discord.ButtonStyle.secondary, emoji="🤖", row=2)
@@ -557,6 +597,12 @@ PITCH_CHOICES = [
     app_commands.Choice(name="+0Hz — normal", value="+0Hz"),
     app_commands.Choice(name="+25Hz — levemente agudo", value="+25Hz"),
     app_commands.Choice(name="+50Hz — mais agudo", value="+50Hz"),
+]
+
+
+USER_CONFIG_ACTION_CHOICES = [
+    app_commands.Choice(name="Abrir painel pessoal do usuário", value="panel"),
+    app_commands.Choice(name="Resetar configurações do usuário para as do servidor", value="reset"),
 ]
 
 
@@ -1237,7 +1283,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, engine=value))
             title, desc = "Modo padrão atualizado", f"O modo padrão do servidor agora é `{value}`."
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, engine=value))
+            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, engine=value))
             title, desc = "Modo atualizado", f"O seu modo de TTS agora é `{value}`."
         await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
@@ -1258,7 +1304,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, voice=voice))
             title, desc = "Voz padrão atualizada", f"A voz padrão do servidor agora é `{voice}`."
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, voice=voice))
+            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, voice=voice))
             title, desc = "Voz atualizada", f"A sua voz do Edge agora é `{voice}`."
         await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
@@ -1351,8 +1397,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             interaction.user.id,
             server=False,
             panel_kind="user",
+            target_user_name=self._member_panel_name(interaction.user),
+            viewer_user_id=interaction.user.id,
         )
-        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=False)
+        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=False, target_user_id=interaction.user.id, target_user_name=self._member_panel_name(interaction.user))
         msg = await self._respond(interaction, embed=embed, view=view, ephemeral=True)
         view.message = msg
 
@@ -1405,8 +1453,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             ok=False,
         )
 
-    def _build_panel_view(self, owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180) -> discord.ui.View:
-        return TTSMainPanelView(self, owner_id, guild_id, server=server, timeout=timeout)
+    def _build_panel_view(self, owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None) -> discord.ui.View:
+        return TTSMainPanelView(self, owner_id, guild_id, server=server, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
+
+    def _member_panel_name(self, member: discord.abc.User | None) -> str:
+        if member is None:
+            return "@usuário"
+        name = getattr(member, "name", None) or getattr(member, "display_name", None) or str(member)
+        return name if str(name).startswith("@") else f"@{name}"
+
+    def _resolve_target_user(self, interaction: discord.Interaction, target_user_id: int | None = None, target_user_name: str | None = None) -> tuple[int, str]:
+        resolved_id = int(target_user_id or getattr(getattr(interaction, "user", None), "id", 0) or 0)
+        resolved_name = str(target_user_name or self._member_panel_name(getattr(interaction, "user", None)))
+        return resolved_id, resolved_name
 
     def _build_toggle_view(self, owner_id: int, guild_id: int, *, timeout: float = 180) -> discord.ui.View:
         return TTSTogglePanelView(self, owner_id, guild_id, timeout=timeout)
@@ -1440,13 +1499,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             print(f"[tts_voice] Falha ao anunciar alteração do painel: {e}")
 
 
-    def _user_history_text(self, interaction: discord.Interaction, what: str, value: str, *, message_id: int | None = None) -> str:
+    def _user_history_text(self, interaction: discord.Interaction, what: str, value: str, *, message_id: int | None = None, target_user_id: int | None = None, target_user_name: str | None = None) -> str:
+        actor_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
+        target_id = int(target_user_id or actor_id or 0)
+        target_name = str(target_user_name or self._panel_actor_name(interaction))
         action_text = f"alterou {what} para {value}"
         state = self._public_panel_states.get(message_id or 0, {}) or {}
-        actor_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
-        if state.get("panel_kind") == "user" and int(state.get("owner_id", 0) or 0) == actor_id:
+        if target_id == actor_id and state.get("panel_kind") == "user" and int(state.get("owner_id", 0) or 0) == actor_id:
             return self._encode_public_owner_history(actor_id, self._panel_actor_name(interaction), action_text)
-        return f"{self._panel_actor_name(interaction)} mudou {what} para {value}"
+        if target_id == actor_id:
+            return f"{self._panel_actor_name(interaction)} mudou {what} para {value}"
+        return f"{self._panel_actor_name(interaction)} alterou {what} de {target_name} para {value}"
 
     def _server_history_text(self, interaction: discord.Interaction, what: str, value: str) -> str:
         return f"{self._panel_actor_name(interaction)} alterou {what} para {value}"
@@ -1462,6 +1525,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         *,
         last_changes: list[str] | None = None,
         message_id: int | None = None,
+        target_user_name: str | None = None,
+        viewer_user_id: int | None = None,
     ) -> discord.Embed:
         db = self._get_db()
         panel_history = await self._maybe_await(db.get_panel_history(guild_id, user_id)) if db and hasattr(db, "get_panel_history") else {}
@@ -1491,7 +1556,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             value="`Ativado`" if bool(guild_defaults.get("only_target_user", False)) else "`Desativado`",
             inline=True,
         )
-        history_text = self._format_history_entries(last_changes or [], viewer_user_id=user_id, message_id=message_id)
+        history_text = self._format_history_entries(last_changes or [], viewer_user_id=viewer_user_id or user_id, message_id=message_id)
         if history_text:
             embed.add_field(name="Últimas alterações", value=history_text, inline=False)
         return embed
@@ -1505,6 +1570,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         panel_kind: str = "user",
         last_changes: list[str] | None = None,
         message_id: int | None = None,
+        target_user_name: str | None = None,
+        viewer_user_id: int | None = None,
     ) -> discord.Embed:
         db = self._get_db()
         guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild_id)) if db else {}
@@ -1537,12 +1604,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             last_changes = stored_last_changes
         last_changes = self._resolve_last_changes(stored_changes=last_changes, message_id=message_id)
 
-        title = "Painel de TTS do servidor" if server else "Painel de TTS"
-        description = (
-            "Use os botões abaixo para alterar os padrões do servidor."
-            if server else
-            "Use os botões abaixo para alterar as suas configurações."
-        )
+        if server:
+            title = "Painel de TTS do servidor"
+            description = "Use os botões abaixo para alterar os padrões do servidor."
+        elif target_user_name and int(user_id or 0) != int(viewer_user_id or user_id or 0):
+            title = f"Painel de TTS de {target_user_name}"
+            description = f"Use os botões abaixo para alterar as configurações de {target_user_name}."
+        else:
+            title = "Painel de TTS"
+            description = "Use os botões abaixo para alterar as suas configurações."
 
         embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
         embed.add_field(name="Modo ativo", value=f"`{resolved.get('engine', 'gtts')}`", inline=True)
@@ -1553,7 +1623,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if server:
             embed.add_field(name="Prefixo do bot", value=f"`{guild_defaults.get('bot_prefix', '_')}`", inline=True)
             embed.add_field(name="Prefixo do TTS", value=f"`{guild_defaults.get('tts_prefix', ',')}`", inline=True)
-        history_text = self._format_history_entries(last_changes or [], viewer_user_id=user_id, message_id=message_id)
+        history_text = self._format_history_entries(last_changes or [], viewer_user_id=viewer_user_id or user_id, message_id=message_id)
         if history_text:
             embed.add_field(name="Últimas alterações", value=history_text, inline=False)
 
@@ -1703,7 +1773,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
 
 
-    async def _apply_mode_from_panel(self, interaction: discord.Interaction, mode: str, *, server: bool, source_panel_message: discord.Message | None = None):
+    async def _apply_mode_from_panel(self, interaction: discord.Interaction, mode: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
         if server and not interaction.user.guild_permissions.kick_members:
             await interaction.response.send_message(
                 embed=self._make_embed(
@@ -1725,6 +1795,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         value = validate_mode(mode)
         panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
+        effective_user_id, effective_user_name = self._resolve_target_user(interaction, target_user_id, target_user_name)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, engine=value))
             desc = f"O modo padrão do servidor agora é `{value}`."
@@ -1733,22 +1804,24 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, engine=value))
-            desc = f"O seu modo de TTS agora é `{value}`."
-            history_entry = self._user_history_text(interaction, "o próprio modo", value, message_id=message_id)
-            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
+            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, engine=value))
+            desc = f"O modo de TTS de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu modo de TTS agora é `{value}`."
+            history_entry = self._user_history_text(interaction, "o próprio modo" if effective_user_id == interaction.user.id else "o modo", value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, effective_user_id, history_entry))
             self._append_public_panel_history(message_id, history_entry)
-            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("user_last_changes", []) or [])
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get("user_last_changes", []) or [])
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
-            interaction.user.id,
+            effective_user_id if not server else interaction.user.id,
             server=server,
             panel_kind="server" if server else "user",
             last_changes=last_changes,
             message_id=message_id,
+            target_user_name=effective_user_name if not server else None,
+            viewer_user_id=interaction.user.id,
         )
-        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server)
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=effective_user_id if not server else None, target_user_name=effective_user_name if not server else None)
         if panel_message is not None:
             view.message = panel_message
         await self._panel_update_after_change(
@@ -1763,7 +1836,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._announce_panel_change(interaction, title="Modo atualizado", description=desc)
 
 
-    async def _apply_voice_from_panel(self, interaction: discord.Interaction, voice: str, *, server: bool, source_panel_message: discord.Message | None = None):
+    async def _apply_voice_from_panel(self, interaction: discord.Interaction, voice: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
         if server and not interaction.user.guild_permissions.kick_members:
             await interaction.response.send_message(
                 embed=self._make_embed(
@@ -1791,6 +1864,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
+        effective_user_id, effective_user_name = self._resolve_target_user(interaction, target_user_id, target_user_name)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, voice=voice))
             desc = f"A voz padrão do servidor agora é `{voice}`."
@@ -1799,22 +1873,24 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, voice=voice))
-            desc = f"A sua voz do Edge agora é `{voice}`."
-            history_entry = self._user_history_text(interaction, "a própria voz", voice, message_id=message_id)
-            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
+            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, voice=voice))
+            desc = f"A voz do Edge de {effective_user_name} agora é `{voice}`." if effective_user_id != interaction.user.id else f"A sua voz do Edge agora é `{voice}`."
+            history_entry = self._user_history_text(interaction, "a própria voz" if effective_user_id == interaction.user.id else "a voz", voice, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, effective_user_id, history_entry))
             self._append_public_panel_history(message_id, history_entry)
-            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("user_last_changes", []) or [])
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get("user_last_changes", []) or [])
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
-            interaction.user.id,
+            effective_user_id if not server else interaction.user.id,
             server=server,
             panel_kind="server" if server else "user",
             last_changes=last_changes,
             message_id=message_id,
+            target_user_name=effective_user_name if not server else None,
+            viewer_user_id=interaction.user.id,
         )
-        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server)
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=effective_user_id if not server else None, target_user_name=effective_user_name if not server else None)
         if panel_message is not None:
             view.message = panel_message
         await self._panel_update_after_change(
@@ -1829,7 +1905,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
 
-    async def _apply_language_from_panel(self, interaction: discord.Interaction, language: str, *, server: bool, source_panel_message: discord.Message | None = None):
+    async def _apply_language_from_panel(self, interaction: discord.Interaction, language: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
         if server and not interaction.user.guild_permissions.kick_members:
             await interaction.response.send_message(
                 embed=self._make_embed(
@@ -1850,6 +1926,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
+        effective_user_id, effective_user_name = self._resolve_target_user(interaction, target_user_id, target_user_name)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, language=language))
             desc = f"O idioma padrão do servidor agora é `{language}`."
@@ -1858,22 +1935,24 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, language=language))
-            desc = f"O seu idioma do gtts agora é `{language}`."
-            history_entry = self._user_history_text(interaction, "o próprio idioma", language, message_id=message_id)
-            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
+            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, language=language))
+            desc = f"O idioma do gtts de {effective_user_name} agora é `{language}`." if effective_user_id != interaction.user.id else f"O seu idioma do gtts agora é `{language}`."
+            history_entry = self._user_history_text(interaction, "o próprio idioma" if effective_user_id == interaction.user.id else "o idioma", language, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, effective_user_id, history_entry))
             self._append_public_panel_history(message_id, history_entry)
-            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("user_last_changes", []) or [])
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get("user_last_changes", []) or [])
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
-            interaction.user.id,
+            effective_user_id if not server else interaction.user.id,
             server=server,
             panel_kind="server" if server else "user",
             last_changes=last_changes,
             message_id=message_id,
+            target_user_name=effective_user_name if not server else None,
+            viewer_user_id=interaction.user.id,
         )
-        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server)
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=effective_user_id if not server else None, target_user_name=effective_user_name if not server else None)
         if panel_message is not None:
             view.message = panel_message
         await self._panel_update_after_change(
@@ -1888,7 +1967,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
 
-    async def _apply_speed_from_panel(self, interaction: discord.Interaction, speed: str, *, server: bool, source_panel_message: discord.Message | None = None):
+    async def _apply_speed_from_panel(self, interaction: discord.Interaction, speed: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
         if server and not interaction.user.guild_permissions.kick_members:
             await interaction.response.send_message(
                 embed=self._make_embed(
@@ -1909,6 +1988,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
+        effective_user_id, effective_user_name = self._resolve_target_user(interaction, target_user_id, target_user_name)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, rate=speed))
             desc = f"A velocidade padrão do servidor agora é `{speed}`."
@@ -1917,22 +1997,24 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, rate=speed))
-            desc = f"A sua velocidade agora é `{speed}`."
-            history_entry = self._user_history_text(interaction, "a própria velocidade", speed, message_id=message_id)
-            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
+            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, rate=speed))
+            desc = f"A velocidade de {effective_user_name} agora é `{speed}`." if effective_user_id != interaction.user.id else f"A sua velocidade agora é `{speed}`."
+            history_entry = self._user_history_text(interaction, "a própria velocidade" if effective_user_id == interaction.user.id else "a velocidade", speed, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, effective_user_id, history_entry))
             self._append_public_panel_history(message_id, history_entry)
-            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("user_last_changes", []) or [])
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get("user_last_changes", []) or [])
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
-            interaction.user.id,
+            effective_user_id if not server else interaction.user.id,
             server=server,
             panel_kind="server" if server else "user",
             last_changes=last_changes,
             message_id=message_id,
+            target_user_name=effective_user_name if not server else None,
+            viewer_user_id=interaction.user.id,
         )
-        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server)
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=effective_user_id if not server else None, target_user_name=effective_user_name if not server else None)
         if panel_message is not None:
             view.message = panel_message
         await self._panel_update_after_change(
@@ -1947,7 +2029,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
 
-    async def _apply_pitch_from_panel(self, interaction: discord.Interaction, pitch: str, *, server: bool, source_panel_message: discord.Message | None = None):
+    async def _apply_pitch_from_panel(self, interaction: discord.Interaction, pitch: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
         if server and not interaction.user.guild_permissions.kick_members:
             await interaction.response.send_message(
                 embed=self._make_embed(
@@ -1968,6 +2050,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
+        effective_user_id, effective_user_name = self._resolve_target_user(interaction, target_user_id, target_user_name)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, pitch=pitch))
             desc = f"O tom padrão do servidor agora é `{pitch}`."
@@ -1976,22 +2059,24 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, pitch=pitch))
-            desc = f"O seu tom agora é `{pitch}`."
-            history_entry = self._user_history_text(interaction, "o próprio tom", pitch, message_id=message_id)
-            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
+            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, pitch=pitch))
+            desc = f"O tom de {effective_user_name} agora é `{pitch}`." if effective_user_id != interaction.user.id else f"O seu tom agora é `{pitch}`."
+            history_entry = self._user_history_text(interaction, "o próprio tom" if effective_user_id == interaction.user.id else "o tom", pitch, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, effective_user_id, history_entry))
             self._append_public_panel_history(message_id, history_entry)
-            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("user_last_changes", []) or [])
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get("user_last_changes", []) or [])
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
-            interaction.user.id,
+            effective_user_id if not server else interaction.user.id,
             server=server,
             panel_kind="server" if server else "user",
             last_changes=last_changes,
             message_id=message_id,
+            target_user_name=effective_user_name if not server else None,
+            viewer_user_id=interaction.user.id,
         )
-        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server)
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=effective_user_id if not server else None, target_user_name=effective_user_name if not server else None)
         if panel_message is not None:
             view.message = panel_message
         await self._panel_update_after_change(
@@ -2297,6 +2382,65 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             ephemeral=True,
         )
 
+
+
+    @app_commands.command(name="usuario", description="Reseta ou abre o painel pessoal de TTS de um usuário")
+    @app_commands.describe(usuario="Usuário que terá as configurações alteradas", acao="Escolha se quer resetar ou abrir o painel")
+    @app_commands.choices(acao=USER_CONFIG_ACTION_CHOICES)
+    async def usuario(self, interaction: discord.Interaction, usuario: discord.Member, acao: app_commands.Choice[str]):
+        await self._defer_ephemeral(interaction)
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_kick_members(interaction):
+            return
+        db = self._get_db()
+        if db is None:
+            await self._respond(interaction, embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False), ephemeral=True)
+            return
+
+        target_name = self._member_panel_name(usuario)
+        action_value = str(getattr(acao, "value", "") or "")
+
+        if action_value == "reset":
+            if not hasattr(db, "reset_user_tts"):
+                await self._respond(interaction, embed=self._make_embed("Função indisponível", "Esse banco ainda não suporta resetar as configurações do usuário.", ok=False), ephemeral=True)
+                return
+            await self._maybe_await(db.reset_user_tts(interaction.guild.id, usuario.id))
+            history_entry = f"{self._panel_actor_name(interaction)} resetou as configurações de TTS de {target_name} para os padrões do servidor"
+            if hasattr(db, "set_user_panel_last_change"):
+                await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, usuario.id, history_entry))
+            embed = await self._build_settings_embed(
+                interaction.guild.id,
+                usuario.id,
+                server=False,
+                panel_kind="user",
+                target_user_name=target_name,
+                viewer_user_id=interaction.user.id,
+            )
+            await self._respond(interaction, embed=embed, ephemeral=True)
+            await interaction.followup.send(
+                embed=self._make_embed("Configurações resetadas", f"As configurações de TTS de {target_name} agora seguem os padrões do servidor.", ok=True),
+                ephemeral=True,
+            )
+            return
+
+        embed = await self._build_settings_embed(
+            interaction.guild.id,
+            usuario.id,
+            server=False,
+            panel_kind="user",
+            target_user_name=target_name,
+            viewer_user_id=interaction.user.id,
+        )
+        view = self._build_panel_view(
+            interaction.user.id,
+            interaction.guild.id,
+            server=False,
+            target_user_id=usuario.id,
+            target_user_name=target_name,
+        )
+        msg = await self._respond(interaction, embed=embed, view=view, ephemeral=True)
+        view.message = msg
 
 
     @server.command(name="menu", description="Abre um painel guiado para configurar o TTS do servidor")
