@@ -1,6 +1,5 @@
 import inspect
 import asyncio
-import logging
 import time
 from typing import Optional
 
@@ -12,10 +11,6 @@ import config
 from tts_audio import GuildTTSState, QueueItem, TTSAudioMixin
 
 from typing import Callable
-
-logger = logging.getLogger(__name__)
-EDGE_VOICE_CACHE_TTL_SECONDS = max(300.0, float(getattr(config, "EDGE_VOICE_CACHE_TTL_SECONDS", 3600)))
-PUBLIC_PANEL_STATE_TTL_SECONDS = max(300.0, float(getattr(config, "PUBLIC_PANEL_STATE_TTL_SECONDS", 1800)))
 
 
 def _shorten(text: str, limit: int = 100) -> str:
@@ -47,12 +42,11 @@ class _BaseTTSView(discord.ui.View):
         return True
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
-        logger.exception(
-            "[tts_panel_error] user=%s guild=%s item=%s error=%r",
-            getattr(interaction.user, "id", None),
-            getattr(interaction.guild, "id", None),
-            getattr(item, "custom_id", None) or getattr(item, "label", None) or type(item).__name__,
-            error,
+        print(
+            f"[tts_panel_error] user={getattr(interaction.user, 'id', None)} "
+            f"guild={getattr(interaction.guild, 'id', None)} "
+            f"item={getattr(item, 'custom_id', None) or getattr(item, 'label', None) or type(item).__name__} "
+            f"error={repr(error)}"
         )
         try:
             if interaction.response.is_done():
@@ -74,7 +68,7 @@ class _BaseTTSView(discord.ui.View):
                     ephemeral=True,
                 )
         except Exception as e:
-            logger.warning("[tts_panel_error] falha ao responder erro: %r", e)
+            print(f"[tts_panel_error] falha ao responder erro: {e!r}")
 
     async def on_timeout(self) -> None:
         if self.message is None:
@@ -90,7 +84,7 @@ class _BaseTTSView(discord.ui.View):
         except discord.NotFound:
             pass
         except Exception as e:
-            logger.warning("[tts_panel_timeout] falha ao expirar painel: %r", e)
+            print(f"[tts_panel_timeout] falha ao expirar painel: {e!r}")
 
 
 class _SimpleSelectView(_BaseTTSView):
@@ -449,19 +443,18 @@ class TTSMainPanelView(_BaseTTSView):
 
     @discord.ui.button(label="Modo", style=discord.ButtonStyle.secondary, emoji="🎛️", row=0)
     async def mode_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        logger.debug("[tts_panel] mode_button | user=%s guild=%s server=%s", interaction.user.id, interaction.guild.id if interaction.guild else None, self.server)
+        print(f"[tts_panel] mode_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
         await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o modo", "Selecione como a fala vai funcionar.", ModeSelect(self.cog, server=self.server), source_panel_message=interaction.message).send(interaction)
 
     @discord.ui.button(label="Voz", style=discord.ButtonStyle.secondary, emoji="🎙️", row=0)
     async def voice_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        logger.debug("[tts_panel] voice_button | user=%s guild=%s server=%s", interaction.user.id, interaction.guild.id if interaction.guild else None, self.server)
-        await self.cog._ensure_edge_voices()
+        print(f"[tts_panel] voice_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
         view = _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha a região da voz", "Primeiro escolha a região, depois selecione a voz.", VoiceRegionSelect(self.cog, server=self.server), source_panel_message=interaction.message)
         await view.send(interaction)
 
     @discord.ui.button(label="Idioma", style=discord.ButtonStyle.secondary, emoji="🌐", row=0)
     async def language_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        logger.debug("[tts_panel] language_button | user=%s guild=%s server=%s", interaction.user.id, interaction.guild.id if interaction.guild else None, self.server)
+        print(f"[tts_panel] language_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
         embed = discord.Embed(
             title="Escolha o idioma",
             description="Você pode digitar o código do idioma aqui. Exemplos: `pt-br`, `en`, `es`, `fr`, `ja`",
@@ -482,12 +475,12 @@ class TTSMainPanelView(_BaseTTSView):
 
     @discord.ui.button(label="Velocidade", style=discord.ButtonStyle.secondary, emoji="⏩", row=1)
     async def speed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        logger.debug("[tts_panel] speed_button | user=%s guild=%s server=%s", interaction.user.id, interaction.guild.id if interaction.guild else None, self.server)
+        print(f"[tts_panel] speed_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
         await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha a velocidade", "Selecione uma velocidade pronta para o modo edge.", SpeedSelect(self.cog, server=self.server), source_panel_message=interaction.message).send(interaction)
 
     @discord.ui.button(label="Tom", style=discord.ButtonStyle.secondary, emoji="🎚️", row=1)
     async def pitch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        logger.debug("[tts_panel] pitch_button | user=%s guild=%s server=%s", interaction.user.id, interaction.guild.id if interaction.guild else None, self.server)
+        print(f"[tts_panel] pitch_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
         await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o tom", "Selecione um tom pronto para o modo edge.", PitchSelect(self.cog, server=self.server), source_panel_message=interaction.message).send(interaction)
 
 
@@ -583,11 +576,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._prefix_panel_cooldowns: dict[tuple[int, int, str], float] = {}
         self._active_prefix_panels: dict[tuple[int, int, str], tuple[discord.Message, discord.ui.View]] = {}
         self._public_panel_states: dict[int, dict] = {}
-        self._edge_voices_loaded_at: float = 0.0
-        self._edge_voices_lock = asyncio.Lock()
 
     async def cog_load(self):
-        return
+        await self._load_edge_voices()
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
@@ -618,53 +609,42 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             lines.append(line)
         return "\n".join(lines)
 
-    def _cleanup_public_panel_states(self) -> None:
-        cutoff = time.monotonic() - PUBLIC_PANEL_STATE_TTL_SECONDS
-        stale_ids = [mid for mid, state in self._public_panel_states.items() if float((state or {}).get("updated_at", 0.0) or 0.0) < cutoff]
-        for message_id in stale_ids:
-            self._public_panel_states.pop(message_id, None)
-
-    def _cleanup_guild_runtime_state(self, guild_id: int) -> None:
-        self._voice_connect_locks.pop(guild_id, None)
-        stale_panel_keys = [key for key in self._active_prefix_panels if key[0] == guild_id]
-        for key in stale_panel_keys:
-            self._active_prefix_panels.pop(key, None)
-
-    async def _ensure_edge_voices(self, *, force: bool = False) -> bool:
-        needs_refresh = force or not self.edge_voice_cache or (time.monotonic() - self._edge_voices_loaded_at) >= EDGE_VOICE_CACHE_TTL_SECONDS
-        if not needs_refresh:
-            return bool(self.edge_voice_cache)
-
-        async with self._edge_voices_lock:
-            needs_refresh = force or not self.edge_voice_cache or (time.monotonic() - self._edge_voices_loaded_at) >= EDGE_VOICE_CACHE_TTL_SECONDS
-            if not needs_refresh:
-                return bool(self.edge_voice_cache)
-            await self._load_edge_voices()
-            return bool(self.edge_voice_cache)
-
     def _get_public_panel_history(self, message_id: int | None) -> list[str]:
-        self._cleanup_public_panel_states()
         if not message_id:
             return []
         state = self._public_panel_states.get(message_id, {}) or {}
         return [str(x) for x in (state.get("history", []) or []) if str(x or "").strip()]
 
+    def _merge_history_entries(self, *groups: list[str] | tuple[str, ...]) -> list[str]:
+        merged: list[str] = []
+        for group in groups:
+            for entry in (group or []):
+                clean = str(entry or "").strip()
+                if not clean:
+                    continue
+                if clean in merged:
+                    merged.remove(clean)
+                merged.append(clean)
+        return merged[-3:]
+
     def _append_public_panel_history(self, message_id: int | None, text: str):
-        self._cleanup_public_panel_states()
         if not message_id:
             return
         state = self._public_panel_states.get(message_id)
         if state is None:
             state = {"history": []}
             self._public_panel_states[message_id] = state
-        history = [str(x) for x in (state.get("history", []) or []) if str(x or "").strip()]
-        if text:
-            history.append(str(text))
-        state["history"] = history[-3:]
-        state["updated_at"] = time.monotonic()
+        history = self._merge_history_entries(state.get("history", []) or [], [text] if text else [])
+        state["history"] = history
+
+    def _resolve_last_changes(self, *, stored_changes: list[str] | None = None, message_id: int | None = None) -> list[str]:
+        stored = [str(x) for x in (stored_changes or []) if str(x or "").strip()]
+        if not message_id or message_id not in self._public_panel_states:
+            return stored
+        public_history = self._get_public_panel_history(message_id)
+        return self._merge_history_entries(stored, public_history)
 
     def _resolve_public_panel_message(self, interaction: discord.Interaction, source_panel_message: discord.Message | None = None) -> tuple[discord.Message | None, int | None]:
-        self._cleanup_public_panel_states()
         direct_message = getattr(interaction, "message", None)
         direct_id = getattr(direct_message, "id", None)
         if direct_id in self._public_panel_states:
@@ -747,8 +727,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         sent = await message.channel.send(embed=embed, view=view)
         view.message = sent
-        self._cleanup_public_panel_states()
-        self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "history": [], "updated_at": time.monotonic()}
+        db = self._get_db()
+        initial_history: list[str] = []
+        if db and hasattr(db, "get_panel_history"):
+            panel_history = await self._maybe_await(db.get_panel_history(message.guild.id, message.author.id))
+            if panel_kind == "server":
+                initial_history = list((panel_history or {}).get("server_last_changes", []) or [])
+            elif panel_kind == "toggle":
+                initial_history = list((panel_history or {}).get("toggle_last_changes", []) or [])
+            else:
+                initial_history = list((panel_history or {}).get("user_last_changes", []) or [])
+        self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "history": self._merge_history_entries(initial_history)}
         self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent
 
     def _mark_tts_message_seen(self, message_id: int) -> None:
@@ -775,13 +764,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             names = sorted({v["ShortName"] for v in voices if "ShortName" in v})
             self.edge_voice_cache = names
             self.edge_voice_names = set(names)
-            self._edge_voices_loaded_at = time.monotonic()
-            logger.info("[tts_voice] %s vozes edge carregadas.", len(names))
+            print(f"[tts_voice] {len(names)} vozes edge carregadas.")
         except Exception as e:
-            logger.warning("[tts_voice] Falha ao carregar vozes edge: %s", e)
+            print(f"[tts_voice] Falha ao carregar vozes edge: {e}")
             self.edge_voice_cache = []
             self.edge_voice_names = set()
-            self._edge_voices_loaded_at = time.monotonic()
 
     def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
         return discord.Embed(title=title, description=description, color=discord.Color.green() if ok else discord.Color.red())
@@ -868,7 +855,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             data = await self._maybe_await(data)
             return bool((data or {}).get("only_target_user", False))
         except Exception as e:
-            logger.warning("[tts_voice] Erro ao ler only_target_user da guild %s: %s", guild_id, e)
+            print(f"[tts_voice] Erro ao ler only_target_user da guild {guild_id}: {e}")
             return False
 
     async def _block_voice_bot_enabled(self, guild_id: int) -> bool:
@@ -880,7 +867,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             data = await self._maybe_await(data)
             return bool((data or {}).get("block_voice_bot", False))
         except Exception as e:
-            logger.warning("[tts_voice] Erro ao ler block_voice_bot da guild %s: %s", guild_id, e)
+            print(f"[tts_voice] Erro ao ler block_voice_bot da guild {guild_id}: {e}")
             return False
 
     def _target_voice_bot_id(self) -> Optional[int]:
@@ -934,7 +921,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             try:
                 await vc.disconnect(force=False)
             except Exception as e:
-                logger.warning("[tts_voice] erro ao desconectar guild %s: %s", guild.id, e)
+                print(f"[tts_voice] erro ao desconectar guild {guild.id}: {e}")
 
     async def _disconnect_if_blocked(self, guild: discord.Guild):
         await self._disconnect_and_clear(guild)
@@ -950,12 +937,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
         if self._voice_channel_has_only_bots_or_is_empty(vc.channel):
-            logger.info("[tts_voice] saindo da call | sozinho ou só com bots | guild=%s channel=%s", guild.id, vc.channel.id)
+            print(f"[tts_voice] saindo da call | sozinho ou só com bots | guild={guild.id} channel={vc.channel.id}")
             await self._disconnect_and_clear(guild)
 
     async def _ensure_connected(self, guild: discord.Guild, voice_channel) -> Optional[discord.VoiceClient]:
         if voice_channel is None:
-            logger.warning("[tts_voice] _ensure_connected recebeu canal None | guild=%s", guild.id)
+            print(f"[tts_voice] _ensure_connected recebeu canal None | guild={guild.id}")
             return None
 
         lock = self._get_voice_connect_lock(guild.id)
@@ -967,14 +954,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
             async def _fresh_connect() -> Optional[discord.VoiceClient]:
                 new_vc = await voice_channel.connect(self_deaf=True)
-                logger.info("[tts_voice] Conectado no canal %s na guild %s", voice_channel.id, guild.id)
+                print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
                 return new_vc
 
             try:
                 if vc and vc.is_connected():
                     try:
                         await vc.move_to(voice_channel)
-                        logger.info("[tts_voice] Movido para canal %s na guild %s", voice_channel.id, guild.id)
+                        print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return vc
                     except Exception as move_err:
                         msg = str(move_err).lower()
@@ -997,7 +984,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         return current_vc
                     try:
                         await current_vc.move_to(voice_channel)
-                        logger.info("[tts_voice] Movido para canal %s na guild %s", voice_channel.id, guild.id)
+                        print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return current_vc
                     except Exception:
                         pass
@@ -1011,10 +998,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     try:
                         return await _fresh_connect()
                     except Exception as retry_err:
-                        logger.warning("[tts_voice] Erro ao reconectar na guild %s: %s", guild.id, retry_err)
+                        print(f"[tts_voice] Erro ao reconectar na guild {guild.id}: {retry_err}")
                         return None
 
-                logger.warning("[tts_voice] Erro ao conectar na guild %s: %s", guild.id, e)
+                print(f"[tts_voice] Erro ao conectar na guild {guild.id}: {e}")
                 return None
 
     def _chunk_lines(self, lines: list[str], max_chars: int = 3500) -> list[str]:
@@ -1109,25 +1096,25 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._mark_tts_message_seen(message.id)
         author_voice = getattr(message.author, "voice", None)
         if author_voice is None or author_voice.channel is None:
-            logger.debug("[tts_voice] ignorado | autor não está em call")
+            print("[tts_voice] ignorado | autor não está em call")
             return
         voice_channel = author_voice.channel
 
         blocked = await self._should_block_for_voice_bot(message.guild, voice_channel)
         if blocked:
-            logger.info("[tts_voice] bloqueado | outro bot de voz detectado | guild=%s canal_voz=%s", message.guild.id, voice_channel.id)
+            print(f"[tts_voice] bloqueado | outro bot de voz detectado | guild={message.guild.id} canal_voz={voice_channel.id}")
             await self._disconnect_and_clear(message.guild)
             return
 
         db = self._get_db()
         if db is None:
-            logger.warning("[tts_voice] ignorado | settings_db indisponível")
+            print("[tts_voice] ignorado | settings_db indisponível")
             return
 
         try:
             resolved = await self._maybe_await(db.resolve_tts(message.guild.id, message.author.id))
         except Exception as e:
-            logger.warning("[tts_voice] erro em resolve_tts | guild=%s user=%s erro=%s", message.guild.id, message.author.id, e)
+            print(f"[tts_voice] erro em resolve_tts | guild={message.guild.id} user={message.author.id} erro={e}")
             return
 
         only_target_enabled = await self._only_target_user_enabled(message.guild.id)
@@ -1143,16 +1130,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         text = message.content[len(tts_prefix):].strip()
         if not text:
-            logger.debug("[tts_voice] ignorado | texto vazio após prefixo")
+            print("[tts_voice] ignorado | texto vazio após prefixo")
             return
 
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = getattr(message.channel, "id", None)
-        accepted, dropped = await self._enqueue_tts_item(message.guild.id, QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"]))
-        if dropped:
-            logger.warning("[tts_voice] fila cheia; %s item(ns) descartados | guild=%s", dropped, message.guild.id)
-        logger.info("[tts_voice] trigger TTS | guild=%s channel_type=%s user=%s raw=%r", message.guild.id, type(message.channel).__name__, message.author.id, message.content)
-        logger.info("[tts_voice] enfileirada | guild=%s user=%s canal_voz=%s engine=%s forced_gtts=%s", message.guild.id, message.author.id, voice_channel.id, resolved["engine"], forced_gtts)
+        await state.queue.put(QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"]))
+        print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
+        print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
         self._ensure_worker(message.guild.id)
 
     @commands.Cog.listener()
@@ -1162,7 +1147,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
         if await self._block_voice_bot_enabled(guild.id) and self._target_voice_bot_in_channel(vc.channel):
-            logger.info("[tts_voice] Bot de voz alvo detectado na call | guild=%s channel=%s target_bot_id=%s", guild.id, vc.channel.id, self._target_voice_bot_id())
+            print(f"[tts_voice] Bot de voz alvo detectado na call | guild={guild.id} channel={vc.channel.id} target_bot_id={self._target_voice_bot_id()}")
             await self._disconnect_and_clear(guild)
             return
         await self._disconnect_if_alone_or_only_bots(guild)
@@ -1174,7 +1159,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         current: str,
     ) -> list[app_commands.Choice[str]]:
         current = (current or "").strip().lower()
-        await self._ensure_edge_voices()
         voices = self.edge_voice_cache or sorted(self.edge_voice_names)
         voices = [voice for voice in voices if voice.lower().startswith("pt-")]
 
@@ -1235,7 +1219,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if db is None:
             await self._respond(interaction, embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False), ephemeral=True)
             return
-        await self._ensure_edge_voices()
         if voice not in self.edge_voice_names:
             await self._respond(interaction, embed=self._make_embed("Voz inválida", "Essa voz não foi encontrada na lista do Edge. Use `/tts voices edge` para ver as opções.", ok=False), ephemeral=True)
             return
@@ -1358,7 +1341,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     if cmd_id:
                         return f"</{command_path}:{cmd_id}>"
         except Exception as e:
-            logger.warning("[tts_panel_timeout] falha ao buscar menção do comando: %r", e)
+            print(f"[tts_panel_timeout] falha ao buscar menção do comando: {e!r}")
 
         return f"`/{command_path}`"
 
@@ -1403,7 +1386,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         *,
         title: str,
         description: str,
-        target_message: discord.Message | None = None,
     ):
         channel = interaction.channel
         if channel is None:
@@ -1423,7 +1405,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             embed.set_footer(text="Alteração feita pelo painel de TTS")
             await channel.send(embed=embed)
         except Exception as e:
-            logger.warning("[tts_voice] Falha ao anunciar alteração do painel: %s", e)
+            print(f"[tts_voice] Falha ao anunciar alteração do painel: {e}")
 
 
     def _user_history_text(self, interaction: discord.Interaction, what: str, value: str) -> str:
@@ -1442,6 +1424,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         user_id: int,
         *,
         last_changes: list[str] | None = None,
+        message_id: int | None = None,
     ) -> discord.Embed:
         db = self._get_db()
         panel_history = await self._maybe_await(db.get_panel_history(guild_id, user_id)) if db and hasattr(db, "get_panel_history") else {}
@@ -1451,6 +1434,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             stored_last_changes = [stored_last] if stored_last else []
         if last_changes is None:
             last_changes = stored_last_changes
+        last_changes = self._resolve_last_changes(stored_changes=last_changes, message_id=message_id)
 
         guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild_id)) if db else {}
         guild_defaults = guild_defaults or {}
@@ -1507,10 +1491,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 stored_last = str((panel_history or {}).get("toggle_last_change", "") or "")
                 stored_last_changes = [stored_last] if stored_last else []
         else:
-            stored_last_changes = self._get_public_panel_history(message_id) if message_id else []
+            stored_last_changes = list((panel_history or {}).get("user_last_changes", []) or [])
+            if not stored_last_changes:
+                stored_last = str((panel_history or {}).get("user_last_change", "") or "")
+                stored_last_changes = [stored_last] if stored_last else []
 
         if last_changes is None:
             last_changes = stored_last_changes
+        last_changes = self._resolve_last_changes(stored_changes=last_changes, message_id=message_id)
 
         title = "Painel de TTS do servidor" if server else "Painel de TTS"
         description = (
@@ -1585,6 +1573,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             title = "Prefixo do TTS atualizado"
 
         await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+        self._append_public_panel_history(getattr(panel_message, "id", None), history_entry)
         last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         embed = await self._build_settings_embed(
             interaction.guild.id,
@@ -1605,9 +1594,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 await panel_message.edit(embed=embed, view=view)
                 edited = True
         except discord.NotFound:
-            logger.debug("[tts_panel] painel antigo não existe mais; seguindo sem editar")
+            print("[tts_panel] painel antigo não existe mais; seguindo sem editar")
         except Exception as e:
-            logger.warning("[tts_panel] falha ao editar painel: %r", e)
+            print(f"[tts_panel] falha ao editar painel: {e!r}")
 
         if edited:
             await interaction.followup.send(
@@ -1656,9 +1645,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     await message_to_edit.edit(embed=embed, view=view)
                 edited = True
         except discord.NotFound:
-            logger.debug("[tts_panel] painel antigo não existe mais; seguindo sem editar")
+            print("[tts_panel] painel antigo não existe mais; seguindo sem editar")
         except Exception as e:
-            logger.warning("[tts_panel] falha ao editar painel: %r", e)
+            print(f"[tts_panel] falha ao editar painel: {e!r}")
 
         if not edited:
             try:
@@ -1673,7 +1662,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         ephemeral=True,
                     )
             except Exception as e:
-                logger.warning("[tts_panel] falha ao responder followup: %r", e)
+                print(f"[tts_panel] falha ao responder followup: {e!r}")
 
 
 
@@ -1704,13 +1693,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             desc = f"O modo padrão do servidor agora é `{value}`."
             history_entry = self._server_history_text(interaction, "o modo padrão do servidor", value)
             await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, engine=value))
             desc = f"O seu modo de TTS agora é `{value}`."
             history_entry = self._user_history_text(interaction, "o próprio modo", value)
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
             self._append_public_panel_history(message_id, history_entry)
-            last_changes = self._get_public_panel_history(message_id)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("user_last_changes", []) or [])
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
@@ -1747,7 +1738,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             return
 
-        await self._ensure_edge_voices()
         if voice not in self.edge_voice_names and voice not in self.edge_voice_cache:
             await interaction.response.send_message(
                 embed=self._make_embed("Voz inválida", "Essa voz não foi encontrada na lista do Edge.", ok=False),
@@ -1769,13 +1759,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             desc = f"A voz padrão do servidor agora é `{voice}`."
             history_entry = self._server_history_text(interaction, "a voz padrão do servidor", voice)
             await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, voice=voice))
             desc = f"A sua voz do Edge agora é `{voice}`."
             history_entry = self._user_history_text(interaction, "a própria voz", voice)
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
             self._append_public_panel_history(message_id, history_entry)
-            last_changes = self._get_public_panel_history(message_id)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("user_last_changes", []) or [])
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
@@ -1826,13 +1818,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             desc = f"O idioma padrão do servidor agora é `{language}`."
             history_entry = self._server_history_text(interaction, "o idioma padrão do servidor", language)
             await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, language=language))
             desc = f"O seu idioma do gtts agora é `{language}`."
             history_entry = self._user_history_text(interaction, "o próprio idioma", language)
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
             self._append_public_panel_history(message_id, history_entry)
-            last_changes = self._get_public_panel_history(message_id)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("user_last_changes", []) or [])
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
@@ -1883,13 +1877,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             desc = f"A velocidade padrão do servidor agora é `{speed}`."
             history_entry = self._server_history_text(interaction, "a velocidade padrão do servidor", speed)
             await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, rate=speed))
             desc = f"A sua velocidade agora é `{speed}`."
             history_entry = self._user_history_text(interaction, "a própria velocidade", speed)
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
             self._append_public_panel_history(message_id, history_entry)
-            last_changes = self._get_public_panel_history(message_id)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("user_last_changes", []) or [])
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
@@ -1940,13 +1936,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             desc = f"O tom padrão do servidor agora é `{pitch}`."
             history_entry = self._server_history_text(interaction, "o tom padrão do servidor", pitch)
             await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
             await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, pitch=pitch))
             desc = f"O seu tom agora é `{pitch}`."
             history_entry = self._user_history_text(interaction, "o próprio tom", pitch)
+            await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
             self._append_public_panel_history(message_id, history_entry)
-            last_changes = self._get_public_panel_history(message_id)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("user_last_changes", []) or [])
 
         embed = await self._build_settings_embed(
             interaction.guild.id,
@@ -1995,8 +1993,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         desc = "Modo Cuca ativado." if enabled else "Modo Cuca desativado."
         history_entry = self._toggle_history_text(interaction, "ativou o Modo Cuca" if enabled else "desativou o Modo Cuca")
         await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
+        self._append_public_panel_history(getattr(getattr(interaction, "message", None), "id", None), history_entry)
         last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("toggle_last_changes", []) or [])
-        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes)
+        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=getattr(getattr(interaction, "message", None), "id", None))
         view = self._build_toggle_view(0 if getattr(getattr(interaction, "message", None), "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id)
         await self._panel_update_after_change(
             interaction,
@@ -2033,8 +2032,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         desc = f"Bloqueio por outro bot {'ativado' if enabled else 'desativado'}."
         history_entry = self._toggle_history_text(interaction, "ativou o Bloqueio por outro bot" if enabled else "desativou o Bloqueio por outro bot")
         await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
+        self._append_public_panel_history(getattr(getattr(interaction, "message", None), "id", None), history_entry)
         last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("toggle_last_changes", []) or [])
-        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes)
+        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=getattr(getattr(interaction, "message", None), "id", None))
         view = self._build_toggle_view(0 if getattr(getattr(interaction, "message", None), "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id)
         await self._panel_update_after_change(
             interaction,
@@ -2116,7 +2116,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             task.cancel()
             state.worker_task = None
 
-        self._cleanup_guild_state_if_idle(guild.id)
         return cleared
 
     async def _prefix_leave(self, message: discord.Message):
@@ -2131,8 +2130,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 await vc.disconnect(force=False)
             except Exception:
                 pass
-
-        self._cleanup_guild_state_if_idle(message.guild.id)
 
         embed = discord.Embed(
             title="Saindo da call",
@@ -2230,8 +2227,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         sent = await message.channel.send(embed=embed, view=view)
         view.message = sent
-        self._cleanup_public_panel_states()
-        self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "history": [], "updated_at": time.monotonic()}
+        self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "history": []}
         self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent
 
     async def _leave_from_panel(self, interaction: discord.Interaction):
