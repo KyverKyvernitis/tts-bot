@@ -162,11 +162,15 @@ class SpeedSelect(discord.ui.Select):
         self.cog = cog
         self.server = server
         options = [
+            discord.SelectOption(label="-100%", description="Extremamente devagar", value="-100%"),
+            discord.SelectOption(label="-75%", description="Muito mais devagar", value="-75%"),
             discord.SelectOption(label="-50%", description="Bem mais devagar", value="-50%"),
             discord.SelectOption(label="-25%", description="Mais devagar", value="-25%"),
             discord.SelectOption(label="+0%", description="Velocidade normal", value="+0%"),
             discord.SelectOption(label="+25%", description="Mais rápido", value="+25%"),
             discord.SelectOption(label="+50%", description="Bem mais rápido", value="+50%"),
+            discord.SelectOption(label="+75%", description="Muito mais rápido", value="+75%"),
+            discord.SelectOption(label="+100%", description="Extremamente rápido", value="+100%"),
         ]
         super().__init__(placeholder="Escolha uma velocidade", min_values=1, max_values=1, options=options)
 
@@ -180,11 +184,15 @@ class PitchSelect(discord.ui.Select):
         self.cog = cog
         self.server = server
         options = [
+            discord.SelectOption(label="-100Hz", description="Extremamente grave", value="-100Hz"),
+            discord.SelectOption(label="-75Hz", description="Muito grave", value="-75Hz"),
             discord.SelectOption(label="-50Hz", description="Mais grave", value="-50Hz"),
             discord.SelectOption(label="-25Hz", description="Levemente grave", value="-25Hz"),
             discord.SelectOption(label="+0Hz", description="Tom normal", value="+0Hz"),
             discord.SelectOption(label="+25Hz", description="Levemente agudo", value="+25Hz"),
             discord.SelectOption(label="+50Hz", description="Mais agudo", value="+50Hz"),
+            discord.SelectOption(label="+75Hz", description="Muito agudo", value="+75Hz"),
+            discord.SelectOption(label="+100Hz", description="Extremamente agudo", value="+100Hz"),
         ]
         super().__init__(placeholder="Escolha um tom", min_values=1, max_values=1, options=options)
 
