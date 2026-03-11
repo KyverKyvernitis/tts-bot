@@ -20,10 +20,8 @@ def _shorten(text: str, limit: int = 100) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-_CUSTOM_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_~]+):\d+>")
-
 def _replace_custom_emojis_for_tts(text: str) -> str:
-    return _CUSTOM_EMOJI_RE.sub(lambda m: f"emoji {m.group(1)}", text)
+    return re.sub(r"<a?:([A-Za-z0-9_~]+):\d+>", lambda m: f"emoji {m.group(1)}", text)
 
 
 def _spoken_site_from_url(url: str) -> str:
@@ -91,11 +89,6 @@ _ABBREVIATION_MAP = {
 
 _WORD_TOKEN_RE = re.compile(r"\b[\wÀ-ÿ]+\b", re.UNICODE)
 
-_PREFIX_CACHE_TTL_SECONDS = float(getattr(config, "TTS_PREFIX_CACHE_TTL_SECONDS", 30.0))
-_POSSIBLE_PREFIX_START_CHARS = set("._,!?:;/-+*#@$%^&()[]{}<>\\|~")
-_ABBREV_TRIGGER_RE = re.compile(r"\b(?:" + "|".join(re.escape(k) for k in sorted(_ABBREVIATION_MAP, key=len, reverse=True)) + r")\b", re.IGNORECASE)
-
-
 
 def _clean_name_for_tts(value: str) -> str:
     raw = str(value or "").strip()
@@ -157,22 +150,6 @@ _DISCORD_CHANNEL_LINK_RE = re.compile(
     r"https?://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/channels/(?:@me|\d+)/(\d+)(?:/\d+)?",
     re.IGNORECASE,
 )
-
-
-_FAST_MENTION_OR_EMOJI_TRIGGER_RE = re.compile(r"<(?:a?:|@!?|@&|#)")
-_LINK_TRIGGER_RE = re.compile(r"https?://", re.IGNORECASE)
-
-
-def _text_needs_tts_transforms(text: str, has_attachments: bool) -> bool:
-    if has_attachments:
-        return True
-    if _FAST_MENTION_OR_EMOJI_TRIGGER_RE.search(text):
-        return True
-    if _LINK_TRIGGER_RE.search(text):
-        return True
-    if _ABBREV_TRIGGER_RE.search(text):
-        return True
-    return False
 
 
 def _spoken_link_for_tts(url: str, message: discord.Message) -> str:
@@ -936,50 +913,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._active_prefix_panels: dict[tuple[int, int, str], tuple[discord.Message, discord.ui.View]] = {}
         self._public_panel_states: dict[int, dict] = {}
         self._prefix_command_alias_cache: dict[str, dict[str, object]] = {}
-        self._edge_voice_load_task: asyncio.Task | None = None
-        self._voice_preconnect_tasks: dict[int, asyncio.Task] = {}
-        self._guild_prefix_cache: dict[int, tuple[float, dict[str, str]]] = {}
 
     async def cog_load(self):
-        self._ensure_edge_voice_load_started()
+        await self._load_edge_voices()
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
-
-    def _cache_guild_prefixes(self, guild_id: int, guild_defaults: dict | None) -> dict[str, str]:
-        defaults = guild_defaults or {}
-        cached = {
-            "gtts_prefix": str(defaults.get("gtts_prefix", defaults.get("tts_prefix", ".")) or "."),
-            "edge_prefix": str(defaults.get("edge_prefix", ",") or ","),
-            "bot_prefix": str(defaults.get("bot_prefix", "_") or "_"),
-        }
-        self._guild_prefix_cache[guild_id] = (time.monotonic(), cached)
-        return cached
-
-    async def _get_cached_guild_prefixes(self, guild_id: int) -> dict[str, str]:
-        cached = self._guild_prefix_cache.get(guild_id)
-        now = time.monotonic()
-        if cached and (now - cached[0]) <= _PREFIX_CACHE_TTL_SECONDS:
-            return cached[1]
-
-        db = self._get_db()
-        guild_defaults = {}
-        if db is not None:
-            try:
-                guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild_id))
-            except Exception:
-                guild_defaults = {}
-        return self._cache_guild_prefixes(guild_id, guild_defaults)
-
-    def _invalidate_guild_prefix_cache(self, guild_id: int) -> None:
-        self._guild_prefix_cache.pop(guild_id, None)
-
-    def _message_might_use_prefixes(self, content: str) -> bool:
-        if not content:
-            return False
-        first = content[0]
-        return (not first.isalnum()) or (first in _POSSIBLE_PREFIX_START_CHARS)
-
 
     def _panel_actor_name(self, interaction: discord.Interaction) -> str:
         member = getattr(interaction, "user", None)
@@ -1147,7 +1086,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         return False
 
-    async def _send_prefix_panel_built(
+    async def _send_prefix_panel(
         self,
         message: discord.Message,
         *,
@@ -1196,55 +1135,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return True
 
     async def _load_edge_voices(self):
-        existing = self._edge_voice_load_task
-        if existing is not None and not existing.done():
-            await existing
-            return
-
-        async def _runner():
-            try:
-                import edge_tts
-                voices = await edge_tts.list_voices()
-                names = sorted({v["ShortName"] for v in voices if "ShortName" in v})
-                self.edge_voice_cache = names
-                self.edge_voice_names = set(names)
-                print(f"[tts_voice] {len(names)} vozes edge carregadas.")
-            except Exception as e:
-                print(f"[tts_voice] Falha ao carregar vozes edge: {e}")
-                self.edge_voice_cache = []
-                self.edge_voice_names = set()
-
-        task = asyncio.create_task(_runner())
-        self._edge_voice_load_task = task
         try:
-            await task
-        finally:
-            if self._edge_voice_load_task is task:
-                self._edge_voice_load_task = None
-
-    def _ensure_edge_voice_load_started(self) -> None:
-        task = self._edge_voice_load_task
-        if task is None or task.done():
-            self._edge_voice_load_task = asyncio.create_task(self._load_edge_voices())
-
-    def _start_voice_preconnect(self, guild: discord.Guild, voice_channel) -> None:
-        if guild is None or voice_channel is None:
-            return
-        current = self._voice_preconnect_tasks.get(guild.id)
-        if current is not None and not current.done():
-            return
-
-        async def _runner():
-            try:
-                await self._ensure_connected(guild, voice_channel)
-            except Exception:
-                pass
-            finally:
-                task = self._voice_preconnect_tasks.get(guild.id)
-                if task is asyncio.current_task():
-                    self._voice_preconnect_tasks.pop(guild.id, None)
-
-        self._voice_preconnect_tasks[guild.id] = asyncio.create_task(_runner())
+            import edge_tts
+            voices = await edge_tts.list_voices()
+            names = sorted({v["ShortName"] for v in voices if "ShortName" in v})
+            self.edge_voice_cache = names
+            self.edge_voice_names = set(names)
+            print(f"[tts_voice] {len(names)} vozes edge carregadas.")
+        except Exception as e:
+            print(f"[tts_voice] Falha ao carregar vozes edge: {e}")
+            self.edge_voice_cache = []
+            self.edge_voice_names = set()
 
     def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
         return discord.Embed(title=title, description=description, color=discord.Color.green() if ok else discord.Color.red())
@@ -1286,23 +1187,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if active_prefix and text.startswith(active_prefix):
             text = text[len(active_prefix):]
         text = text.strip()
-        if not text:
-            return ""
 
-        attachments = getattr(message, "attachments", None) or ()
-        if not _text_needs_tts_transforms(text, bool(attachments)):
-            return text
-
-        if "<" in text:
+        if text:
             text = _replace_custom_emojis_for_tts(text)
             text = _replace_discord_mentions_for_tts(text, message)
-
-        if _ABBREV_TRIGGER_RE.search(text):
             text = _expand_abbreviations_for_tts(text)
 
-        if attachments or _LINK_TRIGGER_RE.search(text):
-            text = _append_links_and_attachments_for_tts(text, message)
-
+        text = _append_links_and_attachments_for_tts(text, message)
         return text.strip()
 
     def _parse_speech_limit_seconds(self, raw: str) -> int | None:
@@ -1534,77 +1425,83 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     return current
                 return None
 
-            async def _reuse_or_move_current(current: Optional[discord.VoiceClient]) -> Optional[discord.VoiceClient]:
-                if current is None or not current.is_connected():
-                    return None
-                current_channel = getattr(current, "channel", None)
-                if current_channel is not None and current_channel.id == voice_channel.id:
-                    return current
-                try:
-                    await current.move_to(voice_channel)
-                    print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
-                except Exception as move_err:
-                    current = _current_connected_vc() or current
-                    current_channel = getattr(current, "channel", None)
-                    if current is not None and current.is_connected() and current_channel is not None and current_channel.id == voice_channel.id:
-                        return current
-                    print(f"[tts_voice] Falha ao mover voice_client na guild {guild.id}: {move_err}")
-                    return None
-                current = _current_connected_vc() or current
-                current_channel = getattr(current, "channel", None)
-                if current is not None and current.is_connected() and current_channel is not None and current_channel.id == voice_channel.id:
-                    return current
-                return None
-
-            vc = await _reuse_or_move_current(_current_connected_vc())
-            if vc is not None:
+            vc = _current_connected_vc()
+            if vc and vc.channel and vc.channel.id == voice_channel.id:
                 return vc
 
             async def _fresh_connect() -> Optional[discord.VoiceClient]:
-                try:
-                    new_vc = await voice_channel.connect(self_deaf=True)
-                    print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
-                    return new_vc
-                except Exception as connect_err:
-                    msg = str(connect_err).lower()
-                    current_vc = await _reuse_or_move_current(_current_connected_vc())
-                    if current_vc is not None:
-                        print(f"[tts_voice] Reaproveitando conexão existente na guild {guild.id}")
-                        return current_vc
-                    if "already connected" in msg:
-                        current = guild.voice_client
-                        if current is not None:
-                            current_vc = await _reuse_or_move_current(current)
-                            if current_vc is not None:
-                                print(f"[tts_voice] Reaproveitando conexão após already connected | guild={guild.id}")
-                                return current_vc
-                    raise
+                new_vc = await voice_channel.connect(self_deaf=True)
+                print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
+                return new_vc
 
             try:
+                if vc is not None:
+                    try:
+                        await vc.move_to(voice_channel)
+                        print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+                        return _current_connected_vc() or vc
+                    except Exception as move_err:
+                        msg = str(move_err).lower()
+                        current_vc = _current_connected_vc()
+                        if current_vc and current_vc.channel and current_vc.channel.id == voice_channel.id:
+                            return current_vc
+                        if "already connected" in msg and current_vc is not None:
+                            try:
+                                await current_vc.move_to(voice_channel)
+                            except Exception:
+                                pass
+                            current_vc = _current_connected_vc()
+                            if current_vc and current_vc.channel and current_vc.channel.id == voice_channel.id:
+                                print(f"[tts_voice] Reaproveitando conexão já existente na guild {guild.id}")
+                                return current_vc
+                        if "closing transport" in msg or "not connected to voice" in msg:
+                            try:
+                                await vc.disconnect(force=True)
+                            except Exception:
+                                pass
+                            current_vc = _current_connected_vc()
+                            if current_vc and current_vc.channel and current_vc.channel.id == voice_channel.id:
+                                return current_vc
+                            return await _fresh_connect()
+                        raise
+
                 return await _fresh_connect()
+
             except Exception as e:
                 msg = str(e).lower()
-                current_vc = await _reuse_or_move_current(_current_connected_vc())
-                if current_vc is not None:
+                current_vc = _current_connected_vc()
+
+                if current_vc and current_vc.channel and current_vc.channel.id == voice_channel.id:
+                    print(f"[tts_voice] Reaproveitando voice_client já conectado na guild {guild.id}")
                     return current_vc
 
-                if "closing transport" in msg or "not connected to voice" in msg:
-                    current = guild.voice_client
+                if "already connected" in msg and current_vc and current_vc.is_connected():
                     try:
-                        if current is not None:
-                            await current.disconnect(force=True)
+                        await current_vc.move_to(voice_channel)
+                        print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+                        return _current_connected_vc() or current_vc
+                    except Exception:
+                        current_vc = _current_connected_vc()
+                        if current_vc and current_vc.channel and current_vc.channel.id == voice_channel.id:
+                            print(f"[tts_voice] Reaproveitando conexão após already connected | guild={guild.id}")
+                            return current_vc
+
+                if "closing transport" in msg or "not connected to voice" in msg:
+                    try:
+                        if current_vc:
+                            await current_vc.disconnect(force=True)
                     except Exception:
                         pass
-                    current_vc = await _reuse_or_move_current(_current_connected_vc())
-                    if current_vc is not None:
+                    current_vc = _current_connected_vc()
+                    if current_vc and current_vc.channel and current_vc.channel.id == voice_channel.id:
                         return current_vc
                     try:
-                        return await voice_channel.connect(self_deaf=True)
+                        return await _fresh_connect()
                     except Exception as retry_err:
-                        current_vc = await _reuse_or_move_current(_current_connected_vc())
-                        if current_vc is not None:
-                            return current_vc
                         print(f"[tts_voice] Erro ao reconectar na guild {guild.id}: {retry_err}")
+                        current_vc = _current_connected_vc()
+                        if current_vc and current_vc.channel and current_vc.channel.id == voice_channel.id:
+                            return current_vc
                         return None
 
                 print(f"[tts_voice] Erro ao conectar na guild {guild.id}: {e}")
@@ -1641,19 +1538,16 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if message.author.bot or not message.guild or not message.content:
             return
 
+        db = self._get_db()
+        guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(message.guild.id)) if db else {}
+        guild_defaults = guild_defaults or {}
         content = str(message.content)
-        if not self._message_might_use_prefixes(content):
-            return
-
         stripped_content = content.strip()
-        if not stripped_content:
-            return
         lowered = stripped_content.lower()
 
-        prefixes = await self._get_cached_guild_prefixes(message.guild.id)
-        gtts_prefix = prefixes["gtts_prefix"]
-        edge_prefix = prefixes["edge_prefix"]
-        bot_prefix = prefixes["bot_prefix"]
+        gtts_prefix = str(guild_defaults.get("gtts_prefix", guild_defaults.get("tts_prefix", ".")) or ".")
+        edge_prefix = str(guild_defaults.get("edge_prefix", ",") or ",")
+        bot_prefix = str(guild_defaults.get("bot_prefix", "_") or "_")
 
         aliases = self._get_prefix_command_aliases(bot_prefix)
         clear_command = str(aliases["clear"])
@@ -1662,9 +1556,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         reset_command = str(aliases["reset"])
         set_lang_command = str(aliases["set_lang"])
         set_limit_command = str(aliases["set_limit"])
-        panel_aliases = aliases["panel_aliases"]
-        server_aliases = aliases["server_aliases"]
-        toggle_aliases = aliases["toggle_aliases"]
+        panel_aliases = set(aliases["panel_aliases"])
+        server_aliases = set(aliases["server_aliases"])
+        toggle_aliases = set(aliases["toggle_aliases"])
 
         is_prefix_command = (
             lowered == clear_command
@@ -1732,32 +1626,25 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._mark_tts_message_seen(message.id)
         author_voice = getattr(message.author, "voice", None)
         if author_voice is None or author_voice.channel is None:
-            self._log_debug("[tts_voice] ignorado | autor não está em call")
+            print("[tts_voice] ignorado | autor não está em call")
             return
         voice_channel = author_voice.channel
 
         blocked = await self._should_block_for_voice_bot(message.guild, voice_channel)
         if blocked:
-            self._log_debug(f"[tts_voice] bloqueado | outro bot de voz detectado | guild={message.guild.id} canal_voz={voice_channel.id}")
+            print(f"[tts_voice] bloqueado | outro bot de voz detectado | guild={message.guild.id} canal_voz={voice_channel.id}")
             await self._disconnect_and_clear(message.guild)
-            return
-
-        self._start_voice_preconnect(message.guild, voice_channel)
-
-        text = await self._prepare_message_text_for_tts(message, active_prefix)
-        if not text:
-            self._log_debug("[tts_voice] ignorado | texto vazio após prefixo")
             return
 
         db = self._get_db()
         if db is None:
-            self._log_debug("[tts_voice] ignorado | settings_db indisponível")
+            print("[tts_voice] ignorado | settings_db indisponível")
             return
 
         try:
             resolved = await self._maybe_await(db.resolve_tts(message.guild.id, message.author.id))
-        except Exception:
-            logger.exception("[tts_voice] erro em resolve_tts | guild=%s user=%s", message.guild.id, message.author.id)
+        except Exception as e:
+            print(f"[tts_voice] erro em resolve_tts | guild={message.guild.id} user={message.author.id} erro={e}")
             return
 
         only_target_enabled = await self._only_target_user_enabled(message.guild.id)
@@ -1765,7 +1652,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         forced_gtts = False
         if only_target_enabled and target_user_id and message.author.id != target_user_id:
             resolved["engine"] = "gtts"
-            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")
+            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
             resolved["voice"] = ""
             resolved["rate"] = "+0%"
             resolved["pitch"] = "+0Hz"
@@ -1773,21 +1660,24 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         if forced_engine == "gtts":
             resolved["engine"] = "gtts"
-            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")
+            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
         elif forced_engine == "edge":
-            self._ensure_edge_voice_load_started()
             resolved["engine"] = "edge"
             resolved["voice"] = resolved.get("voice") or "pt-BR-FranciscaNeural"
             resolved["rate"] = resolved.get("rate") or "+0%"
             resolved["pitch"] = resolved.get("pitch") or "+0Hz"
 
+        text = await self._prepare_message_text_for_tts(message, active_prefix)
+        if not text:
+            print("[tts_voice] ignorado | texto vazio após prefixo")
+            return
+
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = getattr(message.channel, "id", None)
-        item = QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"])
+        await state.queue.put(QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"]))
+        print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
+        print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
         self._ensure_worker(message.guild.id)
-        _, dropped = await self._enqueue_tts_item(message.guild.id, item)
-        self._log_debug(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
-        self._log_debug(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts} dropped={dropped}")
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -1956,16 +1846,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             interaction.user.id,
             server=False,
             panel_kind="user",
-            target_user_name=self._member_panel_name(interaction.user),
             viewer_user_id=interaction.user.id,
         )
-        view = self._build_panel_view(
-            interaction.user.id,
-            interaction.guild.id,
-            server=False,
-            target_user_id=interaction.user.id,
-            target_user_name=self._member_panel_name(interaction.user),
-        )
+        view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=False)
         msg = await self._respond(interaction, embed=embed, view=view, ephemeral=True)
         view.message = msg
 
@@ -2483,19 +2366,16 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         if prefix_kind == "bot":
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, bot_prefix=cleaned))
-            self._invalidate_guild_prefix_cache(interaction.guild.id)
             desc = f"O prefixo do bot do servidor agora é `{cleaned}`"
             history_entry = self._server_history_text(interaction, "o prefixo dos comandos", self._quote_value(cleaned))
             title = "Prefixo do bot atualizado"
         elif prefix_kind == "edge":
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, edge_prefix=cleaned))
-            self._invalidate_guild_prefix_cache(interaction.guild.id)
             desc = f"O prefixo do modo Edge do servidor agora é `{cleaned}`"
             history_entry = self._server_history_text(interaction, "o prefixo do modo Edge", self._quote_value(cleaned))
             title = "Prefixo do modo Edge atualizado"
         else:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gtts_prefix=cleaned, tts_prefix=cleaned))
-            self._invalidate_guild_prefix_cache(interaction.guild.id)
             desc = f"O prefixo do modo gTTS do servidor agora é `{cleaned}`"
             history_entry = self._server_history_text(interaction, "o prefixo do modo gTTS", self._quote_value(cleaned))
             title = "Prefixo do modo gTTS atualizado"
@@ -3203,19 +3083,18 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 message.author.id,
                 server=False,
                 panel_kind="user",
-                target_user_name=self._member_panel_name(message.author),
-                viewer_user_id=message.author.id,
             )
-            view = self._build_panel_view(
-                0,
-                message.guild.id,
-                server=False,
-                timeout=300,
-                target_user_id=message.author.id,
-                target_user_name=self._member_panel_name(message.author),
-            )
+            view = self._build_panel_view(0, message.guild.id, server=False, timeout=300)
 
-        await self._send_prefix_panel_built(message, panel_kind=panel_kind, embed=embed, view=view)
+        if await self._check_prefix_panel_cooldown(message, panel_kind):
+            return
+
+        await self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind)
+
+        sent = await message.channel.send(embed=embed, view=view)
+        view.message = sent
+        self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "history": [], "owner_id": message.author.id}
+        self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent
 
     async def _leave_from_panel(self, interaction: discord.Interaction):
         vc = self._get_voice_client_for_guild(interaction.guild)
