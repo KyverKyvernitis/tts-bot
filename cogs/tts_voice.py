@@ -610,6 +610,41 @@ def get_gtts_languages() -> dict[str, str]:
         }
 
 
+def build_gtts_language_aliases(languages: dict[str, str]) -> dict[str, str]:
+    aliases: dict[str, str] = {
+        "portugues": "pt",
+        "português": "pt",
+        "portugues brasil": "pt-br",
+        "português brasil": "pt-br",
+        "pt br": "pt-br",
+        "pt-br": "pt-br",
+        "ptbr": "pt-br",
+        "brasileiro": "pt-br",
+        "ingles": "en",
+        "inglês": "en",
+        "espanhol": "es",
+        "frances": "fr",
+        "francês": "fr",
+        "alemao": "de",
+        "alemão": "de",
+        "italiano": "it",
+        "japones": "ja",
+        "japonês": "ja",
+    }
+    for code, name in (languages or {}).items():
+        code_norm = str(code or "").strip().lower()
+        if not code_norm:
+            continue
+        aliases.setdefault(code_norm, code_norm)
+        aliases.setdefault(code_norm.replace("_", "-"), code_norm)
+        aliases.setdefault(code_norm.replace("-", " "), code_norm)
+        name_norm = str(name or "").strip().lower()
+        if name_norm:
+            aliases.setdefault(name_norm, code_norm)
+            aliases.setdefault(name_norm.replace("(", " ").replace(")", " ").replace("-", " ").replace("_", " ").replace("  ", " ").strip(), code_norm)
+    return aliases
+
+
 def validate_mode(mode: str) -> str:
     return "edge" if str(mode or "").strip().lower() == "edge" else "gtts"
 
@@ -653,6 +688,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self.edge_voice_cache: list[str] = []
         self.edge_voice_names: set[str] = set()
         self.gtts_languages: dict[str, str] = get_gtts_languages()
+        self.gtts_language_aliases: dict[str, str] = build_gtts_language_aliases(self.gtts_languages)
         self._recent_tts_message_ids: dict[int, float] = {}
         self._voice_connect_locks: dict[int, asyncio.Lock] = {}
         self._prefix_panel_cooldowns: dict[tuple[int, int, str], float] = {}
@@ -1185,6 +1221,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             or lowered == f"{bot_prefix}join"
             or lowered == f"{bot_prefix}reset"
             or lowered.startswith(f"{bot_prefix}reset ")
+            or lowered == f"{bot_prefix}set lang"
+            or lowered.startswith(f"{bot_prefix}set lang ")
             or lowered in panel_aliases
             or lowered in server_aliases
             or lowered in toggle_aliases
@@ -1196,6 +1234,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._mark_tts_message_seen(message.id)
 
         reset_command = f"{bot_prefix}reset"
+        set_lang_command = f"{bot_prefix}set lang"
 
         if lowered == f"{bot_prefix}clear":
             await self._prefix_clear(message)
@@ -1209,6 +1248,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if lowered == reset_command or lowered.startswith(reset_command + " "):
             raw_target = message.content[len(reset_command):].strip()
             await self._prefix_reset_user(message, raw_target)
+            return
+        if lowered == set_lang_command or lowered.startswith(set_lang_command + " "):
+            raw_language = message.content[len(set_lang_command):].strip()
+            await self._prefix_set_lang(message, raw_language)
             return
         if lowered in panel_aliases:
             await self._send_prefix_panel(message, panel_type="user")
@@ -1567,6 +1610,97 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if len(fuzzy_matches) == 1:
             return fuzzy_matches[0]
         return None
+
+    def _normalize_language_query(self, value: str) -> str:
+        normalized = unicodedata.normalize("NFKD", str(value or "").strip().lower())
+        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        normalized = re.sub(r"[^a-z0-9\-\s]", " ", normalized)
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def _resolve_gtts_language_input(self, raw_language: str) -> tuple[str | None, str | None]:
+        value = str(raw_language or "").strip()
+        if not value:
+            return None, None
+
+        normalized = self._normalize_language_query(value)
+        candidates = [normalized]
+        if normalized:
+            candidates.extend({normalized.replace("_", "-"), normalized.replace(" ", "-"), normalized.replace("-", " ")})
+
+        for candidate in candidates:
+            code = self.gtts_language_aliases.get(candidate)
+            if code and code in self.gtts_languages:
+                return code, self.gtts_languages.get(code)
+
+        raw_code = value.strip().lower().replace("_", "-")
+        if raw_code in self.gtts_languages:
+            return raw_code, self.gtts_languages.get(raw_code)
+
+        return None, None
+
+    async def _prefix_set_lang(self, message: discord.Message, raw_language: str):
+        if message.guild is None:
+            return
+
+        value = str(raw_language or "").strip()
+        if not value:
+            await message.channel.send(embed=self._make_embed("Idioma obrigatório", "Use esse comando assim: `_set lang português`, `_set lang pt-br` ou `_set lang pt-br @usuário`.", ok=False))
+            return
+
+        target_member: discord.Member | None = None
+        language_value = value
+        code, language_name = self._resolve_gtts_language_input(language_value)
+
+        if code is None:
+            parts = value.split()
+            for i in range(len(parts) - 1, 0, -1):
+                possible_language = " ".join(parts[:i]).strip()
+                possible_target = " ".join(parts[i:]).strip()
+                resolved_code, resolved_name = self._resolve_gtts_language_input(possible_language)
+                if resolved_code is None or not possible_target:
+                    continue
+                member = await self._resolve_member_from_text(message.guild, possible_target)
+                if member is None:
+                    continue
+                language_value = possible_language
+                code, language_name = resolved_code, resolved_name
+                target_member = member
+                break
+
+        if code is None:
+            await message.channel.send(embed=self._make_embed("Idioma inválido", "Não reconheci esse idioma do gTTS. Use um código como `pt-br`, `pt`, `en`, `es` ou um nome em português como `português` e `espanhol`.", ok=False))
+            return
+
+        if target_member is None:
+            target_member = message.author if isinstance(message.author, discord.Member) else None
+
+        if target_member is None:
+            await message.channel.send(embed=self._make_embed("Usuário inválido", "Não consegui identificar o usuário que terá o idioma alterado.", ok=False))
+            return
+
+        if target_member.id != message.author.id and not getattr(message.author.guild_permissions, "kick_members", False):
+            await message.channel.send(embed=self._make_embed("Sem permissão", "Você precisa da permissão `Expulsar Membros` para alterar o idioma do gTTS de outro usuário.", ok=False))
+            return
+
+        db = self._get_db()
+        if db is None or not hasattr(db, "set_user_tts"):
+            await message.channel.send(embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora para alterar o idioma do gTTS.", ok=False))
+            return
+
+        await self._maybe_await(db.set_user_tts(message.guild.id, target_member.id, language=code))
+        if hasattr(db, "set_user_panel_last_change"):
+            if target_member.id == message.author.id:
+                history_entry = f"Você alterou o próprio idioma para {code}"
+            else:
+                history_entry = f"{self._member_panel_name(message.author)} alterou o idioma de {self._member_panel_name(target_member)} para {code}"
+            await self._maybe_await(db.set_user_panel_last_change(message.guild.id, target_member.id, history_entry))
+
+        pretty_name = language_name or code
+        if target_member.id == message.author.id:
+            description = f"Seu idioma pessoal do gTTS agora é `{code}` ({pretty_name})."
+        else:
+            description = f"O idioma pessoal do gTTS de {self._member_panel_name(target_member)} agora é `{code}` ({pretty_name})."
+        await message.channel.send(embed=self._make_embed("Idioma atualizado", description, ok=True))
 
     async def _prefix_reset_user(self, message: discord.Message, raw_target: str):
         if message.guild is None:
