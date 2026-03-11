@@ -22,10 +22,11 @@ def _replace_custom_emojis_for_tts(text: str) -> str:
     return re.sub(r"<a?:([A-Za-z0-9_~]+):\d+>", lambda m: f"emoji {m.group(1)}", text)
 
 
-_TTS_ABBREVIATION_MAP: dict[str, str] = {
-    "tmb": "também",
-    "tbm": "também",
+_TTS_ABBREVIATION_MAP = {
+    # comuns
     "tb": "também",
+    "tbm": "também",
+    "tmb": "também",
     "vc": "você",
     "vcs": "vocês",
     "pq": "porque",
@@ -34,22 +35,56 @@ _TTS_ABBREVIATION_MAP: dict[str, str] = {
     "blz": "beleza",
     "obg": "obrigado",
     "obgd": "obrigado",
+    "pf": "por favor",
+    "pfv": "por favor",
+    "hj": "hoje",
+    "dps": "depois",
+    "gnt": "gente",
+    "sdds": "saudades",
+    "vdd": "verdade",
+    "flw": "falou",
+    "vlw": "valeu",
+    "cmg": "comigo",
+    "ctz": "certeza",
     "msg": "mensagem",
-    "tdb": "tudo bem",
-    "tbd": "tudo bem",
+    # outras comuns
+    "mds": "meu deus",
+    "tmj": "tamo junto",
+    "slk": "cê é louco",
+    "pdc": "pode crer",
+    "rlx": "relaxa",
+    "sqn": "só que não",
+    "ngm": "ninguém",
+    "td": "tudo",
+    "nd": "nada",
+    "bjs": "beijos",
+    "abs": "abraços",
+    "kd": "cadê",
+    "qnd": "quando",
+    "fds": "fim de semana",
+    # ofensivas comuns
+    "fdp": "filho da puta",
+    "vsf": "vai se foder",
+    "vtnc": "vai tomar no cu",
+    "tmnc": "tomar no cu",
+    "tnc": "tomar no cu",
+    "pqp": "puta que pariu",
+    "prr": "porra",
+    "crl": "caralho",
+    "krl": "caralho",
 }
+
 _TTS_ABBREVIATION_PATTERN = re.compile(
-    r"(?i)\b(?:" + "|".join(re.escape(k) for k in sorted(_TTS_ABBREVIATION_MAP, key=len, reverse=True)) + r")\b"
+    r"\b(" + "|".join(re.escape(k) for k in sorted(_TTS_ABBREVIATION_MAP, key=len, reverse=True)) + r")\b",
+    flags=re.IGNORECASE,
 )
 
 
 def _expand_abbreviations_for_tts(text: str) -> str:
-    if not text:
-        return text
-    if _TTS_ABBREVIATION_PATTERN.search(text) is None:
+    if not text or not _TTS_ABBREVIATION_PATTERN.search(text):
         return text
 
-    def repl(match: re.Match) -> str:
+    def repl(match: re.Match[str]) -> str:
         token = match.group(0)
         return _TTS_ABBREVIATION_MAP.get(token.lower(), token)
 
@@ -965,94 +1000,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
         return discord.Embed(title=title, description=description, color=discord.Color.green() if ok else discord.Color.red())
 
-    async def _prepare_message_text_for_tts(self, message: discord.Message, active_prefix: str | None) -> str:
-        text = str(getattr(message, "content", "") or "")
-        if active_prefix and text.startswith(active_prefix):
-            text = text[len(active_prefix):]
-        text = text.strip()
-
-        guild = getattr(message, "guild", None)
-
-        async def replace_user_id(user_id_text: str) -> str:
-            try:
-                user_id = int(user_id_text)
-            except Exception:
-                return "usuário mencionado"
-            member = None
-            if guild is not None:
-                member = guild.get_member(user_id)
-                if member is None:
-                    try:
-                        member = await guild.fetch_member(user_id)
-                    except Exception:
-                        member = None
-            if member is not None:
-                display = getattr(member, "display_name", None) or getattr(member, "name", None) or "usuário mencionado"
-                return f"@{display}"
-            user = self.bot.get_user(user_id)
-            if user is not None:
-                name = getattr(user, "name", None) or str(user)
-                return f"@{name}"
-            return "usuário mencionado"
-
-        async def async_sub(pattern: str, repl, value: str) -> str:
-            result = []
-            last = 0
-            for match in re.finditer(pattern, value):
-                result.append(value[last:match.start()])
-                result.append(await repl(match))
-                last = match.end()
-            result.append(value[last:])
-            return ''.join(result)
-
-        url_pattern = r"https?://\S+"
-        found_urls = re.findall(url_pattern, text, flags=re.IGNORECASE)
-        text = re.sub(url_pattern, '', text, flags=re.IGNORECASE)
-
-        text = _replace_custom_emojis_for_tts(text)
-
-        async def user_repl(match: re.Match) -> str:
-            return await replace_user_id(match.group(1) or match.group(2) or "")
-
-        async def role_repl(match: re.Match) -> str:
-            role = guild.get_role(int(match.group(1))) if guild is not None else None
-            role_name = getattr(role, "name", None) or "cargo"
-            return f"cargo {role_name}"
-
-        async def channel_repl(match: re.Match) -> str:
-            channel_id = int(match.group(1))
-            channel = guild.get_channel(channel_id) if guild is not None else None
-            if channel is None:
-                channel = self.bot.get_channel(channel_id)
-            channel_name = getattr(channel, "name", None) or "canal"
-            return f"canal {channel_name}"
-
-        text = await async_sub(r"<@!(\d+)>|<@(\d+)>", user_repl, text)
-        text = await async_sub(r"<@&(\d+)>", role_repl, text)
-        text = await async_sub(r"<#(\d+)>", channel_repl, text)
-        text = _expand_abbreviations_for_tts(text)
-
-        text = re.sub(r"\s+", " ", text).strip()
-
-        extras: list[str] = []
-        for attachment in getattr(message, "attachments", []) or []:
-            try:
-                extras.append(_attachment_tts_label(attachment))
-            except Exception:
-                extras.append("anexo")
-        for url in found_urls:
-            extras.append(_link_tts_label(url))
-
-        extras = [x for x in extras if str(x or "").strip()]
-        if extras:
-            extras_text = ". ".join(extras)
-            if text:
-                text = f"{text}. {extras_text}"
-            else:
-                text = extras_text
-
-        return re.sub(r"\s+", " ", text).strip()
-
     async def _respond(
         self,
         interaction: discord.Interaction,
@@ -1341,6 +1288,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             lowered == f"{bot_prefix}clear"
             or lowered == f"{bot_prefix}leave"
             or lowered == f"{bot_prefix}join"
+            or lowered == f"{bot_prefix}reset"
+            or lowered.startswith(f"{bot_prefix}reset ")
+            or lowered == f"{bot_prefix}set lang"
+            or lowered.startswith(f"{bot_prefix}set lang ")
             or lowered in panel_aliases
             or lowered in server_aliases
             or lowered in toggle_aliases
@@ -1351,6 +1302,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 return
             self._mark_tts_message_seen(message.id)
 
+        reset_command = f"{bot_prefix}reset"
+        set_lang_command = f"{bot_prefix}set lang"
+
         if lowered == f"{bot_prefix}clear":
             await self._prefix_clear(message)
             return
@@ -1359,6 +1313,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
         if lowered == f"{bot_prefix}join":
             await self._prefix_join(message)
+            return
+        if lowered == reset_command or lowered.startswith(reset_command + " "):
+            raw_target = message.content[len(reset_command):].strip()
+            await self._prefix_reset_user(message, raw_target)
+            return
+        if lowered == set_lang_command or lowered.startswith(set_lang_command + " "):
+            raw_language = message.content[len(set_lang_command):].strip()
+            await self._prefix_set_lang(message, raw_language)
             return
         if lowered in panel_aliases:
             await self._send_prefix_panel(message, panel_type="user")
@@ -1426,7 +1388,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             resolved["rate"] = resolved.get("rate") or "+0%"
             resolved["pitch"] = resolved.get("pitch") or "+0Hz"
 
-        text = await self._prepare_message_text_for_tts(message, active_prefix)
+        text = _replace_custom_emojis_for_tts(message.content[len(active_prefix):].strip())
+        text = _expand_abbreviations_for_tts(text)
         if not text:
             print("[tts_voice] ignorado | texto vazio após prefixo")
             return
@@ -1668,6 +1631,138 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return "@usuário"
         name = getattr(member, "name", None) or getattr(member, "display_name", None) or str(member)
         return name if str(name).startswith("@") else f"@{name}"
+
+    async def _resolve_member_from_text(self, guild: discord.Guild, raw: str) -> discord.Member | None:
+        query = str(raw or "").strip()
+        if not query:
+            return None
+
+        mention_match = re.fullmatch(r"<@!?(\d+)>", query)
+        if mention_match:
+            member_id = int(mention_match.group(1))
+            member = guild.get_member(member_id)
+            if member is not None:
+                return member
+            try:
+                return await guild.fetch_member(member_id)
+            except Exception:
+                return None
+
+        if query.isdigit():
+            member_id = int(query)
+            member = guild.get_member(member_id)
+            if member is not None:
+                return member
+            try:
+                return await guild.fetch_member(member_id)
+            except Exception:
+                return None
+
+        lowered = query.lower()
+        exact_matches: list[discord.Member] = []
+        fuzzy_matches: list[discord.Member] = []
+        for member in guild.members:
+            candidates = [
+                str(member),
+                getattr(member, "display_name", "") or "",
+                getattr(member, "global_name", "") or "",
+                getattr(member, "name", "") or "",
+            ]
+            candidate_values = [c.strip() for c in candidates if str(c).strip()]
+            if any(c.lower() == lowered for c in candidate_values):
+                exact_matches.append(member)
+                continue
+            if any(lowered in c.lower() for c in candidate_values):
+                fuzzy_matches.append(member)
+
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if len(fuzzy_matches) == 1:
+            return fuzzy_matches[0]
+        return None
+
+    def _normalize_language_query(self, value: str) -> str:
+        normalized = unicodedata.normalize("NFKD", str(value or "").strip().lower())
+        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        normalized = re.sub(r"[^a-z0-9\-\s]", " ", normalized)
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def _resolve_gtts_language_input(self, raw_language: str) -> tuple[str | None, str | None]:
+        value = str(raw_language or "").strip()
+        if not value:
+            return None, None
+
+        normalized = self._normalize_language_query(value)
+        candidates = [normalized]
+        if normalized:
+            candidates.extend({normalized.replace("_", "-"), normalized.replace(" ", "-"), normalized.replace("-", " ")})
+
+        for candidate in candidates:
+            code = self.gtts_language_aliases.get(candidate)
+            if code and code in self.gtts_languages:
+                return code, self.gtts_languages.get(code)
+
+        raw_code = value.strip().lower().replace("_", "-")
+        if raw_code in self.gtts_languages:
+            return raw_code, self.gtts_languages.get(raw_code)
+
+        return None, None
+
+    async def _prefix_set_lang(self, message: discord.Message, raw_language: str):
+        if message.guild is None:
+            return
+
+        value = str(raw_language or "").strip()
+        if not value:
+            await message.channel.send(embed=self._make_embed("Idioma obrigatório", f"Use esse comando assim: `_set lang português` ou `_set lang pt-br`.", ok=False))
+            return
+
+        code, language_name = self._resolve_gtts_language_input(value)
+        if code is None:
+            await message.channel.send(embed=self._make_embed("Idioma inválido", "Não reconheci esse idioma do gTTS. Use um código como `pt-br`, `pt`, `en`, `es` ou um nome em português como `português` e `espanhol`.", ok=False))
+            return
+
+        db = self._get_db()
+        if db is None or not hasattr(db, "set_user_tts"):
+            await message.channel.send(embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora para alterar o idioma do gTTS.", ok=False))
+            return
+
+        await self._maybe_await(db.set_user_tts(message.guild.id, message.author.id, language=code))
+        if hasattr(db, "set_user_panel_last_change"):
+            history_entry = f"Você alterou o próprio idioma para {code}"
+            await self._maybe_await(db.set_user_panel_last_change(message.guild.id, message.author.id, history_entry))
+
+        pretty_name = language_name or code
+        await message.channel.send(embed=self._make_embed("Idioma atualizado", f"Seu idioma pessoal do gTTS agora é `{code}` ({pretty_name}).", ok=True))
+
+    async def _prefix_reset_user(self, message: discord.Message, raw_target: str):
+        if message.guild is None:
+            return
+        if not getattr(message.author.guild_permissions, "kick_members", False):
+            await message.channel.send(embed=self._make_embed("Sem permissão", "Você precisa da permissão `Expulsar Membros` para resetar as configurações de TTS de outro usuário.", ok=False))
+            return
+
+        target_text = str(raw_target or "").strip()
+        if not target_text:
+            await message.channel.send(embed=self._make_embed("Usuário obrigatório", "Use esse comando assim: `reset @usuário`, `reset ID` ou `reset tag`.", ok=False))
+            return
+
+        db = self._get_db()
+        if db is None or not hasattr(db, "reset_user_tts"):
+            await message.channel.send(embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora para resetar as configurações.", ok=False))
+            return
+
+        member = await self._resolve_member_from_text(message.guild, target_text)
+        if member is None:
+            await message.channel.send(embed=self._make_embed("Usuário não encontrado", "Não consegui encontrar esse usuário. Use menção, ID ou tag exata do usuário no servidor.", ok=False))
+            return
+
+        await self._maybe_await(db.reset_user_tts(message.guild.id, member.id))
+        if hasattr(db, "set_user_panel_last_change"):
+            history_entry = f"{self._member_panel_name(message.author)} resetou as configurações de TTS de {self._member_panel_name(member)} para os padrões do servidor"
+            await self._maybe_await(db.set_user_panel_last_change(message.guild.id, member.id, history_entry))
+
+        await message.channel.send(embed=self._make_embed("Configurações resetadas", f"As configurações de TTS de {self._member_panel_name(member)} agora seguem os padrões do servidor.", ok=True))
 
     def _resolve_target_user(self, interaction: discord.Interaction, target_user_id: int | None = None, target_user_name: str | None = None) -> tuple[int, str]:
         resolved_id = int(target_user_id or getattr(getattr(interaction, "user", None), "id", 0) or 0)
