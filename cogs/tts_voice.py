@@ -55,6 +55,89 @@ def _attachment_label(att: discord.Attachment) -> str:
     return "anexo"
 
 
+_ABBREVIATION_MAP = {
+    "tmb": "também",
+    "tbm": "também",
+    "vc": "você",
+    "vcs": "vocês",
+    "pq": "porque",
+    "pk": "porque",
+    "q": "que",
+    "blz": "beleza",
+    "obg": "obrigado",
+    "obgd": "obrigado",
+    "msg": "mensagem",
+    "fds": "fim de semana",
+    "mds": "meu deus",
+    "pdc": "pode crer",
+    "td": "tudo",
+    "tds": "todos",
+    "tb": "também",
+    "nao": "não",
+    "n": "não",
+    "s": "sim",
+    "fds": "fim de semana",
+    "pqp": "puta que pariu",
+    "fdp": "filho da puta",
+    "vsf": "vai se foder",
+    "tmnc": "tomar no cu",
+    "tnc": "tomar no cu",
+    "krl": "caralho",
+    "crl": "caralho",
+    "porra": "porra",
+}
+
+_WORD_TOKEN_RE = re.compile(r"\b[\wÀ-ÿ]+\b", re.UNICODE)
+
+
+def _clean_name_for_tts(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    raw = unicodedata.normalize("NFKC", raw)
+    cleaned_chars: list[str] = []
+    kept = 0
+    for ch in raw:
+        cat = unicodedata.category(ch)
+        if ch.isalnum() or ch in " _-.":
+            cleaned_chars.append(ch)
+            kept += 1
+        elif cat.startswith("Z"):
+            cleaned_chars.append(" ")
+        else:
+            cleaned_chars.append(" ")
+    cleaned = re.sub(r"\s+", " ", "".join(cleaned_chars)).strip(" ._-")
+    if not cleaned:
+        return ""
+    if kept < max(2, len(raw) // 3):
+        return ""
+    letters_digits = sum(1 for ch in cleaned if ch.isalnum())
+    if letters_digits < max(2, len(cleaned.replace(" ", "")) // 2):
+        return ""
+    return cleaned
+
+
+def _display_name_for_tts(member: discord.abc.User | discord.Member | None) -> str:
+    if member is None:
+        return "usuário mencionado"
+    preferred = _clean_name_for_tts(getattr(member, "display_name", None) or "")
+    if preferred:
+        return preferred
+    fallback = _clean_name_for_tts(getattr(member, "name", None) or "")
+    if fallback:
+        return fallback
+    return "usuário mencionado"
+
+
+def _expand_abbreviations_for_tts(text: str) -> str:
+    def repl(match: re.Match) -> str:
+        token = match.group(0)
+        replacement = _ABBREVIATION_MAP.get(token.lower())
+        return replacement if replacement else token
+
+    return _WORD_TOKEN_RE.sub(repl, text)
+
+
 _URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 _USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 _ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
@@ -89,11 +172,10 @@ def _replace_discord_mentions_for_tts(text: str, message: discord.Message) -> st
         member_id = int(match.group(1))
         member = guild.get_member(member_id) if guild else None
         if member:
-            name = member.display_name or member.name
-            return f"@{name}"
+            return f"@{_display_name_for_tts(member)}"
         user = message.client.get_user(member_id)
         if user:
-            return f"@{getattr(user, 'display_name', None) or user.name}"
+            return f"@{_display_name_for_tts(user)}"
         return "@usuário mencionado"
 
     def role_sub(match: re.Match) -> str:
@@ -1109,6 +1191,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if text:
             text = _replace_custom_emojis_for_tts(text)
             text = _replace_discord_mentions_for_tts(text, message)
+            text = _expand_abbreviations_for_tts(text)
 
         text = _append_links_and_attachments_for_tts(text, message)
         return text.strip()
