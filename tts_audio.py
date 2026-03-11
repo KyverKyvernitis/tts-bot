@@ -18,7 +18,7 @@ import config
 from tts_helpers import validate_voice
 
 
-GTTS_DEFAULT_LANGUAGE = getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
+GTTS_DEFAULT_LANGUAGE = getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")
 TTS_IDLE_DISCONNECT_SECONDS = int(getattr(config, "TTS_IDLE_DISCONNECT_SECONDS", 240))
 TTS_AUDIO_CACHE_SIZE = int(getattr(config, "TTS_AUDIO_CACHE_SIZE", 128))
 TTS_AUDIO_CACHE_TTL_SECONDS = int(getattr(config, "TTS_AUDIO_CACHE_TTL_SECONDS", 900))

@@ -258,7 +258,7 @@ class SettingsDB:
         return {
             "engine": engine,
             "voice": pick("voice", "pt-BR-FranciscaNeural"),
-            "language": pick("language", "pt-br"),
+            "language": pick("language", "pt"),
             "rate": pick("rate", "+0%"),
             "pitch": pick("pitch", "+0Hz"),
             "bot_prefix": str(guild.get("bot_prefix", "_") or "_"),
