@@ -361,7 +361,6 @@ class LanguageHelpView(discord.ui.View):
         timeout: float = 180,
         target_user_id: int | None = None,
         target_user_name: str | None = None,
-        allow_select_modal: bool = True,
     ):
         super().__init__(timeout=timeout)
         self.cog = cog
@@ -371,9 +370,6 @@ class LanguageHelpView(discord.ui.View):
         self.source_panel_message = source_panel_message
         self.target_user_id = target_user_id
         self.target_user_name = target_user_name
-        self.allow_select_modal = allow_select_modal
-        if not self.allow_select_modal:
-            self.remove_item(self.select_button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         target_owner = interaction.user.id if self.owner_id == 0 else self.owner_id
@@ -1649,7 +1645,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         value = str(raw_language or "").strip()
         if not value:
-            await message.channel.send(embed=self._make_embed("Idioma obrigatório", "Use esse comando assim: `_set lang português`, `_set lang pt-br` ou `_set lang pt-br @usuário`.", ok=False))
+            await message.channel.send(embed=self._make_embed("Idioma obrigatório", "Use esse comando assim: `_set lang português`, `_set lang pt` ou `_set lang pt @usuário`.", ok=False))
             return
 
         target_member: discord.Member | None = None
@@ -1679,7 +1675,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 ok=False,
             )
             try:
-                invalid_view = LanguageHelpView(self, message.author.id, message.guild.id, server=False, allow_select_modal=False)
+                invalid_view = LanguageHelpView(self, message.author.id, message.guild.id, server=False)
             except Exception:
                 invalid_view = None
 
