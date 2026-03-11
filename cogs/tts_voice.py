@@ -809,6 +809,10 @@ class TTSMainPanelView(_BaseTTSView):
     async def edge_prefix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(EdgePrefixModal(self.cog, interaction.message, self._target_owner(interaction), self.guild_id))
 
+    @discord.ui.button(label="Limite de fala", style=discord.ButtonStyle.secondary, emoji="⏱️", row=2)
+    async def speech_limit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SpeechLimitModal(self.cog, interaction.message, self._target_owner(interaction), self.guild_id))
+
     @discord.ui.button(label="Entrar na call", style=discord.ButtonStyle.secondary, emoji="📥", row=2)
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog._join_from_panel(interaction)
@@ -2444,6 +2448,86 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         embed.set_footer(text="Os ajustes do gTTS e do Edge ficam salvos no banco." if server or panel_kind == "toggle" else "As alterações desse painel ficam salvas para o usuário correspondente.")
         return embed
 
+
+    async def _apply_server_speech_limit_from_modal(
+        self,
+        interaction: discord.Interaction,
+        *,
+        limit_value: str,
+        panel_message: discord.Message,
+    ):
+        if not interaction.user.guild_permissions.kick_members:
+            await interaction.response.send_message(
+                embed=self._make_embed(
+                    "Sem permissão",
+                    "Você precisa da permissão `Expulsar Membros` para alterar o limite de fala do servidor por esse painel.",
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        db = self._get_db()
+        if db is None:
+            await interaction.response.send_message(
+                embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        seconds = self._parse_speech_limit_seconds(limit_value)
+        if seconds is None:
+            await interaction.response.send_message(
+                embed=self._make_embed("Limite inválido", "Use um valor como `30` ou `30s`.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, speech_limit_seconds=seconds))
+        history_entry = self._server_history_text(interaction, "o limite de fala do bot", f"{seconds}s")
+        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+        self._append_public_panel_history(getattr(panel_message, "id", None), history_entry)
+        last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
+        embed = await self._build_settings_embed(
+            interaction.guild.id,
+            interaction.user.id,
+            server=True,
+            panel_kind="server",
+            last_changes=last_changes,
+            message_id=getattr(panel_message, "id", None),
+        )
+        view = self._build_panel_view(
+            0 if getattr(panel_message, "id", None) in self._public_panel_states else interaction.user.id,
+            interaction.guild.id,
+            server=True,
+        )
+        view.message = panel_message
+        edited = False
+        try:
+            if getattr(interaction, "message", None) is not None and getattr(interaction.message, "id", None) == getattr(panel_message, "id", None):
+                await interaction.response.edit_message(embed=embed, view=view)
+                edited = True
+            else:
+                await panel_message.edit(embed=embed, view=view)
+                edited = True
+        except discord.NotFound:
+            print("[tts_panel] painel antigo não existe mais; seguindo sem editar")
+        except Exception as e:
+            print(f"[tts_panel] falha ao editar painel: {e!r}")
+
+        title = "Limite de fala atualizado"
+        desc = f"O limite de fala do servidor agora é `{seconds}s`"
+        if edited:
+            await interaction.followup.send(embed=self._make_embed(title, desc, ok=True), ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=self._make_embed(title, desc, ok=True), ephemeral=True)
+
+        await self._announce_panel_change(
+            interaction,
+            title=title,
+            description=desc,
+            target_message=panel_message,
+        )
 
     async def _apply_server_prefix_from_modal(
         self,
