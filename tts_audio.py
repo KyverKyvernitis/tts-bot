@@ -272,7 +272,7 @@ class TTSAudioMixin:
             raise
 
     async def _generate_audio_file(self, item: QueueItem) -> str:
-        logger.info("[tts_voice] synth dispatch | guild=%s engine=%s author=%s text=%r", item.guild_id, item.engine, item.author_id, (item.text or "")[:120])
+        self._log_debug(f"[tts_voice] synth dispatch | guild={item.guild_id} engine={item.engine} author={item.author_id} text={(item.text or '')[:120]!r}")
         if item.engine == "edge":
             try:
                 return await self._generate_edge_file(item.text, item.voice, item.rate, item.pitch)
@@ -304,6 +304,7 @@ class TTSAudioMixin:
     async def _play_file(self, vc: discord.VoiceClient, path: str) -> None:
         loop = asyncio.get_running_loop()
         finished = loop.create_future()
+        started = loop.create_future()
 
         def _after_playback(error: Optional[Exception]) -> None:
             if error:
@@ -319,6 +320,9 @@ class TTSAudioMixin:
             options=TTS_FFMPEG_OPTIONS,
         )
         vc.play(source, after=_after_playback)
+        if not started.done():
+            loop.call_soon(started.set_result, None)
+        await asyncio.wait_for(started, timeout=TTS_PLAYBACK_START_TIMEOUT_SECONDS)
         await finished
 
     async def _disconnect_idle(self, guild: discord.Guild) -> bool:
@@ -334,7 +338,7 @@ class TTSAudioMixin:
 
         try:
             await vc.disconnect(force=False)
-            logger.info("[tts_voice] Desconectado por inatividade | guild=%s", guild.id)
+            self._log_debug(f"[tts_voice] Desconectado por inatividade | guild={guild.id}")
             return True
         except Exception as e:
             logger.warning("[tts_voice] Erro ao desconectar por inatividade | guild=%s erro=%s", guild.id, e)
@@ -413,7 +417,7 @@ class TTSAudioMixin:
                             timeout = min(timeout, max(1.0, state.warmed_until - time.monotonic()))
                         item = await asyncio.wait_for(state.queue.get(), timeout=timeout)
                         fetched_from_queue = True
-                        logger.info("[tts_voice] worker dequeued | guild=%s engine=%s author=%s text=%r", guild_id, item.engine, item.author_id, (item.text or "")[:120])
+                        self._log_debug(f"[tts_voice] worker dequeued | guild={guild_id} engine={item.engine} author={item.author_id} text={(item.text or '')[:120]!r}")
                     except asyncio.TimeoutError:
                         if state.warmed_until > time.monotonic():
                             continue
@@ -447,7 +451,7 @@ class TTSAudioMixin:
                             except Exception:
                                 pass
                         continue
-                    logger.info("[tts_voice] worker connected | guild=%s voice_channel=%s", guild_id, getattr(getattr(vc, "channel", None), "id", None))
+                    self._log_debug(f"[tts_voice] worker connected | guild={guild_id} voice_channel={getattr(getattr(vc, 'channel', None), 'id', None)}")
 
                     current_path, should_cleanup = await audio_task
 
