@@ -61,7 +61,7 @@ _TTS_ABBREVIATION_MAP = {
     "abs": "abraços",
     "kd": "cadê",
     "qnd": "quando",
-    "fds": "fim de semana",
+    "fds": "foda-se",
     # ofensivas comuns
     "fdp": "filho da puta",
     "vsf": "vai se foder",
