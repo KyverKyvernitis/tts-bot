@@ -7,6 +7,10 @@ app = Flask(__name__)
 def home():
     return "OK", 200
 
+@app.get("/healthz")
+def healthz():
+    return "OK", 200
+
 def run_webserver():
     port = int(os.getenv("PORT", "10000"))
     print("WEB SERVER INICIANDO")

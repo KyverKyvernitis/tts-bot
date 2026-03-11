@@ -24,8 +24,10 @@ TTS_IDLE_DISCONNECT_SECONDS = int(getattr(config, "TTS_IDLE_DISCONNECT_SECONDS",
 TTS_AUDIO_CACHE_SIZE = int(getattr(config, "TTS_AUDIO_CACHE_SIZE", 128))
 TTS_AUDIO_CACHE_TTL_SECONDS = int(getattr(config, "TTS_AUDIO_CACHE_TTL_SECONDS", 900))
 TTS_DEBUG_LOGS = bool(getattr(config, "TTS_DEBUG_LOGS", False))
-TTS_WARM_HOLD_SECONDS = float(getattr(config, "TTS_WARM_HOLD_SECONDS", 15))
+TTS_WARM_HOLD_SECONDS = float(getattr(config, "TTS_WARM_HOLD_SECONDS", 30))
 TTS_QUEUE_MAXSIZE = max(1, int(getattr(config, "TTS_QUEUE_MAXSIZE", 20)))
+TTS_SYNTH_CONCURRENCY = max(1, int(getattr(config, "TTS_SYNTH_CONCURRENCY", 2)))
+TTS_EDGE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_EDGE_TIMEOUT_SECONDS", 10)))
 TTS_FFMPEG_BEFORE_OPTIONS = getattr(config, "TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin")
 TTS_FFMPEG_OPTIONS = getattr(config, "TTS_FFMPEG_OPTIONS", "-vn -loglevel error")
 
@@ -151,6 +153,13 @@ class TTSAudioMixin:
         text = text.replace("!!", "!").replace("??", "?").replace("..", ".")
         return text
 
+    def _get_synth_semaphore(self) -> asyncio.Semaphore:
+        semaphore = getattr(self, "_tts_synth_semaphore", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(TTS_SYNTH_CONCURRENCY)
+            setattr(self, "_tts_synth_semaphore", semaphore)
+        return semaphore
+
     def _cache_key(self, item: QueueItem) -> str:
         text = self._normalize_cache_text(item.text)
         engine = (item.engine or "gtts").strip().lower()
@@ -239,7 +248,9 @@ class TTSAudioMixin:
         fd, path = tempfile.mkstemp(suffix=".mp3")
         os.close(fd)
         try:
-            gTTS(text=text, lang=language).save(path)
+            tts = gTTS(text=text, lang=language)
+            async with self._get_synth_semaphore():
+                await asyncio.to_thread(tts.save, path)
             return path
         except Exception:
             try:
@@ -261,7 +272,9 @@ class TTSAudioMixin:
         fd, path = tempfile.mkstemp(suffix=".mp3")
         os.close(fd)
         try:
-            await edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch).save(path)
+            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
+            async with self._get_synth_semaphore():
+                await asyncio.wait_for(communicate.save(path), timeout=TTS_EDGE_TIMEOUT_SECONDS)
             return path
         except Exception:
             try:
