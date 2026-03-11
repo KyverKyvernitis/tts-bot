@@ -89,6 +89,11 @@ _ABBREVIATION_MAP = {
 
 _WORD_TOKEN_RE = re.compile(r"\b[\wÀ-ÿ]+\b", re.UNICODE)
 
+_PREFIX_CACHE_TTL_SECONDS = float(getattr(config, "TTS_PREFIX_CACHE_TTL_SECONDS", 30.0))
+_POSSIBLE_PREFIX_START_CHARS = set("._,!?:;/-+*#@$%^&()[]{}<>\\|~")
+_ABBREV_TRIGGER_RE = re.compile(r"\b(?:" + "|".join(re.escape(k) for k in sorted(_ABBREVIATION_MAP, key=len, reverse=True)) + r")\b", re.IGNORECASE)
+
+
 
 def _clean_name_for_tts(value: str) -> str:
     raw = str(value or "").strip()
@@ -915,12 +920,48 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._prefix_command_alias_cache: dict[str, dict[str, object]] = {}
         self._edge_voice_load_task: asyncio.Task | None = None
         self._voice_preconnect_tasks: dict[int, asyncio.Task] = {}
+        self._guild_prefix_cache: dict[int, tuple[float, dict[str, str]]] = {}
 
     async def cog_load(self):
         self._ensure_edge_voice_load_started()
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
+
+    def _cache_guild_prefixes(self, guild_id: int, guild_defaults: dict | None) -> dict[str, str]:
+        defaults = guild_defaults or {}
+        cached = {
+            "gtts_prefix": str(defaults.get("gtts_prefix", defaults.get("tts_prefix", ".")) or "."),
+            "edge_prefix": str(defaults.get("edge_prefix", ",") or ","),
+            "bot_prefix": str(defaults.get("bot_prefix", "_") or "_"),
+        }
+        self._guild_prefix_cache[guild_id] = (time.monotonic(), cached)
+        return cached
+
+    async def _get_cached_guild_prefixes(self, guild_id: int) -> dict[str, str]:
+        cached = self._guild_prefix_cache.get(guild_id)
+        now = time.monotonic()
+        if cached and (now - cached[0]) <= _PREFIX_CACHE_TTL_SECONDS:
+            return cached[1]
+
+        db = self._get_db()
+        guild_defaults = {}
+        if db is not None:
+            try:
+                guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild_id))
+            except Exception:
+                guild_defaults = {}
+        return self._cache_guild_prefixes(guild_id, guild_defaults)
+
+    def _invalidate_guild_prefix_cache(self, guild_id: int) -> None:
+        self._guild_prefix_cache.pop(guild_id, None)
+
+    def _message_might_use_prefixes(self, content: str) -> bool:
+        if not content:
+            return False
+        first = content[0]
+        return (not first.isalnum()) or (first in _POSSIBLE_PREFIX_START_CHARS)
+
 
     def _panel_actor_name(self, interaction: discord.Interaction) -> str:
         member = getattr(interaction, "user", None)
@@ -1578,16 +1619,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if message.author.bot or not message.guild or not message.content:
             return
 
-        db = self._get_db()
-        guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(message.guild.id)) if db else {}
-        guild_defaults = guild_defaults or {}
         content = str(message.content)
+        if not self._message_might_use_prefixes(content):
+            return
+
         stripped_content = content.strip()
+        if not stripped_content:
+            return
         lowered = stripped_content.lower()
 
-        gtts_prefix = str(guild_defaults.get("gtts_prefix", guild_defaults.get("tts_prefix", ".")) or ".")
-        edge_prefix = str(guild_defaults.get("edge_prefix", ",") or ",")
-        bot_prefix = str(guild_defaults.get("bot_prefix", "_") or "_")
+        prefixes = await self._get_cached_guild_prefixes(message.guild.id)
+        gtts_prefix = prefixes["gtts_prefix"]
+        edge_prefix = prefixes["edge_prefix"]
+        bot_prefix = prefixes["bot_prefix"]
 
         aliases = self._get_prefix_command_aliases(bot_prefix)
         clear_command = str(aliases["clear"])
@@ -1666,13 +1710,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._mark_tts_message_seen(message.id)
         author_voice = getattr(message.author, "voice", None)
         if author_voice is None or author_voice.channel is None:
-            print("[tts_voice] ignorado | autor não está em call")
+            self._log_debug("[tts_voice] ignorado | autor não está em call")
             return
         voice_channel = author_voice.channel
 
         blocked = await self._should_block_for_voice_bot(message.guild, voice_channel)
         if blocked:
-            print(f"[tts_voice] bloqueado | outro bot de voz detectado | guild={message.guild.id} canal_voz={voice_channel.id}")
+            self._log_debug(f"[tts_voice] bloqueado | outro bot de voz detectado | guild={message.guild.id} canal_voz={voice_channel.id}")
             await self._disconnect_and_clear(message.guild)
             return
 
@@ -1680,13 +1724,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         db = self._get_db()
         if db is None:
-            print("[tts_voice] ignorado | settings_db indisponível")
+            self._log_debug("[tts_voice] ignorado | settings_db indisponível")
             return
 
         try:
             resolved = await self._maybe_await(db.resolve_tts(message.guild.id, message.author.id))
         except Exception as e:
-            print(f"[tts_voice] erro em resolve_tts | guild={message.guild.id} user={message.author.id} erro={e}")
+            logger.exception("[tts_voice] erro em resolve_tts | guild=%s user=%s", message.guild.id, message.author.id)
             return
 
         only_target_enabled = await self._only_target_user_enabled(message.guild.id)
@@ -1712,7 +1756,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         text = await self._prepare_message_text_for_tts(message, active_prefix)
         if not text:
-            print("[tts_voice] ignorado | texto vazio após prefixo")
+            self._log_debug("[tts_voice] ignorado | texto vazio após prefixo")
             return
 
         state = self._get_state(message.guild.id)
@@ -1720,8 +1764,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         item = QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"])
         self._ensure_worker(message.guild.id)
         _, dropped = await self._enqueue_tts_item(message.guild.id, item)
-        print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
-        print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts} dropped={dropped}")
+        self._log_debug(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
+        self._log_debug(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts} dropped={dropped}")
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -2410,16 +2454,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         if prefix_kind == "bot":
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, bot_prefix=cleaned))
+            self._invalidate_guild_prefix_cache(interaction.guild.id)
             desc = f"O prefixo do bot do servidor agora é `{cleaned}`"
             history_entry = self._server_history_text(interaction, "o prefixo dos comandos", self._quote_value(cleaned))
             title = "Prefixo do bot atualizado"
         elif prefix_kind == "edge":
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, edge_prefix=cleaned))
+            self._invalidate_guild_prefix_cache(interaction.guild.id)
             desc = f"O prefixo do modo Edge do servidor agora é `{cleaned}`"
             history_entry = self._server_history_text(interaction, "o prefixo do modo Edge", self._quote_value(cleaned))
             title = "Prefixo do modo Edge atualizado"
         else:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gtts_prefix=cleaned, tts_prefix=cleaned))
+            self._invalidate_guild_prefix_cache(interaction.guild.id)
             desc = f"O prefixo do modo gTTS do servidor agora é `{cleaned}`"
             history_entry = self._server_history_text(interaction, "o prefixo do modo gTTS", self._quote_value(cleaned))
             title = "Prefixo do modo gTTS atualizado"
