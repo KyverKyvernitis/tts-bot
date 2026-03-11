@@ -913,9 +913,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._active_prefix_panels: dict[tuple[int, int, str], tuple[discord.Message, discord.ui.View]] = {}
         self._public_panel_states: dict[int, dict] = {}
         self._prefix_command_alias_cache: dict[str, dict[str, object]] = {}
+        self._edge_voice_load_task: asyncio.Task | None = None
+        self._voice_preconnect_tasks: dict[int, asyncio.Task] = {}
 
     async def cog_load(self):
-        await self._load_edge_voices()
+        self._ensure_edge_voice_load_started()
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
@@ -1135,17 +1137,55 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return True
 
     async def _load_edge_voices(self):
+        existing = self._edge_voice_load_task
+        if existing is not None and not existing.done():
+            await existing
+            return
+
+        async def _runner():
+            try:
+                import edge_tts
+                voices = await edge_tts.list_voices()
+                names = sorted({v["ShortName"] for v in voices if "ShortName" in v})
+                self.edge_voice_cache = names
+                self.edge_voice_names = set(names)
+                print(f"[tts_voice] {len(names)} vozes edge carregadas.")
+            except Exception as e:
+                print(f"[tts_voice] Falha ao carregar vozes edge: {e}")
+                self.edge_voice_cache = []
+                self.edge_voice_names = set()
+
+        task = asyncio.create_task(_runner())
+        self._edge_voice_load_task = task
         try:
-            import edge_tts
-            voices = await edge_tts.list_voices()
-            names = sorted({v["ShortName"] for v in voices if "ShortName" in v})
-            self.edge_voice_cache = names
-            self.edge_voice_names = set(names)
-            print(f"[tts_voice] {len(names)} vozes edge carregadas.")
-        except Exception as e:
-            print(f"[tts_voice] Falha ao carregar vozes edge: {e}")
-            self.edge_voice_cache = []
-            self.edge_voice_names = set()
+            await task
+        finally:
+            if self._edge_voice_load_task is task:
+                self._edge_voice_load_task = None
+
+    def _ensure_edge_voice_load_started(self) -> None:
+        task = self._edge_voice_load_task
+        if task is None or task.done():
+            self._edge_voice_load_task = asyncio.create_task(self._load_edge_voices())
+
+    def _start_voice_preconnect(self, guild: discord.Guild, voice_channel) -> None:
+        if guild is None or voice_channel is None:
+            return
+        current = self._voice_preconnect_tasks.get(guild.id)
+        if current is not None and not current.done():
+            return
+
+        async def _runner():
+            try:
+                await self._ensure_connected(guild, voice_channel)
+            except Exception:
+                pass
+            finally:
+                task = self._voice_preconnect_tasks.get(guild.id)
+                if task is asyncio.current_task():
+                    self._voice_preconnect_tasks.pop(guild.id, None)
+
+        self._voice_preconnect_tasks[guild.id] = asyncio.create_task(_runner())
 
     def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
         return discord.Embed(title=title, description=description, color=discord.Color.green() if ok else discord.Color.red())
@@ -1636,6 +1676,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._disconnect_and_clear(message.guild)
             return
 
+        self._start_voice_preconnect(message.guild, voice_channel)
+
         db = self._get_db()
         if db is None:
             print("[tts_voice] ignorado | settings_db indisponível")
@@ -1652,7 +1694,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         forced_gtts = False
         if only_target_enabled and target_user_id and message.author.id != target_user_id:
             resolved["engine"] = "gtts"
-            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
+            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")
             resolved["voice"] = ""
             resolved["rate"] = "+0%"
             resolved["pitch"] = "+0Hz"
@@ -1660,8 +1702,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         if forced_engine == "gtts":
             resolved["engine"] = "gtts"
-            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
+            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")
         elif forced_engine == "edge":
+            self._ensure_edge_voice_load_started()
             resolved["engine"] = "edge"
             resolved["voice"] = resolved.get("voice") or "pt-BR-FranciscaNeural"
             resolved["rate"] = resolved.get("rate") or "+0%"
@@ -1674,10 +1717,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = getattr(message.channel, "id", None)
-        await state.queue.put(QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"]))
-        print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
-        print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
+        item = QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"])
         self._ensure_worker(message.guild.id)
+        _, dropped = await self._enqueue_tts_item(message.guild.id, item)
+        print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
+        print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts} dropped={dropped}")
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
