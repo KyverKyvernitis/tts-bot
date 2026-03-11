@@ -164,6 +164,15 @@ class TTSAudioMixin:
     def _cache_path(self, key: str) -> str:
         return os.path.join(_CACHE_DIR, f"{key}.mp3")
 
+    def _is_audio_file_valid(self, path: str) -> bool:
+        try:
+            if not path or not os.path.exists(path):
+                return False
+            size = os.path.getsize(path)
+            return size >= 1024
+        except Exception:
+            return False
+
     def _touch_cache_entry(self, state: GuildTTSState, key: str) -> None:
         now = time.time()
         state.cache_order[key] = now
@@ -205,7 +214,7 @@ class TTSAudioMixin:
             return None
 
         age = time.time() - os.path.getmtime(path)
-        if age > TTS_AUDIO_CACHE_TTL_SECONDS:
+        if age > TTS_AUDIO_CACHE_TTL_SECONDS or not self._is_audio_file_valid(path):
             try:
                 os.remove(path)
             except Exception:
@@ -239,6 +248,8 @@ class TTSAudioMixin:
         os.close(fd)
         try:
             gTTS(text=text, lang=language).save(path)
+            if not self._is_audio_file_valid(path):
+                raise RuntimeError(f"gTTS gerou áudio vazio/inválido para {language!r}")
             return path
         except Exception:
             try:
@@ -261,6 +272,8 @@ class TTSAudioMixin:
         os.close(fd)
         try:
             await edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch).save(path)
+            if not self._is_audio_file_valid(path):
+                raise RuntimeError(f"Edge gerou áudio vazio/inválido para {voice!r}")
             return path
         except Exception:
             try:
@@ -299,6 +312,9 @@ class TTSAudioMixin:
         return generated, True
 
     async def _play_file(self, vc: discord.VoiceClient, path: str) -> None:
+        if not self._is_audio_file_valid(path):
+            raise RuntimeError(f"Arquivo de áudio vazio/inválido: {path}")
+
         loop = asyncio.get_running_loop()
         finished = loop.create_future()
 
