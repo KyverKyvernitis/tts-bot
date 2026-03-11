@@ -67,7 +67,7 @@ _ABBREVIATION_MAP = {
     "obg": "obrigado",
     "obgd": "obrigado",
     "msg": "mensagem",
-    "fds": "fim de semana",
+    "fds": "foda-se",
     "mds": "meu deus",
     "pdc": "pode crer",
     "td": "tudo",
@@ -76,7 +76,6 @@ _ABBREVIATION_MAP = {
     "nao": "não",
     "n": "não",
     "s": "sim",
-    "fds": "fim de semana",
     "pqp": "puta que pariu",
     "fdp": "filho da puta",
     "vsf": "vai se foder",
@@ -84,7 +83,8 @@ _ABBREVIATION_MAP = {
     "tnc": "tomar no cu",
     "krl": "caralho",
     "crl": "caralho",
-    "porra": "porra",
+    "prr": "porra", 
+    "poha" :"porra",
 }
 
 _WORD_TOKEN_RE = re.compile(r"\b[\wÀ-ÿ]+\b", re.UNICODE)
