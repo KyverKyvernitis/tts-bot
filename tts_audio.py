@@ -353,15 +353,31 @@ class TTSAudioMixin:
                 state.last_channel_id = item.channel_id
                 return vc
             except Exception:
-                pass
+                # O client pode continuar conectado mesmo se o move_to falhar em uma corrida.
+                current = guild.voice_client
+                if current is not None and current.is_connected():
+                    if current.channel is not None and current.channel.id == item.channel_id:
+                        state.last_channel_id = item.channel_id
+                        return current
 
         vc = await self._maybe_await(self._ensure_connected(guild, target_channel))
+        current = guild.voice_client
+
+        # Se a tentativa de conectar falhar por "Already connected" ou corrida parecida,
+        # reutiliza a conexão atual em vez de abortar o worker.
         if vc is None:
-            current = guild.voice_client
             if current is not None and current.is_connected():
                 if current.channel is not None and current.channel.id == item.channel_id:
                     state.last_channel_id = item.channel_id
                     return current
+                try:
+                    await current.move_to(target_channel)
+                    state.last_channel_id = item.channel_id
+                    return current
+                except Exception:
+                    if current.channel is not None:
+                        state.last_channel_id = current.channel.id
+                        return current
             return None
 
         if vc.is_connected():
