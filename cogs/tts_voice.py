@@ -2292,8 +2292,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         *,
         title: str,
         description: str,
+        target_message: discord.Message | None = None,
     ):
-        channel = interaction.channel
+        channel = getattr(target_message, "channel", None) or interaction.channel
         if channel is None:
             return
 
@@ -2975,14 +2976,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             return
 
+        panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
         await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, only_target_user=bool(enabled)))
         desc = "Modo Cuca ativado." if enabled else "Modo Cuca desativado."
         history_entry = self._toggle_history_text(interaction, "ativou o Modo Cuca" if enabled else "desativou o Modo Cuca")
         await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
-        self._append_public_panel_history(getattr(getattr(interaction, "message", None), "id", None), history_entry)
+        self._append_public_panel_history(message_id, history_entry)
         last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("toggle_last_changes", []) or [])
-        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=getattr(getattr(interaction, "message", None), "id", None))
-        view = self._build_toggle_view(0 if getattr(getattr(interaction, "message", None), "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id)
+        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=message_id)
+        view = self._build_toggle_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id)
+        if panel_message is not None:
+            view.message = panel_message
         await self._panel_update_after_change(
             interaction,
             embed=embed,
@@ -2991,7 +2995,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             description=desc,
             target_message=panel_message,
         )
-        await self._announce_panel_change(interaction, title="Modo de TTS atualizado", description=desc)
+        await self._announce_panel_change(interaction, title="Modo de TTS atualizado", description=desc, target_message=panel_message)
 
 
     async def _apply_block_voice_bot_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
@@ -3014,14 +3018,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             return
 
+        panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
         await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, block_voice_bot=bool(enabled)))
         desc = f"Bloqueio por outro bot {'ativado' if enabled else 'desativado'}."
         history_entry = self._toggle_history_text(interaction, "ativou o Bloqueio por outro bot" if enabled else "desativou o Bloqueio por outro bot")
         await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
-        self._append_public_panel_history(getattr(getattr(interaction, "message", None), "id", None), history_entry)
+        self._append_public_panel_history(message_id, history_entry)
         last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("toggle_last_changes", []) or [])
-        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=getattr(getattr(interaction, "message", None), "id", None))
-        view = self._build_toggle_view(0 if getattr(getattr(interaction, "message", None), "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id)
+        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=message_id)
+        view = self._build_toggle_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id)
+        if panel_message is not None:
+            view.message = panel_message
         await self._panel_update_after_change(
             interaction,
             embed=embed,
@@ -3030,7 +3037,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             description=desc,
             target_message=panel_message,
         )
-        await self._announce_panel_change(interaction, title="Modo de TTS atualizado", description=desc)
+        await self._announce_panel_change(interaction, title="Modo de TTS atualizado", description=desc, target_message=panel_message)
 
         if enabled:
             await self._disconnect_if_blocked(interaction.guild)
