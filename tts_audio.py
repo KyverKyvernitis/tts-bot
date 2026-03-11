@@ -434,16 +434,22 @@ class TTSAudioMixin:
                                     await self._maybe_await(self._disconnect_if_blocked(guild))
                                 continue
 
-                    vc = await self._ensure_connected_fast(guild, item)
+                    connect_task = asyncio.create_task(self._ensure_connected_fast(guild, item))
+                    if audio_task is None:
+                        audio_task = asyncio.create_task(self._resolve_audio_path(state, item))
+                    vc = await connect_task
                     if vc is None:
                         logger.warning("[tts_voice] Worker não conseguiu conectar | guild=%s channel=%s", guild_id, item.channel_id)
+                        if not audio_task.done():
+                            audio_task.cancel()
+                            try:
+                                await audio_task
+                            except Exception:
+                                pass
                         continue
                     logger.info("[tts_voice] worker connected | guild=%s voice_channel=%s", guild_id, getattr(getattr(vc, "channel", None), "id", None))
 
-                    if audio_task is None:
-                        current_path, should_cleanup = await self._resolve_audio_path(state, item)
-                    else:
-                        current_path, should_cleanup = await audio_task
+                    current_path, should_cleanup = await audio_task
 
                     if prefetched_item is None:
                         prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
