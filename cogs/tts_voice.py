@@ -2,6 +2,7 @@ import inspect
 import asyncio
 import time
 import re
+import unicodedata
 from typing import Optional
 
 import discord
