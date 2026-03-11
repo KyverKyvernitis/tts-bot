@@ -22,6 +22,40 @@ def _replace_custom_emojis_for_tts(text: str) -> str:
     return re.sub(r"<a?:([A-Za-z0-9_~]+):\d+>", lambda m: f"emoji {m.group(1)}", text)
 
 
+_TTS_ABBREVIATION_MAP: dict[str, str] = {
+    "tmb": "também",
+    "tbm": "também",
+    "tb": "também",
+    "vc": "você",
+    "vcs": "vocês",
+    "pq": "porque",
+    "pk": "porque",
+    "q": "que",
+    "blz": "beleza",
+    "obg": "obrigado",
+    "obgd": "obrigado",
+    "msg": "mensagem",
+    "tdb": "tudo bem",
+    "tbd": "tudo bem",
+}
+_TTS_ABBREVIATION_PATTERN = re.compile(
+    r"(?i)\b(?:" + "|".join(re.escape(k) for k in sorted(_TTS_ABBREVIATION_MAP, key=len, reverse=True)) + r")\b"
+)
+
+
+def _expand_abbreviations_for_tts(text: str) -> str:
+    if not text:
+        return text
+    if _TTS_ABBREVIATION_PATTERN.search(text) is None:
+        return text
+
+    def repl(match: re.Match) -> str:
+        token = match.group(0)
+        return _TTS_ABBREVIATION_MAP.get(token.lower(), token)
+
+    return _TTS_ABBREVIATION_PATTERN.sub(repl, text)
+
+
 class _BaseTTSView(discord.ui.View):
     def __init__(
         self,
@@ -996,6 +1030,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         text = await async_sub(r"<@!(\d+)>|<@(\d+)>", user_repl, text)
         text = await async_sub(r"<@&(\d+)>", role_repl, text)
         text = await async_sub(r"<#(\d+)>", channel_repl, text)
+        text = _expand_abbreviations_for_tts(text)
 
         text = re.sub(r"\s+", " ", text).strip()
 
