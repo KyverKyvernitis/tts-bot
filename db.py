@@ -236,45 +236,44 @@ class SettingsDB:
             upsert=True,
         )
 
-
     async def reset_user_tts(self, guild_id: int, user_id: int) -> bool:
         key = (guild_id, user_id)
-        doc = self.user_cache.get(key)
+        doc = dict(self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id}))
+        had_tts = bool((doc.get("tts", {}) or {}))
+        doc.pop("tts", None)
 
-        if doc is None:
-            existing = await self.coll.find_one(
+        def _has_meaningful_value(value: Any) -> bool:
+            if value in (None, "", [], {}):
+                return False
+            if isinstance(value, dict):
+                return any(_has_meaningful_value(v) for v in value.values())
+            if isinstance(value, (list, tuple, set)):
+                return any(_has_meaningful_value(v) for v in value)
+            return True
+
+        keep_doc = False
+        for field, value in doc.items():
+            if field in {"type", "guild_id", "user_id"}:
+                continue
+            if _has_meaningful_value(value):
+                keep_doc = True
+                break
+
+        if keep_doc:
+            doc["type"] = "user"
+            doc["guild_id"] = guild_id
+            doc["user_id"] = user_id
+            self.user_cache[key] = doc
+            await self.coll.update_one(
                 {"type": "user", "guild_id": guild_id, "user_id": user_id},
-                {"_id": 0},
+                {"$unset": {"tts": ""}, "$set": doc},
+                upsert=True,
             )
-            doc = dict(existing or {}) if existing else None
-
-        if not doc:
-            return False
-
-        changed = False
-        if "tts" in doc:
-            doc.pop("tts", None)
-            changed = True
-
-        doc["type"] = "user"
-        doc["guild_id"] = guild_id
-        doc["user_id"] = user_id
-
-        has_panel_history = bool(doc.get("panel_history"))
-        remaining_keys = {k for k, v in doc.items() if k not in {"type", "guild_id", "user_id"} and v not in (None, "", [], {})}
-
-        if not remaining_keys and not has_panel_history:
+        else:
             self.user_cache.pop(key, None)
             await self.coll.delete_one({"type": "user", "guild_id": guild_id, "user_id": user_id})
-            return changed
 
-        self.user_cache[key] = doc
-        await self.coll.update_one(
-            {"type": "user", "guild_id": guild_id, "user_id": user_id},
-            {"$set": doc, "$unset": {"tts": ""}},
-            upsert=True,
-        )
-        return changed
+        return had_tts
 
     def resolve_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
         user = self.get_user_tts(guild_id, user_id)
