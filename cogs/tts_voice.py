@@ -2,6 +2,7 @@ import inspect
 import asyncio
 import time
 import re
+import logging
 from typing import Optional
 
 import discord
@@ -12,6 +13,9 @@ import config
 from tts_audio import GuildTTSState, QueueItem, TTSAudioMixin
 
 from typing import Callable
+
+
+logger = logging.getLogger(__name__)
 
 
 def _shorten(text: str, limit: int = 100) -> str:
@@ -763,12 +767,66 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._prefix_panel_cooldowns: dict[tuple[int, int, str], float] = {}
         self._active_prefix_panels: dict[tuple[int, int, str], tuple[discord.Message, discord.ui.View]] = {}
         self._public_panel_states: dict[int, dict] = {}
+        self._guild_prefix_runtime_cache: dict[int, tuple[tuple[str, str, str], dict[str, object]]] = {}
 
     async def cog_load(self):
         await self._load_edge_voices()
 
+    def _cleanup_guild_runtime_state(self, guild_id: int) -> None:
+        self._guild_prefix_runtime_cache.pop(guild_id, None)
+
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
+
+    def _tts_debug_enabled(self) -> bool:
+        return bool(getattr(config, "TTS_DEBUG_LOGS", False))
+
+    def _log_tts_debug(self, message: str) -> None:
+        if self._tts_debug_enabled():
+            logger.debug(message)
+
+    async def _get_guild_prefix_runtime(self, guild_id: int) -> tuple[dict, dict[str, object]]:
+        db = self._get_db()
+        guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild_id)) if db else {}
+        guild_defaults = guild_defaults or {}
+
+        gtts_prefix = str(guild_defaults.get("gtts_prefix", guild_defaults.get("tts_prefix", ".")) or ".")
+        edge_prefix = str(guild_defaults.get("edge_prefix", ",") or ",")
+        bot_prefix = str(guild_defaults.get("bot_prefix", "_") or "_")
+        cache_key = (bot_prefix, gtts_prefix, edge_prefix)
+
+        cached = self._guild_prefix_runtime_cache.get(guild_id)
+        if cached and cached[0] == cache_key:
+            return guild_defaults, cached[1]
+
+        panel_aliases = frozenset({f"{bot_prefix}panel", f"{bot_prefix}painel"})
+        server_aliases = frozenset({
+            f"{bot_prefix}panel_server", f"{bot_prefix}panel-server", f"{bot_prefix}panelserver",
+            f"{bot_prefix}server_panel", f"{bot_prefix}server-panel", f"{bot_prefix}serverpanel",
+            f"{bot_prefix}painel_server", f"{bot_prefix}painel-server", f"{bot_prefix}painelserver",
+            f"{bot_prefix}servidor_panel", f"{bot_prefix}servidor-panel", f"{bot_prefix}servidorpanel",
+        })
+        toggle_aliases = frozenset({
+            f"{bot_prefix}panel_toggle", f"{bot_prefix}panel-toggle", f"{bot_prefix}paneltoggle",
+            f"{bot_prefix}panel_toggles", f"{bot_prefix}panel-toggles", f"{bot_prefix}paneltoggles",
+            f"{bot_prefix}toggle_panel", f"{bot_prefix}toggle-panel", f"{bot_prefix}togglepanel",
+            f"{bot_prefix}toggles_panel", f"{bot_prefix}toggles-panel", f"{bot_prefix}togglespanel",
+        })
+        runtime = {
+            "gtts_prefix": gtts_prefix,
+            "edge_prefix": edge_prefix,
+            "bot_prefix": bot_prefix,
+            "panel_aliases": panel_aliases,
+            "server_aliases": server_aliases,
+            "toggle_aliases": toggle_aliases,
+            "clear_command": f"{bot_prefix}clear",
+            "leave_command": f"{bot_prefix}leave",
+            "join_command": f"{bot_prefix}join",
+            "reset_command": f"{bot_prefix}reset",
+            "set_lang_command": f"{bot_prefix}set lang",
+        }
+        self._guild_prefix_runtime_cache[guild_id] = (cache_key, runtime)
+        return guild_defaults, runtime
 
     def _panel_actor_name(self, interaction: discord.Interaction) -> str:
         member = getattr(interaction, "user", None)
@@ -1148,7 +1206,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             try:
                 await vc.disconnect(force=False)
             except Exception as e:
-                print(f"[tts_voice] erro ao desconectar guild {guild.id}: {e}")
+                logger.warning("[tts_voice] erro ao desconectar guild %s: %s", guild.id, e)
 
     async def _disconnect_if_blocked(self, guild: discord.Guild):
         await self._disconnect_and_clear(guild)
@@ -1164,12 +1222,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
         if self._voice_channel_has_only_bots_or_is_empty(vc.channel):
-            print(f"[tts_voice] saindo da call | sozinho ou só com bots | guild={guild.id} channel={vc.channel.id}")
+            self._log_tts_debug(f"[tts_voice] saindo da call | sozinho ou só com bots | guild={guild.id} channel={vc.channel.id}")
             await self._disconnect_and_clear(guild)
 
     async def _ensure_connected(self, guild: discord.Guild, voice_channel) -> Optional[discord.VoiceClient]:
         if voice_channel is None:
-            print(f"[tts_voice] _ensure_connected recebeu canal None | guild={guild.id}")
+            logger.warning("[tts_voice] _ensure_connected recebeu canal None | guild=%s", guild.id)
             return None
 
         lock = self._get_voice_connect_lock(guild.id)
@@ -1181,14 +1239,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
             async def _fresh_connect() -> Optional[discord.VoiceClient]:
                 new_vc = await voice_channel.connect(self_deaf=True)
-                print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
+                self._log_tts_debug(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
                 return new_vc
 
             try:
                 if vc and vc.is_connected():
                     try:
                         await vc.move_to(voice_channel)
-                        print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+                        self._log_tts_debug(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return vc
                     except Exception as move_err:
                         msg = str(move_err).lower()
@@ -1211,7 +1269,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         return current_vc
                     try:
                         await current_vc.move_to(voice_channel)
-                        print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+                        self._log_tts_debug(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return current_vc
                     except Exception:
                         pass
@@ -1225,10 +1283,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     try:
                         return await _fresh_connect()
                     except Exception as retry_err:
-                        print(f"[tts_voice] Erro ao reconectar na guild {guild.id}: {retry_err}")
+                        logger.warning("[tts_voice] Erro ao reconectar na guild %s: %s", guild.id, retry_err)
                         return None
 
-                print(f"[tts_voice] Erro ao conectar na guild {guild.id}: {e}")
+                logger.warning("[tts_voice] Erro ao conectar na guild %s: %s", guild.id, e)
                 return None
 
     def _chunk_lines(self, lines: list[str], max_chars: int = 3500) -> list[str]:
@@ -1262,36 +1320,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if message.author.bot or not message.guild or not message.content:
             return
 
-        db = self._get_db()
-        guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(message.guild.id)) if db else {}
-        gtts_prefix = str((guild_defaults or {}).get("gtts_prefix", (guild_defaults or {}).get("tts_prefix", ".")) or ".")
-        edge_prefix = str((guild_defaults or {}).get("edge_prefix", ",") or ",")
-
-        bot_prefix = str((guild_defaults or {}).get("bot_prefix", "_") or "_")
+        _, runtime = await self._get_guild_prefix_runtime(message.guild.id)
+        gtts_prefix = runtime["gtts_prefix"]
+        edge_prefix = runtime["edge_prefix"]
+        bot_prefix = runtime["bot_prefix"]
+        panel_aliases = runtime["panel_aliases"]
+        server_aliases = runtime["server_aliases"]
+        toggle_aliases = runtime["toggle_aliases"]
 
         lowered = message.content.strip().lower()
-        server_aliases = {
-            f"{bot_prefix}panel_server", f"{bot_prefix}panel-server", f"{bot_prefix}panelserver",
-            f"{bot_prefix}server_panel", f"{bot_prefix}server-panel", f"{bot_prefix}serverpanel",
-            f"{bot_prefix}painel_server", f"{bot_prefix}painel-server", f"{bot_prefix}painelserver",
-            f"{bot_prefix}servidor_panel", f"{bot_prefix}servidor-panel", f"{bot_prefix}servidorpanel",
-        }
-        toggle_aliases = {
-            f"{bot_prefix}panel_toggle", f"{bot_prefix}panel-toggle", f"{bot_prefix}paneltoggle",
-            f"{bot_prefix}panel_toggles", f"{bot_prefix}panel-toggles", f"{bot_prefix}paneltoggles",
-            f"{bot_prefix}toggle_panel", f"{bot_prefix}toggle-panel", f"{bot_prefix}togglepanel",
-            f"{bot_prefix}toggles_panel", f"{bot_prefix}toggles-panel", f"{bot_prefix}togglespanel",
-        }
-        panel_aliases = {f"{bot_prefix}panel", f"{bot_prefix}painel"}
+        clear_command = runtime["clear_command"]
+        leave_command = runtime["leave_command"]
+        join_command = runtime["join_command"]
+        reset_command = runtime["reset_command"]
+        set_lang_command = runtime["set_lang_command"]
 
         is_prefix_command = (
-            lowered == f"{bot_prefix}clear"
-            or lowered == f"{bot_prefix}leave"
-            or lowered == f"{bot_prefix}join"
-            or lowered == f"{bot_prefix}reset"
-            or lowered.startswith(f"{bot_prefix}reset ")
-            or lowered == f"{bot_prefix}set lang"
-            or lowered.startswith(f"{bot_prefix}set lang ")
+            lowered == clear_command
+            or lowered == leave_command
+            or lowered == join_command
+            or lowered == reset_command
+            or lowered.startswith(reset_command + " ")
+            or lowered == set_lang_command
+            or lowered.startswith(set_lang_command + " ")
             or lowered in panel_aliases
             or lowered in server_aliases
             or lowered in toggle_aliases
@@ -1302,16 +1353,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 return
             self._mark_tts_message_seen(message.id)
 
-        reset_command = f"{bot_prefix}reset"
-        set_lang_command = f"{bot_prefix}set lang"
-
-        if lowered == f"{bot_prefix}clear":
+        if lowered == clear_command:
             await self._prefix_clear(message)
             return
-        if lowered == f"{bot_prefix}leave":
+        if lowered == leave_command:
             await self._prefix_leave(message)
             return
-        if lowered == f"{bot_prefix}join":
+        if lowered == join_command:
             await self._prefix_join(message)
             return
         if lowered == reset_command or lowered.startswith(reset_command + " "):
@@ -1347,25 +1395,25 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._mark_tts_message_seen(message.id)
         author_voice = getattr(message.author, "voice", None)
         if author_voice is None or author_voice.channel is None:
-            print("[tts_voice] ignorado | autor não está em call")
+            self._log_tts_debug("[tts_voice] ignorado | autor não está em call")
             return
         voice_channel = author_voice.channel
 
         blocked = await self._should_block_for_voice_bot(message.guild, voice_channel)
         if blocked:
-            print(f"[tts_voice] bloqueado | outro bot de voz detectado | guild={message.guild.id} canal_voz={voice_channel.id}")
+            self._log_tts_debug(f"[tts_voice] bloqueado | outro bot de voz detectado | guild={message.guild.id} canal_voz={voice_channel.id}")
             await self._disconnect_and_clear(message.guild)
             return
 
         db = self._get_db()
         if db is None:
-            print("[tts_voice] ignorado | settings_db indisponível")
+            logger.warning("[tts_voice] ignorado | settings_db indisponível")
             return
 
         try:
             resolved = await self._maybe_await(db.resolve_tts(message.guild.id, message.author.id))
         except Exception as e:
-            print(f"[tts_voice] erro em resolve_tts | guild={message.guild.id} user={message.author.id} erro={e}")
+            logger.warning("[tts_voice] erro em resolve_tts | guild=%s user=%s erro=%s", message.guild.id, message.author.id, e)
             return
 
         only_target_enabled = await self._only_target_user_enabled(message.guild.id)
@@ -1391,14 +1439,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         text = _replace_custom_emojis_for_tts(message.content[len(active_prefix):].strip())
         text = _expand_abbreviations_for_tts(text)
         if not text:
-            print("[tts_voice] ignorado | texto vazio após prefixo")
+            self._log_tts_debug("[tts_voice] ignorado | texto vazio após prefixo")
             return
 
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = getattr(message.channel, "id", None)
         await state.queue.put(QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"]))
-        print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
-        print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
+        self._log_tts_debug(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
+        self._log_tts_debug(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
         self._ensure_worker(message.guild.id)
 
     @commands.Cog.listener()
@@ -1408,7 +1456,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
         if await self._block_voice_bot_enabled(guild.id) and self._target_voice_bot_in_channel(vc.channel):
-            print(f"[tts_voice] Bot de voz alvo detectado na call | guild={guild.id} channel={vc.channel.id} target_bot_id={self._target_voice_bot_id()}")
+            self._log_tts_debug(f"[tts_voice] Bot de voz alvo detectado na call | guild={guild.id} channel={vc.channel.id} target_bot_id={self._target_voice_bot_id()}")
             await self._disconnect_and_clear(guild)
             return
         await self._disconnect_if_alone_or_only_bots(guild)
