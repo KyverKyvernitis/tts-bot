@@ -160,6 +160,66 @@ class TTSAudioMixin:
             setattr(self, "_tts_synth_semaphore", semaphore)
         return semaphore
 
+    def _get_global_cache_order(self) -> OrderedDict[str, float]:
+        cache_order = getattr(self, "_tts_cache_order", None)
+        if cache_order is None:
+            cache_order = OrderedDict()
+            setattr(self, "_tts_cache_order", cache_order)
+        return cache_order
+
+    def _touch_cache_entry(self, state: GuildTTSState, key: str) -> None:
+        cache_order = self._get_global_cache_order()
+        now = time.time()
+        cache_order[key] = now
+        cache_order.move_to_end(key)
+
+    def _purge_cache(self, state: GuildTTSState) -> None:
+        now = time.time()
+        cache_order = self._get_global_cache_order()
+
+        expired = []
+        for key in list(cache_order.keys()):
+            path = self._cache_path(key)
+            ts = cache_order.get(key, 0.0)
+            if (not os.path.exists(path)) or (now - ts > TTS_AUDIO_CACHE_TTL_SECONDS):
+                expired.append(key)
+
+        for key in expired:
+            cache_order.pop(key, None)
+            path = self._cache_path(key)
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+
+        while len(cache_order) > TTS_AUDIO_CACHE_SIZE:
+            oldest_key, _ = cache_order.popitem(last=False)
+            path = self._cache_path(oldest_key)
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+
+    async def _store_in_cache(self, state: GuildTTSState, item: QueueItem, source_path: str) -> str:
+        key = self._cache_key(item)
+        path = self._cache_path(key)
+
+        if os.path.exists(path):
+            self._touch_cache_entry(state, key)
+            self._purge_cache(state)
+            return path
+
+        try:
+            await asyncio.to_thread(shutil.copyfile, source_path, path)
+        except Exception:
+            return source_path
+
+        self._touch_cache_entry(state, key)
+        self._purge_cache(state)
+        return path
+
     def _cache_key(self, item: QueueItem) -> str:
         text = self._normalize_cache_text(item.text)
         engine = (item.engine or "gtts").strip().lower()
@@ -174,38 +234,6 @@ class TTSAudioMixin:
     def _cache_path(self, key: str) -> str:
         return os.path.join(_CACHE_DIR, f"{key}.mp3")
 
-    def _touch_cache_entry(self, state: GuildTTSState, key: str) -> None:
-        now = time.time()
-        state.cache_order[key] = now
-        state.cache_order.move_to_end(key)
-
-    def _purge_cache(self, state: GuildTTSState) -> None:
-        now = time.time()
-
-        expired = []
-        for key in list(state.cache_order.keys()):
-            path = self._cache_path(key)
-            ts = state.cache_order.get(key, 0.0)
-            if (not os.path.exists(path)) or (now - ts > TTS_AUDIO_CACHE_TTL_SECONDS):
-                expired.append(key)
-
-        for key in expired:
-            state.cache_order.pop(key, None)
-            path = self._cache_path(key)
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception:
-                pass
-
-        while len(state.cache_order) > TTS_AUDIO_CACHE_SIZE:
-            oldest_key, _ = state.cache_order.popitem(last=False)
-            path = self._cache_path(oldest_key)
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception:
-                pass
 
     def _try_get_cached_path(self, state: GuildTTSState, item: QueueItem) -> Optional[str]:
         key = self._cache_key(item)
@@ -220,7 +248,7 @@ class TTSAudioMixin:
                 os.remove(path)
             except Exception:
                 pass
-            state.cache_order.pop(key, None)
+            self._get_global_cache_order().pop(key, None)
             return None
 
         self._touch_cache_entry(state, key)
@@ -228,18 +256,6 @@ class TTSAudioMixin:
         self._log_debug(f"[tts_voice] cache hit | guild={item.guild_id} key={key[:10]}")
         return path
 
-    def _store_in_cache(self, state: GuildTTSState, item: QueueItem, source_path: str) -> str:
-        key = self._cache_key(item)
-        path = self._cache_path(key)
-
-        try:
-            shutil.copyfile(source_path, path)
-        except Exception:
-            return source_path
-
-        self._touch_cache_entry(state, key)
-        self._purge_cache(state)
-        return path
 
     async def _generate_gtts_file(self, text: str, language: str) -> str:
         language = (language or GTTS_DEFAULT_LANGUAGE).strip().lower()
@@ -302,7 +318,7 @@ class TTSAudioMixin:
 
         should_cache = len(self._normalize_cache_text(item.text)) <= 220
         if should_cache:
-            cached_path = self._store_in_cache(state, item, generated)
+            cached_path = await self._store_in_cache(state, item, generated)
             if cached_path != generated:
                 try:
                     os.remove(generated)
