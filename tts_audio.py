@@ -333,7 +333,7 @@ class TTSAudioMixin:
         await finished
 
     async def _disconnect_idle(self, guild: discord.Guild) -> bool:
-        vc = guild.voice_client
+        vc = self._get_voice_client_for_guild(guild)
         if vc is None or not vc.is_connected() or vc.channel is None:
             return True
 
@@ -357,7 +357,7 @@ class TTSAudioMixin:
         if target_channel is None:
             return None
 
-        vc = guild.voice_client
+        vc = self._get_voice_client_for_guild(guild)
         if vc is not None and vc.is_connected():
             if vc.channel is not None and vc.channel.id == item.channel_id:
                 state.last_channel_id = item.channel_id
@@ -371,7 +371,7 @@ class TTSAudioMixin:
 
         vc = await self._maybe_await(self._ensure_connected(guild, target_channel))
         if vc is None:
-            current = guild.voice_client
+            current = self._get_voice_client_for_guild(guild)
             if current is not None and current.is_connected():
                 if current.channel is not None and current.channel.id == item.channel_id:
                     state.last_channel_id = item.channel_id
