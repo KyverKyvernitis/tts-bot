@@ -2,9 +2,7 @@ import inspect
 import asyncio
 import time
 import re
-import logging
-import unicodedata
-from urllib.parse import urlparse
+import weakref
 from typing import Optional
 
 import discord
@@ -15,9 +13,6 @@ import config
 from tts_audio import GuildTTSState, QueueItem, TTSAudioMixin
 
 from typing import Callable
-
-
-logger = logging.getLogger(__name__)
 
 
 def _shorten(text: str, limit: int = 100) -> str:
@@ -84,74 +79,6 @@ _TTS_ABBREVIATION_PATTERN = re.compile(
     r"\b(" + "|".join(re.escape(k) for k in sorted(_TTS_ABBREVIATION_MAP, key=len, reverse=True)) + r")\b",
     flags=re.IGNORECASE,
 )
-
-
-USER_MENTION_PATTERN = re.compile(r"<@!?(\d+)>")
-ROLE_MENTION_PATTERN = re.compile(r"<@&(\d+)>")
-CHANNEL_MENTION_PATTERN = re.compile(r"<#(\d+)>")
-URL_PATTERN = re.compile(r"https?://[^\s<>]+", flags=re.IGNORECASE)
-DISCORD_CHANNEL_URL_PATTERN = re.compile(
-    r"https?://(?:canary\.|ptb\.)?(?:www\.)?discord(?:app)?\.com/channels/(@me|\d+)/(\d+)(?:/\d+)?",
-    flags=re.IGNORECASE,
-)
-_ATTACHMENT_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".svg", ".avif", ".heic", ".heif")
-_ATTACHMENT_VIDEO_EXTENSIONS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".wmv", ".flv", ".3gp")
-_COMMON_MULTI_PART_TLDS = {"com", "net", "org", "gov", "edu", "co"}
-_TTS_REFERENCE_CACHE_LIMIT = 2048
-
-
-def _normalize_spaces(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text or "")).strip()
-
-
-def _speech_name(text: str) -> str:
-    text = _normalize_spaces(text)
-    if not text:
-        return ""
-    text = re.sub(r"[_\-.]+", " ", text)
-    return _normalize_spaces(text)
-
-
-def _looks_pronounceable_for_tts(text: str) -> bool:
-    text = _normalize_spaces(text)
-    if not text:
-        return False
-
-    non_space = [ch for ch in text if not ch.isspace()]
-    if not non_space:
-        return False
-
-    alnum_count = sum(ch.isalnum() for ch in non_space)
-    friendly_count = sum(ch.isalnum() or ch in "._-" for ch in non_space)
-    symbol_count = sum(unicodedata.category(ch).startswith("S") for ch in non_space)
-    hard_punct = {"[", "]", "{", "}", "(", ")", "<", ">", "~", "^", "`", "|", chr(92), "/", '"', "'", "*", "=", ":", ";", "+", ","}
-    hard_punct_count = sum(ch in hard_punct for ch in non_space)
-
-    if alnum_count == 0:
-        return False
-    if friendly_count / max(1, len(non_space)) < 0.6:
-        return False
-    if symbol_count >= 1:
-        return False
-    if hard_punct_count >= 2:
-        return False
-    return True
-
-
-def _extract_primary_domain(hostname: str) -> str:
-    host = str(hostname or "").strip().lower().strip(".")
-    if not host:
-        return ""
-    parts = [part for part in host.split(".") if part]
-    if not parts:
-        return ""
-    while len(parts) > 2 and parts[0] in {"www", "m", "ptb", "canary", "cdn", "media"}:
-        parts = parts[1:]
-    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _COMMON_MULTI_PART_TLDS:
-        return parts[-3]
-    if len(parts) >= 2:
-        return parts[-2]
-    return parts[0]
 
 
 def _expand_abbreviations_for_tts(text: str) -> str:
@@ -720,6 +647,110 @@ class TTSMainPanelView(_BaseTTSView):
         await self.cog._leave_from_panel(interaction)
 
 
+class TTSStatusView(_BaseTTSView):
+    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None):
+        super().__init__(cog, owner_id, guild_id, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
+        self.panel_kind = "status"
+
+    def attach_message(self, message: discord.Message | None) -> None:
+        self.message = message
+        self.cog._register_status_view(self)
+
+    async def refresh_from_config_change(self) -> None:
+        if self.message is None or self.is_finished():
+            return
+        try:
+            guild = self.cog.bot.get_guild(self.guild_id)
+            if guild is None:
+                self.cog._unregister_status_view(self)
+                return
+            target_user_id = int(self.target_user_id or self.owner_id or 0)
+            member = guild.get_member(target_user_id) if target_user_id else None
+            target_user_name = str(self.target_user_name or self.cog._member_panel_name(member))
+            refreshed = await self.cog._build_status_embed(
+                self.guild_id,
+                target_user_id,
+                viewer_user_id=self.owner_id,
+                target_user_name=target_user_name,
+                public=False,
+            )
+            await self.message.edit(embed=refreshed, view=self)
+        except discord.NotFound:
+            self.cog._unregister_status_view(self)
+            self.stop()
+        except Exception as e:
+            print(f"[tts_status_refresh] falha ao atualizar status: {e!r}")
+
+    async def on_timeout(self) -> None:
+        self.cog._unregister_status_view(self)
+        await super().on_timeout()
+
+    @discord.ui.button(label="Abrir painel", style=discord.ButtonStyle.secondary, emoji="⚙️", row=0)
+    async def open_panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Comando indisponível", "Esse botão só pode ser usado dentro de um servidor.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        target_user_id = int(self.target_user_id or interaction.user.id)
+        target_user_name = str(self.target_user_name or self.cog._member_panel_name(interaction.user))
+        embed = await self.cog._build_settings_embed(
+            interaction.guild.id,
+            target_user_id,
+            server=False,
+            panel_kind="user",
+            target_user_name=target_user_name,
+            viewer_user_id=interaction.user.id,
+        )
+        view = self.cog._build_panel_view(
+            interaction.user.id,
+            interaction.guild.id,
+            server=False,
+            target_user_id=target_user_id,
+            target_user_name=target_user_name,
+        )
+        msg = await self.cog._respond(interaction, embed=embed, view=view, ephemeral=True)
+        view.message = msg
+
+    @discord.ui.button(label="Resetar para o padrão do servidor", style=discord.ButtonStyle.danger, emoji="♻️", row=0)
+    async def reset_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Comando indisponível", "Esse botão só pode ser usado dentro de um servidor.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        db = self.cog._get_db()
+        if db is None or not hasattr(db, "reset_user_tts"):
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora para resetar as suas configurações.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        target_user_id = int(self.target_user_id or interaction.user.id)
+        target_user_name = str(self.target_user_name or self.cog._member_panel_name(interaction.user))
+        await self.cog._reset_user_tts_and_refresh(interaction.guild.id, target_user_id)
+        if hasattr(db, "set_user_panel_last_change"):
+            history_entry = f"{self.cog._panel_actor_name(interaction)} resetou as próprias configurações de TTS para os padrões do servidor"
+            await self.cog._maybe_await(db.set_user_panel_last_change(interaction.guild.id, target_user_id, history_entry))
+
+        refreshed = await self.cog._build_status_embed(
+            interaction.guild.id,
+            target_user_id,
+            viewer_user_id=interaction.user.id,
+            target_user_name=target_user_name,
+            public=False,
+        )
+        await interaction.response.edit_message(embed=refreshed, view=self)
+        await interaction.followup.send(
+            embed=self.cog._make_embed("Configurações resetadas", f"As suas configurações de TTS agora seguem os padrões do servidor.", ok=True),
+            ephemeral=True,
+        )
+
 class TTSTogglePanelView(_BaseTTSView):
     def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 180):
         super().__init__(cog, owner_id, guild_id, timeout=timeout)
@@ -820,6 +851,13 @@ USER_CONFIG_ACTION_CHOICES = [
 ]
 
 
+STATUS_ACTION_CHOICES = [
+    app_commands.Choice(name="Ver o meu status", value="self"),
+    app_commands.Choice(name="Mostrar o status de outro usuário no chat", value="show_other"),
+    app_commands.Choice(name="Copiar as configurações de outro usuário", value="copy_other"),
+]
+
+
 class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_description="Comandos de texto para fala"):
     server = app_commands.Group(name="server", description="Configurações padrão do servidor")
     voices = app_commands.Group(name="voices", description="Listas de vozes e idiomas")
@@ -837,86 +875,72 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._prefix_panel_cooldowns: dict[tuple[int, int, str], float] = {}
         self._active_prefix_panels: dict[tuple[int, int, str], tuple[discord.Message, discord.ui.View]] = {}
         self._public_panel_states: dict[int, dict] = {}
-        self._guild_prefix_runtime_cache: dict[int, tuple[tuple[str, str, str], dict[str, object]]] = {}
-        self._tts_user_reference_cache: dict[tuple[int, int, str, str], str] = {}
-        self._tts_role_reference_cache: dict[tuple[int, str], str] = {}
-        self._tts_channel_reference_cache: dict[tuple[int, str], str] = {}
-        self._tts_link_reference_cache: dict[tuple[int, str], str] = {}
+        self._status_views_by_target: dict[tuple[int, int], weakref.WeakSet[TTSStatusView]] = {}
+        self._status_refresh_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
     async def cog_load(self):
         await self._load_edge_voices()
 
-    def _cleanup_guild_runtime_state(self, guild_id: int) -> None:
-        self._guild_prefix_runtime_cache.pop(guild_id, None)
-
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
 
-    def _tts_debug_enabled(self) -> bool:
-        return bool(getattr(config, "TTS_DEBUG_LOGS", False))
-
-    def _log_tts_debug(self, message: str) -> None:
-        if self._tts_debug_enabled():
-            logger.debug(message)
-
-    def _cache_lookup(self, cache: dict, key):
-        value = cache.get(key)
-        if value is not None:
-            cache.pop(key, None)
-            cache[key] = value
-        return value
-
-    def _cache_store(self, cache: dict, key, value):
-        cache[key] = value
-        if len(cache) > _TTS_REFERENCE_CACHE_LIMIT:
-            try:
-                cache.pop(next(iter(cache)))
-            except StopIteration:
-                pass
-        return value
-
-    async def _get_guild_prefix_runtime(self, guild_id: int) -> tuple[dict, dict[str, object]]:
+    async def _set_user_tts_and_refresh(self, guild_id: int, user_id: int, **kwargs):
         db = self._get_db()
-        guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild_id)) if db else {}
-        guild_defaults = guild_defaults or {}
+        if db is None:
+            raise RuntimeError("settings db unavailable")
+        result = await self._maybe_await(db.set_user_tts(guild_id, user_id, **kwargs))
+        await self._notify_status_views_changed(guild_id, user_id)
+        return result
 
-        gtts_prefix = str(guild_defaults.get("gtts_prefix", guild_defaults.get("tts_prefix", ".")) or ".")
-        edge_prefix = str(guild_defaults.get("edge_prefix", ",") or ",")
-        bot_prefix = str(guild_defaults.get("bot_prefix", "_") or "_")
-        cache_key = (bot_prefix, gtts_prefix, edge_prefix)
+    async def _reset_user_tts_and_refresh(self, guild_id: int, user_id: int):
+        db = self._get_db()
+        if db is None:
+            raise RuntimeError("settings db unavailable")
+        result = await self._maybe_await(db.reset_user_tts(guild_id, user_id))
+        await self._notify_status_views_changed(guild_id, user_id)
+        return result
 
-        cached = self._guild_prefix_runtime_cache.get(guild_id)
-        if cached and cached[0] == cache_key:
-            return guild_defaults, cached[1]
+    def _register_status_view(self, view: TTSStatusView) -> None:
+        if view.message is None:
+            return
+        target_user_id = int(view.target_user_id or view.owner_id or 0)
+        if not target_user_id:
+            return
+        key = (int(view.guild_id), target_user_id)
+        views = self._status_views_by_target.get(key)
+        if views is None:
+            views = weakref.WeakSet()
+            self._status_views_by_target[key] = views
+        views.add(view)
 
-        panel_aliases = frozenset({f"{bot_prefix}panel", f"{bot_prefix}painel"})
-        server_aliases = frozenset({
-            f"{bot_prefix}panel_server", f"{bot_prefix}panel-server", f"{bot_prefix}panelserver",
-            f"{bot_prefix}server_panel", f"{bot_prefix}server-panel", f"{bot_prefix}serverpanel",
-            f"{bot_prefix}painel_server", f"{bot_prefix}painel-server", f"{bot_prefix}painelserver",
-            f"{bot_prefix}servidor_panel", f"{bot_prefix}servidor-panel", f"{bot_prefix}servidorpanel",
-        })
-        toggle_aliases = frozenset({
-            f"{bot_prefix}panel_toggle", f"{bot_prefix}panel-toggle", f"{bot_prefix}paneltoggle",
-            f"{bot_prefix}panel_toggles", f"{bot_prefix}panel-toggles", f"{bot_prefix}paneltoggles",
-            f"{bot_prefix}toggle_panel", f"{bot_prefix}toggle-panel", f"{bot_prefix}togglepanel",
-            f"{bot_prefix}toggles_panel", f"{bot_prefix}toggles-panel", f"{bot_prefix}togglespanel",
-        })
-        runtime = {
-            "gtts_prefix": gtts_prefix,
-            "edge_prefix": edge_prefix,
-            "bot_prefix": bot_prefix,
-            "panel_aliases": panel_aliases,
-            "server_aliases": server_aliases,
-            "toggle_aliases": toggle_aliases,
-            "clear_command": f"{bot_prefix}clear",
-            "leave_command": f"{bot_prefix}leave",
-            "join_command": f"{bot_prefix}join",
-            "reset_command": f"{bot_prefix}reset",
-            "set_lang_command": f"{bot_prefix}set lang",
-        }
-        self._guild_prefix_runtime_cache[guild_id] = (cache_key, runtime)
-        return guild_defaults, runtime
+    def _unregister_status_view(self, view: TTSStatusView) -> None:
+        target_user_id = int(view.target_user_id or view.owner_id or 0)
+        if not target_user_id:
+            return
+        key = (int(view.guild_id), target_user_id)
+        views = self._status_views_by_target.get(key)
+        if not views:
+            return
+        views.discard(view)
+        if not list(views):
+            self._status_views_by_target.pop(key, None)
+            self._status_refresh_locks.pop(key, None)
+
+    async def _notify_status_views_changed(self, guild_id: int, user_id: int) -> None:
+        key = (int(guild_id), int(user_id))
+        views = self._status_views_by_target.get(key)
+        if not views:
+            return
+        active_views = [view for view in list(views) if getattr(view, "message", None) is not None and not view.is_finished()]
+        if not active_views:
+            self._status_views_by_target.pop(key, None)
+            self._status_refresh_locks.pop(key, None)
+            return
+        lock = self._status_refresh_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            for view in list(active_views):
+                await view.refresh_from_config_change()
+
 
     def _panel_actor_name(self, interaction: discord.Interaction) -> str:
         member = getattr(interaction, "user", None)
@@ -930,189 +954,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if not str(name).startswith("@"):
             return f"@{name}"
         return str(name)
-
-
-    def _tts_user_reference(self, member: discord.abc.User | None) -> str:
-        if member is None:
-            return "@usuário"
-
-        guild_id = int(getattr(getattr(member, "guild", None), "id", 0) or 0)
-        member_id = int(getattr(member, "id", 0) or 0)
-        display_name = _normalize_spaces(getattr(member, "display_name", None) or "")
-        username = _normalize_spaces(getattr(member, "name", None) or "")
-        cache_key = (guild_id, member_id, display_name, username)
-        cached = self._cache_lookup(self._tts_user_reference_cache, cache_key)
-        if cached is not None:
-            return cached
-
-        if _looks_pronounceable_for_tts(display_name):
-            spoken = _speech_name(display_name)
-            if spoken:
-                return self._cache_store(self._tts_user_reference_cache, cache_key, f"@{spoken}")
-
-        if _looks_pronounceable_for_tts(username):
-            spoken = _speech_name(username)
-            if spoken:
-                return self._cache_store(self._tts_user_reference_cache, cache_key, f"@{spoken}")
-
-        return self._cache_store(self._tts_user_reference_cache, cache_key, "@usuário")
-
-    def _tts_role_reference(self, role: discord.Role | None) -> str:
-        if role is None:
-            return "cargo do discord"
-
-        role_id = int(getattr(role, "id", 0) or 0)
-        name = _normalize_spaces(getattr(role, "name", None) or "")
-        cache_key = (role_id, name)
-        cached = self._cache_lookup(self._tts_role_reference_cache, cache_key)
-        if cached is not None:
-            return cached
-
-        if _looks_pronounceable_for_tts(name):
-            spoken = _speech_name(name)
-            if spoken:
-                return self._cache_store(self._tts_role_reference_cache, cache_key, f"cargo {spoken}")
-        return self._cache_store(self._tts_role_reference_cache, cache_key, "cargo do discord")
-
-    def _tts_channel_reference(self, channel) -> str:
-        if channel is None:
-            return "canal do discord"
-
-        channel_id = int(getattr(channel, "id", 0) or 0)
-        name = _normalize_spaces(getattr(channel, "name", None) or "")
-        cache_key = (channel_id, name)
-        cached = self._cache_lookup(self._tts_channel_reference_cache, cache_key)
-        if cached is not None:
-            return cached
-
-        if _looks_pronounceable_for_tts(name):
-            spoken = _speech_name(name)
-            if spoken:
-                return self._cache_store(self._tts_channel_reference_cache, cache_key, f"canal {spoken}")
-        return self._cache_store(self._tts_channel_reference_cache, cache_key, "canal do discord")
-
-    def _tts_link_reference(self, url: str, *, guild: discord.Guild | None = None) -> str:
-        cleaned_url = str(url or "").strip().rstrip(".,!?)]}")
-        guild_id = int(getattr(guild, "id", 0) or 0)
-        cache_key = (guild_id, cleaned_url.lower())
-        cached = self._cache_lookup(self._tts_link_reference_cache, cache_key)
-        if cached is not None:
-            return cached
-
-        match = DISCORD_CHANNEL_URL_PATTERN.fullmatch(cleaned_url)
-        if match and guild is not None:
-            channel_id = int(match.group(2))
-            channel = guild.get_channel(channel_id)
-            return self._cache_store(self._tts_link_reference_cache, cache_key, self._tts_channel_reference(channel))
-
-        try:
-            parsed = urlparse(cleaned_url)
-        except Exception:
-            return self._cache_store(self._tts_link_reference_cache, cache_key, "link")
-
-        domain = _extract_primary_domain(parsed.hostname or "")
-        if _looks_pronounceable_for_tts(domain):
-            spoken = _speech_name(domain)
-            if spoken:
-                return self._cache_store(self._tts_link_reference_cache, cache_key, f"link do {spoken}")
-        return self._cache_store(self._tts_link_reference_cache, cache_key, "link")
-
-    def _tts_attachment_descriptions(self, attachments) -> list[str]:
-        descriptions: list[str] = []
-        for attachment in attachments or []:
-            content_type = str(getattr(attachment, "content_type", "") or "").lower()
-            filename = str(getattr(attachment, "filename", "") or "").lower()
-            if content_type == "image/gif" or filename.endswith(".gif"):
-                descriptions.append("Anexo em GIF")
-            elif content_type.startswith("image/") or filename.endswith(_ATTACHMENT_IMAGE_EXTENSIONS):
-                descriptions.append("Anexo de imagem")
-            elif content_type.startswith("video/") or filename.endswith(_ATTACHMENT_VIDEO_EXTENSIONS):
-                descriptions.append("Anexo de vídeo")
-        return descriptions
-
-    def _append_tts_descriptions(self, text: str, descriptions: list[str]) -> str:
-        text = _normalize_spaces(text)
-        descriptions = [_normalize_spaces(item) for item in (descriptions or []) if _normalize_spaces(item)]
-        if not descriptions:
-            return text
-        suffix = ". ".join(descriptions)
-        if not text:
-            return suffix
-        if text.endswith((".", "!", "?", "…")):
-            return f"{text} {suffix}"
-        return f"{text}. {suffix}"
-
-    def _render_tts_text(self, message: discord.Message, raw_text: str) -> str:
-        text = str(raw_text or "")
-        attachments = getattr(message, "attachments", []) or []
-
-        has_custom_emojis = "<" in text and ":" in text
-        has_user_mentions = "<@" in text
-        has_role_mentions = "<@&" in text
-        has_channel_mentions = "<#" in text
-        has_urls = "http://" in text or "https://" in text
-
-        if has_custom_emojis:
-            text = _replace_custom_emojis_for_tts(text)
-
-        if has_user_mentions or has_role_mentions or has_channel_mentions or has_urls:
-            guild = message.guild
-
-            if has_user_mentions:
-                member_map = {int(getattr(member, "id", 0) or 0): member for member in getattr(message, "mentions", [])}
-                if guild is not None:
-                    for member_id in USER_MENTION_PATTERN.findall(text):
-                        int_member_id = int(member_id)
-                        if int_member_id not in member_map:
-                            member = guild.get_member(int_member_id)
-                            if member is not None:
-                                member_map[int_member_id] = member
-
-                def replace_user(match: re.Match[str]) -> str:
-                    return self._tts_user_reference(member_map.get(int(match.group(1))))
-
-                text = USER_MENTION_PATTERN.sub(replace_user, text)
-
-            if has_role_mentions:
-                role_map = {int(getattr(role, "id", 0) or 0): role for role in getattr(message, "role_mentions", [])}
-                if guild is not None:
-                    for role_id in ROLE_MENTION_PATTERN.findall(text):
-                        int_role_id = int(role_id)
-                        if int_role_id not in role_map:
-                            role = guild.get_role(int_role_id)
-                            if role is not None:
-                                role_map[int_role_id] = role
-
-                def replace_role(match: re.Match[str]) -> str:
-                    return self._tts_role_reference(role_map.get(int(match.group(1))))
-
-                text = ROLE_MENTION_PATTERN.sub(replace_role, text)
-
-            if has_channel_mentions:
-                channel_map = {int(getattr(channel, "id", 0) or 0): channel for channel in getattr(message, "channel_mentions", [])}
-                if guild is not None:
-                    for channel_id in CHANNEL_MENTION_PATTERN.findall(text):
-                        int_channel_id = int(channel_id)
-                        if int_channel_id not in channel_map:
-                            channel = guild.get_channel(int_channel_id)
-                            if channel is not None:
-                                channel_map[int_channel_id] = channel
-
-                def replace_channel(match: re.Match[str]) -> str:
-                    return self._tts_channel_reference(channel_map.get(int(match.group(1))))
-
-                text = CHANNEL_MENTION_PATTERN.sub(replace_channel, text)
-
-            if has_urls:
-                def replace_url(match: re.Match[str]) -> str:
-                    return self._tts_link_reference(match.group(0), guild=guild)
-
-                text = URL_PATTERN.sub(replace_url, text)
-
-        text = _expand_abbreviations_for_tts(text)
-        if attachments:
-            return self._append_tts_descriptions(text, self._tts_attachment_descriptions(attachments))
-        return _normalize_spaces(text)
 
     def _encode_public_owner_history(self, owner_id: int, actor_name: str, action_text: str) -> str:
         safe_actor = str(actor_name or "@usuário").replace("|", "/")
@@ -1479,7 +1320,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             try:
                 await vc.disconnect(force=False)
             except Exception as e:
-                logger.warning("[tts_voice] erro ao desconectar guild %s: %s", guild.id, e)
+                print(f"[tts_voice] erro ao desconectar guild {guild.id}: {e}")
 
     async def _disconnect_if_blocked(self, guild: discord.Guild):
         await self._disconnect_and_clear(guild)
@@ -1495,12 +1336,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
         if self._voice_channel_has_only_bots_or_is_empty(vc.channel):
-            self._log_tts_debug(f"[tts_voice] saindo da call | sozinho ou só com bots | guild={guild.id} channel={vc.channel.id}")
+            print(f"[tts_voice] saindo da call | sozinho ou só com bots | guild={guild.id} channel={vc.channel.id}")
             await self._disconnect_and_clear(guild)
 
     async def _ensure_connected(self, guild: discord.Guild, voice_channel) -> Optional[discord.VoiceClient]:
         if voice_channel is None:
-            logger.warning("[tts_voice] _ensure_connected recebeu canal None | guild=%s", guild.id)
+            print(f"[tts_voice] _ensure_connected recebeu canal None | guild={guild.id}")
             return None
 
         lock = self._get_voice_connect_lock(guild.id)
@@ -1512,14 +1353,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
             async def _fresh_connect() -> Optional[discord.VoiceClient]:
                 new_vc = await voice_channel.connect(self_deaf=True)
-                self._log_tts_debug(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
+                print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
                 return new_vc
 
             try:
                 if vc and vc.is_connected():
                     try:
                         await vc.move_to(voice_channel)
-                        self._log_tts_debug(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+                        print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return vc
                     except Exception as move_err:
                         msg = str(move_err).lower()
@@ -1542,7 +1383,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         return current_vc
                     try:
                         await current_vc.move_to(voice_channel)
-                        self._log_tts_debug(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
+                        print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return current_vc
                     except Exception:
                         pass
@@ -1556,10 +1397,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     try:
                         return await _fresh_connect()
                     except Exception as retry_err:
-                        logger.warning("[tts_voice] Erro ao reconectar na guild %s: %s", guild.id, retry_err)
+                        print(f"[tts_voice] Erro ao reconectar na guild {guild.id}: {retry_err}")
                         return None
 
-                logger.warning("[tts_voice] Erro ao conectar na guild %s: %s", guild.id, e)
+                print(f"[tts_voice] Erro ao conectar na guild {guild.id}: {e}")
                 return None
 
     def _chunk_lines(self, lines: list[str], max_chars: int = 3500) -> list[str]:
@@ -1593,29 +1434,36 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if message.author.bot or not message.guild or not message.content:
             return
 
-        _, runtime = await self._get_guild_prefix_runtime(message.guild.id)
-        gtts_prefix = runtime["gtts_prefix"]
-        edge_prefix = runtime["edge_prefix"]
-        bot_prefix = runtime["bot_prefix"]
-        panel_aliases = runtime["panel_aliases"]
-        server_aliases = runtime["server_aliases"]
-        toggle_aliases = runtime["toggle_aliases"]
+        db = self._get_db()
+        guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(message.guild.id)) if db else {}
+        gtts_prefix = str((guild_defaults or {}).get("gtts_prefix", (guild_defaults or {}).get("tts_prefix", ".")) or ".")
+        edge_prefix = str((guild_defaults or {}).get("edge_prefix", ",") or ",")
+
+        bot_prefix = str((guild_defaults or {}).get("bot_prefix", "_") or "_")
 
         lowered = message.content.strip().lower()
-        clear_command = runtime["clear_command"]
-        leave_command = runtime["leave_command"]
-        join_command = runtime["join_command"]
-        reset_command = runtime["reset_command"]
-        set_lang_command = runtime["set_lang_command"]
+        server_aliases = {
+            f"{bot_prefix}panel_server", f"{bot_prefix}panel-server", f"{bot_prefix}panelserver",
+            f"{bot_prefix}server_panel", f"{bot_prefix}server-panel", f"{bot_prefix}serverpanel",
+            f"{bot_prefix}painel_server", f"{bot_prefix}painel-server", f"{bot_prefix}painelserver",
+            f"{bot_prefix}servidor_panel", f"{bot_prefix}servidor-panel", f"{bot_prefix}servidorpanel",
+        }
+        toggle_aliases = {
+            f"{bot_prefix}panel_toggle", f"{bot_prefix}panel-toggle", f"{bot_prefix}paneltoggle",
+            f"{bot_prefix}panel_toggles", f"{bot_prefix}panel-toggles", f"{bot_prefix}paneltoggles",
+            f"{bot_prefix}toggle_panel", f"{bot_prefix}toggle-panel", f"{bot_prefix}togglepanel",
+            f"{bot_prefix}toggles_panel", f"{bot_prefix}toggles-panel", f"{bot_prefix}togglespanel",
+        }
+        panel_aliases = {f"{bot_prefix}panel", f"{bot_prefix}painel"}
 
         is_prefix_command = (
-            lowered == clear_command
-            or lowered == leave_command
-            or lowered == join_command
-            or lowered == reset_command
-            or lowered.startswith(reset_command + " ")
-            or lowered == set_lang_command
-            or lowered.startswith(set_lang_command + " ")
+            lowered == f"{bot_prefix}clear"
+            or lowered == f"{bot_prefix}leave"
+            or lowered == f"{bot_prefix}join"
+            or lowered == f"{bot_prefix}reset"
+            or lowered.startswith(f"{bot_prefix}reset ")
+            or lowered == f"{bot_prefix}set lang"
+            or lowered.startswith(f"{bot_prefix}set lang ")
             or lowered in panel_aliases
             or lowered in server_aliases
             or lowered in toggle_aliases
@@ -1626,13 +1474,16 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 return
             self._mark_tts_message_seen(message.id)
 
-        if lowered == clear_command:
+        reset_command = f"{bot_prefix}reset"
+        set_lang_command = f"{bot_prefix}set lang"
+
+        if lowered == f"{bot_prefix}clear":
             await self._prefix_clear(message)
             return
-        if lowered == leave_command:
+        if lowered == f"{bot_prefix}leave":
             await self._prefix_leave(message)
             return
-        if lowered == join_command:
+        if lowered == f"{bot_prefix}join":
             await self._prefix_join(message)
             return
         if lowered == reset_command or lowered.startswith(reset_command + " "):
@@ -1668,25 +1519,25 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._mark_tts_message_seen(message.id)
         author_voice = getattr(message.author, "voice", None)
         if author_voice is None or author_voice.channel is None:
-            self._log_tts_debug("[tts_voice] ignorado | autor não está em call")
+            print("[tts_voice] ignorado | autor não está em call")
             return
         voice_channel = author_voice.channel
 
         blocked = await self._should_block_for_voice_bot(message.guild, voice_channel)
         if blocked:
-            self._log_tts_debug(f"[tts_voice] bloqueado | outro bot de voz detectado | guild={message.guild.id} canal_voz={voice_channel.id}")
+            print(f"[tts_voice] bloqueado | outro bot de voz detectado | guild={message.guild.id} canal_voz={voice_channel.id}")
             await self._disconnect_and_clear(message.guild)
             return
 
         db = self._get_db()
         if db is None:
-            logger.warning("[tts_voice] ignorado | settings_db indisponível")
+            print("[tts_voice] ignorado | settings_db indisponível")
             return
 
         try:
             resolved = await self._maybe_await(db.resolve_tts(message.guild.id, message.author.id))
         except Exception as e:
-            logger.warning("[tts_voice] erro em resolve_tts | guild=%s user=%s erro=%s", message.guild.id, message.author.id, e)
+            print(f"[tts_voice] erro em resolve_tts | guild={message.guild.id} user={message.author.id} erro={e}")
             return
 
         only_target_enabled = await self._only_target_user_enabled(message.guild.id)
@@ -1709,16 +1560,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             resolved["rate"] = resolved.get("rate") or "+0%"
             resolved["pitch"] = resolved.get("pitch") or "+0Hz"
 
-        text = self._render_tts_text(message, message.content[len(active_prefix):].strip())
+        text = _replace_custom_emojis_for_tts(message.content[len(active_prefix):].strip())
+        text = _expand_abbreviations_for_tts(text)
         if not text:
-            self._log_tts_debug("[tts_voice] ignorado | texto vazio após prefixo e anexos")
+            print("[tts_voice] ignorado | texto vazio após prefixo")
             return
 
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = getattr(message.channel, "id", None)
         await state.queue.put(QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"]))
-        self._log_tts_debug(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
-        self._log_tts_debug(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
+        print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
+        print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
         self._ensure_worker(message.guild.id)
 
     @commands.Cog.listener()
@@ -1728,7 +1580,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
         if await self._block_voice_bot_enabled(guild.id) and self._target_voice_bot_in_channel(vc.channel):
-            self._log_tts_debug(f"[tts_voice] Bot de voz alvo detectado na call | guild={guild.id} channel={vc.channel.id} target_bot_id={self._target_voice_bot_id()}")
+            print(f"[tts_voice] Bot de voz alvo detectado na call | guild={guild.id} channel={vc.channel.id} target_bot_id={self._target_voice_bot_id()}")
             await self._disconnect_and_clear(guild)
             return
         await self._disconnect_if_alone_or_only_bots(guild)
@@ -1786,7 +1638,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, engine=value))
             title, desc = "Modo padrão atualizado", f"O modo padrão do servidor agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos gTTS e Edge continuam escolhendo o motor por mensagem."
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, engine=value))
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, engine=value)
             title, desc = "Modo atualizado", f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos gTTS e Edge continuam escolhendo o motor por mensagem."
         await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
@@ -1807,7 +1659,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, voice=voice))
             title, desc = "Voz padrão atualizada", f"A voz padrão do servidor agora é `{voice}`."
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, voice=voice))
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, voice=voice)
             title, desc = "Voz atualizada", f"A sua voz do Edge agora é `{voice}`."
         await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
@@ -1829,7 +1681,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, language=value))
             title, desc = "Idioma padrão atualizado", f"O idioma padrão do servidor agora é `{value}`."
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, language=value))
+            await self._set_user_tts_and_refresh(interaction.guild.id, interaction.user.id, language=value)
             title, desc = "Idioma atualizado", f"O seu idioma do gTTS agora é `{value}`."
         await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
@@ -1851,7 +1703,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, rate=value))
             title, desc = "Velocidade padrão atualizada", f"A velocidade padrão do servidor agora é `{value}`."
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, rate=value))
+            await self._set_user_tts_and_refresh(interaction.guild.id, interaction.user.id, rate=value)
             title, desc = "Velocidade atualizada", f"A sua velocidade do Edge agora é `{value}`."
         await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
@@ -1873,7 +1725,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, pitch=value))
             title, desc = "Tom padrão atualizado", f"O tom padrão do servidor agora é `{value}`."
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, interaction.user.id, pitch=value))
+            await self._set_user_tts_and_refresh(interaction.guild.id, interaction.user.id, pitch=value)
             title, desc = "Tom atualizado", f"O seu tom do Edge agora é `{value}`."
         await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
@@ -1892,7 +1744,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         )
         view = self._build_panel_view(interaction.user.id, interaction.guild.id, server=False)
         msg = await self._respond(interaction, embed=embed, view=view, ephemeral=True)
-        view.message = msg
+        if isinstance(view, TTSStatusView):
+            view.attach_message(msg)
+        else:
+            view.message = msg
 
 
 
@@ -2047,7 +1902,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await message.channel.send(embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora para alterar o idioma do gTTS.", ok=False))
             return
 
-        await self._maybe_await(db.set_user_tts(message.guild.id, message.author.id, language=code))
+        await self._set_user_tts_and_refresh(message.guild.id, message.author.id, language=code)
         if hasattr(db, "set_user_panel_last_change"):
             history_entry = f"Você alterou o próprio idioma para {code}"
             await self._maybe_await(db.set_user_panel_last_change(message.guild.id, message.author.id, history_entry))
@@ -2077,7 +1932,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await message.channel.send(embed=self._make_embed("Usuário não encontrado", "Não consegui encontrar esse usuário. Use menção, ID ou tag exata do usuário no servidor.", ok=False))
             return
 
-        await self._maybe_await(db.reset_user_tts(message.guild.id, member.id))
+        await self._reset_user_tts_and_refresh(message.guild.id, member.id)
         if hasattr(db, "set_user_panel_last_change"):
             history_entry = f"{self._member_panel_name(message.author)} resetou as configurações de TTS de {self._member_panel_name(member)} para os padrões do servidor"
             await self._maybe_await(db.set_user_panel_last_change(message.guild.id, member.id, history_entry))
@@ -2205,6 +2060,155 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if history_text:
             embed.add_field(name="Últimas alterações", value=history_text, inline=False)
         return embed
+
+    def _setting_origin_label(self, user_settings: dict, key: str) -> str:
+        return "Usuário" if str((user_settings or {}).get(key, "") or "").strip() else "Servidor"
+
+    def _status_bool(self, value: bool) -> str:
+        return "Ativado" if bool(value) else "Desativado"
+
+    def _status_badge(self, value: bool, *, on: str = "Ativo", off: str = "Inativo") -> str:
+        return f"🟢 {on}" if bool(value) else f"⚫ {off}"
+
+    def _status_source_badge(self, source: str) -> str:
+        source = str(source or "Servidor")
+        return f"👤 {source}" if source == "Usuário" else f"🏠 {source}"
+
+    def _status_engine_label(self, engine: str) -> str:
+        return "🌐 gTTS" if str(engine or "gtts").lower() == "gtts" else "🗣️ Edge"
+
+    def _status_voice_channel_text(self, guild: discord.Guild | None, target_user_id: int) -> str:
+        if guild is None:
+            return "Não disponível"
+        member = guild.get_member(int(target_user_id or 0))
+        voice_state = getattr(member, "voice", None)
+        channel = getattr(voice_state, "channel", None)
+        if channel is None:
+            return "Fora de call"
+        return getattr(channel, "mention", None) or f"`{getattr(channel, 'name', 'Desconhecido')}`"
+
+    async def _build_status_embed(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        viewer_user_id: int | None = None,
+        target_user_name: str | None = None,
+        public: bool = False,
+    ) -> discord.Embed:
+        db = self._get_db()
+        guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild_id)) if db else {}
+        user_settings = await self._maybe_await(db.get_user_tts(guild_id, user_id)) if db else {}
+        resolved = await self._maybe_await(db.resolve_tts(guild_id, user_id)) if db else {}
+
+        guild_defaults = guild_defaults or {}
+        user_settings = user_settings or {}
+        resolved = resolved or {}
+
+        guild = self.bot.get_guild(guild_id)
+        vc = self._get_voice_client_for_guild(guild)
+        state = self.guild_states.get(guild_id)
+        queue_size = int(getattr(getattr(state, 'queue', None), 'qsize', lambda: 0)() if state else 0)
+        is_connected = bool(vc and vc.is_connected())
+        is_playing = bool(vc and (vc.is_playing() or vc.is_paused()))
+        bot_channel = getattr(getattr(vc, 'channel', None), 'mention', None) or (f"`{getattr(getattr(vc, 'channel', None), 'name', 'Desconhecido')}`" if getattr(vc, 'channel', None) is not None else "Desconectado")
+        user_channel = self._status_voice_channel_text(guild, user_id)
+        member = guild.get_member(user_id) if guild else None
+        target_name = str(target_user_name or self._member_panel_name(member))
+
+        if public:
+            title = f"📡 Status de TTS de {target_name}"
+            description = f"Resumo público das configurações atuais de TTS de {target_name}."
+        elif int(user_id or 0) != int(viewer_user_id or user_id or 0):
+            title = f"📡 Status de TTS de {target_name}"
+            description = f"Resumo das configurações atuais de TTS de {target_name}."
+        else:
+            title = "📡 Status do TTS"
+            description = "Resumo das suas configurações atuais e do estado ao vivo do TTS neste servidor."
+
+        color = discord.Color.green() if is_playing else (discord.Color.blurple() if is_connected else discord.Color.orange())
+        embed = discord.Embed(title=title, description=description, color=color, timestamp=discord.utils.utcnow())
+
+        if member is not None:
+            avatar = getattr(getattr(member, 'display_avatar', None), 'url', None)
+            if avatar:
+                embed.set_thumbnail(url=avatar)
+
+        queue_label = f"{queue_size} item" + ("" if queue_size == 1 else "s")
+        summary_bits = [
+            self._status_badge(is_connected, on="Conectado", off="Desconectado"),
+            self._status_badge(is_playing, on="Falando", off="Em espera"),
+            f"📚 Fila: `{queue_label}`",
+            f"🎙️ Engine: `{resolved.get('engine', 'gtts')}`",
+        ]
+        embed.add_field(name="Resumo rápido", value=" • ".join(summary_bits), inline=False)
+
+        embed.add_field(
+            name="🎛️ Configuração ativa",
+            value=(
+                f"**Engine**\n{self._status_engine_label(str(resolved.get('engine', 'gtts')))}\n"
+                f"**Voz do Edge**\n`{resolved.get('voice', 'Não definido')}`\n"
+                f"**Idioma do gTTS**\n`{resolved.get('language', 'Não definido')}`\n"
+                f"**Velocidade do Edge**\n`{resolved.get('rate', '+0%')}`\n"
+                f"**Tom do Edge**\n`{resolved.get('pitch', '+0Hz')}`"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="🧩 Origem das configurações",
+            value=(
+                f"**Engine**\n{self._status_source_badge(self._setting_origin_label(user_settings, 'engine'))}\n"
+                f"**Voz**\n{self._status_source_badge(self._setting_origin_label(user_settings, 'voice'))}\n"
+                f"**Idioma**\n{self._status_source_badge(self._setting_origin_label(user_settings, 'language'))}\n"
+                f"**Velocidade**\n{self._status_source_badge(self._setting_origin_label(user_settings, 'rate'))}\n"
+                f"**Tom**\n{self._status_source_badge(self._setting_origin_label(user_settings, 'pitch'))}"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="🛰️ Estado ao vivo",
+            value=(
+                f"**Canal do usuário**\n{user_channel}\n"
+                f"**Canal do bot**\n{bot_channel}\n"
+                f"**Conexão**\n{self._status_badge(is_connected, on='Conectado', off='Desconectado')}\n"
+                f"**Reprodução**\n{self._status_badge(is_playing, on='Falando agora', off='Parado')}\n"
+                f"**Fila atual**\n`{queue_label}`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🏷️ Prefixos do servidor",
+            value=(
+                f"**Bot**\n`{guild_defaults.get('bot_prefix', '_')}`\n"
+                f"**Modo gTTS**\n`{guild_defaults.get('gtts_prefix', guild_defaults.get('tts_prefix', '.'))}`\n"
+                f"**Modo Edge**\n`{guild_defaults.get('edge_prefix', ',')}`"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="🛡️ Toggles do servidor",
+            value=(
+                f"**Bloqueio por outro bot**\n{self._status_badge(bool(guild_defaults.get('block_voice_bot', False)), on='Ativado', off='Desativado')}\n"
+                f"**Modo Cuca**\n{self._status_badge(bool(guild_defaults.get('only_target_user', False)), on='Ativado', off='Desativado')}"
+            ),
+            inline=True,
+        )
+
+        panel_history = await self._maybe_await(db.get_panel_history(guild_id, user_id)) if db and hasattr(db, "get_panel_history") else {}
+        stored_last_changes = list((panel_history or {}).get("user_last_changes", []) or [])
+        if not stored_last_changes:
+            stored_last = str((panel_history or {}).get("user_last_change", "") or "")
+            stored_last_changes = [stored_last] if stored_last else []
+        history_text = self._format_history_entries(stored_last_changes or [], viewer_user_id=viewer_user_id or user_id)
+        if history_text:
+            embed.add_field(name="🕘 Últimas alterações", value=history_text, inline=False)
+
+        footer_text = "Esse painel usa o mesmo histórico de alterações do seu tts menu e permite abrir o painel ou resetar para os padrões do servidor." if not public and int(user_id or 0) == int(viewer_user_id or 0) else "Esse status usa o mesmo histórico de alterações do tts menu e combina ajustes do usuário com os padrões do servidor."
+        embed.set_footer(text=footer_text)
+        return embed
+
+    def _build_status_view(self, owner_id: int, guild_id: int, *, target_user_id: int | None = None, target_user_name: str | None = None, timeout: float = 180) -> discord.ui.View:
+        return TTSStatusView(self, owner_id, guild_id, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
 
     async def _build_settings_embed(
         self,
@@ -2487,7 +2491,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, engine=value))
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, engine=value)
             desc = f"O modo de TTS de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos gTTS e Edge continuam escolhendo o motor por mensagem."
             history_entry = self._user_history_text(interaction, "o próprio modo" if effective_user_id == interaction.user.id else "o modo", value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
             await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, effective_user_id, history_entry))
@@ -2558,7 +2562,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, voice=voice))
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, voice=voice)
             desc = f"A voz do Edge de {effective_user_name} agora é `{voice}`." if effective_user_id != interaction.user.id else f"A sua voz do Edge agora é `{voice}`."
             history_entry = self._user_history_text(interaction, "a própria voz" if effective_user_id == interaction.user.id else "a voz", voice, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
             await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, effective_user_id, history_entry))
@@ -2622,7 +2626,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, language=language))
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, language=language)
             desc = f"O idioma do gtts de {effective_user_name} agora é `{language}`." if effective_user_id != interaction.user.id else f"O seu idioma do gtts agora é `{language}`."
             history_entry = self._user_history_text(interaction, "o próprio idioma" if effective_user_id == interaction.user.id else "o idioma", language, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
             await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, effective_user_id, history_entry))
@@ -2686,7 +2690,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, rate=speed))
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, rate=speed)
             desc = f"A velocidade do Edge de {effective_user_name} agora é `{speed}`." if effective_user_id != interaction.user.id else f"A sua velocidade do Edge agora é `{speed}`."
             history_entry = self._user_history_text(interaction, "a própria velocidade" if effective_user_id == interaction.user.id else "a velocidade", speed, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
             await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, effective_user_id, history_entry))
@@ -2750,7 +2754,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
         else:
-            await self._maybe_await(db.set_user_tts(interaction.guild.id, effective_user_id, pitch=pitch))
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, pitch=pitch)
             desc = f"O tom do Edge de {effective_user_name} agora é `{pitch}`." if effective_user_id != interaction.user.id else f"O seu tom do Edge agora é `{pitch}`."
             history_entry = self._user_history_text(interaction, "o próprio tom" if effective_user_id == interaction.user.id else "o tom", pitch, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
             await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, effective_user_id, history_entry))
@@ -3077,6 +3081,96 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
 
 
+    @app_commands.command(name="status", description="Mostra o status atual do TTS ou copia a configuração de outro usuário")
+    @app_commands.describe(acao="Escolha se quer ver o seu status, mostrar o de outro usuário ou copiar a configuração dele", usuario="Usuário alvo quando a ação envolver outro usuário")
+    @app_commands.choices(acao=STATUS_ACTION_CHOICES)
+    async def status(
+        self,
+        interaction: discord.Interaction,
+        acao: app_commands.Choice[str] | None = None,
+        usuario: discord.Member | None = None,
+    ):
+        if not await self._require_guild(interaction):
+            return
+
+        db = self._get_db()
+        if db is None:
+            await self._respond(interaction, embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False), ephemeral=True)
+            return
+
+        action_value = str(getattr(acao, "value", "self") or "self")
+
+        if action_value == "show_other":
+            if usuario is None:
+                await self._respond(interaction, embed=self._make_embed("Usuário obrigatório", "Escolha um usuário para mostrar o status público dele no chat.", ok=False), ephemeral=True)
+                return
+            embed = await self._build_status_embed(
+                interaction.guild.id,
+                usuario.id,
+                viewer_user_id=interaction.user.id,
+                target_user_name=self._member_panel_name(usuario),
+                public=True,
+            )
+            embed.description = f"{self._member_panel_name(interaction.user)} mostrou no chat o status de TTS de {self._member_panel_name(usuario)}."
+            await self._respond(interaction, embed=embed, ephemeral=False)
+            return
+
+        if action_value == "copy_other":
+            if usuario is None:
+                await self._respond(interaction, embed=self._make_embed("Usuário obrigatório", "Escolha um usuário para copiar as configurações de TTS dele.", ok=False), ephemeral=True)
+                return
+            if usuario.id == interaction.user.id:
+                await self._respond(interaction, embed=self._make_embed("Escolha outro usuário", "Você já está usando as suas próprias configurações. Escolha outro usuário para copiar as configurações dele.", ok=False), ephemeral=True)
+                return
+
+            resolved = await self._maybe_await(db.resolve_tts(interaction.guild.id, usuario.id))
+            resolved = resolved or {}
+            await self._set_user_tts_and_refresh(
+                interaction.guild.id,
+                interaction.user.id,
+                engine=str(resolved.get('engine', 'gtts') or 'gtts'),
+                voice=str(resolved.get('voice', 'pt-BR-FranciscaNeural') or 'pt-BR-FranciscaNeural'),
+                language=str(resolved.get('language', 'pt-br') or 'pt-br'),
+                rate=str(resolved.get('rate', '+0%') or '+0%'),
+                pitch=str(resolved.get('pitch', '+0Hz') or '+0Hz'),
+            )
+            history_entry = f"{self._panel_actor_name(interaction)} copiou as configurações de TTS de {self._member_panel_name(usuario)}"
+            if hasattr(db, 'set_user_panel_last_change'):
+                await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, interaction.user.id, history_entry))
+
+            embed = self._make_embed(
+                "Configurações copiadas",
+                f"{self._member_panel_name(interaction.user)} copiou as configurações de TTS de {self._member_panel_name(usuario)}.",
+                ok=True,
+            )
+            embed.add_field(name="Engine", value=f"`{resolved.get('engine', 'gtts')}`", inline=True)
+            embed.add_field(name="Voz do Edge", value=f"`{resolved.get('voice', 'pt-BR-FranciscaNeural')}`", inline=True)
+            embed.add_field(name="Idioma do gTTS", value=f"`{resolved.get('language', 'pt-br')}`", inline=True)
+            embed.add_field(name="Velocidade do Edge", value=f"`{resolved.get('rate', '+0%')}`", inline=True)
+            embed.add_field(name="Tom do Edge", value=f"`{resolved.get('pitch', '+0Hz')}`", inline=True)
+            await self._respond(interaction, embed=embed, ephemeral=False)
+            return
+
+        embed = await self._build_status_embed(
+            interaction.guild.id,
+            interaction.user.id,
+            viewer_user_id=interaction.user.id,
+            target_user_name=self._member_panel_name(interaction.user),
+            public=False,
+        )
+        view = self._build_status_view(
+            interaction.user.id,
+            interaction.guild.id,
+            target_user_id=interaction.user.id,
+            target_user_name=self._member_panel_name(interaction.user),
+        )
+        msg = await self._respond(interaction, embed=embed, view=view, ephemeral=True)
+        if isinstance(view, TTSStatusView):
+            view.attach_message(msg)
+        else:
+            view.message = msg
+
+
     @app_commands.command(name="usuario", description="Reseta ou abre o painel pessoal de TTS de um usuário")
     @app_commands.describe(usuario="Usuário que terá as configurações alteradas", acao="Escolha se quer resetar ou abrir o painel")
     @app_commands.choices(acao=USER_CONFIG_ACTION_CHOICES)
@@ -3098,7 +3192,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             if not hasattr(db, "reset_user_tts"):
                 await self._respond(interaction, embed=self._make_embed("Função indisponível", "Esse banco ainda não suporta resetar as configurações do usuário.", ok=False), ephemeral=True)
                 return
-            await self._maybe_await(db.reset_user_tts(interaction.guild.id, usuario.id))
+            await self._reset_user_tts_and_refresh(interaction.guild.id, usuario.id)
             history_entry = f"{self._panel_actor_name(interaction)} resetou as configurações de TTS de {target_name} para os padrões do servidor"
             if hasattr(db, "set_user_panel_last_change"):
                 await self._maybe_await(db.set_user_panel_last_change(interaction.guild.id, usuario.id, history_entry))
@@ -3133,7 +3227,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             target_user_name=target_name,
         )
         msg = await self._respond(interaction, embed=embed, view=view, ephemeral=True)
-        view.message = msg
+        if isinstance(view, TTSStatusView):
+            view.attach_message(msg)
+        else:
+            view.message = msg
 
 
     @server.command(name="menu", description="Abre um painel guiado para configurar o TTS do servidor")
@@ -3169,7 +3266,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id)
         view = self._build_toggle_view(interaction.user.id, interaction.guild.id)
         msg = await self._respond(interaction, embed=embed, view=view, ephemeral=True)
-        view.message = msg
+        if isinstance(view, TTSStatusView):
+            view.attach_message(msg)
+        else:
+            view.message = msg
 
 
     @app_commands.describe(enabled="true para ativar, false para desativar")
