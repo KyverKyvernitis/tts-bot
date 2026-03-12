@@ -3,6 +3,8 @@ import asyncio
 import time
 import re
 import logging
+import unicodedata
+from urllib.parse import urlparse
 from typing import Optional
 
 import discord
@@ -82,6 +84,74 @@ _TTS_ABBREVIATION_PATTERN = re.compile(
     r"\b(" + "|".join(re.escape(k) for k in sorted(_TTS_ABBREVIATION_MAP, key=len, reverse=True)) + r")\b",
     flags=re.IGNORECASE,
 )
+
+
+USER_MENTION_PATTERN = re.compile(r"<@!?(\d+)>")
+ROLE_MENTION_PATTERN = re.compile(r"<@&(\d+)>")
+CHANNEL_MENTION_PATTERN = re.compile(r"<#(\d+)>")
+URL_PATTERN = re.compile(r"https?://[^\s<>]+", flags=re.IGNORECASE)
+DISCORD_CHANNEL_URL_PATTERN = re.compile(
+    r"https?://(?:canary\.|ptb\.)?(?:www\.)?discord(?:app)?\.com/channels/(@me|\d+)/(\d+)(?:/\d+)?",
+    flags=re.IGNORECASE,
+)
+_ATTACHMENT_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".svg", ".avif", ".heic", ".heif")
+_ATTACHMENT_VIDEO_EXTENSIONS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".wmv", ".flv", ".3gp")
+_COMMON_MULTI_PART_TLDS = {"com", "net", "org", "gov", "edu", "co"}
+_TTS_REFERENCE_CACHE_LIMIT = 2048
+
+
+def _normalize_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _speech_name(text: str) -> str:
+    text = _normalize_spaces(text)
+    if not text:
+        return ""
+    text = re.sub(r"[_\-.]+", " ", text)
+    return _normalize_spaces(text)
+
+
+def _looks_pronounceable_for_tts(text: str) -> bool:
+    text = _normalize_spaces(text)
+    if not text:
+        return False
+
+    non_space = [ch for ch in text if not ch.isspace()]
+    if not non_space:
+        return False
+
+    alnum_count = sum(ch.isalnum() for ch in non_space)
+    friendly_count = sum(ch.isalnum() or ch in "._-" for ch in non_space)
+    symbol_count = sum(unicodedata.category(ch).startswith("S") for ch in non_space)
+    hard_punct = {"[", "]", "{", "}", "(", ")", "<", ">", "~", "^", "`", "|", chr(92), "/", '"', "'", "*", "=", ":", ";", "+", ","}
+    hard_punct_count = sum(ch in hard_punct for ch in non_space)
+
+    if alnum_count == 0:
+        return False
+    if friendly_count / max(1, len(non_space)) < 0.6:
+        return False
+    if symbol_count >= 1:
+        return False
+    if hard_punct_count >= 2:
+        return False
+    return True
+
+
+def _extract_primary_domain(hostname: str) -> str:
+    host = str(hostname or "").strip().lower().strip(".")
+    if not host:
+        return ""
+    parts = [part for part in host.split(".") if part]
+    if not parts:
+        return ""
+    while len(parts) > 2 and parts[0] in {"www", "m", "ptb", "canary", "cdn", "media"}:
+        parts = parts[1:]
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _COMMON_MULTI_PART_TLDS:
+        return parts[-3]
+    if len(parts) >= 2:
+        return parts[-2]
+    return parts[0]
 
 
 def _expand_abbreviations_for_tts(text: str) -> str:
@@ -768,6 +838,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._active_prefix_panels: dict[tuple[int, int, str], tuple[discord.Message, discord.ui.View]] = {}
         self._public_panel_states: dict[int, dict] = {}
         self._guild_prefix_runtime_cache: dict[int, tuple[tuple[str, str, str], dict[str, object]]] = {}
+        self._tts_user_reference_cache: dict[tuple[int, int, str, str], str] = {}
+        self._tts_role_reference_cache: dict[tuple[int, str], str] = {}
+        self._tts_channel_reference_cache: dict[tuple[int, str], str] = {}
+        self._tts_link_reference_cache: dict[tuple[int, str], str] = {}
 
     async def cog_load(self):
         await self._load_edge_voices()
@@ -784,6 +858,22 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _log_tts_debug(self, message: str) -> None:
         if self._tts_debug_enabled():
             logger.debug(message)
+
+    def _cache_lookup(self, cache: dict, key):
+        value = cache.get(key)
+        if value is not None:
+            cache.pop(key, None)
+            cache[key] = value
+        return value
+
+    def _cache_store(self, cache: dict, key, value):
+        cache[key] = value
+        if len(cache) > _TTS_REFERENCE_CACHE_LIMIT:
+            try:
+                cache.pop(next(iter(cache)))
+            except StopIteration:
+                pass
+        return value
 
     async def _get_guild_prefix_runtime(self, guild_id: int) -> tuple[dict, dict[str, object]]:
         db = self._get_db()
@@ -840,6 +930,189 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if not str(name).startswith("@"):
             return f"@{name}"
         return str(name)
+
+
+    def _tts_user_reference(self, member: discord.abc.User | None) -> str:
+        if member is None:
+            return "@usuário"
+
+        guild_id = int(getattr(getattr(member, "guild", None), "id", 0) or 0)
+        member_id = int(getattr(member, "id", 0) or 0)
+        display_name = _normalize_spaces(getattr(member, "display_name", None) or "")
+        username = _normalize_spaces(getattr(member, "name", None) or "")
+        cache_key = (guild_id, member_id, display_name, username)
+        cached = self._cache_lookup(self._tts_user_reference_cache, cache_key)
+        if cached is not None:
+            return cached
+
+        if _looks_pronounceable_for_tts(display_name):
+            spoken = _speech_name(display_name)
+            if spoken:
+                return self._cache_store(self._tts_user_reference_cache, cache_key, f"@{spoken}")
+
+        if _looks_pronounceable_for_tts(username):
+            spoken = _speech_name(username)
+            if spoken:
+                return self._cache_store(self._tts_user_reference_cache, cache_key, f"@{spoken}")
+
+        return self._cache_store(self._tts_user_reference_cache, cache_key, "@usuário")
+
+    def _tts_role_reference(self, role: discord.Role | None) -> str:
+        if role is None:
+            return "cargo do discord"
+
+        role_id = int(getattr(role, "id", 0) or 0)
+        name = _normalize_spaces(getattr(role, "name", None) or "")
+        cache_key = (role_id, name)
+        cached = self._cache_lookup(self._tts_role_reference_cache, cache_key)
+        if cached is not None:
+            return cached
+
+        if _looks_pronounceable_for_tts(name):
+            spoken = _speech_name(name)
+            if spoken:
+                return self._cache_store(self._tts_role_reference_cache, cache_key, f"cargo {spoken}")
+        return self._cache_store(self._tts_role_reference_cache, cache_key, "cargo do discord")
+
+    def _tts_channel_reference(self, channel) -> str:
+        if channel is None:
+            return "canal do discord"
+
+        channel_id = int(getattr(channel, "id", 0) or 0)
+        name = _normalize_spaces(getattr(channel, "name", None) or "")
+        cache_key = (channel_id, name)
+        cached = self._cache_lookup(self._tts_channel_reference_cache, cache_key)
+        if cached is not None:
+            return cached
+
+        if _looks_pronounceable_for_tts(name):
+            spoken = _speech_name(name)
+            if spoken:
+                return self._cache_store(self._tts_channel_reference_cache, cache_key, f"canal {spoken}")
+        return self._cache_store(self._tts_channel_reference_cache, cache_key, "canal do discord")
+
+    def _tts_link_reference(self, url: str, *, guild: discord.Guild | None = None) -> str:
+        cleaned_url = str(url or "").strip().rstrip(".,!?)]}")
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        cache_key = (guild_id, cleaned_url.lower())
+        cached = self._cache_lookup(self._tts_link_reference_cache, cache_key)
+        if cached is not None:
+            return cached
+
+        match = DISCORD_CHANNEL_URL_PATTERN.fullmatch(cleaned_url)
+        if match and guild is not None:
+            channel_id = int(match.group(2))
+            channel = guild.get_channel(channel_id)
+            return self._cache_store(self._tts_link_reference_cache, cache_key, self._tts_channel_reference(channel))
+
+        try:
+            parsed = urlparse(cleaned_url)
+        except Exception:
+            return self._cache_store(self._tts_link_reference_cache, cache_key, "link")
+
+        domain = _extract_primary_domain(parsed.hostname or "")
+        if _looks_pronounceable_for_tts(domain):
+            spoken = _speech_name(domain)
+            if spoken:
+                return self._cache_store(self._tts_link_reference_cache, cache_key, f"link do {spoken}")
+        return self._cache_store(self._tts_link_reference_cache, cache_key, "link")
+
+    def _tts_attachment_descriptions(self, attachments) -> list[str]:
+        descriptions: list[str] = []
+        for attachment in attachments or []:
+            content_type = str(getattr(attachment, "content_type", "") or "").lower()
+            filename = str(getattr(attachment, "filename", "") or "").lower()
+            if content_type == "image/gif" or filename.endswith(".gif"):
+                descriptions.append("Anexo em GIF")
+            elif content_type.startswith("image/") or filename.endswith(_ATTACHMENT_IMAGE_EXTENSIONS):
+                descriptions.append("Anexo de imagem")
+            elif content_type.startswith("video/") or filename.endswith(_ATTACHMENT_VIDEO_EXTENSIONS):
+                descriptions.append("Anexo de vídeo")
+        return descriptions
+
+    def _append_tts_descriptions(self, text: str, descriptions: list[str]) -> str:
+        text = _normalize_spaces(text)
+        descriptions = [_normalize_spaces(item) for item in (descriptions or []) if _normalize_spaces(item)]
+        if not descriptions:
+            return text
+        suffix = ". ".join(descriptions)
+        if not text:
+            return suffix
+        if text.endswith((".", "!", "?", "…")):
+            return f"{text} {suffix}"
+        return f"{text}. {suffix}"
+
+    def _render_tts_text(self, message: discord.Message, raw_text: str) -> str:
+        text = str(raw_text or "")
+        attachments = getattr(message, "attachments", []) or []
+
+        has_custom_emojis = "<" in text and ":" in text
+        has_user_mentions = "<@" in text
+        has_role_mentions = "<@&" in text
+        has_channel_mentions = "<#" in text
+        has_urls = "http://" in text or "https://" in text
+
+        if has_custom_emojis:
+            text = _replace_custom_emojis_for_tts(text)
+
+        if has_user_mentions or has_role_mentions or has_channel_mentions or has_urls:
+            guild = message.guild
+
+            if has_user_mentions:
+                member_map = {int(getattr(member, "id", 0) or 0): member for member in getattr(message, "mentions", [])}
+                if guild is not None:
+                    for member_id in USER_MENTION_PATTERN.findall(text):
+                        int_member_id = int(member_id)
+                        if int_member_id not in member_map:
+                            member = guild.get_member(int_member_id)
+                            if member is not None:
+                                member_map[int_member_id] = member
+
+                def replace_user(match: re.Match[str]) -> str:
+                    return self._tts_user_reference(member_map.get(int(match.group(1))))
+
+                text = USER_MENTION_PATTERN.sub(replace_user, text)
+
+            if has_role_mentions:
+                role_map = {int(getattr(role, "id", 0) or 0): role for role in getattr(message, "role_mentions", [])}
+                if guild is not None:
+                    for role_id in ROLE_MENTION_PATTERN.findall(text):
+                        int_role_id = int(role_id)
+                        if int_role_id not in role_map:
+                            role = guild.get_role(int_role_id)
+                            if role is not None:
+                                role_map[int_role_id] = role
+
+                def replace_role(match: re.Match[str]) -> str:
+                    return self._tts_role_reference(role_map.get(int(match.group(1))))
+
+                text = ROLE_MENTION_PATTERN.sub(replace_role, text)
+
+            if has_channel_mentions:
+                channel_map = {int(getattr(channel, "id", 0) or 0): channel for channel in getattr(message, "channel_mentions", [])}
+                if guild is not None:
+                    for channel_id in CHANNEL_MENTION_PATTERN.findall(text):
+                        int_channel_id = int(channel_id)
+                        if int_channel_id not in channel_map:
+                            channel = guild.get_channel(int_channel_id)
+                            if channel is not None:
+                                channel_map[int_channel_id] = channel
+
+                def replace_channel(match: re.Match[str]) -> str:
+                    return self._tts_channel_reference(channel_map.get(int(match.group(1))))
+
+                text = CHANNEL_MENTION_PATTERN.sub(replace_channel, text)
+
+            if has_urls:
+                def replace_url(match: re.Match[str]) -> str:
+                    return self._tts_link_reference(match.group(0), guild=guild)
+
+                text = URL_PATTERN.sub(replace_url, text)
+
+        text = _expand_abbreviations_for_tts(text)
+        if attachments:
+            return self._append_tts_descriptions(text, self._tts_attachment_descriptions(attachments))
+        return _normalize_spaces(text)
 
     def _encode_public_owner_history(self, owner_id: int, actor_name: str, action_text: str) -> str:
         safe_actor = str(actor_name or "@usuário").replace("|", "/")
@@ -1436,10 +1709,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             resolved["rate"] = resolved.get("rate") or "+0%"
             resolved["pitch"] = resolved.get("pitch") or "+0Hz"
 
-        text = _replace_custom_emojis_for_tts(message.content[len(active_prefix):].strip())
-        text = _expand_abbreviations_for_tts(text)
+        text = self._render_tts_text(message, message.content[len(active_prefix):].strip())
         if not text:
-            self._log_tts_debug("[tts_voice] ignorado | texto vazio após prefixo")
+            self._log_tts_debug("[tts_voice] ignorado | texto vazio após prefixo e anexos")
             return
 
         state = self._get_state(message.guild.id)
