@@ -236,6 +236,46 @@ class SettingsDB:
             upsert=True,
         )
 
+
+    async def reset_user_tts(self, guild_id: int, user_id: int) -> bool:
+        key = (guild_id, user_id)
+        doc = self.user_cache.get(key)
+
+        if doc is None:
+            existing = await self.coll.find_one(
+                {"type": "user", "guild_id": guild_id, "user_id": user_id},
+                {"_id": 0},
+            )
+            doc = dict(existing or {}) if existing else None
+
+        if not doc:
+            return False
+
+        changed = False
+        if "tts" in doc:
+            doc.pop("tts", None)
+            changed = True
+
+        doc["type"] = "user"
+        doc["guild_id"] = guild_id
+        doc["user_id"] = user_id
+
+        has_panel_history = bool(doc.get("panel_history"))
+        remaining_keys = {k for k, v in doc.items() if k not in {"type", "guild_id", "user_id"} and v not in (None, "", [], {})}
+
+        if not remaining_keys and not has_panel_history:
+            self.user_cache.pop(key, None)
+            await self.coll.delete_one({"type": "user", "guild_id": guild_id, "user_id": user_id})
+            return changed
+
+        self.user_cache[key] = doc
+        await self.coll.update_one(
+            {"type": "user", "guild_id": guild_id, "user_id": user_id},
+            {"$set": doc, "$unset": {"tts": ""}},
+            upsert=True,
+        )
+        return changed
+
     def resolve_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
         user = self.get_user_tts(guild_id, user_id)
         guild = self.get_guild_tts_defaults(guild_id)
