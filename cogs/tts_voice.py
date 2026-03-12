@@ -1138,7 +1138,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 state.queue.task_done()
         except Exception:
             pass
-        vc = guild.voice_client
+        vc = self._get_voice_client_for_guild(guild)
         if vc and vc.is_connected():
             try:
                 if vc.is_playing():
@@ -1160,7 +1160,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return not any(not m.bot for m in members)
 
     async def _disconnect_if_alone_or_only_bots(self, guild: discord.Guild):
-        vc = guild.voice_client
+        vc = self._get_voice_client_for_guild(guild)
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
         if self._voice_channel_has_only_bots_or_is_empty(vc.channel):
@@ -1174,7 +1174,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         lock = self._get_voice_connect_lock(guild.id)
         async with lock:
-            vc = guild.voice_client
+            vc = self._get_voice_client_for_guild(guild)
 
             if vc and vc.is_connected() and vc.channel and vc.channel.id == voice_channel.id:
                 return vc
@@ -1204,7 +1204,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
             except Exception as e:
                 msg = str(e).lower()
-                current_vc = guild.voice_client
+                current_vc = self._get_voice_client_for_guild(guild)
 
                 if "already connected" in msg and current_vc and current_vc.is_connected():
                     if current_vc.channel and current_vc.channel.id == voice_channel.id:
@@ -1404,7 +1404,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         guild = member.guild
-        vc = guild.voice_client
+        vc = self._get_voice_client_for_guild(guild)
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
         if await self._block_voice_bot_enabled(guild.id) and self._target_voice_bot_in_channel(vc.channel):
