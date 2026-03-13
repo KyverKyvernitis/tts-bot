@@ -14,6 +14,13 @@ def _parse_int(value: str, default: int = 0) -> int:
         return default
 
 
+def _parse_float(value: str, default: float = 0.0) -> float:
+    try:
+        return float(str(value).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_guild_ids(value: str) -> list[int]:
     if not value:
         return []
@@ -81,6 +88,14 @@ TTS_SYNTH_CONCURRENCY = _parse_int(os.getenv("TTS_SYNTH_CONCURRENCY", "2"), 2)
 
 # Tempo máximo de espera da síntese Edge antes de fallback
 TTS_EDGE_TIMEOUT_SECONDS = _parse_int(os.getenv("TTS_EDGE_TIMEOUT_SECONDS", "10"), 10)
+
+# Ajustes do gTTS para reduzir 429
+TTS_GTTS_MAX_RETRIES = _parse_int(os.getenv("TTS_GTTS_MAX_RETRIES", "4"), 4)
+TTS_GTTS_RETRY_BASE_DELAY_SECONDS = _parse_float(os.getenv("TTS_GTTS_RETRY_BASE_DELAY_SECONDS", "2.0"), 2.0)
+TTS_GTTS_TLDS = (os.getenv("TTS_GTTS_TLDS", "com,com.br,com.hk,ie,co.uk") or "com,com.br,com.hk,ie,co.uk").strip()
+TTS_GTTS_MIN_INTERVAL_SECONDS = _parse_float(os.getenv("TTS_GTTS_MIN_INTERVAL_SECONDS", "1.35"), 1.35)
+TTS_GTTS_RATE_LIMIT_COOLDOWN_SECONDS = _parse_float(os.getenv("TTS_GTTS_RATE_LIMIT_COOLDOWN_SECONDS", "8.0"), 8.0)
+TTS_GTTS_CONCURRENCY = _parse_int(os.getenv("TTS_GTTS_CONCURRENCY", "1"), 1)
 
 # FFmpeg enxuto para reprodução
 TTS_FFMPEG_BEFORE_OPTIONS = (os.getenv("TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin") or "-nostdin").strip()
