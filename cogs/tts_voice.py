@@ -1,4 +1,5 @@
 import inspect
+import contextlib
 import asyncio
 import time
 import re
@@ -858,8 +859,6 @@ class TTSMainPanelView(_BaseTTSView):
         self.server = server
         self.panel_kind = "server" if server else "user"
         self.remove_item(self.mode_button)
-        self.remove_item(self.join_button)
-        self.remove_item(self.leave_button)
         if self.server:
             self.remove_item(self.spoken_name_button)
         else:
@@ -991,14 +990,6 @@ class TTSMainPanelView(_BaseTTSView):
     @discord.ui.button(label="Tom (Google)", style=discord.ButtonStyle.secondary, emoji="🎚️", row=4)
     async def gcloud_pitch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o tom do Google Cloud", "Selecione o tom usado nas mensagens com prefixo do Google Cloud.", GCloudPitchSelect(self.cog, server=self.server), source_panel_message=interaction.message, target_user_id=self.target_user_id, target_user_name=self.target_user_name).send(interaction)
-
-    @discord.ui.button(label="Entrar na call", style=discord.ButtonStyle.secondary, emoji="📥", row=3)
-    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._join_from_panel(interaction)
-
-    @discord.ui.button(label="Sair da call", style=discord.ButtonStyle.secondary, emoji="📤", row=3)
-    async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._leave_from_panel(interaction)
 
 
 class TTSStatusView(_BaseTTSView):
@@ -1709,7 +1700,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         ]
 
     async def _open_gcloud_language_picker(self, interaction: discord.Interaction, *, owner_id: int, guild_id: int, current_value: str, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
-        await self._defer_ephemeral(interaction)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
         catalog = await self._load_gcloud_voices()
         options = self._build_gcloud_language_options_from_catalog(catalog, current_value=current_value)
         if not options:
@@ -1719,7 +1711,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await _SimpleSelectView(self, owner_id, guild_id, 'Escolha o idioma do Google Cloud', description, GCloudLanguageSelect(self, server=server, options=options), source_panel_message=source_panel_message, target_user_id=target_user_id, target_user_name=target_user_name).send(interaction)
 
     async def _open_gcloud_voice_picker(self, interaction: discord.Interaction, *, owner_id: int, guild_id: int, language_code: str, current_value: str, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
-        await self._defer_ephemeral(interaction)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
         effective_language = str(language_code or '').strip() or str(getattr(config, 'GOOGLE_CLOUD_TTS_LANGUAGE_CODE', 'pt-BR') or 'pt-BR')
         catalog = await self._load_gcloud_voices()
         options = self._build_gcloud_voice_options_from_catalog(catalog, effective_language, current_value=current_value)
@@ -1743,11 +1736,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     ):
         if interaction.response.is_done():
             response_type = getattr(interaction.response, "type", None)
-            deferred_types = {
-                discord.InteractionResponseType.deferred_channel_message,
-                discord.InteractionResponseType.deferred_message_update,
-            }
-            if response_type in deferred_types:
+            if response_type == discord.InteractionResponseType.deferred_channel_message:
                 await interaction.edit_original_response(
                     content=content,
                     embed=embed,
