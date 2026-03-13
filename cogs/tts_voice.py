@@ -279,12 +279,15 @@ class _SimpleSelectView(_BaseTTSView):
     async def send(self, interaction: discord.Interaction):
         if self.source_panel_message is None:
             self.source_panel_message = getattr(interaction, "message", None)
-        msg = await self.cog._respond(
-            interaction,
-            embed=self.cog._make_embed(self.title, self.description, ok=True),
-            view=self,
-            ephemeral=True,
-        )
+        embed = self.cog._make_embed(self.title, self.description, ok=True)
+        if interaction.response.is_done():
+            msg = await interaction.followup.send(embed=embed, view=self, ephemeral=True, wait=True)
+        else:
+            await interaction.response.send_message(embed=embed, view=self, ephemeral=True)
+            try:
+                msg = await interaction.original_response()
+            except Exception:
+                msg = None
         self.message = msg
 
 
@@ -1698,6 +1701,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             discord.SelectOption(label=_shorten(name, 100), description=self._describe_gcloud_voice(name), value=name, default=(name == current_value))
             for name in ordered_names[:25]
         ]
+
+    def _gcloud_voice_matches_language(self, voice_name: str, language_code: str) -> bool:
+        voice = str(voice_name or '').strip().lower()
+        language = str(language_code or '').strip().lower()
+        if not voice or not language:
+            return False
+        return voice.startswith(language + '-')
+
+    def _pick_first_gcloud_voice_for_language(self, catalog: list[dict[str, object]], language_code: str) -> str:
+        options = self._build_gcloud_voice_options_from_catalog(catalog, language_code, current_value=None)
+        return str(options[0].value if options else '')
 
     async def _open_gcloud_language_picker(self, interaction: discord.Interaction, *, owner_id: int, guild_id: int, current_value: str, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
         if not interaction.response.is_done():
@@ -3618,17 +3632,34 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
         panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
         effective_user_id, effective_user_name, is_public_user_panel = self._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
+
+        catalog = await self._load_gcloud_voices()
+        current_voice = self._get_current_gcloud_voice(interaction.guild.id, effective_user_id, server=server)
+        updates: dict[str, str] = {'gcloud_language': value}
+        adjusted_voice = ''
+        if catalog and not self._gcloud_voice_matches_language(current_voice, value):
+            adjusted_voice = self._pick_first_gcloud_voice_for_language(catalog, value)
+            if adjusted_voice:
+                updates['gcloud_voice'] = adjusted_voice
+
         if server:
-            await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gcloud_language=value))
+            await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, **updates))
             desc = f"O idioma do Google Cloud do servidor agora é `{value}`."
             history_entry = self._server_history_text(interaction, 'o idioma do Google Cloud do servidor', value)
+            if adjusted_voice:
+                desc += f" A voz do Google foi ajustada para `{adjusted_voice}` para combinar com o idioma."
+                history_entry = self._server_history_text(interaction, 'o idioma do Google Cloud do servidor', f'{value} (voz ajustada para {adjusted_voice})')
             await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get('server_last_changes', []) or [])
         else:
             history_entry = self._user_history_text(interaction, 'o próprio idioma do Google' if effective_user_id == interaction.user.id else 'o idioma do Google', value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
-            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, gcloud_language=value, history_entry=history_entry)
+            if adjusted_voice:
+                history_entry = self._user_history_text(interaction, 'o próprio idioma do Google' if effective_user_id == interaction.user.id else 'o idioma do Google', f'{value} (voz ajustada para {adjusted_voice})', message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, history_entry=history_entry, **updates)
             desc = f"O idioma do Google Cloud de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu idioma do Google Cloud agora é `{value}`."
+            if adjusted_voice:
+                desc += f" A voz do Google foi ajustada para `{adjusted_voice}` para combinar com o idioma."
             self._append_public_panel_history(message_id, history_entry)
             last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get('user_last_changes', []) or [])
         embed = await self._build_settings_embed(interaction.guild.id, effective_user_id if not server else interaction.user.id, server=server, panel_kind='server' if server else 'user', last_changes=last_changes, message_id=message_id, target_user_name=effective_user_name if not server else None, viewer_user_id=interaction.user.id)
