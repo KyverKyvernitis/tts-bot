@@ -1,6 +1,7 @@
 import contextlib
 import asyncio
 import hashlib
+import json
 import inspect
 import os
 import shutil
@@ -15,6 +16,11 @@ import discord
 import edge_tts
 from gtts import gTTS
 from gtts.tts import gTTSError
+
+try:
+    from google.cloud import texttospeech_v1 as google_texttospeech
+except Exception:  # pragma: no cover - dependência opcional em tempo de import
+    google_texttospeech = None
 
 import config
 from tts_helpers import validate_voice
@@ -37,6 +43,10 @@ TTS_GTTS_TLDS = tuple(
 TTS_GTTS_MIN_INTERVAL_SECONDS = max(0.0, float(getattr(config, "TTS_GTTS_MIN_INTERVAL_SECONDS", 1.35)))
 TTS_GTTS_RATE_LIMIT_COOLDOWN_SECONDS = max(0.0, float(getattr(config, "TTS_GTTS_RATE_LIMIT_COOLDOWN_SECONDS", 8.0)))
 TTS_GTTS_CONCURRENCY = max(1, int(getattr(config, "TTS_GTTS_CONCURRENCY", 1)))
+GOOGLE_CLOUD_TTS_LANGUAGE_CODE = str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR").strip() or "pt-BR"
+GOOGLE_CLOUD_TTS_VOICE_NAME = str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
+GOOGLE_CLOUD_TTS_SPEAKING_RATE = float(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0))
+GOOGLE_CLOUD_TTS_PITCH = float(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0))
 TTS_FFMPEG_BEFORE_OPTIONS = getattr(config, "TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin")
 TTS_FFMPEG_OPTIONS = getattr(config, "TTS_FFMPEG_OPTIONS", "-vn -loglevel error")
 
@@ -269,6 +279,8 @@ class TTSAudioMixin:
         if engine == "edge":
             voice = validate_voice(item.voice, getattr(self, "edge_voice_names", set()))
             payload = f"edge|{voice}|{self._normalize_edge_rate(item.rate)}|{self._normalize_edge_pitch(item.pitch)}|{text}"
+        elif engine == "gcloud":
+            payload = f"gcloud|{GOOGLE_CLOUD_TTS_LANGUAGE_CODE}|{GOOGLE_CLOUD_TTS_VOICE_NAME}|{GOOGLE_CLOUD_TTS_SPEAKING_RATE}|{GOOGLE_CLOUD_TTS_PITCH}|{text}"
         else:
             language = (item.language or GTTS_DEFAULT_LANGUAGE).strip().lower()
             payload = f"gtts|{language}|{text}"
@@ -398,6 +410,75 @@ class TTSAudioMixin:
                 pass
             raise
 
+    def _ensure_google_credentials_file(self) -> None:
+        if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+            return
+
+        raw_json = (os.getenv("GOOGLE_CREDENTIALS_JSON", "") or "").strip()
+        if not raw_json:
+            return
+
+        try:
+            parsed = json.loads(raw_json)
+        except Exception as exc:
+            raise RuntimeError("GOOGLE_CREDENTIALS_JSON está inválido e não pôde ser lido como JSON.") from exc
+
+        path = os.path.join(tempfile.gettempdir(), "chat_revive_google_credentials.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(parsed, handle, ensure_ascii=False)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
+
+    def _get_google_tts_client(self):
+        if google_texttospeech is None:
+            raise RuntimeError("A dependência google-cloud-texttospeech não está instalada.")
+        self._ensure_google_credentials_file()
+        client = getattr(self, "_google_tts_client", None)
+        if client is None:
+            client = google_texttospeech.TextToSpeechClient()
+            setattr(self, "_google_tts_client", client)
+        return client
+
+    async def _generate_google_cloud_file(self, text: str) -> str:
+        self._log_debug(
+            "[tts_voice] Google Cloud TTS synth | "
+            f"voice={GOOGLE_CLOUD_TTS_VOICE_NAME!r} language={GOOGLE_CLOUD_TTS_LANGUAGE_CODE!r} text={text[:80]!r}"
+        )
+
+        fd, path = tempfile.mkstemp(suffix=".mp3")
+        os.close(fd)
+
+        try:
+            client = await asyncio.to_thread(self._get_google_tts_client)
+            synthesis_input = google_texttospeech.SynthesisInput(text=text)
+            voice = google_texttospeech.VoiceSelectionParams(
+                language_code=GOOGLE_CLOUD_TTS_LANGUAGE_CODE,
+                name=GOOGLE_CLOUD_TTS_VOICE_NAME,
+            )
+            audio_config = google_texttospeech.AudioConfig(
+                audio_encoding=google_texttospeech.AudioEncoding.MP3,
+                speaking_rate=GOOGLE_CLOUD_TTS_SPEAKING_RATE,
+                pitch=GOOGLE_CLOUD_TTS_PITCH,
+            )
+            request = google_texttospeech.SynthesizeSpeechRequest(
+                input=synthesis_input,
+                voice=voice,
+                audio_config=audio_config,
+            )
+
+            async with self._get_synth_semaphore():
+                response = await asyncio.to_thread(client.synthesize_speech, request=request)
+                def _write_audio_file(target_path: str, data: bytes) -> None:
+                    with open(target_path, 'wb') as handle:
+                        handle.write(data)
+                await asyncio.to_thread(_write_audio_file, path, response.audio_content)
+            return path
+        except Exception:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            raise
+
     async def _generate_audio_file(self, item: QueueItem) -> str:
         if item.engine == "edge":
             try:
@@ -405,6 +486,9 @@ class TTSAudioMixin:
             except Exception as e:
                 logger.warning("[tts_voice] Edge falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
                 return await self._generate_gtts_with_retries(item)
+
+        if item.engine == "gcloud":
+            return await self._generate_google_cloud_file(item.text)
 
         return await self._generate_gtts_with_retries(item)
 

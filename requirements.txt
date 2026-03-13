@@ -4,3 +4,4 @@ motor
 edge-tts
 gTTS
 psutil
+google-cloud-texttospeech
