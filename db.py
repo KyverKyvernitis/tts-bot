@@ -135,6 +135,7 @@ class SettingsDB:
             "speech_limit_seconds": int(g.get("speech_limit_seconds", 30) or 30),
             "block_voice_bot": bool(g.get("block_voice_bot_enabled", True)),
             "only_target_user": bool(g.get("only_target_user_enabled", False)),
+            "announce_author": bool(g.get("announce_author_enabled", False)),
         }
 
     async def set_guild_tts_defaults(
@@ -153,6 +154,7 @@ class SettingsDB:
         speech_limit_seconds: Optional[int] = None,
         block_voice_bot: Optional[bool] = None,
         only_target_user: Optional[bool] = None,
+        announce_author: Optional[bool] = None,
     ):
         doc = self._get_guild_doc(guild_id)
         tts = doc.get("tts_defaults", {}) or {}
@@ -184,6 +186,8 @@ class SettingsDB:
             doc["block_voice_bot_enabled"] = bool(block_voice_bot)
         if only_target_user is not None:
             doc["only_target_user_enabled"] = bool(only_target_user)
+        if announce_author is not None:
+            doc["announce_author_enabled"] = bool(announce_author)
 
         doc["tts_defaults"] = tts
         await self._save_guild_doc(guild_id, doc)
