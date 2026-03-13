@@ -25,7 +25,7 @@ def make_embed(title: str, description: str, *, ok: bool, on_color: int, off_col
 
 def validate_engine(engine: str) -> str:
     engine = engine.strip().lower()
-    return engine if engine in ("gtts", "edge") else "gtts"
+    return engine if engine in ("gtts", "edge", "gcloud") else "gtts"
 
 def validate_rate(value: str) -> str:
     value = value.strip()

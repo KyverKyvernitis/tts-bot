@@ -280,7 +280,11 @@ class TTSAudioMixin:
             voice = validate_voice(item.voice, getattr(self, "edge_voice_names", set()))
             payload = f"edge|{voice}|{self._normalize_edge_rate(item.rate)}|{self._normalize_edge_pitch(item.pitch)}|{text}"
         elif engine == "gcloud":
-            payload = f"gcloud|{GOOGLE_CLOUD_TTS_LANGUAGE_CODE}|{GOOGLE_CLOUD_TTS_VOICE_NAME}|{GOOGLE_CLOUD_TTS_SPEAKING_RATE}|{GOOGLE_CLOUD_TTS_PITCH}|{text}"
+            language = self._normalize_gcloud_language(item.language)
+            voice = self._normalize_gcloud_voice(item.voice)
+            rate = self._normalize_gcloud_rate(item.rate)
+            pitch = self._normalize_gcloud_pitch(item.pitch)
+            payload = f"gcloud|{language}|{voice}|{rate}|{pitch}|{text}"
         else:
             language = (item.language or GTTS_DEFAULT_LANGUAGE).strip().lower()
             payload = f"gtts|{language}|{text}"
@@ -438,10 +442,14 @@ class TTSAudioMixin:
             setattr(self, "_google_tts_client", client)
         return client
 
-    async def _generate_google_cloud_file(self, text: str) -> str:
+    async def _generate_google_cloud_file(self, text: str, language: str, voice_name: str, rate: str, pitch: str) -> str:
+        language = self._normalize_gcloud_language(language)
+        voice_name = self._normalize_gcloud_voice(voice_name)
+        normalized_rate = self._normalize_gcloud_rate(rate)
+        normalized_pitch = self._normalize_gcloud_pitch(pitch)
         self._log_debug(
             "[tts_voice] Google Cloud TTS synth | "
-            f"voice={GOOGLE_CLOUD_TTS_VOICE_NAME!r} language={GOOGLE_CLOUD_TTS_LANGUAGE_CODE!r} text={text[:80]!r}"
+            f"voice={voice_name!r} language={language!r} rate={normalized_rate!r} pitch={normalized_pitch!r} text={text[:80]!r}"
         )
 
         fd, path = tempfile.mkstemp(suffix=".mp3")
@@ -451,13 +459,13 @@ class TTSAudioMixin:
             client = await asyncio.to_thread(self._get_google_tts_client)
             synthesis_input = google_texttospeech.SynthesisInput(text=text)
             voice = google_texttospeech.VoiceSelectionParams(
-                language_code=GOOGLE_CLOUD_TTS_LANGUAGE_CODE,
-                name=GOOGLE_CLOUD_TTS_VOICE_NAME,
+                language_code=language,
+                name=voice_name,
             )
             audio_config = google_texttospeech.AudioConfig(
                 audio_encoding=google_texttospeech.AudioEncoding.MP3,
-                speaking_rate=GOOGLE_CLOUD_TTS_SPEAKING_RATE,
-                pitch=GOOGLE_CLOUD_TTS_PITCH,
+                speaking_rate=float(normalized_rate),
+                pitch=float(normalized_pitch),
             )
             request = google_texttospeech.SynthesizeSpeechRequest(
                 input=synthesis_input,
@@ -488,7 +496,7 @@ class TTSAudioMixin:
                 return await self._generate_gtts_with_retries(item)
 
         if item.engine == "gcloud":
-            return await self._generate_google_cloud_file(item.text)
+            return await self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch)
 
         return await self._generate_gtts_with_retries(item)
 

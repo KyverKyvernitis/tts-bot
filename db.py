@@ -5,6 +5,8 @@ from typing import Any, Dict, Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
+import config
+
 
 class SettingsDB:
     def __init__(self, uri: str, db_name: str, coll_name: str):
@@ -128,10 +130,15 @@ class SettingsDB:
             "language": str(tts.get("language", "") or ""),
             "rate": str(tts.get("rate", "") or ""),
             "pitch": str(tts.get("pitch", "") or ""),
+            "gcloud_voice": str(tts.get("gcloud_voice", "") or ""),
+            "gcloud_language": str(tts.get("gcloud_language", "") or ""),
+            "gcloud_rate": str(tts.get("gcloud_rate", "") or ""),
+            "gcloud_pitch": str(tts.get("gcloud_pitch", "") or ""),
             "bot_prefix": str(g.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(g.get("tts_prefix", ",") or ","),
             "gtts_prefix": str(g.get("gtts_prefix", g.get("tts_prefix", ".")) or "."),
             "edge_prefix": str(g.get("edge_prefix", ",") or ","),
+            "gcloud_prefix": str(g.get("gcloud_prefix", getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'")) or getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'")),
             "speech_limit_seconds": int(g.get("speech_limit_seconds", 30) or 30),
             "block_voice_bot": bool(g.get("block_voice_bot_enabled", True)),
             "only_target_user": bool(g.get("only_target_user_enabled", False)),
@@ -147,10 +154,15 @@ class SettingsDB:
         language: Optional[str] = None,
         rate: Optional[str] = None,
         pitch: Optional[str] = None,
+        gcloud_voice: Optional[str] = None,
+        gcloud_language: Optional[str] = None,
+        gcloud_rate: Optional[str] = None,
+        gcloud_pitch: Optional[str] = None,
         bot_prefix: Optional[str] = None,
         tts_prefix: Optional[str] = None,
         gtts_prefix: Optional[str] = None,
         edge_prefix: Optional[str] = None,
+        gcloud_prefix: Optional[str] = None,
         speech_limit_seconds: Optional[int] = None,
         block_voice_bot: Optional[bool] = None,
         only_target_user: Optional[bool] = None,
@@ -169,6 +181,14 @@ class SettingsDB:
             tts["rate"] = rate
         if pitch is not None:
             tts["pitch"] = pitch
+        if gcloud_voice is not None:
+            tts["gcloud_voice"] = gcloud_voice
+        if gcloud_language is not None:
+            tts["gcloud_language"] = gcloud_language
+        if gcloud_rate is not None:
+            tts["gcloud_rate"] = gcloud_rate
+        if gcloud_pitch is not None:
+            tts["gcloud_pitch"] = gcloud_pitch
         if bot_prefix is not None:
             doc["bot_prefix"] = str(bot_prefix or "_")[:8]
         if tts_prefix is not None:
@@ -177,6 +197,8 @@ class SettingsDB:
             doc["gtts_prefix"] = str(gtts_prefix or ".")[:8]
         if edge_prefix is not None:
             doc["edge_prefix"] = str(edge_prefix or ",")[:8]
+        if gcloud_prefix is not None:
+            doc["gcloud_prefix"] = str(gcloud_prefix or getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'"))[:8]
         if speech_limit_seconds is not None:
             try:
                 doc["speech_limit_seconds"] = max(1, min(600, int(speech_limit_seconds)))
@@ -201,6 +223,10 @@ class SettingsDB:
             "language": str(tts.get("language", "") or ""),
             "rate": str(tts.get("rate", "") or ""),
             "pitch": str(tts.get("pitch", "") or ""),
+            "gcloud_voice": str(tts.get("gcloud_voice", "") or ""),
+            "gcloud_language": str(tts.get("gcloud_language", "") or ""),
+            "gcloud_rate": str(tts.get("gcloud_rate", "") or ""),
+            "gcloud_pitch": str(tts.get("gcloud_pitch", "") or ""),
             "speaker_name": str(tts.get("speaker_name", "") or ""),
         }
 
@@ -214,6 +240,10 @@ class SettingsDB:
         language: Optional[str] = None,
         rate: Optional[str] = None,
         pitch: Optional[str] = None,
+        gcloud_voice: Optional[str] = None,
+        gcloud_language: Optional[str] = None,
+        gcloud_rate: Optional[str] = None,
+        gcloud_pitch: Optional[str] = None,
         speaker_name: Optional[str] = None,
     ):
         key = (guild_id, user_id)
@@ -230,6 +260,14 @@ class SettingsDB:
             tts["rate"] = rate
         if pitch is not None:
             tts["pitch"] = pitch
+        if gcloud_voice is not None:
+            tts["gcloud_voice"] = gcloud_voice
+        if gcloud_language is not None:
+            tts["gcloud_language"] = gcloud_language
+        if gcloud_rate is not None:
+            tts["gcloud_rate"] = gcloud_rate
+        if gcloud_pitch is not None:
+            tts["gcloud_pitch"] = gcloud_pitch
         if speaker_name is not None:
             cleaned_speaker_name = str(speaker_name or "").strip()
             if cleaned_speaker_name:
