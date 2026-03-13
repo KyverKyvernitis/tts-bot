@@ -4474,7 +4474,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view.message = msg
 
 
-    @_guild_scoped()
     @toggle.command(name="auto_leave", description="Ativa ou desativa o auto leave quando o bot ficar sozinho ou só com bots")
     @app_commands.describe(enabled="true para ativar, false para desativar")
     async def toggle_auto_leave(self, interaction: discord.Interaction, enabled: bool):
