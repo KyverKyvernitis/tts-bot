@@ -638,34 +638,6 @@ class EdgePrefixModal(discord.ui.Modal, title="Alterar prefixo do modo Edge"):
         )
 
 
-class UserAnnounceNameModal(discord.ui.Modal, title="Apelido falado no TTS"):
-    new_name = discord.ui.TextInput(
-        label="Apelido falado",
-        placeholder="Ex.: Lucas. Use 'auto' para limpar.",
-        required=True,
-        min_length=1,
-        max_length=32,
-    )
-
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message, owner_id: int, guild_id: int, *, target_user_id: int | None = None, target_user_name: str | None = None):
-        super().__init__()
-        self.cog = cog
-        self.panel_message = panel_message
-        self.owner_id = owner_id
-        self.guild_id = guild_id
-        self.target_user_id = target_user_id
-        self.target_user_name = target_user_name
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await self.cog._apply_user_announce_name_from_modal(
-            interaction,
-            announce_name=str(self.new_name),
-            panel_message=self.panel_message,
-            target_user_id=self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
-
-
 class TTSMainPanelView(_BaseTTSView):
     def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None):
         super().__init__(cog, owner_id, guild_id, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
@@ -677,8 +649,6 @@ class TTSMainPanelView(_BaseTTSView):
             self.remove_item(self.gtts_prefix_button)
             self.remove_item(self.edge_prefix_button)
             self.remove_item(self.announce_author_button)
-        else:
-            self.remove_item(self.user_announce_name_button)
 
     def _target_owner(self, interaction: discord.Interaction) -> int:
         return interaction.user.id if self.owner_id == 0 else self.owner_id
@@ -730,7 +700,7 @@ class TTSMainPanelView(_BaseTTSView):
     @discord.ui.button(label="Autor + frase", style=discord.ButtonStyle.secondary, emoji="🗣️", row=1)
     async def announce_author_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] announce_author_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Autor antes da frase", "Quando ativado, o bot fala 'Nome disse, frase' quando muda o usuário que está falando pelos prefixos. Ele tenta usar o nickname se for pronunciável; senão, usa a tag do usuário.", ToggleSelect(self.cog, "announce_author")).send(interaction)
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Autor antes da frase", "Quando ativado, o bot fala '@nome disse, frase' quando muda o usuário que está falando pelos prefixos.", ToggleSelect(self.cog, "announce_author")).send(interaction)
 
     @discord.ui.button(label="Prefixo do bot", style=discord.ButtonStyle.secondary, emoji="🤖", row=2)
     async def bot_prefix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -743,21 +713,6 @@ class TTSMainPanelView(_BaseTTSView):
     @discord.ui.button(label="Prefixo do Edge", style=discord.ButtonStyle.secondary, emoji="🔊", row=2)
     async def edge_prefix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(EdgePrefixModal(self.cog, interaction.message, self._target_owner(interaction), self.guild_id))
-
-    @discord.ui.button(label="Apelido autor", style=discord.ButtonStyle.secondary, emoji="🏷️", row=2)
-    async def user_announce_name_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        target_user_id = self.target_user_id if self.target_user_id is not None else interaction.user.id
-        target_user_name = self.target_user_name if self.target_user_name is not None else self.cog._member_panel_name(interaction.user)
-        await interaction.response.send_modal(
-            UserAnnounceNameModal(
-                self.cog,
-                interaction.message,
-                self._target_owner(interaction),
-                self.guild_id,
-                target_user_id=target_user_id,
-                target_user_name=target_user_name,
-            )
-        )
 
     @discord.ui.button(label="Entrar na call", style=discord.ButtonStyle.secondary, emoji="📥", row=2)
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -967,7 +922,6 @@ PITCH_CHOICES = [
 USER_CONFIG_ACTION_CHOICES = [
     app_commands.Choice(name="Abrir painel pessoal do usuário", value="panel"),
     app_commands.Choice(name="Resetar configurações do usuário para as do servidor", value="reset"),
-    app_commands.Choice(name="Alterar apelido falado no 'autor + frase'", value="announce_name"),
 ]
 
 
@@ -1072,34 +1026,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _guild_announce_author_enabled(self, guild_defaults: dict | None) -> bool:
         return bool((guild_defaults or {}).get("announce_author", False))
 
-    def _normalize_announce_name_input(self, value: str) -> tuple[str, bool]:
-        raw = _normalize_spaces(str(value or ""))
-        lowered = raw.lower()
-        if lowered in {"auto", "automatico", "automático", "padrao", "padrão", "default", "limpar", "remover", "nenhum"}:
-            return "", True
-        return _speech_name(raw), False
-
-    def _resolve_custom_announce_name(self, guild_id: int | None, user_id: int | None) -> str:
-        if not guild_id or not user_id:
-            return ""
-        db = self._get_db()
-        if db is None or not hasattr(db, "get_user_tts"):
-            return ""
-        try:
-            user_settings = db.get_user_tts(int(guild_id), int(user_id)) or {}
-        except Exception:
-            return ""
-        candidate = _speech_name(str((user_settings or {}).get("announce_name", "") or ""))
-        if candidate and _looks_pronounceable_for_tts(candidate):
-            return candidate
-        return ""
-
-    def _effective_tts_user_reference(self, guild_id: int | None, member: discord.abc.User | None) -> str:
-        custom_name = self._resolve_custom_announce_name(guild_id, getattr(member, "id", None))
-        if custom_name:
-            return custom_name
-        return self._tts_user_reference(member, guild_id=guild_id)
-
     def _apply_author_prefix_if_needed(self, guild_id: int, author: discord.abc.User | None, text: str, *, enabled: bool) -> str:
         text = str(text or "").strip()
         if not enabled or not text:
@@ -1111,7 +1037,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._last_announced_author_by_guild[int(guild_id)] = author_id
         if last_author_id == author_id:
             return text
-        speaker = self._effective_tts_user_reference(guild_id, author)
+        speaker = self._tts_user_reference(author)
         return f"{speaker} disse, {text}" if speaker else text
 
 
@@ -2187,9 +2113,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         *,
         title: str,
         description: str,
-        target_message: discord.Message | None = None,
     ):
-        channel = getattr(target_message, "channel", None) or interaction.channel
+        channel = interaction.channel
         if channel is None:
             return
 
@@ -2210,40 +2135,24 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             print(f"[tts_voice] Falha ao anunciar alteração do painel: {e}")
 
 
-    def _tts_user_reference(self, member: discord.abc.User | None, *, guild_id: int | None = None) -> str:
+    def _tts_user_reference(self, member: discord.abc.User | None) -> str:
         if member is None:
-            return "usuário"
-
-        custom_name = self._resolve_custom_announce_name(guild_id, getattr(member, "id", None))
-        if custom_name:
-            return custom_name
+            return "@usuário"
 
         display_name = _normalize_spaces(getattr(member, "display_name", None) or "")
+        username = _normalize_spaces(getattr(member, "name", None) or "")
+
         if _looks_pronounceable_for_tts(display_name):
             spoken = _speech_name(display_name)
             if spoken:
-                return spoken
+                return f"@{spoken}"
 
-        tag_candidates = []
+        if _looks_pronounceable_for_tts(username):
+            spoken = _speech_name(username)
+            if spoken:
+                return f"@{spoken}"
 
-        user_tag = _normalize_spaces(str(member) or "")
-        if user_tag:
-            tag_candidates.append(user_tag)
-
-        username = _normalize_spaces(getattr(member, "name", None) or "")
-        if username and username not in tag_candidates:
-            tag_candidates.append(username)
-
-        for candidate in tag_candidates:
-            normalized_candidate = _normalize_spaces(re.sub(r"[#@]+", " ", candidate))
-            if not normalized_candidate:
-                continue
-            if _looks_pronounceable_for_tts(normalized_candidate):
-                spoken = _speech_name(normalized_candidate)
-                if spoken:
-                    return spoken
-
-        return "usuário"
+        return "@usuário"
 
     def _tts_role_reference(self, role: discord.Role | None) -> str:
         name = _normalize_spaces(getattr(role, "name", None) or "")
@@ -2314,7 +2223,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             member = message.guild.get_member(member_id) if message.guild else None
             if member is None:
                 member = next((m for m in getattr(message, "mentions", []) if getattr(m, "id", None) == member_id), None)
-            return self._tts_user_reference(member, guild_id=getattr(getattr(message, "guild", None), "id", None))
+            return self._tts_user_reference(member)
 
         def replace_role(match: re.Match[str]) -> str:
             role_id = int(match.group(1))
@@ -2485,12 +2394,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 ("language", "idioma"),
                 ("rate", "velocidade"),
                 ("pitch", "tom"),
-                ("announce_name", "apelido falado"),
             )
             if str((user_settings or {}).get(key, "") or "").strip()
         ]
-        effective_announce_name = self._effective_tts_user_reference(guild_id, member)
-        custom_announce_name = _normalize_spaces(str((user_settings or {}).get("announce_name", "") or ""))
         source_line = (
             "**Origem:** usando padrões do servidor"
             if not customized_keys
@@ -2595,15 +2501,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         embed.add_field(name="Idioma do gTTS", value=f"`{resolved.get('language', 'Não definido')}`", inline=True)
         embed.add_field(name="Velocidade do Edge", value=f"`{resolved.get('rate', '+0%')}`", inline=True)
         embed.add_field(name="Tom do Edge", value=f"`{resolved.get('pitch', '+0Hz')}`", inline=True)
-        if not server:
-            custom_announce_name = _normalize_spaces(str((user_settings or {}).get('announce_name', '') or ''))
-            effective_announce_name = self._effective_tts_user_reference(guild_id, self.bot.get_guild(guild_id).get_member(user_id) if self.bot.get_guild(guild_id) else None)
-            announce_value = f"`{effective_announce_name}`"
-            if custom_announce_name:
-                announce_value += " (personalizado)"
-            else:
-                announce_value += " (automático)"
-            embed.add_field(name="Apelido no autor + frase", value=announce_value, inline=True)
         if server:
             embed.add_field(name="Prefixo do bot", value=f"`{guild_defaults.get('bot_prefix', '_')}`", inline=True)
             embed.add_field(name="Prefixo do modo gTTS", value=f"`{guild_defaults.get('gtts_prefix', guild_defaults.get('tts_prefix', '.'))}`", inline=True)
@@ -2796,74 +2693,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 print(f"[tts_panel] falha ao responder followup: {e!r}")
 
 
-
-    async def _apply_user_announce_name_from_modal(
-        self,
-        interaction: discord.Interaction,
-        *,
-        announce_name: str,
-        panel_message: discord.Message,
-        target_user_id: int | None = None,
-        target_user_name: str | None = None,
-    ):
-        if interaction.guild is None:
-            await interaction.response.send_message(embed=self._make_embed("Servidor obrigatório", "Esse ajuste só pode ser usado dentro de um servidor.", ok=False), ephemeral=True)
-            return
-
-        db = self._get_db()
-        if db is None or not hasattr(db, "set_user_tts"):
-            await interaction.response.send_message(embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False), ephemeral=True)
-            return
-
-        effective_user_id = int(target_user_id or interaction.user.id)
-        member = interaction.guild.get_member(effective_user_id)
-        effective_user_name = str(target_user_name or self._member_panel_name(member or interaction.user))
-        normalized_name, clear_requested = self._normalize_announce_name_input(announce_name)
-
-        if normalized_name and not _looks_pronounceable_for_tts(normalized_name):
-            await interaction.response.send_message(
-                embed=self._make_embed(
-                    "Apelido inválido",
-                    "Esse apelido tem caracteres que o TTS provavelmente não pronuncia bem. Use apenas letras, números simples, espaço, ponto, traço ou underline. Você também pode digitar `auto` para voltar ao nome automático.",
-                    ok=False,
-                ),
-                ephemeral=True,
-            )
-            return
-
-        if clear_requested:
-            history_entry = self._user_history_text(interaction, "removeu o apelido falado de", "nome automático", target_user_id=effective_user_id, target_user_name=effective_user_name)
-            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, announce_name="", history_entry=history_entry)
-            desc = f"O apelido falado no autor + frase de {effective_user_name} voltou para o modo automático."
-        else:
-            history_entry = self._user_history_text(interaction, "alterou o apelido falado de", normalized_name, target_user_id=effective_user_id, target_user_name=effective_user_name)
-            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, announce_name=normalized_name, history_entry=history_entry)
-            desc = f"O apelido falado no autor + frase de {effective_user_name} agora é `{normalized_name}`."
-
-        embed = await self._build_settings_embed(
-            interaction.guild.id,
-            effective_user_id,
-            server=False,
-            panel_kind="user",
-            target_user_name=effective_user_name,
-            viewer_user_id=interaction.user.id,
-        )
-        view = self._build_panel_view(
-            interaction.user.id,
-            interaction.guild.id,
-            server=False,
-            target_user_id=effective_user_id,
-            target_user_name=effective_user_name,
-        )
-        view.message = panel_message
-        await self._panel_update_after_change(
-            interaction,
-            embed=embed,
-            view=view,
-            target_message=panel_message,
-            title="Apelido atualizado",
-            description=desc,
-        )
 
     async def _apply_mode_from_panel(self, interaction: discord.Interaction, mode: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
         if server and not interaction.user.guild_permissions.kick_members:
@@ -3189,7 +3018,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
 
     async def _apply_only_target_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
-        panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
         if not interaction.user.guild_permissions.kick_members:
             await interaction.response.send_message(
                 embed=self._make_embed(
@@ -3213,10 +3041,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         desc = "Modo Cuca ativado." if enabled else "Modo Cuca desativado."
         history_entry = self._toggle_history_text(interaction, "ativou o Modo Cuca" if enabled else "desativou o Modo Cuca")
         await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
-        self._append_public_panel_history(message_id, history_entry)
+        self._append_public_panel_history(getattr(getattr(interaction, "message", None), "id", None), history_entry)
         last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("toggle_last_changes", []) or [])
-        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=message_id)
-        view = self._build_toggle_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id)
+        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=getattr(getattr(interaction, "message", None), "id", None))
+        view = self._build_toggle_view(0 if getattr(getattr(interaction, "message", None), "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id)
         await self._panel_update_after_change(
             interaction,
             embed=embed,
@@ -3228,62 +3056,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await self._announce_panel_change(interaction, title="Modo de TTS atualizado", description=desc)
 
 
-    async def _apply_announce_author_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
-        panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
-        if not interaction.user.guild_permissions.kick_members:
-            await interaction.response.send_message(
-                embed=self._make_embed(
-                    "Sem permissão",
-                    "Você precisa da permissão `Expulsar Membros` para usar esse painel.",
-                    ok=False,
-                ),
-                ephemeral=True,
-            )
-            return
-
-        db = self._get_db()
-        if db is None:
-            await interaction.response.send_message(
-                embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False),
-                ephemeral=True,
-            )
-            return
-
-        await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, announce_author=bool(enabled)))
-        desc = f"Autor antes da frase {'ativado' if enabled else 'desativado'}."
-        history_entry = self._server_history_text(interaction, "o autor antes da frase", "`Ativado`" if enabled else "`Desativado`")
-        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
-        self._append_public_panel_history(message_id, history_entry)
-        last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
-        embed = await self._build_settings_embed(
-            interaction.guild.id,
-            interaction.user.id,
-            server=True,
-            panel_kind="server",
-            last_changes=last_changes,
-            message_id=message_id,
-        )
-        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=True)
-        if panel_message is not None:
-            view.message = panel_message
-        await self._panel_update_after_change(
-            interaction,
-            embed=embed,
-            view=view,
-            title="Configuração de TTS atualizada",
-            description=desc,
-            target_message=panel_message,
-        )
-        await self._announce_panel_change(
-            interaction,
-            title="Configuração de TTS atualizada",
-            description=desc,
-            target_message=panel_message,
-        )
-
-
     async def _apply_block_voice_bot_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
-        panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
         if not interaction.user.guild_permissions.kick_members:
             await interaction.response.send_message(
                 embed=self._make_embed(
@@ -3307,10 +3080,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         desc = f"Bloqueio por outro bot {'ativado' if enabled else 'desativado'}."
         history_entry = self._toggle_history_text(interaction, "ativou o Bloqueio por outro bot" if enabled else "desativou o Bloqueio por outro bot")
         await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
-        self._append_public_panel_history(message_id, history_entry)
+        self._append_public_panel_history(getattr(getattr(interaction, "message", None), "id", None), history_entry)
         last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("toggle_last_changes", []) or [])
-        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=message_id)
-        view = self._build_toggle_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id)
+        embed = await self._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=getattr(getattr(interaction, "message", None), "id", None))
+        view = self._build_toggle_view(0 if getattr(getattr(interaction, "message", None), "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id)
         await self._panel_update_after_change(
             interaction,
             embed=embed,
@@ -3631,9 +3404,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
 
     @app_commands.command(name="usuario", description="Reseta ou abre o painel pessoal de TTS de um usuário")
-    @app_commands.describe(usuario="Usuário que terá as configurações alteradas", acao="Escolha se quer resetar, abrir o painel ou alterar o apelido falado", apelido="Novo apelido falado no autor + frase. Use auto para limpar")
+    @app_commands.describe(usuario="Usuário que terá as configurações alteradas", acao="Escolha se quer resetar ou abrir o painel")
     @app_commands.choices(acao=USER_CONFIG_ACTION_CHOICES)
-    async def usuario(self, interaction: discord.Interaction, usuario: discord.Member, acao: app_commands.Choice[str], apelido: str | None = None):
+    async def usuario(self, interaction: discord.Interaction, usuario: discord.Member, acao: app_commands.Choice[str]):
         await self._defer_ephemeral(interaction)
         if not await self._require_guild(interaction):
             return
@@ -3666,25 +3439,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 embed=self._make_embed("Configurações resetadas", f"As configurações de TTS de {target_name} agora seguem os padrões do servidor.", ok=True),
                 ephemeral=True,
             )
-            return
-
-        if action_value == "announce_name":
-            raw_alias = str(apelido or "").strip()
-            if not raw_alias:
-                await self._respond(interaction, embed=self._make_embed("Apelido obrigatório", "Informe o apelido falado. Você também pode usar `auto` para limpar e voltar ao nome automático.", ok=False), ephemeral=True)
-                return
-            normalized_name, clear_requested = self._normalize_announce_name_input(raw_alias)
-            if normalized_name and not _looks_pronounceable_for_tts(normalized_name):
-                await self._respond(interaction, embed=self._make_embed("Apelido inválido", "Esse apelido tem caracteres que o TTS provavelmente não pronuncia bem. Use letras, números simples, espaço, ponto, traço ou underline. Você também pode usar `auto` para limpar.", ok=False), ephemeral=True)
-                return
-            if clear_requested:
-                history_entry = f"{self._panel_actor_name(interaction)} removeu o apelido falado de {target_name} e voltou para o nome automático"
-                await self._set_user_tts_and_refresh(interaction.guild.id, usuario.id, announce_name="", history_entry=history_entry)
-                await self._respond(interaction, embed=self._make_embed("Apelido removido", f"{target_name} voltou a usar o nome automático no autor + frase.", ok=True), ephemeral=True)
-                return
-            history_entry = f"{self._panel_actor_name(interaction)} alterou o apelido falado de {target_name} para {normalized_name}"
-            await self._set_user_tts_and_refresh(interaction.guild.id, usuario.id, announce_name=normalized_name, history_entry=history_entry)
-            await self._respond(interaction, embed=self._make_embed("Apelido atualizado", f"{target_name} agora usa `{normalized_name}` no autor + frase.", ok=True), ephemeral=True)
             return
 
         embed = await self._build_settings_embed(
