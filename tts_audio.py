@@ -220,6 +220,13 @@ class TTSAudioMixin:
             setattr(self, "_tts_cache_order", cache_order)
         return cache_order
 
+    def _get_inflight_cache_tasks(self) -> dict[str, asyncio.Task]:
+        tasks = getattr(self, "_tts_inflight_cache_tasks", None)
+        if tasks is None:
+            tasks = {}
+            setattr(self, "_tts_inflight_cache_tasks", tasks)
+        return tasks
+
     def _touch_cache_entry(self, state: GuildTTSState, key: str) -> None:
         cache_order = self._get_global_cache_order()
         now = time.time()
@@ -434,6 +441,35 @@ class TTSAudioMixin:
                 pass
             raise
 
+    async def _resolve_or_generate_cached_audio(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:
+        key = self._cache_key(item)
+        inflight = self._get_inflight_cache_tasks()
+
+        existing = inflight.get(key)
+        if existing is not None:
+            return await existing
+
+        async def _runner() -> tuple[str, bool]:
+            cached = self._try_get_cached_path(state, item)
+            if cached:
+                return cached, False
+
+            generated = await self._generate_audio_file(item)
+            cached_path = await self._store_in_cache(state, item, generated)
+            if cached_path != generated:
+                with contextlib.suppress(Exception):
+                    os.remove(generated)
+                return cached_path, False
+            return generated, True
+
+        task = asyncio.create_task(_runner())
+        inflight[key] = task
+        try:
+            return await task
+        finally:
+            if inflight.get(key) is task:
+                inflight.pop(key, None)
+
     async def _generate_audio_file(self, item: QueueItem) -> str:
         if item.engine == "edge":
             try:
@@ -448,22 +484,15 @@ class TTSAudioMixin:
         return await self._generate_gtts_file(item.text, item.language)
 
     async def _resolve_audio_path(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:
+        should_cache = len(self._normalize_cache_text(item.text)) <= 220
+        if should_cache:
+            return await self._resolve_or_generate_cached_audio(state, item)
+
         cached = self._try_get_cached_path(state, item)
         if cached:
             return cached, False
 
         generated = await self._generate_audio_file(item)
-
-        should_cache = len(self._normalize_cache_text(item.text)) <= 220
-        if should_cache:
-            cached_path = await self._store_in_cache(state, item, generated)
-            if cached_path != generated:
-                try:
-                    os.remove(generated)
-                except Exception:
-                    pass
-                return cached_path, False
-
         return generated, True
 
     async def _play_file(self, vc: discord.VoiceClient, path: str) -> None:

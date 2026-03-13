@@ -56,6 +56,7 @@ class SettingsDB:
     async def load_cache(self):
         self.guild_cache.clear()
         self.user_cache.clear()
+        self._resolved_tts_cache.clear()
         cursor = self.coll.find({}, {"_id": 0})
         async for doc in cursor:
             doc_type = doc.get("type")
@@ -74,7 +75,22 @@ class SettingsDB:
         doc["type"] = "guild"
         doc["guild_id"] = guild_id
         self.guild_cache[guild_id] = doc
+        self._invalidate_resolved_tts_cache(guild_id=guild_id)
         await self.coll.update_one({"type": "guild", "guild_id": guild_id}, {"$set": doc}, upsert=True)
+
+    def _invalidate_resolved_tts_cache(self, *, guild_id: int | None = None, user_id: int | None = None):
+        if guild_id is None and user_id is None:
+            self._resolved_tts_cache.clear()
+            return
+
+        if guild_id is not None and user_id is not None:
+            self._resolved_tts_cache.pop((guild_id, user_id), None)
+            return
+
+        if guild_id is not None:
+            stale = [key for key in self._resolved_tts_cache if key[0] == guild_id]
+            for key in stale:
+                self._resolved_tts_cache.pop(key, None)
 
     def anti_mzk_enabled(self, guild_id: int) -> bool:
         g = self.guild_cache.get(guild_id, {})
@@ -314,6 +330,7 @@ class SettingsDB:
             doc["guild_id"] = guild_id
             doc["user_id"] = user_id
             self.user_cache[key] = doc
+            self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
             await self.coll.update_one(
                 {"type": "user", "guild_id": guild_id, "user_id": user_id},
                 {"$unset": {"tts": ""}, "$set": doc},
@@ -321,11 +338,17 @@ class SettingsDB:
             )
         else:
             self.user_cache.pop(key, None)
+            self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
             await self.coll.delete_one({"type": "user", "guild_id": guild_id, "user_id": user_id})
 
         return had_tts
 
     def resolve_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
+        cache_key = (guild_id, user_id)
+        cached = self._resolved_tts_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
         user = self.get_user_tts(guild_id, user_id)
         guild = self.get_guild_tts_defaults(guild_id)
 
@@ -336,7 +359,7 @@ class SettingsDB:
         if engine not in ("edge", "gtts", "gcloud"):
             engine = "gtts"
 
-        return {
+        resolved = {
             "engine": engine,
             "voice": pick("voice", "pt-BR-FranciscaNeural"),
             "language": pick("language", "pt-br"),
@@ -354,6 +377,8 @@ class SettingsDB:
             "gcloud_prefix": str(guild.get("gcloud_prefix", "'") or "'"),
             "speech_limit_seconds": int(guild.get("speech_limit_seconds", 30) or 30),
         }
+        self._resolved_tts_cache[cache_key] = dict(resolved)
+        return resolved
 
     def get_panel_history(self, guild_id: int, user_id: int) -> Dict[str, Any]:
         guild_doc = self.guild_cache.get(guild_id, {})
