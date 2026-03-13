@@ -23,6 +23,13 @@ from tts_audio import GuildTTSState, QueueItem, TTSAudioMixin
 from typing import Callable
 
 
+_TTS_GUILD_OBJECTS = [discord.Object(id=guild_id) for guild_id in getattr(config, "GUILD_IDS", [])]
+
+
+def _guild_scoped():
+    return app_commands.guilds(*_TTS_GUILD_OBJECTS) if _TTS_GUILD_OBJECTS else (lambda f: f)
+
+
 def _shorten(text: str, limit: int = 100) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -1806,6 +1813,23 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await self._respond(interaction, embed=self._make_embed("Sem permissão", "Você precisa da permissão `Expulsar Membros` para usar esse comando.", ok=False), ephemeral=True)
         return False
 
+    async def _require_staff_or_kick_members(self, interaction: discord.Interaction) -> bool:
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if perms and (perms.kick_members or perms.manage_guild or perms.administrator):
+            return True
+        await self._respond(interaction, embed=self._make_embed("Sem permissão", "Você precisa ser staff ou ter a permissão `Expulsar Membros` para usar esse comando.", ok=False), ephemeral=True)
+        return False
+
+    async def _require_toggle_allowed_guild(self, interaction: discord.Interaction) -> bool:
+        guild_ids = getattr(config, "GUILD_IDS", []) or []
+        if not guild_ids:
+            return True
+        guild = getattr(interaction, "guild", None)
+        if guild and guild.id in guild_ids:
+            return True
+        await self._respond(interaction, embed=self._make_embed("Indisponível aqui", "Esse comando só está habilitado nos servidores definidos na env.", ok=False), ephemeral=True)
+        return False
+
     def _normalize_rate_value(self, raw: str) -> str | None:
         value = str(raw).strip().replace("％", "%").replace("−", "-").replace("–", "-").replace("—", "-").replace(" ", "")
         if value.endswith("%"):
@@ -1918,6 +1942,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return not any(not m.bot for m in members)
 
     async def _disconnect_if_alone_or_only_bots(self, guild: discord.Guild):
+        db = self._get_db()
+        guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(guild.id)) if db else {}
+        if guild_defaults is not None and not bool((guild_defaults or {}).get("auto_leave", True)):
+            return
+
         vc = self._get_voice_client_for_guild(guild)
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
@@ -2857,6 +2886,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         embed.add_field(
             name="Modo Cuca",
             value="`Ativado`" if bool(guild_defaults.get("only_target_user", False)) else "`Desativado`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Auto leave",
+            value="`Ativado`" if bool(guild_defaults.get("auto_leave", True)) else "`Desativado`",
             inline=True,
         )
         history_text = self._format_history_entries(last_changes or [], viewer_user_id=viewer_user_id or user_id, message_id=message_id)
@@ -4438,6 +4472,30 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view.attach_message(msg)
         else:
             view.message = msg
+
+
+    @_guild_scoped()
+    @toggle.command(name="auto_leave", description="Ativa ou desativa o auto leave quando o bot ficar sozinho ou só com bots")
+    @app_commands.describe(enabled="true para ativar, false para desativar")
+    async def toggle_auto_leave(self, interaction: discord.Interaction, enabled: bool):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_toggle_allowed_guild(interaction):
+            return
+        if not await self._require_staff_or_kick_members(interaction):
+            return
+        db = self._get_db()
+        if db is None:
+            await self._respond(interaction, embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False), ephemeral=True)
+            return
+
+        await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, auto_leave=bool(enabled)))
+        history_entry = self._toggle_history_text(interaction, "ativou o Auto leave" if enabled else "desativou o Auto leave")
+        if hasattr(db, "set_guild_panel_last_change"):
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
+        title = "Auto leave atualizado"
+        desc = "Auto leave ativado: o bot vai sair automaticamente quando ficar sozinho ou só com bots na call." if enabled else "Auto leave desativado: o bot não vai mais sair automaticamente quando ficar sozinho ou só com bots na call."
+        await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
 
     @app_commands.describe(enabled="true para ativar, false para desativar")
