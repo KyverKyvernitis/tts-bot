@@ -3,6 +3,8 @@ import asyncio
 import time
 import re
 import weakref
+import unicodedata
+from urllib.parse import urlparse
 from typing import Optional
 
 import discord
@@ -79,6 +81,73 @@ _TTS_ABBREVIATION_PATTERN = re.compile(
     r"\b(" + "|".join(re.escape(k) for k in sorted(_TTS_ABBREVIATION_MAP, key=len, reverse=True)) + r")\b",
     flags=re.IGNORECASE,
 )
+
+
+USER_MENTION_PATTERN = re.compile(r"<@!?(\d+)>")
+ROLE_MENTION_PATTERN = re.compile(r"<@&(\d+)>")
+CHANNEL_MENTION_PATTERN = re.compile(r"<#(\d+)>")
+URL_PATTERN = re.compile(r"https?://[^\s<>]+", flags=re.IGNORECASE)
+DISCORD_CHANNEL_URL_PATTERN = re.compile(
+    r"https?://(?:canary\.|ptb\.)?(?:www\.)?discord(?:app)?\.com/channels/(@me|\d+)/(\d+)(?:/\d+)?",
+    flags=re.IGNORECASE,
+)
+_ATTACHMENT_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".svg", ".avif", ".heic", ".heif")
+_ATTACHMENT_VIDEO_EXTENSIONS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".wmv", ".flv", ".3gp")
+_COMMON_MULTI_PART_TLDS = {"com", "net", "org", "gov", "edu", "co"}
+
+
+def _normalize_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _speech_name(text: str) -> str:
+    text = _normalize_spaces(text)
+    if not text:
+        return ""
+    text = re.sub(r"[_\-.]+", " ", text)
+    return _normalize_spaces(text)
+
+
+def _looks_pronounceable_for_tts(text: str) -> bool:
+    text = _normalize_spaces(text)
+    if not text:
+        return False
+
+    non_space = [ch for ch in text if not ch.isspace()]
+    if not non_space:
+        return False
+
+    alnum_count = sum(ch.isalnum() for ch in non_space)
+    friendly_count = sum(ch.isalnum() or ch in "._-" for ch in non_space)
+    symbol_count = sum(unicodedata.category(ch).startswith("S") for ch in non_space)
+    hard_punct = {"[", "]", "{", "}", "(", ")", "<", ">", "~", "^", "`", "|", chr(92), "/", '"', "'", "*", "=", ":", ";", "+", ","}
+    hard_punct_count = sum(ch in hard_punct for ch in non_space)
+
+    if alnum_count == 0:
+        return False
+    if friendly_count / max(1, len(non_space)) < 0.6:
+        return False
+    if symbol_count >= 1:
+        return False
+    if hard_punct_count >= 2:
+        return False
+    return True
+
+
+def _extract_primary_domain(hostname: str) -> str:
+    host = str(hostname or "").strip().lower().strip(".")
+    if not host:
+        return ""
+    parts = [part for part in host.split(".") if part]
+    if not parts:
+        return ""
+    while len(parts) > 2 and parts[0] in {"www", "m", "ptb", "canary", "cdn", "media"}:
+        parts = parts[1:]
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _COMMON_MULTI_PART_TLDS:
+        return parts[-3]
+    if len(parts) >= 2:
+        return parts[-2]
+    return parts[0]
 
 
 def _expand_abbreviations_for_tts(text: str) -> str:
@@ -1009,6 +1078,21 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             lines.append(line)
         return "\n".join(lines)
 
+    def _format_status_history_entries(self, entries: list[str], *, viewer_user_id: int | None = None) -> str:
+        entries = [str(x) for x in (entries or []) if str(x or "").strip()]
+        if not entries:
+            return ""
+        lines = []
+        recent_entries = entries[-2:]
+        for idx, entry in enumerate(recent_entries):
+            rendered = self._render_history_entry(entry, viewer_user_id=viewer_user_id, message_id=None)
+            safe = rendered.replace("`", "'")
+            line = f"• {safe}"
+            if idx == len(recent_entries) - 1:
+                line = f"**{line}**"
+            lines.append(line)
+        return "\n".join(lines)
+
     def _get_public_panel_history(self, message_id: int | None) -> list[str]:
         if not message_id:
             return []
@@ -1579,8 +1663,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             resolved["rate"] = resolved.get("rate") or "+0%"
             resolved["pitch"] = resolved.get("pitch") or "+0Hz"
 
-        text = _replace_custom_emojis_for_tts(message.content[len(active_prefix):].strip())
-        text = _expand_abbreviations_for_tts(text)
+        text = self._render_tts_text(message, message.content[len(active_prefix):].strip())
         if not text:
             print("[tts_voice] ignorado | texto vazio após prefixo")
             return
@@ -2017,6 +2100,118 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             print(f"[tts_voice] Falha ao anunciar alteração do painel: {e}")
 
 
+    def _tts_user_reference(self, member: discord.abc.User | None) -> str:
+        if member is None:
+            return "@usuário"
+
+        display_name = _normalize_spaces(getattr(member, "display_name", None) or "")
+        username = _normalize_spaces(getattr(member, "name", None) or "")
+
+        if _looks_pronounceable_for_tts(display_name):
+            spoken = _speech_name(display_name)
+            if spoken:
+                return f"@{spoken}"
+
+        if _looks_pronounceable_for_tts(username):
+            spoken = _speech_name(username)
+            if spoken:
+                return f"@{spoken}"
+
+        return "@usuário"
+
+    def _tts_role_reference(self, role: discord.Role | None) -> str:
+        name = _normalize_spaces(getattr(role, "name", None) or "")
+        if _looks_pronounceable_for_tts(name):
+            spoken = _speech_name(name)
+            if spoken:
+                return f"cargo {spoken}"
+        return "cargo do discord"
+
+    def _tts_channel_reference(self, channel) -> str:
+        name = _normalize_spaces(getattr(channel, "name", None) or "")
+        if _looks_pronounceable_for_tts(name):
+            spoken = _speech_name(name)
+            if spoken:
+                return f"canal {spoken}"
+        return "canal do discord"
+
+    def _tts_link_reference(self, url: str, *, guild: discord.Guild | None = None) -> str:
+        cleaned_url = str(url or "").strip().rstrip(".,!?)]}")
+        match = DISCORD_CHANNEL_URL_PATTERN.fullmatch(cleaned_url)
+        if match and guild is not None:
+            channel_id = int(match.group(2))
+            channel = guild.get_channel(channel_id)
+            return self._tts_channel_reference(channel)
+
+        try:
+            parsed = urlparse(cleaned_url)
+        except Exception:
+            return "link"
+
+        domain = _extract_primary_domain(parsed.hostname or "")
+        if _looks_pronounceable_for_tts(domain):
+            spoken = _speech_name(domain)
+            if spoken:
+                return f"link do {spoken}"
+        return "link"
+
+    def _tts_attachment_descriptions(self, attachments) -> list[str]:
+        descriptions: list[str] = []
+        for attachment in attachments or []:
+            content_type = str(getattr(attachment, "content_type", "") or "").lower()
+            filename = str(getattr(attachment, "filename", "") or "").lower()
+            if content_type == "image/gif" or filename.endswith(".gif"):
+                descriptions.append("Anexo em GIF")
+            elif content_type.startswith("image/") or filename.endswith(_ATTACHMENT_IMAGE_EXTENSIONS):
+                descriptions.append("Anexo de imagem")
+            elif content_type.startswith("video/") or filename.endswith(_ATTACHMENT_VIDEO_EXTENSIONS):
+                descriptions.append("Anexo de vídeo")
+        return descriptions
+
+    def _append_tts_descriptions(self, text: str, descriptions: list[str]) -> str:
+        text = _normalize_spaces(text)
+        descriptions = [_normalize_spaces(item) for item in (descriptions or []) if _normalize_spaces(item)]
+        if not descriptions:
+            return text
+        suffix = ". ".join(descriptions)
+        if not text:
+            return suffix
+        if text.endswith((".", "!", "?", "…")):
+            return f"{text} {suffix}"
+        return f"{text}. {suffix}"
+
+    def _render_tts_text(self, message: discord.Message, raw_text: str) -> str:
+        text = _replace_custom_emojis_for_tts(raw_text)
+
+        def replace_user(match: re.Match[str]) -> str:
+            member_id = int(match.group(1))
+            member = message.guild.get_member(member_id) if message.guild else None
+            if member is None:
+                member = next((m for m in getattr(message, "mentions", []) if getattr(m, "id", None) == member_id), None)
+            return self._tts_user_reference(member)
+
+        def replace_role(match: re.Match[str]) -> str:
+            role_id = int(match.group(1))
+            role = message.guild.get_role(role_id) if message.guild else None
+            if role is None:
+                role = next((r for r in getattr(message, "role_mentions", []) if getattr(r, "id", None) == role_id), None)
+            return self._tts_role_reference(role)
+
+        def replace_channel(match: re.Match[str]) -> str:
+            channel_id = int(match.group(1))
+            channel = message.guild.get_channel(channel_id) if message.guild else None
+            return self._tts_channel_reference(channel)
+
+        def replace_url(match: re.Match[str]) -> str:
+            return self._tts_link_reference(match.group(0), guild=message.guild)
+
+        text = USER_MENTION_PATTERN.sub(replace_user, text)
+        text = ROLE_MENTION_PATTERN.sub(replace_role, text)
+        text = CHANNEL_MENTION_PATTERN.sub(replace_channel, text)
+        text = URL_PATTERN.sub(replace_url, text)
+        text = _expand_abbreviations_for_tts(text)
+        return self._append_tts_descriptions(text, self._tts_attachment_descriptions(getattr(message, "attachments", [])))
+
     def _user_history_text(self, interaction: discord.Interaction, what: str, value: str, *, message_id: int | None = None, target_user_id: int | None = None, target_user_name: str | None = None) -> str:
         actor_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
         target_id = int(target_user_id or actor_id or 0)
@@ -2121,10 +2316,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         guild = self.bot.get_guild(guild_id)
         vc = self._get_voice_client_for_guild(guild)
         state = self.guild_states.get(guild_id)
-        queue_size = int(getattr(getattr(state, 'queue', None), 'qsize', lambda: 0)() if state else 0)
+        queue_size = int(getattr(getattr(state, "queue", None), "qsize", lambda: 0)() if state else 0)
         is_connected = bool(vc and vc.is_connected())
         is_playing = bool(vc and (vc.is_playing() or vc.is_paused()))
-        bot_channel = getattr(getattr(vc, 'channel', None), 'mention', None) or (f"`{getattr(getattr(vc, 'channel', None), 'name', 'Desconhecido')}`" if getattr(vc, 'channel', None) is not None else "Desconectado")
+        bot_channel = getattr(getattr(vc, "channel", None), "mention", None) or (f"`{getattr(getattr(vc, 'channel', None), 'name', 'Desconhecido')}`" if getattr(vc, "channel", None) is not None else "Desconectado")
         user_channel = self._status_voice_channel_text(guild, user_id)
         member = guild.get_member(user_id) if guild else None
         target_name = str(target_user_name or self._member_panel_name(member))
@@ -2143,7 +2338,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         embed = discord.Embed(title=title, description=description, color=color, timestamp=discord.utils.utcnow())
 
         if member is not None:
-            avatar = getattr(getattr(member, 'display_avatar', None), 'url', None)
+            avatar = getattr(getattr(member, "display_avatar", None), "url", None)
             if avatar:
                 embed.set_thumbnail(url=avatar)
 
@@ -2156,11 +2351,22 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         ]
         embed.add_field(name="Resumo rápido", value=" • ".join(summary_bits), inline=False)
 
-        custom_keys = []
-        for key, label in (("engine", "engine"), ("voice", "voz"), ("language", "idioma"), ("rate", "velocidade"), ("pitch", "tom")):
-            if str((user_settings or {}).get(key, "") or "").strip():
-                custom_keys.append(label)
-        origin_line = "Origem: usando padrões do servidor" if not custom_keys else f"Personalizado: {', '.join(custom_keys)}"
+        customized_keys = [
+            label
+            for key, label in (
+                ("engine", "engine"),
+                ("voice", "voz"),
+                ("language", "idioma"),
+                ("rate", "velocidade"),
+                ("pitch", "tom"),
+            )
+            if str((user_settings or {}).get(key, "") or "").strip()
+        ]
+        source_line = (
+            "**Origem:** usando padrões do servidor"
+            if not customized_keys
+            else "**Personalizado:** " + ", ".join(customized_keys)
+        )
 
         embed.add_field(
             name="🎛️ Configuração ativa",
@@ -2170,7 +2376,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 f"**Idioma:** `{resolved.get('language', 'Não definido')}`\n"
                 f"**Velocidade:** `{resolved.get('rate', '+0%')}`\n"
                 f"**Tom:** `{resolved.get('pitch', '+0Hz')}`\n"
-                f"**{origin_line}**"
+                f"{source_line}"
             ),
             inline=False,
         )
