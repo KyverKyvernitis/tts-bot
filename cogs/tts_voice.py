@@ -1184,11 +1184,28 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         ephemeral: bool = True,
     ):
         if interaction.response.is_done():
+            response_type = getattr(interaction.response, "type", None)
+            deferred_types = {
+                discord.InteractionResponseType.deferred_channel_message,
+                discord.InteractionResponseType.deferred_message_update,
+            }
+            if response_type in deferred_types:
+                await interaction.edit_original_response(
+                    content=content,
+                    embed=embed,
+                    view=view,
+                )
+                try:
+                    return await interaction.original_response()
+                except Exception:
+                    return None
+
             return await interaction.followup.send(
                 content=content,
                 embed=embed,
                 view=view,
                 ephemeral=ephemeral,
+                wait=True,
             )
         await interaction.response.send_message(
             content=content,
