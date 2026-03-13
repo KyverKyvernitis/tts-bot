@@ -2139,35 +2139,34 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         ]
         embed.add_field(name="Resumo rápido", value=" • ".join(summary_bits), inline=False)
 
-        config_lines = [
-            f"**Engine:** {self._status_engine_label(str(resolved.get('engine', 'gtts')))}",
-            f"**Voz:** `{resolved.get('voice', 'Não definido')}`",
-            f"**Idioma:** `{resolved.get('language', 'Não definido')}`",
-            f"**Velocidade:** `{resolved.get('rate', '+0%')}` • **Tom:** `{resolved.get('pitch', '+0Hz')}`",
-        ]
-        if user_settings:
-            changed_keys = []
-            for key, label in (("engine", "engine"), ("voice", "voz"), ("language", "idioma"), ("rate", "velocidade"), ("pitch", "tom")):
-                if key in user_settings:
-                    changed_keys.append(label)
-            if changed_keys:
-                config_lines.append(f"**Personalizado:** {', '.join(changed_keys)}")
-            else:
-                config_lines.append("**Origem:** usando padrões do servidor")
-        else:
-            config_lines.append("**Origem:** usando padrões do servidor")
-
         embed.add_field(
             name="🎛️ Configuração ativa",
-            value="\n".join(config_lines),
-            inline=False,
+            value=(
+                f"**Engine:** {self._status_engine_label(str(resolved.get('engine', 'gtts')))}\n"
+                f"**Voz:** `{resolved.get('voice', 'Não definido')}`\n"
+                f"**Idioma:** `{resolved.get('language', 'Não definido')}`\n"
+                f"**Velocidade:** `{resolved.get('rate', '+0%')}`\n"
+                f"**Tom:** `{resolved.get('pitch', '+0Hz')}`"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="🧩 Origem",
+            value=(
+                f"**Engine:** {self._status_source_badge(self._setting_origin_label(user_settings, 'engine'))}\n"
+                f"**Voz:** {self._status_source_badge(self._setting_origin_label(user_settings, 'voice'))}\n"
+                f"**Idioma:** {self._status_source_badge(self._setting_origin_label(user_settings, 'language'))}\n"
+                f"**Velocidade:** {self._status_source_badge(self._setting_origin_label(user_settings, 'rate'))}\n"
+                f"**Tom:** {self._status_source_badge(self._setting_origin_label(user_settings, 'pitch'))}"
+            ),
+            inline=True,
         )
         embed.add_field(
             name="🛰️ Estado atual",
             value=(
                 f"**Você:** {user_channel}\n"
                 f"**Bot:** {bot_channel}\n"
-                f"**Conexão:** {self._status_badge(is_connected, on='Conectado', off='Desconectado')} • "
+                f"**Conexão:** {self._status_badge(is_connected, on='Conectado', off='Desconectado')}\n"
                 f"**Reprodução:** {self._status_badge(is_playing, on='Falando agora', off='Parado')}\n"
                 f"**Fila:** `{queue_label}`"
             ),
@@ -2183,7 +2182,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if history_text:
             embed.add_field(name="🕘 Últimas alterações", value=history_text, inline=False)
 
-        footer_text = "Sincronizado com o histórico do tts menu."
+        footer_text = "Sincronizado com o histórico do seu tts menu." if not public and int(user_id or 0) == int(viewer_user_id or 0) else "Sincronizado com o histórico do tts menu."
         embed.set_footer(text=footer_text)
         return embed
 
@@ -3074,10 +3073,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         action_value = str(getattr(acao, "value", "self") or "self")
-        if action_value == "self":
-            await self._defer_ephemeral(interaction)
-        elif not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=False)
 
         if action_value == "show_other":
             if usuario is None:
