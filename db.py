@@ -333,7 +333,7 @@ class SettingsDB:
             return (user.get(key) or "").strip() or (guild.get(key) or "").strip() or fallback
 
         engine = pick("engine", "gtts").lower()
-        if engine not in ("edge", "gtts"):
+        if engine not in ("edge", "gtts", "gcloud"):
             engine = "gtts"
 
         return {
@@ -342,11 +342,16 @@ class SettingsDB:
             "language": pick("language", "pt-br"),
             "rate": pick("rate", "+0%"),
             "pitch": pick("pitch", "+0Hz"),
+            "gcloud_voice": pick("gcloud_voice", "pt-BR-Standard-A"),
+            "gcloud_language": pick("gcloud_language", "pt-BR"),
+            "gcloud_rate": pick("gcloud_rate", "1.0"),
+            "gcloud_pitch": pick("gcloud_pitch", "0.0"),
             "speaker_name": str(user.get("speaker_name", "") or ""),
             "bot_prefix": str(guild.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(guild.get("tts_prefix", ",") or ","),
             "gtts_prefix": str(guild.get("gtts_prefix", guild.get("tts_prefix", ".")) or "."),
             "edge_prefix": str(guild.get("edge_prefix", ",") or ","),
+            "gcloud_prefix": str(guild.get("gcloud_prefix", "'") or "'"),
             "speech_limit_seconds": int(guild.get("speech_limit_seconds", 30) or 30),
         }
 
