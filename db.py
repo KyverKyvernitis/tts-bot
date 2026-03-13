@@ -155,6 +155,7 @@ class SettingsDB:
         block_voice_bot: Optional[bool] = None,
         only_target_user: Optional[bool] = None,
         announce_author: Optional[bool] = None,
+        announce_name: Optional[str] = None,
     ):
         doc = self._get_guild_doc(guild_id)
         tts = doc.get("tts_defaults", {}) or {}
