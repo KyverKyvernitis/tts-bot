@@ -75,11 +75,20 @@ class BotLocal(commands.Bot):
 
         should_sync = str(os.getenv("SYNC_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
         if should_sync:
-            synced = await self.tree.sync()
-            print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced)}")
-            for cmd in synced:
+            synced_global = await self.tree.sync()
+            print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced_global)}")
+            for cmd in synced_global:
                 name = getattr(cmd, "name", None) or str(cmd)
-                print(f"[SYNC] /{name}")
+                print(f"[SYNC][GLOBAL] /{name}")
+
+            guild_ids = getattr(config, "GUILD_IDS", []) or []
+            for guild_id in guild_ids:
+                guild_obj = discord.Object(id=guild_id)
+                synced_guild = await self.tree.sync(guild=guild_obj)
+                print(f"[SYNC] Slash commands sincronizados na guild {guild_id}: {len(synced_guild)}")
+                for cmd in synced_guild:
+                    name = getattr(cmd, "name", None) or str(cmd)
+                    print(f"[SYNC][GUILD {guild_id}] /{name}")
         else:
             print("[SYNC] Pulado no boot (defina SYNC_SLASH_COMMANDS=true para sincronizar no startup)")
 
