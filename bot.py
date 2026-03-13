@@ -75,11 +75,29 @@ class BotLocal(commands.Bot):
 
         should_sync = str(os.getenv("SYNC_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
         if should_sync:
-            synced = await self.tree.sync()
-            print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced)}")
-            for cmd in synced:
-                name = getattr(cmd, "name", None) or str(cmd)
-                print(f"[SYNC] /{name}")
+            guild_ids = list(getattr(config, "GUILD_IDS", []) or [])
+            if guild_ids:
+                total_synced = 0
+                seen_names: set[str] = set()
+                for guild_id in guild_ids:
+                    guild_obj = discord.Object(id=int(guild_id))
+                    self.tree.copy_global_to(guild=guild_obj)
+                    synced = await self.tree.sync(guild=guild_obj)
+                    total_synced += len(synced)
+                    print(f"[SYNC] Slash commands sincronizados para guild {guild_id}: {len(synced)}")
+                    for cmd in synced:
+                        name = getattr(cmd, "qualified_name", None) or getattr(cmd, "name", None) or str(cmd)
+                        if name in seen_names:
+                            continue
+                        seen_names.add(name)
+                        print(f"[SYNC] /{name}")
+                print(f"[SYNC] Total sincronizado em guilds de desenvolvimento: {total_synced}")
+            else:
+                synced = await self.tree.sync()
+                print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced)}")
+                for cmd in synced:
+                    name = getattr(cmd, "qualified_name", None) or getattr(cmd, "name", None) or str(cmd)
+                    print(f"[SYNC] /{name}")
         else:
             print("[SYNC] Pulado no boot (defina SYNC_SLASH_COMMANDS=true para sincronizar no startup)")
 
