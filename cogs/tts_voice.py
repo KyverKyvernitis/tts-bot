@@ -2861,8 +2861,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             embed=embed,
             view=view,
             target_message=panel_message,
-            success_title="Apelido atualizado",
-            success_description=desc,
+            title="Apelido atualizado",
+            description=desc,
         )
 
     async def _apply_mode_from_panel(self, interaction: discord.Interaction, mode: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
