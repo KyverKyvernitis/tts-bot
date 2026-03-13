@@ -1660,7 +1660,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     def _gcloud_voice_priority(self, voice_name: str) -> tuple[int, str]:
         value = str(voice_name or '').strip()
-        order = [('Standard', 0), ('Neural2', 1), ('Wavenet', 2), ('Studio', 3), ('Chirp3-HD', 4), ('Chirp3', 4)]
+        order = [('Studio', 0), ('Neural2', 1), ('Wavenet', 2), ('Standard', 3), ('Chirp3-HD', 4), ('Chirp3', 4)]
         family_rank = 99
         for token, rank in order:
             if token.lower() in value.lower():
@@ -1668,17 +1668,20 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 break
         return (family_rank, value.lower())
 
-    def _describe_gcloud_voice(self, voice_name: str) -> str:
+    def _split_gcloud_voice_name(self, voice_name: str) -> tuple[str, str]:
         value = str(voice_name or '').strip()
         family = 'Google Cloud'
-        for token, label in [('Standard', 'Standard'), ('Neural2', 'Neural2'), ('Wavenet', 'WaveNet'), ('Studio', 'Studio'), ('Chirp3-HD', 'Chirp 3 HD'), ('Chirp3', 'Chirp 3')]:
+        for token, label in [('Studio', 'Studio'), ('Neural2', 'Neural2'), ('Wavenet', 'WaveNet'), ('Standard', 'Standard'), ('Chirp3-HD', 'Chirp 3 HD'), ('Chirp3', 'Chirp 3')]:
             if token.lower() in value.lower():
                 family = label
                 break
         tail = value.rsplit('-', 1)[-1] if '-' in value else ''
-        if len(tail) <= 3 and tail.isalnum():
-            return _shorten(f'{family} · variante {tail}', 100)
-        return _shorten(f'{family} disponível no Google Cloud', 100)
+        variant = f'variante {tail}' if len(tail) <= 3 and tail.isalnum() else value
+        return family, variant
+
+    def _describe_gcloud_voice(self, voice_name: str) -> str:
+        family, variant = self._split_gcloud_voice_name(voice_name)
+        return _shorten(f'{family} · {variant}', 100)
 
     def _build_gcloud_voice_options_from_catalog(self, catalog: list[dict[str, object]], language_code: str, current_value: str | None = None) -> list[discord.SelectOption]:
         language_code = str(language_code or '').strip() or str(getattr(config, 'GOOGLE_CLOUD_TTS_LANGUAGE_CODE', 'pt-BR') or 'pt-BR')
@@ -1697,10 +1700,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             if name not in seen:
                 seen.add(name)
                 ordered_names.append(name)
-        return [
-            discord.SelectOption(label=_shorten(name, 100), description=self._describe_gcloud_voice(name), value=name, default=(name == current_value))
-            for name in ordered_names[:25]
-        ]
+        options: list[discord.SelectOption] = []
+        for name in ordered_names[:25]:
+            family, variant = self._split_gcloud_voice_name(name)
+            label = _shorten(f'{family} — {variant}', 100)
+            options.append(discord.SelectOption(label=label, description=_shorten(name, 100), value=name, default=(name == current_value)))
+        return options
 
     def _gcloud_voice_matches_language(self, voice_name: str, language_code: str) -> bool:
         voice = str(voice_name or '').strip().lower()
@@ -1733,7 +1738,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if not options:
             await self._respond(interaction, embed=self._make_embed('Nenhuma voz encontrada', f'Não encontrei vozes do Google Cloud para o idioma `{effective_language}`. Ajuste o idioma e tente de novo.', ok=False), ephemeral=True)
             return
-        description = f'Selecione uma voz disponível para `{effective_language}`. A lista depende do idioma configurado no Google Cloud.'
+        description = f'Selecione uma voz disponível para `{effective_language}`. O título mostra a família da voz e a variante; abaixo aparece o nome técnico completo.'
         await _SimpleSelectView(self, owner_id, guild_id, 'Escolha a voz do Google Cloud', description, GCloudVoiceSelect(self, server=server, options=options), source_panel_message=source_panel_message, target_user_id=target_user_id, target_user_name=target_user_name).send(interaction)
 
     def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
