@@ -162,6 +162,7 @@ class SettingsDB:
             "block_voice_bot": bool(g.get("block_voice_bot_enabled", True)),
             "only_target_user": bool(g.get("only_target_user_enabled", False)),
             "announce_author": bool(g.get("announce_author_enabled", False)),
+            "auto_leave": bool(g.get("auto_leave_enabled", True)),
         }
 
     async def set_guild_tts_defaults(
@@ -186,6 +187,7 @@ class SettingsDB:
         block_voice_bot: Optional[bool] = None,
         only_target_user: Optional[bool] = None,
         announce_author: Optional[bool] = None,
+        auto_leave: Optional[bool] = None,
     ):
         doc = self._get_guild_doc(guild_id)
         tts = doc.get("tts_defaults", {}) or {}
@@ -229,6 +231,8 @@ class SettingsDB:
             doc["only_target_user_enabled"] = bool(only_target_user)
         if announce_author is not None:
             doc["announce_author_enabled"] = bool(announce_author)
+        if auto_leave is not None:
+            doc["auto_leave_enabled"] = bool(auto_leave)
 
         doc["tts_defaults"] = tts
         await self._save_guild_doc(guild_id, doc)
