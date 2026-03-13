@@ -2871,7 +2871,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             embed.add_field(name="Prefixo do bot", value=f"`{guild_defaults.get('bot_prefix', '_')}`", inline=True)
             embed.add_field(name="Prefixo do modo gTTS", value=f"`{guild_defaults.get('gtts_prefix', guild_defaults.get('tts_prefix', '.'))}`", inline=True)
             embed.add_field(name="Prefixo do modo Edge", value=f"`{guild_defaults.get('edge_prefix', ',')}`", inline=True)
-            embed.add_field(name="Prefixo do Google", value=f"`{guild_defaults.get('gcloud_prefix', getattr(config, 'GOOGLE_CLOUD_TTS_PREFIX', "'"))}`", inline=True)
+            google_prefix = guild_defaults.get('gcloud_prefix', getattr(config, 'GOOGLE_CLOUD_TTS_PREFIX', "'"))
+            embed.add_field(name="Prefixo do Google", value=f"`{google_prefix}`", inline=True)
             embed.add_field(name="Autor antes da frase", value="`Ativado`" if bool(guild_defaults.get('announce_author', False)) else "`Desativado`", inline=True)
         history_text = self._format_history_entries(last_changes or [], viewer_user_id=viewer_user_id or user_id, message_id=message_id)
         if history_text:
