@@ -35,13 +35,6 @@ TTS_WARM_HOLD_SECONDS = float(getattr(config, "TTS_WARM_HOLD_SECONDS", 30))
 TTS_QUEUE_MAXSIZE = max(1, int(getattr(config, "TTS_QUEUE_MAXSIZE", 20)))
 TTS_SYNTH_CONCURRENCY = max(1, int(getattr(config, "TTS_SYNTH_CONCURRENCY", 2)))
 TTS_EDGE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_EDGE_TIMEOUT_SECONDS", 10)))
-TTS_GTTS_MAX_RETRIES = max(0, int(getattr(config, "TTS_GTTS_MAX_RETRIES", 2)))
-TTS_GTTS_RETRY_BASE_DELAY_SECONDS = max(0.25, float(getattr(config, "TTS_GTTS_RETRY_BASE_DELAY_SECONDS", 1.25)))
-TTS_GTTS_TLDS = tuple(
-    str(getattr(config, "TTS_GTTS_TLDS", "com,com.br,com.hk,ie,co.uk") or "com,com.br,com.hk,ie,co.uk").split(",")
-)
-TTS_GTTS_MIN_INTERVAL_SECONDS = max(0.0, float(getattr(config, "TTS_GTTS_MIN_INTERVAL_SECONDS", 1.35)))
-TTS_GTTS_RATE_LIMIT_COOLDOWN_SECONDS = max(0.0, float(getattr(config, "TTS_GTTS_RATE_LIMIT_COOLDOWN_SECONDS", 8.0)))
 TTS_GTTS_CONCURRENCY = max(1, int(getattr(config, "TTS_GTTS_CONCURRENCY", 1)))
 GOOGLE_CLOUD_TTS_LANGUAGE_CODE = str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR").strip() or "pt-BR"
 GOOGLE_CLOUD_TTS_VOICE_NAME = str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
@@ -220,26 +213,6 @@ class TTSAudioMixin:
             setattr(self, "_tts_gtts_rate_lock", lock)
         return lock
 
-    async def _wait_for_gtts_slot(self) -> None:
-        lock = self._get_gtts_rate_lock()
-        async with lock:
-            now = time.monotonic()
-            next_request_at = float(getattr(self, "_tts_gtts_next_request_at", 0.0) or 0.0)
-            rate_limited_until = float(getattr(self, "_tts_gtts_rate_limited_until", 0.0) or 0.0)
-            ready_at = max(now, next_request_at, rate_limited_until)
-            delay = ready_at - now
-            if delay > 0:
-                await asyncio.sleep(delay)
-            setattr(self, "_tts_gtts_next_request_at", time.monotonic() + TTS_GTTS_MIN_INTERVAL_SECONDS)
-
-    async def _note_gtts_rate_limit(self) -> float:
-        lock = self._get_gtts_rate_lock()
-        async with lock:
-            now = time.monotonic()
-            cooldown_until = max(now, float(getattr(self, "_tts_gtts_rate_limited_until", 0.0) or 0.0)) + TTS_GTTS_RATE_LIMIT_COOLDOWN_SECONDS
-            setattr(self, "_tts_gtts_rate_limited_until", cooldown_until)
-            return max(0.0, cooldown_until - now)
-
     def _get_global_cache_order(self) -> OrderedDict[str, float]:
         cache_order = getattr(self, "_tts_cache_order", None)
         if cache_order is None:
@@ -343,28 +316,6 @@ class TTSAudioMixin:
         return path
 
 
-    def _get_gtts_tlds(self) -> tuple[str, ...]:
-        values = [str(tld or "").strip() for tld in TTS_GTTS_TLDS]
-        values = [value for value in values if value]
-        return tuple(dict.fromkeys(values)) or ("com",)
-
-    def _is_gtts_rate_limit_error(self, error: Exception) -> bool:
-        if isinstance(error, gTTSError):
-            message = str(error).lower()
-            if "429" in message or "too many requests" in message:
-                return True
-
-        current = error
-        visited: set[int] = set()
-        while current is not None and id(current) not in visited:
-            visited.add(id(current))
-            message = str(current).lower()
-            if "429" in message or "too many requests" in message:
-                return True
-            current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
-
-        return False
-
     async def _generate_gtts_file(self, text: str, language: str, *, tld: str = "com") -> str:
         language = (language or GTTS_DEFAULT_LANGUAGE).strip().lower()
         tld = str(tld or "com").strip() or "com"
@@ -375,7 +326,6 @@ class TTSAudioMixin:
         try:
             tts = gTTS(text=text, lang=language, tld=tld)
             async with self._get_gtts_semaphore():
-                await self._wait_for_gtts_slot()
                 await asyncio.to_thread(tts.save, path)
             return path
         except Exception:
@@ -384,38 +334,6 @@ class TTSAudioMixin:
             except Exception:
                 pass
             raise
-
-    async def _generate_gtts_with_retries(self, item: QueueItem) -> str:
-        language = (item.language or GTTS_DEFAULT_LANGUAGE).strip().lower()
-        tlds = self._get_gtts_tlds()
-        attempts = max(1, TTS_GTTS_MAX_RETRIES + 1, len(tlds))
-        last_error: Optional[Exception] = None
-
-        for attempt in range(attempts):
-            tld = tlds[attempt % len(tlds)]
-            try:
-                return await self._generate_gtts_file(item.text, language, tld=tld)
-            except Exception as error:
-                last_error = error
-                if not self._is_gtts_rate_limit_error(error) or attempt >= attempts - 1:
-                    break
-
-                cooldown_delay = await self._note_gtts_rate_limit()
-                retry_delay = TTS_GTTS_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
-                delay = max(cooldown_delay, retry_delay, TTS_GTTS_MIN_INTERVAL_SECONDS)
-                logger.warning(
-                    "[tts_voice] gTTS limitou a requisição, tentando novamente | guild=%s attempt=%s/%s tld=%s wait=%.2fs",
-                    item.guild_id,
-                    attempt + 1,
-                    attempts,
-                    tld,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("Falha ao sintetizar áudio com gTTS.")
 
     async def _generate_edge_file(self, text: str, voice: str, rate: str, pitch: str) -> str:
         voice = validate_voice(voice, getattr(self, "edge_voice_names", set()))
@@ -522,12 +440,12 @@ class TTSAudioMixin:
                 return await self._generate_edge_file(item.text, item.voice, item.rate, item.pitch)
             except Exception as e:
                 logger.warning("[tts_voice] Edge falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
-                return await self._generate_gtts_with_retries(item)
+                return await self._generate_gtts_file(item.text, item.language)
 
         if item.engine == "gcloud":
             return await self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch)
 
-        return await self._generate_gtts_with_retries(item)
+        return await self._generate_gtts_file(item.text, item.language)
 
     async def _resolve_audio_path(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:
         cached = self._try_get_cached_path(state, item)
