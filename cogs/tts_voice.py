@@ -1623,6 +1623,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(message.guild.id)) if db else {}
         gtts_prefix = str((guild_defaults or {}).get("gtts_prefix", (guild_defaults or {}).get("tts_prefix", ".")) or ".")
         edge_prefix = str((guild_defaults or {}).get("edge_prefix", ",") or ",")
+        gcloud_prefix = str(getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'")
 
         bot_prefix = str((guild_defaults or {}).get("bot_prefix", "_") or "_")
 
@@ -1697,6 +1698,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         elif message.content.startswith(gtts_prefix):
             forced_engine = "gtts"
             active_prefix = gtts_prefix
+        elif message.content.startswith(gcloud_prefix):
+            forced_engine = "gcloud"
+            active_prefix = gcloud_prefix
         else:
             return
         if self._was_tts_message_seen(message.id):
@@ -1744,6 +1748,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             resolved["voice"] = resolved.get("voice") or "pt-BR-FranciscaNeural"
             resolved["rate"] = resolved.get("rate") or "+0%"
             resolved["pitch"] = resolved.get("pitch") or "+0Hz"
+        elif forced_engine == "gcloud":
+            resolved["engine"] = "gcloud"
 
         text = self._render_tts_text(message, message.content[len(active_prefix):].strip())
         text = self._apply_author_prefix_if_needed(
