@@ -166,6 +166,33 @@ class TTSAudioMixin:
             return "+0Hz"
         return f"{sign}{number}Hz"
 
+    def _normalize_gcloud_language(self, raw: str) -> str:
+        value = str(raw or "").strip() or GOOGLE_CLOUD_TTS_LANGUAGE_CODE
+        value = value.replace("_", "-")
+        return value or "pt-BR"
+
+    def _normalize_gcloud_voice(self, raw: str) -> str:
+        value = str(raw or "").strip() or GOOGLE_CLOUD_TTS_VOICE_NAME
+        return value or "pt-BR-Standard-A"
+
+    def _normalize_gcloud_rate(self, raw: str | float) -> str:
+        try:
+            numeric = float(str(raw).strip().replace(",", "."))
+        except Exception:
+            numeric = float(GOOGLE_CLOUD_TTS_SPEAKING_RATE or 1.0)
+        numeric = max(0.25, min(2.0, numeric))
+        return f"{numeric:.2f}".rstrip("0").rstrip(".")
+
+    def _normalize_gcloud_pitch(self, raw: str | float) -> str:
+        try:
+            numeric = float(str(raw).strip().replace(",", "."))
+        except Exception:
+            numeric = float(GOOGLE_CLOUD_TTS_PITCH or 0.0)
+        numeric = max(-20.0, min(20.0, numeric))
+        if abs(numeric - round(numeric)) < 1e-9:
+            return str(int(round(numeric)))
+        return f"{numeric:.2f}".rstrip("0").rstrip(".")
+
     def _normalize_cache_text(self, text: str) -> str:
         text = " ".join((text or "").strip().split())
         text = text.lower()
