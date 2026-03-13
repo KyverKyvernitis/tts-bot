@@ -2156,6 +2156,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         ]
         embed.add_field(name="Resumo rápido", value=" • ".join(summary_bits), inline=False)
 
+        custom_keys = []
+        for key, label in (("engine", "engine"), ("voice", "voz"), ("language", "idioma"), ("rate", "velocidade"), ("pitch", "tom")):
+            if str((user_settings or {}).get(key, "") or "").strip():
+                custom_keys.append(label)
+        origin_line = "Origem: usando padrões do servidor" if not custom_keys else f"Personalizado: {', '.join(custom_keys)}"
+
         embed.add_field(
             name="🎛️ Configuração ativa",
             value=(
@@ -2163,20 +2169,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 f"**Voz:** `{resolved.get('voice', 'Não definido')}`\n"
                 f"**Idioma:** `{resolved.get('language', 'Não definido')}`\n"
                 f"**Velocidade:** `{resolved.get('rate', '+0%')}`\n"
-                f"**Tom:** `{resolved.get('pitch', '+0Hz')}`"
+                f"**Tom:** `{resolved.get('pitch', '+0Hz')}`\n"
+                f"**{origin_line}**"
             ),
-            inline=True,
-        )
-        embed.add_field(
-            name="🧩 Origem",
-            value=(
-                f"**Engine:** {self._status_source_badge(self._setting_origin_label(user_settings, 'engine'))}\n"
-                f"**Voz:** {self._status_source_badge(self._setting_origin_label(user_settings, 'voice'))}\n"
-                f"**Idioma:** {self._status_source_badge(self._setting_origin_label(user_settings, 'language'))}\n"
-                f"**Velocidade:** {self._status_source_badge(self._setting_origin_label(user_settings, 'rate'))}\n"
-                f"**Tom:** {self._status_source_badge(self._setting_origin_label(user_settings, 'pitch'))}"
-            ),
-            inline=True,
+            inline=False,
         )
         embed.add_field(
             name="🛰️ Estado atual",
