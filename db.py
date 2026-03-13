@@ -155,7 +155,6 @@ class SettingsDB:
         block_voice_bot: Optional[bool] = None,
         only_target_user: Optional[bool] = None,
         announce_author: Optional[bool] = None,
-        announce_name: Optional[str] = None,
     ):
         doc = self._get_guild_doc(guild_id)
         tts = doc.get("tts_defaults", {}) or {}
@@ -170,12 +169,6 @@ class SettingsDB:
             tts["rate"] = rate
         if pitch is not None:
             tts["pitch"] = pitch
-        if announce_name is not None:
-            announce_name = str(announce_name or "").strip()
-            if announce_name:
-                tts["announce_name"] = announce_name
-            else:
-                tts.pop("announce_name", None)
         if bot_prefix is not None:
             doc["bot_prefix"] = str(bot_prefix or "_")[:8]
         if tts_prefix is not None:
@@ -208,7 +201,6 @@ class SettingsDB:
             "language": str(tts.get("language", "") or ""),
             "rate": str(tts.get("rate", "") or ""),
             "pitch": str(tts.get("pitch", "") or ""),
-            "announce_name": str(tts.get("announce_name", "") or ""),
         }
 
     async def set_user_tts(
@@ -221,7 +213,6 @@ class SettingsDB:
         language: Optional[str] = None,
         rate: Optional[str] = None,
         pitch: Optional[str] = None,
-        announce_name: Optional[str] = None,
     ):
         key = (guild_id, user_id)
         doc = self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id})
@@ -237,12 +228,6 @@ class SettingsDB:
             tts["rate"] = rate
         if pitch is not None:
             tts["pitch"] = pitch
-        if announce_name is not None:
-            announce_name = str(announce_name or "").strip()
-            if announce_name:
-                tts["announce_name"] = announce_name
-            else:
-                tts.pop("announce_name", None)
 
         doc["type"] = "user"
         doc["guild_id"] = guild_id
