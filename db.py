@@ -201,6 +201,7 @@ class SettingsDB:
             "language": str(tts.get("language", "") or ""),
             "rate": str(tts.get("rate", "") or ""),
             "pitch": str(tts.get("pitch", "") or ""),
+            "speaker_name": str(tts.get("speaker_name", "") or ""),
         }
 
     async def set_user_tts(
@@ -213,6 +214,7 @@ class SettingsDB:
         language: Optional[str] = None,
         rate: Optional[str] = None,
         pitch: Optional[str] = None,
+        speaker_name: Optional[str] = None,
     ):
         key = (guild_id, user_id)
         doc = self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id})
@@ -228,6 +230,12 @@ class SettingsDB:
             tts["rate"] = rate
         if pitch is not None:
             tts["pitch"] = pitch
+        if speaker_name is not None:
+            cleaned_speaker_name = str(speaker_name or "").strip()
+            if cleaned_speaker_name:
+                tts["speaker_name"] = cleaned_speaker_name
+            else:
+                tts.pop("speaker_name", None)
 
         doc["type"] = "user"
         doc["guild_id"] = guild_id
@@ -296,6 +304,7 @@ class SettingsDB:
             "language": pick("language", "pt-br"),
             "rate": pick("rate", "+0%"),
             "pitch": pick("pitch", "+0Hz"),
+            "speaker_name": str(user.get("speaker_name", "") or ""),
             "bot_prefix": str(guild.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(guild.get("tts_prefix", ",") or ","),
             "gtts_prefix": str(guild.get("gtts_prefix", guild.get("tts_prefix", ".")) or "."),
