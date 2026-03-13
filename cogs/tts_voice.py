@@ -453,6 +453,8 @@ class ToggleSelect(discord.ui.Select):
         source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
         if self.toggle_name == "only_target_user":
             await self.cog._apply_only_target_from_panel(interaction, enabled, source_panel_message=source_panel_message)
+        elif self.toggle_name == "announce_author":
+            await self.cog._apply_announce_author_from_panel(interaction, enabled, source_panel_message=source_panel_message)
         else:
             await self.cog._apply_block_voice_bot_from_panel(interaction, enabled, source_panel_message=source_panel_message)
 
@@ -646,6 +648,7 @@ class TTSMainPanelView(_BaseTTSView):
             self.remove_item(self.bot_prefix_button)
             self.remove_item(self.gtts_prefix_button)
             self.remove_item(self.edge_prefix_button)
+            self.remove_item(self.announce_author_button)
 
     def _target_owner(self, interaction: discord.Interaction) -> int:
         return interaction.user.id if self.owner_id == 0 else self.owner_id
@@ -694,6 +697,10 @@ class TTSMainPanelView(_BaseTTSView):
         print(f"[tts_panel] pitch_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
         await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Escolha o tom do Edge", "Selecione o tom usado nas mensagens com prefixo do Edge.", PitchSelect(self.cog, server=self.server), source_panel_message=interaction.message, target_user_id=self.target_user_id, target_user_name=self.target_user_name).send(interaction)
 
+    @discord.ui.button(label="Autor + frase", style=discord.ButtonStyle.secondary, emoji="🗣️", row=1)
+    async def announce_author_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        print(f"[tts_panel] announce_author_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Autor antes da frase", "Quando ativado, o bot fala '@nome disse, frase' quando muda o usuário que está falando pelos prefixos.", ToggleSelect(self.cog, "announce_author")).send(interaction)
 
     @discord.ui.button(label="Prefixo do bot", style=discord.ButtonStyle.secondary, emoji="🤖", row=2)
     async def bot_prefix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -944,6 +951,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._public_panel_states: dict[int, dict] = {}
         self._status_views_by_target: dict[tuple[int, int], weakref.WeakSet[TTSStatusView]] = {}
         self._status_refresh_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._last_announced_author_by_guild: dict[int, int] = {}
 
     async def cog_load(self):
         await self._load_edge_voices()
@@ -1011,6 +1019,26 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         async with lock:
             for view in list(active_views):
                 await view.refresh_from_config_change()
+
+    def _cleanup_guild_runtime_state(self, guild_id: int) -> None:
+        self._last_announced_author_by_guild.pop(int(guild_id), None)
+
+    def _guild_announce_author_enabled(self, guild_defaults: dict | None) -> bool:
+        return bool((guild_defaults or {}).get("announce_author", False))
+
+    def _apply_author_prefix_if_needed(self, guild_id: int, author: discord.abc.User | None, text: str, *, enabled: bool) -> str:
+        text = str(text or "").strip()
+        if not enabled or not text:
+            return text
+        author_id = int(getattr(author, "id", 0) or 0)
+        if not author_id:
+            return text
+        last_author_id = int(self._last_announced_author_by_guild.get(int(guild_id), 0) or 0)
+        self._last_announced_author_by_guild[int(guild_id)] = author_id
+        if last_author_id == author_id:
+            return text
+        speaker = self._tts_user_reference(author)
+        return f"{speaker} disse, {text}" if speaker else text
 
 
     def _panel_actor_name(self, interaction: discord.Interaction) -> str:
@@ -1413,6 +1441,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 state.queue.task_done()
         except Exception:
             pass
+        self._last_announced_author_by_guild.pop(int(guild.id), None)
         vc = self._get_voice_client_for_guild(guild)
         if vc and vc.is_connected():
             try:
@@ -1664,6 +1693,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             resolved["pitch"] = resolved.get("pitch") or "+0Hz"
 
         text = self._render_tts_text(message, message.content[len(active_prefix):].strip())
+        text = self._apply_author_prefix_if_needed(
+            message.guild.id,
+            message.author,
+            text,
+            enabled=self._guild_announce_author_enabled(guild_defaults),
+        )
         if not text:
             print("[tts_voice] ignorado | texto vazio após prefixo")
             return
@@ -2470,6 +2505,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             embed.add_field(name="Prefixo do bot", value=f"`{guild_defaults.get('bot_prefix', '_')}`", inline=True)
             embed.add_field(name="Prefixo do modo gTTS", value=f"`{guild_defaults.get('gtts_prefix', guild_defaults.get('tts_prefix', '.'))}`", inline=True)
             embed.add_field(name="Prefixo do modo Edge", value=f"`{guild_defaults.get('edge_prefix', ',')}`", inline=True)
+            embed.add_field(name="Autor antes da frase", value="`Ativado`" if bool(guild_defaults.get('announce_author', False)) else "`Desativado`", inline=True)
         history_text = self._format_history_entries(last_changes or [], viewer_user_id=viewer_user_id or user_id, message_id=message_id)
         if history_text:
             embed.add_field(name="Últimas alterações", value=history_text, inline=False)
