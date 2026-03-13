@@ -3073,6 +3073,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         action_value = str(getattr(acao, "value", "self") or "self")
+        if action_value == "self":
+            await self._defer_ephemeral(interaction)
+        elif not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=False)
 
         if action_value == "show_other":
             if usuario is None:
