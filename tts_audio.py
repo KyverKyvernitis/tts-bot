@@ -474,6 +474,8 @@ class TTSAudioMixin:
         voice_name = self._normalize_gcloud_voice(voice_name)
         normalized_rate = self._normalize_gcloud_rate(rate)
         normalized_pitch = self._normalize_gcloud_pitch(pitch)
+        if voice_name and not str(voice_name).lower().startswith(str(language).lower() + '-'):
+            voice_name = ''
         self._log_debug(
             "[tts_voice] Google Cloud TTS synth | "
             f"voice={voice_name!r} language={language!r} rate={normalized_rate!r} pitch={normalized_pitch!r} text={text[:80]!r}"
@@ -485,10 +487,10 @@ class TTSAudioMixin:
         try:
             client = await asyncio.to_thread(self._get_google_tts_client)
             synthesis_input = google_texttospeech.SynthesisInput(text=text)
-            voice = google_texttospeech.VoiceSelectionParams(
-                language_code=language,
-                name=voice_name,
-            )
+            voice_kwargs = {"language_code": language}
+            if voice_name:
+                voice_kwargs["name"] = voice_name
+            voice = google_texttospeech.VoiceSelectionParams(**voice_kwargs)
             audio_config = google_texttospeech.AudioConfig(
                 audio_encoding=google_texttospeech.AudioEncoding.MP3,
                 speaking_rate=float(normalized_rate),
