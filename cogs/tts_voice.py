@@ -11,6 +11,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+try:
+    from google.cloud import texttospeech_v1 as google_texttospeech
+except Exception:  # pragma: no cover - dependência opcional em tempo de import
+    google_texttospeech = None
+
 import config
 from tts_audio import GuildTTSState, QueueItem, TTSAudioMixin
 
@@ -415,6 +420,53 @@ class GCloudPitchSelect(discord.ui.Select):
         await self.cog._apply_gcloud_pitch_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message, target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None), target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None))
 
 
+
+class GCloudLanguageSelect(discord.ui.Select):
+    def __init__(self, cog: "TTSVoice", *, server: bool, options: list[discord.SelectOption]):
+        self.cog = cog
+        self.server = server
+        super().__init__(
+            placeholder="Escolha o idioma do Google Cloud",
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
+        await self.cog._apply_gcloud_language_from_panel(
+            interaction,
+            self.values[0],
+            server=self.server,
+            source_panel_message=source_panel_message,
+            target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None),
+            target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None),
+        )
+
+
+class GCloudVoiceSelect(discord.ui.Select):
+    def __init__(self, cog: "TTSVoice", *, server: bool, options: list[discord.SelectOption]):
+        self.cog = cog
+        self.server = server
+        super().__init__(
+            placeholder="Escolha a voz do Google Cloud",
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
+        await self.cog._apply_gcloud_voice_from_panel(
+            interaction,
+            self.values[0],
+            server=self.server,
+            source_panel_message=source_panel_message,
+            target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None),
+            target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None),
+        )
+
+
 class VoiceRegionSelect(discord.ui.Select):
     def __init__(self, cog: "TTSVoice", *, server: bool):
         self.cog = cog
@@ -806,6 +858,8 @@ class TTSMainPanelView(_BaseTTSView):
         self.server = server
         self.panel_kind = "server" if server else "user"
         self.remove_item(self.mode_button)
+        self.remove_item(self.join_button)
+        self.remove_item(self.leave_button)
         if self.server:
             self.remove_item(self.spoken_name_button)
         else:
@@ -902,30 +956,32 @@ class TTSMainPanelView(_BaseTTSView):
     async def gcloud_language_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         current_target_user_id = int(self.target_user_id or interaction.user.id)
         current_value = self.cog._get_current_gcloud_language(self.guild_id, current_target_user_id, server=self.server)
-        await interaction.response.send_modal(
-            GCloudLanguageModal(
-                self.cog,
-                interaction.message,
-                server=self.server,
-                target_user_id=None if self.owner_id == 0 and self.target_user_id is None else self.target_user_id,
-                target_user_name=self.target_user_name,
-                current_value=current_value,
-            )
+        await self.cog._open_gcloud_language_picker(
+            interaction,
+            owner_id=self._target_owner(interaction),
+            guild_id=self.guild_id,
+            current_value=current_value,
+            server=self.server,
+            source_panel_message=interaction.message,
+            target_user_id=None if self.owner_id == 0 and self.target_user_id is None else self.target_user_id,
+            target_user_name=self.target_user_name,
         )
 
     @discord.ui.button(label="Voz (Google)", style=discord.ButtonStyle.secondary, emoji="🎙️", row=3)
     async def gcloud_voice_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         current_target_user_id = int(self.target_user_id or interaction.user.id)
+        current_language = self.cog._get_current_gcloud_language(self.guild_id, current_target_user_id, server=self.server)
         current_value = self.cog._get_current_gcloud_voice(self.guild_id, current_target_user_id, server=self.server)
-        await interaction.response.send_modal(
-            GCloudVoiceModal(
-                self.cog,
-                interaction.message,
-                server=self.server,
-                target_user_id=None if self.owner_id == 0 and self.target_user_id is None else self.target_user_id,
-                target_user_name=self.target_user_name,
-                current_value=current_value,
-            )
+        await self.cog._open_gcloud_voice_picker(
+            interaction,
+            owner_id=self._target_owner(interaction),
+            guild_id=self.guild_id,
+            language_code=current_language,
+            current_value=current_value,
+            server=self.server,
+            source_panel_message=interaction.message,
+            target_user_id=None if self.owner_id == 0 and self.target_user_id is None else self.target_user_id,
+            target_user_name=self.target_user_name,
         )
 
     @discord.ui.button(label="Velocidade (Google)", style=discord.ButtonStyle.secondary, emoji="⏩", row=4)
@@ -1179,6 +1235,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._status_views_by_target: dict[tuple[int, int], weakref.WeakSet[TTSStatusView]] = {}
         self._status_refresh_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._last_announced_author_by_guild: dict[int, int] = {}
+        self._gcloud_voices_cache: list[dict[str, object]] = []
+        self._gcloud_voices_cache_loaded_at: float = 0.0
+        self._gcloud_voices_cache_lock = asyncio.Lock()
 
     async def cog_load(self):
         await self._load_edge_voices()
@@ -1509,6 +1568,166 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             print(f"[tts_voice] Falha ao carregar vozes edge: {e}")
             self.edge_voice_cache = []
             self.edge_voice_names = set()
+
+    async def _load_gcloud_voices(self, *, force: bool = False) -> list[dict[str, object]]:
+        if google_texttospeech is None:
+            return []
+        now = time.monotonic()
+        if not force and self._gcloud_voices_cache and (now - self._gcloud_voices_cache_loaded_at) < 1800:
+            return list(self._gcloud_voices_cache)
+        async with self._gcloud_voices_cache_lock:
+            now = time.monotonic()
+            if not force and self._gcloud_voices_cache and (now - self._gcloud_voices_cache_loaded_at) < 1800:
+                return list(self._gcloud_voices_cache)
+
+            def _worker() -> list[dict[str, object]]:
+                client = google_texttospeech.TextToSpeechClient()
+                try:
+                    response = client.list_voices(request={})
+                    voices: list[dict[str, object]] = []
+                    for voice in list(getattr(response, 'voices', []) or []):
+                        name = str(getattr(voice, 'name', '') or '')
+                        language_codes = [str(code) for code in list(getattr(voice, 'language_codes', []) or []) if str(code or '').strip()]
+                        if not name or not language_codes:
+                            continue
+                        voices.append({
+                            'name': name,
+                            'language_codes': language_codes,
+                            'ssml_gender': int(getattr(voice, 'ssml_gender', 0) or 0),
+                        })
+                    return voices
+                finally:
+                    with contextlib.suppress(Exception):
+                        client.transport.close()
+
+            try:
+                voices = await asyncio.to_thread(_worker)
+            except Exception as e:
+                print(f"[tts_voice] Falha ao carregar vozes do Google Cloud: {e!r}")
+                return list(self._gcloud_voices_cache)
+
+            self._gcloud_voices_cache = list(voices)
+            self._gcloud_voices_cache_loaded_at = time.monotonic()
+            return list(self._gcloud_voices_cache)
+
+    def _gcloud_language_priority(self, code: str) -> tuple[int, str]:
+        value = str(code or '').strip()
+        preferred = {
+            'pt-BR': 0,
+            'pt-PT': 1,
+            'en-US': 2,
+            'es-ES': 3,
+            'es-US': 4,
+            'fr-FR': 5,
+            'de-DE': 6,
+            'it-IT': 7,
+            'ja-JP': 8,
+        }
+        base = value.split('-', 1)[0].lower() if value else ''
+        base_order = {
+            'pt': 0,
+            'en': 1,
+            'es': 2,
+            'fr': 3,
+            'de': 4,
+            'it': 5,
+            'ja': 6,
+        }
+        return (preferred.get(value, 100 + base_order.get(base, 100)), value.lower())
+
+    def _build_gcloud_language_options_from_catalog(self, catalog: list[dict[str, object]], current_value: str | None = None) -> list[discord.SelectOption]:
+        seen: set[str] = set()
+        ordered_codes: list[str] = []
+        preferred = [
+            str(current_value or '').strip(),
+            str(getattr(config, 'GOOGLE_CLOUD_TTS_LANGUAGE_CODE', 'pt-BR') or 'pt-BR').strip(),
+            'pt-BR', 'pt-PT', 'en-US', 'es-ES', 'es-US', 'fr-FR', 'de-DE', 'it-IT', 'ja-JP'
+        ]
+        for code in preferred:
+            if code and code not in seen:
+                seen.add(code)
+                ordered_codes.append(code)
+        discovered = sorted({str(code) for entry in catalog for code in list(entry.get('language_codes', []) or []) if str(code or '').strip()}, key=self._gcloud_language_priority)
+        for code in discovered:
+            if code not in seen:
+                seen.add(code)
+                ordered_codes.append(code)
+        options: list[discord.SelectOption] = []
+        for code in ordered_codes[:25]:
+            desc = 'Idioma disponível no Google Cloud'
+            if code.startswith('pt-'):
+                desc = 'Português disponível no Google Cloud'
+            elif code.startswith('en-'):
+                desc = 'Inglês disponível no Google Cloud'
+            elif code.startswith('es-'):
+                desc = 'Espanhol disponível no Google Cloud'
+            options.append(discord.SelectOption(label=_shorten(code, 100), description=_shorten(desc, 100), value=code, default=(code == current_value)))
+        return options
+
+    def _gcloud_voice_priority(self, voice_name: str) -> tuple[int, str]:
+        value = str(voice_name or '').strip()
+        order = [('Standard', 0), ('Neural2', 1), ('Wavenet', 2), ('Studio', 3), ('Chirp3-HD', 4), ('Chirp3', 4)]
+        family_rank = 99
+        for token, rank in order:
+            if token.lower() in value.lower():
+                family_rank = rank
+                break
+        return (family_rank, value.lower())
+
+    def _describe_gcloud_voice(self, voice_name: str) -> str:
+        value = str(voice_name or '').strip()
+        family = 'Google Cloud'
+        for token, label in [('Standard', 'Standard'), ('Neural2', 'Neural2'), ('Wavenet', 'WaveNet'), ('Studio', 'Studio'), ('Chirp3-HD', 'Chirp 3 HD'), ('Chirp3', 'Chirp 3')]:
+            if token.lower() in value.lower():
+                family = label
+                break
+        tail = value.rsplit('-', 1)[-1] if '-' in value else ''
+        if len(tail) <= 3 and tail.isalnum():
+            return _shorten(f'{family} · variante {tail}', 100)
+        return _shorten(f'{family} disponível no Google Cloud', 100)
+
+    def _build_gcloud_voice_options_from_catalog(self, catalog: list[dict[str, object]], language_code: str, current_value: str | None = None) -> list[discord.SelectOption]:
+        language_code = str(language_code or '').strip() or str(getattr(config, 'GOOGLE_CLOUD_TTS_LANGUAGE_CODE', 'pt-BR') or 'pt-BR')
+        filtered_names = sorted({str(entry.get('name') or '') for entry in catalog if language_code in list(entry.get('language_codes', []) or []) and str(entry.get('name') or '').strip()}, key=self._gcloud_voice_priority)
+        ordered_names: list[str] = []
+        seen: set[str] = set()
+        preferred = [
+            str(current_value or '').strip(),
+            str(getattr(config, 'GOOGLE_CLOUD_TTS_VOICE_NAME', 'pt-BR-Standard-A') or 'pt-BR-Standard-A').strip(),
+        ]
+        for name in preferred:
+            if name and name not in seen:
+                seen.add(name)
+                ordered_names.append(name)
+        for name in filtered_names:
+            if name not in seen:
+                seen.add(name)
+                ordered_names.append(name)
+        return [
+            discord.SelectOption(label=_shorten(name, 100), description=self._describe_gcloud_voice(name), value=name, default=(name == current_value))
+            for name in ordered_names[:25]
+        ]
+
+    async def _open_gcloud_language_picker(self, interaction: discord.Interaction, *, owner_id: int, guild_id: int, current_value: str, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+        await self._defer_ephemeral(interaction)
+        catalog = await self._load_gcloud_voices()
+        options = self._build_gcloud_language_options_from_catalog(catalog, current_value=current_value)
+        if not options:
+            await self._respond(interaction, embed=self._make_embed('Google Cloud indisponível', 'Não consegui listar os idiomas do Google Cloud agora. Confira as credenciais e tente novamente.', ok=False), ephemeral=True)
+            return
+        description = 'Selecione um idioma disponível do Google Cloud. A lista é carregada das vozes que a sua conta consegue usar.'
+        await _SimpleSelectView(self, owner_id, guild_id, 'Escolha o idioma do Google Cloud', description, GCloudLanguageSelect(self, server=server, options=options), source_panel_message=source_panel_message, target_user_id=target_user_id, target_user_name=target_user_name).send(interaction)
+
+    async def _open_gcloud_voice_picker(self, interaction: discord.Interaction, *, owner_id: int, guild_id: int, language_code: str, current_value: str, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+        await self._defer_ephemeral(interaction)
+        effective_language = str(language_code or '').strip() or str(getattr(config, 'GOOGLE_CLOUD_TTS_LANGUAGE_CODE', 'pt-BR') or 'pt-BR')
+        catalog = await self._load_gcloud_voices()
+        options = self._build_gcloud_voice_options_from_catalog(catalog, effective_language, current_value=current_value)
+        if not options:
+            await self._respond(interaction, embed=self._make_embed('Nenhuma voz encontrada', f'Não encontrei vozes do Google Cloud para o idioma `{effective_language}`. Ajuste o idioma e tente de novo.', ok=False), ephemeral=True)
+            return
+        description = f'Selecione uma voz disponível para `{effective_language}`. A lista depende do idioma configurado no Google Cloud.'
+        await _SimpleSelectView(self, owner_id, guild_id, 'Escolha a voz do Google Cloud', description, GCloudVoiceSelect(self, server=server, options=options), source_panel_message=source_panel_message, target_user_id=target_user_id, target_user_name=target_user_name).send(interaction)
 
     def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
         return discord.Embed(title=title, description=description, color=discord.Color.green() if ok else discord.Color.red())
@@ -3389,6 +3608,154 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if server:
             await self._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
+
+    async def _apply_gcloud_language_from_modal(self, interaction: discord.Interaction, language: str, *, server: bool, panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+        await self._apply_gcloud_language_from_panel(interaction, language, server=server, source_panel_message=panel_message, target_user_id=target_user_id, target_user_name=target_user_name)
+
+    async def _apply_gcloud_voice_from_modal(self, interaction: discord.Interaction, voice_name: str, *, server: bool, panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+        await self._apply_gcloud_voice_from_panel(interaction, voice_name, server=server, source_panel_message=panel_message, target_user_id=target_user_id, target_user_name=target_user_name)
+
+    async def _apply_gcloud_language_from_panel(self, interaction: discord.Interaction, language: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+        if server and not interaction.user.guild_permissions.kick_members:
+            await self._respond(interaction, embed=self._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
+            return
+        db = self._get_db()
+        if db is None:
+            await self._respond(interaction, embed=self._make_embed('Banco indisponível', 'Não consegui acessar o banco de dados agora.', ok=False), ephemeral=True)
+            return
+        value, error = self._validate_gcloud_language_input(language)
+        if error or value is None:
+            await self._respond(interaction, embed=self._make_embed('Idioma inválido', error or 'Idioma inválido.', ok=False), ephemeral=True)
+            return
+        panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
+        effective_user_id, effective_user_name, is_public_user_panel = self._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
+        if server:
+            await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gcloud_language=value))
+            desc = f"O idioma do Google Cloud do servidor agora é `{value}`."
+            history_entry = self._server_history_text(interaction, 'o idioma do Google Cloud do servidor', value)
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get('server_last_changes', []) or [])
+        else:
+            history_entry = self._user_history_text(interaction, 'o próprio idioma do Google' if effective_user_id == interaction.user.id else 'o idioma do Google', value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, gcloud_language=value, history_entry=history_entry)
+            desc = f"O idioma do Google Cloud de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu idioma do Google Cloud agora é `{value}`."
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get('user_last_changes', []) or [])
+        embed = await self._build_settings_embed(interaction.guild.id, effective_user_id if not server else interaction.user.id, server=server, panel_kind='server' if server else 'user', last_changes=last_changes, message_id=message_id, target_user_name=effective_user_name if not server else None, viewer_user_id=interaction.user.id)
+        view_target_user_id = None if server or is_public_user_panel else effective_user_id
+        view_target_user_name = None if server or is_public_user_panel else effective_user_name
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=view_target_user_id, target_user_name=view_target_user_name)
+        if panel_message is not None:
+            view.message = panel_message
+        await self._panel_update_after_change(interaction, embed=embed, view=view, title='Configuração de TTS atualizada', description=desc, target_message=panel_message)
+        if server:
+            await self._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
+
+    async def _apply_gcloud_voice_from_panel(self, interaction: discord.Interaction, voice_name: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+        if server and not interaction.user.guild_permissions.kick_members:
+            await self._respond(interaction, embed=self._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
+            return
+        db = self._get_db()
+        if db is None:
+            await self._respond(interaction, embed=self._make_embed('Banco indisponível', 'Não consegui acessar o banco de dados agora.', ok=False), ephemeral=True)
+            return
+        value, error = self._validate_gcloud_voice_input(voice_name)
+        if error or value is None:
+            await self._respond(interaction, embed=self._make_embed('Voz inválida', error or 'Voz inválida.', ok=False), ephemeral=True)
+            return
+        panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
+        effective_user_id, effective_user_name, is_public_user_panel = self._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
+        if server:
+            await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gcloud_voice=value))
+            desc = f"A voz do Google Cloud do servidor agora é `{value}`."
+            history_entry = self._server_history_text(interaction, 'a voz do Google Cloud do servidor', value)
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get('server_last_changes', []) or [])
+        else:
+            history_entry = self._user_history_text(interaction, 'a própria voz do Google' if effective_user_id == interaction.user.id else 'a voz do Google', value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, gcloud_voice=value, history_entry=history_entry)
+            desc = f"A voz do Google Cloud de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"A sua voz do Google Cloud agora é `{value}`."
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get('user_last_changes', []) or [])
+        embed = await self._build_settings_embed(interaction.guild.id, effective_user_id if not server else interaction.user.id, server=server, panel_kind='server' if server else 'user', last_changes=last_changes, message_id=message_id, target_user_name=effective_user_name if not server else None, viewer_user_id=interaction.user.id)
+        view_target_user_id = None if server or is_public_user_panel else effective_user_id
+        view_target_user_name = None if server or is_public_user_panel else effective_user_name
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=view_target_user_id, target_user_name=view_target_user_name)
+        if panel_message is not None:
+            view.message = panel_message
+        await self._panel_update_after_change(interaction, embed=embed, view=view, title='Configuração de TTS atualizada', description=desc, target_message=panel_message)
+        if server:
+            await self._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
+
+    async def _apply_gcloud_speed_from_panel(self, interaction: discord.Interaction, speed: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+        if server and not interaction.user.guild_permissions.kick_members:
+            await self._respond(interaction, embed=self._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
+            return
+        db = self._get_db()
+        if db is None:
+            await self._respond(interaction, embed=self._make_embed('Banco indisponível', 'Não consegui acessar o banco de dados agora.', ok=False), ephemeral=True)
+            return
+        value = self._normalize_gcloud_rate_value(speed)
+        panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
+        effective_user_id, effective_user_name, is_public_user_panel = self._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
+        if server:
+            await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gcloud_rate=value))
+            desc = f"A velocidade do Google Cloud do servidor agora é `{value}`."
+            history_entry = self._server_history_text(interaction, 'a velocidade do Google Cloud do servidor', value)
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get('server_last_changes', []) or [])
+        else:
+            history_entry = self._user_history_text(interaction, 'a própria velocidade do Google' if effective_user_id == interaction.user.id else 'a velocidade do Google', value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, gcloud_rate=value, history_entry=history_entry)
+            desc = f"A velocidade do Google Cloud de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"A sua velocidade do Google Cloud agora é `{value}`."
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get('user_last_changes', []) or [])
+        embed = await self._build_settings_embed(interaction.guild.id, effective_user_id if not server else interaction.user.id, server=server, panel_kind='server' if server else 'user', last_changes=last_changes, message_id=message_id, target_user_name=effective_user_name if not server else None, viewer_user_id=interaction.user.id)
+        view_target_user_id = None if server or is_public_user_panel else effective_user_id
+        view_target_user_name = None if server or is_public_user_panel else effective_user_name
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=view_target_user_id, target_user_name=view_target_user_name)
+        if panel_message is not None:
+            view.message = panel_message
+        await self._panel_update_after_change(interaction, embed=embed, view=view, title='Configuração de TTS atualizada', description=desc, target_message=panel_message)
+        if server:
+            await self._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
+
+    async def _apply_gcloud_pitch_from_panel(self, interaction: discord.Interaction, pitch: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+        if server and not interaction.user.guild_permissions.kick_members:
+            await self._respond(interaction, embed=self._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
+            return
+        db = self._get_db()
+        if db is None:
+            await self._respond(interaction, embed=self._make_embed('Banco indisponível', 'Não consegui acessar o banco de dados agora.', ok=False), ephemeral=True)
+            return
+        value = self._normalize_gcloud_pitch_value(pitch)
+        panel_message, message_id = self._resolve_public_panel_message(interaction, source_panel_message)
+        effective_user_id, effective_user_name, is_public_user_panel = self._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
+        if server:
+            await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gcloud_pitch=value))
+            desc = f"O tom do Google Cloud do servidor agora é `{value}`."
+            history_entry = self._server_history_text(interaction, 'o tom do Google Cloud do servidor', value)
+            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get('server_last_changes', []) or [])
+        else:
+            history_entry = self._user_history_text(interaction, 'o próprio tom do Google' if effective_user_id == interaction.user.id else 'o tom do Google', value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
+            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, gcloud_pitch=value, history_entry=history_entry)
+            desc = f"O tom do Google Cloud de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu tom do Google Cloud agora é `{value}`."
+            self._append_public_panel_history(message_id, history_entry)
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get('user_last_changes', []) or [])
+        embed = await self._build_settings_embed(interaction.guild.id, effective_user_id if not server else interaction.user.id, server=server, panel_kind='server' if server else 'user', last_changes=last_changes, message_id=message_id, target_user_name=effective_user_name if not server else None, viewer_user_id=interaction.user.id)
+        view_target_user_id = None if server or is_public_user_panel else effective_user_id
+        view_target_user_name = None if server or is_public_user_panel else effective_user_name
+        view = self._build_panel_view(0 if message_id in self._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=view_target_user_id, target_user_name=view_target_user_name)
+        if panel_message is not None:
+            view.message = panel_message
+        await self._panel_update_after_change(interaction, embed=embed, view=view, title='Configuração de TTS atualizada', description=desc, target_message=panel_message)
+        if server:
+            await self._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
 
     async def _apply_spoken_name_from_modal(
         self,
