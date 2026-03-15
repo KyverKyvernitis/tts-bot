@@ -79,6 +79,7 @@ class BotLocal(commands.Bot):
             "tts_history_utils",
             "tts_status_utils",
             "tts_text_utils",
+            "tts_embed_utils",
         }
 
         cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
