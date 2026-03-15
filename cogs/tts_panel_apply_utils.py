@@ -103,7 +103,7 @@ async def _apply_server_prefix_from_modal(
         target_message=panel_message,
     )
 
-async def _apply_mode_from_panel(self, interaction: discord.Interaction, mode: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_mode_from_panel(cog, interaction: discord.Interaction, mode: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     if server and not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message(
             embed=cog._make_embed(
@@ -166,7 +166,7 @@ async def _apply_mode_from_panel(self, interaction: discord.Interaction, mode: s
     if server:
         await cog._announce_panel_change(interaction, title="Modo atualizado", description=desc)
 
-async def _apply_voice_from_panel(self, interaction: discord.Interaction, voice: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_voice_from_panel(cog, interaction: discord.Interaction, voice: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     if server and not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message(
             embed=cog._make_embed(
@@ -235,7 +235,7 @@ async def _apply_voice_from_panel(self, interaction: discord.Interaction, voice:
     if server:
         await cog._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
-async def _apply_language_from_panel(self, interaction: discord.Interaction, language: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_language_from_panel(cog, interaction: discord.Interaction, language: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     if server and not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message(
             embed=cog._make_embed(
@@ -297,7 +297,7 @@ async def _apply_language_from_panel(self, interaction: discord.Interaction, lan
     if server:
         await cog._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
-async def _apply_speed_from_panel(self, interaction: discord.Interaction, speed: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_speed_from_panel(cog, interaction: discord.Interaction, speed: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     if server and not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message(
             embed=cog._make_embed(
@@ -359,7 +359,7 @@ async def _apply_speed_from_panel(self, interaction: discord.Interaction, speed:
     if server:
         await cog._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
-async def _apply_pitch_from_panel(self, interaction: discord.Interaction, pitch: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_pitch_from_panel(cog, interaction: discord.Interaction, pitch: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     if server and not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message(
             embed=cog._make_embed(
@@ -421,13 +421,13 @@ async def _apply_pitch_from_panel(self, interaction: discord.Interaction, pitch:
     if server:
         await cog._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
-async def _apply_gcloud_language_from_modal(self, interaction: discord.Interaction, language: str, *, server: bool, panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_gcloud_language_from_modal(cog, interaction: discord.Interaction, language: str, *, server: bool, panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     await cog._apply_gcloud_language_from_panel(interaction, language, server=server, source_panel_message=panel_message, target_user_id=target_user_id, target_user_name=target_user_name)
 
-async def _apply_gcloud_voice_from_modal(self, interaction: discord.Interaction, voice_name: str, *, server: bool, panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_gcloud_voice_from_modal(cog, interaction: discord.Interaction, voice_name: str, *, server: bool, panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     await cog._apply_gcloud_voice_from_panel(interaction, voice_name, server=server, source_panel_message=panel_message, target_user_id=target_user_id, target_user_name=target_user_name)
 
-async def _apply_gcloud_language_from_panel(self, interaction: discord.Interaction, language: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_gcloud_language_from_panel(cog, interaction: discord.Interaction, language: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     if server and not interaction.user.guild_permissions.kick_members:
         await cog._respond(interaction, embed=cog._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
         return
@@ -481,7 +481,7 @@ async def _apply_gcloud_language_from_panel(self, interaction: discord.Interacti
     if server:
         await cog._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
 
-async def _apply_gcloud_voice_from_panel(self, interaction: discord.Interaction, voice_name: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_gcloud_voice_from_panel(cog, interaction: discord.Interaction, voice_name: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     if server and not interaction.user.guild_permissions.kick_members:
         await cog._respond(interaction, embed=cog._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
         return
@@ -518,7 +518,7 @@ async def _apply_gcloud_voice_from_panel(self, interaction: discord.Interaction,
     if server:
         await cog._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
 
-async def _apply_gcloud_speed_from_panel(self, interaction: discord.Interaction, speed: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_gcloud_speed_from_panel(cog, interaction: discord.Interaction, speed: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     if server and not interaction.user.guild_permissions.kick_members:
         await cog._respond(interaction, embed=cog._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
         return
@@ -552,7 +552,7 @@ async def _apply_gcloud_speed_from_panel(self, interaction: discord.Interaction,
     if server:
         await cog._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
 
-async def _apply_gcloud_pitch_from_panel(self, interaction: discord.Interaction, pitch: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
+async def _apply_gcloud_pitch_from_panel(cog, interaction: discord.Interaction, pitch: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
     if server and not interaction.user.guild_permissions.kick_members:
         await cog._respond(interaction, embed=cog._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
         return
@@ -693,7 +693,7 @@ async def _apply_spoken_name_from_modal(
         target_message=panel_message,
     )
 
-async def _apply_announce_author_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
+async def _apply_announce_author_from_panel(cog, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
     if not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message(
             embed=cog._make_embed(
@@ -734,7 +734,7 @@ async def _apply_announce_author_from_panel(self, interaction: discord.Interacti
     )
     await cog._announce_panel_change(interaction, title="Modo de TTS atualizado", description=desc)
 
-async def _apply_only_target_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
+async def _apply_only_target_from_panel(cog, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
     if not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message(
             embed=cog._make_embed(
@@ -773,7 +773,7 @@ async def _apply_only_target_from_panel(self, interaction: discord.Interaction, 
     )
     await cog._announce_panel_change(interaction, title="Modo de TTS atualizado", description=desc)
 
-async def _apply_block_voice_bot_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
+async def _apply_block_voice_bot_from_panel(cog, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
     if not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message(
             embed=cog._make_embed(
