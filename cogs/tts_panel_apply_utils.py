@@ -716,12 +716,21 @@ async def _apply_announce_author_from_panel(cog, interaction: discord.Interactio
     panel_message = source_panel_message or getattr(interaction, "message", None)
     await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, announce_author=bool(enabled)))
     desc = "Autor antes da frase ativado." if enabled else "Autor antes da frase desativado."
-    history_entry = cog._toggle_history_text(interaction, "ativou o Autor antes da frase" if enabled else "desativou o Autor antes da frase")
-    await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
+    history_entry = cog._server_history_text(interaction, "ativou o Autor antes da frase" if enabled else "desativou o Autor antes da frase")
+    await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
     cog._append_public_panel_history(getattr(panel_message, "id", None), history_entry)
-    last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("toggle_last_changes", []) or [])
-    embed = await cog._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=getattr(panel_message, "id", None))
-    view = cog._build_toggle_view(0 if getattr(panel_message, "id", None) in cog._public_panel_states else interaction.user.id, interaction.guild.id)
+    panel_history = await cog._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))
+    last_changes = list((panel_history or {}).get("server_last_changes", []) or [])
+    embed = await cog._build_settings_embed(
+        interaction.guild.id,
+        interaction.user.id,
+        server=True,
+        panel_kind="server",
+        last_changes=last_changes,
+        message_id=getattr(panel_message, "id", None),
+        viewer_user_id=interaction.user.id,
+    )
+    view = cog._build_panel_view(0 if getattr(panel_message, "id", None) in cog._public_panel_states else interaction.user.id, interaction.guild.id, server=True)
     if panel_message is not None:
         view.message = panel_message
     await cog._panel_update_after_change(

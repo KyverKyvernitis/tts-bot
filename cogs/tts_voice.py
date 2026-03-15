@@ -2161,10 +2161,20 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view = self._build_panel_view(0, message.guild.id, server=True, timeout=300)
         elif panel_type == "toggle":
             panel_kind = "toggle"
+            fake_interaction = None
             if not message.author.guild_permissions.kick_members:
                 embed = self._make_embed(
                     "Sem permissão",
                     "Você precisa da permissão `Expulsar Membros` para abrir o painel de toggles",
+                    ok=False,
+                )
+                await message.channel.send(embed=embed)
+                return
+            guild_ids = getattr(config, "GUILD_IDS", []) or []
+            if guild_ids and message.guild.id not in guild_ids:
+                embed = self._make_embed(
+                    "Indisponível aqui",
+                    "Esse painel de toggles só está habilitado nos servidores definidos na env.",
                     ok=False,
                 )
                 await message.channel.send(embed=embed)
@@ -2424,6 +2434,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     async def toggle_menu(self, interaction: discord.Interaction):
         await self._defer_ephemeral(interaction)
         if not await self._require_guild(interaction):
+            return
+        if not await self._require_toggle_allowed_guild(interaction):
             return
         if not await self._require_kick_members(interaction):
             return
