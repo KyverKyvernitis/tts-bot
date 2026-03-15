@@ -330,6 +330,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 clean = str(entry or "").strip()
                 if not clean:
                     continue
+                if merged and merged[-1] == clean:
+                    continue
                 merged.append(clean)
         return merged[-3:]
 
