@@ -125,14 +125,18 @@ STATUS_ACTION_CHOICES = [
     app_commands.Choice(name="Copiar as configurações de outro usuário", value="copy_other"),
 ]
 
+TOGGLE_GUILD_IDS = tuple(getattr(config, "GUILD_IDS", []) or [])
+
+if TOGGLE_GUILD_IDS:
+    toggle_guilds = app_commands.guilds(*TOGGLE_GUILD_IDS)
+else:
+    def toggle_guilds(func):
+        return func
+
 class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_description="Comandos de texto para fala"):
     server = app_commands.Group(name="server", description="Configurações padrão do servidor")
     voices = app_commands.Group(name="voices", description="Listas de vozes e idiomas")
-    toggle = app_commands.Group(
-        name="toggle",
-        description="Atalhos e modos especiais",
-        guild_ids=(getattr(config, "GUILD_IDS", []) or None),
-    )
+    toggle = app_commands.Group(name="toggle", description="Atalhos e modos especiais")
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -2429,6 +2433,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         view.message = msg
 
     @toggle.command(name="menu", description="Abre um painel guiado para os toggles de TTS")
+    @toggle_guilds
     async def toggle_menu(self, interaction: discord.Interaction):
         await self._defer_ephemeral(interaction)
         if not await self._require_guild(interaction):
@@ -2444,29 +2449,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view.attach_message(msg)
         else:
             view.message = msg
-
-
-    @toggle.command(name="auto_leave", description="Ativa ou desativa o auto leave quando o bot ficar sozinho ou só com bots")
-    @app_commands.describe(enabled="true para ativar, false para desativar")
-    async def toggle_auto_leave(self, interaction: discord.Interaction, enabled: bool):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_toggle_allowed_guild(interaction):
-            return
-        if not await self._require_staff_or_kick_members(interaction):
-            return
-        db = self._get_db()
-        if db is None:
-            await self._respond(interaction, embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False), ephemeral=True)
-            return
-
-        await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, auto_leave=bool(enabled)))
-        history_entry = self._toggle_history_text(interaction, "ativou o Auto leave" if enabled else "desativou o Auto leave")
-        if hasattr(db, "set_guild_panel_last_change"):
-            await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
-        title = "Auto leave atualizado"
-        desc = "Auto leave ativado: o bot vai sair automaticamente quando ficar sozinho ou só com bots na call." if enabled else "Auto leave desativado: o bot não vai mais sair automaticamente quando ficar sozinho ou só com bots na call."
-        await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
 
     @app_commands.describe(enabled="true para ativar, false para desativar")
