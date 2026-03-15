@@ -128,7 +128,11 @@ STATUS_ACTION_CHOICES = [
 class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_description="Comandos de texto para fala"):
     server = app_commands.Group(name="server", description="Configurações padrão do servidor")
     voices = app_commands.Group(name="voices", description="Listas de vozes e idiomas")
-    toggle = app_commands.Group(name="toggle", description="Atalhos e modos especiais")
+    toggle = app_commands.Group(
+        name="toggle",
+        description="Atalhos e modos especiais",
+        guild_ids=(getattr(config, "GUILD_IDS", []) or None),
+    )
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -2172,12 +2176,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 return
             guild_ids = getattr(config, "GUILD_IDS", []) or []
             if guild_ids and message.guild.id not in guild_ids:
-                embed = self._make_embed(
-                    "Indisponível aqui",
-                    "Esse painel de toggles só está habilitado nos servidores definidos na env.",
-                    ok=False,
-                )
-                await message.channel.send(embed=embed)
                 return
             embed = await self._build_toggle_embed(message.guild.id, message.author.id)
             view = self._build_toggle_view(0, message.guild.id, timeout=300)
