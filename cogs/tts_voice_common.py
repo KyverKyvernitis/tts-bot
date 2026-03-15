@@ -179,7 +179,6 @@ def get_gtts_languages() -> dict[str, str]:
         return tts_langs()
     except Exception:
         return {
-            "pt-br": "Portuguese (Brazil)",
             "pt": "Portuguese",
             "en": "English",
             "es": "Spanish",
@@ -194,12 +193,12 @@ def build_gtts_language_aliases(languages: dict[str, str]) -> dict[str, str]:
     aliases: dict[str, str] = {
         "portugues": "pt",
         "português": "pt",
-        "portugues brasil": "pt-br",
-        "português brasil": "pt-br",
-        "pt br": "pt-br",
-        "pt-br": "pt-br",
-        "ptbr": "pt-br",
-        "brasileiro": "pt-br",
+        "portugues brasil": "pt",
+        "português brasil": "pt",
+        "pt br": "pt",
+        "pt-br": "pt",
+        "ptbr": "pt",
+        "brasileiro": "pt",
         "ingles": "en",
         "inglês": "en",
         "espanhol": "es",

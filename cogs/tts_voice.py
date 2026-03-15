@@ -76,6 +76,18 @@ from .tts_voice_ui import (
     TTSTogglePanelView,
 )
 
+USER_CONFIG_ACTION_CHOICES = [
+    app_commands.Choice(name="Abrir painel pessoal do usuário", value="panel"),
+    app_commands.Choice(name="Alterar apelido falado do usuário", value="spoken_name"),
+    app_commands.Choice(name="Resetar configurações do usuário para as do servidor", value="reset"),
+]
+
+STATUS_ACTION_CHOICES = [
+    app_commands.Choice(name="Ver o meu status", value="self"),
+    app_commands.Choice(name="Mostrar o status de outro usuário no chat", value="show_other"),
+    app_commands.Choice(name="Copiar as configurações de outro usuário", value="copy_other"),
+]
+
 class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_description="Comandos de texto para fala"):
     server = app_commands.Group(name="server", description="Configurações padrão do servidor")
     voices = app_commands.Group(name="voices", description="Listas de vozes e idiomas")
