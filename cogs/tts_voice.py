@@ -2178,7 +2178,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         forced_gtts = False
         if only_target_enabled and target_user_id and message.author.id != target_user_id:
             resolved["engine"] = "gtts"
-            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
+            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")
             resolved["voice"] = ""
             resolved["rate"] = "+0%"
             resolved["pitch"] = "+0Hz"
@@ -2186,7 +2186,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         if forced_engine == "gtts":
             resolved["engine"] = "gtts"
-            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
+            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")
         elif forced_engine == "edge":
             resolved["engine"] = "edge"
             resolved["voice"] = resolved.get("voice") or "pt-BR-FranciscaNeural"
@@ -4328,7 +4328,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 interaction.user.id,
                 engine=str(resolved.get('engine', 'gtts') or 'gtts'),
                 voice=str(resolved.get('edge_voice', resolved.get('voice', 'pt-BR-FranciscaNeural')) or 'pt-BR-FranciscaNeural'),
-                language=str(resolved.get('gtts_language', resolved.get('language', 'pt-br')) or 'pt-br'),
+                language=str(resolved.get('gtts_language', resolved.get('language', 'pt')) or 'pt'),
                 rate=str(resolved.get('edge_rate', resolved.get('rate', '+0%')) or '+0%'),
                 pitch=str(resolved.get('edge_pitch', resolved.get('pitch', '+0Hz')) or '+0Hz'),
                 gcloud_voice=str(resolved.get('gcloud_voice', getattr(config, 'GOOGLE_CLOUD_TTS_VOICE_NAME', 'pt-BR-Standard-A')) or getattr(config, 'GOOGLE_CLOUD_TTS_VOICE_NAME', 'pt-BR-Standard-A')),
@@ -4345,7 +4345,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             embed.add_field(name="Engine", value=f"`{resolved.get('engine', 'gtts')}`", inline=True)
             embed.add_field(name="Voz do Edge", value=f"`{resolved.get('edge_voice', resolved.get('voice', 'pt-BR-FranciscaNeural'))}`", inline=True)
-            embed.add_field(name="Idioma do gTTS", value=f"`{resolved.get('gtts_language', resolved.get('language', 'pt-br'))}`", inline=True)
+            embed.add_field(name="Idioma do gTTS", value=f"`{resolved.get('gtts_language', resolved.get('language', 'pt'))}`", inline=True)
             embed.add_field(name="Velocidade do Edge", value=f"`{resolved.get('edge_rate', resolved.get('rate', '+0%'))}`", inline=True)
             embed.add_field(name="Tom do Edge", value=f"`{resolved.get('edge_pitch', resolved.get('pitch', '+0Hz'))}`", inline=True)
             embed.add_field(name="Idioma do Google", value=f"`{resolved.get('gcloud_language', getattr(config, 'GOOGLE_CLOUD_TTS_LANGUAGE_CODE', 'pt-BR'))}`", inline=True)
