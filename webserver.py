@@ -1,72 +1,33 @@
-import os
-import time
-from typing import Any, Callable, Dict
-
 from flask import Flask, jsonify
+from waitress import serve
+import os
 
 app = Flask(__name__)
 
-_started_at = time.time()
-_health_provider: Callable[[], Dict[str, Any]] | None = None
+_health_provider = None
 
-
-def set_health_provider(provider: Callable[[], Dict[str, Any]]):
+def set_health_provider(provider):
     global _health_provider
     _health_provider = provider
 
-
-def _default_health() -> Dict[str, Any]:
-    return {
-        "status": "starting",
-        "healthy": True,
-        "starting": True,
-        "uptime_seconds": round(time.time() - _started_at, 2),
-    }
-
-
-def _resolve_health() -> Dict[str, Any]:
-    data = _default_health()
-    if _health_provider is not None:
-        try:
-            provided = _health_provider() or {}
-            if isinstance(provided, dict):
-                data.update(provided)
-        except Exception as e:
-            data.update({
-                "status": "error",
-                "healthy": False,
-                "starting": False,
-                "error": f"health provider failed: {e}",
-            })
-
-    data.setdefault("uptime_seconds", round(time.time() - _started_at, 2))
-    data.setdefault("healthy", True)
-    data.setdefault("starting", False)
-    data.setdefault("status", "ok" if data.get("healthy") else "error")
-    return data
-
-
 @app.get("/")
-def home():
-    return "OK", 200
-
+def index():
+    return "ok", 200
 
 @app.get("/health")
 def health():
-    data = _resolve_health()
-    code = 200 if data.get("healthy") or data.get("starting") else 503
-    return jsonify(data), code
-
-
-@app.get("/healthz")
-def healthz():
-    data = _resolve_health()
-    code = 200 if data.get("healthy") or data.get("starting") else 503
-    return jsonify(data), code
-
+    if callable(_health_provider):
+        try:
+            return jsonify(_health_provider()), 200
+        except Exception as e:
+            return jsonify({
+                "ok": False,
+                "healthy": False,
+                "error": str(e),
+            }), 500
+    return jsonify({"ok": True}), 200
 
 def run_webserver():
     port = int(os.getenv("PORT", "10000"))
-    print("WEB SERVER INICIANDO")
     print(f"[webserver] usando porta {port}")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    serve(app, host="0.0.0.0", port=port, threads=4)
