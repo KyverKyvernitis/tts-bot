@@ -6,7 +6,7 @@ from gtts.lang import tts_langs
 
 EDGE_DEFAULT_VOICE = "pt-BR-FranciscaNeural"
 EDGE_FALLBACK_VOICE = "pt-BR-AntonioNeural"
-GTTS_DEFAULT_LANGUAGE = "pt-br"
+GTTS_DEFAULT_LANGUAGE = "pt"
 
 RATE_RE = re.compile(r"^[+-]\d+%$")
 PITCH_RE = re.compile(r"^[+-]\d+Hz$")
