@@ -80,6 +80,8 @@ class BotLocal(commands.Bot):
             "tts_status_utils",
             "tts_text_utils",
             "tts_embed_utils",
+            "tts_voice_common",
+            "tts_voice_ui",
         }
 
         cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
