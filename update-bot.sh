@@ -41,7 +41,7 @@ remove_file() {
 }
 
 sanity_check() {
-  local attempts=12
+  local attempts=24
   local sleep_seconds=5
   local i
   local health_json=""
