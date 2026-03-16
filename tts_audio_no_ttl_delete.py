@@ -1,0 +1,726 @@
+import contextlib
+import asyncio
+import hashlib
+import json
+import inspect
+import os
+import shutil
+import tempfile
+import time
+import logging
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Optional
+
+import discord
+import edge_tts
+from gtts import gTTS
+from gtts.tts import gTTSError
+
+try:
+    from google.cloud import texttospeech_v1 as google_texttospeech
+except Exception:  # pragma: no cover - dependência opcional em tempo de import
+    google_texttospeech = None
+
+import config
+from tts_helpers import validate_voice
+
+
+GTTS_DEFAULT_LANGUAGE = getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")
+TTS_IDLE_DISCONNECT_SECONDS = int(getattr(config, "TTS_IDLE_DISCONNECT_SECONDS", 240))
+TTS_AUDIO_CACHE_SIZE = max(1, int(getattr(config, "TTS_AUDIO_CACHE_SIZE", 128)))
+TTS_AUDIO_CACHE_TTL_SECONDS = int(getattr(config, "TTS_AUDIO_CACHE_TTL_SECONDS", 900))
+TTS_DEBUG_LOGS = bool(getattr(config, "TTS_DEBUG_LOGS", False))
+TTS_WARM_HOLD_SECONDS = float(getattr(config, "TTS_WARM_HOLD_SECONDS", 30))
+TTS_QUEUE_MAXSIZE = max(1, int(getattr(config, "TTS_QUEUE_MAXSIZE", 20)))
+TTS_SYNTH_CONCURRENCY = max(1, int(getattr(config, "TTS_SYNTH_CONCURRENCY", 2)))
+TTS_EDGE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_EDGE_TIMEOUT_SECONDS", 10)))
+TTS_GTTS_CONCURRENCY = max(1, int(getattr(config, "TTS_GTTS_CONCURRENCY", 1)))
+GOOGLE_CLOUD_TTS_LANGUAGE_CODE = str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR").strip() or "pt-BR"
+GOOGLE_CLOUD_TTS_VOICE_NAME = str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
+GOOGLE_CLOUD_TTS_SPEAKING_RATE = float(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0))
+GOOGLE_CLOUD_TTS_PITCH = float(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0))
+TTS_FFMPEG_BEFORE_OPTIONS = getattr(config, "TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin")
+TTS_FFMPEG_OPTIONS = getattr(config, "TTS_FFMPEG_OPTIONS", "-vn -loglevel error")
+TTS_TEMP_DIR = os.path.abspath(str(getattr(config, "TTS_TEMP_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio")) or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio")).strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio"))
+TTS_TEMP_MAX_MB = max(64, int(getattr(config, "TTS_TEMP_MAX_MB", 512)))
+TTS_TEMP_MAX_FILES = max(32, int(getattr(config, "TTS_TEMP_MAX_FILES", 512)))
+TTS_TEMP_MAX_BYTES = TTS_TEMP_MAX_MB * 1024 * 1024
+
+_RUNTIME_DIR = os.path.join(TTS_TEMP_DIR, "runtime")
+_CACHE_DIR = os.path.join(TTS_TEMP_DIR, "cache")
+_CREDENTIALS_DIR = os.path.join(TTS_TEMP_DIR, "credentials")
+
+for _dir in (TTS_TEMP_DIR, _RUNTIME_DIR, _CACHE_DIR, _CREDENTIALS_DIR):
+    os.makedirs(_dir, exist_ok=True)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class QueueItem:
+    guild_id: int
+    channel_id: int
+    author_id: int
+    text: str
+    engine: str
+    voice: str
+    language: str
+    rate: str
+    pitch: str
+
+
+@dataclass
+class GuildTTSState:
+    queue: asyncio.Queue
+    worker_task: Optional[asyncio.Task] = None
+    last_text_channel_id: Optional[int] = None
+    last_channel_id: Optional[int] = None
+    warmed_until: float = 0.0
+    cache_order: OrderedDict[str, float] = field(default_factory=OrderedDict)
+
+
+class TTSAudioMixin:
+    def _log_debug(self, text: str) -> None:
+        if TTS_DEBUG_LOGS:
+            logger.debug(text)
+
+    def _get_state(self, guild_id: int) -> GuildTTSState:
+        state = self.guild_states.get(guild_id)
+        if state is None:
+            state = GuildTTSState(queue=asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE))
+            self.guild_states[guild_id] = state
+        return state
+
+
+    def _cleanup_guild_state_if_idle(self, guild_id: int) -> bool:
+        state = self.guild_states.get(guild_id)
+        if state is None:
+            return True
+
+        task = getattr(state, "worker_task", None)
+        if task is not None and not task.done():
+            return False
+
+        if not state.queue.empty():
+            return False
+
+        self.guild_states.pop(guild_id, None)
+
+        cleanup = getattr(self, "_cleanup_guild_runtime_state", None)
+        if cleanup is not None:
+            try:
+                cleanup(guild_id)
+            except Exception:
+                logger.exception("[tts_voice] Falha ao limpar estado runtime da guild=%s", guild_id)
+
+        return True
+
+    async def _enqueue_tts_item(self, guild_id: int, item: QueueItem) -> tuple[bool, int]:
+        state = self._get_state(guild_id)
+        dropped = 0
+
+        while state.queue.full():
+            try:
+                state.queue.get_nowait()
+                state.queue.task_done()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+
+        await state.queue.put(item)
+        return dropped == 0, dropped
+
+    def _ensure_worker(self, guild_id: int) -> None:
+        state = self._get_state(guild_id)
+        if state.worker_task is None or state.worker_task.done():
+            state.worker_task = asyncio.create_task(self._worker_loop(guild_id))
+
+    async def _maybe_await(self, value):
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+    def _normalize_edge_rate(self, raw: str) -> str:
+        value = str(raw or "").strip().replace("％", "%").replace("−", "-").replace("–", "-").replace("—", "-").replace(" ", "")
+        if value.endswith("%"):
+            value = value[:-1]
+        if not value:
+            return "+0%"
+        if value[0] not in "+-":
+            value = f"+{value}"
+        sign, number = value[0], value[1:]
+        if not number.isdigit():
+            return "+0%"
+        return f"{sign}{number}%"
+
+    def _normalize_edge_pitch(self, raw: str) -> str:
+        value = str(raw or "").strip().replace("−", "-").replace("–", "-").replace("—", "-").replace(" ", "")
+        if value.lower().endswith("hz"):
+            value = value[:-2]
+        if not value:
+            return "+0Hz"
+        if value[0] not in "+-":
+            value = f"{value}" if value.startswith(("+", "-")) else f"+{value}"
+        sign, number = value[0], value[1:]
+        if not number.isdigit():
+            return "+0Hz"
+        return f"{sign}{number}Hz"
+
+    def _normalize_gcloud_language(self, raw: str) -> str:
+        value = str(raw or "").strip() or GOOGLE_CLOUD_TTS_LANGUAGE_CODE
+        value = value.replace("_", "-")
+        return value or "pt-BR"
+
+    def _normalize_gcloud_voice(self, raw: str) -> str:
+        value = str(raw or "").strip() or GOOGLE_CLOUD_TTS_VOICE_NAME
+        return value or "pt-BR-Standard-A"
+
+    def _normalize_gcloud_rate(self, raw: str | float) -> str:
+        try:
+            numeric = float(str(raw).strip().replace(",", "."))
+        except Exception:
+            numeric = float(GOOGLE_CLOUD_TTS_SPEAKING_RATE or 1.0)
+        numeric = max(0.25, min(2.0, numeric))
+        return f"{numeric:.2f}".rstrip("0").rstrip(".")
+
+    def _normalize_gcloud_pitch(self, raw: str | float) -> str:
+        try:
+            numeric = float(str(raw).strip().replace(",", "."))
+        except Exception:
+            numeric = float(GOOGLE_CLOUD_TTS_PITCH or 0.0)
+        numeric = max(-20.0, min(20.0, numeric))
+        if abs(numeric - round(numeric)) < 1e-9:
+            return str(int(round(numeric)))
+        return f"{numeric:.2f}".rstrip("0").rstrip(".")
+
+    def _normalize_cache_text(self, text: str) -> str:
+        text = " ".join((text or "").strip().split())
+        text = text.lower()
+        text = text.replace("!!", "!").replace("??", "?").replace("..", ".")
+        return text
+
+    def _get_synth_semaphore(self) -> asyncio.Semaphore:
+        semaphore = getattr(self, "_tts_synth_semaphore", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(TTS_SYNTH_CONCURRENCY)
+            setattr(self, "_tts_synth_semaphore", semaphore)
+        return semaphore
+
+    def _get_gtts_semaphore(self) -> asyncio.Semaphore:
+        semaphore = getattr(self, "_tts_gtts_semaphore", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(TTS_GTTS_CONCURRENCY)
+            setattr(self, "_tts_gtts_semaphore", semaphore)
+        return semaphore
+
+    def _get_gtts_rate_lock(self) -> asyncio.Lock:
+        lock = getattr(self, "_tts_gtts_rate_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            setattr(self, "_tts_gtts_rate_lock", lock)
+        return lock
+
+    def _get_global_cache_order(self) -> OrderedDict[str, float]:
+        cache_order = getattr(self, "_tts_cache_order", None)
+        if cache_order is None:
+            cache_order = OrderedDict()
+            setattr(self, "_tts_cache_order", cache_order)
+        return cache_order
+
+    def _get_inflight_cache_tasks(self) -> dict[str, asyncio.Task]:
+        tasks = getattr(self, "_tts_inflight_cache_tasks", None)
+        if tasks is None:
+            tasks = {}
+            setattr(self, "_tts_inflight_cache_tasks", tasks)
+        return tasks
+
+    def _make_runtime_temp_file(self, suffix: str = ".mp3") -> str:
+        fd, path = tempfile.mkstemp(prefix="tts_", suffix=suffix, dir=_RUNTIME_DIR)
+        os.close(fd)
+        return path
+
+    def _list_tmp_audio_files(self) -> list[tuple[float, int, str]]:
+        result: list[tuple[float, int, str]] = []
+        for directory in (_RUNTIME_DIR, _CACHE_DIR):
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        if not entry.name.lower().endswith((".mp3", ".wav", ".ogg", ".tmp")):
+                            continue
+                        try:
+                            stat = entry.stat()
+                        except FileNotFoundError:
+                            continue
+                        result.append((stat.st_mtime, stat.st_size, entry.path))
+            except FileNotFoundError:
+                continue
+        return result
+
+    def _prune_tmp_audio_dir(self, *, protected_paths: Optional[set[str]] = None) -> None:
+        protected = {os.path.abspath(p) for p in (protected_paths or set()) if p}
+        files = self._list_tmp_audio_files()
+        total_files = len(files)
+        total_bytes = sum(size for _, size, _ in files)
+
+        if total_files <= TTS_TEMP_MAX_FILES and total_bytes <= TTS_TEMP_MAX_BYTES:
+            return
+
+        cache_order = self._get_global_cache_order()
+
+        for _, size, path in sorted(files, key=lambda item: item[0]):
+            abs_path = os.path.abspath(path)
+            if abs_path in protected:
+                continue
+            if total_files <= TTS_TEMP_MAX_FILES and total_bytes <= TTS_TEMP_MAX_BYTES:
+                break
+            try:
+                os.remove(abs_path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                continue
+            total_files = max(0, total_files - 1)
+            total_bytes = max(0, total_bytes - size)
+            if abs_path.startswith(os.path.abspath(_CACHE_DIR) + os.sep):
+                cache_order.pop(os.path.splitext(os.path.basename(abs_path))[0], None)
+
+
+    def _touch_cache_entry(self, state: GuildTTSState, key: str) -> None:
+        cache_order = self._get_global_cache_order()
+        now = time.time()
+        cache_order[key] = now
+        cache_order.move_to_end(key)
+
+    def _purge_cache(self, state: GuildTTSState, *, protected_paths: Optional[set[str]] = None) -> None:
+        cache_order = self._get_global_cache_order()
+
+        missing = []
+        for key in list(cache_order.keys()):
+            path = self._cache_path(key)
+            if not os.path.exists(path):
+                missing.append(key)
+
+        for key in missing:
+            cache_order.pop(key, None)
+
+        protected = {os.path.abspath(p) for p in (protected_paths or set()) if p}
+        while len(cache_order) > TTS_AUDIO_CACHE_SIZE:
+            oldest_key, oldest_ts = cache_order.popitem(last=False)
+            path = self._cache_path(oldest_key)
+            abs_path = os.path.abspath(path)
+            if abs_path in protected:
+                cache_order[oldest_key] = oldest_ts
+                cache_order.move_to_end(oldest_key)
+                continue
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+
+        self._prune_tmp_audio_dir(protected_paths=protected_paths)
+
+    async def _store_in_cache(self, state: GuildTTSState, item: QueueItem, source_path: str) -> str:
+        key = self._cache_key(item)
+        path = self._cache_path(key)
+
+        if os.path.exists(path):
+            self._touch_cache_entry(state, key)
+            self._purge_cache(state, protected_paths={path})
+            return path
+
+        try:
+            await asyncio.to_thread(shutil.move, source_path, path)
+        except Exception:
+            try:
+                await asyncio.to_thread(shutil.copyfile, source_path, path)
+            except Exception:
+                return source_path
+
+        self._touch_cache_entry(state, key)
+        self._purge_cache(state, protected_paths={path})
+        return path
+
+    def _cache_key(self, item: QueueItem) -> str:
+        text = self._normalize_cache_text(item.text)
+        engine = (item.engine or "gtts").strip().lower()
+        if engine == "edge":
+            voice = validate_voice(item.voice, getattr(self, "edge_voice_names", set()))
+            payload = f"edge|{voice}|{self._normalize_edge_rate(item.rate)}|{self._normalize_edge_pitch(item.pitch)}|{text}"
+        elif engine == "gcloud":
+            language = self._normalize_gcloud_language(item.language)
+            voice = self._normalize_gcloud_voice(item.voice)
+            rate = self._normalize_gcloud_rate(item.rate)
+            pitch = self._normalize_gcloud_pitch(item.pitch)
+            payload = f"gcloud|{language}|{voice}|{rate}|{pitch}|{text}"
+        else:
+            language = (item.language or GTTS_DEFAULT_LANGUAGE).strip().lower()
+            payload = f"gtts|{language}|{text}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _cache_path(self, key: str) -> str:
+        return os.path.join(_CACHE_DIR, f"{key}.mp3")
+
+
+    def _try_get_cached_path(self, state: GuildTTSState, item: QueueItem) -> Optional[str]:
+        key = self._cache_key(item)
+        path = self._cache_path(key)
+
+        if not os.path.exists(path):
+            return None
+
+        self._touch_cache_entry(state, key)
+        self._purge_cache(state, protected_paths={path})
+        self._log_debug(f"[tts_voice] cache hit | guild={item.guild_id} key={key[:10]}")
+        return path
+
+
+    async def _generate_gtts_file(self, text: str, language: str, *, tld: str = "com") -> str:
+        language = (language or GTTS_DEFAULT_LANGUAGE).strip().lower()
+        tld = str(tld or "com").strip() or "com"
+        self._log_debug(f"[tts_voice] gTTS synth | language={language!r} tld={tld!r} text={text[:80]!r}")
+
+        path = self._make_runtime_temp_file(suffix=".mp3")
+        try:
+            tts = gTTS(text=text, lang=language, tld=tld)
+            async with self._get_gtts_semaphore():
+                await asyncio.to_thread(tts.save, path)
+            return path
+        except Exception:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            raise
+
+    async def _generate_edge_file(self, text: str, voice: str, rate: str, pitch: str) -> str:
+        voice = validate_voice(voice, getattr(self, "edge_voice_names", set()))
+        rate = self._normalize_edge_rate(rate)
+        pitch = self._normalize_edge_pitch(pitch)
+
+        self._log_debug(
+            "[tts_voice] Edge synth | "
+            f"voice={voice!r} rate={rate!r} pitch={pitch!r} text={text[:80]!r}"
+        )
+
+        path = self._make_runtime_temp_file(suffix=".mp3")
+        try:
+            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
+            async with self._get_synth_semaphore():
+                await asyncio.wait_for(communicate.save(path), timeout=TTS_EDGE_TIMEOUT_SECONDS)
+            return path
+        except Exception:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            raise
+
+    def _ensure_google_credentials_file(self) -> None:
+        if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+            return
+
+        raw_json = (os.getenv("GOOGLE_CREDENTIALS_JSON", "") or "").strip()
+        if not raw_json:
+            return
+
+        try:
+            parsed = json.loads(raw_json)
+        except Exception as exc:
+            raise RuntimeError("GOOGLE_CREDENTIALS_JSON está inválido e não pôde ser lido como JSON.") from exc
+
+        path = os.path.join(_CREDENTIALS_DIR, "chat_revive_google_credentials.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(parsed, handle, ensure_ascii=False)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
+
+    def _get_google_tts_client(self):
+        if google_texttospeech is None:
+            raise RuntimeError("A dependência google-cloud-texttospeech não está instalada.")
+        self._ensure_google_credentials_file()
+        client = getattr(self, "_google_tts_client", None)
+        if client is None:
+            client = google_texttospeech.TextToSpeechClient()
+            setattr(self, "_google_tts_client", client)
+        return client
+
+    async def _generate_google_cloud_file(self, text: str, language: str, voice_name: str, rate: str, pitch: str) -> str:
+        language = self._normalize_gcloud_language(language)
+        voice_name = self._normalize_gcloud_voice(voice_name)
+        normalized_rate = self._normalize_gcloud_rate(rate)
+        normalized_pitch = self._normalize_gcloud_pitch(pitch)
+        if voice_name and not str(voice_name).lower().startswith(str(language).lower() + '-'):
+            voice_name = ''
+        self._log_debug(
+            "[tts_voice] Google Cloud TTS synth | "
+            f"voice={voice_name!r} language={language!r} rate={normalized_rate!r} pitch={normalized_pitch!r} text={text[:80]!r}"
+        )
+
+        path = self._make_runtime_temp_file(suffix=".mp3")
+
+        try:
+            client = await asyncio.to_thread(self._get_google_tts_client)
+            synthesis_input = google_texttospeech.SynthesisInput(text=text)
+            voice_kwargs = {"language_code": language}
+            if voice_name:
+                voice_kwargs["name"] = voice_name
+            voice = google_texttospeech.VoiceSelectionParams(**voice_kwargs)
+            audio_config = google_texttospeech.AudioConfig(
+                audio_encoding=google_texttospeech.AudioEncoding.MP3,
+                speaking_rate=float(normalized_rate),
+                pitch=float(normalized_pitch),
+            )
+            request = google_texttospeech.SynthesizeSpeechRequest(
+                input=synthesis_input,
+                voice=voice,
+                audio_config=audio_config,
+            )
+
+            async with self._get_synth_semaphore():
+                response = await asyncio.to_thread(client.synthesize_speech, request=request)
+                def _write_audio_file(target_path: str, data: bytes) -> None:
+                    with open(target_path, 'wb') as handle:
+                        handle.write(data)
+                await asyncio.to_thread(_write_audio_file, path, response.audio_content)
+            return path
+        except Exception:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            raise
+
+    async def _resolve_or_generate_cached_audio(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:
+        key = self._cache_key(item)
+        inflight = self._get_inflight_cache_tasks()
+
+        existing = inflight.get(key)
+        if existing is not None:
+            return await existing
+
+        async def _runner() -> tuple[str, bool]:
+            cached = self._try_get_cached_path(state, item)
+            if cached:
+                return cached, False
+
+            generated = await self._generate_audio_file(item)
+            cached_path = await self._store_in_cache(state, item, generated)
+            if cached_path != generated:
+                return cached_path, False
+            return generated, False
+
+        task = asyncio.create_task(_runner())
+        inflight[key] = task
+        try:
+            return await task
+        finally:
+            if inflight.get(key) is task:
+                inflight.pop(key, None)
+
+    async def _generate_audio_file(self, item: QueueItem) -> str:
+        if item.engine == "edge":
+            try:
+                return await self._generate_edge_file(item.text, item.voice, item.rate, item.pitch)
+            except Exception as e:
+                logger.warning("[tts_voice] Edge falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
+                return await self._generate_gtts_file(item.text, item.language)
+
+        if item.engine == "gcloud":
+            return await self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch)
+
+        return await self._generate_gtts_file(item.text, item.language)
+
+    async def _resolve_audio_path(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:
+        should_cache = len(self._normalize_cache_text(item.text)) <= 220
+        if should_cache:
+            return await self._resolve_or_generate_cached_audio(state, item)
+
+        cached = self._try_get_cached_path(state, item)
+        if cached:
+            return cached, False
+
+        generated = await self._generate_audio_file(item)
+        return generated, False
+
+    async def _play_file(self, vc: discord.VoiceClient, path: str) -> None:
+        loop = asyncio.get_running_loop()
+        finished = loop.create_future()
+
+        def _after_playback(error: Optional[Exception]) -> None:
+            if error:
+                if not finished.done():
+                    loop.call_soon_threadsafe(finished.set_exception, error)
+            else:
+                if not finished.done():
+                    loop.call_soon_threadsafe(finished.set_result, None)
+
+        source = discord.FFmpegPCMAudio(
+            path,
+            before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+            options=TTS_FFMPEG_OPTIONS,
+        )
+        vc.play(source, after=_after_playback)
+        await finished
+
+    async def _disconnect_idle(self, guild: discord.Guild) -> bool:
+        vc = self._get_voice_client_for_guild(guild)
+        if vc is None or not vc.is_connected() or vc.channel is None:
+            return True
+
+        members = list(getattr(vc.channel, "members", []))
+        humans = [m for m in members if not m.bot]
+        if humans:
+            self._log_debug(f"[tts_voice] Idle timeout ignorado | ainda há humanos na call | guild={guild.id}")
+            return False
+
+        try:
+            await vc.disconnect(force=False)
+            logger.info("[tts_voice] Desconectado por inatividade | guild=%s", guild.id)
+            return True
+        except Exception as e:
+            logger.warning("[tts_voice] Erro ao desconectar por inatividade | guild=%s erro=%s", guild.id, e)
+            return False
+
+    async def _ensure_connected_fast(self, guild: discord.Guild, item: QueueItem):
+        state = self._get_state(guild.id)
+        target_channel = guild.get_channel(item.channel_id) or self.bot.get_channel(item.channel_id)
+        if target_channel is None:
+            return None
+
+        vc = self._get_voice_client_for_guild(guild)
+        if vc is not None and vc.is_connected():
+            if vc.channel is not None and vc.channel.id == item.channel_id:
+                state.last_channel_id = item.channel_id
+                return vc
+            try:
+                await vc.move_to(target_channel)
+                state.last_channel_id = item.channel_id
+                return vc
+            except Exception:
+                pass
+
+        vc = await self._maybe_await(self._ensure_connected(guild, target_channel))
+        if vc is None:
+            current = self._get_voice_client_for_guild(guild)
+            if current is not None and current.is_connected():
+                if current.channel is not None and current.channel.id == item.channel_id:
+                    state.last_channel_id = item.channel_id
+                    return current
+            return None
+
+        if vc.is_connected():
+            state.last_channel_id = item.channel_id
+        return vc
+
+    async def _maybe_prefetch_next(self, state: GuildTTSState):
+        prefetched_item: Optional[QueueItem] = None
+        prefetched_audio_task: Optional[asyncio.Task] = None
+
+        if state.queue.empty():
+            return prefetched_item, prefetched_audio_task
+
+        try:
+            prefetched_item = state.queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None, None
+
+        prefetched_audio_task = asyncio.create_task(self._resolve_audio_path(state, prefetched_item))
+        return prefetched_item, prefetched_audio_task
+
+    async def _worker_loop(self, guild_id: int) -> None:
+        state = self._get_state(guild_id)
+        prefetched_item: Optional[QueueItem] = None
+        prefetched_audio_task: Optional[asyncio.Task] = None
+
+        try:
+            while True:
+                guild = self.bot.get_guild(guild_id)
+                if guild is None:
+                    self._log_debug(f"[tts_voice] Guild não encontrada no worker | guild={guild_id}")
+                    return
+
+                fetched_from_queue = False
+
+                if prefetched_item is not None:
+                    item = prefetched_item
+                    fetched_from_queue = True
+                    prefetched_item = None
+                    audio_task = prefetched_audio_task
+                    prefetched_audio_task = None
+                else:
+                    try:
+                        timeout = TTS_IDLE_DISCONNECT_SECONDS
+                        if state.warmed_until > time.monotonic():
+                            timeout = min(timeout, max(1.0, state.warmed_until - time.monotonic()))
+                        item = await asyncio.wait_for(state.queue.get(), timeout=timeout)
+                        fetched_from_queue = True
+                    except asyncio.TimeoutError:
+                        if state.warmed_until > time.monotonic():
+                            continue
+                        disconnected = await self._disconnect_idle(guild)
+                        if disconnected:
+                            return
+                        continue
+                    audio_task = None
+
+                try:
+                    if hasattr(self, "_should_block_for_voice_bot"):
+                        target_channel = guild.get_channel(item.channel_id) or self.bot.get_channel(item.channel_id)
+                        if target_channel is not None:
+                            blocked = await self._maybe_await(self._should_block_for_voice_bot(guild, target_channel))
+                            if blocked:
+                                logger.info("[tts_voice] Worker bloqueado por outro bot de voz | guild=%s channel=%s", guild_id, item.channel_id)
+                                if hasattr(self, "_disconnect_if_blocked"):
+                                    await self._maybe_await(self._disconnect_if_blocked(guild))
+                                continue
+
+                    connect_task = asyncio.create_task(self._ensure_connected_fast(guild, item))
+                    own_audio_task = None
+                    if audio_task is None:
+                        own_audio_task = asyncio.create_task(self._resolve_audio_path(state, item))
+                        active_audio_task = own_audio_task
+                    else:
+                        active_audio_task = audio_task
+
+                    vc = await connect_task
+                    if vc is None:
+                        if own_audio_task is not None and not own_audio_task.done():
+                            own_audio_task.cancel()
+                            with contextlib.suppress(BaseException):
+                                await own_audio_task
+                        logger.warning("[tts_voice] Worker não conseguiu conectar | guild=%s channel=%s", guild_id, item.channel_id)
+                        continue
+
+                    current_path, should_cleanup = await active_audio_task
+
+                    if prefetched_item is None:
+                        prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
+
+                    try:
+                        await self._play_file(vc, current_path)
+                    finally:
+                        protected_paths: set[str] = set()
+                        if should_cleanup:
+                            protected_paths.add(current_path)
+                        if prefetched_audio_task is not None and prefetched_audio_task.done() and not prefetched_audio_task.cancelled():
+                            with contextlib.suppress(Exception):
+                                prefetched_path, _ = prefetched_audio_task.result()
+                                if prefetched_path:
+                                    protected_paths.add(prefetched_path)
+                        self._purge_cache(state, protected_paths=protected_paths)
+                        state.warmed_until = time.monotonic() + TTS_WARM_HOLD_SECONDS
+
+                    if prefetched_item is None and not state.queue.empty():
+                        prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
+
+                except Exception as e:
+                    logger.exception("[tts_voice] Erro no worker da guild %s: %s", guild_id, e)
+                finally:
+                    if fetched_from_queue:
+                        state.queue.task_done()
+        finally:
+            state.worker_task = None
+            self._cleanup_guild_state_if_idle(guild_id)
