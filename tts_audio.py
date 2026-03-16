@@ -70,6 +70,8 @@ class QueueItem:
     language: str
     rate: str
     pitch: str
+    _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
+    _cache_key_value: Optional[str] = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -202,6 +204,13 @@ class TTSAudioMixin:
         text = text.replace("!!", "!").replace("??", "?").replace("..", ".")
         return text
 
+    def _get_item_normalized_cache_text(self, item: QueueItem) -> str:
+        cached = getattr(item, "_normalized_cache_text", None)
+        if cached is None:
+            cached = self._normalize_cache_text(item.text)
+            item._normalized_cache_text = cached
+        return cached
+
     def _get_synth_semaphore(self) -> asyncio.Semaphore:
         semaphore = getattr(self, "_tts_synth_semaphore", None)
         if semaphore is None:
@@ -255,9 +264,9 @@ class TTSAudioMixin:
         os.close(fd)
         return path
 
-    def _list_tmp_audio_files(self) -> list[tuple[float, int, str]]:
-        result: list[tuple[float, int, str]] = []
-        for directory in (_RUNTIME_DIR, _CACHE_DIR):
+    def _list_tmp_audio_files(self) -> list[tuple[int, float, int, str]]:
+        result: list[tuple[int, float, int, str]] = []
+        for directory, priority in ((_RUNTIME_DIR, 0), (_CACHE_DIR, 1)):
             try:
                 with os.scandir(directory) as entries:
                     for entry in entries:
@@ -269,7 +278,7 @@ class TTSAudioMixin:
                             stat = entry.stat()
                         except FileNotFoundError:
                             continue
-                        result.append((stat.st_mtime, stat.st_size, entry.path))
+                        result.append((priority, stat.st_mtime, stat.st_size, entry.path))
             except FileNotFoundError:
                 continue
         return result
@@ -281,14 +290,14 @@ class TTSAudioMixin:
         protected = {os.path.abspath(p) for p in (protected_paths or set()) if p}
         files = self._list_tmp_audio_files()
         total_files = len(files)
-        total_bytes = sum(size for _, size, _ in files)
+        total_bytes = sum(size for _, _, size, _ in files)
 
         if total_files <= TTS_TEMP_MAX_FILES and total_bytes <= TTS_TEMP_MAX_BYTES:
             return
 
         cache_order = self._get_global_cache_order()
 
-        for _, size, path in sorted(files, key=lambda item: item[0]):
+        for _, _, size, path in sorted(files, key=lambda item: (item[0], item[1])):
             abs_path = os.path.abspath(path)
             if abs_path in protected:
                 continue
@@ -363,7 +372,11 @@ class TTSAudioMixin:
         return path
 
     def _cache_key(self, item: QueueItem) -> str:
-        text = self._normalize_cache_text(item.text)
+        cached_key = getattr(item, "_cache_key_value", None)
+        if cached_key is not None:
+            return cached_key
+
+        text = self._get_item_normalized_cache_text(item)
         engine = (item.engine or "gtts").strip().lower()
         if engine == "edge":
             voice = validate_voice(item.voice, getattr(self, "edge_voice_names", set()))
@@ -375,9 +388,13 @@ class TTSAudioMixin:
             pitch = self._normalize_gcloud_pitch(item.pitch)
             payload = f"gcloud|{language}|{voice}|{rate}|{pitch}|{text}"
         else:
-            language = (item.language or GTTS_DEFAULT_LANGUAGE).strip().lower()
+            language = (item.language or GTTS_DEFAULT_LANGUAGE).strip().lower().replace('_', '-')
+            if language == 'pt-br':
+                language = 'pt'
             payload = f"gtts|{language}|{text}"
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        cached_key = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        item._cache_key_value = cached_key
+        return cached_key
 
     def _cache_path(self, key: str) -> str:
         return os.path.join(_CACHE_DIR, f"{key}.mp3")
@@ -396,7 +413,9 @@ class TTSAudioMixin:
 
 
     async def _generate_gtts_file(self, text: str, language: str, *, tld: str = "com") -> str:
-        language = (language or GTTS_DEFAULT_LANGUAGE).strip().lower()
+        language = (language or GTTS_DEFAULT_LANGUAGE).strip().lower().replace('_', '-')
+        if language == 'pt-br':
+            language = 'pt'
         tld = str(tld or "com").strip() or "com"
         self._log_debug(f"[tts_voice] gTTS synth | language={language!r} tld={tld!r} text={text[:80]!r}")
 
@@ -551,7 +570,7 @@ class TTSAudioMixin:
         return await self._generate_gtts_file(item.text, item.language)
 
     async def _resolve_audio_path(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:
-        should_cache = len(self._normalize_cache_text(item.text)) <= TTS_CACHEABLE_TEXT_MAX_LENGTH
+        should_cache = len(self._get_item_normalized_cache_text(item)) <= TTS_CACHEABLE_TEXT_MAX_LENGTH
         if should_cache:
             return await self._resolve_or_generate_cached_audio(state, item)
 
