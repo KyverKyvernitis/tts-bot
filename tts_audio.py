@@ -38,6 +38,10 @@ TTS_EDGE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_EDGE_TIMEOUT_SECO
 TTS_GTTS_CONCURRENCY = max(1, int(getattr(config, "TTS_GTTS_CONCURRENCY", 1)))
 TTS_CACHEABLE_TEXT_MAX_LENGTH = max(64, int(getattr(config, "TTS_CACHEABLE_TEXT_MAX_LENGTH", 320)))
 TTS_TEMP_PRUNE_INTERVAL_SECONDS = max(5.0, float(getattr(config, "TTS_TEMP_PRUNE_INTERVAL_SECONDS", 20)))
+TTS_BOOT_WARMUP_ENABLED = bool(getattr(config, "TTS_BOOT_WARMUP_ENABLED", True))
+TTS_ENGINE_ALERT_COOLDOWN_SECONDS = max(60.0, float(getattr(config, "TTS_ENGINE_ALERT_COOLDOWN_SECONDS", 900)))
+TTS_ENGINE_FAILURE_ALERT_THRESHOLD = max(1, int(getattr(config, "TTS_ENGINE_FAILURE_ALERT_THRESHOLD", 3)))
+TTS_ENGINE_SLOW_WARN_SECONDS = max(1.0, float(getattr(config, "TTS_ENGINE_SLOW_WARN_SECONDS", 8.0)))
 GOOGLE_CLOUD_TTS_LANGUAGE_CODE = str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR").strip() or "pt-BR"
 GOOGLE_CLOUD_TTS_VOICE_NAME = str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
 GOOGLE_CLOUD_TTS_SPEAKING_RATE = float(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0))
@@ -70,8 +74,10 @@ class QueueItem:
     language: str
     rate: str
     pitch: str
+    enqueued_at_monotonic: float = field(default_factory=time.monotonic, repr=False, compare=False)
     _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
     _cache_key_value: Optional[str] = field(default=None, repr=False, compare=False)
+    _dedup_signature: Optional[str] = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -82,6 +88,7 @@ class GuildTTSState:
     last_channel_id: Optional[int] = None
     warmed_until: float = 0.0
     cache_order: OrderedDict[str, float] = field(default_factory=OrderedDict)
+    pending_signatures: dict[str, int] = field(default_factory=dict)
 
 
 class TTSAudioMixin:
@@ -120,20 +127,29 @@ class TTSAudioMixin:
 
         return True
 
-    async def _enqueue_tts_item(self, guild_id: int, item: QueueItem) -> tuple[bool, int]:
+    async def _enqueue_tts_item(self, guild_id: int, item: QueueItem) -> tuple[bool, int, bool]:
         state = self._get_state(guild_id)
         dropped = 0
+        deduplicated = False
+        signature = self._queue_signature(item)
 
         while state.queue.full():
             try:
-                state.queue.get_nowait()
+                dropped_item = state.queue.get_nowait()
+                self._decrement_pending_signature(state, dropped_item)
                 state.queue.task_done()
                 dropped += 1
             except asyncio.QueueEmpty:
                 break
 
+        if int(state.pending_signatures.get(signature, 0) or 0) > 0:
+            self._record_queue_enqueue(deduplicated=True)
+            return False, dropped, True
+
         await state.queue.put(item)
-        return dropped == 0, dropped
+        self._increment_pending_signature(state, item)
+        self._record_queue_enqueue(dropped=dropped, deduplicated=False)
+        return True, dropped, deduplicated
 
     def _ensure_worker(self, guild_id: int) -> None:
         state = self._get_state(guild_id)
@@ -245,6 +261,281 @@ class TTSAudioMixin:
             tasks = {}
             setattr(self, "_tts_inflight_cache_tasks", tasks)
         return tasks
+    def _get_cache_frequency_map(self) -> dict[str, int]:
+        frequencies = getattr(self, "_tts_cache_frequency", None)
+        if frequencies is None:
+            frequencies = {}
+            setattr(self, "_tts_cache_frequency", frequencies)
+        return frequencies
+
+    def _get_metrics_store(self) -> dict[str, object]:
+        metrics = getattr(self, "_tts_metrics", None)
+        if metrics is None:
+            metrics = {
+                "queue_enqueued": 0,
+                "queue_deduplicated": 0,
+                "queue_dropped": 0,
+                "cache_hits": 0,
+                "cache_misses": 0,
+                "cache_stores": 0,
+                "queue_wait_total_ms": 0.0,
+                "queue_wait_samples": 0,
+                "dispatch_total_ms": 0.0,
+                "dispatch_samples": 0,
+                "playback_total_ms": 0.0,
+                "playback_samples": 0,
+                "boot_warmups": 0,
+                "last_warmup_started_at": None,
+                "last_warmup_completed_at": None,
+                "last_warmup_duration_ms": None,
+                "engines": {},
+            }
+            setattr(self, "_tts_metrics", metrics)
+        return metrics
+
+    def _get_engine_metrics(self, engine: str) -> dict[str, object]:
+        engine = (engine or "gtts").strip().lower()
+        metrics = self._get_metrics_store()
+        engines = metrics.setdefault("engines", {})
+        if engine not in engines:
+            engines[engine] = {
+                "synth_count": 0,
+                "synth_failures": 0,
+                "slow_alerts": 0,
+                "cache_hits": 0,
+                "cache_misses": 0,
+                "synth_total_ms": 0.0,
+                "last_synth_ms": None,
+                "last_error": None,
+                "last_error_at": None,
+                "consecutive_failures": 0,
+            }
+        return engines[engine]
+
+    def _record_average_metric(self, total_key: str, samples_key: str, value_ms: float) -> None:
+        metrics = self._get_metrics_store()
+        metrics[total_key] = float(metrics.get(total_key, 0.0) or 0.0) + float(value_ms)
+        metrics[samples_key] = int(metrics.get(samples_key, 0) or 0) + 1
+
+    def _queue_signature(self, item: QueueItem) -> str:
+        cached = getattr(item, "_dedup_signature", None)
+        if cached is not None:
+            return cached
+        cached = f"{int(item.channel_id)}|{self._cache_key(item)}"
+        item._dedup_signature = cached
+        return cached
+
+    def _increment_pending_signature(self, state: GuildTTSState, item: QueueItem) -> None:
+        signature = self._queue_signature(item)
+        state.pending_signatures[signature] = int(state.pending_signatures.get(signature, 0) or 0) + 1
+
+    def _decrement_pending_signature(self, state: GuildTTSState, item: QueueItem) -> None:
+        signature = self._queue_signature(item)
+        count = int(state.pending_signatures.get(signature, 0) or 0)
+        if count <= 1:
+            state.pending_signatures.pop(signature, None)
+        else:
+            state.pending_signatures[signature] = count - 1
+
+    def _record_queue_enqueue(self, *, dropped: int = 0, deduplicated: bool = False) -> None:
+        metrics = self._get_metrics_store()
+        if deduplicated:
+            metrics["queue_deduplicated"] = int(metrics.get("queue_deduplicated", 0) or 0) + 1
+            return
+        metrics["queue_enqueued"] = int(metrics.get("queue_enqueued", 0) or 0) + 1
+        if dropped:
+            metrics["queue_dropped"] = int(metrics.get("queue_dropped", 0) or 0) + int(dropped)
+
+    def _record_cache_hit(self, engine: str) -> None:
+        metrics = self._get_metrics_store()
+        metrics["cache_hits"] = int(metrics.get("cache_hits", 0) or 0) + 1
+        engine_metrics = self._get_engine_metrics(engine)
+        engine_metrics["cache_hits"] = int(engine_metrics.get("cache_hits", 0) or 0) + 1
+
+    def _record_cache_miss(self, engine: str) -> None:
+        metrics = self._get_metrics_store()
+        metrics["cache_misses"] = int(metrics.get("cache_misses", 0) or 0) + 1
+        engine_metrics = self._get_engine_metrics(engine)
+        engine_metrics["cache_misses"] = int(engine_metrics.get("cache_misses", 0) or 0) + 1
+
+    def _record_cache_store(self) -> None:
+        metrics = self._get_metrics_store()
+        metrics["cache_stores"] = int(metrics.get("cache_stores", 0) or 0) + 1
+
+    def _get_engine_alert_state(self) -> dict[str, float]:
+        state = getattr(self, "_tts_engine_alert_last_sent", None)
+        if state is None:
+            state = {}
+            setattr(self, "_tts_engine_alert_last_sent", state)
+        return state
+
+    def _schedule_alert_script(self, alert_type: str, title: str, body: str) -> None:
+        script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alert.sh")
+        if not os.path.exists(script_path):
+            return
+
+        async def _runner() -> None:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "bash",
+                    script_path,
+                    alert_type,
+                    title,
+                    body,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await process.communicate()
+            except Exception:
+                logger.exception("[tts_voice] Falha ao enviar alerta de engine via webhook")
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(_runner())
+
+    def _maybe_send_engine_alert(self, alert_key: str, alert_type: str, title: str, body: str) -> None:
+        state = self._get_engine_alert_state()
+        now = time.monotonic()
+        last_sent = float(state.get(alert_key, 0.0) or 0.0)
+        if (now - last_sent) < TTS_ENGINE_ALERT_COOLDOWN_SECONDS:
+            return
+        state[alert_key] = now
+        self._schedule_alert_script(alert_type, title, body)
+
+    def _record_engine_success(self, engine: str, duration_ms: float) -> None:
+        engine_metrics = self._get_engine_metrics(engine)
+        engine_metrics["synth_count"] = int(engine_metrics.get("synth_count", 0) or 0) + 1
+        engine_metrics["synth_total_ms"] = float(engine_metrics.get("synth_total_ms", 0.0) or 0.0) + float(duration_ms)
+        engine_metrics["last_synth_ms"] = round(float(duration_ms), 2)
+        engine_metrics["consecutive_failures"] = 0
+
+        if duration_ms >= TTS_ENGINE_SLOW_WARN_SECONDS * 1000.0:
+            engine_metrics["slow_alerts"] = int(engine_metrics.get("slow_alerts", 0) or 0) + 1
+            title = f"Engine TTS lenta: {engine}"
+            body = (
+                f"Engine: {engine}\n"
+                f"Duração da síntese: {round(duration_ms, 2)} ms\n"
+                f"Limite de alerta: {round(TTS_ENGINE_SLOW_WARN_SECONDS * 1000.0, 2)} ms"
+            )
+            self._maybe_send_engine_alert(f"slow:{engine}", "warn", title, body)
+
+    def _record_engine_failure(self, engine: str, error: Exception, duration_ms: float | None = None) -> None:
+        engine_metrics = self._get_engine_metrics(engine)
+        engine_metrics["synth_failures"] = int(engine_metrics.get("synth_failures", 0) or 0) + 1
+        engine_metrics["consecutive_failures"] = int(engine_metrics.get("consecutive_failures", 0) or 0) + 1
+        engine_metrics["last_error"] = str(error)
+        engine_metrics["last_error_at"] = time.time()
+        if duration_ms is not None:
+            engine_metrics["last_synth_ms"] = round(float(duration_ms), 2)
+
+        if int(engine_metrics.get("consecutive_failures", 0) or 0) >= TTS_ENGINE_FAILURE_ALERT_THRESHOLD:
+            title = f"Falhas repetidas na engine TTS: {engine}"
+            body = (
+                f"Engine: {engine}\n"
+                f"Falhas consecutivas: {engine_metrics['consecutive_failures']}\n"
+                f"Último erro: {error}"
+            )
+            if duration_ms is not None:
+                body += f"\nDuração até falhar: {round(float(duration_ms), 2)} ms"
+            self._maybe_send_engine_alert(f"fail:{engine}", "error", title, body)
+
+    def _record_queue_timing(self, *, queue_wait_ms: float | None = None, dispatch_ms: float | None = None, playback_ms: float | None = None) -> None:
+        if queue_wait_ms is not None:
+            self._record_average_metric("queue_wait_total_ms", "queue_wait_samples", queue_wait_ms)
+        if dispatch_ms is not None:
+            self._record_average_metric("dispatch_total_ms", "dispatch_samples", dispatch_ms)
+        if playback_ms is not None:
+            self._record_average_metric("playback_total_ms", "playback_samples", playback_ms)
+
+    def _hydrate_cache_index(self) -> None:
+        cache_order = self._get_global_cache_order()
+        cache_frequency = self._get_cache_frequency_map()
+        cache_order.clear()
+        if not os.path.isdir(_CACHE_DIR):
+            return
+        cache_files = []
+        try:
+            with os.scandir(_CACHE_DIR) as entries:
+                for entry in entries:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    if not entry.name.lower().endswith(".mp3"):
+                        continue
+                    try:
+                        stat = entry.stat()
+                    except FileNotFoundError:
+                        continue
+                    cache_files.append((stat.st_mtime, entry.name[:-4]))
+        except FileNotFoundError:
+            return
+
+        for modified_ts, key in sorted(cache_files, key=lambda item: item[0]):
+            cache_order[key] = modified_ts
+            cache_frequency.setdefault(key, 1)
+
+    def _prime_tts_runtime(self) -> None:
+        self._get_synth_semaphore()
+        self._get_gtts_semaphore()
+        self._get_gtts_rate_lock()
+        self._get_global_cache_order()
+        self._get_cache_frequency_map()
+        self._get_inflight_cache_tasks()
+        self._get_metrics_store()
+        self._hydrate_cache_index()
+
+    async def _boot_warmup(self) -> None:
+        metrics = self._get_metrics_store()
+        started_at = time.monotonic()
+        metrics["boot_warmups"] = int(metrics.get("boot_warmups", 0) or 0) + 1
+        metrics["last_warmup_started_at"] = time.time()
+
+        try:
+            await asyncio.to_thread(self._prime_tts_runtime)
+            await asyncio.to_thread(self._prune_tmp_audio_dir, force=True)
+
+            if google_texttospeech is not None and (((os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()) or ((os.getenv("GOOGLE_CREDENTIALS_JSON") or "").strip())):
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self._get_google_tts_client)
+        finally:
+            duration_ms = (time.monotonic() - started_at) * 1000.0
+            metrics["last_warmup_completed_at"] = time.time()
+            metrics["last_warmup_duration_ms"] = round(duration_ms, 2)
+
+    def get_tts_metrics_snapshot(self) -> dict[str, object]:
+        metrics = self._get_metrics_store()
+        snapshot = {
+            "queue_enqueued": int(metrics.get("queue_enqueued", 0) or 0),
+            "queue_deduplicated": int(metrics.get("queue_deduplicated", 0) or 0),
+            "queue_dropped": int(metrics.get("queue_dropped", 0) or 0),
+            "cache_hits": int(metrics.get("cache_hits", 0) or 0),
+            "cache_misses": int(metrics.get("cache_misses", 0) or 0),
+            "cache_stores": int(metrics.get("cache_stores", 0) or 0),
+            "avg_queue_wait_ms": round((float(metrics.get("queue_wait_total_ms", 0.0) or 0.0) / int(metrics.get("queue_wait_samples", 0) or 1)), 2) if int(metrics.get("queue_wait_samples", 0) or 0) else 0.0,
+            "avg_dispatch_ms": round((float(metrics.get("dispatch_total_ms", 0.0) or 0.0) / int(metrics.get("dispatch_samples", 0) or 1)), 2) if int(metrics.get("dispatch_samples", 0) or 0) else 0.0,
+            "avg_playback_ms": round((float(metrics.get("playback_total_ms", 0.0) or 0.0) / int(metrics.get("playback_samples", 0) or 1)), 2) if int(metrics.get("playback_samples", 0) or 0) else 0.0,
+            "boot_warmups": int(metrics.get("boot_warmups", 0) or 0),
+            "last_warmup_duration_ms": metrics.get("last_warmup_duration_ms"),
+            "queued_items_current": int(sum(state.queue.qsize() for state in self.guild_states.values())),
+            "guild_states_current": int(len(self.guild_states)),
+            "engines": {},
+        }
+        for engine, engine_metrics in dict(metrics.get("engines", {})).items():
+            synth_count = int(engine_metrics.get("synth_count", 0) or 0)
+            total_ms = float(engine_metrics.get("synth_total_ms", 0.0) or 0.0)
+            snapshot["engines"][engine] = {
+                "synth_count": synth_count,
+                "synth_failures": int(engine_metrics.get("synth_failures", 0) or 0),
+                "slow_alerts": int(engine_metrics.get("slow_alerts", 0) or 0),
+                "cache_hits": int(engine_metrics.get("cache_hits", 0) or 0),
+                "cache_misses": int(engine_metrics.get("cache_misses", 0) or 0),
+                "avg_synth_ms": round(total_ms / synth_count, 2) if synth_count else 0.0,
+                "last_synth_ms": engine_metrics.get("last_synth_ms"),
+                "last_error": engine_metrics.get("last_error"),
+                "consecutive_failures": int(engine_metrics.get("consecutive_failures", 0) or 0),
+            }
+        return snapshot
 
     def _should_prune_tmp_audio_dir(self, *, force: bool = False) -> bool:
         if force:
@@ -312,17 +603,22 @@ class TTSAudioMixin:
             total_files = max(0, total_files - 1)
             total_bytes = max(0, total_bytes - size)
             if abs_path.startswith(os.path.abspath(_CACHE_DIR) + os.sep):
-                cache_order.pop(os.path.splitext(os.path.basename(abs_path))[0], None)
+                cache_key = os.path.splitext(os.path.basename(abs_path))[0]
+                cache_order.pop(cache_key, None)
+                self._get_cache_frequency_map().pop(cache_key, None)
 
 
     def _touch_cache_entry(self, state: GuildTTSState, key: str) -> None:
         cache_order = self._get_global_cache_order()
+        cache_frequency = self._get_cache_frequency_map()
         now = time.time()
         cache_order[key] = now
         cache_order.move_to_end(key)
+        cache_frequency[key] = int(cache_frequency.get(key, 0) or 0) + 1
 
     def _purge_cache(self, state: GuildTTSState, *, protected_paths: Optional[set[str]] = None, force_tmp_prune: bool = False) -> None:
         cache_order = self._get_global_cache_order()
+        cache_frequency = self._get_cache_frequency_map()
 
         missing = []
         for key in list(cache_order.keys()):
@@ -332,16 +628,29 @@ class TTSAudioMixin:
 
         for key in missing:
             cache_order.pop(key, None)
+            cache_frequency.pop(key, None)
 
         protected = {os.path.abspath(p) for p in (protected_paths or set()) if p}
         while len(cache_order) > TTS_AUDIO_CACHE_SIZE:
-            oldest_key, oldest_ts = cache_order.popitem(last=False)
-            path = self._cache_path(oldest_key)
-            abs_path = os.path.abspath(path)
-            if abs_path in protected:
-                cache_order[oldest_key] = oldest_ts
-                cache_order.move_to_end(oldest_key)
-                continue
+            candidate_key = None
+            candidate_score = None
+
+            for key, last_used_ts in cache_order.items():
+                path = self._cache_path(key)
+                abs_path = os.path.abspath(path)
+                if abs_path in protected:
+                    continue
+                score = (int(cache_frequency.get(key, 0) or 0), float(last_used_ts))
+                if candidate_score is None or score < candidate_score:
+                    candidate_key = key
+                    candidate_score = score
+
+            if candidate_key is None:
+                break
+
+            path = self._cache_path(candidate_key)
+            cache_order.pop(candidate_key, None)
+            cache_frequency.pop(candidate_key, None)
             try:
                 if os.path.exists(path):
                     os.remove(path)
@@ -368,6 +677,7 @@ class TTSAudioMixin:
                 return source_path
 
         self._touch_cache_entry(state, key)
+        self._record_cache_store()
         self._purge_cache(state, protected_paths={path}, force_tmp_prune=True)
         return path
 
@@ -408,6 +718,7 @@ class TTSAudioMixin:
             return None
 
         self._touch_cache_entry(state, key)
+        self._record_cache_hit(item.engine)
         self._log_debug(f"[tts_voice] cache hit | guild={item.guild_id} key={key[:10]}")
         return path
 
@@ -556,18 +867,42 @@ class TTSAudioMixin:
             if inflight.get(key) is task:
                 inflight.pop(key, None)
 
+    async def _run_timed_generation(self, engine: str, factory) -> str:
+        started_at = time.monotonic()
+        try:
+            result = await factory()
+        except Exception as exc:
+            duration_ms = (time.monotonic() - started_at) * 1000.0
+            self._record_engine_failure(engine, exc, duration_ms=duration_ms)
+            raise
+        duration_ms = (time.monotonic() - started_at) * 1000.0
+        self._record_engine_success(engine, duration_ms)
+        return result
+
     async def _generate_audio_file(self, item: QueueItem) -> str:
         if item.engine == "edge":
             try:
-                return await self._generate_edge_file(item.text, item.voice, item.rate, item.pitch)
+                return await self._run_timed_generation(
+                    "edge",
+                    lambda: self._generate_edge_file(item.text, item.voice, item.rate, item.pitch),
+                )
             except Exception as e:
                 logger.warning("[tts_voice] Edge falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
-                return await self._generate_gtts_file(item.text, item.language)
+                return await self._run_timed_generation(
+                    "gtts",
+                    lambda: self._generate_gtts_file(item.text, item.language),
+                )
 
         if item.engine == "gcloud":
-            return await self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch)
+            return await self._run_timed_generation(
+                "gcloud",
+                lambda: self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch),
+            )
 
-        return await self._generate_gtts_file(item.text, item.language)
+        return await self._run_timed_generation(
+            "gtts",
+            lambda: self._generate_gtts_file(item.text, item.language),
+        )
 
     async def _resolve_audio_path(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:
         should_cache = len(self._get_item_normalized_cache_text(item)) <= TTS_CACHEABLE_TEXT_MAX_LENGTH
@@ -578,6 +913,7 @@ class TTSAudioMixin:
         if cached:
             return cached, False
 
+        self._record_cache_miss(item.engine)
         generated = await self._generate_audio_file(item)
         return generated, False
 
@@ -660,6 +996,7 @@ class TTSAudioMixin:
 
         try:
             prefetched_item = state.queue.get_nowait()
+            self._decrement_pending_signature(state, prefetched_item)
         except asyncio.QueueEmpty:
             return None, None
 
@@ -692,6 +1029,7 @@ class TTSAudioMixin:
                         if state.warmed_until > time.monotonic():
                             timeout = min(timeout, max(1.0, state.warmed_until - time.monotonic()))
                         item = await asyncio.wait_for(state.queue.get(), timeout=timeout)
+                        self._decrement_pending_signature(state, item)
                         fetched_from_queue = True
                     except asyncio.TimeoutError:
                         if state.warmed_until > time.monotonic():
@@ -735,8 +1073,15 @@ class TTSAudioMixin:
                     if prefetched_item is None:
                         prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
 
+                    dispatch_started_at = time.monotonic()
+                    queue_wait_ms = max(0.0, (dispatch_started_at - float(getattr(item, "enqueued_at_monotonic", dispatch_started_at))) * 1000.0)
+                    self._record_queue_timing(queue_wait_ms=queue_wait_ms, dispatch_ms=queue_wait_ms)
+
                     try:
+                        playback_started_at = time.monotonic()
                         await self._play_file(vc, current_path)
+                        playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
+                        self._record_queue_timing(playback_ms=playback_duration_ms)
                     finally:
                         protected_paths: set[str] = set()
                         if should_cleanup:
