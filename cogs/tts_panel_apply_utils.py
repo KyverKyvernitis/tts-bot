@@ -716,7 +716,7 @@ async def _apply_announce_author_from_panel(cog, interaction: discord.Interactio
     panel_message, message_id = cog._resolve_public_panel_message(interaction, source_panel_message)
     await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, announce_author=bool(enabled)))
     desc = "Autor antes da frase ativado." if enabled else "Autor antes da frase desativado."
-    history_entry = cog._server_history_text(interaction, "ativou o Autor antes da frase" if enabled else "desativou o Autor antes da frase")
+    history_entry = cog._toggle_history_text(interaction, "ativou o Autor antes da frase" if enabled else "desativou o Autor antes da frase")
     await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
     cog._append_public_panel_history(message_id, history_entry)
     panel_history = await cog._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))
