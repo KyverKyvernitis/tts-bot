@@ -1294,6 +1294,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         prefix_hint = await self._get_panel_prefix_hint(guild_id, panel_kind)
         return build_expired_panel_embed(slash_mention=slash_mention, prefix_hint=prefix_hint)
 
+    async def _build_expired_panel_message(self, guild_id: int, panel_kind: str) -> str:
+        slash_mention = await self._get_panel_command_mention(guild_id, panel_kind)
+        prefix_hint = await self._get_panel_prefix_hint(guild_id, panel_kind)
+        return (
+            "Essa interação já expirou porque esse comando ficou aberto por tempo demais.\n\n"
+            f"Para abrir um novo painel, tente usar {slash_mention} novamente"
+            f" — ou, se preferir, {prefix_hint}."
+        )
+
     def _build_panel_view(self, owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None) -> discord.ui.View:
         return TTSMainPanelView(self, owner_id, guild_id, server=server, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
 

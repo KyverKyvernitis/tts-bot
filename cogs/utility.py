@@ -1,4 +1,5 @@
 import inspect
+import time
 from typing import Any
 
 import discord
@@ -8,15 +9,27 @@ from discord.ext import commands
 import config
 
 
+HELP_EXPIRE_AFTER_SECONDS = 180.0
+HELP_DISPATCH_TIMEOUT_SECONDS = 3600.0
+
+
 class HelpPaginatorView(discord.ui.View):
-    def __init__(self, cog: "Utility", *, owner_id: int, pages: list[discord.Embed], timeout: float = 180):
-        super().__init__(timeout=timeout)
+    def __init__(self, cog: "Utility", *, owner_id: int, pages: list[discord.Embed], command_mention: str, prefix_hint: str, timeout: float = 180):
+        requested_timeout = max(1.0, float(timeout or HELP_EXPIRE_AFTER_SECONDS))
+        dispatch_timeout = max(requested_timeout, HELP_DISPATCH_TIMEOUT_SECONDS)
+        super().__init__(timeout=dispatch_timeout)
         self.cog = cog
         self.owner_id = int(owner_id)
         self.pages = pages
+        self.command_mention = str(command_mention or "`/help`")
+        self.prefix_hint = str(prefix_hint or "`help`")
         self.page_index = 0
         self.message: discord.Message | None = None
+        self.expires_at_monotonic = time.monotonic() + requested_timeout
         self._refresh_buttons()
+
+    def _is_expired(self) -> bool:
+        return time.monotonic() >= self.expires_at_monotonic
 
     def _refresh_buttons(self) -> None:
         total = max(1, len(self.pages))
@@ -38,6 +51,21 @@ class HelpPaginatorView(discord.ui.View):
         self.add_item(self.last_button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self._is_expired():
+            message = (
+                "Essa central de ajuda já expirou porque ficou aberta por tempo demais.\n\n"
+                f"Para abrir tudo de novo, use {self.command_mention} novamente"
+                f" — ou, se preferir, {self.prefix_hint}."
+            )
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(message, ephemeral=True)
+                else:
+                    await interaction.response.send_message(message, ephemeral=True)
+            except Exception:
+                pass
+            return False
+
         if int(getattr(getattr(interaction, "user", None), "id", 0) or 0) == self.owner_id:
             return True
         message = "Só quem abriu esse help pode trocar de página."
@@ -51,15 +79,7 @@ class HelpPaginatorView(discord.ui.View):
         return False
 
     async def on_timeout(self) -> None:
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-        if self.message is None:
-            return
-        try:
-            await self.message.edit(view=self)
-        except Exception:
-            pass
+        pass
 
     @discord.ui.button(emoji="⏪", style=discord.ButtonStyle.secondary, row=0)
     async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -392,7 +412,13 @@ class Utility(commands.Cog):
         prefixes = await self._get_prefix_data(guild)
         root_ids = await self._fetch_root_command_ids(guild)
         pages = self._build_help_embeds(guild=guild, prefixes=prefixes, root_ids=root_ids)
-        view = HelpPaginatorView(self, owner_id=owner.id, pages=pages)
+        view = HelpPaginatorView(
+            self,
+            owner_id=owner.id,
+            pages=pages,
+            command_mention=self._slash_mention(root_ids, root="help", path="help"),
+            prefix_hint=f"`{prefixes['bot_prefix']}help`",
+        )
 
         if interaction is not None:
             if not interaction.response.is_done():

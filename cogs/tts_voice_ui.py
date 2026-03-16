@@ -15,6 +15,9 @@ from discord.ext import commands
 import config
 from .tts_voice_common import _shorten
 
+TTS_PANEL_EXPIRE_AFTER_SECONDS = 180.0
+TTS_PANEL_DISPATCH_TIMEOUT_SECONDS = 3600.0
+
 class _BaseTTSView(discord.ui.View):
     def __init__(
         self,
@@ -26,7 +29,9 @@ class _BaseTTSView(discord.ui.View):
         target_user_id: int | None = None,
         target_user_name: str | None = None,
     ):
-        super().__init__(timeout=timeout)
+        requested_timeout = max(1.0, float(timeout or TTS_PANEL_EXPIRE_AFTER_SECONDS))
+        dispatch_timeout = max(requested_timeout, TTS_PANEL_DISPATCH_TIMEOUT_SECONDS)
+        super().__init__(timeout=dispatch_timeout)
         self.cog = cog
         self.owner_id = owner_id
         self.guild_id = guild_id
@@ -34,8 +39,26 @@ class _BaseTTSView(discord.ui.View):
         self.panel_kind: str = "user"
         self.target_user_id: int | None = target_user_id
         self.target_user_name: str | None = target_user_name
+        self.expires_at_monotonic = time.monotonic() + requested_timeout
+
+    def _is_expired(self) -> bool:
+        return time.monotonic() >= self.expires_at_monotonic
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self._is_expired():
+            try:
+                message = await self.cog._build_expired_panel_message(self.guild_id, self.panel_kind)
+            except Exception:
+                message = (
+                    "Essa interação já expirou porque esse comando ficou aberto por tempo demais.\n\n"
+                    "Para continuar, abra o comando novamente e gere um painel novo."
+                )
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+            return False
+
         if self.owner_id == 0:
             return True
         if interaction.user.id != self.owner_id:
@@ -80,20 +103,7 @@ class _BaseTTSView(discord.ui.View):
             print(f"[tts_panel_error] falha ao responder erro: {e!r}")
 
     async def on_timeout(self) -> None:
-        if self.message is None:
-            return
-        try:
-            for child in self.children:
-                try:
-                    child.disabled = True
-                except Exception:
-                    pass
-            embed = await self.cog._build_expired_panel_embed(self.guild_id, self.panel_kind)
-            await self.message.edit(embed=embed, view=self)
-        except discord.NotFound:
-            pass
-        except Exception as e:
-            print(f"[tts_panel_timeout] falha ao expirar painel: {e!r}")
+        pass
 
 
 class _SimpleSelectView(_BaseTTSView):
