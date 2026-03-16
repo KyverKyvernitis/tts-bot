@@ -125,18 +125,10 @@ STATUS_ACTION_CHOICES = [
     app_commands.Choice(name="Copiar as configurações de outro usuário", value="copy_other"),
 ]
 
-TOGGLE_GUILD_IDS = tuple(getattr(config, "GUILD_IDS", []) or [])
-
-if TOGGLE_GUILD_IDS:
-    toggle_guilds = app_commands.guilds(*TOGGLE_GUILD_IDS)
-else:
-    def toggle_guilds(func):
-        return func
 
 class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_description="Comandos de texto para fala"):
     server = app_commands.Group(name="server", description="Configurações padrão do servidor")
     voices = app_commands.Group(name="voices", description="Listas de vozes e idiomas")
-    toggle = app_commands.Group(name="toggle", description="Atalhos e modos especiais")
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1262,7 +1254,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         command_path = {
             "user": "tts menu",
             "server": "tts server menu",
-            "toggle": "tts toggle menu",
+            "toggle": "toggle_menu",
         }.get(panel_kind, "tts menu")
 
         try:
@@ -2432,8 +2424,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         )
         view.message = msg
 
-    @toggle.command(name="menu", description="Abre um painel guiado para os toggles de TTS")
-    @toggle_guilds
     async def toggle_menu(self, interaction: discord.Interaction):
         await self._defer_ephemeral(interaction)
         if not await self._require_guild(interaction):
