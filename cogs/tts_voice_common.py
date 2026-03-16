@@ -69,7 +69,7 @@ _TTS_ABBREVIATION_MAP = {
     "slk": "cê é louco",
     "pdc": "pode crer",
     "rlx": "relaxa",
-    "sqn": "só que não",
+    "dboa": "de boa",
     "ngm": "ninguém",
     "td": "tudo",
     "nd": "nada",
