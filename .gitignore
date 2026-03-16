@@ -1,35 +1,35 @@
-# Ambiente
-.env
-.venv/
-.venv-py310-backup/
+# backups / arquivos temporários locais
+*.bak
+*.tmp
+*.swp
+*.swo
 
-# Python
+# logs
+*.log
+logs/
+*.out
+
+# pastas locais da VPS
+backups/
+tmp_audio/
+
+# estados temporários dos scripts
+.update_last_state
+.healthcheck_fail_count
+.healthcheck_last_alert
+.healthcheck_starting_since
+.resource_alert_state
+
+# cache / python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
+*$py.class
 
-# Logs
-*.log
-*.log.*
-healthcheck.log
-healthcheck.log.*
-update.log
-update.log.*
-resource-check.log
-resource-check.log.*
+# ambientes virtuais
+.venv/
+venv/
+env/
 
-# Arquivos temporários / estado local
-.healthcheck_last_alert
-.update_last_state
-utility_top.txt
-
-# Credenciais locais
-google-credentials.json
-
-# Artefatos locais
-*.gz
-
-# Termius / acidentes de shell
-eval "$(ssh-agent -s)"
-eval "$(ssh-agent -s)".pub
+# sistema / editor
+.DS_Store
+Thumbs.db
