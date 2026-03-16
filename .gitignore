@@ -29,7 +29,12 @@ __pycache__/
 .venv/
 venv/
 env/
-
+.env
+.env.*
+.venv-py310-backup/
+google-credentials.json
+*.log.*
+*.gz
 # sistema / editor
 .DS_Store
 Thumbs.db
