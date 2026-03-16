@@ -190,8 +190,8 @@ class Utility(commands.Cog):
         tts_server_menu_slash = self._slash_mention(root_ids, root="tts", path="tts server menu")
 
         prefix_help = f"`{bot_prefix}help`"
-        prefix_panel = f"`{bot_prefix}panel`"
-        prefix_server_panel = f"`{bot_prefix}panel_server`"
+        prefix_panel = f"`{bot_prefix}panel` ou `{bot_prefix}p`"
+        prefix_server_panel = f"`{bot_prefix}panel_server` ou `{bot_prefix}sp`"
         prefix_join = f"`{bot_prefix}join`"
         prefix_leave = f"`{bot_prefix}leave`"
         prefix_clear = f"`{bot_prefix}clear`"
