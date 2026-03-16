@@ -134,6 +134,13 @@ class BotLocal(commands.Bot):
         snapshot["starting"] = starting
         snapshot["healthy"] = healthy
         snapshot["status"] = "starting" if starting else ("ok" if healthy else "error")
+
+        tts_cog = self.get_cog("TTSVoice")
+        if tts_cog is not None and hasattr(tts_cog, "get_tts_metrics_snapshot"):
+            try:
+                snapshot["tts_metrics"] = tts_cog.get_tts_metrics_snapshot()
+            except Exception as e:
+                snapshot["tts_metrics_error"] = str(e)
         return snapshot
 
     async def _health_monitor_loop(self):
