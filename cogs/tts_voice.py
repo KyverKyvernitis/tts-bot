@@ -18,7 +18,7 @@ except Exception:  # pragma: no cover - dependência opcional em tempo de import
     google_texttospeech = None
 
 import config
-from tts_audio import GuildTTSState, QueueItem, TTSAudioMixin
+from tts_audio import GuildTTSState, QueueItem, TTSAudioMixin, TTS_BOOT_WARMUP_ENABLED
 from .tts_voice_common import (
     _guild_scoped,
     _shorten,
@@ -151,7 +151,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._gcloud_voices_cache_lock = asyncio.Lock()
 
     async def cog_load(self):
+        self._prime_tts_runtime()
         await self._load_edge_voices()
+        if TTS_BOOT_WARMUP_ENABLED:
+            asyncio.create_task(self._boot_warmup())
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
@@ -1069,9 +1072,28 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = getattr(message.channel, "id", None)
-        await state.queue.put(QueueItem(guild_id=message.guild.id, channel_id=voice_channel.id, author_id=message.author.id, text=text, engine=resolved["engine"], voice=resolved["voice"], language=resolved["language"], rate=resolved["rate"], pitch=resolved["pitch"]))
+        enqueued, dropped_count, deduplicated = await self._enqueue_tts_item(
+            message.guild.id,
+            QueueItem(
+                guild_id=message.guild.id,
+                channel_id=voice_channel.id,
+                author_id=message.author.id,
+                text=text,
+                engine=resolved["engine"],
+                voice=resolved["voice"],
+                language=resolved["language"],
+                rate=resolved["rate"],
+                pitch=resolved["pitch"],
+            ),
+        )
         print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
-        print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
+        if deduplicated:
+            print(f"[tts_voice] deduplicada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']}")
+        else:
+            if dropped_count:
+                print(f"[tts_voice] fila cheia, itens descartados={dropped_count} | guild={message.guild.id}")
+            if enqueued:
+                print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
         self._ensure_worker(message.guild.id)
 
     @commands.Cog.listener()
