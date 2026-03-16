@@ -20,8 +20,12 @@ class HelpPaginatorView(discord.ui.View):
 
     def _refresh_buttons(self) -> None:
         total = max(1, len(self.pages))
-        self.prev_button.disabled = self.page_index <= 0
-        self.next_button.disabled = self.page_index >= total - 1
+        at_start = self.page_index <= 0
+        at_end = self.page_index >= total - 1
+        self.first_button.disabled = at_start
+        self.prev_button.disabled = at_start
+        self.next_button.disabled = at_end
+        self.last_button.disabled = at_end
         self.page_button.label = f"{self.page_index + 1}/{total}"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -48,6 +52,12 @@ class HelpPaginatorView(discord.ui.View):
         except Exception:
             pass
 
+    @discord.ui.button(emoji="⏪", style=discord.ButtonStyle.secondary)
+    async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page_index = 0
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
+
     @discord.ui.button(label="◀️ Anterior", style=discord.ButtonStyle.secondary)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page_index > 0:
@@ -63,6 +73,12 @@ class HelpPaginatorView(discord.ui.View):
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page_index < len(self.pages) - 1:
             self.page_index += 1
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
+
+    @discord.ui.button(emoji="⏩", style=discord.ButtonStyle.secondary)
+    async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page_index = max(0, len(self.pages) - 1)
         self._refresh_buttons()
         await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
 
@@ -159,8 +175,7 @@ class Utility(commands.Cog):
         overview = discord.Embed(
             title="📘 Central de ajuda do TTS",
             description=(
-                f"Todos os comandos principais do bot, organizados por categoria, com exemplos bonitos pra {guild_name}.\n\n"
-                "⚠️ Os comandos de **toggle** e **antimzk** ficaram de fora daqui, como você pediu."
+                f"Todos os comandos principais do bot, organizados por categoria, com exemplos bonitos pra {guild_name}."
             ),
             color=discord.Color.blurple(),
             timestamp=discord.utils.utcnow(),
@@ -169,9 +184,9 @@ class Utility(commands.Cog):
             name="🧭 Navegação",
             value=(
                 "**Página 1** • visão geral\n"
-                "**Página 2** • comandos do usuário\n"
-                "**Página 3** • comandos de servidor\n"
-                "**Página 4** • atalhos de fala por prefixo\n"
+                "**Página 2** • atalhos de fala por prefixo\n"
+                "**Página 3** • comandos do usuário\n"
+                "**Página 4** • comandos de servidor\n"
                 "**Página 5** • utilidades"
             ),
             inline=False,
@@ -206,6 +221,46 @@ class Utility(commands.Cog):
             inline=False,
         )
         pages.append(overview)
+
+        speech_page = discord.Embed(
+            title="🎙️ Atalhos de fala por prefixo",
+            description="Esses não são painéis; são os prefixos que fazem o bot falar a mensagem diretamente.",
+            color=discord.Color.purple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        speech_page.add_field(
+            name="🌐 gTTS",
+            value=(
+                f"**Prefixo:** `{gtts_prefix}`\n"
+                f"**Exemplo:** `{gtts_prefix}olá, tudo bem?`\n"
+                "**Uso:** fala a mensagem usando o modo gTTS."
+            ),
+            inline=False,
+        )
+        speech_page.add_field(
+            name="🗣️ Edge",
+            value=(
+                f"**Prefixo:** `{edge_prefix}`\n"
+                f"**Exemplo:** `{edge_prefix}essa frase vai no edge`\n"
+                "**Uso:** fala a mensagem usando o modo Edge."
+            ),
+            inline=False,
+        )
+        speech_page.add_field(
+            name="☁️ Google Cloud",
+            value=(
+                f"**Prefixo:** `{gcloud_prefix}`\n"
+                f"**Exemplo:** `{gcloud_prefix}essa frase vai no google cloud`\n"
+                "**Uso:** fala a mensagem usando o modo Google Cloud."
+            ),
+            inline=False,
+        )
+        speech_page.add_field(
+            name="📝 Observação",
+            value="As vozes, idiomas e ajustes usados nesses prefixos podem mudar conforme o painel do usuário ou o painel do servidor.",
+            inline=False,
+        )
+        pages.append(speech_page)
 
         user_page = discord.Embed(
             title="👤 Comandos do usuário",
@@ -285,46 +340,6 @@ class Utility(commands.Cog):
             inline=False,
         )
         pages.append(server_page)
-
-        speech_page = discord.Embed(
-            title="🎙️ Atalhos de fala por prefixo",
-            description="Esses não são painéis; são os prefixos que fazem o bot falar a mensagem diretamente.",
-            color=discord.Color.purple(),
-            timestamp=discord.utils.utcnow(),
-        )
-        speech_page.add_field(
-            name="🌐 gTTS",
-            value=(
-                f"**Prefixo:** `{gtts_prefix}`\n"
-                f"**Exemplo:** `{gtts_prefix}olá, tudo bem?`\n"
-                "**Uso:** fala a mensagem usando o modo gTTS."
-            ),
-            inline=False,
-        )
-        speech_page.add_field(
-            name="🗣️ Edge",
-            value=(
-                f"**Prefixo:** `{edge_prefix}`\n"
-                f"**Exemplo:** `{edge_prefix}essa frase vai no edge`\n"
-                "**Uso:** fala a mensagem usando o modo Edge."
-            ),
-            inline=False,
-        )
-        speech_page.add_field(
-            name="☁️ Google Cloud",
-            value=(
-                f"**Prefixo:** `{gcloud_prefix}`\n"
-                f"**Exemplo:** `{gcloud_prefix}essa frase vai no google cloud`\n"
-                "**Uso:** fala a mensagem usando o modo Google Cloud."
-            ),
-            inline=False,
-        )
-        speech_page.add_field(
-            name="📝 Observação",
-            value="As vozes, idiomas e ajustes usados nesses prefixos podem mudar conforme o painel do usuário ou o painel do servidor.",
-            inline=False,
-        )
-        pages.append(speech_page)
 
         utility_page = discord.Embed(
             title="🧰 Utilidades",
