@@ -34,12 +34,56 @@ clear_state() {
   rm -f "$STATE_FILE"
 }
 
+sanity_check() {
+  sleep 10
+
+  if ! systemctl is-active --quiet tts-bot; then
+    echo "Serviço tts-bot não ficou ativo após o restart."
+    return 1
+  fi
+
+  if [ -x /home/ubuntu/bot/healthcheck.sh ]; then
+    if ! /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1; then
+      echo "healthcheck.sh falhou após a atualização."
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
+rollback_update() {
+  local reason="$1"
+
+  log "Falha pós-update: $reason"
+  log "Iniciando rollback para $PREV_SHORT..."
+
+  git reset --hard "$PREV_HASH" >/dev/null 2>&1 || true
+
+  if [ -x /home/ubuntu/bot/.venv/bin/python ]; then
+    /home/ubuntu/bot/.venv/bin/python -m pip install -r requirements.txt >/dev/null 2>&1 || true
+  elif [ -f /home/ubuntu/bot/.venv/bin/activate ]; then
+    . /home/ubuntu/bot/.venv/bin/activate
+    pip install -r requirements.txt >/dev/null 2>&1 || true
+  fi
+
+  sudo systemctl restart tts-bot || true
+  sleep 8
+
+  BODY="Branch: $BRANCH
+Tentativa de update para: $NEW_SHORT
+Rollback para: $PREV_SHORT
+Motivo: $reason"
+
+  /home/ubuntu/bot/alert.sh error "Update falhou e rollback foi aplicado" "$BODY"
+}
+
 run_step() {
   local step_name="$1"
   shift
 
   : > "$TMP_ERR"
-  "$@" > /dev/null 2> "$TMP_ERR"
+  "$@" >/dev/null 2>"$TMP_ERR"
   local code=$?
 
   if [ $code -ne 0 ]; then
@@ -75,6 +119,7 @@ Por segurança, o update automático foi cancelado."
     /home/ubuntu/bot/alert.sh warn "Update ignorado" "$BODY"
     set_state "dirty"
   fi
+
   rm -f "$TMP_ERR"
   exit 0
 fi
@@ -107,23 +152,38 @@ fi
 
 OLD_SHORT="$(git rev-parse --short "$LOCAL_HASH" 2>/dev/null)"
 NEW_SHORT="$(git rev-parse --short "$REMOTE_HASH" 2>/dev/null)"
-COMMIT_MSG="$(git log -1 --pretty=%s "$REMOTE_HASH" 2>/dev/null)"
+COMMIT_MSG="$(git log -1 --pretty=%s "$REMOTE_HASH" 2>/dev/null || true)"
+
+PREV_HASH="$LOCAL_HASH"
+PREV_SHORT="$OLD_SHORT"
 
 log "Novo commit detectado. Atualizando..."
 
-if ! run_step "git reset --hard" git reset --hard "origin/$BRANCH"; then
+if ! run_step "git reset --hard" git reset --hard "$REMOTE_HASH"; then
   exit 1
 fi
 
-if [ -f "/home/ubuntu/bot/.venv/bin/activate" ]; then
-  . /home/ubuntu/bot/.venv/bin/activate
+if [ -x /home/ubuntu/bot/.venv/bin/python ]; then
+  PIP_CMD=(/home/ubuntu/bot/.venv/bin/python -m pip)
+else
+  if [ -f /home/ubuntu/bot/.venv/bin/activate ]; then
+    . /home/ubuntu/bot/.venv/bin/activate
+  fi
+  PIP_CMD=(pip)
 fi
 
-if ! run_step "pip install -r requirements.txt" pip install -r requirements.txt; then
+if ! run_step "pip install -r requirements.txt" "${PIP_CMD[@]}" install -r requirements.txt; then
+  rollback_update "Falha ao instalar dependências"
   exit 1
 fi
 
 if ! run_step "systemctl restart tts-bot" sudo systemctl restart tts-bot; then
+  rollback_update "Falha ao reiniciar o serviço"
+  exit 1
+fi
+
+if ! sanity_check; then
+  rollback_update "Sanity check falhou após a atualização"
   exit 1
 fi
 
@@ -132,9 +192,9 @@ De: $OLD_SHORT
 Para: $NEW_SHORT
 Commit: $COMMIT_MSG
 
-tts-bot reiniciado com sucesso."
+tts-bot reiniciado com sucesso e verificado."
 
-log "Atualização concluída."
+log "Atualização concluída com sucesso."
 /home/ubuntu/bot/alert.sh update "Update automático aplicado" "$BODY"
 
 rm -f "$TMP_ERR"
