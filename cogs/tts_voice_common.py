@@ -74,7 +74,6 @@ _TTS_ABBREVIATION_MAP = {
     "td": "tudo",
     "nd": "nada",
     "fd": "foda",
-    "fd": "foda",
     "kd": "cadê",
     "qnd": "quando",
     "fds": "foda-se",
