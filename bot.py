@@ -177,6 +177,15 @@ class BotLocal(commands.Bot):
     async def on_ready(self):
         print(f"Logado como {self.user} (id: {self.user.id})")
         print(f"Em {len(self.guilds)} servidor(es)")
+        try:
+            await self.change_presence(
+                activity=discord.Activity(
+                    type=discord.ActivityType.listening,
+                    name="/help | _help",
+                )
+            )
+        except Exception as e:
+            print(f"[bot] falha ao aplicar presence: {e!r}")
         if self._health_task is None or self._health_task.done():
             self._health_task = asyncio.create_task(self._health_monitor_loop())
 
