@@ -28,7 +28,7 @@ from tts_helpers import validate_voice
 
 GTTS_DEFAULT_LANGUAGE = getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")
 TTS_IDLE_DISCONNECT_SECONDS = int(getattr(config, "TTS_IDLE_DISCONNECT_SECONDS", 240))
-TTS_AUDIO_CACHE_SIZE = int(getattr(config, "TTS_AUDIO_CACHE_SIZE", 128))
+TTS_AUDIO_CACHE_SIZE = max(1, int(getattr(config, "TTS_AUDIO_CACHE_SIZE", 128)))
 TTS_AUDIO_CACHE_TTL_SECONDS = int(getattr(config, "TTS_AUDIO_CACHE_TTL_SECONDS", 900))
 TTS_DEBUG_LOGS = bool(getattr(config, "TTS_DEBUG_LOGS", False))
 TTS_WARM_HOLD_SECONDS = float(getattr(config, "TTS_WARM_HOLD_SECONDS", 30))
@@ -42,9 +42,17 @@ GOOGLE_CLOUD_TTS_SPEAKING_RATE = float(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKIN
 GOOGLE_CLOUD_TTS_PITCH = float(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0))
 TTS_FFMPEG_BEFORE_OPTIONS = getattr(config, "TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin")
 TTS_FFMPEG_OPTIONS = getattr(config, "TTS_FFMPEG_OPTIONS", "-vn -loglevel error")
+TTS_TEMP_DIR = os.path.abspath(str(getattr(config, "TTS_TEMP_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio")) or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio")).strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio"))
+TTS_TEMP_MAX_MB = max(64, int(getattr(config, "TTS_TEMP_MAX_MB", 512)))
+TTS_TEMP_MAX_FILES = max(32, int(getattr(config, "TTS_TEMP_MAX_FILES", 512)))
+TTS_TEMP_MAX_BYTES = TTS_TEMP_MAX_MB * 1024 * 1024
 
-_CACHE_DIR = os.path.join(tempfile.gettempdir(), "chat_revive_tts_cache")
-os.makedirs(_CACHE_DIR, exist_ok=True)
+_RUNTIME_DIR = os.path.join(TTS_TEMP_DIR, "runtime")
+_CACHE_DIR = os.path.join(TTS_TEMP_DIR, "cache")
+_CREDENTIALS_DIR = os.path.join(TTS_TEMP_DIR, "credentials")
+
+for _dir in (TTS_TEMP_DIR, _RUNTIME_DIR, _CACHE_DIR, _CREDENTIALS_DIR):
+    os.makedirs(_dir, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
@@ -227,40 +235,93 @@ class TTSAudioMixin:
             setattr(self, "_tts_inflight_cache_tasks", tasks)
         return tasks
 
+    def _make_runtime_temp_file(self, suffix: str = ".mp3") -> str:
+        fd, path = tempfile.mkstemp(prefix="tts_", suffix=suffix, dir=_RUNTIME_DIR)
+        os.close(fd)
+        return path
+
+    def _list_tmp_audio_files(self) -> list[tuple[float, int, str]]:
+        result: list[tuple[float, int, str]] = []
+        for directory in (_RUNTIME_DIR, _CACHE_DIR):
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        if not entry.name.lower().endswith((".mp3", ".wav", ".ogg", ".tmp")):
+                            continue
+                        try:
+                            stat = entry.stat()
+                        except FileNotFoundError:
+                            continue
+                        result.append((stat.st_mtime, stat.st_size, entry.path))
+            except FileNotFoundError:
+                continue
+        return result
+
+    def _prune_tmp_audio_dir(self, *, protected_paths: Optional[set[str]] = None) -> None:
+        protected = {os.path.abspath(p) for p in (protected_paths or set()) if p}
+        files = self._list_tmp_audio_files()
+        total_files = len(files)
+        total_bytes = sum(size for _, size, _ in files)
+
+        if total_files <= TTS_TEMP_MAX_FILES and total_bytes <= TTS_TEMP_MAX_BYTES:
+            return
+
+        cache_order = self._get_global_cache_order()
+
+        for _, size, path in sorted(files, key=lambda item: item[0]):
+            abs_path = os.path.abspath(path)
+            if abs_path in protected:
+                continue
+            if total_files <= TTS_TEMP_MAX_FILES and total_bytes <= TTS_TEMP_MAX_BYTES:
+                break
+            try:
+                os.remove(abs_path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                continue
+            total_files = max(0, total_files - 1)
+            total_bytes = max(0, total_bytes - size)
+            if abs_path.startswith(os.path.abspath(_CACHE_DIR) + os.sep):
+                cache_order.pop(os.path.splitext(os.path.basename(abs_path))[0], None)
+
+
     def _touch_cache_entry(self, state: GuildTTSState, key: str) -> None:
         cache_order = self._get_global_cache_order()
         now = time.time()
         cache_order[key] = now
         cache_order.move_to_end(key)
 
-    def _purge_cache(self, state: GuildTTSState) -> None:
-        now = time.time()
+    def _purge_cache(self, state: GuildTTSState, *, protected_paths: Optional[set[str]] = None) -> None:
         cache_order = self._get_global_cache_order()
 
-        expired = []
+        missing = []
         for key in list(cache_order.keys()):
             path = self._cache_path(key)
-            ts = cache_order.get(key, 0.0)
-            if (not os.path.exists(path)) or (now - ts > TTS_AUDIO_CACHE_TTL_SECONDS):
-                expired.append(key)
+            if not os.path.exists(path):
+                missing.append(key)
 
-        for key in expired:
+        for key in missing:
             cache_order.pop(key, None)
-            path = self._cache_path(key)
+
+        protected = {os.path.abspath(p) for p in (protected_paths or set()) if p}
+        while len(cache_order) > TTS_AUDIO_CACHE_SIZE:
+            oldest_key, oldest_ts = cache_order.popitem(last=False)
+            path = self._cache_path(oldest_key)
+            abs_path = os.path.abspath(path)
+            if abs_path in protected:
+                cache_order[oldest_key] = oldest_ts
+                cache_order.move_to_end(oldest_key)
+                continue
             try:
                 if os.path.exists(path):
                     os.remove(path)
             except Exception:
                 pass
 
-        while len(cache_order) > TTS_AUDIO_CACHE_SIZE:
-            oldest_key, _ = cache_order.popitem(last=False)
-            path = self._cache_path(oldest_key)
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception:
-                pass
+        self._prune_tmp_audio_dir(protected_paths=protected_paths)
 
     async def _store_in_cache(self, state: GuildTTSState, item: QueueItem, source_path: str) -> str:
         key = self._cache_key(item)
@@ -268,16 +329,19 @@ class TTSAudioMixin:
 
         if os.path.exists(path):
             self._touch_cache_entry(state, key)
-            self._purge_cache(state)
+            self._purge_cache(state, protected_paths={path})
             return path
 
         try:
-            await asyncio.to_thread(shutil.copyfile, source_path, path)
+            await asyncio.to_thread(shutil.move, source_path, path)
         except Exception:
-            return source_path
+            try:
+                await asyncio.to_thread(shutil.copyfile, source_path, path)
+            except Exception:
+                return source_path
 
         self._touch_cache_entry(state, key)
-        self._purge_cache(state)
+        self._purge_cache(state, protected_paths={path})
         return path
 
     def _cache_key(self, item: QueueItem) -> str:
@@ -310,15 +374,12 @@ class TTSAudioMixin:
 
         age = time.time() - os.path.getmtime(path)
         if age > TTS_AUDIO_CACHE_TTL_SECONDS:
-            try:
-                os.remove(path)
-            except Exception:
-                pass
             self._get_global_cache_order().pop(key, None)
+            self._prune_tmp_audio_dir()
             return None
 
         self._touch_cache_entry(state, key)
-        self._purge_cache(state)
+        self._purge_cache(state, protected_paths={path})
         self._log_debug(f"[tts_voice] cache hit | guild={item.guild_id} key={key[:10]}")
         return path
 
@@ -328,8 +389,7 @@ class TTSAudioMixin:
         tld = str(tld or "com").strip() or "com"
         self._log_debug(f"[tts_voice] gTTS synth | language={language!r} tld={tld!r} text={text[:80]!r}")
 
-        fd, path = tempfile.mkstemp(suffix=".mp3")
-        os.close(fd)
+        path = self._make_runtime_temp_file(suffix=".mp3")
         try:
             tts = gTTS(text=text, lang=language, tld=tld)
             async with self._get_gtts_semaphore():
@@ -352,8 +412,7 @@ class TTSAudioMixin:
             f"voice={voice!r} rate={rate!r} pitch={pitch!r} text={text[:80]!r}"
         )
 
-        fd, path = tempfile.mkstemp(suffix=".mp3")
-        os.close(fd)
+        path = self._make_runtime_temp_file(suffix=".mp3")
         try:
             communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
             async with self._get_synth_semaphore():
@@ -379,7 +438,7 @@ class TTSAudioMixin:
         except Exception as exc:
             raise RuntimeError("GOOGLE_CREDENTIALS_JSON está inválido e não pôde ser lido como JSON.") from exc
 
-        path = os.path.join(tempfile.gettempdir(), "chat_revive_google_credentials.json")
+        path = os.path.join(_CREDENTIALS_DIR, "chat_revive_google_credentials.json")
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(parsed, handle, ensure_ascii=False)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
@@ -406,8 +465,7 @@ class TTSAudioMixin:
             f"voice={voice_name!r} language={language!r} rate={normalized_rate!r} pitch={normalized_pitch!r} text={text[:80]!r}"
         )
 
-        fd, path = tempfile.mkstemp(suffix=".mp3")
-        os.close(fd)
+        path = self._make_runtime_temp_file(suffix=".mp3")
 
         try:
             client = await asyncio.to_thread(self._get_google_tts_client)
@@ -457,10 +515,8 @@ class TTSAudioMixin:
             generated = await self._generate_audio_file(item)
             cached_path = await self._store_in_cache(state, item, generated)
             if cached_path != generated:
-                with contextlib.suppress(Exception):
-                    os.remove(generated)
                 return cached_path, False
-            return generated, True
+            return generated, False
 
         task = asyncio.create_task(_runner())
         inflight[key] = task
@@ -493,7 +549,7 @@ class TTSAudioMixin:
             return cached, False
 
         generated = await self._generate_audio_file(item)
-        return generated, True
+        return generated, False
 
     async def _play_file(self, vc: discord.VoiceClient, path: str) -> None:
         loop = asyncio.get_running_loop()
@@ -652,11 +708,15 @@ class TTSAudioMixin:
                     try:
                         await self._play_file(vc, current_path)
                     finally:
+                        protected_paths: set[str] = set()
                         if should_cleanup:
-                            try:
-                                os.remove(current_path)
-                            except Exception:
-                                pass
+                            protected_paths.add(current_path)
+                        if prefetched_audio_task is not None and prefetched_audio_task.done() and not prefetched_audio_task.cancelled():
+                            with contextlib.suppress(Exception):
+                                prefetched_path, _ = prefetched_audio_task.result()
+                                if prefetched_path:
+                                    protected_paths.add(prefetched_path)
+                        self._purge_cache(state, protected_paths=protected_paths)
                         state.warmed_until = time.monotonic() + TTS_WARM_HOLD_SECONDS
 
                     if prefetched_item is None and not state.queue.empty():
