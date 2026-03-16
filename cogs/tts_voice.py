@@ -936,14 +936,16 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             f"{bot_prefix}server_panel", f"{bot_prefix}server-panel", f"{bot_prefix}serverpanel",
             f"{bot_prefix}painel_server", f"{bot_prefix}painel-server", f"{bot_prefix}painelserver",
             f"{bot_prefix}servidor_panel", f"{bot_prefix}servidor-panel", f"{bot_prefix}servidorpanel",
+            f"{bot_prefix}sp",
         }
         toggle_aliases = {
             f"{bot_prefix}panel_toggle", f"{bot_prefix}panel-toggle", f"{bot_prefix}paneltoggle",
             f"{bot_prefix}panel_toggles", f"{bot_prefix}panel-toggles", f"{bot_prefix}paneltoggles",
             f"{bot_prefix}toggle_panel", f"{bot_prefix}toggle-panel", f"{bot_prefix}togglepanel",
             f"{bot_prefix}toggles_panel", f"{bot_prefix}toggles-panel", f"{bot_prefix}togglespanel",
+            f"{bot_prefix}tp",
         }
-        panel_aliases = {f"{bot_prefix}panel", f"{bot_prefix}painel"}
+        panel_aliases = {f"{bot_prefix}panel", f"{bot_prefix}painel", f"{bot_prefix}p"}
 
         is_prefix_command = (
             lowered == f"{bot_prefix}help"
