@@ -937,7 +937,48 @@ class TTSAudioMixin:
         vc.play(source, after=_after_playback)
         await finished
 
+    async def _ensure_self_deaf_fast(self, guild: discord.Guild, target_channel=None) -> bool:
+        last_error = None
+        for _ in range(3):
+            try:
+                me = getattr(guild, "me", None)
+                me_voice = getattr(me, "voice", None)
+                target = getattr(me_voice, "channel", None) or target_channel
+                if me_voice and getattr(me_voice, "self_deaf", False):
+                    return True
+                if target is None:
+                    return False
+                await guild.change_voice_state(channel=target, self_deaf=True)
+                await asyncio.sleep(0.35)
+                me = getattr(guild, "me", None)
+                me_voice = getattr(me, "voice", None)
+                if me_voice and getattr(me_voice, "self_deaf", False):
+                    return True
+            except Exception as e:
+                last_error = e
+                await asyncio.sleep(0.35)
+        if last_error is not None:
+            logger.warning("[tts_voice] Falha ao reaplicar self_deaf | guild=%s channel=%s erro=%s", guild.id, getattr(target_channel, "id", None), last_error)
+        return False
+
     async def _disconnect_idle(self, guild: discord.Guild) -> bool:
+        if hasattr(self, "_get_guild_toggle_value"):
+            try:
+                auto_leave_enabled = await self._maybe_await(
+                    self._get_guild_toggle_value(
+                        guild.id,
+                        public_key="auto_leave",
+                        raw_key="auto_leave_enabled",
+                        default=True,
+                    )
+                )
+            except Exception as e:
+                logger.warning("[tts_voice] Falha ao consultar auto_leave no idle timeout | guild=%s erro=%s", guild.id, e)
+                auto_leave_enabled = True
+            if not auto_leave_enabled:
+                self._log_debug(f"[tts_voice] Idle timeout ignorado | auto_leave desativado | guild={guild.id}")
+                return False
+
         vc = self._get_voice_client_for_guild(guild)
         if vc is None or not vc.is_connected() or vc.channel is None:
             return True
@@ -965,10 +1006,12 @@ class TTSAudioMixin:
         vc = self._get_voice_client_for_guild(guild)
         if vc is not None and vc.is_connected():
             if vc.channel is not None and vc.channel.id == item.channel_id:
+                await self._ensure_self_deaf_fast(guild, target_channel)
                 state.last_channel_id = item.channel_id
                 return vc
             try:
                 await vc.move_to(target_channel)
+                await self._ensure_self_deaf_fast(guild, target_channel)
                 state.last_channel_id = item.channel_id
                 return vc
             except Exception:
@@ -984,6 +1027,7 @@ class TTSAudioMixin:
             return None
 
         if vc.is_connected():
+            await self._ensure_self_deaf_fast(guild, target_channel)
             state.last_channel_id = item.channel_id
         return vc
 
