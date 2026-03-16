@@ -10,7 +10,7 @@ import config
 
 
 HELP_EXPIRE_AFTER_SECONDS = 180.0
-HELP_DISPATCH_TIMEOUT_SECONDS = 3600.0
+HELP_DISPATCH_TIMEOUT_SECONDS = 86400.0
 
 
 class HelpPaginatorView(discord.ui.View):

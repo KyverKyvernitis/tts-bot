@@ -16,7 +16,7 @@ import config
 from .tts_voice_common import _shorten
 
 TTS_PANEL_EXPIRE_AFTER_SECONDS = 180.0
-TTS_PANEL_DISPATCH_TIMEOUT_SECONDS = 3600.0
+TTS_PANEL_DISPATCH_TIMEOUT_SECONDS = 86400.0
 
 class _BaseTTSView(discord.ui.View):
     def __init__(
