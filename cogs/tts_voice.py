@@ -943,7 +943,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         panel_aliases = {f"{bot_prefix}panel", f"{bot_prefix}painel"}
 
         is_prefix_command = (
-            lowered == f"{bot_prefix}clear"
+            lowered == f"{bot_prefix}help"
+            or lowered == f"{bot_prefix}clear"
             or lowered == f"{bot_prefix}leave"
             or lowered == f"{bot_prefix}join"
             or lowered == f"{bot_prefix}reset"
