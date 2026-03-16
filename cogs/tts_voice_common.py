@@ -62,7 +62,7 @@ _TTS_ABBREVIATION_MAP = {
     "vlw": "valeu",
     "cmg": "comigo",
     "ctz": "certeza",
-    "enzo": "viado gay",
+    "oq": "o que",
     # outras comuns
     "mds": "meu deus",
     "tmj": "tamo junto",
