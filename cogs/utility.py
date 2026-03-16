@@ -60,31 +60,31 @@ class HelpPaginatorView(discord.ui.View):
         except Exception:
             pass
 
-    @discord.ui.button(label="◀️◀️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(emoji="⏪", style=discord.ButtonStyle.secondary, row=0)
     async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page_index = 0
         self._refresh_buttons()
         await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
 
-    @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="◀️ Anterior", style=discord.ButtonStyle.secondary, row=0)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page_index > 0:
             self.page_index -= 1
         self._refresh_buttons()
         await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
 
-    @discord.ui.button(label="1/1", style=discord.ButtonStyle.primary, disabled=True)
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.primary, disabled=True, row=0)
     async def page_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         pass
 
-    @discord.ui.button(label="▶️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Próxima ▶️", style=discord.ButtonStyle.secondary, row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page_index < len(self.pages) - 1:
             self.page_index += 1
         self._refresh_buttons()
         await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
 
-    @discord.ui.button(label="▶️▶️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(emoji="⏩", style=discord.ButtonStyle.secondary, row=0)
     async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page_index = max(0, len(self.pages) - 1)
         self._refresh_buttons()
@@ -168,7 +168,6 @@ class Utility(commands.Cog):
         tts_user_slash = self._slash_mention(root_ids, root="tts", path="tts usuario")
         tts_server_menu_slash = self._slash_mention(root_ids, root="tts", path="tts server menu")
 
-        guild_name = getattr(guild, "name", None) or "este servidor"
         prefix_help = f"`{bot_prefix}help`"
         prefix_panel = f"`{bot_prefix}panel`"
         prefix_server_panel = f"`{bot_prefix}panel_server`"
@@ -183,7 +182,7 @@ class Utility(commands.Cog):
         overview = discord.Embed(
             title="📘 Central de ajuda do TTS",
             description=(
-                f"Guia rápido com os principais comandos do bot, separado por categoria e com exemplos de uso em {guild_name}."
+                f"Um painel rápido pra consultar comandos, descobrir onde mexer nas configurações e achar o que você precisa sem caçar mensagem antiga."
             ),
             color=discord.Color.blurple(),
             timestamp=discord.utils.utcnow(),
@@ -218,15 +217,6 @@ class Utility(commands.Cog):
                 f"`{gtts_prefix}teste de voz`"
             ),
             inline=True,
-        )
-        overview.add_field(
-            name="🟢 Legenda",
-            value=(
-                "🟢 livre para usar\n"
-                "🏠 funciona no servidor\n"
-                "🔒 exige `Expulsar Membros`"
-            ),
-            inline=False,
         )
         pages.append(overview)
 
