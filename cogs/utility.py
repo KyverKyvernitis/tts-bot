@@ -22,11 +22,19 @@ class HelpPaginatorView(discord.ui.View):
         total = max(1, len(self.pages))
         at_start = self.page_index <= 0
         at_end = self.page_index >= total - 1
-        self.first_button.disabled = at_start
+
         self.prev_button.disabled = at_start
         self.next_button.disabled = at_end
-        self.last_button.disabled = at_end
         self.page_button.label = f"{self.page_index + 1}/{total}"
+
+        self.clear_items()
+        if not at_start:
+            self.add_item(self.first_button)
+        self.add_item(self.prev_button)
+        self.add_item(self.page_button)
+        self.add_item(self.next_button)
+        if not at_end:
+            self.add_item(self.last_button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if int(getattr(getattr(interaction, "user", None), "id", 0) or 0) == self.owner_id:
@@ -52,13 +60,13 @@ class HelpPaginatorView(discord.ui.View):
         except Exception:
             pass
 
-    @discord.ui.button(emoji="⏪", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="◀️◀️", style=discord.ButtonStyle.secondary)
     async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page_index = 0
         self._refresh_buttons()
         await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
 
-    @discord.ui.button(label="◀️ Anterior", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page_index > 0:
             self.page_index -= 1
@@ -69,14 +77,14 @@ class HelpPaginatorView(discord.ui.View):
     async def page_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         pass
 
-    @discord.ui.button(label="Próxima ▶️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.secondary)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page_index < len(self.pages) - 1:
             self.page_index += 1
         self._refresh_buttons()
         await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
 
-    @discord.ui.button(emoji="⏩", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="▶️▶️", style=discord.ButtonStyle.secondary)
     async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page_index = max(0, len(self.pages) - 1)
         self._refresh_buttons()
@@ -175,7 +183,7 @@ class Utility(commands.Cog):
         overview = discord.Embed(
             title="📘 Central de ajuda do TTS",
             description=(
-                f"Todos os comandos principais do bot, organizados por categoria, com exemplos bonitos pra {guild_name}."
+                f"Guia rápido com os principais comandos do bot, separado por categoria e com exemplos de uso em {guild_name}."
             ),
             color=discord.Color.blurple(),
             timestamp=discord.utils.utcnow(),
