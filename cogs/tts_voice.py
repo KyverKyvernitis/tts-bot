@@ -1102,6 +1102,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         vc = self._get_voice_client_for_guild(guild)
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
+
+        me = getattr(guild, "me", None)
+        if me and member.id == me.id and after.channel is not None and not getattr(after, "self_deaf", False):
+            try:
+                await guild.change_voice_state(channel=after.channel, self_deaf=True)
+                print(f"[tts_voice] self_deaf reaplicado após mudança de canal | guild={guild.id} channel={after.channel.id}")
+            except Exception as e:
+                print(f"[tts_voice] falha ao reaplicar self_deaf no voice_state_update | guild={guild.id} channel={getattr(after.channel, 'id', None)} error={e}")
+
         if await self._block_voice_bot_enabled(guild.id) and self._target_voice_bot_in_channel(vc.channel):
             print(f"[tts_voice] Bot de voz alvo detectado na call | guild={guild.id} channel={vc.channel.id} target_bot_id={self._target_voice_bot_id()}")
             await self._disconnect_and_clear(guild)
