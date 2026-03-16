@@ -786,7 +786,17 @@ class TTSMainPanelView(_BaseTTSView):
     @discord.ui.button(label="Autor + frase", style=discord.ButtonStyle.secondary, emoji="🗣️", row=1)
     async def announce_author_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[tts_panel] announce_author_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Autor antes da frase", "Quando ativado, o bot fala 'nome disse, frase' quando muda o usuário que está falando pelos prefixos.", ToggleSelect(self.cog, "announce_author")).send(interaction)
+        await _SimpleSelectView(
+            self.cog,
+            self._target_owner(interaction),
+            self.guild_id,
+            "Autor antes da frase",
+            "Quando ativado, o bot fala 'nome disse, frase' quando muda o usuário que está falando pelos prefixos.",
+            ToggleSelect(self.cog, "announce_author"),
+            source_panel_message=interaction.message,
+            target_user_id=self.target_user_id,
+            target_user_name=self.target_user_name,
+        ).send(interaction)
 
     @discord.ui.button(label="Prefixo do bot", style=discord.ButtonStyle.secondary, emoji="🤖", row=2)
     async def bot_prefix_button(self, interaction: discord.Interaction, button: discord.ui.Button):

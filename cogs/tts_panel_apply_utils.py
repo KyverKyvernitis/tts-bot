@@ -713,12 +713,12 @@ async def _apply_announce_author_from_panel(cog, interaction: discord.Interactio
         )
         return
 
-    panel_message = source_panel_message or getattr(interaction, "message", None)
+    panel_message, message_id = cog._resolve_public_panel_message(interaction, source_panel_message)
     await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, announce_author=bool(enabled)))
     desc = "Autor antes da frase ativado." if enabled else "Autor antes da frase desativado."
     history_entry = cog._server_history_text(interaction, "ativou o Autor antes da frase" if enabled else "desativou o Autor antes da frase")
     await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
-    cog._append_public_panel_history(getattr(panel_message, "id", None), history_entry)
+    cog._append_public_panel_history(message_id, history_entry)
     panel_history = await cog._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))
     last_changes = list((panel_history or {}).get("server_last_changes", []) or [])
     embed = await cog._build_settings_embed(
@@ -727,10 +727,14 @@ async def _apply_announce_author_from_panel(cog, interaction: discord.Interactio
         server=True,
         panel_kind="server",
         last_changes=last_changes,
-        message_id=getattr(panel_message, "id", None),
+        message_id=message_id,
         viewer_user_id=interaction.user.id,
     )
-    view = cog._build_panel_view(0 if getattr(panel_message, "id", None) in cog._public_panel_states else interaction.user.id, interaction.guild.id, server=True)
+    view = cog._build_panel_view(
+        0 if message_id in cog._public_panel_states else interaction.user.id,
+        interaction.guild.id,
+        server=True,
+    )
     if panel_message is not None:
         view.message = panel_message
     await cog._panel_update_after_change(
