@@ -43,8 +43,8 @@ GOOGLE_CLOUD_TTS_PITCH = float(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0))
 TTS_FFMPEG_BEFORE_OPTIONS = getattr(config, "TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin")
 TTS_FFMPEG_OPTIONS = getattr(config, "TTS_FFMPEG_OPTIONS", "-vn -loglevel error")
 TTS_TEMP_DIR = os.path.abspath(str(getattr(config, "TTS_TEMP_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio")) or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio")).strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio"))
-TTS_TEMP_MAX_MB = max(64, int(getattr(config, "TTS_TEMP_MAX_MB", 512)))
-TTS_TEMP_MAX_FILES = max(32, int(getattr(config, "TTS_TEMP_MAX_FILES", 512)))
+TTS_TEMP_MAX_MB = max(64, int(getattr(config, "TTS_TEMP_MAX_MB", 256)))
+TTS_TEMP_MAX_FILES = max(32, int(getattr(config, "TTS_TEMP_MAX_FILES", 256)))
 TTS_TEMP_MAX_BYTES = TTS_TEMP_MAX_MB * 1024 * 1024
 
 _RUNTIME_DIR = os.path.join(TTS_TEMP_DIR, "runtime")
