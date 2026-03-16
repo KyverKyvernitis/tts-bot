@@ -33,9 +33,11 @@ TTS_AUDIO_CACHE_TTL_SECONDS = int(getattr(config, "TTS_AUDIO_CACHE_TTL_SECONDS",
 TTS_DEBUG_LOGS = bool(getattr(config, "TTS_DEBUG_LOGS", False))
 TTS_WARM_HOLD_SECONDS = float(getattr(config, "TTS_WARM_HOLD_SECONDS", 30))
 TTS_QUEUE_MAXSIZE = max(1, int(getattr(config, "TTS_QUEUE_MAXSIZE", 20)))
-TTS_SYNTH_CONCURRENCY = max(1, int(getattr(config, "TTS_SYNTH_CONCURRENCY", 2)))
+TTS_SYNTH_CONCURRENCY = max(1, int(getattr(config, "TTS_SYNTH_CONCURRENCY", 3)))
 TTS_EDGE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_EDGE_TIMEOUT_SECONDS", 10)))
 TTS_GTTS_CONCURRENCY = max(1, int(getattr(config, "TTS_GTTS_CONCURRENCY", 1)))
+TTS_CACHEABLE_TEXT_MAX_LENGTH = max(64, int(getattr(config, "TTS_CACHEABLE_TEXT_MAX_LENGTH", 320)))
+TTS_TEMP_PRUNE_INTERVAL_SECONDS = max(5.0, float(getattr(config, "TTS_TEMP_PRUNE_INTERVAL_SECONDS", 20)))
 GOOGLE_CLOUD_TTS_LANGUAGE_CODE = str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR").strip() or "pt-BR"
 GOOGLE_CLOUD_TTS_VOICE_NAME = str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
 GOOGLE_CLOUD_TTS_SPEAKING_RATE = float(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0))
@@ -235,6 +237,19 @@ class TTSAudioMixin:
             setattr(self, "_tts_inflight_cache_tasks", tasks)
         return tasks
 
+    def _should_prune_tmp_audio_dir(self, *, force: bool = False) -> bool:
+        if force:
+            setattr(self, "_tts_last_prune_ts", time.monotonic())
+            return True
+
+        now = time.monotonic()
+        last_prune = float(getattr(self, "_tts_last_prune_ts", 0.0) or 0.0)
+        if (now - last_prune) < TTS_TEMP_PRUNE_INTERVAL_SECONDS:
+            return False
+
+        setattr(self, "_tts_last_prune_ts", now)
+        return True
+
     def _make_runtime_temp_file(self, suffix: str = ".mp3") -> str:
         fd, path = tempfile.mkstemp(prefix="tts_", suffix=suffix, dir=_RUNTIME_DIR)
         os.close(fd)
@@ -259,7 +274,10 @@ class TTSAudioMixin:
                 continue
         return result
 
-    def _prune_tmp_audio_dir(self, *, protected_paths: Optional[set[str]] = None) -> None:
+    def _prune_tmp_audio_dir(self, *, protected_paths: Optional[set[str]] = None, force: bool = False) -> None:
+        if not self._should_prune_tmp_audio_dir(force=force):
+            return
+
         protected = {os.path.abspath(p) for p in (protected_paths or set()) if p}
         files = self._list_tmp_audio_files()
         total_files = len(files)
@@ -294,7 +312,7 @@ class TTSAudioMixin:
         cache_order[key] = now
         cache_order.move_to_end(key)
 
-    def _purge_cache(self, state: GuildTTSState, *, protected_paths: Optional[set[str]] = None) -> None:
+    def _purge_cache(self, state: GuildTTSState, *, protected_paths: Optional[set[str]] = None, force_tmp_prune: bool = False) -> None:
         cache_order = self._get_global_cache_order()
 
         missing = []
@@ -321,7 +339,7 @@ class TTSAudioMixin:
             except Exception:
                 pass
 
-        self._prune_tmp_audio_dir(protected_paths=protected_paths)
+        self._prune_tmp_audio_dir(protected_paths=protected_paths, force=force_tmp_prune)
 
     async def _store_in_cache(self, state: GuildTTSState, item: QueueItem, source_path: str) -> str:
         key = self._cache_key(item)
@@ -329,7 +347,7 @@ class TTSAudioMixin:
 
         if os.path.exists(path):
             self._touch_cache_entry(state, key)
-            self._purge_cache(state, protected_paths={path})
+            self._purge_cache(state, protected_paths={path}, force_tmp_prune=True)
             return path
 
         try:
@@ -341,7 +359,7 @@ class TTSAudioMixin:
                 return source_path
 
         self._touch_cache_entry(state, key)
-        self._purge_cache(state, protected_paths={path})
+        self._purge_cache(state, protected_paths={path}, force_tmp_prune=True)
         return path
 
     def _cache_key(self, item: QueueItem) -> str:
@@ -373,7 +391,6 @@ class TTSAudioMixin:
             return None
 
         self._touch_cache_entry(state, key)
-        self._purge_cache(state, protected_paths={path})
         self._log_debug(f"[tts_voice] cache hit | guild={item.guild_id} key={key[:10]}")
         return path
 
@@ -534,7 +551,7 @@ class TTSAudioMixin:
         return await self._generate_gtts_file(item.text, item.language)
 
     async def _resolve_audio_path(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:
-        should_cache = len(self._normalize_cache_text(item.text)) <= 220
+        should_cache = len(self._normalize_cache_text(item.text)) <= TTS_CACHEABLE_TEXT_MAX_LENGTH
         if should_cache:
             return await self._resolve_or_generate_cached_audio(state, item)
 
