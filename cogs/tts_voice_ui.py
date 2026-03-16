@@ -403,6 +403,8 @@ class ToggleSelect(discord.ui.Select):
             await self.cog._apply_only_target_from_panel(interaction, enabled, source_panel_message=source_panel_message)
         elif self.toggle_name == "announce_author":
             await self.cog._apply_announce_author_from_panel(interaction, enabled, source_panel_message=source_panel_message)
+        elif self.toggle_name == "auto_leave":
+            await self.cog._apply_auto_leave_from_panel(interaction, enabled, source_panel_message=source_panel_message)
         else:
             await self.cog._apply_block_voice_bot_from_panel(interaction, enabled, source_panel_message=source_panel_message)
 
@@ -959,3 +961,7 @@ class TTSTogglePanelView(_BaseTTSView):
     @discord.ui.button(label="Modo Cuca", style=discord.ButtonStyle.secondary, emoji="👑", row=0)
     async def only_target_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Modo Cuca", "Quando ativado, a Cuca continua normal e os outros usuários são forçados para gtts.", ToggleSelect(self.cog, "only_target_user")).send(interaction)
+
+    @discord.ui.button(label="Auto leave", style=discord.ButtonStyle.secondary, emoji="⏏️", row=1)
+    async def auto_leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Auto leave", "Escolha se o bot deve sair da call quando ficar sozinho ou só com bots.", ToggleSelect(self.cog, "auto_leave")).send(interaction)

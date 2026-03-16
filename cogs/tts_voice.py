@@ -109,6 +109,7 @@ from .tts_panel_apply_utils import (
     _apply_gcloud_pitch_from_panel as apply_gcloud_pitch_from_panel,
     _apply_spoken_name_from_modal as apply_spoken_name_from_modal,
     _apply_announce_author_from_panel as apply_announce_author_from_panel,
+    _apply_auto_leave_from_panel as apply_auto_leave_from_panel,
     _apply_only_target_from_panel as apply_only_target_from_panel,
     _apply_block_voice_bot_from_panel as apply_block_voice_bot_from_panel,
 )
@@ -2000,6 +2001,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     async def _apply_announce_author_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
         return await apply_announce_author_from_panel(self, interaction, enabled, source_panel_message)
+
+
+    async def _apply_auto_leave_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
+        return await apply_auto_leave_from_panel(self, interaction, enabled, source_panel_message)
 
 
     async def _apply_only_target_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):

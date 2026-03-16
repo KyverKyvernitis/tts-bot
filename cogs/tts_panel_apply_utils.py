@@ -743,6 +743,46 @@ async def _apply_announce_author_from_panel(cog, interaction: discord.Interactio
     )
     await cog._announce_panel_change(interaction, title="Modo de TTS atualizado", description=desc)
 
+
+async def _apply_auto_leave_from_panel(cog, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
+    if not interaction.user.guild_permissions.kick_members:
+        await interaction.response.send_message(
+            embed=cog._make_embed(
+                "Sem permissão",
+                "Você precisa da permissão `Expulsar Membros` para usar esse painel.",
+                ok=False,
+            ),
+            ephemeral=True,
+        )
+        return
+
+    db = cog._get_db()
+    if db is None:
+        await interaction.response.send_message(
+            embed=cog._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False),
+            ephemeral=True,
+        )
+        return
+
+    panel_message = source_panel_message or getattr(interaction, "message", None)
+    await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, auto_leave=bool(enabled)))
+    desc = f"Auto leave {'ativado' if enabled else 'desativado'}."
+    history_entry = cog._toggle_history_text(interaction, "ativou o Auto Leave" if enabled else "desativou o Auto Leave")
+    await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, toggle_last_change=history_entry))
+    cog._append_public_panel_history(getattr(getattr(interaction, "message", None), "id", None), history_entry)
+    last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("toggle_last_changes", []) or [])
+    embed = await cog._build_toggle_embed(interaction.guild.id, interaction.user.id, last_changes=last_changes, message_id=getattr(getattr(interaction, "message", None), "id", None))
+    view = cog._build_toggle_view(0 if getattr(getattr(interaction, "message", None), "id", None) in cog._public_panel_states else interaction.user.id, interaction.guild.id)
+    await cog._panel_update_after_change(
+        interaction,
+        embed=embed,
+        view=view,
+        title="Modo de TTS atualizado",
+        description=desc,
+        target_message=panel_message,
+    )
+    await cog._announce_panel_change(interaction, title="Modo de TTS atualizado", description=desc)
+
 async def _apply_only_target_from_panel(cog, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
     if not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message(
