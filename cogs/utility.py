@@ -61,13 +61,13 @@ class HelpPaginatorView(discord.ui.View):
         except Exception:
             pass
 
-    @discord.ui.button(emoji="⏪", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(emoji="⏪", style=discord.ButtonStyle.secondary, row=0)
     async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page_index = 0
         self._refresh_buttons()
         await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
 
-    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page_index > 0:
             self.page_index -= 1
@@ -78,14 +78,14 @@ class HelpPaginatorView(discord.ui.View):
     async def page_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         pass
 
-    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary, row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page_index < len(self.pages) - 1:
             self.page_index += 1
         self._refresh_buttons()
         await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
 
-    @discord.ui.button(emoji="⏩", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(emoji="⏩", style=discord.ButtonStyle.secondary, row=0)
     async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page_index = max(0, len(self.pages) - 1)
         self._refresh_buttons()
