@@ -163,6 +163,7 @@ class SettingsDB:
             "only_target_user": bool(g.get("only_target_user_enabled", False)),
             "announce_author": bool(g.get("announce_author_enabled", False)),
             "auto_leave": bool(g.get("auto_leave_enabled", True)),
+            "ignored_tts_role_id": int(g.get("ignored_tts_role_id", 0) or 0),
         }
 
     async def set_guild_tts_defaults(
@@ -188,6 +189,7 @@ class SettingsDB:
         only_target_user: Optional[bool] = None,
         announce_author: Optional[bool] = None,
         auto_leave: Optional[bool] = None,
+        ignored_tts_role_id: Optional[int] = None,
     ):
         doc = self._get_guild_doc(guild_id)
         tts = doc.get("tts_defaults", {}) or {}
@@ -233,9 +235,29 @@ class SettingsDB:
             doc["announce_author_enabled"] = bool(announce_author)
         if auto_leave is not None:
             doc["auto_leave_enabled"] = bool(auto_leave)
+        if ignored_tts_role_id is not None:
+            try:
+                doc["ignored_tts_role_id"] = max(0, int(ignored_tts_role_id or 0))
+            except Exception:
+                doc["ignored_tts_role_id"] = 0
 
         doc["tts_defaults"] = tts
         self._invalidate_resolved_tts_cache(guild_id=guild_id)
+        await self._save_guild_doc(guild_id, doc)
+
+    def get_ignored_tts_role_id(self, guild_id: int) -> int:
+        g = self.guild_cache.get(guild_id, {})
+        try:
+            return max(0, int(g.get("ignored_tts_role_id", 0) or 0))
+        except Exception:
+            return 0
+
+    async def set_ignored_tts_role_id(self, guild_id: int, role_id: int | None):
+        doc = self._get_guild_doc(guild_id)
+        try:
+            doc["ignored_tts_role_id"] = max(0, int(role_id or 0))
+        except Exception:
+            doc["ignored_tts_role_id"] = 0
         await self._save_guild_doc(guild_id, doc)
 
     def get_user_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
