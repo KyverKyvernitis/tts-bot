@@ -292,6 +292,9 @@ class AntiMzkCog(commands.Cog):
         if not targets:
             return
 
+        target_ids = {member.id for member in targets}
+        author_is_target = message.author.id in target_ids
+
         if TRIGGER_WORD and TRIGGER_WORD in content:
             for target in targets:
                 if target.voice and target.voice.channel:
@@ -301,6 +304,9 @@ class AntiMzkCog(commands.Cog):
                         pass
 
         if MUTE_TOGGLE_WORD and MUTE_TOGGLE_WORD in content:
+            if author_is_target:
+                return
+
             for target in targets:
                 if target.voice and target.voice.channel:
                     try:
