@@ -2492,20 +2492,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         else:
             view.message = msg
 
-
-    @app_commands.command(name="perf", description="Mostra métricas técnicas do TTS para staff")
-    async def perf(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_staff_or_kick_members(interaction):
-            return
-
-        await self._defer_ephemeral(interaction)
-        embeds = self._build_tts_perf_embeds(interaction.guild)
-        await interaction.followup.send(embeds=embeds, ephemeral=True)
-
-
-
     @app_commands.command(name="usuario", description="Abre o painel, reseta ou altera o apelido falado de um usuário")
     @app_commands.describe(usuario="Usuário que terá as configurações alteradas", acao="Escolha se quer abrir o painel, alterar o apelido falado ou resetar")
     @app_commands.choices(acao=USER_CONFIG_ACTION_CHOICES)
