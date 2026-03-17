@@ -110,8 +110,11 @@ class BotLocal(commands.Bot):
                 name = getattr(cmd, "name", None) or str(cmd)
                 print(f"[SYNC][GLOBAL] /{name}")
 
-            guild_ids = getattr(config, "GUILD_IDS", []) or []
-            for guild_id in guild_ids:
+            health_guild_id = 927002914449424404
+            guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
+            guild_ids.add(health_guild_id)
+
+            for guild_id in sorted(guild_ids):
                 guild_obj = discord.Object(id=guild_id)
                 synced_guild = await self.tree.sync(guild=guild_obj)
                 print(f"[SYNC] Slash commands sincronizados na guild {guild_id}: {len(synced_guild)}")
@@ -120,6 +123,7 @@ class BotLocal(commands.Bot):
                     print(f"[SYNC][GUILD {guild_id}] /{name}")
         else:
             print("[SYNC] Pulado no boot (defina SYNC_SLASH_COMMANDS=true para sincronizar no startup)")
+            print("[SYNC] Observação: comandos limitados por guild, como /health, só aparecem após sync da guild correspondente.")
 
     def get_health_snapshot(self) -> dict[str, object]:
         snapshot = dict(self.health_state)
