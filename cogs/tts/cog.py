@@ -19,8 +19,8 @@ except Exception:  # pragma: no cover - dependência opcional em tempo de import
     google_texttospeech = None
 
 import config
-from tts_audio import GuildTTSState, QueueItem, TTSAudioMixin, TTS_BOOT_WARMUP_ENABLED
-from .tts_voice_common import (
+from .audio import GuildTTSState, QueueItem, TTSAudioMixin, TTS_BOOT_WARMUP_ENABLED
+from .common import (
     _guild_scoped,
     _shorten,
     _replace_custom_emojis_for_tts,
@@ -40,7 +40,7 @@ from .tts_voice_common import (
     build_gtts_language_aliases,
     validate_mode,
 )
-from .tts_embed_utils import (
+from .utils.embed import (
     make_embed,
     build_expired_panel_embed,
     build_toggle_embed,
@@ -49,13 +49,13 @@ from .tts_embed_utils import (
     status_voice_channel_text,
     spoken_name_status_text,
 )
-from .tts_prefix_utils import (
+from .prefix import (
     build_prefix_routing_config,
     match_prefix_control_command,
     match_engine_prefix,
     dispatch_prefix_control_command,
 )
-from .tts_resolution_utils import (
+from .utils.resolution import (
     gcloud_language_priority,
     build_gcloud_language_options_from_catalog,
     gcloud_voice_priority,
@@ -73,7 +73,7 @@ from .tts_resolution_utils import (
     normalize_gcloud_rate_value,
     normalize_gcloud_pitch_value,
 )
-from .tts_voice_ui import (
+from .ui import (
     _BaseTTSView,
     _SimpleSelectView,
     ModeSelect,
@@ -101,7 +101,7 @@ from .tts_voice_ui import (
     TTSTogglePanelView,
 )
 
-from .tts_panel_apply_utils import (
+from .utils.panel_apply import (
     _apply_server_prefix_from_modal as apply_server_prefix_from_modal,
     _apply_mode_from_panel as apply_mode_from_panel,
     _apply_voice_from_panel as apply_voice_from_panel,
@@ -1871,11 +1871,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return status_badge(value, on=on, off=off)
 
     def _status_source_badge(self, source: str) -> str:
-        from .tts_embed_utils import status_source_badge as _status_source_badge
+        from .utils.embed import status_source_badge as _status_source_badge
         return _status_source_badge(source)
 
     def _status_engine_label(self, engine: str) -> str:
-        from .tts_embed_utils import status_engine_label as _status_engine_label
+        from .utils.embed import status_engine_label as _status_engine_label
         return _status_engine_label(engine)
 
     def _status_voice_channel_text(self, guild: discord.Guild | None, target_user_id: int) -> str:

@@ -75,27 +75,23 @@ class BotLocal(commands.Bot):
 
         print("Carregando cogs...")
 
-        helper_modules = {
-            "tts_history_utils",
-            "tts_status_utils",
-            "tts_text_utils",
-            "tts_embed_utils",
-            "tts_voice_common",
-            "tts_voice_ui",
-            "tts_aliases",
-        }
-
         cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
+        extensions = []
+
         for filename in sorted(os.listdir(cogs_dir)):
             if not filename.endswith(".py") or filename.startswith("_"):
                 continue
-
             module_name = filename[:-3]
-            if module_name in helper_modules or module_name.endswith("_utils"):
-                print(f"[bot] pulando módulo utilitário: cogs.{module_name}")
-                continue
-
             ext = f"cogs.{module_name}"
+            extensions.append(ext)
+
+        # TTS foi reorganizado para um pacote próprio em cogs/tts.
+        extensions.extend([
+            "cogs.tts.cog",
+            "cogs.tts.toggle",
+        ])
+
+        for ext in extensions:
             try:
                 await self.load_extension(ext)
             except Exception as e:

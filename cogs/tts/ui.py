@@ -13,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
-from .tts_voice_common import _shorten
+from .common import _shorten
 
 TTS_PANEL_EXPIRE_AFTER_SECONDS = 180.0
 TTS_PANEL_DISPATCH_TIMEOUT_SECONDS = 86400.0

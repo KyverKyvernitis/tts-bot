@@ -1,6 +1,6 @@
 import discord
 
-from .tts_voice_common import validate_mode
+from ..common import validate_mode
 
 async def _apply_server_prefix_from_modal(
     cog,

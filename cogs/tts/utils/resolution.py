@@ -3,7 +3,7 @@ import unicodedata
 
 import discord
 
-from .tts_voice_common import _normalize_spaces, _shorten
+from ..common import _normalize_spaces, _shorten
 
 
 def gcloud_language_priority(code: str) -> tuple[int, str]:

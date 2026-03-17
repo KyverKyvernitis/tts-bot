@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
-from .tts_aliases import format_prefixed_aliases, matches_prefixed_command
+from .tts.aliases import format_prefixed_aliases, matches_prefixed_command
 
 
 HELP_EXPIRE_AFTER_SECONDS = 180.0

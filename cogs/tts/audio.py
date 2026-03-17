@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - dependência opcional em tempo de import
     google_texttospeech = None
 
 import config
-from tts_helpers import validate_voice
+from .helpers import validate_voice
 
 
 GTTS_DEFAULT_LANGUAGE = getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt")

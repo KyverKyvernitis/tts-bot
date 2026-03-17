@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .tts_aliases import extract_prefixed_argument, get_prefixed_aliases, matches_prefixed_command
+from .aliases import extract_prefixed_argument, get_prefixed_aliases, matches_prefixed_command
 
 
 @dataclass(frozen=True)

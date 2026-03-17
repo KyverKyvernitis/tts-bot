@@ -18,7 +18,7 @@ except Exception:  # pragma: no cover - dependência opcional em tempo de import
     google_texttospeech = None
 
 import config
-from tts_audio import GuildTTSState, QueueItem, TTSAudioMixin
+from .audio import GuildTTSState, QueueItem, TTSAudioMixin
 
 from typing import Callable
 

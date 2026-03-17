@@ -7,8 +7,8 @@ import discord
 from discord.ext import commands
 
 from config import BLOCK_VOICE_BOT_ID, TTS_ENABLED
-from tts_audio import QueueItem
-from tts_helpers import (
+from .audio import QueueItem
+from .helpers import (
     EDGE_DEFAULT_VOICE,
     GTTS_DEFAULT_LANGUAGE,
     clean_text,
