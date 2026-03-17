@@ -1,4 +1,5 @@
 import inspect
+import os
 import time
 from typing import Any
 
@@ -12,6 +13,9 @@ from .tts_aliases import format_prefixed_aliases, matches_prefixed_command
 
 HELP_EXPIRE_AFTER_SECONDS = 180.0
 HELP_DISPATCH_TIMEOUT_SECONDS = 86400.0
+
+HEALTH_COMMAND_GUILD_ID = 927002914449424404
+HEALTH_COMMAND_GUILD = discord.Object(id=HEALTH_COMMAND_GUILD_ID)
 
 
 class HelpPaginatorView(discord.ui.View):
@@ -434,6 +438,185 @@ class Utility(commands.Cog):
 
         view.message = await responder.send(embed=pages[0], view=view)
 
+    def _format_bool_badge(self, value: bool, *, ok_label: str = "OK", bad_label: str = "Falha") -> str:
+        return f"🟢 {ok_label}" if bool(value) else f"🔴 {bad_label}"
+
+    def _format_duration(self, total_seconds: float | int | None) -> str:
+        try:
+            total = int(float(total_seconds or 0))
+        except Exception:
+            total = 0
+        days, rem = divmod(max(0, total), 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, seconds = divmod(rem, 60)
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        if seconds or not parts:
+            parts.append(f"{seconds}s")
+        return " ".join(parts)
+
+    def _format_ms(self, value: Any) -> str:
+        try:
+            return f"{float(value):.2f} ms"
+        except Exception:
+            return "n/a"
+
+    def _format_bytes_human(self, value: int | float | None) -> str:
+        try:
+            size = float(value or 0)
+        except Exception:
+            return "0 B"
+        units = ["B", "KB", "MB", "GB", "TB"]
+        idx = 0
+        while size >= 1024.0 and idx < len(units) - 1:
+            size /= 1024.0
+            idx += 1
+        if idx == 0:
+            return f"{int(size)} {units[idx]}"
+        return f"{size:.2f} {units[idx]}"
+
+    def _build_health_embeds(self) -> list[discord.Embed]:
+        snapshot = {}
+        get_snapshot = getattr(self.bot, "get_health_snapshot", None)
+        if callable(get_snapshot):
+            try:
+                snapshot = get_snapshot() or {}
+            except Exception:
+                snapshot = {}
+
+        tts_metrics = dict(snapshot.get("tts_metrics") or {})
+        engine_metrics = dict(tts_metrics.get("engines") or {})
+
+        tmp_root = os.path.join(os.getcwd(), "tmp_audio")
+        runtime_dir = os.path.join(tmp_root, "runtime")
+        cache_dir = os.path.join(tmp_root, "cache")
+        credentials_dir = os.path.join(tmp_root, "credentials")
+
+        def _dir_stats(path: str) -> tuple[int, int]:
+            total_bytes = 0
+            total_files = 0
+            try:
+                for entry in os.scandir(path):
+                    if not entry.is_file():
+                        continue
+                    total_files += 1
+                    try:
+                        total_bytes += int(entry.stat().st_size)
+                    except Exception:
+                        pass
+            except Exception:
+                return 0, 0
+            return total_files, total_bytes
+
+        runtime_files, runtime_bytes = _dir_stats(runtime_dir)
+        cache_files, cache_bytes = _dir_stats(cache_dir)
+        cred_files, cred_bytes = _dir_stats(credentials_dir)
+        total_tmp_bytes = runtime_bytes + cache_bytes + cred_bytes
+
+        healthy = bool(snapshot.get("healthy"))
+        starting = bool(snapshot.get("starting"))
+        color = discord.Color.green() if healthy else (discord.Color.gold() if starting else discord.Color.red())
+
+        cache_hits = int(tts_metrics.get("cache_hits", 0) or 0)
+        cache_misses = int(tts_metrics.get("cache_misses", 0) or 0)
+        cache_stores = int(tts_metrics.get("cache_stores", 0) or 0)
+        total_cache_lookups = cache_hits + cache_misses
+        cache_hit_rate = (cache_hits / total_cache_lookups * 100.0) if total_cache_lookups else 0.0
+
+        title_badge = "🩺" if healthy else ("⏳" if starting else "🚨")
+        summary = discord.Embed(
+            title=f"{title_badge} Saúde geral do bot",
+            description=(
+                "Painel rápido de saúde, latência, fila, cache e engines do bot. "
+                "Use isto para bater o olho e entender se está tudo estável."
+            ),
+            color=color,
+            timestamp=discord.utils.utcnow(),
+        )
+        summary.add_field(
+            name="Estado do bot",
+            value=(
+                f"**Status:** `{snapshot.get('status', 'unknown')}`\n"
+                f"**Healthy:** {self._format_bool_badge(snapshot.get('healthy'), ok_label='saudável', bad_label='com problema')}\n"
+                f"**Inicializando:** {'🟡 sim' if starting else '⚪ não'}\n"
+                f"**Discord pronto:** {self._format_bool_badge(snapshot.get('discord_ready'), ok_label='pronto', bad_label='não pronto')}\n"
+                f"**Conexão fechada:** {'🔴 sim' if snapshot.get('discord_closed') else '🟢 não'}\n"
+                f"**MongoDB:** {self._format_bool_badge(snapshot.get('mongo_ok'), ok_label='ok', bad_label='offline')}"
+            ),
+            inline=False,
+        )
+        summary.add_field(
+            name="Tempo e rede",
+            value=(
+                f"**Uptime:** `{self._format_duration(snapshot.get('uptime_seconds'))}`\n"
+                f"**Latência:** `{snapshot.get('latency_ms', 'n/a')} ms`\n"
+                f"**Guilds:** `{snapshot.get('guild_count', len(self.bot.guilds))}`\n"
+                f"**Voice clients:** `{len(getattr(self.bot, 'voice_clients', []) or [])}`"
+            ),
+            inline=True,
+        )
+        summary.add_field(
+            name="Fila e despacho",
+            value=(
+                f"**Na fila agora:** `{int(tts_metrics.get('queued_items_current', 0) or 0)}`\n"
+                f"**Enfileiradas:** `{int(tts_metrics.get('queue_enqueued', 0) or 0)}`\n"
+                f"**Deduplicadas:** `{int(tts_metrics.get('queue_deduplicated', 0) or 0)}`\n"
+                f"**Descartadas:** `{int(tts_metrics.get('queue_dropped', 0) or 0)}`\n"
+                f"**Espera média:** `{self._format_ms(tts_metrics.get('avg_queue_wait_ms'))}`\n"
+                f"**Despacho médio:** `{self._format_ms(tts_metrics.get('avg_dispatch_ms'))}`"
+            ),
+            inline=True,
+        )
+        summary.add_field(
+            name="Cache e armazenamento",
+            value=(
+                f"**Hits:** `{cache_hits}`\n"
+                f"**Misses:** `{cache_misses}`\n"
+                f"**Stores:** `{cache_stores}`\n"
+                f"**Hit rate:** `{cache_hit_rate:.1f}%`\n"
+                f"**tmp_audio:** `{self._format_bytes_human(total_tmp_bytes)}`\n"
+                f"**Runtime / Cache / Cred:** `{runtime_files}` / `{cache_files}` / `{cred_files}`"
+            ),
+            inline=False,
+        )
+        if self.bot.user and self.bot.user.display_avatar:
+            summary.set_thumbnail(url=self.bot.user.display_avatar.url)
+        summary.set_footer(text="Painel global • não é limitado ao servidor atual")
+
+        engines = discord.Embed(
+            title="⚙️ Engines e synth",
+            description="Indicadores por engine para detectar lentidão, falhas repetidas e efetividade da cache.",
+            color=color,
+            timestamp=discord.utils.utcnow(),
+        )
+        if engine_metrics:
+            for engine_name, data in sorted(engine_metrics.items()):
+                engines.add_field(
+                    name=f"{engine_name.upper()}",
+                    value=(
+                        f"**Synths:** `{int(data.get('synth_count', 0) or 0)}`\n"
+                        f"**Falhas:** `{int(data.get('synth_failures', 0) or 0)}`\n"
+                        f"**Consecutivas:** `{int(data.get('consecutive_failures', 0) or 0)}`\n"
+                        f"**Hits / Misses:** `{int(data.get('cache_hits', 0) or 0)}` / `{int(data.get('cache_misses', 0) or 0)}`\n"
+                        f"**Média synth:** `{self._format_ms(data.get('avg_synth_ms'))}`\n"
+                        f"**Última synth:** `{self._format_ms(data.get('last_synth_ms'))}`\n"
+                        f"**Slow alerts:** `{int(data.get('slow_alerts', 0) or 0)}`\n"
+                        f"**Último erro:** `{str(data.get('last_error') or 'nenhum')[:90]}`"
+                    ),
+                    inline=False,
+                )
+        else:
+            engines.add_field(name="Sem dados", value="Ainda não há métricas suficientes de engine para mostrar aqui.", inline=False)
+        if self.bot.user and self.bot.user.display_avatar:
+            engines.set_thumbnail(url=self.bot.user.display_avatar.url)
+        engines.set_footer(text="Métricas globais do TTS")
+        return [summary, engines]
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.content:
@@ -459,6 +642,12 @@ class Utility(commands.Cog):
             interaction=interaction,
             ephemeral=True,
         )
+
+    @app_commands.command(name="health", description="Mostra a saúde geral do bot, fila, cache e engines")
+    @app_commands.guilds(HEALTH_COMMAND_GUILD)
+    async def health(self, interaction: discord.Interaction):
+        embeds = self._build_health_embeds()
+        await interaction.response.send_message(embeds=embeds, ephemeral=False)
 
     @app_commands.command(name="ping", description="Mostra o status atual e a latência do bot")
     async def ping(self, interaction: discord.Interaction):
