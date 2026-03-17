@@ -48,6 +48,12 @@ from .tts_embed_utils import (
     status_voice_channel_text,
     spoken_name_status_text,
 )
+from .tts_prefix_utils import (
+    build_prefix_routing_config,
+    match_prefix_control_command,
+    match_engine_prefix,
+    dispatch_prefix_control_command,
+)
 from .tts_resolution_utils import (
     gcloud_language_priority,
     build_gcloud_language_options_from_catalog,
@@ -924,90 +930,27 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         db = self._get_db()
         guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(message.guild.id)) if db else {}
-        gtts_prefix = str((guild_defaults or {}).get("gtts_prefix", (guild_defaults or {}).get("tts_prefix", ".")) or ".")
-        edge_prefix = str((guild_defaults or {}).get("edge_prefix", ",") or ",")
-        gcloud_prefix = str((guild_defaults or {}).get("gcloud_prefix", getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'")) or getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'"))
-
-        bot_prefix = str((guild_defaults or {}).get("bot_prefix", "_") or "_")
-
-        lowered = message.content.strip().lower()
-        server_aliases = {
-            f"{bot_prefix}panel_server", f"{bot_prefix}panel-server", f"{bot_prefix}panelserver",
-            f"{bot_prefix}server_panel", f"{bot_prefix}server-panel", f"{bot_prefix}serverpanel",
-            f"{bot_prefix}painel_server", f"{bot_prefix}painel-server", f"{bot_prefix}painelserver",
-            f"{bot_prefix}servidor_panel", f"{bot_prefix}servidor-panel", f"{bot_prefix}servidorpanel",
-            f"{bot_prefix}sp",
-        }
-        toggle_aliases = {
-            f"{bot_prefix}panel_toggle", f"{bot_prefix}panel-toggle", f"{bot_prefix}paneltoggle",
-            f"{bot_prefix}panel_toggles", f"{bot_prefix}panel-toggles", f"{bot_prefix}paneltoggles",
-            f"{bot_prefix}toggle_panel", f"{bot_prefix}toggle-panel", f"{bot_prefix}togglepanel",
-            f"{bot_prefix}toggles_panel", f"{bot_prefix}toggles-panel", f"{bot_prefix}togglespanel",
-            f"{bot_prefix}tp",
-        }
-        panel_aliases = {f"{bot_prefix}panel", f"{bot_prefix}painel", f"{bot_prefix}p"}
-
-        is_prefix_command = (
-            lowered == f"{bot_prefix}help"
-            or lowered == f"{bot_prefix}clear"
-            or lowered == f"{bot_prefix}leave"
-            or lowered == f"{bot_prefix}join"
-            or lowered == f"{bot_prefix}reset"
-            or lowered.startswith(f"{bot_prefix}reset ")
-            or lowered == f"{bot_prefix}set lang"
-            or lowered.startswith(f"{bot_prefix}set lang ")
-            or lowered in panel_aliases
-            or lowered in server_aliases
-            or lowered in toggle_aliases
+        routing = build_prefix_routing_config(
+            guild_defaults,
+            bot_prefix_default=str(getattr(config, "BOT_PREFIX", "_") or "_"),
+            gcloud_prefix_default=str(getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'"),
         )
 
-        if is_prefix_command:
+        prefix_command = match_prefix_control_command(message.content, routing.bot_prefix)
+        if prefix_command is not None:
             if self._was_tts_message_seen(message.id):
                 return
             self._mark_tts_message_seen(message.id)
+            if await dispatch_prefix_control_command(self, message, prefix_command):
+                return
 
-        reset_command = f"{bot_prefix}reset"
-        set_lang_command = f"{bot_prefix}set lang"
-
-        if lowered == f"{bot_prefix}clear":
-            await self._prefix_clear(message)
-            return
-        if lowered == f"{bot_prefix}leave":
-            await self._prefix_leave(message)
-            return
-        if lowered == f"{bot_prefix}join":
-            await self._prefix_join(message)
-            return
-        if lowered == reset_command or lowered.startswith(reset_command + " "):
-            raw_target = message.content[len(reset_command):].strip()
-            await self._prefix_reset_user(message, raw_target)
-            return
-        if lowered == set_lang_command or lowered.startswith(set_lang_command + " "):
-            raw_language = message.content[len(set_lang_command):].strip()
-            await self._prefix_set_lang(message, raw_language)
-            return
-        if lowered in panel_aliases:
-            await self._send_prefix_panel(message, panel_type="user")
-            return
-        if lowered in server_aliases:
-            await self._send_prefix_panel(message, panel_type="server")
-            return
-        if lowered in toggle_aliases:
-            await self._send_prefix_panel(message, panel_type="toggle")
-            return
-
-        forced_engine = None
-        active_prefix = None
-        if message.content.startswith(edge_prefix):
-            forced_engine = "edge"
-            active_prefix = edge_prefix
-        elif message.content.startswith(gtts_prefix):
-            forced_engine = "gtts"
-            active_prefix = gtts_prefix
-        elif message.content.startswith(gcloud_prefix):
-            forced_engine = "gcloud"
-            active_prefix = gcloud_prefix
-        else:
+        forced_engine, active_prefix = match_engine_prefix(
+            message.content,
+            edge_prefix=routing.edge_prefix,
+            gtts_prefix=routing.gtts_prefix,
+            gcloud_prefix=routing.gcloud_prefix,
+        )
+        if not forced_engine or not active_prefix:
             return
         if self._was_tts_message_seen(message.id):
             return
