@@ -2,6 +2,7 @@ import inspect
 import contextlib
 import asyncio
 import time
+import os
 import re
 import weakref
 import unicodedata
@@ -665,6 +666,180 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return True
         await self._respond(interaction, embed=self._make_embed("Sem permissão", "Você precisa ser staff ou ter a permissão `Expulsar Membros` para usar esse comando.", ok=False), ephemeral=True)
         return False
+
+    def _format_metric_ms(self, value) -> str:
+        try:
+            return f"{float(value):.2f} ms"
+        except Exception:
+            return "n/a"
+
+    def _format_bytes_human(self, value: int | float) -> str:
+        try:
+            size = float(value)
+        except Exception:
+            return "0 B"
+        units = ["B", "KB", "MB", "GB", "TB"]
+        idx = 0
+        while size >= 1024.0 and idx < len(units) - 1:
+            size /= 1024.0
+            idx += 1
+        if idx == 0:
+            return f"{int(size)} {units[idx]}"
+        return f"{size:.2f} {units[idx]}"
+
+    def _build_tts_perf_embeds(self, guild: discord.Guild | None) -> list[discord.Embed]:
+        snapshot = {}
+        get_snapshot = getattr(self.bot, "get_health_snapshot", None)
+        if callable(get_snapshot):
+            try:
+                snapshot = get_snapshot() or {}
+            except Exception:
+                snapshot = {}
+
+        tts_metrics = dict(snapshot.get("tts_metrics") or {})
+        engine_metrics = dict(tts_metrics.get("engines") or {})
+
+        total_tmp_bytes = 0
+        runtime_count = 0
+        cache_count = 0
+        tmp_files = []
+        try:
+            tmp_files = self._list_tmp_audio_files()
+        except Exception:
+            tmp_files = []
+        for _, _, size, path in tmp_files:
+            total_tmp_bytes += int(size or 0)
+            parent_name = os.path.basename(os.path.dirname(path)).lower()
+            if parent_name == "runtime":
+                runtime_count += 1
+            elif parent_name == "cache":
+                cache_count += 1
+
+        uptime_seconds = snapshot.get("uptime_seconds")
+        try:
+            uptime_seconds = int(float(uptime_seconds or 0))
+        except Exception:
+            uptime_seconds = 0
+        days, rem = divmod(uptime_seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, seconds = divmod(rem, 60)
+        uptime_parts = []
+        if days:
+            uptime_parts.append(f"{days}d")
+        if hours:
+            uptime_parts.append(f"{hours}h")
+        if minutes:
+            uptime_parts.append(f"{minutes}m")
+        if seconds or not uptime_parts:
+            uptime_parts.append(f"{seconds}s")
+        uptime_text = " ".join(uptime_parts)
+
+        cache_hits = int(tts_metrics.get("cache_hits", 0) or 0)
+        cache_misses = int(tts_metrics.get("cache_misses", 0) or 0)
+        total_cache_lookups = cache_hits + cache_misses
+        cache_hit_rate = (cache_hits / total_cache_lookups * 100.0) if total_cache_lookups else 0.0
+
+        embed = discord.Embed(
+            title="🛠️ Status técnico do TTS",
+            description="Métricas internas do TTS e saúde atual do bot para diagnóstico rápido.",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(
+            name="Saúde geral",
+            value=(
+                f"**Status:** `{snapshot.get('status', 'unknown')}`\n"
+                f"**Healthy:** `{snapshot.get('healthy', False)}`\n"
+                f"**Discord pronto:** `{snapshot.get('discord_ready', False)}`\n"
+                f"**Mongo:** `{snapshot.get('mongo_ok', False)}`\n"
+                f"**Uptime:** `{uptime_text}`\n"
+                f"**Latência:** `{snapshot.get('latency_ms', 'n/a')} ms`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Fila e despacho",
+            value=(
+                f"**Na fila agora:** `{tts_metrics.get('queued_items_current', 0)}`\n"
+                f"**Guild states:** `{tts_metrics.get('guild_states_current', 0)}`\n"
+                f"**Enfileiradas:** `{tts_metrics.get('queue_enqueued', 0)}`\n"
+                f"**Deduplicadas:** `{tts_metrics.get('queue_deduplicated', 0)}`\n"
+                f"**Descartadas:** `{tts_metrics.get('queue_dropped', 0)}`\n"
+                f"**Espera média:** `{self._format_metric_ms(tts_metrics.get('avg_queue_wait_ms'))}`\n"
+                f"**Dispatch médio:** `{self._format_metric_ms(tts_metrics.get('avg_dispatch_ms'))}`\n"
+                f"**Playback médio:** `{self._format_metric_ms(tts_metrics.get('avg_playback_ms'))}`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Cache e armazenamento",
+            value=(
+                f"**Cache hits:** `{cache_hits}`\n"
+                f"**Cache misses:** `{cache_misses}`\n"
+                f"**Hit rate:** `{cache_hit_rate:.1f}%`\n"
+                f"**Cache stores:** `{tts_metrics.get('cache_stores', 0)}`\n"
+                f"**tmp_audio:** `{self._format_bytes_human(total_tmp_bytes)}`\n"
+                f"**Arquivos runtime:** `{runtime_count}`\n"
+                f"**Arquivos cache:** `{cache_count}`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Warmup",
+            value=(
+                f"**Warmups no boot:** `{tts_metrics.get('boot_warmups', 0)}`\n"
+                f"**Último warmup:** `{self._format_metric_ms(tts_metrics.get('last_warmup_duration_ms'))}`"
+            ),
+            inline=False,
+        )
+        if guild is not None:
+            try:
+                state = self.guild_states.get(guild.id)
+                guild_queue = state.queue.qsize() if state else 0
+            except Exception:
+                guild_queue = 0
+            embed.add_field(
+                name="Servidor atual",
+                value=(
+                    f"**Servidor:** `{guild.name}`\n"
+                    f"**Fila deste servidor:** `{guild_queue}`"
+                ),
+                inline=False,
+            )
+        if self.bot.user and self.bot.user.display_avatar:
+            embed.set_thumbnail(url=self.bot.user.display_avatar.url)
+        embed.set_footer(text="Visão técnica para staff/admin")
+
+        engine_embed = discord.Embed(
+            title="⚙️ Engines do TTS",
+            description="Contadores e médias por engine desde o boot atual do bot.",
+            color=discord.Color.dark_teal(),
+            timestamp=discord.utils.utcnow(),
+        )
+        if engine_metrics:
+            for engine_name, data in sorted(engine_metrics.items()):
+                engine_embed.add_field(
+                    name=f"{engine_name}",
+                    value=(
+                        f"**Synths:** `{int(data.get('synth_count', 0) or 0)}`\n"
+                        f"**Falhas:** `{int(data.get('synth_failures', 0) or 0)}`\n"
+                        f"**Falhas consecutivas:** `{int(data.get('consecutive_failures', 0) or 0)}`\n"
+                        f"**Hits cache:** `{int(data.get('cache_hits', 0) or 0)}`\n"
+                        f"**Misses cache:** `{int(data.get('cache_misses', 0) or 0)}`\n"
+                        f"**Média synth:** `{self._format_metric_ms(data.get('avg_synth_ms'))}`\n"
+                        f"**Última synth:** `{self._format_metric_ms(data.get('last_synth_ms'))}`\n"
+                        f"**Slow alerts:** `{int(data.get('slow_alerts', 0) or 0)}`\n"
+                        f"**Último erro:** `{str(data.get('last_error') or 'nenhum')[:120]}`"
+                    ),
+                    inline=False,
+                )
+        else:
+            engine_embed.description = "Ainda não há métricas de engine suficientes para mostrar aqui."
+        if self.bot.user and self.bot.user.display_avatar:
+            engine_embed.set_thumbnail(url=self.bot.user.display_avatar.url)
+        engine_embed.set_footer(text="Use isto para diagnosticar lentidão, cache e falhas por engine")
+
+        return [embed, engine_embed]
 
     async def _require_toggle_allowed_guild(self, interaction: discord.Interaction) -> bool:
         guild_ids = getattr(config, "GUILD_IDS", []) or []
@@ -2316,6 +2491,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view.attach_message(msg)
         else:
             view.message = msg
+
+
+    @app_commands.command(name="perf", description="Mostra métricas técnicas do TTS para staff")
+    async def perf(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_staff_or_kick_members(interaction):
+            return
+
+        await self._defer_ephemeral(interaction)
+        embeds = self._build_tts_perf_embeds(interaction.guild)
+        await interaction.followup.send(embeds=embeds, ephemeral=True)
+
 
 
     @app_commands.command(name="usuario", description="Abre o painel, reseta ou altera o apelido falado de um usuário")
