@@ -681,6 +681,72 @@ class GCloudVoiceModal(discord.ui.Modal, title="Alterar voz do Google Cloud"):
         )
 
 
+class IgnoredRoleSelect(discord.ui.RoleSelect):
+    def __init__(self, cog: "TTSVoice"):
+        self.cog = cog
+        super().__init__(
+            placeholder="Selecione um cargo para ignorar no TTS",
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
+        selected_role = self.values[0] if getattr(self, "values", None) else None
+        if not isinstance(selected_role, discord.Role):
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Cargo inválido", "Não consegui identificar o cargo selecionado.", ok=False),
+                ephemeral=True,
+            )
+            return
+        await self.cog._apply_ignored_tts_role_from_panel(
+            interaction,
+            selected_role,
+            source_panel_message=source_panel_message,
+        )
+
+
+class IgnoreRoleConfigView(_BaseTTSView):
+    def __init__(
+        self,
+        cog: "TTSVoice",
+        owner_id: int,
+        guild_id: int,
+        *,
+        timeout: float = 180,
+        source_panel_message: discord.Message | None = None,
+    ):
+        super().__init__(cog, owner_id, guild_id, timeout=timeout)
+        self.panel_kind = "server"
+        self.source_panel_message = source_panel_message
+        self.add_item(IgnoredRoleSelect(cog))
+
+    async def send(self, interaction: discord.Interaction):
+        if self.source_panel_message is None:
+            self.source_panel_message = getattr(interaction, "message", None)
+        embed = self.cog._make_embed(
+            "Cargo ignorado no TTS",
+            "Selecione um cargo para ignorar mensagens de TTS dos usuários que estiverem nele, ou remova o cargo configurado.",
+            ok=True,
+        )
+        if interaction.response.is_done():
+            msg = await interaction.followup.send(embed=embed, view=self, ephemeral=True, wait=True)
+        else:
+            await interaction.response.send_message(embed=embed, view=self, ephemeral=True)
+            try:
+                msg = await interaction.original_response()
+            except Exception:
+                msg = None
+        self.message = msg
+
+    @discord.ui.button(label="Remover cargo", style=discord.ButtonStyle.danger, emoji="🗑️", row=1)
+    async def remove_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._remove_ignored_tts_role_from_panel(
+            interaction,
+            source_panel_message=self.source_panel_message,
+        )
+
+
 class SpokenNameModal(discord.ui.Modal, title="Alterar apelido falado"):
     spoken_name = discord.ui.TextInput(
         label="Apelido falado",
@@ -730,6 +796,7 @@ class TTSMainPanelView(_BaseTTSView):
             self.remove_item(self.edge_prefix_button)
             self.remove_item(self.gcloud_prefix_button)
             self.remove_item(self.announce_author_button)
+            self.remove_item(self.ignored_role_button)
 
     def _target_owner(self, interaction: discord.Interaction) -> int:
         return interaction.user.id if self.owner_id == 0 else self.owner_id
@@ -823,6 +890,17 @@ class TTSMainPanelView(_BaseTTSView):
     @discord.ui.button(label="Prefixo do Google", style=discord.ButtonStyle.secondary, emoji="☁️", row=2)
     async def gcloud_prefix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(GCloudPrefixModal(self.cog, interaction.message, self._target_owner(interaction), self.guild_id))
+
+    @discord.ui.button(label="Cargo ignorado", style=discord.ButtonStyle.secondary, emoji="🚫", row=3)
+    async def ignored_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        print(f"[tts_panel] ignored_role_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
+        view = IgnoreRoleConfigView(
+            self.cog,
+            self._target_owner(interaction),
+            self.guild_id,
+            source_panel_message=interaction.message,
+        )
+        await view.send(interaction)
 
     @discord.ui.button(label="Idioma (Google)", style=discord.ButtonStyle.secondary, emoji="☁️", row=3)
     async def gcloud_language_button(self, interaction: discord.Interaction, button: discord.ui.Button):

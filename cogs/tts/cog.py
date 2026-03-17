@@ -96,6 +96,7 @@ from .ui import (
     GCloudLanguageModal,
     GCloudVoiceModal,
     SpokenNameModal,
+    IgnoreRoleConfigView,
     TTSMainPanelView,
     TTSStatusView,
     TTSTogglePanelView,
@@ -232,6 +233,54 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     def _guild_announce_author_enabled(self, guild_defaults: dict | None) -> bool:
         return bool((guild_defaults or {}).get("announce_author", False))
+
+    def _get_ignored_tts_role_id(self, guild_id: int, *, guild_defaults: dict | None = None) -> int:
+        if guild_defaults is not None:
+            try:
+                return max(0, int((guild_defaults or {}).get("ignored_tts_role_id", 0) or 0))
+            except Exception:
+                return 0
+
+        db = self._get_db()
+        if db is not None and hasattr(db, "get_ignored_tts_role_id"):
+            try:
+                value = db.get_ignored_tts_role_id(guild_id)
+                return max(0, int(value or 0))
+            except Exception:
+                pass
+        if db is not None and hasattr(db, "get_guild_tts_defaults"):
+            try:
+                defaults = db.get_guild_tts_defaults(guild_id)
+                return max(0, int((defaults or {}).get("ignored_tts_role_id", 0) or 0))
+            except Exception:
+                pass
+        return 0
+
+    def _get_ignored_tts_role(self, guild: discord.Guild | None, *, guild_defaults: dict | None = None) -> discord.Role | None:
+        if guild is None:
+            return None
+        role_id = self._get_ignored_tts_role_id(guild.id, guild_defaults=guild_defaults)
+        if role_id <= 0:
+            return None
+        return guild.get_role(role_id)
+
+    def _ignored_tts_role_text(self, guild_id: int, *, guild_defaults: dict | None = None) -> str:
+        role_id = self._get_ignored_tts_role_id(guild_id, guild_defaults=guild_defaults)
+        if role_id <= 0:
+            return "`Nenhum`"
+        guild = self.bot.get_guild(guild_id)
+        role = guild.get_role(role_id) if guild is not None else None
+        if role is not None:
+            return role.mention
+        return f"`{role_id}` (cargo não encontrado)"
+
+    def _member_has_ignored_tts_role(self, member: discord.Member | None, *, guild_defaults: dict | None = None) -> bool:
+        if member is None or member.guild is None:
+            return False
+        ignored_role_id = self._get_ignored_tts_role_id(member.guild.id, guild_defaults=guild_defaults)
+        if ignored_role_id <= 0:
+            return False
+        return any(int(getattr(role, "id", 0) or 0) == ignored_role_id for role in getattr(member, "roles", []))
 
     def _apply_author_prefix_if_needed(self, guild_id: int, author: discord.abc.User | None, text: str, *, enabled: bool) -> str:
         text = str(text or "").strip()
@@ -1127,6 +1176,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         )
         if not forced_engine or not active_prefix:
             return
+
+        if isinstance(message.author, discord.Member) and self._member_has_ignored_tts_role(message.author, guild_defaults=guild_defaults):
+            print(f"[tts_voice] ignorado | autor possui cargo ignorado | guild={message.guild.id} user={message.author.id}")
+            return
+
         if self._was_tts_message_seen(message.id):
             return
         self._mark_tts_message_seen(message.id)
@@ -2014,8 +2068,140 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             google_rate_default=str(getattr(config, 'GOOGLE_CLOUD_TTS_SPEAKING_RATE', 1.0)),
             google_pitch_default=str(getattr(config, 'GOOGLE_CLOUD_TTS_PITCH', 0.0)),
             google_prefix_default=getattr(config, 'GOOGLE_CLOUD_TTS_PREFIX', "'"),
+            ignored_tts_role_text=self._ignored_tts_role_text(guild_id, guild_defaults=guild_defaults) if server else None,
         )
 
+
+    async def _apply_ignored_tts_role_from_panel(
+        self,
+        interaction: discord.Interaction,
+        role: discord.Role,
+        *,
+        source_panel_message: discord.Message | None = None,
+    ):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=self._make_embed("Comando indisponível", "Esse painel só pode ser usado dentro de um servidor.", ok=False),
+                ephemeral=True,
+            )
+            return
+        if not interaction.user.guild_permissions.kick_members:
+            await interaction.response.send_message(
+                embed=self._make_embed("Sem permissão", "Você precisa da permissão `Expulsar Membros` para alterar o cargo ignorado do servidor.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        db = self._get_db()
+        if db is None:
+            await interaction.response.send_message(
+                embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, ignored_tts_role_id=int(role.id)))
+        history_entry = self._server_history_text(interaction, "o cargo ignorado do TTS", role.mention)
+        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+        if source_panel_message is not None:
+            self._append_public_panel_history(getattr(source_panel_message, "id", None), history_entry)
+
+        panel_message = source_panel_message
+        if panel_message is not None:
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
+            embed = await self._build_settings_embed(
+                interaction.guild.id,
+                interaction.user.id,
+                server=True,
+                panel_kind="server",
+                last_changes=last_changes,
+                message_id=getattr(panel_message, "id", None),
+                viewer_user_id=interaction.user.id,
+            )
+            view = self._build_panel_view(0 if getattr(panel_message, "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id, server=True)
+            view.message = panel_message
+            try:
+                await panel_message.edit(embed=embed, view=view)
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                print(f"[tts_panel] falha ao editar painel: {e!r}")
+
+        title = "Cargo ignorado atualizado"
+        description = f"Agora o bot ignora mensagens de TTS dos usuários que estiverem em {role.mention}."
+        await interaction.response.send_message(embed=self._make_embed(title, description, ok=True), ephemeral=True)
+        if panel_message is not None:
+            await self._announce_panel_change(interaction, title=title, description=description, target_message=panel_message)
+
+    async def _remove_ignored_tts_role_from_panel(
+        self,
+        interaction: discord.Interaction,
+        *,
+        source_panel_message: discord.Message | None = None,
+    ):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=self._make_embed("Comando indisponível", "Esse painel só pode ser usado dentro de um servidor.", ok=False),
+                ephemeral=True,
+            )
+            return
+        if not interaction.user.guild_permissions.kick_members:
+            await interaction.response.send_message(
+                embed=self._make_embed("Sem permissão", "Você precisa da permissão `Expulsar Membros` para remover o cargo ignorado do servidor.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        db = self._get_db()
+        if db is None:
+            await interaction.response.send_message(
+                embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        current_role_id = self._get_ignored_tts_role_id(interaction.guild.id)
+        if current_role_id <= 0:
+            await interaction.response.send_message(
+                embed=self._make_embed("Nenhum cargo configurado", "Não existe cargo ignorado configurado no TTS deste servidor.", ok=False),
+                ephemeral=True,
+            )
+            return
+
+        current_role = interaction.guild.get_role(current_role_id)
+        current_role_text = current_role.mention if current_role is not None else f"`{current_role_id}`"
+        await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, ignored_tts_role_id=0))
+        history_entry = self._server_history_text(interaction, "removeu o cargo ignorado do TTS", current_role_text)
+        await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
+        if source_panel_message is not None:
+            self._append_public_panel_history(getattr(source_panel_message, "id", None), history_entry)
+
+        panel_message = source_panel_message
+        if panel_message is not None:
+            last_changes = list((await self._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get("server_last_changes", []) or [])
+            embed = await self._build_settings_embed(
+                interaction.guild.id,
+                interaction.user.id,
+                server=True,
+                panel_kind="server",
+                last_changes=last_changes,
+                message_id=getattr(panel_message, "id", None),
+                viewer_user_id=interaction.user.id,
+            )
+            view = self._build_panel_view(0 if getattr(panel_message, "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id, server=True)
+            view.message = panel_message
+            try:
+                await panel_message.edit(embed=embed, view=view)
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                print(f"[tts_panel] falha ao editar painel: {e!r}")
+
+        title = "Cargo ignorado removido"
+        description = "O bot voltou a considerar mensagens de TTS de todos os cargos deste servidor."
+        await interaction.response.send_message(embed=self._make_embed(title, description, ok=True), ephemeral=True)
+        if panel_message is not None:
+            await self._announce_panel_change(interaction, title=title, description=description, target_message=panel_message)
 
     async def _apply_server_prefix_from_modal(
         self,
