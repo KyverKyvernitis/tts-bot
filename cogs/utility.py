@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
+from .tts_aliases import format_prefixed_aliases, matches_prefixed_command
 
 
 HELP_EXPIRE_AFTER_SECONDS = 180.0
@@ -189,14 +190,14 @@ class Utility(commands.Cog):
         tts_user_slash = self._slash_mention(root_ids, root="tts", path="tts usuario")
         tts_server_menu_slash = self._slash_mention(root_ids, root="tts", path="tts server menu")
 
-        prefix_help = f"`{bot_prefix}help`"
-        prefix_panel = f"`{bot_prefix}panel` ou `{bot_prefix}p`"
-        prefix_server_panel = f"`{bot_prefix}panel_server` ou `{bot_prefix}sp`"
-        prefix_join = f"`{bot_prefix}join`"
-        prefix_leave = f"`{bot_prefix}leave`"
-        prefix_clear = f"`{bot_prefix}clear`"
-        prefix_reset = f"`{bot_prefix}reset @usuário`"
-        prefix_set_lang = f"`{bot_prefix}set lang pt`"
+        prefix_help = format_prefixed_aliases(bot_prefix, "help")
+        prefix_panel = format_prefixed_aliases(bot_prefix, "panel_user")
+        prefix_server_panel = format_prefixed_aliases(bot_prefix, "panel_server")
+        prefix_join = format_prefixed_aliases(bot_prefix, "join")
+        prefix_leave = format_prefixed_aliases(bot_prefix, "leave")
+        prefix_clear = format_prefixed_aliases(bot_prefix, "clear")
+        prefix_reset = f"{format_prefixed_aliases(bot_prefix, 'reset')} `@usuário`"
+        prefix_set_lang = f"{format_prefixed_aliases(bot_prefix, 'set_lang')} `pt`"
 
         pages: list[discord.Embed] = []
 
@@ -440,8 +441,7 @@ class Utility(commands.Cog):
 
         prefixes = await self._get_prefix_data(message.guild)
         bot_prefix = prefixes["bot_prefix"]
-        lowered = message.content.strip().lower()
-        if lowered != f"{bot_prefix}help":
+        if not matches_prefixed_command(message.content, bot_prefix, kind="help"):
             return
 
         await self._send_help_response(

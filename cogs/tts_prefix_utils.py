@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .tts_aliases import extract_prefixed_argument, get_prefixed_aliases, matches_prefixed_command
+
 
 @dataclass(frozen=True)
 class PrefixControlCommand:
@@ -16,30 +18,6 @@ class PrefixRoutingConfig:
     gtts_prefix: str
     edge_prefix: str
     gcloud_prefix: str
-
-
-def build_panel_aliases(bot_prefix: str) -> dict[str, set[str]]:
-    return {
-        "user": {
-            f"{bot_prefix}panel",
-            f"{bot_prefix}painel",
-            f"{bot_prefix}p",
-        },
-        "server": {
-            f"{bot_prefix}panel_server", f"{bot_prefix}panel-server", f"{bot_prefix}panelserver",
-            f"{bot_prefix}server_panel", f"{bot_prefix}server-panel", f"{bot_prefix}serverpanel",
-            f"{bot_prefix}painel_server", f"{bot_prefix}painel-server", f"{bot_prefix}painelserver",
-            f"{bot_prefix}servidor_panel", f"{bot_prefix}servidor-panel", f"{bot_prefix}servidorpanel",
-            f"{bot_prefix}sp",
-        },
-        "toggle": {
-            f"{bot_prefix}panel_toggle", f"{bot_prefix}panel-toggle", f"{bot_prefix}paneltoggle",
-            f"{bot_prefix}panel_toggles", f"{bot_prefix}panel-toggles", f"{bot_prefix}paneltoggles",
-            f"{bot_prefix}toggle_panel", f"{bot_prefix}toggle-panel", f"{bot_prefix}togglepanel",
-            f"{bot_prefix}toggles_panel", f"{bot_prefix}toggles-panel", f"{bot_prefix}togglespanel",
-            f"{bot_prefix}tp",
-        },
-    }
 
 
 def build_prefix_routing_config(guild_defaults: dict[str, Any] | None, *, bot_prefix_default: str, gcloud_prefix_default: str) -> PrefixRoutingConfig:
@@ -57,28 +35,23 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
     if not raw:
         return None
 
-    lowered = raw.lower()
-    aliases = build_panel_aliases(bot_prefix)
-    reset_command = f"{bot_prefix}reset"
-    set_lang_command = f"{bot_prefix}set lang"
-
-    if lowered == f"{bot_prefix}help":
+    if matches_prefixed_command(raw, bot_prefix, kind="help"):
         return PrefixControlCommand("help")
-    if lowered == f"{bot_prefix}clear":
+    if matches_prefixed_command(raw, bot_prefix, kind="clear"):
         return PrefixControlCommand("clear")
-    if lowered == f"{bot_prefix}leave":
+    if matches_prefixed_command(raw, bot_prefix, kind="leave"):
         return PrefixControlCommand("leave")
-    if lowered == f"{bot_prefix}join":
+    if matches_prefixed_command(raw, bot_prefix, kind="join"):
         return PrefixControlCommand("join")
-    if lowered == reset_command or lowered.startswith(reset_command + " "):
-        return PrefixControlCommand("reset", raw[len(reset_command):].strip())
-    if lowered == set_lang_command or lowered.startswith(set_lang_command + " "):
-        return PrefixControlCommand("set_lang", raw[len(set_lang_command):].strip())
-    if lowered in aliases["user"]:
+    if matches_prefixed_command(raw, bot_prefix, kind="reset"):
+        return PrefixControlCommand("reset", extract_prefixed_argument(raw, bot_prefix, kind="reset"))
+    if matches_prefixed_command(raw, bot_prefix, kind="set_lang"):
+        return PrefixControlCommand("set_lang", extract_prefixed_argument(raw, bot_prefix, kind="set_lang"))
+    if matches_prefixed_command(raw, bot_prefix, kind="panel_user"):
         return PrefixControlCommand("panel_user")
-    if lowered in aliases["server"]:
+    if matches_prefixed_command(raw, bot_prefix, kind="panel_server"):
         return PrefixControlCommand("panel_server")
-    if lowered in aliases["toggle"]:
+    if matches_prefixed_command(raw, bot_prefix, kind="panel_toggle"):
         return PrefixControlCommand("panel_toggle")
     return None
 
