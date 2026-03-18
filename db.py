@@ -142,6 +142,21 @@ class SettingsDB:
         await self._save_guild_doc(guild_id, doc)
         return True
 
+    def get_anti_mzk_staff_role_id(self, guild_id: int) -> int:
+        g = self.guild_cache.get(guild_id, {})
+        try:
+            return max(0, int(g.get("anti_mzk_staff_role_id", 0) or 0))
+        except Exception:
+            return 0
+
+    async def set_anti_mzk_staff_role_id(self, guild_id: int, role_id: int | None):
+        doc = self._get_guild_doc(guild_id)
+        try:
+            doc["anti_mzk_staff_role_id"] = max(0, int(role_id or 0))
+        except Exception:
+            doc["anti_mzk_staff_role_id"] = 0
+        await self._save_guild_doc(guild_id, doc)
+
 
     def _get_modo_censura_focus_map(self, guild_id: int) -> Dict[int, int]:
         g = self.guild_cache.get(guild_id, {})
