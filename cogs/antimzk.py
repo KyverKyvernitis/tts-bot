@@ -627,11 +627,31 @@ class AntiMzkCog(commands.Cog):
             if author_is_target:
                 return
 
+            ignored_tts_role = None
+            ignored_tts_role_id = 0
+            try:
+                ignored_tts_role_id = max(0, int(self.db.get_ignored_tts_role_id(message.guild.id) or 0))
+            except Exception:
+                ignored_tts_role_id = 0
+            if ignored_tts_role_id:
+                ignored_tts_role = message.guild.get_role(ignored_tts_role_id)
+
             for target in targets:
                 if target.voice and target.voice.channel:
                     try:
                         new_muted = not bool(target.voice.mute)
                         await target.edit(mute=new_muted, reason="modo censura toggle mute")
+
+                        if ignored_tts_role is not None:
+                            try:
+                                if new_muted:
+                                    if ignored_tts_role not in getattr(target, "roles", []):
+                                        await target.add_roles(ignored_tts_role, reason="modo censura apply ignored tts role")
+                                else:
+                                    if ignored_tts_role in getattr(target, "roles", []):
+                                        await target.remove_roles(ignored_tts_role, reason="modo censura remove ignored tts role")
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
