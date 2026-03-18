@@ -161,26 +161,27 @@ class SettingsDB:
     def _get_modo_censura_focus_map(self, guild_id: int) -> Dict[int, int]:
         g = self.guild_cache.get(guild_id, {})
         raw = g.get("modo_censura_focus_users", {}) or {}
-        now = int(time.time())
         cleaned: Dict[int, int] = {}
         changed = False
 
         for key, value in raw.items():
             try:
                 uid = int(key)
-                exp = int(value)
             except (TypeError, ValueError):
                 changed = True
                 continue
 
-            if exp > now:
-                cleaned[uid] = exp
-            else:
+            try:
+                stored_value = int(value)
+            except (TypeError, ValueError):
+                stored_value = 1
                 changed = True
+
+            cleaned[uid] = max(1, stored_value)
 
         if changed:
             doc = self._get_guild_doc(guild_id)
-            doc["modo_censura_focus_users"] = {str(uid): exp for uid, exp in cleaned.items()}
+            doc["modo_censura_focus_users"] = {str(uid): stored for uid, stored in cleaned.items()}
             self.guild_cache[guild_id] = doc
 
         return cleaned
@@ -188,11 +189,9 @@ class SettingsDB:
     def get_modo_censura_focus_map(self, guild_id: int) -> Dict[int, int]:
         return dict(self._get_modo_censura_focus_map(guild_id))
 
-    async def toggle_modo_censura_focus_users(self, guild_id: int, user_ids: list[int], *, duration_seconds: int) -> tuple[list[int], list[int], Dict[int, int]]:
+    async def toggle_modo_censura_focus_users(self, guild_id: int, user_ids: list[int]) -> tuple[list[int], list[int], Dict[int, int]]:
         current = self._get_modo_censura_focus_map(guild_id)
         doc = self._get_guild_doc(guild_id)
-        now = int(time.time())
-        expires_at = now + max(1, int(duration_seconds))
         added: list[int] = []
         removed: list[int] = []
 
@@ -206,10 +205,10 @@ class SettingsDB:
                 current.pop(uid, None)
                 removed.append(uid)
             else:
-                current[uid] = expires_at
+                current[uid] = 1
                 added.append(uid)
 
-        doc["modo_censura_focus_users"] = {str(uid): exp for uid, exp in current.items()}
+        doc["modo_censura_focus_users"] = {str(uid): stored for uid, stored in current.items()}
         await self._save_guild_doc(guild_id, doc)
         return added, removed, dict(current)
 
