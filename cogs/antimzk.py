@@ -1,3 +1,5 @@
+import asyncio
+import re
 import time
 
 import discord
@@ -10,6 +12,7 @@ from db import SettingsDB
 
 _GUILD_OBJECTS = [discord.Object(id=guild_id) for guild_id in GUILD_IDS]
 _FOCUS_DURATION_SECONDS = 6 * 60 * 60
+_FOCUS_WORD_RE = re.compile(r"(?<!\w)focus(?!\w)", re.IGNORECASE)
 
 
 def _guild_scoped():
@@ -47,6 +50,23 @@ class AntiMzkCog(commands.Cog):
         guild_cache = getattr(self.db, "guild_cache", {}) or {}
         guild_doc = guild_cache.get(guild_id, {}) or {}
         return bool(guild_doc.get("anti_mzk_only_kick_members", False))
+
+    def _get_staff_role(self, guild: discord.Guild) -> discord.Role | None:
+        role_id = 0
+        try:
+            role_id = max(0, int(self.db.get_anti_mzk_staff_role_id(guild.id) or 0))
+        except Exception:
+            role_id = 0
+        return guild.get_role(role_id) if role_id else None
+
+    def _is_staff_member(self, member: discord.Member) -> bool:
+        perms = getattr(member, "guild_permissions", None)
+        if perms is not None and perms.kick_members:
+            return True
+
+        guild = member.guild
+        staff_role = self._get_staff_role(guild)
+        return staff_role is not None and staff_role in getattr(member, "roles", [])
 
     async def _set_anti_mzk_only_kick_members(self, guild_id: int, value: bool):
         if hasattr(self.db, "_get_guild_doc") and hasattr(self.db, "_save_guild_doc"):
@@ -117,53 +137,78 @@ class AntiMzkCog(commands.Cog):
         *,
         added_ids: list[int],
         removed_ids: list[int],
+        errored_ids: list[int] | None = None,
         reset: bool = False,
     ):
         guild = message.guild
         assert guild is not None
+        errored_ids = errored_ids or []
 
-        def fmt_ids(ids: list[int]) -> str:
-            if not ids:
-                return "Nenhum"
-            parts = []
-            for uid in ids:
-                member = guild.get_member(uid)
-                parts.append(member.mention if member else f"<@{uid}>")
-            return ", ".join(parts)
+        def format_count(label: str, count: int, *, ok: bool = True, extra: str | None = None) -> str:
+            icon = "✅" if ok else "⚠️"
+            user_label = "usuário" if count == 1 else "usuários"
+            base = f"{icon} **{count} {user_label}** {label}"
+            if extra:
+                base += f"\n{extra}"
+            return base
 
+        lines: list[str] = []
         if reset:
             title = "🧠 Modo foco resetado"
-            description = (
-                "A lista de membros focados foi limpa com sucesso.\n\n"
-                f"**Lista atual**\n{self._format_focus_list(guild)}"
-            )
+            description = "A lista de membros focados foi limpa com sucesso."
             color = discord.Color(OFF_COLOR)
+            lines.append(description)
         else:
             title = "🧠 Modo foco atualizado"
-            description = (
-                f"**Adicionados**\n{fmt_ids(added_ids)}\n\n"
-                f"**Removidos**\n{fmt_ids(removed_ids)}\n\n"
-                f"**Duração**\n6 horas\n\n"
-                f"**Lista atual**\n{self._format_focus_list(guild)}"
-            )
             color = discord.Color(ON_COLOR)
+            if added_ids:
+                lines.append(format_count("adicionados à lista com sucesso.", len(added_ids)))
+            if removed_ids:
+                lines.append(format_count("removidos da lista com sucesso.", len(removed_ids)))
+            if errored_ids:
+                mention_list = ", ".join(guild.get_member(uid).mention if guild.get_member(uid) else f"<@{uid}>" for uid in errored_ids)
+                lines.append(format_count(
+                    "não puderam ser adicionados.",
+                    len(errored_ids),
+                    ok=False,
+                    extra=f"Não posso entrar na própria lista de foco: {mention_list}",
+                ))
+            if not lines:
+                lines.append("Nenhuma alteração foi feita na lista de foco.")
 
-        embed = discord.Embed(title=title, description=description, color=color)
+        current_focus = self.db.get_modo_censura_focus_map(guild.id)
+        focus_list = self._format_focus_list(guild)
+        staff_role = self._get_staff_role(guild)
+        staff_line = staff_role.mention if staff_role else "Não definido"
+
+        embed = discord.Embed(title=title, description="\n".join(lines), color=color)
+        embed.add_field(name="📋 Lista atual", value=focus_list, inline=False)
+        embed.add_field(name="⏳ Duração do foco", value="6 horas por membro alterado", inline=True)
+        embed.add_field(name="🛡️ Staff do modo censura", value=staff_line, inline=True)
+        if current_focus:
+            latest_exp = max(current_focus.values())
+            embed.set_footer(text=f"Lista ativa • expira até {time.strftime('%d/%m %H:%M', time.localtime(latest_exp))}")
+        else:
+            embed.set_footer(text="Nenhum membro focado no momento")
         await message.channel.send(embed=embed)
 
-    async def _handle_focus_command(self, message: discord.Message) -> bool:
+    async def _handle_focus_trigger(self, message: discord.Message) -> bool:
         guild = message.guild
         if guild is None:
+            return False
+
+        content = (message.content or "")
+        if not _FOCUS_WORD_RE.search(content):
+            return False
+
+        if GUILD_IDS and guild.id not in GUILD_IDS:
             return True
 
-        defaults = self.db.get_guild_tts_defaults(guild.id)
-        bot_prefix = str(defaults.get("bot_prefix", "_") or "_")
-        content = (message.content or "").strip()
-        lower = content.lower()
-        focus_cmd = f"{bot_prefix}focus"
+        if not isinstance(message.author, discord.Member):
+            return True
 
-        if lower != focus_cmd and not lower.startswith(focus_cmd + " "):
-            return False
+        if not self._is_staff_member(message.author):
+            return True
 
         mentions = []
         seen = set()
@@ -174,16 +219,49 @@ class AntiMzkCog(commands.Cog):
 
         if not mentions:
             await self.db.clear_modo_censura_focus_users(guild.id)
-            await self._send_focus_feedback(message, added_ids=[], removed_ids=[], reset=True)
+            await self._send_focus_feedback(message, added_ids=[], removed_ids=[], errored_ids=[], reset=True)
             return True
 
-        added, removed, _ = await self.db.toggle_modo_censura_focus_users(
-            guild.id,
-            [member.id for member in mentions],
-            duration_seconds=_FOCUS_DURATION_SECONDS,
+        valid_user_ids: list[int] = []
+        errored_ids: list[int] = []
+        for member in mentions:
+            if member.id == self.bot.user.id:
+                errored_ids.append(member.id)
+                continue
+            valid_user_ids.append(member.id)
+
+        added: list[int] = []
+        removed: list[int] = []
+        if valid_user_ids:
+            added, removed, _ = await self.db.toggle_modo_censura_focus_users(
+                guild.id,
+                valid_user_ids,
+                duration_seconds=_FOCUS_DURATION_SECONDS,
+            )
+
+        await self._send_focus_feedback(
+            message,
+            added_ids=added,
+            removed_ids=removed,
+            errored_ids=errored_ids,
+            reset=False,
         )
-        await self._send_focus_feedback(message, added_ids=added, removed_ids=removed, reset=False)
         return True
+
+    async def _react_success_temporarily(self, message: discord.Message):
+        try:
+            reaction = await message.add_reaction("✅")
+        except Exception:
+            return
+
+        async def _cleanup():
+            await asyncio.sleep(3)
+            try:
+                await message.remove_reaction("✅", self.bot.user)
+            except Exception:
+                pass
+
+        asyncio.create_task(_cleanup())
 
     @_guild_scoped()
     @app_commands.command(name="modo_censura", description="Gerencia as roles e modos do modo censura")
@@ -197,8 +275,9 @@ class AntiMzkCog(commands.Cog):
         app_commands.Choice(name="Listar roles", value="list"),
         app_commands.Choice(name="Ativar ou desativar", value="toggle"),
         app_commands.Choice(name="Ativar ou desativar só para staff", value="toggle_kick_only"),
+        app_commands.Choice(name="Definir cargo staff", value="set_staff_role"),
+        app_commands.Choice(name="Remover cargo staff", value="clear_staff_role"),
     ])
-    @app_commands.checks.has_permissions(kick_members=True)
     async def antimzk(
         self,
         interaction: discord.Interaction,
@@ -209,6 +288,12 @@ class AntiMzkCog(commands.Cog):
             return
 
         guild = interaction.guild
+        if guild is None:
+            return
+        if not isinstance(interaction.user, discord.Member) or not self._is_staff_member(interaction.user):
+            embed = self._make_embed("Sem permissão", "Você precisa ter o cargo staff do modo censura ou a permissão **Expulsar Membros** para usar esse comando.", ok=False)
+            await interaction.response.send_message(embed=embed)
+            return
         chosen = action
 
         if chosen == "toggle":
@@ -221,7 +306,8 @@ class AntiMzkCog(commands.Cog):
                 "Modo censura atualizado",
                 f"Status: **{'Ativado' if new_value else 'Desativado'}**\n"
                 f"Roles cadastradas: **{role_total}**\n"
-                f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
+                f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**\n"
+                f"Cargo staff: **{(self._get_staff_role(guild).mention if self._get_staff_role(guild) else 'Não definido')}**",
                 ok=new_value,
             )
             await interaction.response.send_message(embed=embed)
@@ -234,7 +320,8 @@ class AntiMzkCog(commands.Cog):
 
             embed = self._make_embed(
                 "Modo só para staff atualizado",
-                f"Agora o modo censura está **{'limitado a quem tem Expulsar Membros' if new_value else 'liberado para qualquer membro da call disparar'}**",
+                f"Agora o modo censura está **{'limitado à staff do modo censura' if new_value else 'liberado para qualquer membro da call disparar'}**\n"
+                f"Cargo staff atual: **{(self._get_staff_role(guild).mention if self._get_staff_role(guild) else 'Não definido')}**",
                 ok=True,
             )
             await interaction.response.send_message(embed=embed)
@@ -247,7 +334,8 @@ class AntiMzkCog(commands.Cog):
                     "Sem roles cadastradas",
                     f"Nenhuma role está cadastrada no modo censura no momento\n\n"
                     f"Status: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**\n"
-                    f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
+                    f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**\n"
+                    f"Cargo staff: **{(self._get_staff_role(guild).mention if self._get_staff_role(guild) else 'Não definido')}**",
                     ok=False,
                 )
                 await interaction.response.send_message(embed=embed)
@@ -262,9 +350,39 @@ class AntiMzkCog(commands.Cog):
                 "Roles do modo censura",
                 "\n".join(lines)
                 + f"\n\nStatus: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**"
-                + f"\nModo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
+                + f"\nModo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**"
+                + f"\nCargo staff: **{(self._get_staff_role(guild).mention if self._get_staff_role(guild) else 'Não definido')}**",
                 ok=True,
             )
+            await interaction.response.send_message(embed=embed)
+            return
+
+        if chosen == "set_staff_role":
+            if not role_id:
+                embed = self._make_embed("ID obrigatório", "Você precisa informar o **ID da role** que será usada como cargo staff.", ok=False)
+                await interaction.response.send_message(embed=embed)
+                return
+            try:
+                parsed_role_id = int(role_id.strip())
+            except (TypeError, ValueError):
+                embed = self._make_embed("ID inválido", "Envie um **ID de role válido**.", ok=False)
+                await interaction.response.send_message(embed=embed)
+                return
+            role = guild.get_role(parsed_role_id)
+            if role is None:
+                embed = self._make_embed("Role não encontrada", f"Não encontrei nenhuma role com o ID `{parsed_role_id}` neste servidor.", ok=False)
+                await interaction.response.send_message(embed=embed)
+                return
+            await self.db.set_anti_mzk_staff_role_id(guild.id, parsed_role_id)
+            embed = self._make_embed("Cargo staff atualizado", f"✅ {role.mention} agora é o cargo staff do modo censura.\n\nMembros com esse cargo podem usar os recursos de staff mesmo sem **Expulsar Membros**.")
+            await interaction.response.send_message(embed=embed)
+            return
+
+        if chosen == "clear_staff_role":
+            current_staff = self._get_staff_role(guild)
+            await self.db.set_anti_mzk_staff_role_id(guild.id, 0)
+            current_text = current_staff.mention if current_staff else "o cargo staff atual"
+            embed = self._make_embed("Cargo staff removido", f"✅ Removi {current_text} da configuração de staff do modo censura.")
             await interaction.response.send_message(embed=embed)
             return
 
@@ -348,7 +466,7 @@ class AntiMzkCog(commands.Cog):
         if isinstance(error, app_commands.MissingPermissions):
             embed = self._make_embed(
                 "Sem permissão",
-                "Você precisa da permissão **Expulsar Membros** para usar esse comando",
+                "Você precisa ter o cargo staff do modo censura ou a permissão **Expulsar Membros** para usar esse comando.",
                 ok=False,
             )
         else:
@@ -374,16 +492,14 @@ class AntiMzkCog(commands.Cog):
         if GUILD_IDS and message.guild.id not in GUILD_IDS:
             return
 
-        if await self._handle_focus_command(message):
+        if await self._handle_focus_trigger(message):
             return
 
         if not self.db.anti_mzk_enabled(message.guild.id):
             return
 
-        if self._anti_mzk_only_kick_members(message.guild.id):
-            perms = getattr(message.author, "guild_permissions", None)
-            if perms is None or not perms.kick_members:
-                return
+        if self._anti_mzk_only_kick_members(message.guild.id) and not self._is_staff_member(message.author):
+            return
 
         if not TRIGGER_WORD and not MUTE_TOGGLE_WORD:
             return
@@ -404,7 +520,10 @@ class AntiMzkCog(commands.Cog):
         target_ids = {member.id for member in targets}
         author_is_target = message.author.id in target_ids
 
+        did_trigger_action = False
+
         if TRIGGER_WORD and TRIGGER_WORD in content:
+            did_trigger_action = True
             for target in targets:
                 if target.voice and target.voice.channel:
                     try:
@@ -413,6 +532,7 @@ class AntiMzkCog(commands.Cog):
                         pass
 
         if MUTE_TOGGLE_WORD and MUTE_TOGGLE_WORD in content:
+            did_trigger_action = True
             if author_is_target:
                 return
 
@@ -443,6 +563,9 @@ class AntiMzkCog(commands.Cog):
                                 pass
                     except Exception:
                         pass
+
+        if did_trigger_action:
+            await self._react_success_temporarily(message)
 
 
 async def setup(bot: commands.Bot):
