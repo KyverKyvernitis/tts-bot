@@ -248,7 +248,10 @@ class AntiMzkCog(commands.Cog):
         return True
 
     async def _send_role_toggle_feedback(self, message: discord.Message, activated: bool):
-        text = "Ativado" if activated else "Desativado"
+        if activated:
+            text = "✅ **TTS desativado para os alvos.** O cargo ignorado do TTS foi aplicado aos membros afetados."
+        else:
+            text = "✅ **TTS reativado para os alvos.** O cargo ignorado do TTS foi removido dos membros afetados."
         try:
             await message.channel.send(text, delete_after=_ROLE_TOGGLE_DELETE_AFTER)
         except Exception:
@@ -291,7 +294,10 @@ class AntiMzkCog(commands.Cog):
             ignored_tts_role = guild.get_role(ignored_tts_role_id)
 
         if ignored_tts_role is None:
-            await message.channel.send("Cargo ignorado do TTS não configurado.", delete_after=_ROLE_TOGGLE_DELETE_AFTER)
+            await message.channel.send(
+                "⚠️ **Cargo ignorado do TTS não configurado.** Configure esse cargo antes de usar o trigger `pica`.",
+                delete_after=_ROLE_TOGGLE_DELETE_AFTER,
+            )
             return True
 
         should_activate = any(ignored_tts_role not in getattr(target, "roles", []) for target in targets)
@@ -312,6 +318,7 @@ class AntiMzkCog(commands.Cog):
 
         if changed:
             await self._send_role_toggle_feedback(message, should_activate)
+            await self._react_success_temporarily(message)
         return True
 
     async def _react_success_temporarily(self, message: discord.Message):
