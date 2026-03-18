@@ -13,6 +13,7 @@ from db import SettingsDB
 _GUILD_OBJECTS = [discord.Object(id=guild_id) for guild_id in GUILD_IDS]
 _FOCUS_DURATION_SECONDS = 6 * 60 * 60
 _FOCUS_WORD_RE = re.compile(r"(?<!\w)focus(?!\w)", re.IGNORECASE)
+_RESPONSE_DELETE_AFTER = 20
 
 
 def _guild_scoped():
@@ -178,19 +179,15 @@ class AntiMzkCog(commands.Cog):
 
         current_focus = self.db.get_modo_censura_focus_map(guild.id)
         focus_list = self._format_focus_list(guild)
-        staff_role = self._get_staff_role(guild)
-        staff_line = staff_role.mention if staff_role else "Não definido"
-
         embed = discord.Embed(title=title, description="\n".join(lines), color=color)
         embed.add_field(name="📋 Lista atual", value=focus_list, inline=False)
-        embed.add_field(name="⏳ Duração do foco", value="6 horas por membro alterado", inline=True)
-        embed.add_field(name="🛡️ Staff do modo censura", value=staff_line, inline=True)
+        embed.add_field(name="⏳ Duração do foco", value="6 horas por membro alterado", inline=False)
         if current_focus:
             latest_exp = max(current_focus.values())
             embed.set_footer(text=f"Lista ativa • expira até {time.strftime('%d/%m %H:%M', time.localtime(latest_exp))}")
         else:
             embed.set_footer(text="Nenhum membro focado no momento")
-        await message.channel.send(embed=embed)
+        await message.channel.send(embed=embed, delete_after=_RESPONSE_DELETE_AFTER)
 
     async def _handle_focus_trigger(self, message: discord.Message) -> bool:
         guild = message.guild
@@ -306,8 +303,7 @@ class AntiMzkCog(commands.Cog):
                 "Modo censura atualizado",
                 f"Status: **{'Ativado' if new_value else 'Desativado'}**\n"
                 f"Roles cadastradas: **{role_total}**\n"
-                f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**\n"
-                f"Cargo staff: **{(self._get_staff_role(guild).mention if self._get_staff_role(guild) else 'Não definido')}**",
+                f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
                 ok=new_value,
             )
             await interaction.response.send_message(embed=embed)
@@ -320,8 +316,7 @@ class AntiMzkCog(commands.Cog):
 
             embed = self._make_embed(
                 "Modo só para staff atualizado",
-                f"Agora o modo censura está **{'limitado à staff do modo censura' if new_value else 'liberado para qualquer membro da call disparar'}**\n"
-                f"Cargo staff atual: **{(self._get_staff_role(guild).mention if self._get_staff_role(guild) else 'Não definido')}**",
+                f"Agora o modo censura está **{'limitado à staff do modo censura' if new_value else 'liberado para qualquer membro da call disparar'}**.",
                 ok=True,
             )
             await interaction.response.send_message(embed=embed)
@@ -334,8 +329,7 @@ class AntiMzkCog(commands.Cog):
                     "Sem roles cadastradas",
                     f"Nenhuma role está cadastrada no modo censura no momento\n\n"
                     f"Status: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**\n"
-                    f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**\n"
-                    f"Cargo staff: **{(self._get_staff_role(guild).mention if self._get_staff_role(guild) else 'Não definido')}**",
+                    f"Modo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
                     ok=False,
                 )
                 await interaction.response.send_message(embed=embed)
@@ -350,8 +344,7 @@ class AntiMzkCog(commands.Cog):
                 "Roles do modo censura",
                 "\n".join(lines)
                 + f"\n\nStatus: **{'Ativado' if self.db.anti_mzk_enabled(guild.id) else 'Desativado'}**"
-                + f"\nModo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**"
-                + f"\nCargo staff: **{(self._get_staff_role(guild).mention if self._get_staff_role(guild) else 'Não definido')}**",
+                + f"\nModo só para staff: **{'Ativado' if self._anti_mzk_only_kick_members(guild.id) else 'Desativado'}**",
                 ok=True,
             )
             await interaction.response.send_message(embed=embed)
@@ -504,15 +497,13 @@ class AntiMzkCog(commands.Cog):
         if not TRIGGER_WORD and not MUTE_TOGGLE_WORD:
             return
 
-        if not isinstance(message.channel, discord.VoiceChannel):
-            return
-
         author_voice = getattr(message.author, "voice", None)
-        if not author_voice or not author_voice.channel or author_voice.channel.id != message.channel.id:
+        voice_channel = getattr(author_voice, "channel", None)
+        if not isinstance(voice_channel, discord.VoiceChannel):
             return
 
         content = (message.content or "").lower()
-        targets = self._resolve_targets(message.guild, message.channel)
+        targets = self._resolve_targets(message.guild, voice_channel)
 
         if not targets:
             return
