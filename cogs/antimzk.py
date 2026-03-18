@@ -199,12 +199,34 @@ class AntiMzkCog(commands.Cog):
         if not self._is_staff_member(message.author):
             return True
 
-        mentions = []
-        seen = set()
-        for member in message.mentions:
-            if member.id not in seen:
+        mentions: list[discord.Member] = []
+        seen: set[int] = set()
+
+        raw_ids = list(getattr(message, "raw_mentions", []) or [])
+        if raw_ids:
+            for user_id in raw_ids:
+                try:
+                    uid = int(user_id)
+                except (TypeError, ValueError):
+                    continue
+                if uid in seen:
+                    continue
+                member = guild.get_member(uid)
+                if member is None:
+                    try:
+                        fetched = await guild.fetch_member(uid)
+                    except Exception:
+                        fetched = None
+                    member = fetched if isinstance(fetched, discord.Member) else None
+                if member is None:
+                    continue
                 mentions.append(member)
-                seen.add(member.id)
+                seen.add(uid)
+        else:
+            for member in message.mentions:
+                if member.id not in seen:
+                    mentions.append(member)
+                    seen.add(member.id)
 
         if not mentions:
             await self.db.clear_modo_censura_focus_users(guild.id)
