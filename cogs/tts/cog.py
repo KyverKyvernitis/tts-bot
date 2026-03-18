@@ -1665,6 +1665,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         *,
         title: str,
         description: str,
+        target_message: discord.Message | None = None,
     ):
         channel = interaction.channel
         if channel is None:
