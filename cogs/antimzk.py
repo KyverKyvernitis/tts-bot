@@ -1,6 +1,5 @@
 import asyncio
 import re
-import time
 
 import discord
 from discord import app_commands
@@ -11,7 +10,6 @@ from db import SettingsDB
 
 
 _GUILD_OBJECTS = [discord.Object(id=guild_id) for guild_id in GUILD_IDS]
-_FOCUS_DURATION_SECONDS = 6 * 60 * 60
 _FOCUS_WORD_RE = re.compile(r"(?<!\w)focus(?!\w)", re.IGNORECASE)
 _RESPONSE_DELETE_AFTER = 20
 
@@ -126,10 +124,10 @@ class AntiMzkCog(commands.Cog):
             return "Nenhum membro está focado no momento."
 
         lines = []
-        for uid, expires_at in sorted(focus_map.items(), key=lambda item: item[1], reverse=True):
+        for uid in sorted(focus_map):
             member = guild.get_member(uid)
             label = member.mention if member else f"<@{uid}>"
-            lines.append(f"• {label} — até <t:{int(expires_at)}:R>")
+            lines.append(f"• {label}")
         return "\n".join(lines)
 
     async def _send_focus_feedback(
@@ -177,16 +175,10 @@ class AntiMzkCog(commands.Cog):
             if not lines:
                 lines.append("Nenhuma alteração foi feita na lista de foco.")
 
-        current_focus = self.db.get_modo_censura_focus_map(guild.id)
         focus_list = self._format_focus_list(guild)
         embed = discord.Embed(title=title, description="\n".join(lines), color=color)
         embed.add_field(name="📋 Lista atual", value=focus_list, inline=False)
-        embed.add_field(name="⏳ Duração do foco", value="6 horas por membro alterado", inline=False)
-        if current_focus:
-            latest_exp = max(current_focus.values())
-            embed.set_footer(text=f"Lista ativa • expira até {time.strftime('%d/%m %H:%M', time.localtime(latest_exp))}")
-        else:
-            embed.set_footer(text="Nenhum membro focado no momento")
+        embed.set_footer(text="Nenhum membro focado no momento" if focus_list == "Nenhum membro está focado no momento." else "Lista de foco atualizada")
         await message.channel.send(embed=embed, delete_after=_RESPONSE_DELETE_AFTER)
 
     async def _handle_focus_trigger(self, message: discord.Message) -> bool:
@@ -233,7 +225,6 @@ class AntiMzkCog(commands.Cog):
             added, removed, _ = await self.db.toggle_modo_censura_focus_users(
                 guild.id,
                 valid_user_ids,
-                duration_seconds=_FOCUS_DURATION_SECONDS,
             )
 
         await self._send_focus_feedback(
