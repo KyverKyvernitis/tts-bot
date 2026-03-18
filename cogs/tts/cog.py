@@ -282,6 +282,28 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return False
         return any(int(getattr(role, "id", 0) or 0) == ignored_role_id for role in getattr(member, "roles", []))
 
+    def _spoken_name_suffix(self, member: discord.Member | None, *, guild_defaults: dict | None = None) -> str:
+        if member is None:
+            return ""
+
+        is_muted = False
+        voice_state = getattr(member, "voice", None)
+        if voice_state is not None:
+            try:
+                is_muted = bool(getattr(voice_state, "mute", False))
+            except Exception:
+                is_muted = False
+
+        ignores_tts = self._member_has_ignored_tts_role(member, guild_defaults=guild_defaults)
+
+        if is_muted and ignores_tts:
+            return " [ultra-censurado]"
+        if is_muted:
+            return " [censurado]"
+        if ignores_tts:
+            return " [bot ignora]"
+        return ""
+
     def _apply_author_prefix_if_needed(self, guild_id: int, author: discord.abc.User | None, text: str, *, enabled: bool) -> str:
         text = str(text or "").strip()
         if not enabled or not text:
@@ -1754,11 +1776,20 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if member is None:
             return "usuário", "padrão"
 
+        guild_defaults = None
+        if isinstance(member, discord.Member):
+            try:
+                guild_defaults = self.db.get_guild_tts_defaults(member.guild.id)
+            except Exception:
+                guild_defaults = None
+
+        suffix = self._spoken_name_suffix(member if isinstance(member, discord.Member) else None, guild_defaults=guild_defaults)
+
         saved_spoken_name = self._get_saved_spoken_name(guild_id, getattr(member, "id", None))
         if saved_spoken_name:
             spoken = _speech_name(saved_spoken_name)
             if spoken and _looks_pronounceable_for_tts(spoken):
-                return spoken, "personalizado"
+                return f"{spoken}{suffix}", "personalizado"
 
         display_name = _normalize_spaces(getattr(member, "display_name", None) or "")
         username = _normalize_spaces(getattr(member, "name", None) or "")
@@ -1766,14 +1797,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if _looks_pronounceable_for_tts(display_name):
             spoken = _speech_name(display_name)
             if spoken:
-                return spoken, "apelido do servidor"
+                return f"{spoken}{suffix}", "apelido do servidor"
 
         if _looks_pronounceable_for_tts(username):
             spoken = _speech_name(username)
             if spoken:
-                return spoken, "nome de usuário"
+                return f"{spoken}{suffix}", "nome de usuário"
 
-        return "usuário", "padrão"
+        return f"usuário{suffix}", "padrão"
 
     def _tts_user_reference(self, member: discord.abc.User | None, *, guild_id: int | None = None) -> str:
         spoken, _ = self._resolve_spoken_name(member, guild_id=guild_id)
