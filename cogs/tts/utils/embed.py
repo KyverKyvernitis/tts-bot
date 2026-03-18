@@ -88,7 +88,7 @@ def build_status_embed(*, member: discord.abc.User | None, target_name: str, use
     return embed
 
 
-def build_settings_embed(*, title: str, description: str, resolved: dict, guild_defaults: dict, history_text: str, server: bool, panel_kind: str, spoken_name_text: str | None, google_language_default: str, google_voice_default: str, google_rate_default: str, google_pitch_default: str, google_prefix_default: str) -> discord.Embed:
+def build_settings_embed(*, title: str, description: str, resolved: dict, guild_defaults: dict, history_text: str, server: bool, panel_kind: str, spoken_name_text: str | None, google_language_default: str, google_voice_default: str, google_rate_default: str, google_pitch_default: str, google_prefix_default: str, ignored_tts_role_text: str | None = None) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
     embed.add_field(name="Voz do Edge", value=f"`{resolved.get('edge_voice', resolved.get('voice', 'Não definido'))}`", inline=True)
     embed.add_field(name="Idioma do gTTS", value=f"`{resolved.get('gtts_language', resolved.get('language', 'Não definido'))}`", inline=True)
