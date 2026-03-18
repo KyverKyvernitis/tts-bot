@@ -553,6 +553,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 return list(self._gcloud_voices_cache)
 
             def _worker() -> list[dict[str, object]]:
+                self._ensure_google_credentials_file()
                 client = google_texttospeech.TextToSpeechClient()
                 try:
                     response = client.list_voices(request={})
