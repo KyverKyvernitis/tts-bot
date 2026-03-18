@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 
 import discord
 from discord import app_commands
@@ -10,10 +11,9 @@ from db import SettingsDB
 
 
 _GUILD_OBJECTS = [discord.Object(id=guild_id) for guild_id in GUILD_IDS]
+_FOCUS_DURATION_SECONDS = 6 * 60 * 60
 _FOCUS_WORD_RE = re.compile(r"(?<!\w)focus(?!\w)", re.IGNORECASE)
 _RESPONSE_DELETE_AFTER = 20
-_ROLE_TOGGLE_WORD_RE = re.compile(r"(?<!\w)pica(?!\w)", re.IGNORECASE)
-_ROLE_TOGGLE_DELETE_AFTER = 5
 
 
 def _guild_scoped():
@@ -233,6 +233,7 @@ class AntiMzkCog(commands.Cog):
             added, removed, _ = await self.db.toggle_modo_censura_focus_users(
                 guild.id,
                 valid_user_ids,
+                duration_seconds=_FOCUS_DURATION_SECONDS,
             )
 
         await self._send_focus_feedback(
@@ -242,80 +243,6 @@ class AntiMzkCog(commands.Cog):
             errored_ids=errored_ids,
             reset=False,
         )
-        return True
-
-    async def _send_role_toggle_feedback(self, message: discord.Message, activated: bool):
-        if activated:
-            text = "✅ **TTS desativado para os alvos.** O cargo ignorado do TTS foi aplicado aos membros afetados."
-        else:
-            text = "✅ **TTS reativado para os alvos.** O cargo ignorado do TTS foi removido dos membros afetados."
-        try:
-            await message.channel.send(text, delete_after=_ROLE_TOGGLE_DELETE_AFTER)
-        except Exception:
-            pass
-
-    async def _handle_role_toggle_trigger(self, message: discord.Message) -> bool:
-        guild = message.guild
-        if guild is None:
-            return False
-
-        content = (message.content or "")
-        if not _ROLE_TOGGLE_WORD_RE.search(content):
-            return False
-
-        if GUILD_IDS and guild.id not in GUILD_IDS:
-            return True
-
-        if not self.db.anti_mzk_enabled(guild.id):
-            return True
-
-        if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
-            return True
-
-        author_voice = getattr(message.author, "voice", None)
-        voice_channel = getattr(author_voice, "channel", None)
-        if not isinstance(voice_channel, discord.VoiceChannel):
-            return True
-
-        targets = self._resolve_targets(guild, voice_channel)
-        if not targets:
-            return True
-
-        ignored_tts_role = None
-        ignored_tts_role_id = 0
-        try:
-            ignored_tts_role_id = max(0, int(self.db.get_ignored_tts_role_id(guild.id) or 0))
-        except Exception:
-            ignored_tts_role_id = 0
-        if ignored_tts_role_id:
-            ignored_tts_role = guild.get_role(ignored_tts_role_id)
-
-        if ignored_tts_role is None:
-            await message.channel.send(
-                "⚠️ **Cargo ignorado do TTS não configurado.** Configure esse cargo antes de usar o trigger `pica`.",
-                delete_after=_ROLE_TOGGLE_DELETE_AFTER,
-            )
-            return True
-
-        should_activate = any(ignored_tts_role not in getattr(target, "roles", []) for target in targets)
-
-        changed = False
-        for target in targets:
-            try:
-                if should_activate:
-                    if ignored_tts_role not in getattr(target, "roles", []):
-                        await target.add_roles(ignored_tts_role, reason="modo censura role toggle")
-                        changed = True
-                else:
-                    if ignored_tts_role in getattr(target, "roles", []):
-                        await target.remove_roles(ignored_tts_role, reason="modo censura role toggle")
-                        changed = True
-            except Exception:
-                pass
-
-        if changed:
-            await self._send_role_toggle_feedback(message, should_activate)
-            await self._react_success_temporarily(message)
         return True
 
     async def _react_success_temporarily(self, message: discord.Message):
@@ -561,9 +488,6 @@ class AntiMzkCog(commands.Cog):
         if await self._handle_focus_trigger(message):
             return
 
-        if await self._handle_role_toggle_trigger(message):
-            return
-
         if not self.db.anti_mzk_enabled(message.guild.id):
             return
 
@@ -603,11 +527,31 @@ class AntiMzkCog(commands.Cog):
             if author_is_target:
                 return
 
+            ignored_tts_role = None
+            ignored_tts_role_id = 0
+            try:
+                ignored_tts_role_id = max(0, int(self.db.get_ignored_tts_role_id(message.guild.id) or 0))
+            except Exception:
+                ignored_tts_role_id = 0
+            if ignored_tts_role_id:
+                ignored_tts_role = message.guild.get_role(ignored_tts_role_id)
+
             for target in targets:
                 if target.voice and target.voice.channel:
                     try:
                         new_muted = not bool(target.voice.mute)
                         await target.edit(mute=new_muted, reason="modo censura toggle mute")
+
+                        if ignored_tts_role is not None:
+                            try:
+                                if new_muted:
+                                    if ignored_tts_role not in getattr(target, "roles", []):
+                                        await target.add_roles(ignored_tts_role, reason="modo censura apply ignored tts role")
+                                else:
+                                    if ignored_tts_role in getattr(target, "roles", []):
+                                        await target.remove_roles(ignored_tts_role, reason="modo censura remove ignored tts role")
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
