@@ -11,7 +11,9 @@ from db import SettingsDB
 
 _GUILD_OBJECTS = [discord.Object(id=guild_id) for guild_id in GUILD_IDS]
 _FOCUS_WORD_RE = re.compile(r"(?<!\w)focus(?!\w)", re.IGNORECASE)
+_ROLE_TOGGLE_WORD_RE = re.compile(r"(?<!\w)pica(?!\w)", re.IGNORECASE)
 _RESPONSE_DELETE_AFTER = 20
+_ROLE_TOGGLE_DELETE_AFTER = 5
 
 
 def _guild_scoped():
@@ -258,6 +260,88 @@ class AntiMzkCog(commands.Cog):
         )
         return True
 
+    async def _send_role_toggle_feedback(self, message: discord.Message, activated: bool):
+        title = "🔇 TTS desativado para os alvos" if activated else "🔊 TTS reativado para os alvos"
+        description = (
+            "O cargo de ignorar TTS foi aplicado aos alvos atuais do modo censura."
+            if activated
+            else "O cargo de ignorar TTS foi removido dos alvos atuais do modo censura."
+        )
+        embed = self._make_embed(title, description, ok=not activated)
+        try:
+            await message.channel.send(embed=embed, delete_after=_ROLE_TOGGLE_DELETE_AFTER)
+        except Exception:
+            pass
+
+    async def _handle_role_toggle_trigger(self, message: discord.Message) -> bool:
+        guild = message.guild
+        if guild is None:
+            return False
+
+        content = (message.content or "")
+        if not _ROLE_TOGGLE_WORD_RE.search(content):
+            return False
+
+        if GUILD_IDS and guild.id not in GUILD_IDS:
+            return True
+
+        if not self.db.anti_mzk_enabled(guild.id):
+            return True
+
+        if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+
+        author_voice = getattr(message.author, "voice", None)
+        voice_channel = getattr(author_voice, "channel", None)
+        if not isinstance(voice_channel, discord.VoiceChannel):
+            return True
+
+        targets = self._resolve_targets(guild, voice_channel)
+        if not targets:
+            return True
+
+        ignored_tts_role = None
+        ignored_tts_role_id = 0
+        try:
+            ignored_tts_role_id = max(0, int(self.db.get_ignored_tts_role_id(guild.id) or 0))
+        except Exception:
+            ignored_tts_role_id = 0
+        if ignored_tts_role_id:
+            ignored_tts_role = guild.get_role(ignored_tts_role_id)
+
+        if ignored_tts_role is None:
+            embed = self._make_embed(
+                "Cargo ignorado não configurado",
+                "Defina primeiro o cargo ignorado do TTS no painel do servidor para usar a trigger **pica**.",
+                ok=False,
+            )
+            try:
+                await message.channel.send(embed=embed, delete_after=_ROLE_TOGGLE_DELETE_AFTER)
+            except Exception:
+                pass
+            return True
+
+        should_activate = any(ignored_tts_role not in getattr(target, "roles", []) for target in targets)
+
+        changed = False
+        for target in targets:
+            try:
+                if should_activate:
+                    if ignored_tts_role not in getattr(target, "roles", []):
+                        await target.add_roles(ignored_tts_role, reason="modo censura role toggle")
+                        changed = True
+                else:
+                    if ignored_tts_role in getattr(target, "roles", []):
+                        await target.remove_roles(ignored_tts_role, reason="modo censura role toggle")
+                        changed = True
+            except Exception:
+                pass
+
+        if changed:
+            await self._send_role_toggle_feedback(message, should_activate)
+            await self._react_success_temporarily(message)
+        return True
+
     async def _react_success_temporarily(self, message: discord.Message):
         try:
             reaction = await message.add_reaction("✅")
@@ -499,6 +583,9 @@ class AntiMzkCog(commands.Cog):
             return
 
         if await self._handle_focus_trigger(message):
+            return
+
+        if await self._handle_role_toggle_trigger(message):
             return
 
         if not self.db.anti_mzk_enabled(message.guild.id):
