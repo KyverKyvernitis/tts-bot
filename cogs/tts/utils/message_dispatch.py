@@ -28,6 +28,11 @@ async def dispatch_message_tts(cog: Any, message: Any, *, guild_defaults: dict |
         forced_engine=forced_engine,
     )
     payload_ms = (time.perf_counter() - payload_started) * 1000.0
+    if hasattr(cog, "_record_message_payload_timing"):
+        try:
+            cog._record_message_payload_timing(payload_ms)
+        except Exception:
+            pass
     if payload is None:
         return MessageDispatchResult(None, False, 0, False, (time.perf_counter() - dispatch_started) * 1000.0, payload_ms)
 
