@@ -12,6 +12,7 @@ from db import SettingsDB
 _GUILD_OBJECTS = [discord.Object(id=guild_id) for guild_id in GUILD_IDS]
 _FOCUS_WORD_RE = re.compile(r"(?<!\w)focus(?!\w)", re.IGNORECASE)
 _ROLE_TOGGLE_WORD_RE = re.compile(r"(?<!\w)pica(?!\w)", re.IGNORECASE)
+_DJ_TOGGLE_WORD_RE = re.compile(r"(?<!\w)dj(?!\w)", re.IGNORECASE)
 _RESPONSE_DELETE_AFTER = 20
 _ROLE_TOGGLE_DELETE_AFTER = 5
 
@@ -444,6 +445,86 @@ class AntiMzkCog(commands.Cog):
             await self._react_success_temporarily(message)
         return True
 
+
+    async def _send_dj_toggle_feedback(self, message: discord.Message, activated: bool, affected_count: int, voice_channel: discord.VoiceChannel):
+        if activated:
+            title = "🎛️ Efeitos sonoros bloqueados"
+            description = (
+                f"Os membros focados do modo censura ficaram **sem poder usar efeitos sonoros** em {voice_channel.mention}.\n\n"
+                f"Afetados agora: **{affected_count}**"
+            )
+        else:
+            title = "🎚️ Efeitos sonoros liberados"
+            description = (
+                f"Removi o bloqueio de **efeitos sonoros** dos membros focados em {voice_channel.mention}.\n\n"
+                f"Afetados agora: **{affected_count}**"
+            )
+        embed = self._make_embed(title, description, ok=not activated)
+        embed.set_footer(text="Trigger: dj • Staffs não são afetados")
+        try:
+            await message.channel.send(embed=embed)
+        except Exception:
+            pass
+
+    async def _handle_dj_toggle_trigger(self, message: discord.Message) -> bool:
+        guild = message.guild
+        if guild is None:
+            return False
+
+        content = (message.content or "")
+        if not _DJ_TOGGLE_WORD_RE.search(content):
+            return False
+
+        if GUILD_IDS and guild.id not in GUILD_IDS:
+            return True
+
+        if not self.db.anti_mzk_enabled(guild.id):
+            return True
+
+        if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+
+        author_voice = getattr(message.author, "voice", None)
+        voice_channel = getattr(author_voice, "channel", None)
+        if not isinstance(voice_channel, discord.VoiceChannel):
+            return True
+
+        focus_targets = self._iter_focused_members(guild, voice_channel)
+        targets = [member for member in focus_targets if not self._is_staff_member(member)]
+
+        if not targets:
+            embed = self._make_embed(
+                "Nenhum alvo para a trigger dj",
+                "Não há membros focados elegíveis nesse canal de voz. Staffs são ignorados por essa trigger.",
+                ok=False,
+            )
+            try:
+                await message.channel.send(embed=embed)
+            except Exception:
+                pass
+            return True
+
+        def _is_denied(member: discord.Member) -> bool:
+            overwrite = voice_channel.overwrites_for(member)
+            return getattr(overwrite, "use_soundboard", None) is False
+
+        should_activate = any(not _is_denied(target) for target in targets)
+
+        changed = 0
+        for target in targets:
+            try:
+                overwrite = voice_channel.overwrites_for(target)
+                overwrite.use_soundboard = False if should_activate else None
+                await voice_channel.set_permissions(target, overwrite=overwrite, reason="modo censura dj trigger")
+                changed += 1
+            except Exception:
+                pass
+
+        if changed:
+            await self._send_dj_toggle_feedback(message, should_activate, changed, voice_channel)
+            await self._react_success_temporarily(message)
+        return True
+
     async def _react_success_temporarily(self, message: discord.Message):
         try:
             reaction = await message.add_reaction("✅")
@@ -688,6 +769,9 @@ class AntiMzkCog(commands.Cog):
             return
 
         if await self._handle_role_toggle_trigger(message):
+            return
+
+        if await self._handle_dj_toggle_trigger(message):
             return
 
         if not self.db.anti_mzk_enabled(message.guild.id):
