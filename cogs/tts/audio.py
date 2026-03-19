@@ -37,6 +37,8 @@ TTS_SYNTH_CONCURRENCY = max(1, int(getattr(config, "TTS_SYNTH_CONCURRENCY", 3)))
 TTS_EDGE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_EDGE_TIMEOUT_SECONDS", 10)))
 TTS_GTTS_CONCURRENCY = max(1, int(getattr(config, "TTS_GTTS_CONCURRENCY", 1)))
 TTS_CACHEABLE_TEXT_MAX_LENGTH = max(64, int(getattr(config, "TTS_CACHEABLE_TEXT_MAX_LENGTH", 320)))
+TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH = max(TTS_CACHEABLE_TEXT_MAX_LENGTH, int(getattr(config, "TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH", 1200)))
+TTS_LONG_TEXT_CACHE_MIN_REPEATS = max(1, int(getattr(config, "TTS_LONG_TEXT_CACHE_MIN_REPEATS", 2)))
 TTS_TEMP_PRUNE_INTERVAL_SECONDS = max(5.0, float(getattr(config, "TTS_TEMP_PRUNE_INTERVAL_SECONDS", 20)))
 TTS_BOOT_WARMUP_ENABLED = bool(getattr(config, "TTS_BOOT_WARMUP_ENABLED", True))
 TTS_ENGINE_ALERT_COOLDOWN_SECONDS = max(60.0, float(getattr(config, "TTS_ENGINE_ALERT_COOLDOWN_SECONDS", 900)))
@@ -254,6 +256,13 @@ class TTSAudioMixin:
             cache_order = OrderedDict()
             setattr(self, "_tts_cache_order", cache_order)
         return cache_order
+
+    def _get_long_text_repeat_counts(self) -> dict[str, int]:
+        counts = getattr(self, "_tts_long_text_repeat_counts", None)
+        if counts is None:
+            counts = {}
+            setattr(self, "_tts_long_text_repeat_counts", counts)
+        return counts
 
     def _get_inflight_cache_tasks(self) -> dict[str, asyncio.Task]:
         tasks = getattr(self, "_tts_inflight_cache_tasks", None)
@@ -733,8 +742,13 @@ class TTSAudioMixin:
         path = self._make_runtime_temp_file(suffix=".mp3")
         try:
             tts = gTTS(text=text, lang=language, tld=tld)
+
+            def _write_gtts_file(target_path: str):
+                with open(target_path, "wb") as handle:
+                    tts.write_to_fp(handle)
+
             async with self._get_gtts_semaphore():
-                await asyncio.to_thread(tts.save, path)
+                await asyncio.to_thread(_write_gtts_file, path)
             return path
         except Exception:
             try:
@@ -905,16 +919,32 @@ class TTSAudioMixin:
         )
 
     async def _resolve_audio_path(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:
-        should_cache = len(self._get_item_normalized_cache_text(item)) <= TTS_CACHEABLE_TEXT_MAX_LENGTH
-        if should_cache:
+        normalized_text = self._get_item_normalized_cache_text(item)
+        text_length = len(normalized_text)
+        if text_length <= TTS_CACHEABLE_TEXT_MAX_LENGTH:
             return await self._resolve_or_generate_cached_audio(state, item)
 
         cached = self._try_get_cached_path(state, item)
         if cached:
             return cached, False
 
+        key = self._cache_key(item)
+        long_text_counts = self._get_long_text_repeat_counts()
+        seen_count = int(long_text_counts.get(key, 0) or 0) + 1
+        long_text_counts[key] = seen_count
+
+        should_cache_long_text = (
+            text_length <= TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH
+            and seen_count >= TTS_LONG_TEXT_CACHE_MIN_REPEATS
+        )
+
         self._record_cache_miss(item.engine)
         generated = await self._generate_audio_file(item)
+        if should_cache_long_text:
+            cached_path = await self._store_in_cache(state, item, generated)
+            if cached_path != generated:
+                return cached_path, False
+            return generated, False
         return generated, False
 
     async def _play_file(self, vc: discord.VoiceClient, path: str) -> None:

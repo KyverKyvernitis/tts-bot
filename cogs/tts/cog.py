@@ -157,12 +157,40 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._gcloud_voices_cache: list[dict[str, object]] = []
         self._gcloud_voices_cache_loaded_at: float = 0.0
         self._gcloud_voices_cache_lock = asyncio.Lock()
+        self._app_command_id_cache: dict[object, tuple[float, dict[str, int]]] = {}
 
     async def cog_load(self):
         self._prime_tts_runtime()
         await self._load_edge_voices()
         if TTS_BOOT_WARMUP_ENABLED:
             asyncio.create_task(self._boot_warmup())
+
+    async def _get_root_command_ids_cached(self, guild: discord.Guild | None = None, *, ttl_seconds: float = 600.0) -> dict[str, int]:
+        cache_key = int(guild.id) if guild is not None else 0
+        now = time.monotonic()
+        cached = self._app_command_id_cache.get(cache_key)
+        if cached is not None:
+            expires_at, command_ids = cached
+            if now < expires_at:
+                return dict(command_ids)
+
+        command_ids: dict[str, int] = {}
+        fetch_kwargs = {"guild": guild} if guild is not None else {}
+        try:
+            commands_list = await self.bot.tree.fetch_commands(**fetch_kwargs)
+        except Exception as e:
+            print(f"[tts_commands] falha ao buscar comandos: {e!r}")
+            return dict(cached[1]) if cached is not None else {}
+
+        for cmd in commands_list:
+            name = str(getattr(cmd, "name", "") or "").strip()
+            cmd_id = getattr(cmd, "id", None)
+            if not name or not cmd_id or name in command_ids:
+                continue
+            command_ids[name] = int(cmd_id)
+
+        self._app_command_id_cache[cache_key] = (now + ttl_seconds, dict(command_ids))
+        return command_ids
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
@@ -1367,7 +1395,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, engine=value))
             title, desc = "Modo padrão atualizado", f"O modo padrão do servidor agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos gTTS, Edge e Google Cloud continuam escolhendo o motor por mensagem."
         else:
-            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, engine=value)
+            await self._set_user_tts_and_refresh(interaction.guild.id, interaction.user.id, engine=value)
             title, desc = "Modo atualizado", f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos gTTS, Edge e Google Cloud continuam escolhendo o motor por mensagem."
         await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
@@ -1388,7 +1416,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, voice=voice))
             title, desc = "Voz padrão atualizada", f"A voz padrão do servidor agora é `{voice}`."
         else:
-            await self._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, voice=voice)
+            await self._set_user_tts_and_refresh(interaction.guild.id, interaction.user.id, voice=voice)
             title, desc = "Voz atualizada", f"A sua voz do Edge agora é `{voice}`."
         await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
@@ -1487,16 +1515,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             "toggle": "toggle_menu",
         }.get(panel_kind, "tts menu")
 
-        try:
-            commands_list = await self.bot.tree.fetch_commands()
-            for cmd in commands_list:
-                if getattr(cmd, "name", None) == "tts":
-                    cmd_id = getattr(cmd, "id", None)
-                    if cmd_id:
-                        return f"</{command_path}:{cmd_id}>"
-        except Exception as e:
-            print(f"[tts_panel_timeout] falha ao buscar menção do comando: {e!r}")
-
+        command_ids = await self._get_root_command_ids_cached()
+        cmd_id = command_ids.get("tts")
+        if cmd_id:
+            return f"</{command_path}:{cmd_id}>"
         return f"`/{command_path}`"
 
     async def _get_panel_prefix_hint(self, guild_id: int, panel_kind: str) -> str:
