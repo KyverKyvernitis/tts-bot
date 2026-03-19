@@ -20,17 +20,18 @@ class MessageGateDecision:
     forced_engine: str | None = None
     active_prefix: str | None = None
     prefix_command: Any | None = None
+    reason: str = ""
 
 
 async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision:
     if not getattr(config, "TTS_ENABLED", True):
-        return MessageGateDecision(False, False, {})
+        return MessageGateDecision(False, False, {}, reason="tts_disabled")
     if getattr(getattr(message, "author", None), "bot", False):
-        return MessageGateDecision(False, False, {})
+        return MessageGateDecision(False, False, {}, reason="author_bot")
     if getattr(message, "guild", None) is None:
-        return MessageGateDecision(False, False, {})
+        return MessageGateDecision(False, False, {}, reason="no_guild")
     if not getattr(message, "content", None):
-        return MessageGateDecision(False, False, {})
+        return MessageGateDecision(False, False, {}, reason="empty_content")
 
     db = cog._get_db()
     guild_defaults = await cog._maybe_await(db.get_guild_tts_defaults(message.guild.id)) if db else {}
@@ -48,6 +49,7 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
             should_dispatch_prefix_command=True,
             guild_defaults=guild_defaults,
             prefix_command=prefix_command,
+            reason="prefix_command",
         )
 
     forced_engine, active_prefix = match_engine_prefix(
@@ -57,7 +59,7 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
         gcloud_prefix=routing.gcloud_prefix,
     )
     if not forced_engine or not active_prefix:
-        return MessageGateDecision(False, False, guild_defaults)
+        return MessageGateDecision(False, False, guild_defaults, reason="no_engine_prefix")
 
     return MessageGateDecision(
         should_process_tts=True,
@@ -65,4 +67,5 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
         guild_defaults=guild_defaults,
         forced_engine=forced_engine,
         active_prefix=active_prefix,
+        reason="tts_prefix_matched",
     )
