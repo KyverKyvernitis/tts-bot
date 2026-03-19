@@ -6,7 +6,6 @@ import os
 import re
 import weakref
 import unicodedata
-from urllib.parse import urlparse
 from typing import Optional
 
 import discord
@@ -55,6 +54,7 @@ from .prefix import (
     match_engine_prefix,
     dispatch_prefix_control_command,
 )
+from .utils.message_render import render_message_tts_text, append_tts_descriptions
 from .utils.resolution import (
     gcloud_language_priority,
     build_gcloud_language_options_from_catalog,
@@ -1863,48 +1863,21 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return descriptions
 
     def _append_tts_descriptions(self, text: str, descriptions: list[str]) -> str:
-        text = _normalize_spaces(text)
-        descriptions = [_normalize_spaces(item) for item in (descriptions or []) if _normalize_spaces(item)]
-        if not descriptions:
-            return text
-        suffix = ". ".join(descriptions)
-        if not text:
-            return suffix
-        if text.endswith((".", "!", "?", "…")):
-            return f"{text} {suffix}"
-        return f"{text}. {suffix}"
+        return append_tts_descriptions(text, descriptions, normalize_spaces=_normalize_spaces)
 
     def _render_tts_text(self, message: discord.Message, raw_text: str) -> str:
-        text = _replace_custom_emojis_for_tts(raw_text)
-
-        def replace_user(match: re.Match[str]) -> str:
-            member_id = int(match.group(1))
-            member = message.guild.get_member(member_id) if message.guild else None
-            if member is None:
-                member = next((m for m in getattr(message, "mentions", []) if getattr(m, "id", None) == member_id), None)
-            return self._tts_user_reference(member, guild_id=getattr(message.guild, "id", None))
-
-        def replace_role(match: re.Match[str]) -> str:
-            role_id = int(match.group(1))
-            role = message.guild.get_role(role_id) if message.guild else None
-            if role is None:
-                role = next((r for r in getattr(message, "role_mentions", []) if getattr(r, "id", None) == role_id), None)
-            return self._tts_role_reference(role)
-
-        def replace_channel(match: re.Match[str]) -> str:
-            channel_id = int(match.group(1))
-            channel = message.guild.get_channel(channel_id) if message.guild else None
-            return self._tts_channel_reference(channel)
-
-        def replace_url(match: re.Match[str]) -> str:
-            return self._tts_link_reference(match.group(0), guild=message.guild)
-
-        text = USER_MENTION_PATTERN.sub(replace_user, text)
-        text = ROLE_MENTION_PATTERN.sub(replace_role, text)
-        text = CHANNEL_MENTION_PATTERN.sub(replace_channel, text)
-        text = URL_PATTERN.sub(replace_url, text)
-        text = _expand_abbreviations_for_tts(text)
-        return self._append_tts_descriptions(text, self._tts_attachment_descriptions(getattr(message, "attachments", [])))
+        return render_message_tts_text(
+            message,
+            raw_text,
+            guild_id=getattr(message.guild, "id", None),
+            user_reference=self._tts_user_reference,
+            role_reference=self._tts_role_reference,
+            channel_reference=self._tts_channel_reference,
+            link_reference=self._tts_link_reference,
+            normalize_spaces=_normalize_spaces,
+            image_extensions=_ATTACHMENT_IMAGE_EXTENSIONS,
+            video_extensions=_ATTACHMENT_VIDEO_EXTENSIONS,
+        )
 
     def _user_history_text(self, interaction: discord.Interaction, what: str, value: str, *, message_id: int | None = None, target_user_id: int | None = None, target_user_name: str | None = None) -> str:
         actor_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
