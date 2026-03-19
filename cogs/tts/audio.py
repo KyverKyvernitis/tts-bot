@@ -304,6 +304,10 @@ class TTSAudioMixin:
                 "queue_wait_samples": 0,
                 "dispatch_total_ms": 0.0,
                 "dispatch_samples": 0,
+                "source_setup_total_ms": 0.0,
+                "source_setup_samples": 0,
+                "play_call_total_ms": 0.0,
+                "play_call_samples": 0,
                 "playback_total_ms": 0.0,
                 "playback_samples": 0,
                 "total_to_playback_total_ms": 0.0,
@@ -483,6 +487,8 @@ class TTSAudioMixin:
         *,
         queue_wait_ms: float | None = None,
         dispatch_ms: float | None = None,
+        source_setup_ms: float | None = None,
+        play_call_ms: float | None = None,
         playback_ms: float | None = None,
         total_to_playback_ms: float | None = None,
     ) -> None:
@@ -490,6 +496,10 @@ class TTSAudioMixin:
             self._record_average_metric("queue_wait_total_ms", "queue_wait_samples", queue_wait_ms)
         if dispatch_ms is not None:
             self._record_average_metric("dispatch_total_ms", "dispatch_samples", dispatch_ms)
+        if source_setup_ms is not None:
+            self._record_average_metric("source_setup_total_ms", "source_setup_samples", source_setup_ms)
+        if play_call_ms is not None:
+            self._record_average_metric("play_call_total_ms", "play_call_samples", play_call_ms)
         if playback_ms is not None:
             self._record_average_metric("playback_total_ms", "playback_samples", playback_ms)
         if total_to_playback_ms is not None:
@@ -560,6 +570,8 @@ class TTSAudioMixin:
             "cache_stores": int(metrics.get("cache_stores", 0) or 0),
             "avg_queue_wait_ms": round((float(metrics.get("queue_wait_total_ms", 0.0) or 0.0) / int(metrics.get("queue_wait_samples", 0) or 1)), 2) if int(metrics.get("queue_wait_samples", 0) or 0) else 0.0,
             "avg_dispatch_ms": round((float(metrics.get("dispatch_total_ms", 0.0) or 0.0) / int(metrics.get("dispatch_samples", 0) or 1)), 2) if int(metrics.get("dispatch_samples", 0) or 0) else 0.0,
+            "avg_source_setup_ms": round((float(metrics.get("source_setup_total_ms", 0.0) or 0.0) / int(metrics.get("source_setup_samples", 0) or 1)), 2) if int(metrics.get("source_setup_samples", 0) or 0) else 0.0,
+            "avg_play_call_ms": round((float(metrics.get("play_call_total_ms", 0.0) or 0.0) / int(metrics.get("play_call_samples", 0) or 1)), 2) if int(metrics.get("play_call_samples", 0) or 0) else 0.0,
             "avg_playback_ms": round((float(metrics.get("playback_total_ms", 0.0) or 0.0) / int(metrics.get("playback_samples", 0) or 1)), 2) if int(metrics.get("playback_samples", 0) or 0) else 0.0,
             "avg_total_to_playback_ms": round((float(metrics.get("total_to_playback_total_ms", 0.0) or 0.0) / int(metrics.get("total_to_playback_samples", 0) or 1)), 2) if int(metrics.get("total_to_playback_samples", 0) or 0) else 0.0,
             "avg_queue_depth_at_enqueue": round((float(metrics.get("queue_depth_total", 0.0) or 0.0) / int(metrics.get("queue_depth_samples", 0) or 1)), 2) if int(metrics.get("queue_depth_samples", 0) or 0) else 0.0,
@@ -992,7 +1004,7 @@ class TTSAudioMixin:
             store_in_cache=should_cache_long_text,
         )
 
-    async def _play_file(self, vc: discord.VoiceClient, path: str) -> None:
+    async def _play_file(self, vc: discord.VoiceClient, path: str) -> dict[str, float]:
         loop = asyncio.get_running_loop()
         finished = loop.create_future()
 
@@ -1004,13 +1016,27 @@ class TTSAudioMixin:
                 if not finished.done():
                     loop.call_soon_threadsafe(finished.set_result, None)
 
+        source_setup_started_at = time.monotonic()
         source = discord.FFmpegPCMAudio(
             path,
             before_options=TTS_FFMPEG_BEFORE_OPTIONS,
             options=TTS_FFMPEG_OPTIONS,
         )
+        source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
+
+        play_call_started_at = time.monotonic()
         vc.play(source, after=_after_playback)
+        play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
+
+        playback_started_at = time.monotonic()
         await finished
+        playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
+        return {
+            "source_setup_ms": source_setup_ms,
+            "play_call_ms": play_call_ms,
+            "playback_ms": playback_duration_ms,
+            "playback_started_at": playback_started_at,
+        }
 
     async def _ensure_self_deaf_fast(self, guild: discord.Guild, target_channel=None) -> bool:
         last_error = None
@@ -1196,29 +1222,35 @@ class TTSAudioMixin:
                     current_path, should_cleanup = await active_audio_task
 
                     dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
-                    playback_started_at = time.monotonic()
                     queue_wait_ms = max(0.0, (dequeue_started_at - float(getattr(item, "enqueued_at_monotonic", dequeue_started_at))) * 1000.0)
-                    dispatch_ms = max(0.0, (playback_started_at - dequeue_started_at) * 1000.0)
-                    total_to_playback_ms = max(0.0, (playback_started_at - float(getattr(item, "enqueued_at_monotonic", playback_started_at))) * 1000.0)
-                    self._record_queue_timing(
-                        queue_wait_ms=queue_wait_ms,
-                        dispatch_ms=dispatch_ms,
-                        total_to_playback_ms=total_to_playback_ms,
-                    )
-                    logger.debug(
-                        "[tts_perf] pronto para playback | guild=%s engine=%s queue_wait_ms=%.2f dispatch_ms=%.2f total_to_playback_ms=%.2f text_len=%s",
-                        guild_id,
-                        item.engine,
-                        queue_wait_ms,
-                        dispatch_ms,
-                        total_to_playback_ms,
-                        len(item.text or ""),
-                    )
 
                     try:
-                        await self._play_file(vc, current_path)
-                        playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
-                        self._record_queue_timing(playback_ms=playback_duration_ms)
+                        playback_result = await self._play_file(vc, current_path)
+                        playback_started_at = float(playback_result.get("playback_started_at", time.monotonic()) or time.monotonic())
+                        source_setup_ms = max(0.0, float(playback_result.get("source_setup_ms", 0.0) or 0.0))
+                        play_call_ms = max(0.0, float(playback_result.get("play_call_ms", 0.0) or 0.0))
+                        playback_duration_ms = max(0.0, float(playback_result.get("playback_ms", 0.0) or 0.0))
+                        dispatch_ms = max(0.0, (playback_started_at - dequeue_started_at) * 1000.0)
+                        total_to_playback_ms = max(0.0, (playback_started_at - float(getattr(item, "enqueued_at_monotonic", playback_started_at))) * 1000.0)
+                        self._record_queue_timing(
+                            queue_wait_ms=queue_wait_ms,
+                            dispatch_ms=dispatch_ms,
+                            source_setup_ms=source_setup_ms,
+                            play_call_ms=play_call_ms,
+                            playback_ms=playback_duration_ms,
+                            total_to_playback_ms=total_to_playback_ms,
+                        )
+                        logger.debug(
+                            "[tts_perf] pronto para playback | guild=%s engine=%s queue_wait_ms=%.2f dispatch_ms=%.2f source_setup_ms=%.2f play_call_ms=%.2f total_to_playback_ms=%.2f text_len=%s",
+                            guild_id,
+                            item.engine,
+                            queue_wait_ms,
+                            dispatch_ms,
+                            source_setup_ms,
+                            play_call_ms,
+                            total_to_playback_ms,
+                            len(item.text or ""),
+                        )
                     finally:
                         protected_paths: set[str] = set()
                         if should_cleanup:
