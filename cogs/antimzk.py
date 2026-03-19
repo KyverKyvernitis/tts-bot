@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 
 import discord
 from discord import app_commands
@@ -15,6 +16,8 @@ _ROLE_TOGGLE_WORD_RE = re.compile(r"(?<!\w)pica(?!\w)", re.IGNORECASE)
 _DJ_TOGGLE_WORD_RE = re.compile(r"(?<!\w)dj(?!\w)", re.IGNORECASE)
 _RESPONSE_DELETE_AFTER = 20
 _ROLE_TOGGLE_DELETE_AFTER = 5
+_PICA_DURATION_SECONDS = 2 * 60 * 60
+_DJ_DURATION_SECONDS = 6 * 60 * 60
 
 
 def _guild_scoped():
@@ -25,6 +28,8 @@ class AntiMzkCog(commands.Cog):
     def __init__(self, bot: commands.Bot, db: SettingsDB):
         self.bot = bot
         self.db = db
+        self._pica_expirations: dict[tuple[int, int], float] = {}
+        self._dj_expirations: dict[tuple[int, int, int], float] = {}
 
 
     _ANTI_MZK_SUFFIXES = (" [ultra-censurado]", " [censurado]", " [antitts]")
@@ -362,10 +367,101 @@ class AntiMzkCog(commands.Cog):
         )
         return True
 
+    async def _expire_pica_role_later(self, guild_id: int, user_id: int, role_id: int, delay: float):
+        try:
+            await asyncio.sleep(max(0.0, delay))
+        except Exception:
+            return
+
+        key = (guild_id, user_id)
+        expires_at = self._pica_expirations.get(key)
+        now = time.time()
+        if expires_at is None or expires_at > now + 1.0:
+            return
+
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            self._pica_expirations.pop(key, None)
+            return
+
+        member = guild.get_member(user_id)
+        role = guild.get_role(role_id) if role_id else None
+        if member is None or role is None:
+            self._pica_expirations.pop(key, None)
+            return
+
+        try:
+            if role in getattr(member, "roles", []):
+                await member.remove_roles(role, reason="modo censura pica expirado")
+        except Exception:
+            return
+        finally:
+            self._pica_expirations.pop(key, None)
+
+        try:
+            await self._refresh_target_suffix_nickname(member, role)
+        except Exception:
+            pass
+
+    async def _expire_dj_block_later(self, guild_id: int, channel_id: int, user_id: int, delay: float):
+        try:
+            await asyncio.sleep(max(0.0, delay))
+        except Exception:
+            return
+
+        key = (guild_id, channel_id, user_id)
+        expires_at = self._dj_expirations.get(key)
+        now = time.time()
+        if expires_at is None or expires_at > now + 1.0:
+            return
+
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            self._dj_expirations.pop(key, None)
+            return
+
+        channel = guild.get_channel(channel_id)
+        member = guild.get_member(user_id)
+        if not isinstance(channel, discord.VoiceChannel) or member is None:
+            self._dj_expirations.pop(key, None)
+            return
+
+        try:
+            overwrite = channel.overwrites_for(member)
+            overwrite.use_soundboard = None
+            if overwrite.is_empty():
+                await channel.set_permissions(member, overwrite=None, reason="modo censura dj expirado")
+            else:
+                await channel.set_permissions(member, overwrite=overwrite, reason="modo censura dj expirado")
+        except Exception:
+            return
+        finally:
+            self._dj_expirations.pop(key, None)
+
+    def _tracked_pica_targets(self, guild: discord.Guild, current_targets: list[discord.Member]) -> list[discord.Member]:
+        targets: dict[int, discord.Member] = {member.id: member for member in current_targets}
+        for tracked_guild_id, tracked_user_id in list(self._pica_expirations.keys()):
+            if tracked_guild_id != guild.id:
+                continue
+            member = guild.get_member(tracked_user_id)
+            if member is not None:
+                targets[member.id] = member
+        return list(targets.values())
+
+    def _tracked_dj_targets(self, guild: discord.Guild, voice_channel: discord.VoiceChannel, current_targets: list[discord.Member]) -> list[discord.Member]:
+        targets: dict[int, discord.Member] = {member.id: member for member in current_targets}
+        for tracked_guild_id, tracked_channel_id, tracked_user_id in list(self._dj_expirations.keys()):
+            if tracked_guild_id != guild.id or tracked_channel_id != voice_channel.id:
+                continue
+            member = guild.get_member(tracked_user_id)
+            if member is not None:
+                targets[member.id] = member
+        return list(targets.values())
+
     async def _send_role_toggle_feedback(self, message: discord.Message, activated: bool):
         title = "🔇 TTS desativado para os alvos" if activated else "🔊 TTS reativado para os alvos"
         description = (
-            "O cargo de ignorar TTS foi aplicado aos alvos atuais do modo censura."
+            "Por **`2 horas`** o cargo de ignorar TTS foi aplicado aos alvos atuais do modo censura."
             if activated
             else "O cargo de ignorar TTS foi removido dos alvos atuais do modo censura."
         )
@@ -398,7 +494,8 @@ class AntiMzkCog(commands.Cog):
         if not isinstance(voice_channel, discord.VoiceChannel):
             return True
 
-        targets = self._resolve_targets(guild, voice_channel)
+        base_targets = self._resolve_targets(guild, voice_channel)
+        targets = self._tracked_pica_targets(guild, base_targets)
         if not targets:
             return True
 
@@ -423,19 +520,26 @@ class AntiMzkCog(commands.Cog):
                 pass
             return True
 
-        should_activate = any(ignored_tts_role not in getattr(target, "roles", []) for target in targets)
+        tracked_ids = {user_id for tracked_guild_id, user_id in self._pica_expirations.keys() if tracked_guild_id == guild.id}
+        should_activate = any(target.id not in tracked_ids for target in base_targets) or not tracked_ids
 
         changed = False
+        now = time.time()
+        role_id = int(getattr(ignored_tts_role, "id", 0) or 0)
         for target in targets:
             try:
+                key = (guild.id, target.id)
                 if should_activate:
                     if ignored_tts_role not in getattr(target, "roles", []):
                         await target.add_roles(ignored_tts_role, reason="modo censura role toggle")
-                        changed = True
+                    self._pica_expirations[key] = now + _PICA_DURATION_SECONDS
+                    self.bot.loop.create_task(self._expire_pica_role_later(guild.id, target.id, role_id, _PICA_DURATION_SECONDS))
+                    changed = True
                 else:
+                    self._pica_expirations.pop(key, None)
                     if ignored_tts_role in getattr(target, "roles", []):
                         await target.remove_roles(ignored_tts_role, reason="modo censura role toggle")
-                        changed = True
+                    changed = True
             except Exception:
                 pass
 
@@ -450,15 +554,12 @@ class AntiMzkCog(commands.Cog):
         if activated:
             title = "🎛️ Efeitos sonoros bloqueados"
             description = (
-                f"Os membros focados do modo censura ficaram **sem poder usar efeitos sonoros** em {voice_channel.mention}.\n\n"
-                f"Afetados agora: **{affected_count}**"
+                f"Os membros focados do modo censura ficaram **sem poder usar efeitos sonoros por `6 horas`** em {voice_channel.mention}.\n\n"
+                "Staffs não são afetados"
             )
         else:
             title = "🎚️ Efeitos sonoros liberados"
-            description = (
-                f"Removi o bloqueio de **efeitos sonoros** dos membros focados em {voice_channel.mention}.\n\n"
-                f"Afetados agora: **{affected_count}**"
-            )
+            description = f"Removi o bloqueio de **efeitos sonoros** dos membros focados em {voice_channel.mention}."
         embed = self._make_embed(title, description, ok=not activated)
         try:
             await message.channel.send(embed=embed)
@@ -489,7 +590,8 @@ class AntiMzkCog(commands.Cog):
             return True
 
         focus_targets = self._iter_focused_members(guild, voice_channel)
-        targets = [member for member in focus_targets if not self._is_staff_member(member)]
+        current_targets = [member for member in focus_targets if not self._is_staff_member(member)]
+        targets = self._tracked_dj_targets(guild, voice_channel, current_targets)
 
         if not targets:
             embed = self._make_embed(
@@ -507,16 +609,22 @@ class AntiMzkCog(commands.Cog):
             overwrite = voice_channel.overwrites_for(member)
             return getattr(overwrite, "use_soundboard", None) is False
 
-        should_activate = any(not _is_denied(target) for target in targets)
+        tracked_ids = {user_id for tracked_guild_id, tracked_channel_id, user_id in self._dj_expirations.keys() if tracked_guild_id == guild.id and tracked_channel_id == voice_channel.id}
+        should_activate = any(target.id not in tracked_ids for target in current_targets) or not tracked_ids
 
         changed = 0
+        now = time.time()
         for target in targets:
             try:
                 overwrite = voice_channel.overwrites_for(target)
+                key = (guild.id, voice_channel.id, target.id)
                 if should_activate:
                     overwrite.use_soundboard = False
                     await voice_channel.set_permissions(target, overwrite=overwrite, reason="modo censura dj trigger")
+                    self._dj_expirations[key] = now + _DJ_DURATION_SECONDS
+                    self.bot.loop.create_task(self._expire_dj_block_later(guild.id, voice_channel.id, target.id, _DJ_DURATION_SECONDS))
                 else:
+                    self._dj_expirations.pop(key, None)
                     overwrite.use_soundboard = None
                     if overwrite.is_empty():
                         await voice_channel.set_permissions(target, overwrite=None, reason="modo censura dj trigger")
