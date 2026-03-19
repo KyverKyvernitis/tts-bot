@@ -43,7 +43,7 @@ def render_message_tts_text(
     video_extensions: tuple[str, ...],
 ) -> str:
     text = _replace_custom_emojis_for_tts(raw_text)
-    attachments = attachments
+    attachments = list(getattr(message, "attachments", None) or [])
 
     has_mentions_or_links = any(token in text for token in ("<@", "<@&", "<#", "http://", "https://", "www."))
     if not has_mentions_or_links:
