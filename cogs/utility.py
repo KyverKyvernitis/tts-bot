@@ -9,6 +9,7 @@ from discord.ext import commands
 
 import config
 from .tts.aliases import format_prefixed_aliases, matches_prefixed_command
+from .tts.utils.app_commands import fetch_root_command_ids_cached, slash_mention
 
 
 HELP_EXPIRE_AFTER_SECONDS = 180.0
@@ -552,10 +553,7 @@ class Utility(commands.Cog):
                 f"**Deduplicadas:** `{int(tts_metrics.get('queue_deduplicated', 0) or 0)}`\n"
                 f"**Descartadas:** `{int(tts_metrics.get('queue_dropped', 0) or 0)}`\n"
                 f"**Espera média:** `{self._format_ms(tts_metrics.get('avg_queue_wait_ms'))}`\n"
-                f"**Despacho médio:** `{self._format_ms(tts_metrics.get('avg_dispatch_ms'))}`\n"
-                f"**Source setup:** `{self._format_ms(tts_metrics.get('avg_source_setup_ms'))}`\n"
-                f"**Play call:** `{self._format_ms(tts_metrics.get('avg_play_call_ms'))}`\n"
-                f"**Total até tocar:** `{self._format_ms(tts_metrics.get('avg_total_to_playback_ms'))}`"
+                f"**Despacho médio:** `{self._format_ms(tts_metrics.get('avg_dispatch_ms'))}`"
             ),
             inline=True,
         )
