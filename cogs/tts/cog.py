@@ -976,7 +976,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return guild.voice_client
 
     async def _should_block_for_voice_bot(self, guild: discord.Guild, voice_channel) -> bool:
-        return await self._block_voice_bot_enabled(guild.id) and self._target_voice_bot_in_channel(voice_channel)
+        # Legacy toggle removed: nunca mais bloquear o TTS por presença de outro bot na call.
+        return False
 
     async def _disconnect_and_clear(self, guild: discord.Guild):
         state = self._get_state(guild.id)
