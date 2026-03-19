@@ -460,7 +460,6 @@ class AntiMzkCog(commands.Cog):
                 f"Afetados agora: **{affected_count}**"
             )
         embed = self._make_embed(title, description, ok=not activated)
-        embed.set_footer(text="Trigger: dj • Staffs não são afetados")
         try:
             await message.channel.send(embed=embed)
         except Exception:
