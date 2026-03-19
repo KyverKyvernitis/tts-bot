@@ -552,7 +552,10 @@ class Utility(commands.Cog):
                 f"**Deduplicadas:** `{int(tts_metrics.get('queue_deduplicated', 0) or 0)}`\n"
                 f"**Descartadas:** `{int(tts_metrics.get('queue_dropped', 0) or 0)}`\n"
                 f"**Espera média:** `{self._format_ms(tts_metrics.get('avg_queue_wait_ms'))}`\n"
-                f"**Despacho médio:** `{self._format_ms(tts_metrics.get('avg_dispatch_ms'))}`"
+                f"**Despacho médio:** `{self._format_ms(tts_metrics.get('avg_dispatch_ms'))}`\n"
+                f"**Source setup:** `{self._format_ms(tts_metrics.get('avg_source_setup_ms'))}`\n"
+                f"**Play call:** `{self._format_ms(tts_metrics.get('avg_play_call_ms'))}`\n"
+                f"**Total até tocar:** `{self._format_ms(tts_metrics.get('avg_total_to_playback_ms'))}`"
             ),
             inline=True,
         )
