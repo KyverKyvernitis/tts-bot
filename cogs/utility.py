@@ -120,6 +120,7 @@ class HelpPaginatorView(discord.ui.View):
 class Utility(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._app_command_id_cache: dict[object, tuple[float, dict[str, int]]] = {}
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
@@ -173,6 +174,22 @@ class Utility(commands.Cog):
                 if not name or not cmd_id or name in command_ids:
                     continue
                 command_ids[name] = int(cmd_id)
+        return command_ids
+
+    async def _fetch_root_command_ids_cached(self, guild: discord.Guild | None) -> dict[str, int]:
+        cache_key = int(guild.id) if guild is not None else 0
+        now = time.monotonic()
+        cached = self._app_command_id_cache.get(cache_key)
+        if cached is not None:
+            expires_at, command_ids = cached
+            if now < expires_at:
+                return dict(command_ids)
+
+        command_ids = await self._fetch_root_command_ids(guild)
+        if command_ids:
+            self._app_command_id_cache[cache_key] = (now + 600.0, dict(command_ids))
+        elif cached is not None:
+            return dict(cached[1])
         return command_ids
 
     def _slash_mention(self, root_ids: dict[str, int], *, root: str, path: str) -> str:
@@ -415,7 +432,7 @@ class Utility(commands.Cog):
         ephemeral: bool = False,
     ):
         prefixes = await self._get_prefix_data(guild)
-        root_ids = await self._fetch_root_command_ids(guild)
+        root_ids = await self._fetch_root_command_ids_cached(guild)
         pages = self._build_help_embeds(guild=guild, prefixes=prefixes, root_ids=root_ids)
         view = HelpPaginatorView(
             self,
