@@ -176,6 +176,13 @@ class AntiMzkCog(commands.Cog):
         staff_role = self._get_staff_role(guild)
         return staff_role is not None and staff_role in getattr(member, "roles", [])
 
+    def _is_focused_non_staff_member(self, member: discord.Member) -> bool:
+        guild = getattr(member, "guild", None)
+        if guild is None or self._is_staff_member(member):
+            return False
+        focus_map = self.db.get_modo_censura_focus_map(guild.id)
+        return bool(focus_map and member.id in focus_map)
+
     async def _set_anti_mzk_only_kick_members(self, guild_id: int, value: bool):
         if hasattr(self.db, "_get_guild_doc") and hasattr(self.db, "_save_guild_doc"):
             doc = self.db._get_guild_doc(guild_id)
@@ -487,6 +494,9 @@ class AntiMzkCog(commands.Cog):
             return True
 
         if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+
+        if self._is_focused_non_staff_member(message.author):
             return True
 
         author_voice = getattr(message.author, "voice", None)
@@ -910,9 +920,7 @@ class AntiMzkCog(commands.Cog):
 
         target_ids = {member.id for member in targets}
         author_is_target = message.author.id in target_ids
-        focus_map = self.db.get_modo_censura_focus_map(message.guild.id)
-        author_is_focused = bool(focus_map and message.author.id in focus_map)
-        author_can_use_triggers = (not author_is_focused) or self._is_staff_member(message.author)
+        author_can_use_triggers = not self._is_focused_non_staff_member(message.author)
 
         did_trigger_action = False
 
