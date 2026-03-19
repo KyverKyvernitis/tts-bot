@@ -156,47 +156,14 @@ class Utility(commands.Cog):
         defaults["gcloud_prefix"] = str(guild_defaults.get("gcloud_prefix", defaults["gcloud_prefix"]) or defaults["gcloud_prefix"])
         return defaults
 
-    async def _fetch_root_command_ids(self, guild: discord.Guild | None) -> dict[str, int]:
-        command_ids: dict[str, int] = {}
-        fetch_targets: list[discord.Guild | None] = []
-        if guild is not None:
-            fetch_targets.append(guild)
-        fetch_targets.append(None)
-
-        for target in fetch_targets:
-            try:
-                commands_list = await self.bot.tree.fetch_commands(guild=target)
-            except Exception:
-                continue
-            for cmd in commands_list:
-                name = str(getattr(cmd, "name", "") or "").strip()
-                cmd_id = getattr(cmd, "id", None)
-                if not name or not cmd_id or name in command_ids:
-                    continue
-                command_ids[name] = int(cmd_id)
-        return command_ids
-
     async def _fetch_root_command_ids_cached(self, guild: discord.Guild | None) -> dict[str, int]:
-        cache_key = int(guild.id) if guild is not None else 0
-        now = time.monotonic()
-        cached = self._app_command_id_cache.get(cache_key)
-        if cached is not None:
-            expires_at, command_ids = cached
-            if now < expires_at:
-                return dict(command_ids)
-
-        command_ids = await self._fetch_root_command_ids(guild)
-        if command_ids:
-            self._app_command_id_cache[cache_key] = (now + 600.0, dict(command_ids))
-        elif cached is not None:
-            return dict(cached[1])
-        return command_ids
-
-    def _slash_mention(self, root_ids: dict[str, int], *, root: str, path: str) -> str:
-        cmd_id = root_ids.get(root)
-        if cmd_id:
-            return f"</{path}:{cmd_id}>"
-        return f"`/{path}`"
+        return await fetch_root_command_ids_cached(
+            self.bot,
+            self._app_command_id_cache,
+            guild,
+            ttl_seconds=600.0,
+            include_global_fallback=True,
+        )
 
     def _build_help_embeds(self, *, guild: discord.Guild | None, prefixes: dict[str, str], root_ids: dict[str, int]) -> list[discord.Embed]:
         bot_prefix = prefixes["bot_prefix"]
@@ -204,12 +171,12 @@ class Utility(commands.Cog):
         edge_prefix = prefixes["edge_prefix"]
         gcloud_prefix = prefixes["gcloud_prefix"]
 
-        help_slash = self._slash_mention(root_ids, root="help", path="help")
-        ping_slash = self._slash_mention(root_ids, root="ping", path="ping")
-        tts_menu_slash = self._slash_mention(root_ids, root="tts", path="tts menu")
-        tts_status_slash = self._slash_mention(root_ids, root="tts", path="tts status")
-        tts_user_slash = self._slash_mention(root_ids, root="tts", path="tts usuario")
-        tts_server_menu_slash = self._slash_mention(root_ids, root="tts", path="tts server menu")
+        help_slash = slash_mention(root_ids, root="help", path="help")
+        ping_slash = slash_mention(root_ids, root="ping", path="ping")
+        tts_menu_slash = slash_mention(root_ids, root="tts", path="tts menu")
+        tts_status_slash = slash_mention(root_ids, root="tts", path="tts status")
+        tts_user_slash = slash_mention(root_ids, root="tts", path="tts usuario")
+        tts_server_menu_slash = slash_mention(root_ids, root="tts", path="tts server menu")
 
         prefix_help = format_prefixed_aliases(bot_prefix, "help")
         prefix_panel = format_prefixed_aliases(bot_prefix, "panel_user")
@@ -438,7 +405,7 @@ class Utility(commands.Cog):
             self,
             owner_id=owner.id,
             pages=pages,
-            command_mention=self._slash_mention(root_ids, root="help", path="help"),
+            command_mention=slash_mention(root_ids, root="help", path="help"),
             prefix_hint=f"`{prefixes['bot_prefix']}help`",
         )
 
