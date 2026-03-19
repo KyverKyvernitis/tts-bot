@@ -36,16 +36,7 @@ async def build_message_tts_payload(
         return None
 
     resolved = dict(resolved or {})
-    only_target_enabled = await cog._only_target_user_enabled(message.guild.id)
-    target_user_id = getattr(config, "ONLY_TTS_USER_ID", 0)
     forced_gtts = False
-    if only_target_enabled and target_user_id and message.author.id != target_user_id:
-        resolved["engine"] = "gtts"
-        resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
-        resolved["voice"] = ""
-        resolved["rate"] = "+0%"
-        resolved["pitch"] = "+0Hz"
-        forced_gtts = True
 
     if forced_engine == "gtts":
         resolved["engine"] = "gtts"
