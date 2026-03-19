@@ -370,7 +370,7 @@ class AntiMzkCog(commands.Cog):
         )
         embed = self._make_embed(title, description, ok=not activated)
         try:
-            await message.channel.send(embed=embed, delete_after=_ROLE_TOGGLE_DELETE_AFTER)
+            await message.channel.send(embed=embed)
         except Exception:
             pass
 
@@ -417,7 +417,7 @@ class AntiMzkCog(commands.Cog):
                 ok=False,
             )
             try:
-                await message.channel.send(embed=embed, delete_after=_ROLE_TOGGLE_DELETE_AFTER)
+                await message.channel.send(embed=embed)
             except Exception:
                 pass
             return True
@@ -712,10 +712,15 @@ class AntiMzkCog(commands.Cog):
 
         target_ids = {member.id for member in targets}
         author_is_target = message.author.id in target_ids
+        focus_map = self.db.get_modo_censura_focus_map(message.guild.id)
+        author_is_focused = bool(focus_map and message.author.id in focus_map)
+        author_can_use_triggers = (not author_is_focused) or self._is_staff_member(message.author)
 
         did_trigger_action = False
 
         if TRIGGER_WORD and TRIGGER_WORD in content:
+            if not author_can_use_triggers:
+                return
             did_trigger_action = True
             for target in targets:
                 if target.voice and target.voice.channel:
@@ -725,6 +730,8 @@ class AntiMzkCog(commands.Cog):
                         pass
 
         if MUTE_TOGGLE_WORD and MUTE_TOGGLE_WORD in content:
+            if not author_can_use_triggers:
+                return
             did_trigger_action = True
             if author_is_target:
                 return
