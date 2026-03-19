@@ -514,8 +514,15 @@ class AntiMzkCog(commands.Cog):
         for target in targets:
             try:
                 overwrite = voice_channel.overwrites_for(target)
-                overwrite.use_soundboard = False if should_activate else None
-                await voice_channel.set_permissions(target, overwrite=overwrite, reason="modo censura dj trigger")
+                if should_activate:
+                    overwrite.use_soundboard = False
+                    await voice_channel.set_permissions(target, overwrite=overwrite, reason="modo censura dj trigger")
+                else:
+                    overwrite.use_soundboard = None
+                    if overwrite.is_empty():
+                        await voice_channel.set_permissions(target, overwrite=None, reason="modo censura dj trigger")
+                    else:
+                        await voice_channel.set_permissions(target, overwrite=overwrite, reason="modo censura dj trigger")
                 changed += 1
             except Exception:
                 pass
