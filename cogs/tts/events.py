@@ -6,7 +6,6 @@ import time
 import discord
 from discord.ext import commands
 
-from config import TTS_ENABLED
 from .audio import QueueItem
 from .helpers import (
     EDGE_DEFAULT_VOICE,

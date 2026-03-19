@@ -2289,13 +2289,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return await apply_auto_leave_from_panel(self, interaction, enabled, source_panel_message)
 
 
-    async def _apply_only_target_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
-        return await apply_only_target_from_panel(self, interaction, enabled, source_panel_message)
-
-
-    async def _apply_block_voice_bot_from_panel(self, interaction: discord.Interaction, enabled: bool, source_panel_message: discord.Message | None = None):
-        return await apply_block_voice_bot_from_panel(self, interaction, enabled, source_panel_message)
-
     async def _join_from_panel(self, interaction: discord.Interaction):
         if not interaction.guild:
             await interaction.response.send_message(
