@@ -6,7 +6,7 @@ import time
 import discord
 from discord.ext import commands
 
-from config import BLOCK_VOICE_BOT_ID, TTS_ENABLED
+from config import TTS_ENABLED
 from .audio import QueueItem
 from .helpers import (
     EDGE_DEFAULT_VOICE,
@@ -278,38 +278,3 @@ class TTSVoiceEventsMixin:
             resolved=resolved,
         )
 
-    @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        if not member.guild:
-            return
-
-        guild = member.guild
-        vc = guild.voice_client
-
-        if vc and vc.channel and isinstance(vc.channel, (discord.VoiceChannel, discord.StageChannel)):
-            humans = [m for m in vc.channel.members if not m.bot]
-            if len(humans) == 0:
-                await self._disconnect_and_clear(guild)
-                print(f"[tts_voice] Saindo da call na guild {guild.id} por não haver humanos no canal.")
-                return
-
-        if not BLOCK_VOICE_BOT_ID or member.id != BLOCK_VOICE_BOT_ID:
-            return
-
-        db = getattr(self.bot, "settings_db", None)
-        if db is None or not db.block_voice_bot_enabled(guild.id):
-            return
-
-        vc = guild.voice_client
-        if not vc or not vc.channel:
-            return
-
-        current_channel = vc.channel
-        if not isinstance(current_channel, (discord.VoiceChannel, discord.StageChannel)):
-            return
-
-        joined_same_channel = after.channel and after.channel.id == current_channel.id
-        moved_to_same_channel = before.channel != after.channel and after.channel and after.channel.id == current_channel.id
-
-        if joined_same_channel or moved_to_same_channel:
-            await self._disconnect_if_blocked(guild)

@@ -409,14 +409,10 @@ class ToggleSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         enabled = self.values[0] == "true"
         source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
-        if self.toggle_name == "only_target_user":
-            await self.cog._apply_only_target_from_panel(interaction, enabled, source_panel_message=source_panel_message)
-        elif self.toggle_name == "announce_author":
+        if self.toggle_name == "announce_author":
             await self.cog._apply_announce_author_from_panel(interaction, enabled, source_panel_message=source_panel_message)
-        elif self.toggle_name == "auto_leave":
-            await self.cog._apply_auto_leave_from_panel(interaction, enabled, source_panel_message=source_panel_message)
         else:
-            await self.cog._apply_block_voice_bot_from_panel(interaction, enabled, source_panel_message=source_panel_message)
+            await self.cog._apply_auto_leave_from_panel(interaction, enabled, source_panel_message=source_panel_message)
 
 
 
@@ -1052,13 +1048,6 @@ class TTSTogglePanelView(_BaseTTSView):
 
     def _target_owner(self, interaction: discord.Interaction) -> int:
         return interaction.user.id if self.owner_id == 0 else self.owner_id
-    @discord.ui.button(label="Bloqueio por outro bot", style=discord.ButtonStyle.secondary, emoji="🤖", row=0)
-    async def block_voice_bot_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Bloqueio por outro bot", "Escolha se o bot deve sair ou bloquear quando o outro bot de voz entrar na call.", ToggleSelect(self.cog, "block_voice_bot")).send(interaction)
-
-    @discord.ui.button(label="Modo Cuca", style=discord.ButtonStyle.secondary, emoji="👑", row=0)
-    async def only_target_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _SimpleSelectView(self.cog, self._target_owner(interaction), self.guild_id, "Modo Cuca", "Quando ativado, a Cuca continua normal e os outros usuários são forçados para gtts.", ToggleSelect(self.cog, "only_target_user")).send(interaction)
 
     @discord.ui.button(label="Auto leave", style=discord.ButtonStyle.secondary, emoji="⏏️", row=1)
     async def auto_leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):

@@ -51,7 +51,6 @@ from .utils.embed import (
 from .prefix import dispatch_prefix_control_command
 from .utils.message_render import render_message_tts_text, append_tts_descriptions
 from .utils.message_gate import analyze_message_for_tts
-from .utils.message_payload import build_message_tts_payload
 from .utils.resolution import (
     gcloud_language_priority,
     build_gcloud_language_options_from_catalog,
@@ -115,8 +114,6 @@ from .utils.panel_apply import (
     _apply_spoken_name_from_modal as apply_spoken_name_from_modal,
     _apply_announce_author_from_panel as apply_announce_author_from_panel,
     _apply_auto_leave_from_panel as apply_auto_leave_from_panel,
-    _apply_only_target_from_panel as apply_only_target_from_panel,
-    _apply_block_voice_bot_from_panel as apply_block_voice_bot_from_panel,
 )
 
 USER_CONFIG_ACTION_CHOICES = [
@@ -965,39 +962,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             print(f"[tts_voice] Erro ao ler {public_key} da guild {guild_id}: {e}")
             return default
 
-    async def _only_target_user_enabled(self, guild_id: int) -> bool:
-        return await self._get_guild_toggle_value(
-            guild_id,
-            public_key="only_target_user",
-            raw_key="only_target_user_enabled",
-            default=False,
-        )
-
-    async def _block_voice_bot_enabled(self, guild_id: int) -> bool:
-        return await self._get_guild_toggle_value(
-            guild_id,
-            public_key="block_voice_bot",
-            raw_key="block_voice_bot_enabled",
-            default=False,
-        )
-
-    def _target_voice_bot_id(self) -> Optional[int]:
-        for name in ("VOICE_BOT_ID", "BLOCK_VOICE_BOT_ID"):
-            value = getattr(config, name, None)
-            if value:
-                try:
-                    return int(value)
-                except Exception:
-                    pass
-        return None
-
-    def _target_voice_bot_in_channel(self, voice_channel) -> bool:
-        target_bot_id = self._target_voice_bot_id()
-        if not target_bot_id or voice_channel is None:
-            return False
-        return any(member.id == target_bot_id for member in getattr(voice_channel, "members", []))
-
-
     def _get_voice_client_for_guild(self, guild: discord.Guild | None) -> Optional[discord.VoiceClient]:
         if guild is None:
             return None
@@ -1205,30 +1169,60 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
         voice_channel = author_voice.channel
 
-        blocked = await self._should_block_for_voice_bot(message.guild, voice_channel)
-        if blocked:
-            print(f"[tts_voice] bloqueado | outro bot de voz detectado | guild={message.guild.id} canal_voz={voice_channel.id}")
-            await self._disconnect_and_clear(message.guild)
+        db = self._get_db()
+        if db is None:
+            print("[tts_voice] ignorado | settings_db indisponível")
             return
 
-        payload = await build_message_tts_payload(
-            self,
-            message,
-            guild_defaults=guild_defaults,
-            active_prefix=active_prefix,
-            forced_engine=forced_engine,
+        try:
+            resolved = await self._maybe_await(db.resolve_tts(message.guild.id, message.author.id))
+        except Exception as e:
+            print(f"[tts_voice] erro em resolve_tts | guild={message.guild.id} user={message.author.id} erro={e}")
+            return
+
+        forced_gtts = False
+
+        if forced_engine == "gtts":
+            resolved["engine"] = "gtts"
+            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
+        elif forced_engine == "edge":
+            resolved["engine"] = "edge"
+            resolved["voice"] = resolved.get("voice") or "pt-BR-FranciscaNeural"
+            resolved["rate"] = resolved.get("rate") or "+0%"
+            resolved["pitch"] = resolved.get("pitch") or "+0Hz"
+        elif forced_engine == "gcloud":
+            resolved["engine"] = "gcloud"
+            resolved["language"] = resolved.get("gcloud_language") or str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR")
+            resolved["voice"] = resolved.get("gcloud_voice") or str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A")
+            resolved["rate"] = resolved.get("gcloud_rate") or str(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0) or 1.0)
+            resolved["pitch"] = resolved.get("gcloud_pitch") or str(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0) or 0.0)
+
+        text = self._render_tts_text(message, message.content[len(active_prefix):].strip())
+        text = self._apply_author_prefix_if_needed(
+            message.guild.id,
+            message.author,
+            text,
+            enabled=self._guild_announce_author_enabled(guild_defaults),
         )
-        if payload is None:
+        if not text:
+            print("[tts_voice] ignorado | texto vazio após prefixo")
             return
-
-        resolved = payload.resolved
-        forced_gtts = payload.forced_gtts
 
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = getattr(message.channel, "id", None)
         enqueued, dropped_count, deduplicated = await self._enqueue_tts_item(
             message.guild.id,
-            payload.queue_item,
+            QueueItem(
+                guild_id=message.guild.id,
+                channel_id=voice_channel.id,
+                author_id=message.author.id,
+                text=text,
+                engine=resolved["engine"],
+                voice=resolved["voice"],
+                language=resolved["language"],
+                rate=resolved["rate"],
+                pitch=resolved["pitch"],
+            ),
         )
         print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
         if deduplicated:
@@ -1255,10 +1249,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             except Exception as e:
                 print(f"[tts_voice] falha ao reaplicar self_deaf no voice_state_update | guild={guild.id} channel={getattr(after.channel, 'id', None)} error={e}")
 
-        if await self._block_voice_bot_enabled(guild.id) and self._target_voice_bot_in_channel(vc.channel):
-            print(f"[tts_voice] Bot de voz alvo detectado na call | guild={guild.id} channel={vc.channel.id} target_bot_id={self._target_voice_bot_id()}")
-            await self._disconnect_and_clear(guild)
-            return
         await self._disconnect_if_alone_or_only_bots(guild)
 
 
@@ -1856,8 +1846,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         history_text = self._format_history_entries(last_changes or [], viewer_user_id=viewer_user_id or user_id, message_id=message_id)
         return build_toggle_embed(
             auto_leave_enabled=bool(guild_defaults.get("auto_leave", True)),
-            only_target_enabled=bool(guild_defaults.get("only_target_user", False)),
-            block_voice_bot_enabled=bool(guild_defaults.get("block_voice_bot", False)),
             history_text=history_text,
         )
 
@@ -2323,14 +2311,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             return
 
-        blocked = await self._should_block_for_voice_bot(interaction.guild, user_voice.channel)
-        if blocked:
-            await interaction.response.send_message(
-                embed=self._make_embed("Bloqueado", "Não posso entrar porque o outro bot de voz já está nessa call.", ok=False),
-                ephemeral=True,
-            )
-            return
-
         vc = await self._ensure_connected(interaction.guild, user_voice.channel)
         if vc is None or not vc.is_connected():
             await interaction.response.send_message(
@@ -2417,12 +2397,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         author_voice = getattr(message.author, "voice", None)
         if author_voice is None or author_voice.channel is None:
             embed = self._make_embed("Entre em uma call", "Você precisa estar em uma call para usar esse comando", ok=False)
-            await message.channel.send(embed=embed)
-            return
-
-        blocked = await self._should_block_for_voice_bot(message.guild, author_voice.channel)
-        if blocked:
-            embed = self._make_embed("Entrada bloqueada", "Não posso entrar porque o outro bot de voz já está nessa call", ok=False)
             await message.channel.send(embed=embed)
             return
 
@@ -2736,25 +2710,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view.attach_message(msg)
         else:
             view.message = msg
-
-
-    @app_commands.describe(enabled="true para ativar, false para desativar")
-    async def toggle_only_target_user(self, interaction: discord.Interaction, enabled: bool):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_kick_members(interaction):
-            return
-        db = self._get_db()
-        if db is None:
-            await self._respond(interaction, embed=self._make_embed("Banco indisponível", "Não consegui acessar o banco de dados agora.", ok=False), ephemeral=True)
-            return
-        await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, only_target_user=bool(enabled)))
-        target_user_id = getattr(config, "ONLY_TTS_USER_ID", 0)
-        if enabled:
-            desc = "Só a Cuca pode falar nesse caralho.\n\n" + f"Todo mundo que não for o ID `{target_user_id}` será forçado para `gtts`."
-        else:
-            desc = "Agora os betinhas podem usar também.\n\nTodo mundo voltou a usar as próprias configurações."
-        await self._respond(interaction, embed=self._make_embed("Modo Cuca atualizado", desc, ok=True), ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
