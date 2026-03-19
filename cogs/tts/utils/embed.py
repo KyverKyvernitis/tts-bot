@@ -9,10 +9,8 @@ def build_expired_panel_embed(*, slash_mention: str, prefix_hint: str) -> discor
     return make_embed("Esse painel expirou", f"Use o comando de barra {slash_mention} ou prefixo {prefix_hint} para abrir outro painel.", ok=False)
 
 
-def build_toggle_embed(*, auto_leave_enabled: bool, only_target_enabled: bool, block_voice_bot_enabled: bool, history_text: str = "") -> discord.Embed:
-    embed = discord.Embed(title="Painel de toggles do TTS", description="Use os botões abaixo para ligar ou desligar os modos especiais do TTS.", color=discord.Color.blurple())
-    embed.add_field(name="Bloqueio por outro bot", value="`Ativado`" if bool(block_voice_bot_enabled) else "`Desativado`", inline=True)
-    embed.add_field(name="Modo Cuca", value="`Ativado`" if bool(only_target_enabled) else "`Desativado`", inline=True)
+def build_toggle_embed(*, auto_leave_enabled: bool, history_text: str = "") -> discord.Embed:
+    embed = discord.Embed(title="Painel de toggles do TTS", description="Use o botão abaixo para ligar ou desligar o Auto Leave do TTS.", color=discord.Color.blurple())
     embed.add_field(name="Auto leave", value="`Ativado`" if bool(auto_leave_enabled) else "`Desativado`", inline=True)
     if history_text:
         embed.add_field(name="Últimas alterações", value=history_text, inline=False)
