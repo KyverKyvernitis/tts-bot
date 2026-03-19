@@ -150,7 +150,7 @@ class TTSAudioMixin:
 
         await state.queue.put(item)
         self._increment_pending_signature(state, item)
-        self._record_queue_enqueue(dropped=dropped, deduplicated=False)
+        self._record_queue_enqueue(dropped=dropped, deduplicated=False, queue_depth=state.queue.qsize())
         return True, dropped, deduplicated
 
     def _ensure_worker(self, guild_id: int) -> None:
@@ -300,18 +300,18 @@ class TTSAudioMixin:
                 "cache_hits": 0,
                 "cache_misses": 0,
                 "cache_stores": 0,
-                "payload_total_ms": 0.0,
-                "payload_samples": 0,
                 "queue_wait_total_ms": 0.0,
                 "queue_wait_samples": 0,
                 "dispatch_total_ms": 0.0,
                 "dispatch_samples": 0,
-                "start_to_playback_total_ms": 0.0,
-                "start_to_playback_samples": 0,
                 "playback_total_ms": 0.0,
                 "playback_samples": 0,
-                "synth_total_ms": 0.0,
-                "synth_samples": 0,
+                "total_to_playback_total_ms": 0.0,
+                "total_to_playback_samples": 0,
+                "queue_depth_total": 0,
+                "queue_depth_samples": 0,
+                "queue_depth_max": 0,
+                "prefetch_started": 0,
                 "boot_warmups": 0,
                 "last_warmup_started_at": None,
                 "last_warmup_completed_at": None,
@@ -365,7 +365,7 @@ class TTSAudioMixin:
         else:
             state.pending_signatures[signature] = count - 1
 
-    def _record_queue_enqueue(self, *, dropped: int = 0, deduplicated: bool = False) -> None:
+    def _record_queue_enqueue(self, *, dropped: int = 0, deduplicated: bool = False, queue_depth: int | None = None) -> None:
         metrics = self._get_metrics_store()
         if deduplicated:
             metrics["queue_deduplicated"] = int(metrics.get("queue_deduplicated", 0) or 0) + 1
@@ -373,6 +373,15 @@ class TTSAudioMixin:
         metrics["queue_enqueued"] = int(metrics.get("queue_enqueued", 0) or 0) + 1
         if dropped:
             metrics["queue_dropped"] = int(metrics.get("queue_dropped", 0) or 0) + int(dropped)
+        if queue_depth is not None:
+            queue_depth = max(0, int(queue_depth))
+            metrics["queue_depth_total"] = int(metrics.get("queue_depth_total", 0) or 0) + queue_depth
+            metrics["queue_depth_samples"] = int(metrics.get("queue_depth_samples", 0) or 0) + 1
+            metrics["queue_depth_max"] = max(int(metrics.get("queue_depth_max", 0) or 0), queue_depth)
+
+    def _record_prefetch_started(self) -> None:
+        metrics = self._get_metrics_store()
+        metrics["prefetch_started"] = int(metrics.get("prefetch_started", 0) or 0) + 1
 
     def _record_cache_hit(self, engine: str) -> None:
         metrics = self._get_metrics_store()
@@ -469,21 +478,22 @@ class TTSAudioMixin:
                 body += f"\nDuração até falhar: {round(float(duration_ms), 2)} ms"
             self._maybe_send_engine_alert(f"fail:{engine}", "error", title, body)
 
-    def _record_message_payload_timing(self, payload_ms: float) -> None:
-        self._record_average_metric("payload_total_ms", "payload_samples", payload_ms)
-
-    def _record_synth_timing(self, synth_ms: float) -> None:
-        self._record_average_metric("synth_total_ms", "synth_samples", synth_ms)
-
-    def _record_queue_timing(self, *, queue_wait_ms: float | None = None, dispatch_ms: float | None = None, start_to_playback_ms: float | None = None, playback_ms: float | None = None) -> None:
+    def _record_queue_timing(
+        self,
+        *,
+        queue_wait_ms: float | None = None,
+        dispatch_ms: float | None = None,
+        playback_ms: float | None = None,
+        total_to_playback_ms: float | None = None,
+    ) -> None:
         if queue_wait_ms is not None:
             self._record_average_metric("queue_wait_total_ms", "queue_wait_samples", queue_wait_ms)
         if dispatch_ms is not None:
             self._record_average_metric("dispatch_total_ms", "dispatch_samples", dispatch_ms)
-        if start_to_playback_ms is not None:
-            self._record_average_metric("start_to_playback_total_ms", "start_to_playback_samples", start_to_playback_ms)
         if playback_ms is not None:
             self._record_average_metric("playback_total_ms", "playback_samples", playback_ms)
+        if total_to_playback_ms is not None:
+            self._record_average_metric("total_to_playback_total_ms", "total_to_playback_samples", total_to_playback_ms)
 
     def _hydrate_cache_index(self) -> None:
         cache_order = self._get_global_cache_order()
@@ -548,12 +558,13 @@ class TTSAudioMixin:
             "cache_hits": int(metrics.get("cache_hits", 0) or 0),
             "cache_misses": int(metrics.get("cache_misses", 0) or 0),
             "cache_stores": int(metrics.get("cache_stores", 0) or 0),
-            "avg_payload_ms": round((float(metrics.get("payload_total_ms", 0.0) or 0.0) / int(metrics.get("payload_samples", 0) or 1)), 2) if int(metrics.get("payload_samples", 0) or 0) else 0.0,
             "avg_queue_wait_ms": round((float(metrics.get("queue_wait_total_ms", 0.0) or 0.0) / int(metrics.get("queue_wait_samples", 0) or 1)), 2) if int(metrics.get("queue_wait_samples", 0) or 0) else 0.0,
             "avg_dispatch_ms": round((float(metrics.get("dispatch_total_ms", 0.0) or 0.0) / int(metrics.get("dispatch_samples", 0) or 1)), 2) if int(metrics.get("dispatch_samples", 0) or 0) else 0.0,
-            "avg_start_to_playback_ms": round((float(metrics.get("start_to_playback_total_ms", 0.0) or 0.0) / int(metrics.get("start_to_playback_samples", 0) or 1)), 2) if int(metrics.get("start_to_playback_samples", 0) or 0) else 0.0,
             "avg_playback_ms": round((float(metrics.get("playback_total_ms", 0.0) or 0.0) / int(metrics.get("playback_samples", 0) or 1)), 2) if int(metrics.get("playback_samples", 0) or 0) else 0.0,
-            "avg_synth_ms_overall": round((float(metrics.get("synth_total_ms", 0.0) or 0.0) / int(metrics.get("synth_samples", 0) or 1)), 2) if int(metrics.get("synth_samples", 0) or 0) else 0.0,
+            "avg_total_to_playback_ms": round((float(metrics.get("total_to_playback_total_ms", 0.0) or 0.0) / int(metrics.get("total_to_playback_samples", 0) or 1)), 2) if int(metrics.get("total_to_playback_samples", 0) or 0) else 0.0,
+            "avg_queue_depth_at_enqueue": round((float(metrics.get("queue_depth_total", 0.0) or 0.0) / int(metrics.get("queue_depth_samples", 0) or 1)), 2) if int(metrics.get("queue_depth_samples", 0) or 0) else 0.0,
+            "max_queue_depth_seen": int(metrics.get("queue_depth_max", 0) or 0),
+            "prefetch_started": int(metrics.get("prefetch_started", 0) or 0),
             "boot_warmups": int(metrics.get("boot_warmups", 0) or 0),
             "last_warmup_duration_ms": metrics.get("last_warmup_duration_ms"),
             "queued_items_current": int(sum(state.queue.qsize() for state in self.guild_states.values())),
@@ -922,7 +933,6 @@ class TTSAudioMixin:
             self._record_engine_failure(engine, exc, duration_ms=duration_ms)
             raise
         duration_ms = (time.monotonic() - started_at) * 1000.0
-        self._record_synth_timing(duration_ms)
         self._record_engine_success(engine, duration_ms)
         return result
 
@@ -1109,6 +1119,8 @@ class TTSAudioMixin:
         except asyncio.QueueEmpty:
             return None, None
 
+        setattr(prefetched_item, "_dequeued_at_monotonic", time.monotonic())
+        self._record_prefetch_started()
         prefetched_audio_task = asyncio.create_task(self._resolve_audio_path(state, prefetched_item))
         return prefetched_item, prefetched_audio_task
 
@@ -1139,6 +1151,7 @@ class TTSAudioMixin:
                             timeout = min(timeout, max(1.0, state.warmed_until - time.monotonic()))
                         item = await asyncio.wait_for(state.queue.get(), timeout=timeout)
                         self._decrement_pending_signature(state, item)
+                        setattr(item, "_dequeued_at_monotonic", time.monotonic())
                         fetched_from_queue = True
                     except asyncio.TimeoutError:
                         if state.warmed_until > time.monotonic():
@@ -1168,6 +1181,9 @@ class TTSAudioMixin:
                     else:
                         active_audio_task = audio_task
 
+                    if prefetched_item is None and not state.queue.empty():
+                        prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
+
                     vc = await connect_task
                     if vc is None:
                         if own_audio_task is not None and not own_audio_task.done():
@@ -1179,28 +1195,27 @@ class TTSAudioMixin:
 
                     current_path, should_cleanup = await active_audio_task
 
-                    if prefetched_item is None:
-                        prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
-
-                    dequeued_at = time.monotonic()
-                    queue_wait_ms = max(0.0, (dequeued_at - float(getattr(item, "enqueued_at_monotonic", dequeued_at))) * 1000.0)
-                    before_playback_at = time.monotonic()
-                    dispatch_ms = max(0.0, (before_playback_at - dequeued_at) * 1000.0)
-                    start_to_playback_ms = max(0.0, (before_playback_at - float(getattr(item, "enqueued_at_monotonic", before_playback_at))) * 1000.0)
+                    dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
+                    playback_started_at = time.monotonic()
+                    queue_wait_ms = max(0.0, (dequeue_started_at - float(getattr(item, "enqueued_at_monotonic", dequeue_started_at))) * 1000.0)
+                    dispatch_ms = max(0.0, (playback_started_at - dequeue_started_at) * 1000.0)
+                    total_to_playback_ms = max(0.0, (playback_started_at - float(getattr(item, "enqueued_at_monotonic", playback_started_at))) * 1000.0)
                     self._record_queue_timing(
                         queue_wait_ms=queue_wait_ms,
                         dispatch_ms=dispatch_ms,
-                        start_to_playback_ms=start_to_playback_ms,
+                        total_to_playback_ms=total_to_playback_ms,
                     )
-                    self._log_debug(
-                        "[tts_perf] pronto para playback | "
-                        f"guild={guild_id} engine={item.engine} queue_wait_ms={queue_wait_ms:.2f} "
-                        f"dispatch_ms={dispatch_ms:.2f} start_to_playback_ms={start_to_playback_ms:.2f} "
-                        f"text_len={len(item.text)}"
+                    logger.debug(
+                        "[tts_perf] pronto para playback | guild=%s engine=%s queue_wait_ms=%.2f dispatch_ms=%.2f total_to_playback_ms=%.2f text_len=%s",
+                        guild_id,
+                        item.engine,
+                        queue_wait_ms,
+                        dispatch_ms,
+                        total_to_playback_ms,
+                        len(item.text or ""),
                     )
 
                     try:
-                        playback_started_at = time.monotonic()
                         await self._play_file(vc, current_path)
                         playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
                         self._record_queue_timing(playback_ms=playback_duration_ms)
