@@ -21,6 +21,7 @@ from .helpers import (
 
 
 class TTSVoiceEventsMixin:
+    """Mixin legado de compatibilidade. Mantido enxuto para evitar regressões em reaproveitamento futuro."""
     bot: commands.Bot
     edge_voice_names: set[str]
     gtts_languages: dict[str, str]
@@ -210,7 +211,7 @@ class TTSVoiceEventsMixin:
 
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = message.channel.id
-        ok, dropped = await self._enqueue_tts_item(message.guild.id, item)
+        ok, dropped, deduplicated = await self._enqueue_tts_item(message.guild.id, item)
         self._ensure_worker(message.guild.id)
 
         print(
@@ -219,7 +220,7 @@ class TTSVoiceEventsMixin:
         )
         print(
             f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} "
-            f"canal_voz={voice_channel.id} engine={item.engine} dropped={dropped}"
+            f"canal_voz={voice_channel.id} engine={item.engine} dropped={dropped} deduplicated={deduplicated}"
         )
 
     @commands.Cog.listener()

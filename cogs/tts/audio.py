@@ -264,6 +264,19 @@ class TTSAudioMixin:
             setattr(self, "_tts_long_text_repeat_counts", counts)
         return counts
 
+    def _remember_long_text_repeat(self, key: str) -> int:
+        counts = self._get_long_text_repeat_counts()
+        seen_count = int(counts.get(key, 0) or 0) + 1
+        counts[key] = seen_count
+
+        max_entries = max(TTS_AUDIO_CACHE_SIZE * 8, 256)
+        if len(counts) > max_entries:
+            overflow = len(counts) - max_entries
+            for stale_key in list(counts.keys())[:overflow]:
+                counts.pop(stale_key, None)
+
+        return seen_count
+
     def _get_inflight_cache_tasks(self) -> dict[str, asyncio.Task]:
         tasks = getattr(self, "_tts_inflight_cache_tasks", None)
         if tasks is None:
@@ -854,7 +867,7 @@ class TTSAudioMixin:
                 pass
             raise
 
-    async def _resolve_or_generate_cached_audio(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:
+    async def _resolve_or_generate_singleflight_audio(self, state: GuildTTSState, item: QueueItem, *, read_cache: bool, store_in_cache: bool) -> tuple[str, bool]:
         key = self._cache_key(item)
         inflight = self._get_inflight_cache_tasks()
 
@@ -863,14 +876,16 @@ class TTSAudioMixin:
             return await existing
 
         async def _runner() -> tuple[str, bool]:
-            cached = self._try_get_cached_path(state, item)
-            if cached:
-                return cached, False
+            if read_cache:
+                cached = self._try_get_cached_path(state, item)
+                if cached:
+                    return cached, False
 
             generated = await self._generate_audio_file(item)
-            cached_path = await self._store_in_cache(state, item, generated)
-            if cached_path != generated:
-                return cached_path, False
+            if store_in_cache:
+                cached_path = await self._store_in_cache(state, item, generated)
+                if cached_path != generated:
+                    return cached_path, False
             return generated, False
 
         task = asyncio.create_task(_runner())
@@ -922,16 +937,19 @@ class TTSAudioMixin:
         normalized_text = self._get_item_normalized_cache_text(item)
         text_length = len(normalized_text)
         if text_length <= TTS_CACHEABLE_TEXT_MAX_LENGTH:
-            return await self._resolve_or_generate_cached_audio(state, item)
+            return await self._resolve_or_generate_singleflight_audio(
+                state,
+                item,
+                read_cache=True,
+                store_in_cache=True,
+            )
 
         cached = self._try_get_cached_path(state, item)
         if cached:
             return cached, False
 
         key = self._cache_key(item)
-        long_text_counts = self._get_long_text_repeat_counts()
-        seen_count = int(long_text_counts.get(key, 0) or 0) + 1
-        long_text_counts[key] = seen_count
+        seen_count = self._remember_long_text_repeat(key)
 
         should_cache_long_text = (
             text_length <= TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH
@@ -939,13 +957,12 @@ class TTSAudioMixin:
         )
 
         self._record_cache_miss(item.engine)
-        generated = await self._generate_audio_file(item)
-        if should_cache_long_text:
-            cached_path = await self._store_in_cache(state, item, generated)
-            if cached_path != generated:
-                return cached_path, False
-            return generated, False
-        return generated, False
+        return await self._resolve_or_generate_singleflight_audio(
+            state,
+            item,
+            read_cache=False,
+            store_in_cache=should_cache_long_text,
+        )
 
     async def _play_file(self, vc: discord.VoiceClient, path: str) -> None:
         loop = asyncio.get_running_loop()

@@ -166,31 +166,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             asyncio.create_task(self._boot_warmup())
 
     async def _get_root_command_ids_cached(self, guild: discord.Guild | None = None, *, ttl_seconds: float = 600.0) -> dict[str, int]:
-        cache_key = int(guild.id) if guild is not None else 0
-        now = time.monotonic()
-        cached = self._app_command_id_cache.get(cache_key)
-        if cached is not None:
-            expires_at, command_ids = cached
-            if now < expires_at:
-                return dict(command_ids)
-
-        command_ids: dict[str, int] = {}
-        fetch_kwargs = {"guild": guild} if guild is not None else {}
-        try:
-            commands_list = await self.bot.tree.fetch_commands(**fetch_kwargs)
-        except Exception as e:
-            print(f"[tts_commands] falha ao buscar comandos: {e!r}")
-            return dict(cached[1]) if cached is not None else {}
-
-        for cmd in commands_list:
-            name = str(getattr(cmd, "name", "") or "").strip()
-            cmd_id = getattr(cmd, "id", None)
-            if not name or not cmd_id or name in command_ids:
-                continue
-            command_ids[name] = int(cmd_id)
-
-        self._app_command_id_cache[cache_key] = (now + ttl_seconds, dict(command_ids))
-        return command_ids
+        return await fetch_root_command_ids_cached(
+            self.bot,
+            self._app_command_id_cache,
+            guild,
+            ttl_seconds=ttl_seconds,
+            include_global_fallback=False,
+        )
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
