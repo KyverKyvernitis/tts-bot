@@ -48,13 +48,9 @@ from .utils.embed import (
     status_voice_channel_text,
     spoken_name_status_text,
 )
-from .prefix import (
-    build_prefix_routing_config,
-    match_prefix_control_command,
-    match_engine_prefix,
-    dispatch_prefix_control_command,
-)
+from .prefix import dispatch_prefix_control_command
 from .utils.message_render import render_message_tts_text, append_tts_descriptions
+from .utils.message_gate import analyze_message_for_tts
 from .utils.resolution import (
     gcloud_language_priority,
     build_gcloud_language_options_from_catalog,
@@ -1180,35 +1176,20 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not getattr(config, "TTS_ENABLED", True):
-            return
-        if message.author.bot or not message.guild or not message.content:
-            return
-
-        db = self._get_db()
-        guild_defaults = await self._maybe_await(db.get_guild_tts_defaults(message.guild.id)) if db else {}
-        routing = build_prefix_routing_config(
-            guild_defaults,
-            bot_prefix_default=str(getattr(config, "BOT_PREFIX", "_") or "_"),
-            gcloud_prefix_default=str(getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'"),
-        )
-
-        prefix_command = match_prefix_control_command(message.content, routing.bot_prefix)
-        if prefix_command is not None:
+        gate = await analyze_message_for_tts(self, message)
+        if gate.should_dispatch_prefix_command:
             if self._was_tts_message_seen(message.id):
                 return
             self._mark_tts_message_seen(message.id)
-            if await dispatch_prefix_control_command(self, message, prefix_command):
+            if await dispatch_prefix_control_command(self, message, gate.prefix_command):
                 return
 
-        forced_engine, active_prefix = match_engine_prefix(
-            message.content,
-            edge_prefix=routing.edge_prefix,
-            gtts_prefix=routing.gtts_prefix,
-            gcloud_prefix=routing.gcloud_prefix,
-        )
-        if not forced_engine or not active_prefix:
+        if not gate.should_process_tts:
             return
+
+        guild_defaults = gate.guild_defaults
+        forced_engine = str(gate.forced_engine or "")
+        active_prefix = str(gate.active_prefix or "")
 
         if isinstance(message.author, discord.Member) and self._member_has_ignored_tts_role(message.author, guild_defaults=guild_defaults):
             print(f"[tts_voice] ignorado | autor possui cargo ignorado | guild={message.guild.id} user={message.author.id}")
