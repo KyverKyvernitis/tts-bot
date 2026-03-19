@@ -51,6 +51,7 @@ from .utils.embed import (
 from .prefix import dispatch_prefix_control_command
 from .utils.message_render import render_message_tts_text, append_tts_descriptions
 from .utils.message_gate import analyze_message_for_tts
+from .utils.message_dispatch import dispatch_message_tts
 from .utils.resolution import (
     gcloud_language_priority,
     build_gcloud_language_options_from_catalog,
@@ -1142,15 +1143,26 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        flow_started = time.perf_counter()
         gate = await analyze_message_for_tts(self, message)
+        message_id = getattr(message, "id", None)
+        guild_id = getattr(getattr(message, "guild", None), "id", None)
+        author_id = getattr(getattr(message, "author", None), "id", None)
+
         if gate.should_dispatch_prefix_command:
+            print(f"[tts_flow] prefix command detectado | guild={guild_id} user={author_id} message={message_id} reason={gate.reason}")
             if self._was_tts_message_seen(message.id):
+                print(f"[tts_flow] ignorado | mensagem já vista antes do prefix dispatch | guild={guild_id} user={author_id} message={message_id}")
                 return
             self._mark_tts_message_seen(message.id)
             if await dispatch_prefix_control_command(self, message, gate.prefix_command):
+                print(f"[tts_flow] prefix command executado | guild={guild_id} user={author_id} message={message_id}")
                 return
+            print(f"[tts_flow] prefix command não executado | guild={guild_id} user={author_id} message={message_id}")
 
         if not gate.should_process_tts:
+            if gate.reason not in {"author_bot", "no_guild", "empty_content"}:
+                print(f"[tts_flow] ignorado no gate | guild={guild_id} user={author_id} message={message_id} reason={gate.reason}")
             return
 
         guild_defaults = gate.guild_defaults
@@ -1158,81 +1170,64 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         active_prefix = str(gate.active_prefix or "")
 
         if isinstance(message.author, discord.Member) and self._member_has_ignored_tts_role(message.author, guild_defaults=guild_defaults):
-            print(f"[tts_voice] ignorado | autor possui cargo ignorado | guild={message.guild.id} user={message.author.id}")
+            print(f"[tts_flow] ignorado | autor possui cargo ignorado | guild={guild_id} user={author_id} message={message_id}")
             return
 
         if self._was_tts_message_seen(message.id):
+            print(f"[tts_flow] ignorado | mensagem já vista antes do dispatch | guild={guild_id} user={author_id} message={message_id}")
             return
         self._mark_tts_message_seen(message.id)
+
         author_voice = getattr(message.author, "voice", None)
-        if author_voice is None or author_voice.channel is None:
-            print("[tts_voice] ignorado | autor não está em call")
-            return
-        voice_channel = author_voice.channel
-
-        db = self._get_db()
-        if db is None:
-            print("[tts_voice] ignorado | settings_db indisponível")
+        voice_channel = getattr(author_voice, "channel", None)
+        if voice_channel is None:
+            print(f"[tts_flow] ignorado | autor não está em call | guild={guild_id} user={author_id} message={message_id}")
             return
 
-        try:
-            resolved = await self._maybe_await(db.resolve_tts(message.guild.id, message.author.id))
-        except Exception as e:
-            print(f"[tts_voice] erro em resolve_tts | guild={message.guild.id} user={message.author.id} erro={e}")
-            return
-
-        forced_gtts = False
-
-        if forced_engine == "gtts":
-            resolved["engine"] = "gtts"
-            resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
-        elif forced_engine == "edge":
-            resolved["engine"] = "edge"
-            resolved["voice"] = resolved.get("voice") or "pt-BR-FranciscaNeural"
-            resolved["rate"] = resolved.get("rate") or "+0%"
-            resolved["pitch"] = resolved.get("pitch") or "+0Hz"
-        elif forced_engine == "gcloud":
-            resolved["engine"] = "gcloud"
-            resolved["language"] = resolved.get("gcloud_language") or str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR")
-            resolved["voice"] = resolved.get("gcloud_voice") or str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A")
-            resolved["rate"] = resolved.get("gcloud_rate") or str(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0) or 1.0)
-            resolved["pitch"] = resolved.get("gcloud_pitch") or str(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0) or 0.0)
-
-        text = self._render_tts_text(message, message.content[len(active_prefix):].strip())
-        text = self._apply_author_prefix_if_needed(
-            message.guild.id,
-            message.author,
-            text,
-            enabled=self._guild_announce_author_enabled(guild_defaults),
+        print(
+            f"[tts_flow] dispatch iniciado | guild={guild_id} user={author_id} message={message_id} "
+            f"engine={forced_engine} prefix={active_prefix!r} channel_type={type(message.channel).__name__}"
         )
-        if not text:
-            print("[tts_voice] ignorado | texto vazio após prefixo")
+        dispatch_result = await dispatch_message_tts(
+            self,
+            message,
+            guild_defaults=guild_defaults,
+            active_prefix=active_prefix,
+            forced_engine=forced_engine,
+        )
+        payload = dispatch_result.payload
+        if payload is None:
+            print(
+                f"[tts_flow] dispatch abortado | guild={guild_id} user={author_id} message={message_id} "
+                f"payload_ms={dispatch_result.payload_ms:.1f}"
+            )
             return
 
-        state = self._get_state(message.guild.id)
-        state.last_text_channel_id = getattr(message.channel, "id", None)
-        enqueued, dropped_count, deduplicated = await self._enqueue_tts_item(
-            message.guild.id,
-            QueueItem(
-                guild_id=message.guild.id,
-                channel_id=voice_channel.id,
-                author_id=message.author.id,
-                text=text,
-                engine=resolved["engine"],
-                voice=resolved["voice"],
-                language=resolved["language"],
-                rate=resolved["rate"],
-                pitch=resolved["pitch"],
-            ),
+        queue_item = payload.queue_item
+        resolved = payload.resolved
+        print(
+            f"[tts_voice] trigger TTS | guild={guild_id} channel_type={type(message.channel).__name__} "
+            f"user={author_id} raw={message.content!r}"
         )
-        print(f"[tts_voice] trigger TTS | guild={message.guild.id} channel_type={type(message.channel).__name__} user={message.author.id} raw={message.content!r}")
-        if deduplicated:
-            print(f"[tts_voice] deduplicada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']}")
+        print(
+            f"[tts_flow] payload pronto | guild={guild_id} user={author_id} message={message_id} "
+            f"voice_channel={queue_item.channel_id} engine={queue_item.engine} payload_ms={dispatch_result.payload_ms:.1f} "
+            f"text_len={len(queue_item.text)}"
+        )
+        if dispatch_result.deduplicated:
+            print(f"[tts_voice] deduplicada | guild={guild_id} user={author_id} canal_voz={queue_item.channel_id} engine={resolved['engine']}")
         else:
-            if dropped_count:
-                print(f"[tts_voice] fila cheia, itens descartados={dropped_count} | guild={message.guild.id}")
-            if enqueued:
-                print(f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} canal_voz={voice_channel.id} engine={resolved['engine']} forced_gtts={forced_gtts}")
+            if dispatch_result.dropped_count:
+                print(f"[tts_voice] fila cheia, itens descartados={dispatch_result.dropped_count} | guild={guild_id}")
+            if dispatch_result.enqueued:
+                print(
+                    f"[tts_voice] enfileirada | guild={guild_id} user={author_id} canal_voz={queue_item.channel_id} "
+                    f"engine={resolved['engine']} forced_gtts={payload.forced_gtts}"
+                )
+        print(
+            f"[tts_flow] dispatch finalizado | guild={guild_id} user={author_id} message={message_id} "
+            f"dispatch_ms={dispatch_result.dispatch_ms:.1f} total_ms={(time.perf_counter() - flow_started) * 1000.0:.1f}"
+        )
         self._ensure_worker(message.guild.id)
 
     @commands.Cog.listener()
