@@ -699,20 +699,14 @@ class AntiMzkCog(commands.Cog):
                         disconnected += 1
                     except Exception:
                         pass
-            title = "🎲 Roleta da censura: sorte ruim"
-            description = (
-                f"A roleta caiu em **`{rolled}`**. Os usuários alvo do modo censura foram **tirados da call**.\n\n"
-                f"Chance da punição: **10%**"
-            )
+            title = "💥🎰 JACKPOT!!"
+            description = "Membros alvos foram tirados da call"
             ok = False
         else:
             disconnected = 0
-            title = "🎲 Roleta da censura: sobreviveram"
-            description = (
-                f"A roleta caiu em **`{rolled}`**. Dessa vez os usuários alvo do modo censura **não foram tirados da call**.\n\n"
-                f"Chance da punição: **10%**"
-            )
-            ok = True
+            title = "🎰 Não foi dessa vez..."
+            description = "Ninguém foi expulso da call... Ainda (chance: **10%**)"
+            ok = None
 
         embed = self._make_embed(title, description, ok=ok)
         try:
