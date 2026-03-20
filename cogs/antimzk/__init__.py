@@ -1,12 +1,12 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands as dcommands
 
 from .cog import AntiMzkCore
 from .constants import _guild_scoped
 
 
-class AntiMzkCog(AntiMzkCore, commands.Cog):
+class AntiMzkCog(AntiMzkCore, dcommands.Cog):
     @_guild_scoped()
     @app_commands.command(name="modo_censura", description="Gerencia as roles e modos do modo censura")
     @app_commands.describe(
@@ -39,5 +39,5 @@ class AntiMzkCog(AntiMzkCore, commands.Cog):
         await self._handle_antimzk_message(message)
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: dcommands.Bot):
     await bot.add_cog(AntiMzkCog(bot, bot.settings_db))
