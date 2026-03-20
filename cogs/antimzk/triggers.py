@@ -310,11 +310,16 @@ class AntiMzkTriggerMixin:
         return True
 
 
-    def _buckshot_sfx_path(self) -> Path:
-        return Path(__file__).resolve().parents[2] / "assets" / "sfx" / "buckshot.mp3"
+    def _sfx_path(self, filename: str) -> Path:
+        return Path(__file__).resolve().parents[2] / "assets" / "sfx" / filename
 
-    async def _play_buckshot_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
-        sfx_path = self._buckshot_sfx_path()
+    def _buckshot_sfx_path(self) -> Path:
+        return self._sfx_path("buckshot.mp3")
+
+    def _pinto_sfx_path(self) -> Path:
+        return self._sfx_path("pinto.mp3")
+
+    async def _play_sfx_file(self, guild: discord.Guild, voice_channel: discord.VoiceChannel, sfx_path: Path) -> bool:
         if not sfx_path.exists():
             return False
 
@@ -353,6 +358,12 @@ class AntiMzkTriggerMixin:
                         pass
 
                 asyncio.create_task(_delayed_disconnect(voice_client))
+
+    async def _play_buckshot_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
+        return await self._play_sfx_file(guild, voice_channel, self._buckshot_sfx_path())
+
+    async def _play_pinto_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
+        return await self._play_sfx_file(guild, voice_channel, self._pinto_sfx_path())
 
     def _build_roleta_column(self, middle: int | None = None) -> list[int]:
         return [random.randint(1, 9), middle if middle is not None else random.randint(1, 9), random.randint(1, 9)]
@@ -908,6 +919,23 @@ class AntiMzkTriggerMixin:
 
         if TRIGGER_WORD and TRIGGER_WORD in content:
             did_trigger_action = True
+            trigger_voice_channel = None
+            for target in targets:
+                target_channel = getattr(getattr(target, "voice", None), "channel", None)
+                if isinstance(target_channel, discord.VoiceChannel):
+                    trigger_voice_channel = target_channel
+                    break
+
+            if trigger_voice_channel is not None:
+                try:
+                    await self._play_pinto_sfx(message.guild, trigger_voice_channel)
+                except Exception:
+                    pass
+                try:
+                    await asyncio.sleep(0.20)
+                except Exception:
+                    pass
+
             for target in targets:
                 if target.voice and target.voice.channel:
                     try:
