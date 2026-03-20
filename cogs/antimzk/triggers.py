@@ -4,7 +4,7 @@ import time
 
 import discord
 
-from config import GUILD_IDS, MUTE_TOGGLE_WORD, TRIGGER_WORD
+from config import GUILD_IDS, MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
 
 from .constants import (
     _DJ_DURATION_SECONDS,
@@ -447,38 +447,47 @@ class AntiMzkTriggerMixin:
                     self._build_roleta_column(middle[2]),
                 ]
 
-            board = self._render_roleta_board(final_columns)
+            try:
+                board = self._render_roleta_board(final_columns)
 
-            if success:
-                for target in targets:
-                    if target.voice and target.voice.channel:
-                        try:
-                            await target.move_to(None, reason="modo censura roleta")
-                        except Exception:
-                            pass
-                embed = self._make_roleta_result_embed(
-                    "💥🎰 JACKPOT!!",
-                    "Membros alvos foram tirados da call",
-                    board,
-                    success=True,
+                if success:
+                    for target in targets:
+                        if target.voice and target.voice.channel:
+                            try:
+                                await target.move_to(None, reason="modo censura roleta")
+                            except Exception:
+                                pass
+                    embed = self._make_roleta_result_embed(
+                        "💥🎰 JACKPOT!!",
+                        "Membros alvos foram tirados da call",
+                        board,
+                        success=True,
+                    )
+                else:
+                    embed = self._make_roleta_result_embed(
+                        "🎰 Não foi dessa vez...",
+                        "Ninguém foi expulso da call... Ainda (chance: **10%**)",
+                        board,
+                        success=False,
+                    )
+            except Exception:
+                fallback_text = (
+                    "Membros alvos foram tirados da call" if success else "Ninguém foi expulso da call... Ainda (chance: **10%**)"
                 )
-            else:
-                embed = self._make_roleta_result_embed(
-                    "🎰 Não foi dessa vez...",
-                    "Ninguém foi expulso da call... Ainda (chance: **10%**)",
-                    board,
-                    success=False,
+                embed = self._make_embed(
+                    "💥🎰 JACKPOT!!" if success else "🎰 Não foi dessa vez...",
+                    fallback_text,
+                    ok=not success,
                 )
 
+            delivered = False
             if spin_message is not None:
                 try:
                     await spin_message.edit(embed=embed)
+                    delivered = True
                 except Exception:
-                    try:
-                        await message.channel.send(embed=embed)
-                    except Exception:
-                        pass
-            else:
+                    pass
+            if not delivered:
                 try:
                     await message.channel.send(embed=embed)
                 except Exception:
