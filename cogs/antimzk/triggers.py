@@ -7,6 +7,8 @@ import discord
 from config import GUILD_IDS, MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
 
 from .constants import (
+    _ATIRAR_WORD_RE,
+    _BUCKSHOT_WORD_RE,
     _DJ_DURATION_SECONDS,
     _DJ_TOGGLE_WORD_RE,
     _PICA_DURATION_SECONDS,
@@ -14,6 +16,25 @@ from .constants import (
     _ROLE_TOGGLE_WORD_RE,
 )
 
+
+
+class _BuckshotJoinView(discord.ui.View):
+    def __init__(self, cog: "AntiMzkTriggerMixin", guild_id: int, *, timeout: float = 30.0):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.danger, label="Entrar na rodada (0)")
+        self.join_button.callback = self._toggle_join
+        self.add_item(self.join_button)
+
+    async def _toggle_join(self, interaction: discord.Interaction):
+        await self.cog._handle_buckshot_button(interaction, self)
+
+    async def on_timeout(self):
+        try:
+            await self.cog._finish_buckshot(self.guild_id, reason="timeout")
+        except Exception:
+            pass
 
 
 class AntiMzkTriggerMixin:
@@ -488,6 +509,286 @@ class AntiMzkTriggerMixin:
         finally:
             self._roleta_running_guilds.discard(guild.id)
 
+    def _get_buckshot_session(self, guild_id: int) -> dict | None:
+        session = self._buckshot_sessions.get(guild_id)
+        if not session or session.get("ended"):
+            return None
+        return session
+
+    def _get_buckshot_voice_channel(self, guild: discord.Guild, session: dict) -> discord.VoiceChannel | None:
+        channel = guild.get_channel(int(session.get("voice_channel_id", 0) or 0))
+        return channel if isinstance(channel, discord.VoiceChannel) else None
+
+    def _get_buckshot_focus_participants(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> list[discord.Member]:
+        participants = []
+        seen: set[int] = set()
+        for member in self._iter_focused_members(guild, voice_channel):
+            if member.bot or member.id in seen:
+                continue
+            seen.add(member.id)
+            participants.append(member)
+        return participants
+
+    def _get_buckshot_manual_participants(self, guild: discord.Guild, voice_channel: discord.VoiceChannel, session: dict) -> list[discord.Member]:
+        participants = []
+        seen: set[int] = set()
+        current_ids = {member.id for member in getattr(voice_channel, "members", [])}
+        stored_ids = set(session.get("manual_participants", set()) or set())
+        stale_ids = stored_ids - current_ids
+        if stale_ids:
+            stored_ids -= stale_ids
+            session["manual_participants"] = stored_ids
+        for user_id in stored_ids:
+            member = guild.get_member(int(user_id))
+            if member is None or member.bot or getattr(member.voice, "channel", None) != voice_channel or member.id in seen:
+                continue
+            seen.add(member.id)
+            participants.append(member)
+        return participants
+
+    def _get_buckshot_participants(self, guild: discord.Guild, session: dict) -> list[discord.Member]:
+        voice_channel = self._get_buckshot_voice_channel(guild, session)
+        if voice_channel is None:
+            return []
+
+        participants: dict[int, discord.Member] = {}
+        for member in self._get_buckshot_focus_participants(guild, voice_channel):
+            participants[member.id] = member
+        for member in self._get_buckshot_manual_participants(guild, voice_channel, session):
+            participants[member.id] = member
+        return list(participants.values())
+
+    def _make_buckshot_embed(self, guild: discord.Guild, session: dict, *, final_text: str | None = None) -> discord.Embed:
+        participants = self._get_buckshot_participants(guild, session)
+        title = "<:gunforward:1484655577836683434> Roleta russa"
+        description = final_text or "Clique no botão abaixo para entrar na rodada. Membros em foco também entram automaticamente."
+        embed = discord.Embed(title=title, description=description, color=discord.Color.red())
+        if not final_text:
+            embed.add_field(name="Participando", value=f"**{len(participants)}**", inline=True)
+        return embed
+
+    async def _refresh_buckshot_message(self, guild_id: int):
+        session = self._get_buckshot_session(guild_id)
+        if session is None:
+            return
+
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return
+        message = session.get("message")
+        view = session.get("view")
+        if message is None or view is None:
+            return
+
+        participants = self._get_buckshot_participants(guild, session)
+        view.join_button.label = f"Entrar na rodada ({len(participants)})"
+        try:
+            await message.edit(embed=self._make_buckshot_embed(guild, session), view=view)
+        except Exception:
+            pass
+
+    async def _handle_buckshot_button(self, interaction: discord.Interaction, view: _BuckshotJoinView):
+        guild = interaction.guild
+        if guild is None:
+            try:
+                await interaction.response.send_message("Use esse botão dentro de um servidor.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        session = self._get_buckshot_session(guild.id)
+        if session is None:
+            try:
+                await interaction.response.send_message("Essa rodada já terminou.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        voice_channel = self._get_buckshot_voice_channel(guild, session)
+        if voice_channel is None:
+            try:
+                await interaction.response.send_message("A rodada perdeu o canal de voz de referência.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if not isinstance(member, discord.Member) or member.bot:
+            try:
+                await interaction.response.send_message("Bots não podem participar dessa rodada.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        if getattr(member.voice, "channel", None) != voice_channel:
+            try:
+                await interaction.response.send_message("Você precisa estar na mesma call da rodada para participar.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        manual_participants = set(session.get("manual_participants", set()) or set())
+        joined = member.id not in manual_participants
+        if joined:
+            manual_participants.add(member.id)
+        else:
+            manual_participants.discard(member.id)
+        session["manual_participants"] = manual_participants
+
+        await self._refresh_buckshot_message(guild.id)
+
+        note = "Você entrou na rodada." if joined else "Você saiu da rodada."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(note, ephemeral=True)
+            else:
+                await interaction.response.send_message(note, ephemeral=True)
+        except Exception:
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+
+    async def _finish_buckshot(self, guild_id: int, *, reason: str) -> bool:
+        session = self._buckshot_sessions.get(guild_id)
+        if not session or session.get("ended"):
+            return False
+
+        session["ended"] = True
+        timeout_task = session.get("timeout_task")
+        if timeout_task is not None and timeout_task is not asyncio.current_task() and not timeout_task.done():
+            timeout_task.cancel()
+
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            self._buckshot_sessions.pop(guild_id, None)
+            return False
+
+        message = session.get("message")
+        view = session.get("view")
+        if isinstance(view, discord.ui.View):
+            for child in view.children:
+                child.disabled = True
+            try:
+                view.stop()
+            except Exception:
+                pass
+
+        participants = self._get_buckshot_participants(guild, session)
+        chosen = random.choice(participants) if participants else None
+        if chosen is not None and chosen.voice and chosen.voice.channel:
+            try:
+                await chosen.move_to(None, reason="modo censura buckshot")
+            except Exception:
+                pass
+
+        if chosen is None:
+            final_text = "O disparo aconteceu... mas ninguém elegível estava na rodada."
+        else:
+            final_text = f"O disparo aconteceu... **{chosen.mention}** foi tirado da call."
+
+        embed = self._make_buckshot_embed(guild, session, final_text=final_text)
+        delivered = False
+        if message is not None:
+            try:
+                await message.edit(embed=embed, view=view)
+                delivered = True
+            except Exception:
+                pass
+        if not delivered and message is not None:
+            try:
+                await message.channel.send(embed=embed)
+            except Exception:
+                pass
+
+        self._buckshot_sessions.pop(guild_id, None)
+        return True
+
+    async def _handle_buckshot_trigger(self, message: discord.Message) -> bool:
+        guild = message.guild
+        if guild is None:
+            return False
+
+        content = (message.content or "")
+        if not _BUCKSHOT_WORD_RE.search(content):
+            return False
+
+        if GUILD_IDS and guild.id not in GUILD_IDS:
+            return True
+
+        if not self.db.anti_mzk_enabled(guild.id):
+            return True
+
+        if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+
+        if self._get_buckshot_session(guild.id) is not None:
+            return True
+
+        author_voice = getattr(message.author, "voice", None)
+        voice_channel = getattr(author_voice, "channel", None)
+        if not isinstance(voice_channel, discord.VoiceChannel):
+            return True
+
+        view = _BuckshotJoinView(self, guild.id, timeout=30.0)
+        session = {
+            "voice_channel_id": voice_channel.id,
+            "text_channel_id": message.channel.id,
+            "manual_participants": set(),
+            "message": None,
+            "view": view,
+            "ended": False,
+            "timeout_task": None,
+        }
+        self._buckshot_sessions[guild.id] = session
+
+        view.join_button.label = f"Entrar na rodada ({len(self._get_buckshot_participants(guild, session))})"
+        embed = self._make_buckshot_embed(guild, session)
+        try:
+            panel_message = await message.channel.send(embed=embed, view=view)
+        except Exception:
+            self._buckshot_sessions.pop(guild.id, None)
+            return True
+
+        session["message"] = panel_message
+        session["timeout_task"] = self.bot.loop.create_task(view.wait())
+        await self._react_success_temporarily(message)
+        return True
+
+    async def _handle_atirar_trigger(self, message: discord.Message) -> bool:
+        guild = message.guild
+        if guild is None:
+            return False
+
+        content = (message.content or "")
+        if not _ATIRAR_WORD_RE.search(content):
+            return False
+
+        if GUILD_IDS and guild.id not in GUILD_IDS:
+            return True
+
+        if not self.db.anti_mzk_enabled(guild.id):
+            return True
+
+        if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+
+        session = self._get_buckshot_session(guild.id)
+        if session is None:
+            return True
+
+        voice_channel = self._get_buckshot_voice_channel(guild, session)
+        if voice_channel is None:
+            await self._finish_buckshot(guild.id, reason="manual")
+            return True
+
+        if getattr(message.author.voice, "channel", None) != voice_channel:
+            return True
+
+        await self._finish_buckshot(guild.id, reason="manual")
+        await self._react_success_temporarily(message)
+        return True
+
     async def _handle_antimzk_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
@@ -502,6 +803,12 @@ class AntiMzkTriggerMixin:
             return
 
         if await self._handle_dj_toggle_trigger(message):
+            return
+
+        if await self._handle_buckshot_trigger(message):
+            return
+
+        if await self._handle_atirar_trigger(message):
             return
 
         if await self._handle_roleta_trigger(message):
