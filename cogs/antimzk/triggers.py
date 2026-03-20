@@ -1,6 +1,7 @@
 import asyncio
 import random
 import time
+from pathlib import Path
 
 import discord
 
@@ -307,6 +308,51 @@ class AntiMzkTriggerMixin:
             await self._send_dj_toggle_feedback(message, should_activate, changed, voice_channel)
             await self._react_success_temporarily(message)
         return True
+
+
+    def _buckshot_sfx_path(self) -> Path:
+        return Path(__file__).resolve().parents[2] / "assets" / "sfx" / "buckshot.mp3"
+
+    async def _play_buckshot_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
+        sfx_path = self._buckshot_sfx_path()
+        if not sfx_path.exists():
+            return False
+
+        voice_client = guild.voice_client
+        connected_here = False
+
+        try:
+            if voice_client is None or not getattr(voice_client, "is_connected", lambda: False)():
+                voice_client = await voice_channel.connect(self_deaf=True)
+                connected_here = True
+            elif getattr(voice_client, "channel", None) != voice_channel:
+                await voice_client.move_to(voice_channel)
+
+            if voice_client is None:
+                return False
+
+            try:
+                if voice_client.is_playing() or voice_client.is_paused():
+                    voice_client.stop()
+            except Exception:
+                pass
+
+            source = discord.FFmpegPCMAudio(str(sfx_path))
+            voice_client.play(source)
+            return True
+        except Exception:
+            return False
+        finally:
+            if connected_here and voice_client is not None:
+                async def _delayed_disconnect(vc: discord.VoiceClient):
+                    await asyncio.sleep(2.0)
+                    try:
+                        if vc.is_connected() and not vc.is_playing():
+                            await vc.disconnect(force=False)
+                    except Exception:
+                        pass
+
+                asyncio.create_task(_delayed_disconnect(voice_client))
 
     def _build_roleta_column(self, middle: int | None = None) -> list[int]:
         return [random.randint(1, 9), middle if middle is not None else random.randint(1, 9), random.randint(1, 9)]
@@ -687,6 +733,15 @@ class AntiMzkTriggerMixin:
         participants = self._get_buckshot_participants(guild, session)
         chosen = random.choice(participants) if participants else None
         if chosen is not None and chosen.voice and chosen.voice.channel:
+            chosen_channel = chosen.voice.channel
+            try:
+                await self._play_buckshot_sfx(guild, chosen_channel)
+            except Exception:
+                pass
+            try:
+                await asyncio.sleep(0.20)
+            except Exception:
+                pass
             try:
                 await chosen.move_to(None, reason="modo censura buckshot")
             except Exception:
