@@ -15,8 +15,6 @@ from .constants import (
 )
 
 
-_ROLETA_TRIGGER_COOLDOWN_SECONDS = 10.0
-
 
 class AntiMzkTriggerMixin:
     async def _expire_pica_role_later(self, guild_id: int, user_id: int, role_id: int, delay: float):
@@ -391,11 +389,7 @@ class AntiMzkTriggerMixin:
         if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
             return True
 
-        now = time.monotonic()
         if guild.id in self._roleta_running_guilds:
-            return True
-        last_used = self._roleta_last_used.get(guild.id, 0.0)
-        if now - last_used < _ROLETA_TRIGGER_COOLDOWN_SECONDS:
             return True
 
         author_voice = getattr(message.author, "voice", None)
@@ -417,9 +411,8 @@ class AntiMzkTriggerMixin:
             return True
 
         self._roleta_running_guilds.add(guild.id)
-        self._roleta_last_used[guild.id] = now
         try:
-            mega_success = random.randint(1, 100) == 1
+            mega_success = random.randint(1, 50) == 1
             success = random.randint(1, 10) == 1
 
             if mega_success:
@@ -478,7 +471,7 @@ class AntiMzkTriggerMixin:
                 else:
                     embed = self._make_roleta_result_embed(
                         "🎰 Não foi dessa vez...",
-                        "Ninguém foi expulso da call... Ainda (chance: **10%** / **1%** para 999)",
+                        "Ninguém foi expulso da call... Ainda (chance: **10%** / **2%** para 999)",
                         board,
                         success=False,
                     )
@@ -491,7 +484,7 @@ class AntiMzkTriggerMixin:
                     fallback_text = "Membros alvos foram tirados da call"
                 else:
                     fallback_title = "🎰 Não foi dessa vez..."
-                    fallback_text = "Ninguém foi expulso da call... Ainda (chance: **10%** / **1%** para 999)"
+                    fallback_text = "Ninguém foi expulso da call... Ainda (chance: **10%** / **2%** para 999)"
                 embed = self._make_embed(
                     fallback_title,
                     fallback_text,
