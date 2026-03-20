@@ -314,6 +314,13 @@ class AntiMzkTriggerMixin:
             color=discord.Color.blurple(),
         )
 
+    async def _set_roleta_result_reaction(self, message: discord.Message, *, success: bool):
+        emoji = "✅" if success else "❌"
+        try:
+            await message.add_reaction(emoji)
+        except Exception:
+            pass
+
     async def _animate_roleta_spin(self, message: discord.Message, *, success: bool) -> tuple[discord.Message | None, list[list[int]] | None]:
         columns = [self._build_roleta_column() for _ in range(3)]
         try:
@@ -429,7 +436,7 @@ class AntiMzkTriggerMixin:
                 except Exception:
                     pass
 
-            await self._react_success_temporarily(message)
+            await self._set_roleta_result_reaction(message, success=success)
             return True
         finally:
             self._roleta_running_guilds.discard(guild.id)
