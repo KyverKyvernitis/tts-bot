@@ -920,13 +920,11 @@ class AntiMzkCog(commands.Cog):
 
         target_ids = {member.id for member in targets}
         author_is_target = message.author.id in target_ids
-        author_can_use_triggers = not self._is_focused_non_staff_member(message.author)
+        author_is_focused_non_staff = self._is_focused_non_staff_member(message.author)
 
         did_trigger_action = False
 
         if TRIGGER_WORD and TRIGGER_WORD in content:
-            if not author_can_use_triggers:
-                return
             did_trigger_action = True
             for target in targets:
                 if target.voice and target.voice.channel:
@@ -936,7 +934,7 @@ class AntiMzkCog(commands.Cog):
                         pass
 
         if MUTE_TOGGLE_WORD and MUTE_TOGGLE_WORD in content:
-            if not author_can_use_triggers:
+            if author_is_focused_non_staff:
                 return
             did_trigger_action = True
             if author_is_target:
