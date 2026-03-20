@@ -314,12 +314,31 @@ class AntiMzkTriggerMixin:
             color=discord.Color.blurple(),
         )
 
-    async def _set_roleta_result_reaction(self, message: discord.Message, *, success: bool):
-        emoji = "✅" if success else "❌"
+    def _make_roleta_result_embed(self, title: str, summary: str, board: str, *, success: bool) -> discord.Embed:
+        color = discord.Color.blurple() if success else discord.Color(OFF_COLOR)
+        return discord.Embed(
+            title=title,
+            description=f"{summary}\n\n{board}",
+            color=color,
+        )
+
+    async def _set_roleta_reaction(self, message: discord.Message, emoji: str, *, keep: bool):
         try:
             await message.add_reaction(emoji)
         except Exception:
-            pass
+            return
+
+        if keep:
+            return
+
+        async def _cleanup():
+            await asyncio.sleep(3)
+            try:
+                await message.remove_reaction(emoji, self.bot.user)
+            except Exception:
+                pass
+
+        asyncio.create_task(_cleanup())
 
     async def _animate_roleta_spin(self, message: discord.Message, *, success: bool) -> tuple[discord.Message | None, list[list[int]] | None]:
         columns = [self._build_roleta_column() for _ in range(3)]
@@ -328,31 +347,37 @@ class AntiMzkTriggerMixin:
         except Exception:
             return None, None
 
-        target_middle = [7, 7, 7] if success else [random.randint(1, 9) for _ in range(3)]
-        if target_middle == [7, 7, 7]:
-            target_middle[random.randrange(3)] = random.choice([n for n in range(1, 10) if n != 7])
+        if success:
+            target_middle = [7, 7, 7]
+        else:
+            while True:
+                target_middle = [random.randint(1, 9) for _ in range(3)]
+                if target_middle != [7, 7, 7]:
+                    break
 
         target_duration = random.uniform(4.0, 6.0)
-        intervals = [0.20, 0.25, 0.31, 0.39, 0.49, 0.62, 0.76, 0.90, 1.02]
+        intervals = [0.22, 0.26, 0.30, 0.35, 0.41, 0.49, 0.60, 0.74, 0.90, 1.05]
         scale = target_duration / sum(intervals)
         intervals = [step * scale for step in intervals]
+        lock_steps = [len(intervals) - 3, len(intervals) - 2, len(intervals) - 1]
         locked_columns: set[int] = set()
 
-        try:
-            for index, delay in enumerate(intervals):
-                await asyncio.sleep(delay)
-                if index >= len(intervals) - 3:
-                    lock_index = index - (len(intervals) - 3)
-                    locked_columns.add(lock_index)
-                    columns[lock_index] = self._build_roleta_column(target_middle[lock_index])
+        for index, delay in enumerate(intervals):
+            await asyncio.sleep(delay)
 
-                for column_index in range(3):
-                    if column_index not in locked_columns:
-                        self._spin_roleta_column(columns[column_index])
+            if index in lock_steps:
+                lock_index = lock_steps.index(index)
+                locked_columns.add(lock_index)
+                columns[lock_index] = self._build_roleta_column(target_middle[lock_index])
 
+            for column_index in range(3):
+                if column_index not in locked_columns:
+                    self._spin_roleta_column(columns[column_index])
+
+            try:
                 await spin_message.edit(embed=self._make_roleta_spin_embed(self._render_roleta_board(columns)))
-        except Exception:
-            return spin_message, columns
+            except Exception:
+                pass
 
         return spin_message, columns
 
@@ -404,7 +429,25 @@ class AntiMzkTriggerMixin:
         try:
             success = random.randint(1, 10) == 1
             spin_message, final_columns = await self._animate_roleta_spin(message, success=success)
-            board = self._render_roleta_board(final_columns or [self._build_roleta_column() for _ in range(3)])
+
+            if success:
+                final_columns = [
+                    self._build_roleta_column(7),
+                    self._build_roleta_column(7),
+                    self._build_roleta_column(7),
+                ]
+            elif final_columns is None:
+                while True:
+                    middle = [random.randint(1, 9) for _ in range(3)]
+                    if middle != [7, 7, 7]:
+                        break
+                final_columns = [
+                    self._build_roleta_column(middle[0]),
+                    self._build_roleta_column(middle[1]),
+                    self._build_roleta_column(middle[2]),
+                ]
+
+            board = self._render_roleta_board(final_columns)
 
             if success:
                 for target in targets:
@@ -413,15 +456,20 @@ class AntiMzkTriggerMixin:
                             await target.move_to(None, reason="modo censura roleta")
                         except Exception:
                             pass
-                title = "💥🎰 JACKPOT!!"
-                description = f"Membros alvos foram tirados da call\n\n{board}"
-                ok = False
+                embed = self._make_roleta_result_embed(
+                    "💥🎰 JACKPOT!!",
+                    "Membros alvos foram tirados da call",
+                    board,
+                    success=True,
+                )
             else:
-                title = "🎰 Não foi dessa vez..."
-                description = f"Ninguém foi expulso da call... Ainda (chance: **10%**)\n\n{board}"
-                ok = None
+                embed = self._make_roleta_result_embed(
+                    "🎰 Não foi dessa vez...",
+                    "Ninguém foi expulso da call... Ainda (chance: **10%**)",
+                    board,
+                    success=False,
+                )
 
-            embed = self._make_embed(title, description, ok=ok)
             if spin_message is not None:
                 try:
                     await spin_message.edit(embed=embed)
@@ -436,7 +484,10 @@ class AntiMzkTriggerMixin:
                 except Exception:
                     pass
 
-            await self._set_roleta_result_reaction(message, success=success)
+            if success:
+                await self._set_roleta_reaction(message, "✅", keep=True)
+            else:
+                await self._set_roleta_reaction(message, "❌", keep=False)
             return True
         finally:
             self._roleta_running_guilds.discard(guild.id)
