@@ -23,7 +23,7 @@ class _BuckshotJoinView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
-        self.join_button = discord.ui.Button(style=discord.ButtonStyle.danger, label="Entrar na rodada (0)")
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label="Entrar na rodada (0)")
         self.join_button.callback = self._toggle_join
         self.add_item(self.join_button)
 
@@ -562,7 +562,8 @@ class AntiMzkTriggerMixin:
         participants = self._get_buckshot_participants(guild, session)
         title = "<:gunforward:1484655577836683434> Roleta russa"
         description = final_text or "Clique no botão abaixo para entrar na rodada. Membros em foco também entram automaticamente."
-        embed = discord.Embed(title=title, description=description, color=discord.Color.red())
+        color = discord.Color.red() if final_text else discord.Color.blurple()
+        embed = discord.Embed(title=title, description=description, color=color)
         if not final_text:
             embed.add_field(name="Participando", value=f"**{len(participants)}**", inline=True)
         return embed
@@ -582,6 +583,7 @@ class AntiMzkTriggerMixin:
 
         participants = self._get_buckshot_participants(guild, session)
         view.join_button.label = f"Entrar na rodada ({len(participants)})"
+        view.join_button.style = discord.ButtonStyle.success
         try:
             await message.edit(embed=self._make_buckshot_embed(guild, session), view=view)
         except Exception:
@@ -669,6 +671,8 @@ class AntiMzkTriggerMixin:
         if isinstance(view, discord.ui.View):
             for child in view.children:
                 child.disabled = True
+                if isinstance(child, discord.ui.Button):
+                    child.style = discord.ButtonStyle.danger
             try:
                 view.stop()
             except Exception:
@@ -743,6 +747,7 @@ class AntiMzkTriggerMixin:
         self._buckshot_sessions[guild.id] = session
 
         view.join_button.label = f"Entrar na rodada ({len(self._get_buckshot_participants(guild, session))})"
+        view.join_button.style = discord.ButtonStyle.success
         embed = self._make_buckshot_embed(guild, session)
         try:
             panel_message = await message.channel.send(embed=embed, view=view)
