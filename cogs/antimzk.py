@@ -1,4 +1,5 @@
 import asyncio
+import random
 import re
 import time
 
@@ -14,6 +15,7 @@ _GUILD_OBJECTS = [discord.Object(id=guild_id) for guild_id in GUILD_IDS]
 _FOCUS_WORD_RE = re.compile(r"(?<!\w)focus(?!\w)", re.IGNORECASE)
 _ROLE_TOGGLE_WORD_RE = re.compile(r"(?<!\w)pica(?!\w)", re.IGNORECASE)
 _DJ_TOGGLE_WORD_RE = re.compile(r"(?<!\w)dj(?!\w)", re.IGNORECASE)
+_ROLETA_WORD_RE = re.compile(r"(?<!\w)roleta(?!\w)", re.IGNORECASE)
 _RESPONSE_DELETE_AFTER = 20
 _ROLE_TOGGLE_DELETE_AFTER = 5
 _PICA_DURATION_SECONDS = 2 * 60 * 60
@@ -649,6 +651,98 @@ class AntiMzkCog(commands.Cog):
             await self._react_success_temporarily(message)
         return True
 
+    async def _handle_roleta_trigger(self, message: discord.Message) -> bool:
+        guild = message.guild
+        if guild is None:
+            return False
+
+        content = (message.content or "")
+        if not _ROLETA_WORD_RE.search(content):
+            return False
+
+        if GUILD_IDS and guild.id not in GUILD_IDS:
+            return True
+
+        if not self.db.anti_mzk_enabled(guild.id):
+            return True
+
+        if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+
+        author_voice = getattr(message.author, "voice", None)
+        voice_channel = getattr(author_voice, "channel", None)
+        if not isinstance(voice_channel, discord.VoiceChannel):
+            return True
+
+        targets = self._resolve_targets(guild, voice_channel)
+        if not targets:
+            embed = discord.Embed(
+                title="🎰 Roleta sabotagem sem participantes",
+                description=(
+                    "A banca até tentou girar a roleta, mas **não achei nenhum alvo** na call para passar vergonha.\n\n"
+                    f"Canal: {voice_channel.mention}"
+                ),
+                color=discord.Color(OFF_COLOR),
+            )
+            embed.set_footer(text="Sem vítimas, sem entretenimento.")
+            try:
+                await message.channel.send(embed=embed)
+            except Exception:
+                pass
+            return True
+
+        roll = random.randint(1, 10)
+        unlucky = roll == 1
+        ejected = 0
+        if unlucky:
+            for target in targets:
+                try:
+                    if target.voice and target.voice.channel:
+                        await target.move_to(None, reason="modo censura roleta")
+                        ejected += 1
+                except Exception:
+                    pass
+
+        target_mentions = ", ".join(member.mention for member in targets[:6])
+        if len(targets) > 6:
+            target_mentions += f" e mais **{len(targets) - 6}**"
+
+        if unlucky:
+            title = "💥🎰 ROLETAA!! Jackpot da humilhação"
+            description = (
+                f"A roleta girou... caiu no **`{roll}`** e o azar escolheu visitar a call.\n\n"
+                f"**Resultado:** os alvos atuais do modo censura foram **jogados pra fora da call**.\n"
+                f"**Vítimas da vez:** {target_mentions or 'ninguém conseguiu escapar do texto, mas a call esvaziou.'}"
+            )
+            color = discord.Color(ON_COLOR)
+            footer = "10% de chance. 100% de caos."
+        else:
+            title = "🎰 Quase deu ruim... mas a call sobreviveu"
+            description = (
+                f"A roleta girou, fez suspense, caiu no **`{roll}`** e decidiu poupar a tropa dessa vez.\n\n"
+                "**Resultado:** ninguém foi expulso da call. Ainda."
+            )
+            color = discord.Color.blurple()
+            footer = "A roleta foi boazinha agora. Não confia nela não."
+
+        embed = discord.Embed(title=title, description=description, color=color)
+        embed.add_field(name="🎯 Chance de kickar", value="**10%** (só no número `1`)", inline=True)
+        embed.add_field(name="🎲 Número sorteado", value=f"**`{roll}`**", inline=True)
+        embed.add_field(name="👥 Alvos na mira", value=f"**{len(targets)}**", inline=True)
+        if unlucky:
+            embed.add_field(name="🚪 Caíram da call", value=f"**{ejected}**", inline=False)
+        else:
+            embed.add_field(name="🛟 Livramento temporário", value="Hoje a humilhação ficou só no susto.", inline=False)
+        embed.set_footer(text=footer)
+
+        try:
+            await message.channel.send(embed=embed)
+        except Exception:
+            pass
+
+        await self._react_success_temporarily(message)
+        return True
+
     async def _react_success_temporarily(self, message: discord.Message):
         try:
             reaction = await message.add_reaction("✅")
@@ -896,6 +990,9 @@ class AntiMzkCog(commands.Cog):
             return
 
         if await self._handle_dj_toggle_trigger(message):
+            return
+
+        if await self._handle_roleta_trigger(message):
             return
 
         if not self.db.anti_mzk_enabled(message.guild.id):
