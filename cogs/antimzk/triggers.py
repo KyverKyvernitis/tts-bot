@@ -15,6 +15,9 @@ from .constants import (
 )
 
 
+_ROLETA_TRIGGER_COOLDOWN_SECONDS = 10.0
+
+
 class AntiMzkTriggerMixin:
     async def _expire_pica_role_later(self, guild_id: int, user_id: int, role_id: int, delay: float):
         try:
@@ -286,6 +289,66 @@ class AntiMzkTriggerMixin:
             await self._react_success_temporarily(message)
         return True
 
+    def _build_roleta_column(self, middle: int | None = None) -> list[int]:
+        return [random.randint(1, 9), middle if middle is not None else random.randint(1, 9), random.randint(1, 9)]
+
+    def _spin_roleta_column(self, column: list[int]):
+        column.insert(0, random.randint(1, 9))
+        del column[3:]
+
+    def _render_roleta_board(self, columns: list[list[int]]) -> str:
+        rows = [[columns[0][i], columns[1][i], columns[2][i]] for i in range(3)]
+        lines = [
+            f"│ {rows[0][0]}  {rows[0][1]}  {rows[0][2]} │",
+            "───────────",
+            f"» {rows[1][0]}  {rows[1][1]}  {rows[1][2]} «",
+            "───────────",
+            f"│ {rows[2][0]}  {rows[2][1]}  {rows[2][2]} │",
+        ]
+        return "```text\n" + "\n".join(lines) + "\n```"
+
+    def _make_roleta_spin_embed(self, board: str) -> discord.Embed:
+        return discord.Embed(
+            title="🎰 Girando...",
+            description=board,
+            color=discord.Color.blurple(),
+        )
+
+    async def _animate_roleta_spin(self, message: discord.Message, *, success: bool) -> tuple[discord.Message | None, list[list[int]] | None]:
+        columns = [self._build_roleta_column() for _ in range(3)]
+        try:
+            spin_message = await message.channel.send(embed=self._make_roleta_spin_embed(self._render_roleta_board(columns)))
+        except Exception:
+            return None, None
+
+        target_middle = [7, 7, 7] if success else [random.randint(1, 9) for _ in range(3)]
+        if target_middle == [7, 7, 7]:
+            target_middle[random.randrange(3)] = random.choice([n for n in range(1, 10) if n != 7])
+
+        target_duration = random.uniform(4.0, 6.0)
+        intervals = [0.20, 0.25, 0.31, 0.39, 0.49, 0.62, 0.76, 0.90, 1.02]
+        scale = target_duration / sum(intervals)
+        intervals = [step * scale for step in intervals]
+        locked_columns: set[int] = set()
+
+        try:
+            for index, delay in enumerate(intervals):
+                await asyncio.sleep(delay)
+                if index >= len(intervals) - 3:
+                    lock_index = index - (len(intervals) - 3)
+                    locked_columns.add(lock_index)
+                    columns[lock_index] = self._build_roleta_column(target_middle[lock_index])
+
+                for column_index in range(3):
+                    if column_index not in locked_columns:
+                        self._spin_roleta_column(columns[column_index])
+
+                await spin_message.edit(embed=self._make_roleta_spin_embed(self._render_roleta_board(columns)))
+        except Exception:
+            return spin_message, columns
+
+        return spin_message, columns
+
     async def _handle_roleta_trigger(self, message: discord.Message) -> bool:
         guild = message.guild
         if guild is None:
@@ -302,6 +365,13 @@ class AntiMzkTriggerMixin:
             return True
 
         if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+
+        now = time.monotonic()
+        if guild.id in self._roleta_running_guilds:
+            return True
+        last_used = self._roleta_last_used.get(guild.id, 0.0)
+        if now - last_used < _ROLETA_TRIGGER_COOLDOWN_SECONDS:
             return True
 
         author_voice = getattr(message.author, "voice", None)
@@ -322,32 +392,47 @@ class AntiMzkTriggerMixin:
                 pass
             return True
 
-        rolled = random.randint(1, 10)
-        success = rolled == 1
+        self._roleta_running_guilds.add(guild.id)
+        self._roleta_last_used[guild.id] = now
+        try:
+            success = random.randint(1, 10) == 1
+            spin_message, final_columns = await self._animate_roleta_spin(message, success=success)
+            board = self._render_roleta_board(final_columns or [self._build_roleta_column() for _ in range(3)])
 
-        if success:
-            for target in targets:
-                if target.voice and target.voice.channel:
+            if success:
+                for target in targets:
+                    if target.voice and target.voice.channel:
+                        try:
+                            await target.move_to(None, reason="modo censura roleta")
+                        except Exception:
+                            pass
+                title = "💥🎰 JACKPOT!!"
+                description = f"Membros alvos foram tirados da call\n\n{board}"
+                ok = False
+            else:
+                title = "🎰 Não foi dessa vez..."
+                description = f"Ninguém foi expulso da call... Ainda (chance: **10%**)\n\n{board}"
+                ok = None
+
+            embed = self._make_embed(title, description, ok=ok)
+            if spin_message is not None:
+                try:
+                    await spin_message.edit(embed=embed)
+                except Exception:
                     try:
-                        await target.move_to(None, reason="modo censura roleta")
+                        await message.channel.send(embed=embed)
                     except Exception:
                         pass
-            title = "💥🎰 JACKPOT!!"
-            description = "Membros alvos foram tirados da call"
-            ok = False
-        else:
-            title = "🎰 Não foi dessa vez..."
-            description = "Ninguém foi expulso da call... Ainda (chance: **10%**)"
-            ok = None
+            else:
+                try:
+                    await message.channel.send(embed=embed)
+                except Exception:
+                    pass
 
-        embed = self._make_embed(title, description, ok=ok)
-        try:
-            await message.channel.send(embed=embed)
-        except Exception:
-            pass
-
-        await self._react_success_temporarily(message)
-        return True
+            await self._react_success_temporarily(message)
+            return True
+        finally:
+            self._roleta_running_guilds.discard(guild.id)
 
     async def _handle_antimzk_message(self, message: discord.Message):
         if message.author.bot or not message.guild:

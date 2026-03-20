@@ -15,6 +15,8 @@ class AntiMzkBase:
         self.db = db
         self._pica_expirations: dict[tuple[int, int], float] = {}
         self._dj_expirations: dict[tuple[int, int, int], float] = {}
+        self._roleta_last_used: dict[int, float] = {}
+        self._roleta_running_guilds: set[int] = set()
 
     def _strip_antimzk_suffix(self, name: str) -> str:
         base = str(name or "").rstrip()
