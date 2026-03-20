@@ -78,12 +78,22 @@ class BotLocal(commands.Bot):
         cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
         extensions = []
 
-        for filename in sorted(os.listdir(cogs_dir)):
-            if not filename.endswith(".py") or filename.startswith("_"):
+        for entry in sorted(os.listdir(cogs_dir)):
+            if entry.startswith("_"):
                 continue
-            module_name = filename[:-3]
-            ext = f"cogs.{module_name}"
-            extensions.append(ext)
+
+            full_path = os.path.join(cogs_dir, entry)
+
+            if entry.endswith(".py"):
+                module_name = entry[:-3]
+                ext = f"cogs.{module_name}"
+                extensions.append(ext)
+                continue
+
+            if os.path.isdir(full_path):
+                init_py = os.path.join(full_path, "__init__.py")
+                if entry != "tts" and os.path.isfile(init_py):
+                    extensions.append(f"cogs.{entry}")
 
         # TTS foi reorganizado para um pacote próprio em cogs/tts.
         extensions.extend([
