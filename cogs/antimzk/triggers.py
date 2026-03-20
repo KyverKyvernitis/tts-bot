@@ -340,20 +340,12 @@ class AntiMzkTriggerMixin:
 
         asyncio.create_task(_cleanup())
 
-    async def _animate_roleta_spin(self, message: discord.Message, *, success: bool) -> tuple[discord.Message | None, list[list[int]] | None]:
+    async def _animate_roleta_spin(self, message: discord.Message, *, target_middle: list[int]) -> tuple[discord.Message | None, list[list[int]] | None]:
         columns = [self._build_roleta_column() for _ in range(3)]
         try:
             spin_message = await message.channel.send(embed=self._make_roleta_spin_embed(self._render_roleta_board(columns)))
         except Exception:
             return None, None
-
-        if success:
-            target_middle = [7, 7, 7]
-        else:
-            while True:
-                target_middle = [random.randint(1, 9) for _ in range(3)]
-                if target_middle != [7, 7, 7]:
-                    break
 
         target_duration = random.uniform(4.0, 6.0)
         intervals = [0.22, 0.26, 0.30, 0.35, 0.41, 0.49, 0.60, 0.74, 0.90, 1.05]
@@ -427,30 +419,50 @@ class AntiMzkTriggerMixin:
         self._roleta_running_guilds.add(guild.id)
         self._roleta_last_used[guild.id] = now
         try:
-            success = random.randint(1, 10) == 1
-            spin_message, final_columns = await self._animate_roleta_spin(message, success=success)
+            mega_success = random.randint(1, 1000) == 1
+            success = mega_success or (random.randint(1, 10) == 1)
 
-            if success:
-                final_columns = [
-                    self._build_roleta_column(7),
-                    self._build_roleta_column(7),
-                    self._build_roleta_column(7),
-                ]
-            elif final_columns is None:
+            if mega_success:
+                target_middle = [9, 9, 9]
+            elif success:
+                target_middle = [7, 7, 7]
+            else:
                 while True:
-                    middle = [random.randint(1, 9) for _ in range(3)]
-                    if middle != [7, 7, 7]:
+                    target_middle = [random.randint(1, 9) for _ in range(3)]
+                    if target_middle not in ([7, 7, 7], [9, 9, 9]):
                         break
+
+            spin_message, final_columns = await self._animate_roleta_spin(message, target_middle=target_middle)
+
+            if final_columns is None:
                 final_columns = [
-                    self._build_roleta_column(middle[0]),
-                    self._build_roleta_column(middle[1]),
-                    self._build_roleta_column(middle[2]),
+                    self._build_roleta_column(target_middle[0]),
+                    self._build_roleta_column(target_middle[1]),
+                    self._build_roleta_column(target_middle[2]),
                 ]
 
             try:
                 board = self._render_roleta_board(final_columns)
 
-                if success:
+                if mega_success:
+                    everyone_targets = [
+                        member
+                        for member in getattr(voice_channel, "members", [])
+                        if not getattr(member, "bot", False)
+                    ]
+                    for target in everyone_targets:
+                        if target.voice and target.voice.channel:
+                            try:
+                                await target.move_to(None, reason="modo censura roleta 999")
+                            except Exception:
+                                pass
+                    embed = self._make_roleta_result_embed(
+                        "☠️🎰 999!!!",
+                        "Todo mundo da call foi tirado, exceto os bots",
+                        board,
+                        success=True,
+                    )
+                elif success:
                     for target in targets:
                         if target.voice and target.voice.channel:
                             try:
@@ -466,18 +478,24 @@ class AntiMzkTriggerMixin:
                 else:
                     embed = self._make_roleta_result_embed(
                         "🎰 Não foi dessa vez...",
-                        "Ninguém foi expulso da call... Ainda (chance: **10%**)",
+                        "Ninguém foi expulso da call... Ainda (chance: **10%** / **0,1%** para 999)",
                         board,
                         success=False,
                     )
             except Exception:
-                fallback_text = (
-                    "Membros alvos foram tirados da call" if success else "Ninguém foi expulso da call... Ainda (chance: **10%**)"
-                )
+                if mega_success:
+                    fallback_title = "☠️🎰 999!!!"
+                    fallback_text = "Todo mundo da call foi tirado, exceto os bots"
+                elif success:
+                    fallback_title = "💥🎰 JACKPOT!!"
+                    fallback_text = "Membros alvos foram tirados da call"
+                else:
+                    fallback_title = "🎰 Não foi dessa vez..."
+                    fallback_text = "Ninguém foi expulso da call... Ainda (chance: **10%** / **0,1%** para 999)"
                 embed = self._make_embed(
-                    "💥🎰 JACKPOT!!" if success else "🎰 Não foi dessa vez...",
+                    fallback_title,
                     fallback_text,
-                    ok=not success,
+                    ok=not (mega_success or success),
                 )
 
             delivered = False
