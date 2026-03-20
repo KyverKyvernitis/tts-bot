@@ -412,17 +412,14 @@ class AntiMzkTriggerMixin:
 
         self._roleta_running_guilds.add(guild.id)
         try:
-            mega_success = random.randint(1, 50) == 1
             success = random.randint(1, 10) == 1
 
-            if mega_success:
-                target_middle = [9, 9, 9]
-            elif success:
+            if success:
                 target_middle = [7, 7, 7]
             else:
                 while True:
                     target_middle = [random.randint(1, 9) for _ in range(3)]
-                    if target_middle not in ([7, 7, 7], [9, 9, 9]):
+                    if target_middle != [7, 7, 7]:
                         break
 
             spin_message, final_columns = await self._animate_roleta_spin(message, target_middle=target_middle)
@@ -437,25 +434,7 @@ class AntiMzkTriggerMixin:
             try:
                 board = self._render_roleta_board(final_columns)
 
-                if mega_success:
-                    everyone_targets = [
-                        member
-                        for member in getattr(voice_channel, "members", [])
-                        if not getattr(member, "bot", False)
-                    ]
-                    for target in everyone_targets:
-                        if target.voice and target.voice.channel:
-                            try:
-                                await target.move_to(None, reason="modo censura roleta 999")
-                            except Exception:
-                                pass
-                    embed = self._make_roleta_result_embed(
-                        "☠️🎰 999!!!",
-                        "Todo mundo da call foi tirado, exceto os bots",
-                        board,
-                        success=True,
-                    )
-                elif success:
+                if success:
                     for target in targets:
                         if target.voice and target.voice.channel:
                             try:
@@ -471,24 +450,21 @@ class AntiMzkTriggerMixin:
                 else:
                     embed = self._make_roleta_result_embed(
                         "🎰 Não foi dessa vez...",
-                        "Ninguém foi expulso da call... Ainda (chance: **10%** / **2%** para 999)",
+                        "Ninguém foi expulso da call... Ainda (chance: **10%**)",
                         board,
                         success=False,
                     )
             except Exception:
-                if mega_success:
-                    fallback_title = "☠️🎰 999!!!"
-                    fallback_text = "Todo mundo da call foi tirado, exceto os bots"
-                elif success:
+                if success:
                     fallback_title = "💥🎰 JACKPOT!!"
                     fallback_text = "Membros alvos foram tirados da call"
                 else:
                     fallback_title = "🎰 Não foi dessa vez..."
-                    fallback_text = "Ninguém foi expulso da call... Ainda (chance: **10%** / **2%** para 999)"
+                    fallback_text = "Ninguém foi expulso da call... Ainda (chance: **10%**)"
                 embed = self._make_embed(
                     fallback_title,
                     fallback_text,
-                    ok=not (mega_success or success),
+                    ok=not success,
                 )
 
             delivered = False
