@@ -419,8 +419,8 @@ class AntiMzkTriggerMixin:
         self._roleta_running_guilds.add(guild.id)
         self._roleta_last_used[guild.id] = now
         try:
-            mega_success = random.randint(1, 1000) == 1
-            success = mega_success or (random.randint(1, 10) == 1)
+            mega_success = random.randint(1, 100) == 1
+            success = random.randint(1, 10) == 1
 
             if mega_success:
                 target_middle = [9, 9, 9]
@@ -478,7 +478,7 @@ class AntiMzkTriggerMixin:
                 else:
                     embed = self._make_roleta_result_embed(
                         "🎰 Não foi dessa vez...",
-                        "Ninguém foi expulso da call... Ainda (chance: **10%** / **0,1%** para 999)",
+                        "Ninguém foi expulso da call... Ainda (chance: **10%** / **1%** para 999)",
                         board,
                         success=False,
                     )
@@ -491,7 +491,7 @@ class AntiMzkTriggerMixin:
                     fallback_text = "Membros alvos foram tirados da call"
                 else:
                     fallback_title = "🎰 Não foi dessa vez..."
-                    fallback_text = "Ninguém foi expulso da call... Ainda (chance: **10%** / **0,1%** para 999)"
+                    fallback_text = "Ninguém foi expulso da call... Ainda (chance: **10%** / **1%** para 999)"
                 embed = self._make_embed(
                     fallback_title,
                     fallback_text,
