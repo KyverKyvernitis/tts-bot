@@ -715,7 +715,6 @@ class AntiMzkCog(commands.Cog):
                 f"**Vítimas da vez:** {target_mentions or 'ninguém conseguiu escapar do texto, mas a call esvaziou.'}"
             )
             color = discord.Color(ON_COLOR)
-            footer = "10% de chance. 100% de caos."
         else:
             title = "🎰 Quase deu ruim... mas a call sobreviveu"
             description = (
