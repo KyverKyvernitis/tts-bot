@@ -220,7 +220,7 @@ class AntiMzkTriggerMixin:
         if changed:
             await self._refresh_targets_suffix_nicknames(guild, targets)
             await self._send_role_toggle_feedback(message, should_activate)
-            await self._react_success_temporarily(message)
+            await self._react_with_emoji(message, "<a:r_gun01:1484661880323838002>", keep=True)
         return True
 
     async def _send_dj_toggle_feedback(self, message: discord.Message, activated: bool, affected_count: int, voice_channel: discord.VoiceChannel):
@@ -342,8 +342,14 @@ class AntiMzkTriggerMixin:
         )
 
     async def _set_roleta_reaction(self, message: discord.Message, emoji: str, *, keep: bool):
+        await self._react_with_emoji(message, emoji, keep=keep)
+
+    async def _react_with_emoji(self, message: discord.Message, emoji: str, *, keep: bool, delay: float = 3.0):
+        reaction_emoji = emoji
         try:
-            await message.add_reaction(emoji)
+            if isinstance(emoji, str) and emoji.startswith("<") and emoji.endswith(">"):
+                reaction_emoji = discord.PartialEmoji.from_str(emoji)
+            await message.add_reaction(reaction_emoji)
         except Exception:
             return
 
@@ -351,9 +357,9 @@ class AntiMzkTriggerMixin:
             return
 
         async def _cleanup():
-            await asyncio.sleep(3)
+            await asyncio.sleep(max(0.0, delay))
             try:
-                await message.remove_reaction(emoji, self.bot.user)
+                await message.remove_reaction(reaction_emoji, self.bot.user)
             except Exception:
                 pass
 
@@ -757,7 +763,7 @@ class AntiMzkTriggerMixin:
 
         session["message"] = panel_message
         session["timeout_task"] = self.bot.loop.create_task(view.wait())
-        await self._react_success_temporarily(message)
+        await self._react_with_emoji(message, "<a:r_gun01:1484661880323838002>", keep=True)
         return True
 
     async def _handle_atirar_trigger(self, message: discord.Message) -> bool:
@@ -791,7 +797,7 @@ class AntiMzkTriggerMixin:
             return True
 
         await self._finish_buckshot(guild.id, reason="manual")
-        await self._react_success_temporarily(message)
+        await self._react_with_emoji(message, "💥", keep=False)
         return True
 
     async def _handle_antimzk_message(self, message: discord.Message):
