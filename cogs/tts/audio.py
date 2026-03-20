@@ -91,6 +91,8 @@ class GuildTTSState:
     warmed_until: float = 0.0
     cache_order: OrderedDict[str, float] = field(default_factory=OrderedDict)
     pending_signatures: dict[str, int] = field(default_factory=dict)
+    prefetched_item: Optional[QueueItem] = None
+    prefetched_audio_task: Optional[asyncio.Task] = None
 
 
 class TTSAudioMixin:
@@ -151,6 +153,7 @@ class TTSAudioMixin:
         await state.queue.put(item)
         self._increment_pending_signature(state, item)
         self._record_queue_enqueue(dropped=dropped, deduplicated=False, queue_depth=state.queue.qsize())
+        self._maybe_schedule_prefetch(guild_id, state)
         return True, dropped, deduplicated
 
     def _ensure_worker(self, guild_id: int) -> None:
@@ -1132,28 +1135,35 @@ class TTSAudioMixin:
             state.last_channel_id = item.channel_id
         return vc
 
-    async def _maybe_prefetch_next(self, state: GuildTTSState):
-        prefetched_item: Optional[QueueItem] = None
-        prefetched_audio_task: Optional[asyncio.Task] = None
 
+    def _maybe_schedule_prefetch(self, guild_id: int, state: GuildTTSState) -> None:
+        if state.prefetched_item is not None:
+            return
+        existing_task = getattr(state, "prefetched_audio_task", None)
+        if existing_task is not None and not existing_task.done():
+            return
+        worker_task = getattr(state, "worker_task", None)
+        if worker_task is None or worker_task.done():
+            return
         if state.queue.empty():
-            return prefetched_item, prefetched_audio_task
-
+            return
         try:
             prefetched_item = state.queue.get_nowait()
             self._decrement_pending_signature(state, prefetched_item)
         except asyncio.QueueEmpty:
-            return None, None
-
+            return
         setattr(prefetched_item, "_dequeued_at_monotonic", time.monotonic())
+        state.prefetched_item = prefetched_item
+        state.prefetched_audio_task = asyncio.create_task(self._resolve_audio_path(state, prefetched_item))
         self._record_prefetch_started()
-        prefetched_audio_task = asyncio.create_task(self._resolve_audio_path(state, prefetched_item))
-        return prefetched_item, prefetched_audio_task
+        self._log_debug(f"[tts_voice] Prefetch agendado cedo | guild={guild_id} channel={prefetched_item.channel_id} author={prefetched_item.author_id}")
+
+    async def _maybe_prefetch_next(self, guild_id: int, state: GuildTTSState):
+        self._maybe_schedule_prefetch(guild_id, state)
+        return state.prefetched_item, state.prefetched_audio_task
 
     async def _worker_loop(self, guild_id: int) -> None:
         state = self._get_state(guild_id)
-        prefetched_item: Optional[QueueItem] = None
-        prefetched_audio_task: Optional[asyncio.Task] = None
 
         try:
             while True:
@@ -1164,12 +1174,12 @@ class TTSAudioMixin:
 
                 fetched_from_queue = False
 
-                if prefetched_item is not None:
-                    item = prefetched_item
+                if state.prefetched_item is not None:
+                    item = state.prefetched_item
                     fetched_from_queue = True
-                    prefetched_item = None
-                    audio_task = prefetched_audio_task
-                    prefetched_audio_task = None
+                    state.prefetched_item = None
+                    audio_task = state.prefetched_audio_task
+                    state.prefetched_audio_task = None
                 else:
                     try:
                         timeout = TTS_IDLE_DISCONNECT_SECONDS
@@ -1207,8 +1217,8 @@ class TTSAudioMixin:
                     else:
                         active_audio_task = audio_task
 
-                    if prefetched_item is None and not state.queue.empty():
-                        prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
+                    if state.prefetched_item is None and not state.queue.empty():
+                        await self._maybe_prefetch_next(guild_id, state)
 
                     vc = await connect_task
                     if vc is None:
@@ -1255,6 +1265,7 @@ class TTSAudioMixin:
                         protected_paths: set[str] = set()
                         if should_cleanup:
                             protected_paths.add(current_path)
+                        prefetched_audio_task = state.prefetched_audio_task
                         if prefetched_audio_task is not None and prefetched_audio_task.done() and not prefetched_audio_task.cancelled():
                             with contextlib.suppress(Exception):
                                 prefetched_path, _ = prefetched_audio_task.result()
@@ -1263,8 +1274,8 @@ class TTSAudioMixin:
                         self._purge_cache(state, protected_paths=protected_paths)
                         state.warmed_until = time.monotonic() + TTS_WARM_HOLD_SECONDS
 
-                    if prefetched_item is None and not state.queue.empty():
-                        prefetched_item, prefetched_audio_task = await self._maybe_prefetch_next(state)
+                    if state.prefetched_item is None and not state.queue.empty():
+                        await self._maybe_prefetch_next(guild_id, state)
 
                 except Exception as e:
                     logger.exception("[tts_voice] Erro no worker da guild %s: %s", guild_id, e)
