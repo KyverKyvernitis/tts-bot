@@ -34,7 +34,7 @@ class AntiMzkCog(AntiMzkCore, dcommands.Cog):
     async def antimzk_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         await self._handle_antimzk_error(interaction, error)
 
-    @commands.Cog.listener()
+    @dcommands.Cog.listener()
     async def on_message(self, message: discord.Message):
         await self._handle_antimzk_message(message)
 

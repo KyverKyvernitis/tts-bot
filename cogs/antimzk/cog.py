@@ -1,6 +1,6 @@
 from .base import AntiMzkBase
-from .slash_commands import AntiMzkCommandMixin
 from .focus import AntiMzkFocusMixin
+from .slash_commands import AntiMzkCommandMixin
 from .triggers import AntiMzkTriggerMixin
 
 
