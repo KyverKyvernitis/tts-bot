@@ -676,65 +676,45 @@ class AntiMzkCog(commands.Cog):
 
         targets = self._resolve_targets(guild, voice_channel)
         if not targets:
-            embed = discord.Embed(
-                title="🎰 Roleta sabotagem sem participantes",
-                description=(
-                    "A banca até tentou girar a roleta, mas **não achei nenhum alvo** na call para passar vergonha.\n\n"
-                    f"Canal: {voice_channel.mention}"
-                ),
-                color=discord.Color(OFF_COLOR),
+            embed = self._make_embed(
+                "🎲 Roleta sem alvos",
+                "Não há usuários alvo do modo censura nesse canal de voz para usar a trigger **roleta**.",
+                ok=False,
             )
-            embed.set_footer(text="Sem vítimas, sem entretenimento.")
             try:
                 await message.channel.send(embed=embed)
             except Exception:
                 pass
             return True
 
-        roll = random.randint(1, 10)
-        unlucky = roll == 1
-        ejected = 0
-        if unlucky:
+        rolled = random.randint(1, 10)
+        success = rolled == 1
+
+        if success:
+            disconnected = 0
             for target in targets:
-                try:
-                    if target.voice and target.voice.channel:
+                if target.voice and target.voice.channel:
+                    try:
                         await target.move_to(None, reason="modo censura roleta")
-                        ejected += 1
-                except Exception:
-                    pass
-
-        target_mentions = ", ".join(member.mention for member in targets[:6])
-        if len(targets) > 6:
-            target_mentions += f" e mais **{len(targets) - 6}**"
-
-        if unlucky:
-            title = "💥🎰 ROLETAA!! Jackpot da humilhação"
+                        disconnected += 1
+                    except Exception:
+                        pass
+            title = "🎲 Roleta da censura: sorte ruim"
             description = (
-                f"A roleta girou... caiu no **`{roll}`** e o azar escolheu visitar a call.\n\n"
-                f"**Resultado:** os alvos atuais do modo censura foram **jogados pra fora da call**.\n"
-                f"**Vítimas da vez:** {target_mentions or 'ninguém conseguiu escapar do texto, mas a call esvaziou.'}"
+                f"A roleta caiu em **`{rolled}`**. Os usuários alvo do modo censura foram **tirados da call**.\n\n"
+                f"Chance da punição: **10%**"
             )
-            color = discord.Color(ON_COLOR)
-            footer = "10% de chance. 100% de caos."
+            ok = False
         else:
-            title = "🎰 Quase deu ruim... mas a call sobreviveu"
+            disconnected = 0
+            title = "🎲 Roleta da censura: sobreviveram"
             description = (
-                f"A roleta girou, fez suspense, caiu no **`{roll}`** e decidiu poupar a tropa dessa vez.\n\n"
-                "**Resultado:** ninguém foi expulso da call. Ainda."
+                f"A roleta caiu em **`{rolled}`**. Dessa vez os usuários alvo do modo censura **não foram tirados da call**.\n\n"
+                f"Chance da punição: **10%**"
             )
-            color = discord.Color.blurple()
-            footer = "A roleta foi boazinha agora. Não confia nela não."
+            ok = True
 
-        embed = discord.Embed(title=title, description=description, color=color)
-        embed.add_field(name="🎯 Chance de kickar", value="**10%** (só no número `1`)", inline=True)
-        embed.add_field(name="🎲 Número sorteado", value=f"**`{roll}`**", inline=True)
-        embed.add_field(name="👥 Alvos na mira", value=f"**{len(targets)}**", inline=True)
-        if unlucky:
-            embed.add_field(name="🚪 Caíram da call", value=f"**{ejected}**", inline=False)
-        else:
-            embed.add_field(name="🛟 Livramento temporário", value="Hoje a humilhação ficou só no susto.", inline=False)
-        embed.set_footer(text=footer)
-
+        embed = self._make_embed(title, description, ok=ok)
         try:
             await message.channel.send(embed=embed)
         except Exception:
