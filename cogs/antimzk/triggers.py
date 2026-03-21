@@ -445,7 +445,7 @@ class AntiMzkTriggerMixin:
         except Exception:
             return None, None
 
-        target_duration = random.uniform(4.0, 6.0)
+        target_duration = 5.0
         intervals = [0.22, 0.26, 0.30, 0.35, 0.41, 0.49, 0.60, 0.74, 0.90, 1.05]
         scale = target_duration / sum(intervals)
         intervals = [step * scale for step in intervals]
