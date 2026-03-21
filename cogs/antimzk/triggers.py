@@ -927,6 +927,9 @@ class AntiMzkTriggerMixin:
         if await self._handle_roleta_trigger(message):
             return
 
+        if await self._handle_poker_trigger(message):
+            return
+
         if not self.db.anti_mzk_enabled(message.guild.id):
             return
 

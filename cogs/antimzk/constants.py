@@ -13,6 +13,7 @@ _DJ_TOGGLE_WORD_RE = re.compile(r"(?<!\w)dj(?!\w)", re.IGNORECASE)
 _ROLETA_WORD_RE = re.compile(r"(?<!\w)roleta(?!\w)", re.IGNORECASE)
 _BUCKSHOT_WORD_RE = re.compile(r"(?<!\w)buckshot(?!\w)", re.IGNORECASE)
 _ATIRAR_WORD_RE = re.compile(r"(?<!\w)atirar(?!\w)", re.IGNORECASE)
+_POKER_WORD_RE = re.compile(r"(?<!\w)poker(?!\w)", re.IGNORECASE)
 _RESPONSE_DELETE_AFTER = 20
 _ROLE_TOGGLE_DELETE_AFTER = 5
 _PICA_DURATION_SECONDS = 2 * 60 * 60
