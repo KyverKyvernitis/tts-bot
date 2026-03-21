@@ -371,21 +371,52 @@ class AntiMzkTriggerMixin:
     async def _play_roleta_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
         return await self._play_sfx_file(guild, voice_channel, self._roleta_sfx_path())
 
-    def _build_roleta_column(self, middle: int | None = None) -> list[int]:
-        return [random.randint(1, 9), middle if middle is not None else random.randint(1, 9), random.randint(1, 9)]
+    def _favored_roleta_failure_middle(self) -> list[int]:
+        return random.choice(
+            [
+                [7, 7, 3],
+                [7, 1, 7],
+                [2, 7, 7],
+                [7, 4, 7],
+                [6, 7, 7],
+            ]
+        )
+
+    def _pick_roleta_failure_middle(self) -> list[int]:
+        if random.random() < 0.30:
+            return self._favored_roleta_failure_middle()
+        while True:
+            middle = [random.randint(1, 9) for _ in range(3)]
+            if middle != [7, 7, 7]:
+                return middle
+
+    def _build_roleta_column(self, middle: int | None = None, *, top: int | None = None, bottom: int | None = None) -> list[int]:
+        return [
+            top if top is not None else random.randint(1, 9),
+            middle if middle is not None else random.randint(1, 9),
+            bottom if bottom is not None else random.randint(1, 9),
+        ]
 
     def _spin_roleta_column(self, column: list[int]):
         column.insert(0, random.randint(1, 9))
         del column[3:]
 
+    def _format_roleta_row(self, row: list[int]) -> str:
+        return f"  {row[0]}  {row[1]}  {row[2]}  "
+
     def _render_roleta_board(self, columns: list[list[int]]) -> str:
         rows = [[columns[0][i], columns[1][i], columns[2][i]] for i in range(3)]
+        top_row = self._format_roleta_row(rows[0])
+        middle_row = self._format_roleta_row(rows[1])
+        bottom_row = self._format_roleta_row(rows[2])
         lines = [
-            f"│ {rows[0][0]}  {rows[0][1]}  {rows[0][2]} │",
-            "───────────",
-            f"» {rows[1][0]}  {rows[1][1]}  {rows[1][2]} «",
-            "───────────",
-            f"│ {rows[2][0]}  {rows[2][1]}  {rows[2][2]} │",
+            "┌───────────┐",
+            f"│{top_row}│",
+            "├───────────┤",
+            f"»│{middle_row}│«",
+            "├───────────┤",
+            f"│{bottom_row}│",
+            "└───────────┘",
         ]
         return "```text\n" + "\n".join(lines) + "\n```"
 
@@ -435,8 +466,8 @@ class AntiMzkTriggerMixin:
         except Exception:
             return None, None
 
-        target_duration = random.uniform(4.0, 6.0)
-        intervals = [0.22, 0.26, 0.30, 0.35, 0.41, 0.49, 0.60, 0.74, 0.90, 1.05]
+        target_duration = random.uniform(7.0, 10.0)
+        intervals = [0.20, 0.22, 0.24, 0.27, 0.31, 0.36, 0.42, 0.50, 0.60, 0.73, 0.88, 1.06, 1.28, 1.55]
         scale = target_duration / sum(intervals)
         intervals = [step * scale for step in intervals]
         lock_steps = [len(intervals) - 3, len(intervals) - 2, len(intervals) - 1]
@@ -448,7 +479,12 @@ class AntiMzkTriggerMixin:
             if index in lock_steps:
                 lock_index = lock_steps.index(index)
                 locked_columns.add(lock_index)
-                columns[lock_index] = self._build_roleta_column(target_middle[lock_index])
+                existing_column = columns[lock_index]
+                columns[lock_index] = self._build_roleta_column(
+                    target_middle[lock_index],
+                    top=existing_column[0],
+                    bottom=existing_column[2],
+                )
 
             for column_index in range(3):
                 if column_index not in locked_columns:
@@ -507,10 +543,7 @@ class AntiMzkTriggerMixin:
             if success:
                 target_middle = [7, 7, 7]
             else:
-                while True:
-                    target_middle = [random.randint(1, 9) for _ in range(3)]
-                    if target_middle != [7, 7, 7]:
-                        break
+                target_middle = self._pick_roleta_failure_middle()
 
             spin_message, final_columns = await self._animate_roleta_spin(message, target_middle=target_middle)
 
