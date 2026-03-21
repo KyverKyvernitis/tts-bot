@@ -322,9 +322,6 @@ class AntiMzkTriggerMixin:
     def _roleta_sfx_path(self) -> Path:
         return self._sfx_path("roleta777.mp3")
 
-    def _roleta_fail_sfx_path(self) -> Path:
-        return self._sfx_path("roleta_fail.mp3")
-
     async def _play_sfx_file(self, guild: discord.Guild, voice_channel: discord.VoiceChannel, sfx_path: Path) -> bool:
         if not sfx_path.exists():
             return False
@@ -373,9 +370,6 @@ class AntiMzkTriggerMixin:
 
     async def _play_roleta_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
         return await self._play_sfx_file(guild, voice_channel, self._roleta_sfx_path())
-
-    async def _play_roleta_fail_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
-        return await self._play_sfx_file(guild, voice_channel, self._roleta_fail_sfx_path())
 
     def _build_roleta_column(self, middle: int | None = None) -> list[int]:
         return [random.randint(1, 9), middle if middle is not None else random.randint(1, 9), random.randint(1, 9)]
@@ -550,12 +544,6 @@ class AntiMzkTriggerMixin:
                         success=True,
                     )
                 else:
-                    chosen_channel = voice_channel
-                    try:
-                        await self._play_roleta_fail_sfx(guild, chosen_channel)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0.20)
                     embed = self._make_roleta_result_embed(
                         "🎰 Não foi dessa vez...",
                         "Ninguém foi expulso da call... Ainda (chance: **10%**)",
