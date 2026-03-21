@@ -76,49 +76,52 @@ def _evaluate_hand(cards: list[tuple[str, str]]) -> PokerHandEval:
     return PokerHandEval(0, tuple(values))
 
 
-def _compare_hands(player_cards: list[tuple[str, str]], dealer_cards: list[tuple[str, str]]) -> tuple[int, PokerHandEval, PokerHandEval]:
-    player_eval = _evaluate_hand(player_cards)
-    dealer_eval = _evaluate_hand(dealer_cards)
-    player_key = (player_eval.category, *player_eval.tiebreak)
-    dealer_key = (dealer_eval.category, *dealer_eval.tiebreak)
-    if player_key > dealer_key:
-        return 1, player_eval, dealer_eval
-    if player_key < dealer_key:
-        return -1, player_eval, dealer_eval
-    return 0, player_eval, dealer_eval
+def _compare_hands(first_cards: list[tuple[str, str]], second_cards: list[tuple[str, str]]) -> tuple[int, PokerHandEval, PokerHandEval]:
+    first_eval = _evaluate_hand(first_cards)
+    second_eval = _evaluate_hand(second_cards)
+    first_key = (first_eval.category, *first_eval.tiebreak)
+    second_key = (second_eval.category, *second_eval.tiebreak)
+    if first_key > second_key:
+        return 1, first_eval, second_eval
+    if first_key < second_key:
+        return -1, first_eval, second_eval
+    return 0, first_eval, second_eval
 
 
 class AntiMzkPokerMixin:
     def _make_poker_channel_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
         return self._make_embed(title, description, ok=ok)
 
-    def _make_poker_dm_embed(self, title: str, description: str, *, reveal: bool = False, player_cards: list[tuple[str, str]] | None = None, result_line: str | None = None) -> discord.Embed:
+    def _make_poker_dm_embed(self, title: str, description: str, *, player_cards: list[tuple[str, str]] | None = None, opponent: discord.Member | None = None, reveal_line: str | None = None) -> discord.Embed:
         lines = [description]
+        if opponent is not None:
+            lines.append("")
+            lines.append(f"**Adversário**\n{opponent.mention}")
         if player_cards is not None:
             lines.append("")
             lines.append(f"**Suas cartas**\n{_format_cards(player_cards)}")
-        if reveal and result_line:
+        if reveal_line:
             lines.append("")
-            lines.append(result_line)
+            lines.append(reveal_line)
         return discord.Embed(title=title, description="\n".join(lines), color=discord.Color.blurple())
 
-    def _make_poker_result_embed(self, player: discord.Member, player_cards: list[tuple[str, str]], dealer_cards: list[tuple[str, str]], *, outcome: int, player_eval: PokerHandEval, dealer_eval: PokerHandEval) -> discord.Embed:
+    def _make_poker_result_embed(self, first_player: discord.Member, second_player: discord.Member, first_cards: list[tuple[str, str]], second_cards: list[tuple[str, str]], *, outcome: int, first_eval: PokerHandEval, second_eval: PokerHandEval) -> discord.Embed:
         if outcome > 0:
-            title = "🃏 Você venceu no poker"
-            verdict = f"{player.mention} levou a rodada."
+            title = "🃏 Vitória no duelo de poker"
+            verdict = f"{first_player.mention} venceu {second_player.mention}."
             ok = True
         elif outcome < 0:
-            title = "🃏 Dealer venceu no poker"
-            verdict = f"O dealer levou a rodada contra {player.mention}."
-            ok = False
+            title = "🃏 Vitória no duelo de poker"
+            verdict = f"{second_player.mention} venceu {first_player.mention}."
+            ok = True
         else:
-            title = "🃏 Empate no poker"
-            verdict = f"{player.mention} empatou com o dealer."
+            title = "🃏 Empate no duelo de poker"
+            verdict = f"{first_player.mention} e {second_player.mention} empataram."
             ok = True
         description = (
             f"{verdict}\n\n"
-            f"**{player.display_name}** — {_RANK_LABELS[player_eval.category]}\n{_format_cards(player_cards)}\n\n"
-            f"**Dealer** — {_RANK_LABELS[dealer_eval.category]}\n{_format_cards(dealer_cards)}"
+            f"**{first_player.display_name}** — {_RANK_LABELS[first_eval.category]}\n{_format_cards(first_cards)}\n\n"
+            f"**{second_player.display_name}** — {_RANK_LABELS[second_eval.category]}\n{_format_cards(second_cards)}"
         )
         return self._make_embed(title, description, ok=ok)
 
@@ -136,9 +139,23 @@ class AntiMzkPokerMixin:
         if guild.id in self._poker_sessions:
             return True
 
+        mentions = [member for member in message.mentions if isinstance(member, discord.Member) and not member.bot and member.id != message.author.id]
+        opponent = mentions[0] if mentions else None
+        if opponent is None:
+            fail_embed = self._make_embed(
+                "🃏 Duelo de poker inválido",
+                f"{message.author.mention}, use **poker @usuário** para iniciar um duelo. O modo atual funciona apenas em duelo.",
+                ok=False,
+            )
+            try:
+                await message.channel.send(embed=fail_embed)
+            except Exception:
+                pass
+            return True
+
         channel_embed = self._make_poker_channel_embed(
-            "🃏 Poker iniciado",
-            f"{message.author.mention}, abrindo sua mesa privada...",
+            "🃏 Duelo de poker iniciado",
+            f"{message.author.mention} desafiou {opponent.mention}. Abrindo as mesas privadas...",
             ok=True,
         )
         try:
@@ -146,16 +163,23 @@ class AntiMzkPokerMixin:
         except Exception:
             game_message = None
 
+        author_dm_message = None
+        opponent_dm_message = None
         try:
-            dm_embed = self._make_poker_dm_embed(
-                "🃏 Mesa privada de poker",
-                f"Rodada iniciada a partir de {message.guild.name}. Embaralhando as cartas...",
-            )
-            dm_message = await message.author.send(embed=dm_embed)
+            author_dm_message = await message.author.send(embed=self._make_poker_dm_embed(
+                "🃏 Seu duelo de poker começou",
+                f"Rodada iniciada a partir de {message.guild.name}. Aguarde a revelação no canal.",
+                opponent=opponent,
+            ))
+            opponent_dm_message = await opponent.send(embed=self._make_poker_dm_embed(
+                "🃏 Seu duelo de poker começou",
+                f"{message.author.display_name} te desafiou em {message.guild.name}. Aguarde a revelação no canal.",
+                opponent=message.author,
+            ))
         except Exception:
             fail_embed = self._make_embed(
-                "🃏 Não consegui abrir sua DM",
-                f"{message.author.mention}, habilite mensagens diretas do servidor para usar a trigger **poker**.",
+                "🃏 Não consegui abrir as DMs do duelo",
+                f"{message.author.mention} e {opponent.mention} precisam estar com a DM habilitada para usar a trigger **poker** em duelo.",
                 ok=False,
             )
             if game_message is not None:
@@ -172,34 +196,46 @@ class AntiMzkPokerMixin:
 
         self._poker_sessions[guild.id] = {
             "author_id": message.author.id,
+            "opponent_id": opponent.id,
             "channel_id": message.channel.id,
             "message_id": getattr(game_message, "id", 0),
-            "dm_message_id": getattr(dm_message, "id", 0),
+            "author_dm_message_id": getattr(author_dm_message, "id", 0),
+            "opponent_dm_message_id": getattr(opponent_dm_message, "id", 0),
         }
 
         try:
             await self._react_with_emoji(message, "🃏", keep=True)
             deck = _build_deck()
             random.shuffle(deck)
-            player_cards = deck[:5]
-            dealer_cards = deck[5:10]
-            outcome, player_eval, dealer_eval = _compare_hands(player_cards, dealer_cards)
+            author_cards = deck[:5]
+            opponent_cards = deck[5:10]
+            outcome, author_eval, opponent_eval = _compare_hands(author_cards, opponent_cards)
 
             await asyncio.sleep(0.8)
             if game_message is not None:
                 try:
                     await game_message.edit(embed=self._make_poker_channel_embed(
-                        "🃏 Poker iniciado",
-                        f"{message.author.mention}, suas cartas foram enviadas por DM. O dealer está preparando a mão...",
+                        "🃏 Duelo de poker iniciado",
+                        f"As cartas foram enviadas por DM para {message.author.mention} e {opponent.mention}. Revelando a rodada...",
                         ok=True,
                     ))
                 except Exception:
                     pass
             try:
-                await dm_message.edit(embed=self._make_poker_dm_embed(
+                await author_dm_message.edit(embed=self._make_poker_dm_embed(
                     "🃏 Suas cartas chegaram",
-                    "A rodada está conectada ao canal. Aguarde o dealer concluir a revelação.",
-                    player_cards=player_cards,
+                    "Sua mão está conectada ao duelo no canal.",
+                    player_cards=author_cards,
+                    opponent=opponent,
+                ))
+            except Exception:
+                pass
+            try:
+                await opponent_dm_message.edit(embed=self._make_poker_dm_embed(
+                    "🃏 Suas cartas chegaram",
+                    "Sua mão está conectada ao duelo no canal.",
+                    player_cards=opponent_cards,
+                    opponent=message.author,
                 ))
             except Exception:
                 pass
@@ -207,11 +243,12 @@ class AntiMzkPokerMixin:
             await asyncio.sleep(1.2)
             result_embed = self._make_poker_result_embed(
                 message.author,
-                player_cards,
-                dealer_cards,
+                opponent,
+                author_cards,
+                opponent_cards,
                 outcome=outcome,
-                player_eval=player_eval,
-                dealer_eval=dealer_eval,
+                first_eval=author_eval,
+                second_eval=opponent_eval,
             )
             if game_message is not None:
                 try:
@@ -224,18 +261,34 @@ class AntiMzkPokerMixin:
                 except Exception:
                     pass
 
-            dm_result = self._make_poker_dm_embed(
-                "🃏 Resultado da rodada",
-                f"Dealer: {_RANK_LABELS[dealer_eval.category]}\n{_format_cards(dealer_cards)}",
-                reveal=True,
-                player_cards=player_cards,
-                result_line=(
-                    f"**Seu resultado**: {_RANK_LABELS[player_eval.category]}\n"
-                    f"**Resultado final**: {'Vitória' if outcome > 0 else 'Derrota' if outcome < 0 else 'Empate'}"
-                ),
+            author_result_line = (
+                f"**Sua mão**: {_RANK_LABELS[author_eval.category]}\n"
+                f"**Mão de {opponent.display_name}**: {_RANK_LABELS[opponent_eval.category]}\n"
+                f"**Resultado final**: {'Vitória' if outcome > 0 else 'Derrota' if outcome < 0 else 'Empate'}"
+            )
+            opponent_result_line = (
+                f"**Sua mão**: {_RANK_LABELS[opponent_eval.category]}\n"
+                f"**Mão de {message.author.display_name}**: {_RANK_LABELS[author_eval.category]}\n"
+                f"**Resultado final**: {'Vitória' if outcome < 0 else 'Derrota' if outcome > 0 else 'Empate'}"
             )
             try:
-                await dm_message.edit(embed=dm_result)
+                await author_dm_message.edit(embed=self._make_poker_dm_embed(
+                    "🃏 Resultado do duelo",
+                    f"Cartas de {opponent.display_name}:\n{_format_cards(opponent_cards)}",
+                    player_cards=author_cards,
+                    opponent=opponent,
+                    reveal_line=author_result_line,
+                ))
+            except Exception:
+                pass
+            try:
+                await opponent_dm_message.edit(embed=self._make_poker_dm_embed(
+                    "🃏 Resultado do duelo",
+                    f"Cartas de {message.author.display_name}:\n{_format_cards(author_cards)}",
+                    player_cards=opponent_cards,
+                    opponent=message.author,
+                    reveal_line=opponent_result_line,
+                ))
             except Exception:
                 pass
             return True
