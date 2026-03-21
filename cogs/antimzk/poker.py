@@ -22,6 +22,10 @@ _HAND_NAMES = {
     0: "Carta Alta",
 }
 
+_STARTING_STACK = 100
+_BET_SIZE = 10
+_MAX_SWAP = 3
+
 
 @dataclass
 class PokerGame:
@@ -38,14 +42,27 @@ class PokerGame:
     dm_messages: dict[int, discord.Message] = field(default_factory=dict)
     views: dict[int, "PokerSelectionView"] = field(default_factory=dict)
     finished: bool = False
+    accepted: dict[int, bool] = field(default_factory=dict)
+    phase: str = "invite"
+    turn_id: int | None = None
+    stacks: dict[int, int] = field(default_factory=dict)
+    round_bets: dict[int, int] = field(default_factory=dict)
+    round_acted: set[int] = field(default_factory=set)
+    pot: int = 0
+    action_log: list[str] = field(default_factory=list)
+    exchange_counts: dict[int, int] = field(default_factory=dict)
+    folded_by: int | None = None
 
     @property
     def players(self) -> tuple[int, int]:
         return (self.host_id, self.opponent_id)
 
+    def other_player(self, player_id: int) -> int:
+        return self.opponent_id if player_id == self.host_id else self.host_id
+
 
 class PokerSelectionView(discord.ui.View):
-    def __init__(self, cog: "AntiMzkPokerMixin", game: PokerGame, player_id: int, *, timeout: float = 120.0):
+    def __init__(self, cog: "AntiMzkPokerMixin", game: PokerGame, player_id: int, *, timeout: float = 180.0):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.game = game
@@ -64,6 +81,22 @@ class PokerSelectionView(discord.ui.View):
         self.confirm_button = discord.ui.Button(label="Confirmar troca", style=discord.ButtonStyle.success, row=1)
         self.confirm_button.callback = self._confirm_selection
         self.add_item(self.confirm_button)
+
+        self.accept_button = discord.ui.Button(label="Aceitar duelo", style=discord.ButtonStyle.success, row=2)
+        self.accept_button.callback = self._accept_duel
+        self.add_item(self.accept_button)
+
+        self.check_call_button = discord.ui.Button(label="Check", style=discord.ButtonStyle.primary, row=3)
+        self.check_call_button.callback = self._check_call
+        self.add_item(self.check_call_button)
+
+        self.bet_raise_button = discord.ui.Button(label=f"Apostar +{_BET_SIZE}", style=discord.ButtonStyle.secondary, row=3)
+        self.bet_raise_button.callback = self._bet_raise
+        self.add_item(self.bet_raise_button)
+
+        self.fold_button = discord.ui.Button(label="Desistir", style=discord.ButtonStyle.danger, row=3)
+        self.fold_button.callback = self._fold
+        self.add_item(self.fold_button)
         self.refresh_buttons()
 
     def _make_toggle_callback(self, index: int):
@@ -77,15 +110,53 @@ class PokerSelectionView(discord.ui.View):
     async def _confirm_selection(self, interaction: discord.Interaction):
         await self.cog._handle_poker_confirm(interaction, self.game, self.player_id)
 
+    async def _accept_duel(self, interaction: discord.Interaction):
+        await self.cog._handle_poker_accept(interaction, self.game, self.player_id)
+
+    async def _check_call(self, interaction: discord.Interaction):
+        await self.cog._handle_poker_check_call(interaction, self.game, self.player_id)
+
+    async def _bet_raise(self, interaction: discord.Interaction):
+        await self.cog._handle_poker_bet_raise(interaction, self.game, self.player_id)
+
+    async def _fold(self, interaction: discord.Interaction):
+        await self.cog._handle_poker_fold(interaction, self.game, self.player_id)
+
     def refresh_buttons(self):
         selected = self.game.selected.get(self.player_id, set())
         confirmed = self.game.confirmed.get(self.player_id, False)
+        phase = self.game.phase
+        accepted = self.game.accepted.get(self.player_id, False)
+        current_bet = max(self.game.round_bets.values(), default=0)
+        own_bet = self.game.round_bets.get(self.player_id, 0)
+        turn = self.game.turn_id == self.player_id
+        can_bet = self.game.stacks.get(self.player_id, 0) > 0
+
         for idx, button in enumerate(self.position_buttons):
             button.style = discord.ButtonStyle.primary if idx in selected else discord.ButtonStyle.secondary
-            button.disabled = confirmed
-        self.clear_button.disabled = confirmed or not selected
-        self.confirm_button.disabled = confirmed
+            button.disabled = phase != "draw_select" or confirmed
+        self.clear_button.disabled = phase != "draw_select" or confirmed or not selected
+        self.confirm_button.disabled = phase != "draw_select" or confirmed
         self.confirm_button.label = "Troca confirmada" if confirmed else "Confirmar troca"
+
+        self.accept_button.disabled = phase != "invite" or accepted
+        self.accept_button.label = "Duelo aceito" if accepted else "Aceitar duelo"
+
+        betting_phase = phase in {"pre_draw_bet", "post_draw_bet"}
+        self.check_call_button.disabled = not betting_phase or not turn
+        self.bet_raise_button.disabled = not betting_phase or not turn or not can_bet
+        self.fold_button.disabled = not betting_phase or not turn
+
+        if betting_phase:
+            if current_bet > own_bet:
+                self.check_call_button.label = f"Pagar {current_bet - own_bet}"
+                self.bet_raise_button.label = f"Aumentar +{_BET_SIZE}"
+            else:
+                self.check_call_button.label = "Check"
+                self.bet_raise_button.label = f"Apostar {_BET_SIZE}"
+        else:
+            self.check_call_button.label = "Check"
+            self.bet_raise_button.label = f"Apostar {_BET_SIZE}"
 
     async def on_timeout(self):
         try:
@@ -180,21 +251,52 @@ class AntiMzkPokerMixin:
     def _make_poker_status_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
         return self._make_embed(title, description, ok=ok)
 
-    def _make_poker_dm_embed(self, member: discord.Member, hand: list[Card], selected: set[int], confirmed: bool) -> discord.Embed:
-        selection_text = (
-            "Nenhuma carta marcada." if not selected else "Selecionadas para troca: " + ", ".join(str(i + 1) for i in sorted(selected))
-        )
-        status_text = "Troca confirmada. Aguardando o outro jogador." if confirmed else "Você pode trocar até 3 cartas e então confirmar."
+    def _make_poker_dm_embed(self, member: discord.Member, game: PokerGame, selected: set[int], confirmed: bool) -> discord.Embed:
+        hand = game.hands[member.id]
+        selected_text = "Nenhuma carta marcada." if not selected else "Selecionadas: " + ", ".join(str(i + 1) for i in sorted(selected))
+        phase_names = {
+            "invite": "Convite",
+            "pre_draw_bet": "Apostas antes da troca",
+            "draw_select": "Troca de cartas",
+            "post_draw_bet": "Apostas finais",
+            "finished": "Finalizado",
+        }
+        phase_text = phase_names.get(game.phase, game.phase)
+        current_bet = max(game.round_bets.values(), default=0)
+        own_bet = game.round_bets.get(member.id, 0)
+        to_call = max(0, current_bet - own_bet)
+        turn_text = "É a sua vez." if game.turn_id == member.id else "Aguarde a vez do outro jogador."
+
+        if game.phase == "invite":
+            status_text = "Aceite o duelo para a rodada começar."
+        elif game.phase == "draw_select":
+            status_text = "Troque até 3 cartas e confirme." if not confirmed else "Troca confirmada. Aguardando o outro jogador."
+        elif game.phase in {"pre_draw_bet", "post_draw_bet"}:
+            if to_call > 0:
+                status_text = f"Você precisa pagar {to_call} fichas, aumentar ou desistir. {turn_text}"
+            else:
+                status_text = f"Você pode dar check, apostar {_BET_SIZE} fichas ou desistir. {turn_text}"
+        else:
+            status_text = "Rodada encerrada."
+
         embed = discord.Embed(
             title="🃏 Sua mão de poker",
             description=f"**{member.display_name}**\n{self._format_hand(hand)}",
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="Seleção", value=selection_text, inline=False)
+        embed.add_field(name="Fase", value=phase_text, inline=True)
+        embed.add_field(name="Seu stack", value=f"{game.stacks.get(member.id, 0)} fichas", inline=True)
+        embed.add_field(name="Pote", value=f"{game.pot} fichas", inline=True)
+        if game.phase in {"pre_draw_bet", "post_draw_bet"}:
+            embed.add_field(name="Sua aposta na rodada", value=str(own_bet), inline=True)
+            embed.add_field(name="Maior aposta", value=str(current_bet), inline=True)
+            embed.add_field(name="Para pagar", value=str(to_call), inline=True)
+        if game.phase == "draw_select":
+            embed.add_field(name="Seleção", value=selected_text, inline=False)
         embed.add_field(name="Status", value=status_text, inline=False)
         return embed
 
-    def _make_poker_dm_final_embed(self, player: discord.Member, player_hand: list[Card], opponent: discord.Member, opponent_hand: list[Card], result_text: str) -> discord.Embed:
+    def _make_poker_dm_final_embed(self, player: discord.Member, player_hand: list[Card], opponent: discord.Member, opponent_hand: list[Card], result_text: str, game: PokerGame) -> discord.Embed:
         embed = discord.Embed(title="🃏 Resultado da rodada", description=result_text, color=discord.Color.green())
         embed.add_field(
             name=f"{player.display_name} — {self._poker_hand_name(player_hand)}",
@@ -206,25 +308,28 @@ class AntiMzkPokerMixin:
             value=self._format_hand(opponent_hand),
             inline=False,
         )
+        embed.add_field(name="Pote final", value=f"{game.pot} fichas", inline=True)
+        embed.add_field(name="Seu stack", value=f"{game.stacks.get(player.id, 0)} fichas", inline=True)
+        embed.add_field(name="Stack rival", value=f"{game.stacks.get(opponent.id, 0)} fichas", inline=True)
         return embed
 
-    def _make_poker_result_embed(self, player_a: discord.Member, hand_a: list[Card], player_b: discord.Member, hand_b: list[Card], outcome: int) -> discord.Embed:
+    def _make_poker_result_embed(self, player_a: discord.Member, hand_a: list[Card], player_b: discord.Member, hand_b: list[Card], outcome: int, game: PokerGame) -> discord.Embed:
         if outcome > 0:
             title = "🃏 Vitória no poker"
-            description = f"{player_a.mention} levou a rodada contra {player_b.mention}."
-            ok = True
+            description = f"{player_a.mention} levou o pote de **{game.pot} fichas** contra {player_b.mention}."
         elif outcome < 0:
             title = "🃏 Vitória no poker"
-            description = f"{player_b.mention} levou a rodada contra {player_a.mention}."
-            ok = True
+            description = f"{player_b.mention} levou o pote de **{game.pot} fichas** contra {player_a.mention}."
         else:
             title = "🃏 Empate no poker"
-            description = f"{player_a.mention} e {player_b.mention} terminaram empatados."
-            ok = True
+            description = f"{player_a.mention} e {player_b.mention} dividiram o pote de **{game.pot} fichas**."
 
-        embed = self._make_embed(title, description, ok=ok)
+        embed = self._make_embed(title, description, ok=True)
         embed.add_field(name=f"{player_a.display_name} — {self._poker_hand_name(hand_a)}", value=self._format_hand(hand_a), inline=False)
         embed.add_field(name=f"{player_b.display_name} — {self._poker_hand_name(hand_b)}", value=self._format_hand(hand_b), inline=False)
+        embed.add_field(name=f"Stack final — {player_a.display_name}", value=str(game.stacks.get(player_a.id, 0)), inline=True)
+        embed.add_field(name=f"Stack final — {player_b.display_name}", value=str(game.stacks.get(player_b.id, 0)), inline=True)
+        embed.add_field(name="Trocas", value=f"{player_a.display_name}: {game.exchange_counts.get(player_a.id, 0)}\n{player_b.display_name}: {game.exchange_counts.get(player_b.id, 0)}", inline=True)
         return embed
 
     async def _disable_poker_views(self, game: PokerGame):
@@ -252,9 +357,84 @@ class AntiMzkPokerMixin:
                 await game.status_message.edit(embed=self._make_poker_status_embed("🃏 Partida cancelada", notice, ok=False), view=None)
             except Exception:
                 pass
-        for user_id, dm_message in list(game.dm_messages.items()):
+        for dm_message in list(game.dm_messages.values()):
             try:
                 await dm_message.edit(embed=self._make_poker_status_embed("🃏 Partida cancelada", notice, ok=False), view=None)
+            except Exception:
+                pass
+
+    def _reset_betting_round(self, game: PokerGame, *, turn_id: int):
+        game.round_bets = {pid: 0 for pid in game.players}
+        game.round_acted = set()
+        game.turn_id = turn_id
+
+    async def _update_all_poker_dms(self, game: PokerGame):
+        for player_id in game.players:
+            await self._update_poker_dm(game, player_id)
+
+    async def _advance_poker_phase(self, game: PokerGame):
+        if game.phase == "pre_draw_bet":
+            game.phase = "draw_select"
+            game.selected = {pid: set() for pid in game.players}
+            game.confirmed = {pid: False for pid in game.players}
+            game.action_log.append("As apostas iniciais terminaram. Hora de trocar cartas em segredo.")
+            await self._update_poker_status(game)
+            await self._update_all_poker_dms(game)
+            return
+        if game.phase == "post_draw_bet":
+            await asyncio.sleep(0.8)
+            await self._finish_poker_game(game)
+
+    async def _finish_betting_round_if_ready(self, game: PokerGame):
+        if game.finished:
+            return
+        if len(game.round_acted) < 2:
+            return
+        current_bet = max(game.round_bets.values(), default=0)
+        if all(game.round_bets.get(pid, 0) == current_bet for pid in game.players):
+            await self._advance_poker_phase(game)
+        else:
+            await self._update_poker_status(game)
+            await self._update_all_poker_dms(game)
+
+    async def _award_fold_win(self, game: PokerGame, winner_id: int, loser_id: int):
+        if game.finished:
+            return
+        game.finished = True
+        self._poker_games.pop(game.guild_id, None)
+        game.folded_by = loser_id
+        game.stacks[winner_id] += game.pot
+        guild = self.bot.get_guild(game.guild_id)
+        if guild is None:
+            return
+        winner = guild.get_member(winner_id)
+        loser = guild.get_member(loser_id)
+        if winner is None or loser is None:
+            return
+        await self._disable_poker_views(game)
+        if game.status_message is not None:
+            try:
+                await game.status_message.edit(
+                    embed=self._make_poker_status_embed(
+                        "🃏 Vitória por desistência",
+                        f"{loser.mention} desistiu. {winner.mention} levou o pote de **{game.pot} fichas**.",
+                        ok=True,
+                    ),
+                    view=None,
+                )
+            except Exception:
+                pass
+        for player_id, dm_message in list(game.dm_messages.items()):
+            result = "Você venceu por desistência do rival." if player_id == winner_id else "Você desistiu da rodada."
+            try:
+                await dm_message.edit(
+                    embed=self._make_poker_status_embed(
+                        "🃏 Rodada encerrada",
+                        f"{result}\nPote: **{game.pot} fichas**\nSeu stack: **{game.stacks.get(player_id, 0)}**",
+                        ok=player_id == winner_id,
+                    ),
+                    view=None,
+                )
             except Exception:
                 pass
 
@@ -280,12 +460,21 @@ class AntiMzkPokerMixin:
             return
 
         outcome = self._compare_poker_hands(game.hands[player_a.id], game.hands[player_b.id])
+        if outcome > 0:
+            game.stacks[player_a.id] += game.pot
+        elif outcome < 0:
+            game.stacks[player_b.id] += game.pot
+        else:
+            split_left = game.pot // 2
+            split_right = game.pot - split_left
+            game.stacks[player_a.id] += split_left
+            game.stacks[player_b.id] += split_right
         await self._disable_poker_views(game)
 
         if game.status_message is not None:
             try:
                 await game.status_message.edit(
-                    embed=self._make_poker_result_embed(player_a, game.hands[player_a.id], player_b, game.hands[player_b.id], outcome),
+                    embed=self._make_poker_result_embed(player_a, game.hands[player_a.id], player_b, game.hands[player_b.id], outcome, game),
                     view=None,
                 )
             except Exception:
@@ -303,7 +492,7 @@ class AntiMzkPokerMixin:
         player_map = {player_a.id: player_a, player_b.id: player_b}
         result_texts = {player_a.id: text_a, player_b.id: text_b}
         for player_id, dm_message in list(game.dm_messages.items()):
-            opponent_id = game.opponent_id if player_id == game.host_id else game.host_id
+            opponent_id = game.other_player(player_id)
             try:
                 await dm_message.edit(
                     embed=self._make_poker_dm_final_embed(
@@ -312,6 +501,7 @@ class AntiMzkPokerMixin:
                         player_map[opponent_id],
                         game.hands[opponent_id],
                         result_texts[player_id],
+                        game,
                     ),
                     view=None,
                 )
@@ -330,7 +520,8 @@ class AntiMzkPokerMixin:
         view.refresh_buttons()
         try:
             await dm_message.edit(
-                embed=self._make_poker_dm_embed(member, game.hands[player_id], game.selected.get(player_id, set()), game.confirmed.get(player_id, False)),
+                content=None,
+                embed=self._make_poker_dm_embed(member, game, game.selected.get(player_id, set()), game.confirmed.get(player_id, False)),
                 view=view,
             )
         except Exception:
@@ -347,19 +538,39 @@ class AntiMzkPokerMixin:
         if host is None or opponent is None:
             return
 
-        confirmed_host = game.confirmed.get(game.host_id, False)
-        confirmed_opponent = game.confirmed.get(game.opponent_id, False)
-        if confirmed_host and confirmed_opponent:
-            description = f"{host.mention} e {opponent.mention} confirmaram as trocas. Revelando o resultado..."
-        else:
-            host_status = "✅ pronto" if confirmed_host else "⌛ escolhendo"
-            opp_status = "✅ pronto" if confirmed_opponent else "⌛ escolhendo"
+        if game.phase == "invite":
+            accepted_host = "✅" if game.accepted.get(game.host_id, False) else "⌛"
+            accepted_opponent = "✅" if game.accepted.get(game.opponent_id, False) else "⌛"
             description = (
                 f"Duelo entre {host.mention} e {opponent.mention}.\n"
+                f"Aceites: {host.display_name} {accepted_host} | {opponent.display_name} {accepted_opponent}\n\n"
+                "As DMs foram enviadas. Quando os dois aceitarem, a rodada começa."
+            )
+        elif game.phase in {"pre_draw_bet", "post_draw_bet"}:
+            current = guild.get_member(game.turn_id) if game.turn_id else None
+            stage_name = "Apostas antes da troca" if game.phase == "pre_draw_bet" else "Apostas finais"
+            pending = current.mention if current else "Ninguém"
+            log_text = "\n".join(f"• {entry}" for entry in game.action_log[-5:]) or "Nenhuma ação ainda."
+            description = (
+                f"{stage_name}\n"
+                f"Pote: **{game.pot}** fichas\n"
+                f"{host.display_name}: **{game.stacks.get(host.id, 0)}** fichas\n"
+                f"{opponent.display_name}: **{game.stacks.get(opponent.id, 0)}** fichas\n"
+                f"Vez de: {pending}\n\n"
+                f"Ações recentes:\n{log_text}"
+            )
+        elif game.phase == "draw_select":
+            host_status = "✅ pronto" if game.confirmed.get(game.host_id, False) else "⌛ escolhendo"
+            opp_status = "✅ pronto" if game.confirmed.get(game.opponent_id, False) else "⌛ escolhendo"
+            description = (
+                f"Troca de cartas em segredo.\n"
+                f"Pote: **{game.pot}** fichas\n"
                 f"{host.display_name}: {host_status}\n"
                 f"{opponent.display_name}: {opp_status}\n\n"
-                "As cartas foram enviadas por DM. Cada jogador pode trocar até 3 cartas."
+                "As mãos continuam privadas. Só a quantidade trocada será revelada no showdown."
             )
+        else:
+            description = "Rodada encerrada."
         try:
             await game.status_message.edit(embed=self._make_poker_status_embed("🃏 Poker em andamento", description, ok=True), view=None)
         except Exception:
@@ -369,15 +580,15 @@ class AntiMzkPokerMixin:
         if interaction.user.id != player_id:
             await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
             return
-        if game.finished or game.confirmed.get(player_id, False):
+        if game.finished or game.phase != "draw_select" or game.confirmed.get(player_id, False):
             await interaction.response.defer()
             return
         selected = game.selected.setdefault(player_id, set())
         if index in selected:
             selected.remove(index)
         else:
-            if len(selected) >= 3:
-                await interaction.response.send_message("Você pode trocar no máximo 3 cartas.", ephemeral=True)
+            if len(selected) >= _MAX_SWAP:
+                await interaction.response.send_message(f"Você pode trocar no máximo {_MAX_SWAP} cartas.", ephemeral=True)
                 return
             selected.add(index)
         await self._update_poker_dm(game, player_id)
@@ -387,7 +598,7 @@ class AntiMzkPokerMixin:
         if interaction.user.id != player_id:
             await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
             return
-        if game.finished or game.confirmed.get(player_id, False):
+        if game.finished or game.phase != "draw_select" or game.confirmed.get(player_id, False):
             await interaction.response.defer()
             return
         game.selected[player_id] = set()
@@ -398,20 +609,128 @@ class AntiMzkPokerMixin:
         if interaction.user.id != player_id:
             await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
             return
-        if game.finished or game.confirmed.get(player_id, False):
+        if game.finished or game.phase != "draw_select" or game.confirmed.get(player_id, False):
             await interaction.response.defer()
             return
         game.confirmed[player_id] = True
+        game.exchange_counts[player_id] = len(game.selected.get(player_id, set()))
         await self._update_poker_dm(game, player_id)
         await self._update_poker_status(game)
         await interaction.response.defer()
         if all(game.confirmed.get(pid, False) for pid in game.players):
-            await asyncio.sleep(1.2)
-            await self._finish_poker_game(game)
+            for pid in game.players:
+                selected_positions = sorted(game.selected.get(pid, set()))
+                hand = game.hands[pid]
+                game.original_hands[pid] = list(hand)
+                for idx in selected_positions:
+                    hand[idx] = game.deck.pop()
+            game.phase = "post_draw_bet"
+            game.action_log.append(
+                f"Trocas concluídas. {game.exchange_counts.get(game.host_id, 0)} carta(s) para {self.bot.get_guild(game.guild_id).get_member(game.host_id).display_name if self.bot.get_guild(game.guild_id) and self.bot.get_guild(game.guild_id).get_member(game.host_id) else 'Jogador 1'}, "
+                f"{game.exchange_counts.get(game.opponent_id, 0)} para {self.bot.get_guild(game.guild_id).get_member(game.opponent_id).display_name if self.bot.get_guild(game.guild_id) and self.bot.get_guild(game.guild_id).get_member(game.opponent_id) else 'Jogador 2'}."
+            )
+            self._reset_betting_round(game, turn_id=game.opponent_id)
+            await self._update_poker_status(game)
+            await self._update_all_poker_dms(game)
+
+    async def _handle_poker_accept(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
+        if interaction.user.id != player_id:
+            await interaction.response.send_message("Esse convite não é seu.", ephemeral=True)
+            return
+        if game.finished or game.phase != "invite" or game.accepted.get(player_id, False):
+            await interaction.response.defer()
+            return
+        game.accepted[player_id] = True
+        await self._update_poker_dm(game, player_id)
+        await self._update_poker_status(game)
+        await interaction.response.defer()
+        if all(game.accepted.get(pid, False) for pid in game.players):
+            game.phase = "pre_draw_bet"
+            self._reset_betting_round(game, turn_id=game.host_id)
+            game.action_log.append("Os dois jogadores aceitaram. A rodada começou.")
+            await self._update_poker_status(game)
+            await self._update_all_poker_dms(game)
+
+    async def _handle_poker_check_call(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
+        if interaction.user.id != player_id:
+            await interaction.response.send_message("Essa ação não é sua.", ephemeral=True)
+            return
+        if game.finished or game.phase not in {"pre_draw_bet", "post_draw_bet"}:
+            await interaction.response.defer()
+            return
+        if game.turn_id != player_id:
+            await interaction.response.send_message("Ainda não é a sua vez.", ephemeral=True)
+            return
+        current_bet = max(game.round_bets.values(), default=0)
+        own_bet = game.round_bets.get(player_id, 0)
+        to_call = max(0, current_bet - own_bet)
+        guild = self.bot.get_guild(game.guild_id)
+        member = guild.get_member(player_id) if guild else None
+        name = member.display_name if member else "Jogador"
+        if to_call > game.stacks.get(player_id, 0):
+            await interaction.response.send_message("Você não tem fichas suficientes para pagar.", ephemeral=True)
+            return
+        if to_call > 0:
+            game.stacks[player_id] -= to_call
+            game.round_bets[player_id] = current_bet
+            game.pot += to_call
+            game.action_log.append(f"{name} pagou {to_call} fichas.")
+        else:
+            game.action_log.append(f"{name} deu check.")
+        game.round_acted.add(player_id)
+        game.turn_id = game.other_player(player_id)
+        await self._update_poker_status(game)
+        await self._update_all_poker_dms(game)
+        await interaction.response.defer()
+        await self._finish_betting_round_if_ready(game)
+
+    async def _handle_poker_bet_raise(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
+        if interaction.user.id != player_id:
+            await interaction.response.send_message("Essa ação não é sua.", ephemeral=True)
+            return
+        if game.finished or game.phase not in {"pre_draw_bet", "post_draw_bet"}:
+            await interaction.response.defer()
+            return
+        if game.turn_id != player_id:
+            await interaction.response.send_message("Ainda não é a sua vez.", ephemeral=True)
+            return
+        current_bet = max(game.round_bets.values(), default=0)
+        own_bet = game.round_bets.get(player_id, 0)
+        target_bet = current_bet + _BET_SIZE if current_bet > own_bet else own_bet + _BET_SIZE
+        extra = target_bet - own_bet
+        if extra > game.stacks.get(player_id, 0):
+            await interaction.response.send_message("Você não tem fichas suficientes para essa aposta.", ephemeral=True)
+            return
+        game.stacks[player_id] -= extra
+        game.round_bets[player_id] = target_bet
+        game.pot += extra
+        guild = self.bot.get_guild(game.guild_id)
+        member = guild.get_member(player_id) if guild else None
+        name = member.display_name if member else "Jogador"
+        action_name = "apostou" if current_bet == own_bet else "aumentou"
+        game.action_log.append(f"{name} {action_name} para {target_bet} fichas.")
+        game.round_acted = {player_id}
+        game.turn_id = game.other_player(player_id)
+        await self._update_poker_status(game)
+        await self._update_all_poker_dms(game)
+        await interaction.response.defer()
+
+    async def _handle_poker_fold(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
+        if interaction.user.id != player_id:
+            await interaction.response.send_message("Essa ação não é sua.", ephemeral=True)
+            return
+        if game.finished or game.phase not in {"pre_draw_bet", "post_draw_bet"}:
+            await interaction.response.defer()
+            return
+        if game.turn_id != player_id:
+            await interaction.response.send_message("Ainda não é a sua vez.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        await self._award_fold_win(game, game.other_player(player_id), player_id)
 
     async def _handle_poker_trigger(self, message: discord.Message) -> bool:
-        content = message.content or ""
-        if "poker" not in content.lower():
+        content = (message.content or "").strip().lower()
+        if content != "poker" and not content.startswith("poker "):
             return False
 
         guild = message.guild
@@ -466,13 +785,17 @@ class AntiMzkPokerMixin:
         game.original_hands[opponent.id] = list(game.hands[opponent.id])
         game.selected = {message.author.id: set(), opponent.id: set()}
         game.confirmed = {message.author.id: False, opponent.id: False}
+        game.accepted = {message.author.id: False, opponent.id: False}
+        game.stacks = {message.author.id: _STARTING_STACK, opponent.id: _STARTING_STACK}
+        game.round_bets = {message.author.id: 0, opponent.id: 0}
+        game.exchange_counts = {message.author.id: 0, opponent.id: 0}
         self._poker_games[guild.id] = game
 
         try:
             status_message = await message.channel.send(
                 embed=self._make_poker_status_embed(
-                    "🃏 Poker em andamento",
-                    f"Duelo entre {message.author.mention} e {opponent.mention}. Enviando as mãos por DM...",
+                    "🃏 Convite de poker",
+                    f"Duelo entre {message.author.mention} e {opponent.mention}. Enviando as DMs com o convite e as mãos privadas...",
                     ok=True,
                 )
             )
@@ -490,7 +813,7 @@ class AntiMzkPokerMixin:
                 game.views[player.id] = view
                 await dm_message.edit(
                     content=None,
-                    embed=self._make_poker_dm_embed(player, game.hands[player.id], set(), False),
+                    embed=self._make_poker_dm_embed(player, game, set(), False),
                     view=view,
                 )
             except Exception:
