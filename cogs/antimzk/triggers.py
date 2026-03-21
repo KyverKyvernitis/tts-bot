@@ -417,6 +417,15 @@ class AntiMzkTriggerMixin:
     async def _set_roleta_reaction(self, message: discord.Message, emoji: str, *, keep: bool):
         await self._react_with_emoji(message, emoji, keep=keep)
 
+    async def _clear_roleta_reaction(self, message: discord.Message, emoji: str):
+        reaction_emoji = emoji
+        try:
+            if isinstance(emoji, str) and emoji.startswith("<") and emoji.endswith(">"):
+                reaction_emoji = discord.PartialEmoji.from_str(emoji)
+            await message.remove_reaction(reaction_emoji, self.bot.user)
+        except Exception:
+            pass
+
     async def _react_with_emoji(self, message: discord.Message, emoji: str, *, keep: bool, delay: float = 3.0):
         reaction_emoji = emoji
         try:
@@ -511,7 +520,11 @@ class AntiMzkTriggerMixin:
             return True
 
         self._roleta_running_guilds.add(guild.id)
+        spinning_emoji = "<:emoji_63:1485041721573249135>"
+        win_emoji = "<:emoji_64:1485043651292827788>"
+        lose_emoji = "<:emoji_65:1485043671077228786>"
         try:
+            await self._set_roleta_reaction(message, spinning_emoji, keep=True)
             success = random.randint(1, 10) == 1
 
             if success:
@@ -586,10 +599,11 @@ class AntiMzkTriggerMixin:
                 except Exception:
                     pass
 
+            await self._clear_roleta_reaction(message, spinning_emoji)
             if success:
-                await self._set_roleta_reaction(message, "✅", keep=True)
+                await self._set_roleta_reaction(message, win_emoji, keep=True)
             else:
-                await self._set_roleta_reaction(message, "❌", keep=False)
+                await self._set_roleta_reaction(message, lose_emoji, keep=True)
             return True
         finally:
             self._roleta_running_guilds.discard(guild.id)
