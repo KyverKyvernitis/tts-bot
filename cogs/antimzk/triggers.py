@@ -401,13 +401,15 @@ class AntiMzkTriggerMixin:
         column.insert(0, random.randint(1, 9))
         del column[3:]
 
-    def _format_roleta_row(self, row: list[int]) -> str:
+    def _format_roleta_row(self, row: list[int], *, compact: bool = False) -> str:
+        if compact:
+            return f" {row[0]}  {row[1]}  {row[2]} "
         return f"  {row[0]}  {row[1]}  {row[2]}  "
 
     def _render_roleta_board(self, columns: list[list[int]]) -> str:
         rows = [[columns[0][i], columns[1][i], columns[2][i]] for i in range(3)]
         top_row = self._format_roleta_row(rows[0])
-        middle_row = self._format_roleta_row(rows[1])
+        middle_row = self._format_roleta_row(rows[1], compact=True)
         bottom_row = self._format_roleta_row(rows[2])
         lines = [
             "┌───────────┐",
