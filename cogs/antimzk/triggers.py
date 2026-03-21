@@ -13,6 +13,7 @@ from .constants import (
     _DJ_DURATION_SECONDS,
     _DJ_TOGGLE_WORD_RE,
     _PICA_DURATION_SECONDS,
+    _POKER_WORD_RE,
     _ROLETA_WORD_RE,
     _ROLE_TOGGLE_WORD_RE,
 )
@@ -924,10 +925,10 @@ class AntiMzkTriggerMixin:
         if await self._handle_atirar_trigger(message):
             return
 
-        if await self._handle_roleta_trigger(message):
+        if await self._handle_poker_trigger(message):
             return
 
-        if await self._handle_poker_trigger(message):
+        if await self._handle_roleta_trigger(message):
             return
 
         if not self.db.anti_mzk_enabled(message.guild.id):

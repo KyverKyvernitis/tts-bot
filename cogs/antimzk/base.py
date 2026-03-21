@@ -18,7 +18,7 @@ class AntiMzkBase:
         self._roleta_last_used: dict[int, float] = {}
         self._roleta_running_guilds: set[int] = set()
         self._buckshot_sessions: dict[int, dict] = {}
-        self._poker_sessions: dict[int, dict] = {}
+        self._poker_games: dict[int, object] = {}
 
     def _strip_antimzk_suffix(self, name: str) -> str:
         base = str(name or "").rstrip()
