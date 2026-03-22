@@ -547,6 +547,45 @@ class SettingsDB:
         await self._save_user_doc(guild_id, user_id, doc)
         return True, int(amount), 0.0
 
+
+
+    async def increment_user_game_stat(self, guild_id: int, user_id: int, field: str, amount: int = 1) -> int:
+        doc = self._get_user_doc(guild_id, user_id)
+        try:
+            current = int(doc.get(field, 0) or 0)
+        except Exception:
+            current = 0
+        new_value = max(0, current + int(amount))
+        doc[field] = new_value
+        await self._save_user_doc(guild_id, user_id, doc)
+        return new_value
+
+    def get_user_game_stat(self, guild_id: int, user_id: int, field: str) -> int:
+        doc = self.user_cache.get((guild_id, user_id), {})
+        try:
+            return max(0, int(doc.get(field, 0) or 0))
+        except Exception:
+            return 0
+
+    def get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[dict[str, int]]:
+        rows: list[dict[str, int]] = []
+        for (gid, uid), doc in self.user_cache.items():
+            if gid != guild_id:
+                continue
+            try:
+                chips = max(0, int(doc.get("chips", 0) or 0))
+            except Exception:
+                chips = 0
+            rows.append({
+                "user_id": uid,
+                "chips": chips,
+                "poker_wins": self.get_user_game_stat(guild_id, uid, "poker_wins"),
+                "buckshot_wins": self.get_user_game_stat(guild_id, uid, "buckshot_wins"),
+                "roleta_jackpots": self.get_user_game_stat(guild_id, uid, "roleta_jackpots"),
+            })
+        rows.sort(key=lambda item: (item["chips"], item["poker_wins"], item["buckshot_wins"], item["roleta_jackpots"], -item["user_id"]), reverse=True)
+        return rows[:max(1, int(limit))]
+
     def get_panel_history(self, guild_id: int, user_id: int) -> Dict[str, Any]:
         guild_doc = self.guild_cache.get(guild_id, {})
         guild_panel = guild_doc.get("panel_history", {}) or {}
