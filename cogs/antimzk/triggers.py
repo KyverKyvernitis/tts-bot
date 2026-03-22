@@ -49,12 +49,18 @@ class _TargetJoinView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
-        self.join_button = discord.ui.Button(style=discord.ButtonStyle.primary, label="Entrar no alvo (0)")
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label="🎯 Entrar (0)")
         self.join_button.callback = self._join_round
         self.add_item(self.join_button)
+        self.fire_button = discord.ui.Button(style=discord.ButtonStyle.danger, label="💥 Disparar")
+        self.fire_button.callback = self._fire_now
+        self.add_item(self.fire_button)
 
     async def _join_round(self, interaction: discord.Interaction):
         await self.cog._handle_target_button(interaction, self)
+
+    async def _fire_now(self, interaction: discord.Interaction):
+        await self.cog._handle_target_fire_button(interaction, self)
 
     async def on_timeout(self):
         try:
@@ -1158,23 +1164,63 @@ class AntiMzkTriggerMixin:
 
         return rewards, placement_groups
 
+    def _target_zone_style(self, score: int) -> tuple[str, str]:
+        score = int(score)
+        if score >= 3:
+            return "🎯", "centro"
+        if score == 2:
+            return "🟠", "anel interno"
+        if score == 1:
+            return "🟡", "anel externo"
+        return "💨", "errou"
+
+    def _format_target_participants(self, participants: list[discord.Member]) -> str:
+        if not participants:
+            return "Ninguém entrou ainda."
+        mentions = [member.mention for member in participants[:8]]
+        text = ", ".join(mentions)
+        if len(participants) > 8:
+            text += f" e mais **{len(participants) - 8}**"
+        return text
+
+    def _target_opening_text(self, participants: list[discord.Member]) -> str:
+        if len(participants) >= 3:
+            return "Os **2 melhores tiros** dividem o prêmio."
+        if len(participants) == 2:
+            return "Com **2 participantes**, só **1** leva o prêmio."
+        return "Entre na rodada para disputar o prêmio."
+
     def _make_target_embed(self, guild: discord.Guild, session: dict, *, final_text: str | None = None) -> discord.Embed:
         participants = self._get_target_participants(guild, session)
-        pot_total = len(session.get("locked_participants", set())) * ALVO_STAKE
-        title = "🎯 Tiro ao alvo"
+        locked_ids = set(session.get("locked_participants", set()))
+        pot_total = len(locked_ids) * ALVO_STAKE
+        owner_id = int(session.get("owner_id") or 0)
+        owner = guild.get_member(owner_id) if owner_id else None
+
         if final_text:
-            description = final_text
-            color = discord.Color.blurple()
-        else:
-            winner_text = "Os 2 melhores tiros levam o prêmio." if len(participants) >= 3 else "Com 2 participantes, só 1 leva o prêmio."
-            description = (
-                f"Entrada: {self._chip_amount(ALVO_STAKE)} por jogador\n"
-                f"Participantes: **{len(participants)}**\n"
-                f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(pot_total)}\n\n"
-                f"{winner_text}"
+            embed = discord.Embed(
+                title="🎯 Resultado do alvo",
+                description=final_text,
+                color=discord.Color.blurple(),
             )
-            color = discord.Color.blurple()
-        return discord.Embed(title=title, description=description, color=color)
+        else:
+            embed = discord.Embed(
+                title="🎯 Tiro ao alvo aberto",
+                description=(
+                    f"Entrada: {self._chip_amount(ALVO_STAKE)} por jogador\n"
+                    f"Participantes: **{len(participants)}**\n"
+                    f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(pot_total)}\n\n"
+                    f"{self._target_opening_text(participants)}"
+                ),
+                color=discord.Color.blurple(),
+            )
+            embed.add_field(name="Na mira", value=self._format_target_participants(participants), inline=False)
+            embed.add_field(name="Como funciona", value="Entre pelo botão verde. Quem estiver na call quando a rodada fechar participa do disparo.", inline=False)
+            embed.set_footer(text="Entrou, pagou e a entrada fica travada até o fim")
+
+        if owner is not None:
+            embed.set_author(name=f"Rodada aberta por {owner.display_name}", icon_url=owner.display_avatar.url)
+        return embed
 
     async def _refresh_target_message(self, guild_id: int):
         session = self._get_target_session(guild_id)
@@ -1188,11 +1234,61 @@ class AntiMzkTriggerMixin:
         if message is None or view is None:
             return
         participants = self._get_target_participants(guild, session)
-        view.join_button.label = f"Entrar no alvo ({len(participants)})"
+        view.join_button.label = f"🎯 Entrar ({len(participants)})"
+        view.join_button.style = discord.ButtonStyle.success
         try:
+            owner_id = int(session.get("owner_id") or 0)
+            fire_disabled = len(participants) < 2
+            view.fire_button.disabled = fire_disabled
+            if fire_disabled:
+                view.fire_button.label = "💥 Disparar (mín. 2)"
+            else:
+                owner = guild.get_member(owner_id) if owner_id else None
+                suffix = f" por {owner.display_name}" if owner is not None else ""
+                view.fire_button.label = f"💥 Disparar agora{suffix}"
             await message.edit(embed=self._make_target_embed(guild, session), view=view)
         except Exception:
             pass
+
+    async def _handle_target_fire_button(self, interaction: discord.Interaction, view: _TargetJoinView):
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            try:
+                await interaction.response.send_message("Não foi possível encerrar essa rodada agora.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        session = self._get_target_session(guild.id)
+        if session is None or session.get("view") is not view or session.get("ended"):
+            try:
+                await interaction.response.send_message("Essa rodada já terminou.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        owner_id = int(session.get("owner_id") or 0)
+        if user.id != owner_id and not self._is_staff_member(user):
+            try:
+                await interaction.response.send_message("Só quem abriu a rodada ou a staff pode disparar agora.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        participants = self._get_target_participants(guild, session)
+        if len(participants) < 2:
+            try:
+                await interaction.response.send_message("Ainda faltam pelo menos 2 participantes na call.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        await self._finish_target_round(guild.id, reason="manual")
 
     async def _handle_target_button(self, interaction: discord.Interaction, view: _TargetJoinView):
         guild = interaction.guild
@@ -1363,6 +1459,7 @@ class AntiMzkTriggerMixin:
         session = {
             "voice_channel_id": voice_channel.id,
             "text_channel_id": message.channel.id,
+            "owner_id": message.author.id,
             "locked_participants": {message.author.id},
             "message": None,
             "view": view,
@@ -1371,7 +1468,7 @@ class AntiMzkTriggerMixin:
         }
         self._target_sessions[guild.id] = session
 
-        view.join_button.label = f"Entrar no alvo ({len(self._get_target_participants(guild, session))})"
+        view.join_button.label = f"🎯 Entrar ({len(self._get_target_participants(guild, session))})"
         embed = self._make_target_embed(guild, session)
         if chip_note:
             embed.set_footer(text=chip_note)

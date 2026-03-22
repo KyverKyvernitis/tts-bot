@@ -210,6 +210,7 @@ class AntiMzkBase:
             ("🃏 Rei do poker", "poker_wins"),
             ("<:gunforward:1484655577836683434> Sobrevivente", "buckshot_survivals"),
             ("🎰 Jackpots", "roleta_jackpots"),
+            ("🎯 Melhor mira", "alvo_bullseyes"),
         ]
         highlight_lines = []
         for label, key in highlight_specs:
