@@ -549,42 +549,63 @@ class SettingsDB:
 
 
 
-    async def increment_user_game_stat(self, guild_id: int, user_id: int, field: str, amount: int = 1) -> int:
+    def get_user_game_stats(self, guild_id: int, user_id: int) -> Dict[str, int]:
+        doc = self.user_cache.get((guild_id, user_id), {})
+        stats = doc.get("game_stats", {}) or {}
+
+        def _int(key: str) -> int:
+            try:
+                return max(0, int(stats.get(key, 0) or 0))
+            except Exception:
+                return 0
+
+        return {
+            "poker_wins": _int("poker_wins"),
+            "poker_losses": _int("poker_losses"),
+            "poker_rounds": _int("poker_rounds"),
+            "buckshot_survivals": _int("buckshot_survivals"),
+            "buckshot_eliminations": _int("buckshot_eliminations"),
+            "roleta_jackpots": _int("roleta_jackpots"),
+        }
+
+    async def add_user_game_stat(self, guild_id: int, user_id: int, key: str, amount: int = 1) -> int:
         doc = self._get_user_doc(guild_id, user_id)
+        stats = doc.get("game_stats", {}) or {}
+        current = 0
         try:
-            current = int(doc.get(field, 0) or 0)
+            current = int(stats.get(key, 0) or 0)
         except Exception:
             current = 0
         new_value = max(0, current + int(amount))
-        doc[field] = new_value
+        stats[key] = new_value
+        doc["game_stats"] = stats
         await self._save_user_doc(guild_id, user_id, doc)
         return new_value
 
-    def get_user_game_stat(self, guild_id: int, user_id: int, field: str) -> int:
-        doc = self.user_cache.get((guild_id, user_id), {})
-        try:
-            return max(0, int(doc.get(field, 0) or 0))
-        except Exception:
-            return 0
-
-    def get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[dict[str, int]]:
-        rows: list[dict[str, int]] = []
+    def get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[Dict[str, int]]:
+        rows: list[Dict[str, int]] = []
         for (gid, uid), doc in self.user_cache.items():
             if gid != guild_id:
                 continue
             try:
-                chips = max(0, int(doc.get("chips", 0) or 0))
+                chips = max(0, int(doc.get("chips", 100) or 100))
             except Exception:
-                chips = 0
-            rows.append({
-                "user_id": uid,
-                "chips": chips,
-                "poker_wins": self.get_user_game_stat(guild_id, uid, "poker_wins"),
-                "buckshot_wins": self.get_user_game_stat(guild_id, uid, "buckshot_wins"),
-                "roleta_jackpots": self.get_user_game_stat(guild_id, uid, "roleta_jackpots"),
-            })
-        rows.sort(key=lambda item: (item["chips"], item["poker_wins"], item["buckshot_wins"], item["roleta_jackpots"], -item["user_id"]), reverse=True)
-        return rows[:max(1, int(limit))]
+                chips = 100
+            rows.append({"user_id": uid, "chips": chips})
+        rows.sort(key=lambda item: (-item["chips"], item["user_id"]))
+        return rows[: max(1, int(limit))]
+
+    def get_game_stat_leaderboard(self, guild_id: int, stat_key: str, *, limit: int = 3) -> list[Dict[str, int]]:
+        rows: list[Dict[str, int]] = []
+        for (gid, uid), _doc in self.user_cache.items():
+            if gid != guild_id:
+                continue
+            value = self.get_user_game_stats(guild_id, uid).get(stat_key, 0)
+            if value <= 0:
+                continue
+            rows.append({"user_id": uid, "value": value})
+        rows.sort(key=lambda item: (-item["value"], item["user_id"]))
+        return rows[: max(1, int(limit))]
 
     def get_panel_history(self, guild_id: int, user_id: int) -> Dict[str, Any]:
         guild_doc = self.guild_cache.get(guild_id, {})
