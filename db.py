@@ -330,6 +330,24 @@ class SettingsDB:
             doc["ignored_tts_role_id"] = 0
         await self._save_guild_doc(guild_id, doc)
 
+
+
+    def _get_user_doc(self, guild_id: int, user_id: int) -> Dict[str, Any]:
+        return dict(self.user_cache.get((guild_id, user_id), {"type": "user", "guild_id": guild_id, "user_id": user_id}))
+
+    async def _save_user_doc(self, guild_id: int, user_id: int, doc: Dict[str, Any]):
+        key = (guild_id, user_id)
+        doc["type"] = "user"
+        doc["guild_id"] = guild_id
+        doc["user_id"] = user_id
+        self.user_cache[key] = doc
+        self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
+        await self.coll.update_one(
+            {"type": "user", "guild_id": guild_id, "user_id": user_id},
+            {"$set": doc},
+            upsert=True,
+        )
+
     def get_user_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
         u = self.user_cache.get((guild_id, user_id), {})
         tts = u.get("tts", {}) or {}
@@ -480,6 +498,54 @@ class SettingsDB:
         }
         self._resolved_tts_cache[cache_key] = dict(resolved)
         return resolved
+
+
+
+    def get_user_chips(self, guild_id: int, user_id: int, *, default: int = 100) -> int:
+        doc = self.user_cache.get((guild_id, user_id), {})
+        try:
+            return max(0, int(doc.get("chips", default) or default))
+        except Exception:
+            return int(default)
+
+    def get_user_chip_reset_at(self, guild_id: int, user_id: int) -> float:
+        doc = self.user_cache.get((guild_id, user_id), {})
+        raw = doc.get("last_chip_reset_at", 0)
+        try:
+            return float(raw or 0)
+        except Exception:
+            return 0.0
+
+    async def set_user_chips(self, guild_id: int, user_id: int, chips: int):
+        doc = self._get_user_doc(guild_id, user_id)
+        doc["chips"] = max(0, int(chips))
+        await self._save_user_doc(guild_id, user_id, doc)
+
+    async def add_user_chips(self, guild_id: int, user_id: int, amount: int) -> int:
+        current = self.get_user_chips(guild_id, user_id)
+        new_value = max(0, current + int(amount))
+        await self.set_user_chips(guild_id, user_id, new_value)
+        return new_value
+
+    async def set_user_chip_reset_at(self, guild_id: int, user_id: int, timestamp: float):
+        doc = self._get_user_doc(guild_id, user_id)
+        try:
+            doc["last_chip_reset_at"] = float(timestamp or 0)
+        except Exception:
+            doc["last_chip_reset_at"] = 0.0
+        await self._save_user_doc(guild_id, user_id, doc)
+
+    async def maybe_reset_user_chips(self, guild_id: int, user_id: int, *, amount: int = 100, cooldown_seconds: int = 43200) -> tuple[bool, int, float]:
+        now = time.time()
+        last_reset = self.get_user_chip_reset_at(guild_id, user_id)
+        remaining = max(0.0, (last_reset + float(cooldown_seconds)) - now)
+        if remaining > 0:
+            return False, self.get_user_chips(guild_id, user_id, default=amount), remaining
+        doc = self._get_user_doc(guild_id, user_id)
+        doc["chips"] = max(0, int(amount))
+        doc["last_chip_reset_at"] = float(now)
+        await self._save_user_doc(guild_id, user_id, doc)
+        return True, int(amount), 0.0
 
     def get_panel_history(self, guild_id: int, user_id: int) -> Dict[str, Any]:
         guild_doc = self.guild_cache.get(guild_id, {})
