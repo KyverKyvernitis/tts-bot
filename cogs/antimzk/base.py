@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 
 from config import GUILD_IDS, OFF_COLOR, ON_COLOR
-from .constants import CHIPS_DEFAULT, CHIPS_RESET_SECONDS
+from .constants import CHIPS_DEFAULT, CHIPS_INITIAL, CHIPS_RESET_SECONDS
 from db import SettingsDB
 
 
@@ -141,9 +141,14 @@ class AntiMzkBase:
     def _chip_amount(self, amount: int | str) -> str:
         return f"**{amount} {self._CHIP_EMOJI}**"
 
+    async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
+        await self.db.set_user_chips(guild_id, user_id, int(amount))
+        await self.db.set_user_chip_reset_at(guild_id, user_id, 0.0)
+        return int(amount)
+
     def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
         guild_id = member.guild.id
-        chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_DEFAULT)
+        chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_INITIAL)
         stats = self.db.get_user_game_stats(guild_id, member.id)
         remaining = 0.0
         if chips <= 0:
@@ -157,7 +162,7 @@ class AntiMzkBase:
             title=f"{self._CHIP_EMOJI} Suas fichas",
             description=(
                 f"Saldo atual: {self._chip_amount(chips)}\n"
-                f"Mesa padrão: {self._chip_amount(CHIPS_DEFAULT)}"
+                f"Saldo inicial: {self._chip_amount(CHIPS_INITIAL)}\nRecarga: {self._chip_amount(CHIPS_DEFAULT)}"
             ),
             color=discord.Color.blurple(),
         )
@@ -229,7 +234,7 @@ class AntiMzkBase:
         return f"{minutes}min"
 
     async def _try_consume_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
-        current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_DEFAULT)
+        current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
         reset_note = None
         if current < amount:
             reset, new_balance, remaining = await self.db.maybe_reset_user_chips(
@@ -243,7 +248,7 @@ class AntiMzkBase:
         return True, new_balance, reset_note
 
     async def _ensure_action_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
-        current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_DEFAULT)
+        current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
         if current >= amount:
             return True, current, None
         reset, new_balance, remaining = await self.db.maybe_reset_user_chips(
