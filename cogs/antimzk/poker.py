@@ -266,14 +266,16 @@ class AntiMzkPokerMixin:
             return f"⭐ {base}"
         return base
 
-    async def _record_poker_result(self, guild_id: int, winner_id: int | None, loser_id: int | None = None):
-        players = [pid for pid in (winner_id, loser_id) if pid is not None]
+    async def _record_poker_round(self, guild_id: int, *player_ids: int | None):
         seen = set()
-        for pid in players:
-            if pid in seen:
+        for pid in player_ids:
+            if pid is None or pid in seen:
                 continue
             seen.add(pid)
             await self.db.add_user_game_stat(guild_id, pid, "poker_rounds", 1)
+
+    async def _record_poker_result(self, guild_id: int, winner_id: int | None, loser_id: int | None = None):
+        await self._record_poker_round(guild_id, winner_id, loser_id)
         if winner_id is not None:
             await self.db.add_user_game_stat(guild_id, winner_id, "poker_wins", 1)
         if loser_id is not None:
@@ -517,8 +519,7 @@ class AntiMzkPokerMixin:
         elif outcome < 0:
             await self._record_poker_result(game.guild_id, player_b.id, player_a.id)
         else:
-            await self._record_poker_result(game.guild_id, player_a.id, None)
-            await self._record_poker_result(game.guild_id, player_b.id, None)
+            await self._record_poker_round(game.guild_id, player_a.id, player_b.id)
         await self._disable_poker_views(game)
 
         if game.status_message is not None:

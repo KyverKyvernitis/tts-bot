@@ -573,6 +573,7 @@ class AntiMzkTriggerMixin:
                             except Exception:
                                 pass
                     await self.db.add_user_chips(guild.id, message.author.id, ROLETA_JACKPOT_CHIPS)
+                    await self.db.add_user_game_stat(guild.id, message.author.id, "roleta_jackpots", 1)
                     summary = f"Você ganhou **{ROLETA_JACKPOT_CHIPS} fichas** e os alvos foram tirados da call."
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
@@ -654,33 +655,36 @@ class AntiMzkTriggerMixin:
     def _get_buckshot_manual_participants(self, guild: discord.Guild, voice_channel: discord.VoiceChannel, session: dict) -> list[discord.Member]:
         participants = []
         seen: set[int] = set()
-        current_ids = {member.id for member in getattr(voice_channel, "members", [])}
         stored_ids = set(session.get("manual_participants", set()) or set())
-        stale_ids = stored_ids - current_ids
-        if stale_ids:
-            stored_ids -= stale_ids
-            session["manual_participants"] = stored_ids
         for user_id in stored_ids:
             member = guild.get_member(int(user_id))
-            if member is None or member.bot or getattr(member.voice, "channel", None) != voice_channel or member.id in seen:
+            if member is None or member.bot or member.id in seen:
                 continue
             seen.add(member.id)
             participants.append(member)
         return participants
 
-    def _get_buckshot_participants(self, guild: discord.Guild, session: dict) -> list[discord.Member]:
+    def _get_buckshot_participant_ids(self, guild: discord.Guild, session: dict) -> list[int]:
+        participant_ids: set[int] = set()
         voice_channel = self._get_buckshot_voice_channel(guild, session)
-        if voice_channel is None:
-            return []
-
-        participants: dict[int, discord.Member] = {}
         focus_ids = set(session.get("focus_participants", set()) or set())
-        for member in voice_channel.members:
-            if member.id in focus_ids and not member.bot:
-                participants[member.id] = member
-        for member in self._get_buckshot_manual_participants(guild, voice_channel, session):
-            participants[member.id] = member
-        return list(participants.values())
+        if voice_channel is not None:
+            current_voice_ids = {member.id for member in getattr(voice_channel, "members", []) if not getattr(member, "bot", False)}
+            participant_ids.update(current_voice_ids & focus_ids)
+        participant_ids.update(int(user_id) for user_id in (session.get("manual_participants", set()) or set()))
+        participant_ids.update(int(user_id) for user_id in (session.get("locked_participants", set()) or set()))
+        return sorted(participant_ids)
+
+    def _get_buckshot_participants(self, guild: discord.Guild, session: dict) -> list[discord.Member]:
+        participants: list[discord.Member] = []
+        seen: set[int] = set()
+        for user_id in self._get_buckshot_participant_ids(guild, session):
+            member = guild.get_member(int(user_id))
+            if member is None or member.bot or member.id in seen:
+                continue
+            seen.add(member.id)
+            participants.append(member)
+        return participants
 
     def _make_buckshot_embed(self, guild: discord.Guild, session: dict, *, final_text: str | None = None) -> discord.Embed:
         participants = self._get_buckshot_participants(guild, session)
@@ -753,8 +757,16 @@ class AntiMzkTriggerMixin:
                 pass
             return
 
-        ok, _balance, note = await self._ensure_action_chips(guild.id, member.id, BUCKSHOT_STAKE)
-        if not ok:
+        locked_participants = set(session.get("locked_participants", set()) or set())
+        if member.id in locked_participants:
+            try:
+                await interaction.response.send_message("Você já entrou nessa rodada e sua vaga está travada.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
+        if not paid:
             try:
                 await interaction.response.send_message(note or "Você não tem fichas suficientes para entrar.", ephemeral=True)
             except Exception:
@@ -762,16 +774,14 @@ class AntiMzkTriggerMixin:
             return
 
         manual_participants = set(session.get("manual_participants", set()) or set())
-        joined = member.id not in manual_participants
-        if joined:
-            manual_participants.add(member.id)
-        else:
-            manual_participants.discard(member.id)
+        manual_participants.add(member.id)
         session["manual_participants"] = manual_participants
+        locked_participants.add(member.id)
+        session["locked_participants"] = locked_participants
 
         await self._refresh_buckshot_message(guild.id)
 
-        note = "Você entrou na rodada." if joined else "Você saiu da rodada."
+        note = "Você entrou na rodada e pagou sua entrada." if not note else f"{note} Você entrou na rodada e pagou sua entrada."
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(note, ephemeral=True)
@@ -811,7 +821,9 @@ class AntiMzkTriggerMixin:
                 pass
 
         participants = self._get_buckshot_participants(guild, session)
-        chosen = random.choice(participants) if participants else None
+        locked_participants = set(session.get("locked_participants", set()) or set())
+        eligible = [member for member in participants if member.id in locked_participants]
+        chosen = random.choice(eligible) if eligible else None
         if chosen is not None and chosen.voice and chosen.voice.channel:
             chosen_channel = chosen.voice.channel
             try:
@@ -827,29 +839,27 @@ class AntiMzkTriggerMixin:
             except Exception:
                 pass
 
-        winners = [member for member in participants if chosen is not None and member.id != chosen.id]
-        payout_total = 0
+        winners = [member for member in eligible if chosen is not None and member.id != chosen.id]
+        payout_total = max(0, BUCKSHOT_STAKE * len(eligible))
         payout_each = 0
         payout_remainder = 0
         if chosen is None:
-            final_text = "O disparo aconteceu... mas ninguém elegível estava na rodada."
+            final_text = "O disparo aconteceu... mas ninguém com entrada paga ficou elegível na rodada."
         else:
-            paid, _new_balance, _note = await self._try_consume_chips(guild.id, chosen.id, BUCKSHOT_STAKE)
-            if paid:
-                payout_total = BUCKSHOT_STAKE
-                if winners:
-                    payout_each = payout_total // len(winners)
-                    payout_remainder = payout_total % len(winners)
-                    for index, winner in enumerate(winners):
-                        bonus = payout_each + (1 if index < payout_remainder else 0)
-                        if bonus > 0:
-                            await self.db.add_user_chips(guild.id, winner.id, bonus)
-                if winners:
-                    final_text = f"**{chosen.mention}** foi tirado da call e perdeu **{BUCKSHOT_STAKE} fichas**. Os sobreviventes dividiram **{payout_total} fichas**."
-                else:
-                    final_text = f"**{chosen.mention}** foi tirado da call e perdeu **{BUCKSHOT_STAKE} fichas**."
+            if winners:
+                payout_each = payout_total // len(winners)
+                payout_remainder = payout_total % len(winners)
+                for index, winner in enumerate(winners):
+                    bonus = payout_each + (1 if index < payout_remainder else 0)
+                    if bonus > 0:
+                        await self.db.add_user_chips(guild.id, winner.id, bonus)
+                        await self.db.add_user_game_stat(guild.id, winner.id, "buckshot_survivals", 1)
+            await self.db.add_user_game_stat(guild.id, chosen.id, "buckshot_eliminations", 1)
+            chosen_text = chosen.mention if chosen is not None else "Alguém"
+            if winners:
+                final_text = f"**{chosen_text}** foi tirado da call. O pote de **{payout_total} fichas** foi dividido entre os sobreviventes."
             else:
-                final_text = f"**{chosen.mention}** foi tirado da call."
+                final_text = f"**{chosen_text}** foi tirado da call e o pote de **{payout_total} fichas** foi perdido."
 
         embed = self._make_buckshot_embed(guild, session, final_text=final_text)
         delivered = False
@@ -896,16 +906,21 @@ class AntiMzkTriggerMixin:
 
         view = _BuckshotJoinView(self, guild.id, timeout=30.0)
         focus_participants: set[int] = set()
+        locked_participants: set[int] = set()
         for member in self._iter_focused_members(guild, voice_channel):
-            ok, _balance, _note = await self._ensure_action_chips(guild.id, member.id, BUCKSHOT_STAKE)
-            if ok and not getattr(member, "bot", False):
+            if getattr(member, "bot", False):
+                continue
+            paid, _balance, _note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
+            if paid:
                 focus_participants.add(member.id)
+                locked_participants.add(member.id)
 
         session = {
             "voice_channel_id": voice_channel.id,
             "text_channel_id": message.channel.id,
             "manual_participants": set(),
             "focus_participants": focus_participants,
+            "locked_participants": locked_participants,
             "message": None,
             "view": view,
             "ended": False,
