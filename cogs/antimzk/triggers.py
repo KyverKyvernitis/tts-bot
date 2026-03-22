@@ -225,7 +225,7 @@ class AntiMzkTriggerMixin:
         if changed:
             await self._refresh_targets_suffix_nicknames(guild, targets)
             await self._send_role_toggle_feedback(message, should_activate)
-            await self._react_with_emoji(message, "<a:r_gun01:1484661880323838002>", keep=True)
+            await self._react_with_emoji(message, "✅", keep=False)
         return True
 
     async def _send_dj_toggle_feedback(self, message: discord.Message, activated: bool, affected_count: int, voice_channel: discord.VoiceChannel):
@@ -406,12 +406,12 @@ class AntiMzkTriggerMixin:
     def _make_roleta_spin_embed(self, board: str) -> discord.Embed:
         return discord.Embed(
             title="🎰 Girando...",
-            description=f"Custo: **{ROLETA_COST} fichas**\n\n{board}",
+            description=f"{self._CHIP_LOSS_EMOJI} Custo: **{ROLETA_COST} fichas**\n{self._CHIP_GAIN_EMOJI} Jackpot: **{ROLETA_JACKPOT_CHIPS} fichas**\n\n{board}",
             color=discord.Color.blurple(),
         )
 
     def _make_roleta_result_embed(self, title: str, summary: str, board: str, *, success: bool) -> discord.Embed:
-        color = discord.Color.blurple() if success else discord.Color(OFF_COLOR)
+        color = discord.Color.green() if success else discord.Color(OFF_COLOR)
         return discord.Embed(
             title=title,
             description=f"{summary}\n\n{board}",
@@ -574,7 +574,7 @@ class AntiMzkTriggerMixin:
                                 pass
                     await self.db.add_user_chips(guild.id, message.author.id, ROLETA_JACKPOT_CHIPS)
                     await self.db.add_user_game_stat(guild.id, message.author.id, "roleta_jackpots", 1)
-                    summary = f"Você ganhou **{ROLETA_JACKPOT_CHIPS} fichas** e os alvos foram tirados da call."
+                    summary = f"{self._CHIP_GAIN_EMOJI} Você ganhou **{ROLETA_JACKPOT_CHIPS} fichas** e os alvos foram tirados da call."
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
                     embed = self._make_roleta_result_embed(
@@ -584,7 +584,7 @@ class AntiMzkTriggerMixin:
                         success=True,
                     )
                 else:
-                    summary = f"Você perdeu **{ROLETA_COST} fichas**."
+                    summary = f"{self._CHIP_LOSS_EMOJI} Você perdeu **{ROLETA_COST} fichas**."
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
                     embed = self._make_roleta_result_embed(
@@ -596,12 +596,12 @@ class AntiMzkTriggerMixin:
             except Exception:
                 if success:
                     fallback_title = "💥🎰 JACKPOT!!"
-                    fallback_text = f"Você ganhou **{ROLETA_JACKPOT_CHIPS} fichas** e os alvos foram tirados da call."
+                    fallback_text = f"{self._CHIP_GAIN_EMOJI} Você ganhou **{ROLETA_JACKPOT_CHIPS} fichas** e os alvos foram tirados da call."
                     if chip_note:
                         fallback_text = f"{chip_note}\n{fallback_text}"
                 else:
                     fallback_title = "🎰 Não foi dessa vez..."
-                    fallback_text = f"Você perdeu **{ROLETA_COST} fichas**."
+                    fallback_text = f"{self._CHIP_LOSS_EMOJI} Você perdeu **{ROLETA_COST} fichas**."
                     if chip_note:
                         fallback_text = f"{chip_note}\n{fallback_text}"
                 embed = self._make_embed(
@@ -688,12 +688,21 @@ class AntiMzkTriggerMixin:
 
     def _make_buckshot_embed(self, guild: discord.Guild, session: dict, *, final_text: str | None = None) -> discord.Embed:
         participants = self._get_buckshot_participants(guild, session)
+        payout_total = len(participants) * BUCKSHOT_STAKE
         title = "<:gunforward:1484655577836683434> Roleta russa"
-        description = final_text or f"Entrada: **{BUCKSHOT_STAKE} fichas** por jogador."
-        color = discord.Color.red() if final_text else discord.Color.blurple()
+        if final_text:
+            description = final_text
+            color = discord.Color.red()
+        else:
+            description = (
+                f"{self._CHIP_LOSS_EMOJI} Entrada travada: **{BUCKSHOT_STAKE} fichas** por jogador\n"
+                f"{self._CHIP_EMOJI} Participantes pagos: **{len(participants)}**\n"
+                f"{self._CHIP_GAIN_EMOJI} Pote atual: **{payout_total} fichas**"
+            )
+            color = discord.Color.blurple()
         embed = discord.Embed(title=title, description=description, color=color)
         if not final_text:
-            embed.add_field(name="Participando", value=f"**{len(participants)}**", inline=True)
+            embed.add_field(name="Rodada", value="Entrou e pagou, ficou valendo até o fim.", inline=False)
         return embed
 
     async def _refresh_buckshot_message(self, guild_id: int):
@@ -781,7 +790,7 @@ class AntiMzkTriggerMixin:
 
         await self._refresh_buckshot_message(guild.id)
 
-        note = "Você entrou na rodada e pagou sua entrada." if not note else f"{note} Você entrou na rodada e pagou sua entrada."
+        note = f"{self._CHIP_LOSS_EMOJI} Você entrou na rodada e pagou sua entrada." if not note else f"{note} {self._CHIP_LOSS_EMOJI} Você entrou na rodada e pagou sua entrada."
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(note, ephemeral=True)
@@ -857,9 +866,15 @@ class AntiMzkTriggerMixin:
             await self.db.add_user_game_stat(guild.id, chosen.id, "buckshot_eliminations", 1)
             chosen_text = chosen.mention if chosen is not None else "Alguém"
             if winners:
-                final_text = f"**{chosen_text}** foi tirado da call. O pote de **{payout_total} fichas** foi dividido entre os sobreviventes."
+                final_text = (
+                    f"<:gunforward:1484655577836683434> **{chosen_text}** foi tirado da call.\n"
+                    f"{self._CHIP_GAIN_EMOJI} O pote de **{payout_total} fichas** foi dividido entre os sobreviventes."
+                )
             else:
-                final_text = f"**{chosen_text}** foi tirado da call e o pote de **{payout_total} fichas** foi perdido."
+                final_text = (
+                    f"<:gunforward:1484655577836683434> **{chosen_text}** foi tirado da call.\n"
+                    f"{self._CHIP_LOSS_EMOJI} O pote de **{payout_total} fichas** foi perdido."
+                )
 
         embed = self._make_buckshot_embed(guild, session, final_text=final_text)
         delivered = False
@@ -973,7 +988,7 @@ class AntiMzkTriggerMixin:
             return True
 
         await self._finish_buckshot(guild.id, reason="manual")
-        await self._react_with_emoji(message, "💥", keep=False)
+        await self._react_with_emoji(message, "💥", keep=True)
         return True
 
     async def _handle_antimzk_message(self, message: discord.Message):

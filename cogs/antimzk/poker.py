@@ -291,7 +291,10 @@ class AntiMzkPokerMixin:
         return 0
 
     def _make_poker_status_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
-        return self._make_embed(title, description, ok=ok)
+        embed = self._make_embed(title, description, ok=ok)
+        if ok:
+            embed.color = discord.Color.blurple()
+        return embed
 
     def _make_poker_dm_embed(self, member: discord.Member, game: PokerGame, selected: set[int], confirmed: bool) -> discord.Embed:
         hand = game.hands[member.id]
@@ -327,12 +330,12 @@ class AntiMzkPokerMixin:
             color=discord.Color.blurple(),
         )
         embed.add_field(name="Fase", value=phase_text, inline=True)
-        embed.add_field(name="Seu stack", value=f"{game.stacks.get(member.id, 0)} fichas", inline=True)
-        embed.add_field(name="Pote", value=f"{game.pot} fichas", inline=True)
+        embed.add_field(name="Seu stack", value=f"{self._CHIP_EMOJI} **{game.stacks.get(member.id, 0)}**", inline=True)
+        embed.add_field(name="Pote", value=f"{self._CHIP_EMOJI} **{game.pot}**", inline=True)
         if game.phase in {"pre_draw_bet", "post_draw_bet"}:
-            embed.add_field(name="Sua aposta na rodada", value=str(own_bet), inline=True)
-            embed.add_field(name="Maior aposta", value=str(current_bet), inline=True)
-            embed.add_field(name="Para pagar", value=str(to_call), inline=True)
+            embed.add_field(name="Sua aposta", value=f"{self._CHIP_LOSS_EMOJI} **{own_bet}**", inline=True)
+            embed.add_field(name="Maior aposta", value=f"{self._CHIP_EMOJI} **{current_bet}**", inline=True)
+            embed.add_field(name="Para pagar", value=f"{self._CHIP_LOSS_EMOJI} **{to_call}**", inline=True)
         if game.phase == "draw_select":
             embed.add_field(name="Seleção", value=selected_text, inline=False)
         embed.add_field(name="Status", value=status_text, inline=False)
@@ -350,27 +353,27 @@ class AntiMzkPokerMixin:
             value=self._format_hand(opponent_hand),
             inline=False,
         )
-        embed.add_field(name="Pote final", value=f"{game.pot} fichas", inline=True)
-        embed.add_field(name="Seu stack", value=f"{game.stacks.get(player.id, 0)} fichas", inline=True)
-        embed.add_field(name="Stack rival", value=f"{game.stacks.get(opponent.id, 0)} fichas", inline=True)
+        embed.add_field(name="Pote final", value=f"{self._CHIP_EMOJI} **{game.pot}**", inline=True)
+        embed.add_field(name="Seu stack", value=f"{self._CHIP_EMOJI} **{game.stacks.get(player.id, 0)}**", inline=True)
+        embed.add_field(name="Stack rival", value=f"{self._CHIP_EMOJI} **{game.stacks.get(opponent.id, 0)}**", inline=True)
         return embed
 
     def _make_poker_result_embed(self, player_a: discord.Member, hand_a: list[Card], player_b: discord.Member, hand_b: list[Card], outcome: int, game: PokerGame) -> discord.Embed:
         if outcome > 0:
             title = "🃏 Vitória no poker"
-            description = f"{player_a.mention} levou o pote de **{game.pot} fichas** contra {player_b.mention}."
+            description = f"{self._CHIP_GAIN_EMOJI} {player_a.mention} levou o pote de **{game.pot} fichas** contra {player_b.mention}."
         elif outcome < 0:
             title = "🃏 Vitória no poker"
-            description = f"{player_b.mention} levou o pote de **{game.pot} fichas** contra {player_a.mention}."
+            description = f"{self._CHIP_GAIN_EMOJI} {player_b.mention} levou o pote de **{game.pot} fichas** contra {player_a.mention}."
         else:
             title = "🃏 Empate no poker"
-            description = f"{player_a.mention} e {player_b.mention} dividiram o pote de **{game.pot} fichas**."
+            description = f"{self._CHIP_EMOJI} {player_a.mention} e {player_b.mention} dividiram o pote de **{game.pot} fichas**."
 
         embed = self._make_embed(title, description, ok=True)
         embed.add_field(name=f"{player_a.display_name} — {self._poker_hand_display(hand_a)}", value=self._format_hand(hand_a), inline=False)
         embed.add_field(name=f"{player_b.display_name} — {self._poker_hand_display(hand_b)}", value=self._format_hand(hand_b), inline=False)
-        embed.add_field(name=f"Stack final — {player_a.display_name}", value=str(game.stacks.get(player_a.id, 0)), inline=True)
-        embed.add_field(name=f"Stack final — {player_b.display_name}", value=str(game.stacks.get(player_b.id, 0)), inline=True)
+        embed.add_field(name=f"Stack final — {player_a.display_name}", value=f"{self._CHIP_EMOJI} **{game.stacks.get(player_a.id, 0)}**", inline=True)
+        embed.add_field(name=f"Stack final — {player_b.display_name}", value=f"{self._CHIP_EMOJI} **{game.stacks.get(player_b.id, 0)}**", inline=True)
         embed.add_field(name="Trocas reveladas", value=f"{player_a.display_name}: **{game.exchange_counts.get(player_a.id, 0)}**\n{player_b.display_name}: **{game.exchange_counts.get(player_b.id, 0)}**", inline=True)
         return embed
 
@@ -604,9 +607,9 @@ class AntiMzkPokerMixin:
             log_text = "\n".join(f"• {entry}" for entry in game.action_log[-5:]) or "Nenhuma ação ainda."
             description = (
                 f"{stage_name}\n"
-                f"Pote: **{game.pot}** fichas\n"
-                f"{host.display_name}: **{game.stacks.get(host.id, 0)}** fichas\n"
-                f"{opponent.display_name}: **{game.stacks.get(opponent.id, 0)}** fichas\n"
+                f"Pote: {self._CHIP_EMOJI} **{game.pot}** fichas\n"
+                f"{host.display_name}: {self._CHIP_EMOJI} **{game.stacks.get(host.id, 0)}**\n"
+                f"{opponent.display_name}: {self._CHIP_EMOJI} **{game.stacks.get(opponent.id, 0)}**\n"
                 f"Vez de: {pending}\n\n"
                 f"Ações recentes:\n{log_text}"
             )
@@ -615,7 +618,7 @@ class AntiMzkPokerMixin:
             opp_status = "✅ pronto" if game.confirmed.get(game.opponent_id, False) else "⌛ escolhendo"
             description = (
                 f"Troca de cartas em segredo.\n"
-                f"Pote: **{game.pot}** fichas\n"
+                f"Pote: {self._CHIP_EMOJI} **{game.pot}** fichas\n"
                 f"{host.display_name}: {host_status}\n"
                 f"{opponent.display_name}: {opp_status}\n\n"
                 "As mãos continuam privadas. A quantidade trocada por cada jogador será mostrada no resultado final."

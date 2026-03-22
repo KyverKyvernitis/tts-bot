@@ -10,6 +10,9 @@ from db import SettingsDB
 
 class AntiMzkBase:
     _ANTI_MZK_SUFFIXES = (" [ultra-censurado]", " [censurado]", " [antitts]")
+    _CHIP_EMOJI = "<:emoji_63:1485041721573249135>"
+    _CHIP_GAIN_EMOJI = "<:emoji_64:1485043651292827788>"
+    _CHIP_LOSS_EMOJI = "<:emoji_65:1485043671077228786>"
 
     def __init__(self, bot: commands.Bot, db: SettingsDB):
         self.bot = bot
@@ -127,12 +130,18 @@ class AntiMzkBase:
         )
         return embed
 
-
-
+    def _chip_text(self, amount: int | str, *, kind: str = "balance") -> str:
+        emoji = self._CHIP_EMOJI
+        if kind == "gain":
+            emoji = self._CHIP_GAIN_EMOJI
+        elif kind == "loss":
+            emoji = self._CHIP_LOSS_EMOJI
+        return f"{emoji} **{amount}**"
 
     def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
         guild_id = member.guild.id
         chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_DEFAULT)
+        stats = self.db.get_user_game_stats(guild_id, member.id)
         remaining = 0.0
         if chips <= 0:
             last_reset = self.db.get_user_chip_reset_at(guild_id, member.id)
@@ -142,37 +151,34 @@ class AntiMzkBase:
             remaining = max(0.0, CHIPS_RESET_SECONDS - elapsed)
 
         embed = discord.Embed(
-            title="🎟️ Suas fichas",
-            description=f"Saldo atual: **{chips} fichas**",
+            title=f"{self._CHIP_EMOJI} Suas fichas",
+            description=(
+                f"Saldo atual: {self._chip_text(chips)} fichas\n"
+                f"Mesa padrão: {self._chip_text(CHIPS_DEFAULT)} fichas"
+            ),
             color=discord.Color(ON_COLOR),
         )
         embed.set_author(name=str(member.display_name), icon_url=member.display_avatar.url)
         if chips > 0:
-            embed.add_field(name="Recarga", value=f"Automática para **{CHIPS_DEFAULT}** quando faltar saldo.", inline=False)
+            recarga = f"Quando faltar saldo, a próxima recarga volta para {self._chip_text(CHIPS_DEFAULT)} fichas."
+        elif remaining > 0:
+            recarga = f"Disponível em **{self._format_chip_reset_remaining(remaining)}** para voltar a {self._chip_text(CHIPS_DEFAULT)} fichas."
         else:
-            if remaining > 0:
-                embed.add_field(
-                    name="Recarga",
-                    value=f"Disponível em **{self._format_chip_reset_remaining(remaining)}** para voltar a **{CHIPS_DEFAULT} fichas**.",
-                    inline=False,
-                )
-            else:
-                embed.add_field(
-                    name="Recarga",
-                    value=f"Na próxima tentativa sem saldo, suas fichas voltam para **{CHIPS_DEFAULT}**.",
-                    inline=False,
-                )
+            recarga = f"Na próxima tentativa sem saldo, suas fichas voltam para {self._chip_text(CHIPS_DEFAULT)}."
+
+        embed.add_field(name="Recarga", value=recarga, inline=False)
+        embed.add_field(name="🃏 Poker", value=f"Vitórias: **{stats.get('poker_wins', 0)}**", inline=True)
+        embed.add_field(name="<:gunforward:1484655577836683434> Buckshot", value=f"Sobreviveu: **{stats.get('buckshot_survivals', 0)}**", inline=True)
+        embed.add_field(name="🎰 Roleta", value=f"Jackpots: **{stats.get('roleta_jackpots', 0)}**", inline=True)
         embed.set_footer(text="Roleta, buckshot e poker usam esse saldo neste servidor")
         return embed
-
-
 
     def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
         rows = self.db.get_chip_leaderboard(guild.id, limit=10)
         embed = discord.Embed(
-            title="🏆 Rank",
-            description="Ranking de fichas deste servidor",
-            color=discord.Color(ON_COLOR),
+            title=f"🏆 Rank de fichas",
+            description=f"Os maiores saldos deste servidor {self._CHIP_EMOJI}",
+            color=discord.Color.gold(),
         )
         if requester is not None:
             embed.set_author(name=str(requester.display_name), icon_url=requester.display_avatar.url)
@@ -182,16 +188,18 @@ class AntiMzkBase:
             embed.set_footer(text="Use _ficha para ver seu saldo")
             return embed
 
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         ranking_lines = []
         for index, row in enumerate(rows, start=1):
             member = guild.get_member(int(row["user_id"]))
             name = member.display_name if member is not None else f"Usuário {row['user_id']}"
-            ranking_lines.append(f"**{index}.** {name} — **{row['chips']}** fichas")
-        embed.add_field(name="Top fichas", value="\n".join(ranking_lines), inline=False)
+            prefix = medals.get(index, f"`#{index}`")
+            ranking_lines.append(f"{prefix} **{name}** — {self._chip_text(row['chips'])} fichas")
+        embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
 
         highlight_specs = [
-            ("🃏 Poker", "poker_wins"),
-            ("🔫 Buckshot", "buckshot_survivals"),
+            ("🃏 Rei do poker", "poker_wins"),
+            ("<:gunforward:1484655577836683434> Sobrevivente", "buckshot_survivals"),
             ("🎰 Jackpots", "roleta_jackpots"),
         ]
         highlight_lines = []
@@ -205,7 +213,7 @@ class AntiMzkBase:
             highlight_lines.append(f"{label}: **{name}** — **{row['value']}**")
         if highlight_lines:
             embed.add_field(name="Destaques", value="\n".join(highlight_lines), inline=False)
-        embed.set_footer(text="Poker, buckshot e roleta contam neste rank")
+        embed.set_footer(text="Use _ficha para ver seu saldo e estatísticas")
         return embed
 
 
