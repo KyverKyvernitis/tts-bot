@@ -582,21 +582,23 @@ class SettingsDB:
         await self._save_user_doc(guild_id, user_id, doc)
         return new_value
 
-    def has_user_played_any_game(self, guild_id: int, user_id: int) -> bool:
-        stats = self.get_user_game_stats(guild_id, user_id)
-        return any(int(value or 0) > 0 for value in stats.values())
-
     def get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[Dict[str, int]]:
         rows: list[Dict[str, int]] = []
+        default_chips = 100
         for (gid, uid), doc in self.user_cache.items():
             if gid != guild_id:
                 continue
-            if not self.has_user_played_any_game(guild_id, uid):
-                continue
             try:
-                chips = max(0, int(doc.get("chips", 100) or 100))
+                chips = max(0, int(doc.get("chips", default_chips) or default_chips))
             except Exception:
-                chips = 100
+                chips = default_chips
+
+            stats = self.get_user_game_stats(guild_id, uid)
+            has_any_game_stat = any(int(v or 0) > 0 for v in stats.values())
+            has_chip_movement = chips != default_chips
+            if not has_any_game_stat and not has_chip_movement:
+                continue
+
             rows.append({"user_id": uid, "chips": chips})
         rows.sort(key=lambda item: (-item["chips"], item["user_id"]))
         return rows[: max(1, int(limit))]
