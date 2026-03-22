@@ -8,6 +8,7 @@ import discord
 from config import GUILD_IDS, MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
 
 from .constants import (
+    _ALVO_WORD_RE,
     _ATIRAR_WORD_RE,
     _BUCKSHOT_WORD_RE,
     _DJ_DURATION_SECONDS,
@@ -16,6 +17,7 @@ from .constants import (
     _POKER_WORD_RE,
     _ROLETA_WORD_RE,
     _ROLE_TOGGLE_WORD_RE,
+    ALVO_STAKE,
     BUCKSHOT_STAKE,
     ROLETA_COST,
     ROLETA_JACKPOT_CHIPS,
@@ -38,6 +40,25 @@ class _BuckshotJoinView(discord.ui.View):
     async def on_timeout(self):
         try:
             await self.cog._finish_buckshot(self.guild_id, reason="timeout")
+        except Exception:
+            pass
+
+
+class _TargetJoinView(discord.ui.View):
+    def __init__(self, cog: "AntiMzkTriggerMixin", guild_id: int, *, timeout: float = 12.0):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.primary, label="Entrar no alvo (0)")
+        self.join_button.callback = self._join_round
+        self.add_item(self.join_button)
+
+    async def _join_round(self, interaction: discord.Interaction):
+        await self.cog._handle_target_button(interaction, self)
+
+    async def on_timeout(self):
+        try:
+            await self.cog._finish_target_round(self.guild_id, reason="timeout")
         except Exception:
             pass
 
@@ -134,6 +155,11 @@ class AntiMzkTriggerMixin:
                 targets[member.id] = member
         return list(targets.values())
 
+    def _matches_exact_trigger(self, content: str | None, trigger: str) -> bool:
+        if not trigger:
+            return False
+        return str(content or "").strip().casefold() == str(trigger).strip().casefold()
+
     async def _send_role_toggle_feedback(self, message: discord.Message, activated: bool):
         title = "🔇 TTS desativado para os alvos" if activated else "🔊 TTS reativado para os alvos"
         description = (
@@ -153,7 +179,7 @@ class AntiMzkTriggerMixin:
             return False
 
         content = (message.content or "")
-        if not _ROLE_TOGGLE_WORD_RE.search(content):
+        if not self._matches_exact_trigger(content, "pica"):
             return False
 
         if GUILD_IDS and guild.id not in GUILD_IDS:
@@ -250,7 +276,7 @@ class AntiMzkTriggerMixin:
             return False
 
         content = (message.content or "")
-        if not _DJ_TOGGLE_WORD_RE.search(content):
+        if not self._matches_exact_trigger(content, "dj"):
             return False
 
         if GUILD_IDS and guild.id not in GUILD_IDS:
@@ -545,7 +571,7 @@ class AntiMzkTriggerMixin:
             return False
 
         content = (message.content or "")
-        if not _ROLETA_WORD_RE.search(content):
+        if not self._matches_exact_trigger(content, "roleta"):
             return False
 
         if GUILD_IDS and guild.id not in GUILD_IDS:
@@ -952,7 +978,7 @@ class AntiMzkTriggerMixin:
             return False
 
         content = (message.content or "")
-        if not _BUCKSHOT_WORD_RE.search(content):
+        if not self._matches_exact_trigger(content, "buckshot"):
             return False
 
         if GUILD_IDS and guild.id not in GUILD_IDS:
@@ -1016,7 +1042,7 @@ class AntiMzkTriggerMixin:
             return False
 
         content = (message.content or "")
-        if not _ATIRAR_WORD_RE.search(content):
+        if not self._matches_exact_trigger(content, "atirar"):
             return False
 
         if GUILD_IDS and guild.id not in GUILD_IDS:
@@ -1044,6 +1070,323 @@ class AntiMzkTriggerMixin:
         await self._react_with_emoji(message, "💥", keep=True)
         return True
 
+    def _get_target_session(self, guild_id: int) -> dict | None:
+        session = self._target_sessions.get(guild_id)
+        if session and session.get("ended"):
+            self._target_sessions.pop(guild_id, None)
+            return None
+        return session
+
+    def _get_target_voice_channel(self, guild: discord.Guild, session: dict) -> discord.VoiceChannel | None:
+        channel = guild.get_channel(int(session.get("voice_channel_id") or 0))
+        return channel if isinstance(channel, discord.VoiceChannel) else None
+
+    def _get_target_participants(self, guild: discord.Guild, session: dict) -> list[discord.Member]:
+        voice_channel = self._get_target_voice_channel(guild, session)
+        if voice_channel is None:
+            return []
+        participants: list[discord.Member] = []
+        for user_id in sorted(session.get("locked_participants", set())):
+            member = guild.get_member(int(user_id))
+            if member is None or getattr(member, "bot", False):
+                continue
+            if getattr(getattr(member, "voice", None), "channel", None) != voice_channel:
+                continue
+            participants.append(member)
+        return participants
+
+    def _describe_target_zone(self, score: int) -> str:
+        return {3: "centro", 2: "anel interno", 1: "anel externo", 0: "errou"}.get(int(score), "errou")
+
+    def _roll_target_score(self) -> int:
+        roll = random.random()
+        if roll < 0.07:
+            return 3
+        if roll < 0.25:
+            return 2
+        if roll < 0.55:
+            return 1
+        return 0
+
+    def _allocate_target_rewards(self, participants: list[discord.Member], scores: dict[int, int], pot_total: int) -> tuple[dict[int, int], list[tuple[str, list[discord.Member], int]]]:
+        rewards: dict[int, int] = {}
+        placement_groups: list[tuple[str, list[discord.Member], int]] = []
+        if not participants or pot_total <= 0:
+            return rewards, placement_groups
+
+        if len(participants) == 2:
+            best_score = max(scores.get(member.id, 0) for member in participants)
+            top_members = [member for member in participants if scores.get(member.id, 0) == best_score]
+            winner = random.choice(top_members)
+            rewards[winner.id] = pot_total
+            placement_groups.append(("🥇", [winner], pot_total))
+            return rewards, placement_groups
+
+        ordered_scores = sorted({scores.get(member.id, 0) for member in participants}, reverse=True)
+        first_members = [member for member in participants if scores.get(member.id, 0) == ordered_scores[0]]
+        remaining_pool = pot_total
+
+        if len(ordered_scores) > 1:
+            first_pool = int(round(pot_total * 0.6))
+            second_pool = pot_total - first_pool
+            second_members = [member for member in participants if scores.get(member.id, 0) == ordered_scores[1]]
+        else:
+            first_pool = pot_total
+            second_pool = 0
+            second_members = []
+
+        def split_pool(members: list[discord.Member], total: int):
+            if not members or total <= 0:
+                return
+            each = total // len(members)
+            remainder = total % len(members)
+            for index, member in enumerate(members):
+                rewards[member.id] = rewards.get(member.id, 0) + each + (1 if index < remainder else 0)
+
+        split_pool(first_members, first_pool)
+        placement_groups.append(("🥇", first_members, first_pool))
+        remaining_pool -= first_pool
+
+        if second_members and second_pool > 0:
+            split_pool(second_members, second_pool)
+            placement_groups.append(("🥈", second_members, second_pool))
+            remaining_pool -= second_pool
+
+        if remaining_pool > 0 and first_members:
+            split_pool(first_members, remaining_pool)
+            placement_groups[0] = (placement_groups[0][0], placement_groups[0][1], placement_groups[0][2] + remaining_pool)
+
+        return rewards, placement_groups
+
+    def _make_target_embed(self, guild: discord.Guild, session: dict, *, final_text: str | None = None) -> discord.Embed:
+        participants = self._get_target_participants(guild, session)
+        pot_total = len(session.get("locked_participants", set())) * ALVO_STAKE
+        title = "🎯 Tiro ao alvo"
+        if final_text:
+            description = final_text
+            color = discord.Color.blurple()
+        else:
+            winner_text = "Os 2 melhores tiros levam o prêmio." if len(participants) >= 3 else "Com 2 participantes, só 1 leva o prêmio."
+            description = (
+                f"Entrada: {self._chip_amount(ALVO_STAKE)} por jogador\n"
+                f"Participantes: **{len(participants)}**\n"
+                f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(pot_total)}\n\n"
+                f"{winner_text}"
+            )
+            color = discord.Color.blurple()
+        return discord.Embed(title=title, description=description, color=color)
+
+    async def _refresh_target_message(self, guild_id: int):
+        session = self._get_target_session(guild_id)
+        if session is None or session.get("ended"):
+            return
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return
+        message = session.get("message")
+        view = session.get("view")
+        if message is None or view is None:
+            return
+        participants = self._get_target_participants(guild, session)
+        view.join_button.label = f"Entrar no alvo ({len(participants)})"
+        try:
+            await message.edit(embed=self._make_target_embed(guild, session), view=view)
+        except Exception:
+            pass
+
+    async def _handle_target_button(self, interaction: discord.Interaction, view: _TargetJoinView):
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            try:
+                await interaction.response.send_message("Não foi possível entrar nessa rodada agora.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        session = self._get_target_session(guild.id)
+        if session is None or session.get("view") is not view or session.get("ended"):
+            try:
+                await interaction.response.send_message("Essa rodada já terminou.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        voice_channel = self._get_target_voice_channel(guild, session)
+        if voice_channel is None:
+            await self._finish_target_round(guild.id, reason="channel_missing")
+            try:
+                await interaction.response.send_message("A rodada foi encerrada porque o canal de voz sumiu.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        if getattr(user.voice, "channel", None) != voice_channel:
+            try:
+                await interaction.response.send_message("Você precisa estar na mesma call da rodada para entrar.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        locked = session.setdefault("locked_participants", set())
+        if user.id in locked:
+            try:
+                await interaction.response.send_message("Você já entrou nessa rodada e sua entrada ficou travada até o fim.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE)
+        if not paid:
+            try:
+                await interaction.response.send_message(chip_note or "Você não tem saldo suficiente para entrar nessa rodada.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        locked.add(user.id)
+        try:
+            await interaction.response.send_message(chip_note or f"Você entrou na rodada pagando {self._chip_amount(ALVO_STAKE)}.", ephemeral=True)
+        except Exception:
+            pass
+        await self._refresh_target_message(guild.id)
+
+    async def _finish_target_round(self, guild_id: int, *, reason: str) -> bool:
+        session = self._get_target_session(guild_id)
+        if session is None or session.get("ended"):
+            return False
+        session["ended"] = True
+
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            self._target_sessions.pop(guild_id, None)
+            return False
+
+        message = session.get("message")
+        view = session.get("view")
+        if isinstance(view, discord.ui.View):
+            for child in view.children:
+                child.disabled = True
+            try:
+                view.stop()
+            except Exception:
+                pass
+
+        participants = self._get_target_participants(guild, session)
+        locked_ids = set(session.get("locked_participants", set()))
+
+        if len(locked_ids) == 1:
+            only_id = next(iter(locked_ids))
+            await self.db.add_user_chips(guild.id, only_id, ALVO_STAKE)
+            only_member = guild.get_member(only_id)
+            final_text = f"A rodada foi cancelada porque só {only_member.mention if only_member else '1 participante'} entrou. A entrada foi reembolsada."
+        elif len(participants) < 2:
+            for user_id in locked_ids:
+                await self.db.add_user_chips(guild.id, user_id, ALVO_STAKE)
+            final_text = "A rodada foi cancelada porque não ficaram participantes suficientes na call. As entradas foram reembolsadas."
+        else:
+            scores = {member.id: self._roll_target_score() for member in participants}
+            pot_total = len(locked_ids) * ALVO_STAKE
+            rewards, placements = self._allocate_target_rewards(participants, scores, pot_total)
+            result_lines = ["🎯 Os tiros foram disparados.", ""]
+            for member in sorted(participants, key=lambda m: (-scores.get(m.id, 0), m.display_name.casefold())):
+                zone = self._describe_target_zone(scores.get(member.id, 0))
+                result_lines.append(f"{member.mention} acertou **{zone}**.")
+                if scores.get(member.id, 0) == 3:
+                    await self.db.add_user_game_stat(guild.id, member.id, "alvo_bullseyes", 1)
+
+            if rewards:
+                result_lines.append("")
+                for badge, members, total in placements:
+                    if not members or total <= 0:
+                        continue
+                    member_mentions = ", ".join(member.mention for member in members)
+                    result_lines.append(f"{badge} {member_mentions} — {self._chip_amount(total)}")
+                for user_id, amount in rewards.items():
+                    if amount > 0:
+                        await self.db.add_user_chips(guild.id, user_id, amount)
+                        await self.db.add_user_game_stat(guild.id, user_id, "alvo_wins", 1)
+            final_text = "\n".join(result_lines)
+
+        embed = self._make_target_embed(guild, session, final_text=final_text)
+        delivered = False
+        if message is not None:
+            try:
+                await message.edit(embed=embed, view=view)
+                delivered = True
+            except Exception:
+                pass
+        if not delivered and message is not None:
+            try:
+                await message.channel.send(embed=embed)
+            except Exception:
+                pass
+
+        self._target_sessions.pop(guild_id, None)
+        return True
+
+    async def _handle_target_trigger(self, message: discord.Message) -> bool:
+        guild = message.guild
+        if guild is None:
+            return False
+
+        content = (message.content or "")
+        if not self._matches_exact_trigger(content, "alvo"):
+            return False
+
+        if GUILD_IDS and guild.id not in GUILD_IDS:
+            return True
+
+        if not self.db.anti_mzk_enabled(guild.id):
+            return True
+
+        if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+
+        if self._get_target_session(guild.id) is not None:
+            return True
+
+        author_voice = getattr(message.author, "voice", None)
+        voice_channel = getattr(author_voice, "channel", None)
+        if not isinstance(voice_channel, discord.VoiceChannel):
+            return True
+
+        paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ALVO_STAKE)
+        if not paid:
+            try:
+                await message.channel.send(embed=self._make_embed("🎯 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False))
+            except Exception:
+                pass
+            return True
+
+        view = _TargetJoinView(self, guild.id, timeout=12.0)
+        session = {
+            "voice_channel_id": voice_channel.id,
+            "text_channel_id": message.channel.id,
+            "locked_participants": {message.author.id},
+            "message": None,
+            "view": view,
+            "ended": False,
+            "timeout_task": None,
+        }
+        self._target_sessions[guild.id] = session
+
+        view.join_button.label = f"Entrar no alvo ({len(self._get_target_participants(guild, session))})"
+        embed = self._make_target_embed(guild, session)
+        if chip_note:
+            embed.set_footer(text=chip_note)
+        try:
+            panel_message = await message.channel.send(embed=embed, view=view)
+        except Exception:
+            self._target_sessions.pop(guild.id, None)
+            await self.db.add_user_chips(guild.id, message.author.id, ALVO_STAKE)
+            return True
+
+        session["message"] = panel_message
+        session["timeout_task"] = self.bot.loop.create_task(view.wait())
+        await self._react_with_emoji(message, "🎯", keep=True)
+        return True
+
     async def _handle_antimzk_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
@@ -1061,6 +1404,9 @@ class AntiMzkTriggerMixin:
             return
 
         if await self._handle_buckshot_trigger(message):
+            return
+
+        if await self._handle_target_trigger(message):
             return
 
         if await self._handle_atirar_trigger(message):
@@ -1086,7 +1432,8 @@ class AntiMzkTriggerMixin:
         if not isinstance(voice_channel, discord.VoiceChannel):
             return
 
-        content = (message.content or "").lower()
+        content = (message.content or "")
+        normalized_content = content.strip().casefold()
         targets = self._resolve_targets(message.guild, voice_channel)
 
         if not targets:
@@ -1098,7 +1445,7 @@ class AntiMzkTriggerMixin:
 
         did_trigger_action = False
 
-        if TRIGGER_WORD and TRIGGER_WORD in content:
+        if TRIGGER_WORD and normalized_content == TRIGGER_WORD.casefold():
             did_trigger_action = True
             trigger_voice_channel = None
             for target in targets:
@@ -1124,7 +1471,7 @@ class AntiMzkTriggerMixin:
                     except Exception:
                         pass
 
-        if MUTE_TOGGLE_WORD and MUTE_TOGGLE_WORD in content:
+        if MUTE_TOGGLE_WORD and normalized_content == MUTE_TOGGLE_WORD.casefold():
             if author_is_focused_non_staff:
                 return
             did_trigger_action = True
