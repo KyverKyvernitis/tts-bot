@@ -501,7 +501,7 @@ class SettingsDB:
 
 
 
-    def get_user_chips(self, guild_id: int, user_id: int, *, default: int = 100) -> int:
+    def get_user_chips(self, guild_id: int, user_id: int, *, default: int = 200) -> int:
         doc = self.user_cache.get((guild_id, user_id), {})
         try:
             return max(0, int(doc.get("chips", default) or default))
@@ -535,12 +535,18 @@ class SettingsDB:
             doc["last_chip_reset_at"] = 0.0
         await self._save_user_doc(guild_id, user_id, doc)
 
-    async def maybe_reset_user_chips(self, guild_id: int, user_id: int, *, amount: int = 100, cooldown_seconds: int = 43200) -> tuple[bool, int, float]:
+    async def maybe_reset_user_chips(self, guild_id: int, user_id: int, *, amount: int = 100, cooldown_seconds: int = 21600) -> tuple[bool, int, float]:
         now = time.time()
         last_reset = self.get_user_chip_reset_at(guild_id, user_id)
+        if last_reset <= 0:
+            doc = self._get_user_doc(guild_id, user_id)
+            doc["chips"] = max(0, int(amount))
+            doc["last_chip_reset_at"] = float(now)
+            await self._save_user_doc(guild_id, user_id, doc)
+            return True, int(amount), 0.0
         remaining = max(0.0, (last_reset + float(cooldown_seconds)) - now)
         if remaining > 0:
-            return False, self.get_user_chips(guild_id, user_id, default=amount), remaining
+            return False, self.get_user_chips(guild_id, user_id, default=200), remaining
         doc = self._get_user_doc(guild_id, user_id)
         doc["chips"] = max(0, int(amount))
         doc["last_chip_reset_at"] = float(now)
@@ -584,7 +590,7 @@ class SettingsDB:
 
     def get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[Dict[str, int]]:
         rows: list[Dict[str, int]] = []
-        default_chips = 100
+        default_chips = 200
         for (gid, uid), doc in self.user_cache.items():
             if gid != guild_id:
                 continue
