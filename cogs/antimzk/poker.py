@@ -318,9 +318,9 @@ class AntiMzkPokerMixin:
             status_text = "Troque até 3 cartas e confirme." if not confirmed else "Troca confirmada. Aguardando o outro jogador."
         elif game.phase in {"pre_draw_bet", "post_draw_bet"}:
             if to_call > 0:
-                status_text = f"Você precisa pagar {to_call} fichas, aumentar ou desistir. {turn_text}"
+                status_text = f"Você precisa pagar {self._chip_amount(to_call)}, aumentar ou desistir. {turn_text}"
             else:
-                status_text = f"Você pode dar check, apostar {_BET_SIZE} fichas ou desistir. {turn_text}"
+                status_text = f"Você pode dar check, apostar {self._chip_amount(_BET_SIZE)} ou desistir. {turn_text}"
         else:
             status_text = "Rodada encerrada."
 
@@ -361,13 +361,13 @@ class AntiMzkPokerMixin:
     def _make_poker_result_embed(self, player_a: discord.Member, hand_a: list[Card], player_b: discord.Member, hand_b: list[Card], outcome: int, game: PokerGame) -> discord.Embed:
         if outcome > 0:
             title = "🃏 Vitória no poker"
-            description = f"{self._CHIP_GAIN_EMOJI} {player_a.mention} levou o pote de **{game.pot} fichas** contra {player_b.mention}."
+            description = f"{self._CHIP_GAIN_EMOJI} {player_a.mention} levou o pote de {self._chip_amount(game.pot)} contra {player_b.mention}."
         elif outcome < 0:
             title = "🃏 Vitória no poker"
-            description = f"{self._CHIP_GAIN_EMOJI} {player_b.mention} levou o pote de **{game.pot} fichas** contra {player_a.mention}."
+            description = f"{self._CHIP_GAIN_EMOJI} {player_b.mention} levou o pote de {self._chip_amount(game.pot)} contra {player_a.mention}."
         else:
             title = "🃏 Empate no poker"
-            description = f"{self._CHIP_EMOJI} {player_a.mention} e {player_b.mention} dividiram o pote de **{game.pot} fichas**."
+            description = f"{self._CHIP_EMOJI} {player_a.mention} e {player_b.mention} dividiram o pote de {self._chip_amount(game.pot)}."
 
         embed = self._make_embed(title, description, ok=True)
         embed.add_field(name=f"{player_a.display_name} — {self._poker_hand_display(hand_a)}", value=self._format_hand(hand_a), inline=False)
@@ -470,7 +470,7 @@ class AntiMzkPokerMixin:
                 await game.status_message.edit(
                     embed=self._make_poker_status_embed(
                         "🃏 Vitória por abandono" if reason == "abandono" else "🃏 Vitória por desistência",
-                        (f"{loser.mention} ficou inativo e perdeu a rodada. {winner.mention} levou o pote de **{game.pot} fichas**." if reason == "abandono" else f"{loser.mention} desistiu. {winner.mention} levou o pote de **{game.pot} fichas**."),
+                        (f"{loser.mention} ficou inativo e perdeu a rodada. {winner.mention} levou o pote de {self._chip_amount(game.pot)}." if reason == "abandono" else f"{loser.mention} desistiu. {winner.mention} levou o pote de {self._chip_amount(game.pot)}."),
                         ok=True,
                     ),
                     view=None,
@@ -483,7 +483,7 @@ class AntiMzkPokerMixin:
                 await dm_message.edit(
                     embed=self._make_poker_status_embed(
                         "🃏 Rodada encerrada",
-                        f"{result}\nPote: **{game.pot} fichas**\nSeu stack: **{game.stacks.get(player_id, 0)}**",
+                        f"{result}\nPote: {self._chip_amount(game.pot)}\nSeu stack: {self._chip_amount(game.stacks.get(player_id, 0))}",
                         ok=player_id == winner_id,
                     ),
                     view=None,
@@ -607,7 +607,7 @@ class AntiMzkPokerMixin:
             log_text = "\n".join(f"• {entry}" for entry in game.action_log[-5:]) or "Nenhuma ação ainda."
             description = (
                 f"{stage_name}\n"
-                f"Pote: {self._CHIP_EMOJI} **{game.pot}** fichas\n"
+                f"Pote: {self._chip_amount(game.pot)}\n"
                 f"{host.display_name}: {self._CHIP_EMOJI} **{game.stacks.get(host.id, 0)}**\n"
                 f"{opponent.display_name}: {self._CHIP_EMOJI} **{game.stacks.get(opponent.id, 0)}**\n"
                 f"Vez de: {pending}\n\n"
@@ -618,7 +618,7 @@ class AntiMzkPokerMixin:
             opp_status = "✅ pronto" if game.confirmed.get(game.opponent_id, False) else "⌛ escolhendo"
             description = (
                 f"Troca de cartas em segredo.\n"
-                f"Pote: {self._CHIP_EMOJI} **{game.pot}** fichas\n"
+                f"Pote: {self._chip_amount(game.pot)}\n"
                 f"{host.display_name}: {host_status}\n"
                 f"{opponent.display_name}: {opp_status}\n\n"
                 "As mãos continuam privadas. A quantidade trocada por cada jogador será mostrada no resultado final."
@@ -701,7 +701,7 @@ class AntiMzkPokerMixin:
         if all(game.accepted.get(pid, False) for pid in game.players):
             game.phase = "pre_draw_bet"
             self._reset_betting_round(game, turn_id=game.host_id)
-            game.action_log.append(f"Os dois jogadores aceitaram. Pot inicial de {game.pot} fichas.")
+            game.action_log.append(f"Os dois jogadores aceitaram. Pot inicial de {game.pot} {self._CHIP_EMOJI}.")
             await self._update_poker_status(game)
             await self._update_all_poker_dms(game)
 
@@ -728,7 +728,7 @@ class AntiMzkPokerMixin:
             game.stacks[player_id] -= to_call
             game.round_bets[player_id] = current_bet
             game.pot += to_call
-            game.action_log.append(f"{name} pagou {to_call} fichas.")
+            game.action_log.append(f"{name} pagou {to_call} {self._CHIP_EMOJI}.")
         else:
             game.action_log.append(f"{name} deu check.")
         game.round_acted.add(player_id)
@@ -762,7 +762,7 @@ class AntiMzkPokerMixin:
         member = guild.get_member(player_id) if guild else None
         name = member.display_name if member else "Jogador"
         action_name = "apostou" if current_bet == own_bet else "aumentou"
-        game.action_log.append(f"{name} {action_name} para {target_bet} fichas.")
+        game.action_log.append(f"{name} {action_name} para {target_bet} {self._CHIP_EMOJI}.")
         game.round_acted = {player_id}
         game.turn_id = game.other_player(player_id)
         await self._update_poker_status(game)

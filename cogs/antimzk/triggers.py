@@ -406,12 +406,12 @@ class AntiMzkTriggerMixin:
     def _make_roleta_spin_embed(self, board: str) -> discord.Embed:
         return discord.Embed(
             title="🎰 Girando...",
-            description=f"{self._CHIP_LOSS_EMOJI} Custo: **{ROLETA_COST} fichas**\n{self._CHIP_GAIN_EMOJI} Jackpot: **{ROLETA_JACKPOT_CHIPS} fichas**\n\n{board}",
+            description=f"Custo: {self._chip_amount(ROLETA_COST)}\nJackpot: {self._chip_amount(ROLETA_JACKPOT_CHIPS)}\n\n{board}",
             color=discord.Color.blurple(),
         )
 
     def _make_roleta_result_embed(self, title: str, summary: str, board: str, *, success: bool) -> discord.Embed:
-        color = discord.Color.green() if success else discord.Color(OFF_COLOR)
+        color = discord.Color.blurple() if success else discord.Color(OFF_COLOR)
         return discord.Embed(
             title=title,
             description=f"{summary}\n\n{board}",
@@ -453,17 +453,24 @@ class AntiMzkTriggerMixin:
 
     async def _animate_roleta_spin(self, message: discord.Message, *, target_middle: list[int]) -> tuple[discord.Message | None, list[list[int]] | None]:
         columns = [self._build_roleta_column() for _ in range(3)]
+        for idx in range(3):
+            if columns[idx][1] == target_middle[idx]:
+                reroll = self._build_roleta_column()
+                while reroll[1] == target_middle[idx]:
+                    reroll = self._build_roleta_column()
+                columns[idx] = reroll
         try:
             spin_message = await message.channel.send(embed=self._make_roleta_spin_embed(self._render_roleta_board(columns)))
         except Exception:
             return None, None
 
         target_duration = 5.0
-        intervals = [0.22, 0.26, 0.30, 0.35, 0.41, 0.49, 0.60, 0.74, 0.90, 1.05]
+        intervals = [0.18, 0.21, 0.24, 0.28, 0.33, 0.39, 0.47, 0.58, 0.72, 0.90, 1.05]
         scale = target_duration / sum(intervals)
         intervals = [step * scale for step in intervals]
         lock_steps = [len(intervals) - 3, len(intervals) - 2, len(intervals) - 1]
         locked_columns: set[int] = set()
+        previous_board = None
 
         for index, delay in enumerate(intervals):
             await asyncio.sleep(delay)
@@ -477,8 +484,16 @@ class AntiMzkTriggerMixin:
                 if column_index not in locked_columns:
                     self._spin_roleta_column(columns[column_index])
 
+            board = self._render_roleta_board(columns)
+            if board == previous_board and index not in lock_steps:
+                for column_index in range(3):
+                    if column_index not in locked_columns:
+                        self._spin_roleta_column(columns[column_index])
+                board = self._render_roleta_board(columns)
+            previous_board = board
+
             try:
-                await spin_message.edit(embed=self._make_roleta_spin_embed(self._render_roleta_board(columns)))
+                await spin_message.edit(embed=self._make_roleta_spin_embed(board))
             except Exception:
                 pass
 
@@ -526,7 +541,7 @@ class AntiMzkTriggerMixin:
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ROLETA_COST)
         if not paid:
             try:
-                await message.channel.send(embed=self._make_embed("🎰 Fichas insuficientes", chip_note or "Você não tem fichas suficientes.", ok=False))
+                await message.channel.send(embed=self._make_embed("🎰 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False))
             except Exception:
                 pass
             return True
@@ -555,6 +570,12 @@ class AntiMzkTriggerMixin:
                     self._build_roleta_column(target_middle[1]),
                     self._build_roleta_column(target_middle[2]),
                 ]
+            else:
+                final_columns = [
+                    self._build_roleta_column(target_middle[0]),
+                    self._build_roleta_column(target_middle[1]),
+                    self._build_roleta_column(target_middle[2]),
+                ]
 
             try:
                 board = self._render_roleta_board(final_columns)
@@ -574,7 +595,7 @@ class AntiMzkTriggerMixin:
                                 pass
                     await self.db.add_user_chips(guild.id, message.author.id, ROLETA_JACKPOT_CHIPS)
                     await self.db.add_user_game_stat(guild.id, message.author.id, "roleta_jackpots", 1)
-                    summary = f"{self._CHIP_GAIN_EMOJI} Você ganhou **{ROLETA_JACKPOT_CHIPS} fichas** e os alvos foram tirados da call."
+                    summary = f"Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)} e os alvos foram tirados da call."
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
                     embed = self._make_roleta_result_embed(
@@ -584,7 +605,7 @@ class AntiMzkTriggerMixin:
                         success=True,
                     )
                 else:
-                    summary = f"{self._CHIP_LOSS_EMOJI} Você perdeu **{ROLETA_COST} fichas**."
+                    summary = f"Você perdeu {self._chip_amount(ROLETA_COST)}."
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
                     embed = self._make_roleta_result_embed(
@@ -596,18 +617,18 @@ class AntiMzkTriggerMixin:
             except Exception:
                 if success:
                     fallback_title = "💥🎰 JACKPOT!!"
-                    fallback_text = f"{self._CHIP_GAIN_EMOJI} Você ganhou **{ROLETA_JACKPOT_CHIPS} fichas** e os alvos foram tirados da call."
+                    fallback_text = f"Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)} e os alvos foram tirados da call."
                     if chip_note:
                         fallback_text = f"{chip_note}\n{fallback_text}"
                 else:
                     fallback_title = "🎰 Não foi dessa vez..."
-                    fallback_text = f"{self._CHIP_LOSS_EMOJI} Você perdeu **{ROLETA_COST} fichas**."
+                    fallback_text = f"Você perdeu {self._chip_amount(ROLETA_COST)}."
                     if chip_note:
                         fallback_text = f"{chip_note}\n{fallback_text}"
                 embed = self._make_embed(
                     fallback_title,
                     fallback_text,
-                    ok=not success,
+                    ok=success,
                 )
 
             delivered = False
@@ -695,9 +716,9 @@ class AntiMzkTriggerMixin:
             color = discord.Color.red()
         else:
             description = (
-                f"Entrada: **{BUCKSHOT_STAKE}** {self._CHIP_EMOJI} por jogador\n"
+                f"Entrada: {self._chip_amount(BUCKSHOT_STAKE)} por jogador\n"
                 f"Participantes: **{len(participants)}**\n"
-                f"{self._CHIP_GAIN_EMOJI} Pote atual: **{payout_total} {self._CHIP_EMOJI}**"
+                f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(payout_total)}"
             )
             color = discord.Color.blurple()
         embed = discord.Embed(title=title, description=description, color=color)
@@ -775,7 +796,7 @@ class AntiMzkTriggerMixin:
         paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
         if not paid:
             try:
-                await interaction.response.send_message(note or "Você não tem fichas suficientes para entrar.", ephemeral=True)
+                await interaction.response.send_message(note or "Você não tem saldo suficiente para entrar.", ephemeral=True)
             except Exception:
                 pass
             return
@@ -788,7 +809,7 @@ class AntiMzkTriggerMixin:
 
         await self._refresh_buckshot_message(guild.id)
 
-        note = f"{self._CHIP_LOSS_EMOJI} Você entrou na rodada e pagou sua entrada." if not note else f"{note} {self._CHIP_LOSS_EMOJI} Você entrou na rodada e pagou sua entrada."
+        note = f"Você entrou na rodada e pagou **{BUCKSHOT_STAKE} {self._CHIP_LOSS_EMOJI}**." if not note else f"{note} Você entrou na rodada e pagou **{BUCKSHOT_STAKE} {self._CHIP_LOSS_EMOJI}**."
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(note, ephemeral=True)

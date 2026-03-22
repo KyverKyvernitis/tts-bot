@@ -136,7 +136,10 @@ class AntiMzkBase:
             emoji = self._CHIP_GAIN_EMOJI
         elif kind == "loss":
             emoji = self._CHIP_LOSS_EMOJI
-        return f"{emoji} **{amount}**"
+        return f"**{amount} {emoji}**"
+
+    def _chip_amount(self, amount: int | str) -> str:
+        return f"**{amount} {self._CHIP_EMOJI}**"
 
     def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
         guild_id = member.guild.id
@@ -153,18 +156,18 @@ class AntiMzkBase:
         embed = discord.Embed(
             title=f"{self._CHIP_EMOJI} Suas fichas",
             description=(
-                f"Saldo atual: {self._chip_text(chips)} fichas\n"
-                f"Mesa padrão: {self._chip_text(CHIPS_DEFAULT)} fichas"
+                f"Saldo atual: {self._chip_amount(chips)}\n"
+                f"Mesa padrão: {self._chip_amount(CHIPS_DEFAULT)}"
             ),
             color=discord.Color(ON_COLOR),
         )
         embed.set_author(name=str(member.display_name), icon_url=member.display_avatar.url)
         if chips > 0:
-            recarga = f"Quando faltar saldo, a próxima recarga volta para {self._chip_text(CHIPS_DEFAULT)} fichas."
+            recarga = f"Quando faltar saldo, a próxima recarga volta para {self._chip_amount(CHIPS_DEFAULT)}."
         elif remaining > 0:
-            recarga = f"Disponível em **{self._format_chip_reset_remaining(remaining)}** para voltar a {self._chip_text(CHIPS_DEFAULT)} fichas."
+            recarga = f"Disponível em **{self._format_chip_reset_remaining(remaining)}** para voltar a {self._chip_amount(CHIPS_DEFAULT)}."
         else:
-            recarga = f"Na próxima tentativa sem saldo, suas fichas voltam para {self._chip_text(CHIPS_DEFAULT)}."
+            recarga = f"Na próxima tentativa sem saldo, seu saldo volta para {self._chip_amount(CHIPS_DEFAULT)}."
 
         embed.add_field(name="Recarga", value=recarga, inline=False)
         embed.add_field(name="🃏 Poker", value=f"Vitórias: **{stats.get('poker_wins', 0)}**", inline=True)
@@ -194,7 +197,7 @@ class AntiMzkBase:
             member = guild.get_member(int(row["user_id"]))
             name = member.display_name if member is not None else f"Usuário {row['user_id']}"
             prefix = medals.get(index, f"`#{index}`")
-            ranking_lines.append(f"{prefix} **{name}** — {self._chip_text(row['chips'])} fichas")
+            ranking_lines.append(f"{prefix} **{name}** — {self._chip_text(row['chips'])}")
         embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
 
         highlight_specs = [
@@ -233,9 +236,9 @@ class AntiMzkBase:
                 guild_id, user_id, amount=CHIPS_DEFAULT, cooldown_seconds=CHIPS_RESET_SECONDS
             )
             if not reset:
-                return False, current, f"Você não tem fichas suficientes. Sua recarga de **{CHIPS_DEFAULT} fichas** volta em **{self._format_chip_reset_remaining(remaining)}**."
+                return False, current, f"Você não tem saldo suficiente. Sua recarga de {self._chip_text(CHIPS_DEFAULT)} volta em **{self._format_chip_reset_remaining(remaining)}**."
             current = new_balance
-            reset_note = f"Suas fichas foram recarregadas para **{CHIPS_DEFAULT}**."
+            reset_note = f"Seu saldo foi recarregado para {self._chip_text(CHIPS_DEFAULT)}."
         new_balance = await self.db.add_user_chips(guild_id, user_id, -int(amount))
         return True, new_balance, reset_note
 
@@ -247,8 +250,8 @@ class AntiMzkBase:
             guild_id, user_id, amount=CHIPS_DEFAULT, cooldown_seconds=CHIPS_RESET_SECONDS
         )
         if reset:
-            return True, new_balance, f"Suas fichas foram recarregadas para **{CHIPS_DEFAULT}**."
-        return False, current, f"Você não tem fichas suficientes. Sua recarga de **{CHIPS_DEFAULT} fichas** volta em **{self._format_chip_reset_remaining(remaining)}**."
+            return True, new_balance, f"Seu saldo foi recarregado para {self._chip_text(CHIPS_DEFAULT)}."
+        return False, current, f"Você não tem saldo suficiente. Sua recarga de {self._chip_text(CHIPS_DEFAULT)} volta em **{self._format_chip_reset_remaining(remaining)}**."
 
     async def _reject_if_not_allowed_guild(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
