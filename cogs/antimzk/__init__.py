@@ -47,8 +47,8 @@ class AntiMzkCog(AntiMzkCore, dcommands.Cog):
         embed = self._make_chip_balance_embed(ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
 
-    @dcommands.command(name="leaderboard")
-    async def leaderboard(self, ctx: dcommands.Context):
+    @dcommands.command(name="rank", aliases=["leaderboard"])
+    async def rank(self, ctx: dcommands.Context):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return

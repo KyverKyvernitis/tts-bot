@@ -170,7 +170,7 @@ class AntiMzkBase:
     def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
         rows = self.db.get_chip_leaderboard(guild.id, limit=10)
         embed = discord.Embed(
-            title="🏆 Leaderboard",
+            title="🏆 Rank",
             description="Ranking de fichas deste servidor",
             color=discord.Color(ON_COLOR),
         )
@@ -178,7 +178,8 @@ class AntiMzkBase:
             embed.set_author(name=str(requester.display_name), icon_url=requester.display_avatar.url)
 
         if not rows:
-            embed.add_field(name="Ranking", value="Ainda não há jogadores com saldo salvo.", inline=False)
+            embed.add_field(name="Top fichas", value="Ainda não há jogadores com saldo salvo.", inline=False)
+            embed.set_footer(text="Use _ficha para ver seu saldo")
             return embed
 
         ranking_lines = []
@@ -188,16 +189,25 @@ class AntiMzkBase:
             ranking_lines.append(f"**{index}.** {name} — **{row['chips']}** fichas")
         embed.add_field(name="Top fichas", value="\n".join(ranking_lines), inline=False)
 
-        stats_lines = []
-        for row in rows[:5]:
+        highlight_specs = [
+            ("🃏 Poker", "poker_wins"),
+            ("🔫 Buckshot", "buckshot_survivals"),
+            ("🎰 Jackpots", "roleta_jackpots"),
+        ]
+        highlight_lines = []
+        for label, key in highlight_specs:
+            leaders = self.db.get_game_stat_leaderboard(guild.id, key, limit=1)
+            if not leaders:
+                continue
+            row = leaders[0]
             member = guild.get_member(int(row["user_id"]))
             name = member.display_name if member is not None else f"Usuário {row['user_id']}"
-            stats_lines.append(
-                f"**{name}** — Poker: **{row['poker_wins']}**, Buckshot: **{row['buckshot_wins']}**, Jackpots: **{row['roleta_jackpots']}**"
-            )
-        embed.add_field(name="Destaques", value="\n".join(stats_lines), inline=False)
-        embed.set_footer(text="Poker, buckshot e roleta contam neste leaderboard")
+            highlight_lines.append(f"{label}: **{name}** — **{row['value']}**")
+        if highlight_lines:
+            embed.add_field(name="Destaques", value="\n".join(highlight_lines), inline=False)
+        embed.set_footer(text="Poker, buckshot e roleta contam neste rank")
         return embed
+
 
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:
         remaining = max(0, int(remaining_seconds))
