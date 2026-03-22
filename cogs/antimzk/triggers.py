@@ -45,22 +45,16 @@ class _BuckshotJoinView(discord.ui.View):
 
 
 class _TargetJoinView(discord.ui.View):
-    def __init__(self, cog: "AntiMzkTriggerMixin", guild_id: int, *, timeout: float = 12.0):
+    def __init__(self, cog: "AntiMzkTriggerMixin", guild_id: int, *, timeout: float = 30.0):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
         self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label="🎯 Entrar (0)")
         self.join_button.callback = self._join_round
         self.add_item(self.join_button)
-        self.fire_button = discord.ui.Button(style=discord.ButtonStyle.danger, label="💥 Disparar")
-        self.fire_button.callback = self._fire_now
-        self.add_item(self.fire_button)
 
     async def _join_round(self, interaction: discord.Interaction):
         await self.cog._handle_target_button(interaction, self)
-
-    async def _fire_now(self, interaction: discord.Interaction):
-        await self.cog._handle_target_fire_button(interaction, self)
 
     async def on_timeout(self):
         try:
@@ -1167,7 +1161,7 @@ class AntiMzkTriggerMixin:
     def _target_zone_style(self, score: int) -> tuple[str, str]:
         score = int(score)
         if score >= 3:
-            return "🎯", "centro"
+            return "🎯", "CENTRO!"
         if score == 2:
             return "🟠", "anel interno"
         if score == 1:
@@ -1185,12 +1179,12 @@ class AntiMzkTriggerMixin:
 
     def _target_opening_text(self, participants: list[discord.Member]) -> str:
         if len(participants) >= 3:
-            return "Os **2 melhores tiros** dividem o prêmio."
+            return "Os **2 melhores tiros** levam o prêmio."
         if len(participants) == 2:
             return "Com **2 participantes**, só **1** leva o prêmio."
-        return "Entre na rodada para disputar o prêmio."
+        return "Use o botão para entrar e a trigger **disparar** para fechar a rodada."
 
-    def _make_target_embed(self, guild: discord.Guild, session: dict, *, final_text: str | None = None) -> discord.Embed:
+    def _make_target_embed(self, guild: discord.Guild, session: dict, *, final_text: str | None = None, aiming: bool = False) -> discord.Embed:
         participants = self._get_target_participants(guild, session)
         locked_ids = set(session.get("locked_participants", set()))
         pot_total = len(locked_ids) * ALVO_STAKE
@@ -1203,6 +1197,17 @@ class AntiMzkTriggerMixin:
                 description=final_text,
                 color=discord.Color.blurple(),
             )
+        elif aiming:
+            embed = discord.Embed(
+                title="🎯 Mirando...",
+                description=(
+                    f"Participantes: **{len(participants)}**\n"
+                    f"{self._CHIP_GAIN_EMOJI} Pote: {self._chip_amount(pot_total)}\n\n"
+                    "Os tiros estão sendo alinhados..."
+                ),
+                color=discord.Color.blurple(),
+            )
+            embed.add_field(name="Na mira", value=self._format_target_participants(participants), inline=False)
         else:
             embed = discord.Embed(
                 title="🎯 Tiro ao alvo aberto",
@@ -1215,7 +1220,7 @@ class AntiMzkTriggerMixin:
                 color=discord.Color.blurple(),
             )
             embed.add_field(name="Na mira", value=self._format_target_participants(participants), inline=False)
-            embed.add_field(name="Como funciona", value="Entre pelo botão verde. Quem estiver na call quando a rodada fechar participa do disparo.", inline=False)
+            embed.add_field(name="Como dispara", value="Entre pelo botão verde. Depois use a trigger **disparar** na call da rodada ou espere o tempo acabar.", inline=False)
             embed.set_footer(text="Entrou, pagou e a entrada fica travada até o fim")
 
         if owner is not None:
@@ -1237,58 +1242,9 @@ class AntiMzkTriggerMixin:
         view.join_button.label = f"🎯 Entrar ({len(participants)})"
         view.join_button.style = discord.ButtonStyle.success
         try:
-            owner_id = int(session.get("owner_id") or 0)
-            fire_disabled = len(participants) < 2
-            view.fire_button.disabled = fire_disabled
-            if fire_disabled:
-                view.fire_button.label = "💥 Disparar (mín. 2)"
-            else:
-                owner = guild.get_member(owner_id) if owner_id else None
-                suffix = f" por {owner.display_name}" if owner is not None else ""
-                view.fire_button.label = f"💥 Disparar agora{suffix}"
             await message.edit(embed=self._make_target_embed(guild, session), view=view)
         except Exception:
             pass
-
-    async def _handle_target_fire_button(self, interaction: discord.Interaction, view: _TargetJoinView):
-        guild = interaction.guild
-        user = interaction.user
-        if guild is None or not isinstance(user, discord.Member):
-            try:
-                await interaction.response.send_message("Não foi possível encerrar essa rodada agora.", ephemeral=True)
-            except Exception:
-                pass
-            return
-
-        session = self._get_target_session(guild.id)
-        if session is None or session.get("view") is not view or session.get("ended"):
-            try:
-                await interaction.response.send_message("Essa rodada já terminou.", ephemeral=True)
-            except Exception:
-                pass
-            return
-
-        owner_id = int(session.get("owner_id") or 0)
-        if user.id != owner_id and not self._is_staff_member(user):
-            try:
-                await interaction.response.send_message("Só quem abriu a rodada ou a staff pode disparar agora.", ephemeral=True)
-            except Exception:
-                pass
-            return
-
-        participants = self._get_target_participants(guild, session)
-        if len(participants) < 2:
-            try:
-                await interaction.response.send_message("Ainda faltam pelo menos 2 participantes na call.", ephemeral=True)
-            except Exception:
-                pass
-            return
-
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass
-        await self._finish_target_round(guild.id, reason="manual")
 
     async def _handle_target_button(self, interaction: discord.Interaction, view: _TargetJoinView):
         guild = interaction.guild
@@ -1352,6 +1308,7 @@ class AntiMzkTriggerMixin:
         if session is None or session.get("ended"):
             return False
         session["ended"] = True
+        self._target_last_used[guild_id] = time.time()
 
         guild = self.bot.get_guild(guild_id)
         if guild is None:
@@ -1381,15 +1338,30 @@ class AntiMzkTriggerMixin:
                 await self.db.add_user_chips(guild.id, user_id, ALVO_STAKE)
             final_text = "A rodada foi cancelada porque não ficaram participantes suficientes na call. As entradas foram reembolsadas."
         else:
-            scores = {member.id: self._roll_target_score() for member in participants}
             pot_total = len(locked_ids) * ALVO_STAKE
+            if message is not None:
+                try:
+                    await message.edit(embed=self._make_target_embed(guild, session, aiming=True), view=view)
+                    await asyncio.sleep(1.35)
+                except Exception:
+                    pass
+
+            scores = {member.id: self._roll_target_score() for member in participants}
             rewards, placements = self._allocate_target_rewards(participants, scores, pot_total)
-            result_lines = ["🎯 Os tiros foram disparados.", ""]
+            result_lines = [f"💥 Os tiros foram disparados. {self._CHIP_GAIN_EMOJI} Pote final: {self._chip_amount(pot_total)}", ""]
+            bullseye_members: list[discord.Member] = []
             for member in sorted(participants, key=lambda m: (-scores.get(m.id, 0), m.display_name.casefold())):
-                zone = self._describe_target_zone(scores.get(member.id, 0))
-                result_lines.append(f"{member.mention} acertou **{zone}**.")
-                if scores.get(member.id, 0) == 3:
+                score = scores.get(member.id, 0)
+                icon, zone = self._target_zone_style(score)
+                result_lines.append(f"{icon} {member.mention} acertou **{zone}**.")
+                if score == 3:
+                    bullseye_members.append(member)
                     await self.db.add_user_game_stat(guild.id, member.id, "alvo_bullseyes", 1)
+
+            if bullseye_members:
+                names = ", ".join(member.mention for member in bullseye_members)
+                result_lines.append("")
+                result_lines.append(f"🎯 Bullseye de destaque: {names}!")
 
             if rewards:
                 result_lines.append("")
@@ -1442,6 +1414,15 @@ class AntiMzkTriggerMixin:
         if self._get_target_session(guild.id) is not None:
             return True
 
+        last_used = float(self._target_last_used.get(guild.id, 0.0) or 0.0)
+        cooldown_remaining = max(0.0, (last_used + 6.0) - time.time())
+        if cooldown_remaining > 0:
+            try:
+                await message.channel.send(embed=self._make_embed("🎯 Aguarde um pouco", f"Espere **{int(cooldown_remaining) + 1}s** para abrir outra rodada de alvo.", ok=False))
+            except Exception:
+                pass
+            return True
+
         author_voice = getattr(message.author, "voice", None)
         voice_channel = getattr(author_voice, "channel", None)
         if not isinstance(voice_channel, discord.VoiceChannel):
@@ -1455,7 +1436,7 @@ class AntiMzkTriggerMixin:
                 pass
             return True
 
-        view = _TargetJoinView(self, guild.id, timeout=12.0)
+        view = _TargetJoinView(self, guild.id, timeout=30.0)
         session = {
             "voice_channel_id": voice_channel.id,
             "text_channel_id": message.channel.id,
@@ -1471,7 +1452,7 @@ class AntiMzkTriggerMixin:
         view.join_button.label = f"🎯 Entrar ({len(self._get_target_participants(guild, session))})"
         embed = self._make_target_embed(guild, session)
         if chip_note:
-            embed.set_footer(text=chip_note)
+            embed.set_footer(text=f"{chip_note} Entrou, pagou e a entrada fica travada até o fim.")
         try:
             panel_message = await message.channel.send(embed=embed, view=view)
         except Exception:
@@ -1482,6 +1463,48 @@ class AntiMzkTriggerMixin:
         session["message"] = panel_message
         session["timeout_task"] = self.bot.loop.create_task(view.wait())
         await self._react_with_emoji(message, "🎯", keep=True)
+        return True
+
+    async def _handle_disparar_trigger(self, message: discord.Message) -> bool:
+        guild = message.guild
+        if guild is None:
+            return False
+
+        content = (message.content or "")
+        if not self._matches_exact_trigger(content, "disparar"):
+            return False
+
+        if GUILD_IDS and guild.id not in GUILD_IDS:
+            return True
+
+        if not self.db.anti_mzk_enabled(guild.id):
+            return True
+
+        if self._anti_mzk_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+
+        session = self._get_target_session(guild.id)
+        if session is None:
+            return True
+
+        voice_channel = self._get_target_voice_channel(guild, session)
+        if voice_channel is None:
+            await self._finish_target_round(guild.id, reason="channel_missing")
+            return True
+
+        if getattr(message.author.voice, "channel", None) != voice_channel:
+            return True
+
+        participants = self._get_target_participants(guild, session)
+        if len(participants) < 2:
+            try:
+                await message.channel.send(embed=self._make_embed("🎯 Ainda faltam jogadores", "O alvo precisa de pelo menos **2 participantes** na call para disparar.", ok=False))
+            except Exception:
+                pass
+            return True
+
+        await self._finish_target_round(guild.id, reason="manual")
+        await self._react_with_emoji(message, "💥", keep=True)
         return True
 
     async def _handle_antimzk_message(self, message: discord.Message):
@@ -1504,6 +1527,9 @@ class AntiMzkTriggerMixin:
             return
 
         if await self._handle_target_trigger(message):
+            return
+
+        if await self._handle_disparar_trigger(message):
             return
 
         if await self._handle_atirar_trigger(message):

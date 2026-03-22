@@ -23,6 +23,7 @@ class AntiMzkBase:
         self._roleta_running_guilds: set[int] = set()
         self._buckshot_sessions: dict[int, dict] = {}
         self._target_sessions: dict[int, dict] = {}
+        self._target_last_used: dict[int, float] = {}
         self._poker_games: dict[int, object] = {}
 
     def _strip_antimzk_suffix(self, name: str) -> str:
