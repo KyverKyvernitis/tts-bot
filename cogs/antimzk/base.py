@@ -165,6 +165,40 @@ class AntiMzkBase:
         embed.set_footer(text="Roleta, buckshot e poker usam esse saldo neste servidor")
         return embed
 
+
+
+    def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
+        rows = self.db.get_chip_leaderboard(guild.id, limit=10)
+        embed = discord.Embed(
+            title="🏆 Leaderboard",
+            description="Ranking de fichas deste servidor",
+            color=discord.Color(ON_COLOR),
+        )
+        if requester is not None:
+            embed.set_author(name=str(requester.display_name), icon_url=requester.display_avatar.url)
+
+        if not rows:
+            embed.add_field(name="Ranking", value="Ainda não há jogadores com saldo salvo.", inline=False)
+            return embed
+
+        ranking_lines = []
+        for index, row in enumerate(rows, start=1):
+            member = guild.get_member(int(row["user_id"]))
+            name = member.display_name if member is not None else f"Usuário {row['user_id']}"
+            ranking_lines.append(f"**{index}.** {name} — **{row['chips']}** fichas")
+        embed.add_field(name="Top fichas", value="\n".join(ranking_lines), inline=False)
+
+        stats_lines = []
+        for row in rows[:5]:
+            member = guild.get_member(int(row["user_id"]))
+            name = member.display_name if member is not None else f"Usuário {row['user_id']}"
+            stats_lines.append(
+                f"**{name}** — Poker: **{row['poker_wins']}**, Buckshot: **{row['buckshot_wins']}**, Jackpots: **{row['roleta_jackpots']}**"
+            )
+        embed.add_field(name="Destaques", value="\n".join(stats_lines), inline=False)
+        embed.set_footer(text="Poker, buckshot e roleta contam neste leaderboard")
+        return embed
+
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:
         remaining = max(0, int(remaining_seconds))
         hours = remaining // 3600

@@ -47,6 +47,17 @@ class AntiMzkCog(AntiMzkCore, dcommands.Cog):
         embed = self._make_chip_balance_embed(ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
 
+    @dcommands.command(name="leaderboard")
+    async def leaderboard(self, ctx: dcommands.Context):
+        if ctx.guild is None:
+            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            return
+        if GUILD_IDS and ctx.guild.id not in GUILD_IDS:
+            await ctx.reply(embed=self._make_embed("Indisponível aqui", "Esse comando não está habilitado neste servidor", ok=False), mention_author=False)
+            return
+        embed = self._make_chip_leaderboard_embed(ctx.guild, ctx.author)
+        await ctx.reply(embed=embed, mention_author=False)
+
     @dcommands.Cog.listener()
     async def on_message(self, message: discord.Message):
         await self._handle_antimzk_message(message)

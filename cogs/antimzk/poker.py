@@ -6,6 +6,7 @@ from typing import Any
 import discord
 
 from config import GUILD_IDS
+from .constants import POKER_BUY_IN
 
 
 Card = tuple[int, str, str]
@@ -25,7 +26,6 @@ _HAND_NAMES = {
 _STARTING_STACK = 100
 _BET_SIZE = 10
 _MAX_SWAP = 3
-_MIN_BUY_IN = 15
 
 
 @dataclass
@@ -161,7 +161,7 @@ class PokerSelectionView(discord.ui.View):
 
     async def on_timeout(self):
         try:
-            await self.cog._cancel_poker_game(self.game, reason="timeout", notice="A partida de poker expirou por falta de resposta nas DMs.")
+            await self.cog._handle_poker_timeout(self.game, self.player_id)
         except Exception:
             pass
 
@@ -240,6 +240,23 @@ class AntiMzkPokerMixin:
         score, _ = self._evaluate_poker_hand(hand)
         return _HAND_NAMES[score]
 
+    def _poker_hand_flair(self, hand: list[Card]) -> str:
+        score, _ = self._evaluate_poker_hand(hand)
+        if score >= 8:
+            return "👑 Mão absurda"
+        if score == 7:
+            return "💥 Quadra brutal"
+        if score == 6:
+            return "🔥 Full House"
+        if score == 5:
+            return "✨ Flush"
+        if score == 4:
+            return "⚡ Sequência"
+        if score == 3:
+            return "🎯 Trinca"
+        return ""
+
+
     def _compare_poker_hands(self, hand_a: list[Card], hand_b: list[Card]) -> int:
         eval_a = self._evaluate_poker_hand(hand_a)
         eval_b = self._evaluate_poker_hand(hand_b)
@@ -269,7 +286,7 @@ class AntiMzkPokerMixin:
         turn_text = "É a sua vez." if game.turn_id == member.id else "Aguarde a vez do outro jogador."
 
         if game.phase == "invite":
-            status_text = "Aceite o duelo para a rodada começar."
+            status_text = f"Aceite o duelo para começar. Buy-in: {POKER_BUY_IN} fichas. Convite expira em 3 minutos."
         elif game.phase == "draw_select":
             status_text = "Troque até 3 cartas e confirme." if not confirmed else "Troca confirmada. Aguardando o outro jogador."
         elif game.phase in {"pre_draw_bet", "post_draw_bet"}:
@@ -316,10 +333,12 @@ class AntiMzkPokerMixin:
 
     def _make_poker_result_embed(self, player_a: discord.Member, hand_a: list[Card], player_b: discord.Member, hand_b: list[Card], outcome: int, game: PokerGame) -> discord.Embed:
         if outcome > 0:
-            title = "🃏 Vitória no poker"
+            flair = self._poker_hand_flair(hand_a)
+            title = "🃏 Vitória no poker" + (f" — {flair}" if flair else "")
             description = f"{player_a.mention} levou o pote de **{game.pot} fichas** contra {player_b.mention}."
         elif outcome < 0:
-            title = "🃏 Vitória no poker"
+            flair = self._poker_hand_flair(hand_b)
+            title = "🃏 Vitória no poker" + (f" — {flair}" if flair else "")
             description = f"{player_b.mention} levou o pote de **{game.pot} fichas** contra {player_a.mention}."
         else:
             title = "🃏 Empate no poker"
@@ -352,8 +371,8 @@ class AntiMzkPokerMixin:
             return
         game.finished = True
         self._poker_games.pop(game.guild_id, None)
-        await self.db.set_user_chips(game.guild_id, winner_id, game.stacks.get(winner_id, 0))
-        await self.db.set_user_chips(game.guild_id, loser_id, game.stacks.get(loser_id, 0))
+        for player_id in game.players:
+            await self.db.set_user_chips(game.guild_id, player_id, game.stacks.get(player_id, 0))
         await self._disable_poker_views(game)
         if game.status_message is not None:
             try:
@@ -365,6 +384,26 @@ class AntiMzkPokerMixin:
                 await dm_message.edit(embed=self._make_poker_status_embed("🃏 Partida cancelada", notice, ok=False), view=None)
             except Exception:
                 pass
+
+    async def _handle_poker_timeout(self, game: PokerGame, player_id: int):
+        if game.finished:
+            return
+        if game.phase in {"pre_draw_bet", "post_draw_bet", "draw_select"}:
+            await self._award_fold_win(game, game.other_player(player_id), player_id)
+            if game.status_message is not None:
+                try:
+                    await game.status_message.edit(
+                        embed=self._make_poker_status_embed(
+                            "🃏 Vitória por abandono",
+                            f"<@{player_id}> ficou sem responder na DM. <@{game.other_player(player_id)}> levou o pote de **{game.pot} fichas**.",
+                            ok=True,
+                        ),
+                        view=None,
+                    )
+                except Exception:
+                    pass
+            return
+        await self._cancel_poker_game(game, reason="timeout", notice="A partida de poker expirou por falta de resposta nas DMs.")
 
     def _reset_betting_round(self, game: PokerGame, *, turn_id: int):
         game.round_bets = {pid: 0 for pid in game.players}
@@ -416,6 +455,7 @@ class AntiMzkPokerMixin:
             return
         await self.db.set_user_chips(game.guild_id, winner_id, game.stacks.get(winner_id, 0))
         await self.db.set_user_chips(game.guild_id, loser_id, game.stacks.get(loser_id, 0))
+        await self.db.increment_user_game_stat(game.guild_id, winner_id, "poker_wins", 1)
         await self._disable_poker_views(game)
         if game.status_message is not None:
             try:
@@ -467,13 +507,17 @@ class AntiMzkPokerMixin:
         outcome = self._compare_poker_hands(game.hands[player_a.id], game.hands[player_b.id])
         if outcome > 0:
             game.stacks[player_a.id] += game.pot
+            await self.db.increment_user_game_stat(game.guild_id, player_a.id, "poker_wins", 1)
         elif outcome < 0:
             game.stacks[player_b.id] += game.pot
+            await self.db.increment_user_game_stat(game.guild_id, player_b.id, "poker_wins", 1)
         else:
             split_left = game.pot // 2
             split_right = game.pot - split_left
             game.stacks[player_a.id] += split_left
             game.stacks[player_b.id] += split_right
+        await self.db.set_user_chips(game.guild_id, player_a.id, game.stacks.get(player_a.id, 0))
+        await self.db.set_user_chips(game.guild_id, player_b.id, game.stacks.get(player_b.id, 0))
         await self._disable_poker_views(game)
 
         if game.status_message is not None:
@@ -496,9 +540,6 @@ class AntiMzkPokerMixin:
 
         player_map = {player_a.id: player_a, player_b.id: player_b}
         result_texts = {player_a.id: text_a, player_b.id: text_b}
-        await self.db.set_user_chips(game.guild_id, player_a.id, game.stacks.get(player_a.id, 0))
-        await self.db.set_user_chips(game.guild_id, player_b.id, game.stacks.get(player_b.id, 0))
-
         for player_id, dm_message in list(game.dm_messages.items()):
             opponent_id = game.other_player(player_id)
             try:
@@ -552,7 +593,7 @@ class AntiMzkPokerMixin:
             description = (
                 f"Duelo entre {host.mention} e {opponent.mention}.\n"
                 f"Aceites: {host.display_name} {accepted_host} | {opponent.display_name} {accepted_opponent}\n\n"
-                f"As DMs foram enviadas. Quando os dois aceitarem, a rodada começa.\nBuy-in inicial no pote: **{_MIN_BUY_IN * 2} fichas**."
+                "As DMs foram enviadas. Quando os dois aceitarem, a rodada começa."
             )
         elif game.phase in {"pre_draw_bet", "post_draw_bet"}:
             current = guild.get_member(game.turn_id) if game.turn_id else None
@@ -655,7 +696,7 @@ class AntiMzkPokerMixin:
         if all(game.accepted.get(pid, False) for pid in game.players):
             game.phase = "pre_draw_bet"
             self._reset_betting_round(game, turn_id=game.host_id)
-            game.action_log.append("Os dois jogadores aceitaram. A rodada começou.")
+            game.action_log.append(f"Os dois jogadores aceitaram. Pot inicial de {POKER_BUY_IN * 2} fichas confirmado.")
             await self._update_poker_status(game)
             await self._update_all_poker_dms(game)
 
@@ -780,20 +821,23 @@ class AntiMzkPokerMixin:
         if opponent.id == message.author.id:
             return True
 
-        host_ok, host_balance, host_note = await self._try_consume_chips(guild.id, message.author.id, _MIN_BUY_IN)
-        opp_ok, opp_balance, opp_note = await self._try_consume_chips(guild.id, opponent.id, _MIN_BUY_IN)
+        host_ok, host_balance, host_note = await self._ensure_action_chips(guild.id, message.author.id, POKER_BUY_IN)
+        opp_ok, opp_balance, opp_note = await self._ensure_action_chips(guild.id, opponent.id, POKER_BUY_IN)
         if not host_ok:
             try:
-                await message.channel.send(embed=self._make_poker_status_embed("🃏 Fichas insuficientes", host_note or f"Você não tem fichas suficientes para cobrir o buy-in mínimo de {_MIN_BUY_IN} fichas.", ok=False))
+                await message.channel.send(embed=self._make_poker_status_embed("🃏 Fichas insuficientes", host_note or "Você não tem fichas suficientes para jogar.", ok=False))
             except Exception:
                 pass
             return True
         if not opp_ok:
             try:
-                await message.channel.send(embed=self._make_poker_status_embed("🃏 Rival sem fichas", opp_note or f"{opponent.mention} não tem fichas suficientes para cobrir o buy-in mínimo de {_MIN_BUY_IN} fichas.", ok=False))
+                await message.channel.send(embed=self._make_poker_status_embed("🃏 Rival sem fichas", opp_note or f"{opponent.mention} não tem fichas suficientes para jogar.", ok=False))
             except Exception:
                 pass
             return True
+
+        host_balance = await self.db.add_user_chips(guild.id, message.author.id, -POKER_BUY_IN)
+        opp_balance = await self.db.add_user_chips(guild.id, opponent.id, -POKER_BUY_IN)
 
         game = PokerGame(
             guild_id=guild.id,
@@ -811,9 +855,8 @@ class AntiMzkPokerMixin:
         game.accepted = {message.author.id: False, opponent.id: False}
         game.stacks = {message.author.id: host_balance, opponent.id: opp_balance}
         game.round_bets = {message.author.id: 0, opponent.id: 0}
+        game.pot = POKER_BUY_IN * 2
         game.exchange_counts = {message.author.id: 0, opponent.id: 0}
-        game.pot = _MIN_BUY_IN * 2
-        game.action_log.append(f"Buy-in inicial: {_MIN_BUY_IN} fichas por jogador.")
         self._poker_games[guild.id] = game
 
         try:
@@ -821,7 +864,7 @@ class AntiMzkPokerMixin:
                 embed=self._make_poker_status_embed(
                     "🃏 Convite de poker",
                     (
-                        f"Duelo entre {message.author.mention} e {opponent.mention}. Buy-in mínimo: **{_MIN_BUY_IN} fichas** por jogador. Enviando as DMs com o convite e as mãos privadas..."
+                        f"Duelo entre {message.author.mention} e {opponent.mention}. Enviando as DMs com o convite e as mãos privadas..."
                         + (f"\n{host_note}" if host_note else "")
                         + (f"\n{opponent.mention}: {opp_note}" if opp_note else "")
                     ),
