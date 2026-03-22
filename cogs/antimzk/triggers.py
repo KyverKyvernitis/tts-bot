@@ -375,21 +375,28 @@ class AntiMzkTriggerMixin:
     async def _play_roleta_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
         return await self._play_sfx_file(guild, voice_channel, self._roleta_sfx_path())
 
+    def _random_roleta_digit(self, exclude: set[int] | None = None) -> int:
+        exclude = exclude or set()
+        choices = [digit for digit in range(1, 10) if digit not in exclude]
+        if not choices:
+            choices = list(range(1, 10))
+        return random.choice(choices)
+
     def _build_roleta_column(self, middle: int | None = None) -> list[int]:
         return [
-            random.randint(1, 9),
-            middle if middle is not None else random.randint(1, 9),
-            random.randint(1, 9),
+            self._random_roleta_digit(),
+            middle if middle is not None else self._random_roleta_digit(),
+            self._random_roleta_digit(),
         ]
 
     def _spin_roleta_column(self, column: list[int], next_top: int | None = None):
-        column.insert(0, random.randint(1, 9) if next_top is None else next_top)
+        column.insert(0, self._random_roleta_digit() if next_top is None else next_top)
         del column[3:]
 
-    def _lock_roleta_column(self, column: list[int], target_middle: int):
-        previous_middle = column[1]
-        self._spin_roleta_column(column, next_top=target_middle)
-        column[2] = previous_middle
+    def _make_roleta_stop_plan(self, column: list[int], target_middle: int) -> list[int]:
+        first_top = self._random_roleta_digit(exclude={target_middle, column[0], column[1], column[2]})
+        final_top = self._random_roleta_digit(exclude={target_middle, first_top})
+        return [first_top, target_middle, final_top]
 
     def _format_roleta_row(self, row: list[int], *, compact: bool = False) -> str:
         if compact:
@@ -481,26 +488,46 @@ class AntiMzkTriggerMixin:
         intervals = [0.18, 0.21, 0.24, 0.28, 0.33, 0.39, 0.47, 0.58, 0.72, 0.90, 1.05]
         scale = target_duration / sum(intervals)
         intervals = [step * scale for step in intervals]
-        lock_steps = [len(intervals) - 3, len(intervals) - 2, len(intervals) - 1]
+        stop_plan_starts = {
+            0: max(0, len(intervals) - 5),
+            1: max(0, len(intervals) - 4),
+            2: max(0, len(intervals) - 3),
+        }
+        active_stop_plans: dict[int, list[int]] = {}
         locked_columns: set[int] = set()
         previous_board = None
 
         for index, delay in enumerate(intervals):
             await asyncio.sleep(delay)
 
-            if index in lock_steps:
-                lock_index = lock_steps.index(index)
-                self._lock_roleta_column(columns[lock_index], target_middle[lock_index])
-                locked_columns.add(lock_index)
+            for column_index, start_index in stop_plan_starts.items():
+                if index == start_index and column_index not in active_stop_plans and column_index not in locked_columns:
+                    active_stop_plans[column_index] = self._make_roleta_stop_plan(columns[column_index], target_middle[column_index])
 
             for column_index in range(3):
-                if column_index not in locked_columns:
+                if column_index in locked_columns:
+                    continue
+                if column_index in active_stop_plans:
+                    plan = active_stop_plans[column_index]
+                    self._spin_roleta_column(columns[column_index], next_top=plan.pop(0))
+                    if not plan:
+                        active_stop_plans.pop(column_index, None)
+                        locked_columns.add(column_index)
+                else:
                     self._spin_roleta_column(columns[column_index])
 
             board = self._render_roleta_board(columns)
-            if board == previous_board and index not in lock_steps:
+            if board == previous_board:
                 for column_index in range(3):
-                    if column_index not in locked_columns:
+                    if column_index in locked_columns:
+                        continue
+                    if column_index in active_stop_plans:
+                        plan = active_stop_plans[column_index]
+                        self._spin_roleta_column(columns[column_index], next_top=plan.pop(0))
+                        if not plan:
+                            active_stop_plans.pop(column_index, None)
+                            locked_columns.add(column_index)
+                    else:
                         self._spin_roleta_column(columns[column_index])
                 board = self._render_roleta_board(columns)
             previous_board = board
@@ -578,12 +605,6 @@ class AntiMzkTriggerMixin:
             spin_message, final_columns = await self._animate_roleta_spin(message, target_middle=target_middle)
 
             if final_columns is None:
-                final_columns = [
-                    self._build_roleta_column(target_middle[0]),
-                    self._build_roleta_column(target_middle[1]),
-                    self._build_roleta_column(target_middle[2]),
-                ]
-            else:
                 final_columns = [
                     self._build_roleta_column(target_middle[0]),
                     self._build_roleta_column(target_middle[1]),
