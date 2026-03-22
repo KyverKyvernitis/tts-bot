@@ -4,12 +4,15 @@ import discord
 from discord.ext import commands
 
 from config import GUILD_IDS, OFF_COLOR, ON_COLOR
-from .constants import CHIPS_DEFAULT, CHIPS_RESET_SECONDS
+from .constants import CHIPS_DEFAULT, CHIPS_INITIAL, CHIPS_RESET_SECONDS
 from db import SettingsDB
 
 
 class AntiMzkBase:
     _ANTI_MZK_SUFFIXES = (" [ultra-censurado]", " [censurado]", " [antitts]")
+    _CHIP_EMOJI = "<:emoji_63:1485041721573249135>"
+    _CHIP_GAIN_EMOJI = "<:emoji_64:1485043651292827788>"
+    _CHIP_LOSS_EMOJI = "<:emoji_65:1485043671077228786>"
 
     def __init__(self, bot: commands.Bot, db: SettingsDB):
         self.bot = bot
@@ -127,12 +130,25 @@ class AntiMzkBase:
         )
         return embed
 
+    def _chip_text(self, amount: int | str, *, kind: str = "balance") -> str:
+        emoji = self._CHIP_EMOJI
+        if kind == "gain":
+            emoji = self._CHIP_GAIN_EMOJI
+        elif kind == "loss":
+            emoji = self._CHIP_LOSS_EMOJI
+        return f"**{amount} {emoji}**"
 
+    def _chip_amount(self, amount: int | str) -> str:
+        return f"**{amount} {self._CHIP_EMOJI}**"
 
+    async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
+        await self.db.set_user_chips(guild_id, user_id, int(amount))
+        await self.db.set_user_chip_reset_at(guild_id, user_id, 0.0)
+        return int(amount)
 
     def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
         guild_id = member.guild.id
-        chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_DEFAULT)
+        chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_INITIAL)
         stats = self.db.get_user_game_stats(guild_id, member.id)
         remaining = 0.0
         if chips <= 0:
@@ -143,70 +159,71 @@ class AntiMzkBase:
             remaining = max(0.0, CHIPS_RESET_SECONDS - elapsed)
 
         embed = discord.Embed(
-            title="🎟️ Suas fichas",
-            description=f"Saldo atual: **{chips} fichas**",
-            color=discord.Color(ON_COLOR),
+            title=f"{self._CHIP_EMOJI} Suas fichas",
+            description=(
+                f"Saldo atual: {self._chip_amount(chips)}\n"
+                f"Saldo inicial: {self._chip_amount(CHIPS_INITIAL)}\nRecarga: {self._chip_amount(CHIPS_DEFAULT)}"
+            ),
+            color=discord.Color.blurple(),
         )
         embed.set_author(name=str(member.display_name), icon_url=member.display_avatar.url)
         if chips > 0:
-            embed.add_field(name="Recarga", value=f"Automática para **{CHIPS_DEFAULT}** quando faltar saldo.", inline=False)
+            recarga = f"Quando faltar saldo, a próxima recarga volta para {self._chip_amount(CHIPS_DEFAULT)}."
+        elif remaining > 0:
+            recarga = f"Disponível em **{self._format_chip_reset_remaining(remaining)}** para voltar a {self._chip_amount(CHIPS_DEFAULT)}."
         else:
-            if remaining > 0:
-                embed.add_field(
-                    name="Recarga",
-                    value=f"Disponível em **{self._format_chip_reset_remaining(remaining)}** para voltar a **{CHIPS_DEFAULT} fichas**.",
-                    inline=False,
-                )
-            else:
-                embed.add_field(
-                    name="Recarga",
-                    value=f"Na próxima tentativa sem saldo, suas fichas voltam para **{CHIPS_DEFAULT}**.",
-                    inline=False,
-                )
-        embed.add_field(name="Poker", value=f"Vitórias: **{stats.get('poker_wins',0)}**", inline=True)
-        embed.add_field(name="Buckshot", value=f"Sobreviveu: **{stats.get('buckshot_survivals',0)}**", inline=True)
-        embed.add_field(name="Roleta", value=f"Jackpots: **{stats.get('roleta_jackpots',0)}**", inline=True)
+            recarga = f"Na próxima tentativa sem saldo, seu saldo volta para {self._chip_amount(CHIPS_DEFAULT)}."
+
+        embed.add_field(name="⏳ Recarga", value=recarga, inline=False)
+        embed.add_field(name="🃏 Poker", value=f"Vitórias: **{stats.get('poker_wins', 0)}**\nDerrotas: **{stats.get('poker_losses', 0)}**", inline=True)
+        embed.add_field(name="<:gunforward:1484655577836683434> Buckshot", value=f"Sobreviveu: **{stats.get('buckshot_survivals', 0)}**\nEliminações: **{stats.get('buckshot_eliminations', 0)}**", inline=True)
+        embed.add_field(name="🎰 Roleta", value=f"Jackpots: **{stats.get('roleta_jackpots', 0)}**\nCusto por giro: {self._chip_amount(15)}", inline=True)
         embed.set_footer(text="Roleta, buckshot e poker usam esse saldo neste servidor")
         return embed
 
-    def _make_chip_rank_embed(self, guild: discord.Guild) -> discord.Embed:
-        ranking = self.db.get_chip_leaderboard(guild.id, limit=10)
+    def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
+        rows = self.db.get_chip_leaderboard(guild.id, limit=10)
         embed = discord.Embed(
             title="🏆 Rank de fichas",
-            description="Os maiores saldos deste servidor.",
+            description=f"Os maiores saldos deste servidor {self._CHIP_EMOJI}",
             color=discord.Color.gold(),
         )
-        if ranking:
-            lines = []
-            medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-            for idx, row in enumerate(ranking, start=1):
-                member = guild.get_member(row["user_id"])
-                name = member.display_name if member else f"Usuário {row['user_id']}"
-                prefix = medals.get(idx, f"`#{idx}`")
-                lines.append(f"{prefix} **{name}** — **{row['chips']}** fichas")
-            embed.add_field(name="Top fichas", value="\n".join(lines), inline=False)
-        else:
-            embed.add_field(name="Top fichas", value="Ainda não há saldo registrado neste servidor.", inline=False)
+        if requester is not None:
+            embed.set_author(name=str(requester.display_name), icon_url=requester.display_avatar.url)
 
-        categories = [
-            ("Vitórias no poker", "poker_wins", "🃏"),
-            ("Sobrevivências no buckshot", "buckshot_survivals", "🔫"),
-            ("Jackpots na roleta", "roleta_jackpots", "🎰"),
+        if not rows:
+            embed.add_field(name="Top 10", value="Ainda não há jogadores com saldo salvo.", inline=False)
+            embed.set_footer(text="Use _ficha para ver seu saldo")
+            return embed
+
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        ranking_lines = []
+        for index, row in enumerate(rows, start=1):
+            member = guild.get_member(int(row["user_id"]))
+            name = member.display_name if member is not None else f"Usuário {row['user_id']}"
+            prefix = medals.get(index, f"`#{index}`")
+            ranking_lines.append(f"{prefix} **{name}** — {self._chip_amount(row['chips'])}")
+        embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
+
+        highlight_specs = [
+            ("🃏 Rei do poker", "poker_wins"),
+            ("<:gunforward:1484655577836683434> Sobrevivente", "buckshot_survivals"),
+            ("🎰 Jackpots", "roleta_jackpots"),
         ]
-        for label, key, emoji in categories:
-            rows = self.db.get_game_stat_leaderboard(guild.id, key, limit=3)
-            if not rows:
-                value = "Ninguém ainda."
-            else:
-                parts = []
-                for idx, row in enumerate(rows, start=1):
-                    member = guild.get_member(row["user_id"])
-                    name = member.display_name if member else f"Usuário {row['user_id']}"
-                    parts.append(f"{idx}. **{name}** — **{row['value']}**")
-                value = "\n".join(parts)
-            embed.add_field(name=f"{emoji} {label}", value=value, inline=False)
-        embed.set_footer(text="Use _ficha para ver seu saldo e suas estatísticas")
+        highlight_lines = []
+        for label, key in highlight_specs:
+            leaders = self.db.get_game_stat_leaderboard(guild.id, key, limit=1)
+            if not leaders:
+                continue
+            row = leaders[0]
+            member = guild.get_member(int(row["user_id"]))
+            name = member.display_name if member is not None else f"Usuário {row['user_id']}"
+            highlight_lines.append(f"{label}: **{name}** — **{row['value']}**")
+        if highlight_lines:
+            embed.add_field(name="Destaques", value="\n".join(highlight_lines), inline=False)
+        embed.set_footer(text="Use _ficha para ver seu saldo e estatísticas")
         return embed
+
 
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:
         remaining = max(0, int(remaining_seconds))
@@ -217,29 +234,29 @@ class AntiMzkBase:
         return f"{minutes}min"
 
     async def _try_consume_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
-        current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_DEFAULT)
+        current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
         reset_note = None
         if current < amount:
             reset, new_balance, remaining = await self.db.maybe_reset_user_chips(
                 guild_id, user_id, amount=CHIPS_DEFAULT, cooldown_seconds=CHIPS_RESET_SECONDS
             )
             if not reset:
-                return False, current, f"Você não tem fichas suficientes. Sua recarga de **{CHIPS_DEFAULT} fichas** volta em **{self._format_chip_reset_remaining(remaining)}**."
+                return False, current, f"Você não tem saldo suficiente. Sua recarga de {self._chip_text(CHIPS_DEFAULT)} volta em **{self._format_chip_reset_remaining(remaining)}**."
             current = new_balance
-            reset_note = f"Suas fichas foram recarregadas para **{CHIPS_DEFAULT}**."
+            reset_note = f"Seu saldo foi recarregado para {self._chip_text(CHIPS_DEFAULT)}."
         new_balance = await self.db.add_user_chips(guild_id, user_id, -int(amount))
         return True, new_balance, reset_note
 
     async def _ensure_action_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
-        current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_DEFAULT)
+        current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
         if current >= amount:
             return True, current, None
         reset, new_balance, remaining = await self.db.maybe_reset_user_chips(
             guild_id, user_id, amount=CHIPS_DEFAULT, cooldown_seconds=CHIPS_RESET_SECONDS
         )
         if reset:
-            return True, new_balance, f"Suas fichas foram recarregadas para **{CHIPS_DEFAULT}**."
-        return False, current, f"Você não tem fichas suficientes. Sua recarga de **{CHIPS_DEFAULT} fichas** volta em **{self._format_chip_reset_remaining(remaining)}**."
+            return True, new_balance, f"Seu saldo foi recarregado para {self._chip_text(CHIPS_DEFAULT)}."
+        return False, current, f"Você não tem saldo suficiente. Sua recarga de {self._chip_text(CHIPS_DEFAULT)} volta em **{self._format_chip_reset_remaining(remaining)}**."
 
     async def _reject_if_not_allowed_guild(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:

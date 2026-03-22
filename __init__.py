@@ -47,8 +47,33 @@ class AntiMzkCog(AntiMzkCore, dcommands.Cog):
         embed = self._make_chip_balance_embed(ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
 
+    @dcommands.command(name="resetficha", aliases=["resetfichas", "rficha"])
+    async def resetficha(self, ctx: dcommands.Context, member: discord.Member | None = None):
+        if ctx.guild is None:
+            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            return
+        if GUILD_IDS and ctx.guild.id not in GUILD_IDS:
+            await ctx.reply(embed=self._make_embed("Indisponível aqui", "Esse comando não está habilitado neste servidor", ok=False), mention_author=False)
+            return
+        if not isinstance(ctx.author, discord.Member) or not self._is_staff_member(ctx.author):
+            await ctx.reply(embed=self._make_embed("Sem permissão", "Você precisa ser staff do modo censura para resetar fichas manualmente.", ok=False), mention_author=False)
+            return
 
-    @dcommands.command(name="rank")
+        target = member or ctx.author
+        new_balance = await self._force_reset_chips(ctx.guild.id, target.id)
+        embed = discord.Embed(
+            title="♻️ Fichas resetadas",
+            description=(
+                f"Jogador: {target.mention}\n"
+                f"Novo saldo: {self._chip_amount(new_balance)}\n"
+                f"Próxima recarga automática: **6 horas** quando faltar saldo."
+            ),
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="Reset manual aplicado pela staff")
+        await ctx.reply(embed=embed, mention_author=False)
+
+    @dcommands.command(name="rank", aliases=["leaderboard"])
     async def rank(self, ctx: dcommands.Context):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
@@ -56,7 +81,7 @@ class AntiMzkCog(AntiMzkCore, dcommands.Cog):
         if GUILD_IDS and ctx.guild.id not in GUILD_IDS:
             await ctx.reply(embed=self._make_embed("Indisponível aqui", "Esse comando não está habilitado neste servidor", ok=False), mention_author=False)
             return
-        embed = self._make_chip_rank_embed(ctx.guild)
+        embed = self._make_chip_leaderboard_embed(ctx.guild, ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
 
     @dcommands.Cog.listener()
