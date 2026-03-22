@@ -351,6 +351,8 @@ class AntiMzkPokerMixin:
             return
         game.finished = True
         self._poker_games.pop(game.guild_id, None)
+        await self.db.set_user_chips(game.guild_id, winner_id, game.stacks.get(winner_id, 0))
+        await self.db.set_user_chips(game.guild_id, loser_id, game.stacks.get(loser_id, 0))
         await self._disable_poker_views(game)
         if game.status_message is not None:
             try:
@@ -411,6 +413,8 @@ class AntiMzkPokerMixin:
         loser = guild.get_member(loser_id)
         if winner is None or loser is None:
             return
+        await self.db.set_user_chips(game.guild_id, winner_id, game.stacks.get(winner_id, 0))
+        await self.db.set_user_chips(game.guild_id, loser_id, game.stacks.get(loser_id, 0))
         await self._disable_poker_views(game)
         if game.status_message is not None:
             try:
@@ -772,6 +776,21 @@ class AntiMzkPokerMixin:
         if opponent.id == message.author.id:
             return True
 
+        host_ok, host_balance, host_note = await self._ensure_action_chips(guild.id, message.author.id, 1)
+        opp_ok, opp_balance, opp_note = await self._ensure_action_chips(guild.id, opponent.id, 1)
+        if not host_ok:
+            try:
+                await message.channel.send(embed=self._make_poker_status_embed("🃏 Fichas insuficientes", host_note or "Você não tem fichas suficientes para jogar.", ok=False))
+            except Exception:
+                pass
+            return True
+        if not opp_ok:
+            try:
+                await message.channel.send(embed=self._make_poker_status_embed("🃏 Rival sem fichas", opp_note or f"{opponent.mention} não tem fichas suficientes para jogar.", ok=False))
+            except Exception:
+                pass
+            return True
+
         game = PokerGame(
             guild_id=guild.id,
             channel_id=message.channel.id,
@@ -786,7 +805,7 @@ class AntiMzkPokerMixin:
         game.selected = {message.author.id: set(), opponent.id: set()}
         game.confirmed = {message.author.id: False, opponent.id: False}
         game.accepted = {message.author.id: False, opponent.id: False}
-        game.stacks = {message.author.id: _STARTING_STACK, opponent.id: _STARTING_STACK}
+        game.stacks = {message.author.id: host_balance, opponent.id: opp_balance}
         game.round_bets = {message.author.id: 0, opponent.id: 0}
         game.exchange_counts = {message.author.id: 0, opponent.id: 0}
         self._poker_games[guild.id] = game
@@ -795,7 +814,11 @@ class AntiMzkPokerMixin:
             status_message = await message.channel.send(
                 embed=self._make_poker_status_embed(
                     "🃏 Convite de poker",
-                    f"Duelo entre {message.author.mention} e {opponent.mention}. Enviando as DMs com o convite e as mãos privadas...",
+                    (
+                        f"Duelo entre {message.author.mention} e {opponent.mention}. Enviando as DMs com o convite e as mãos privadas..."
+                        + (f"\n{host_note}" if host_note else "")
+                        + (f"\n{opponent.mention}: {opp_note}" if opp_note else "")
+                    ),
                     ok=True,
                 )
             )

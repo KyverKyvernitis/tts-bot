@@ -4,6 +4,7 @@ import discord
 from discord.ext import commands
 
 from config import GUILD_IDS, OFF_COLOR, ON_COLOR
+from .constants import CHIPS_DEFAULT, CHIPS_RESET_SECONDS
 from db import SettingsDB
 
 
@@ -125,6 +126,41 @@ class AntiMzkBase:
             color=discord.Color(ON_COLOR) if ok else discord.Color(OFF_COLOR),
         )
         return embed
+
+
+
+    def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:
+        remaining = max(0, int(remaining_seconds))
+        hours = remaining // 3600
+        minutes = (remaining % 3600) // 60
+        if hours > 0:
+            return f"{hours}h {minutes:02d}min"
+        return f"{minutes}min"
+
+    async def _try_consume_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
+        current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_DEFAULT)
+        reset_note = None
+        if current < amount:
+            reset, new_balance, remaining = await self.db.maybe_reset_user_chips(
+                guild_id, user_id, amount=CHIPS_DEFAULT, cooldown_seconds=CHIPS_RESET_SECONDS
+            )
+            if not reset:
+                return False, current, f"Você não tem fichas suficientes. Sua recarga de **{CHIPS_DEFAULT} fichas** volta em **{self._format_chip_reset_remaining(remaining)}**."
+            current = new_balance
+            reset_note = f"Suas fichas foram recarregadas para **{CHIPS_DEFAULT}**."
+        new_balance = await self.db.add_user_chips(guild_id, user_id, -int(amount))
+        return True, new_balance, reset_note
+
+    async def _ensure_action_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
+        current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_DEFAULT)
+        if current >= amount:
+            return True, current, None
+        reset, new_balance, remaining = await self.db.maybe_reset_user_chips(
+            guild_id, user_id, amount=CHIPS_DEFAULT, cooldown_seconds=CHIPS_RESET_SECONDS
+        )
+        if reset:
+            return True, new_balance, f"Suas fichas foram recarregadas para **{CHIPS_DEFAULT}**."
+        return False, current, f"Você não tem fichas suficientes. Sua recarga de **{CHIPS_DEFAULT} fichas** volta em **{self._format_chip_reset_remaining(remaining)}**."
 
     async def _reject_if_not_allowed_guild(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
