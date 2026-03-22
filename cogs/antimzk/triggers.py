@@ -376,11 +376,20 @@ class AntiMzkTriggerMixin:
         return await self._play_sfx_file(guild, voice_channel, self._roleta_sfx_path())
 
     def _build_roleta_column(self, middle: int | None = None) -> list[int]:
-        return [random.randint(1, 9), middle if middle is not None else random.randint(1, 9), random.randint(1, 9)]
+        return [
+            random.randint(1, 9),
+            middle if middle is not None else random.randint(1, 9),
+            random.randint(1, 9),
+        ]
 
-    def _spin_roleta_column(self, column: list[int]):
-        column.insert(0, random.randint(1, 9))
+    def _spin_roleta_column(self, column: list[int], next_top: int | None = None):
+        column.insert(0, random.randint(1, 9) if next_top is None else next_top)
         del column[3:]
+
+    def _lock_roleta_column(self, column: list[int], target_middle: int):
+        previous_middle = column[1]
+        self._spin_roleta_column(column, next_top=target_middle)
+        column[2] = previous_middle
 
     def _format_roleta_row(self, row: list[int], *, compact: bool = False) -> str:
         if compact:
@@ -406,7 +415,11 @@ class AntiMzkTriggerMixin:
     def _make_roleta_spin_embed(self, board: str) -> discord.Embed:
         return discord.Embed(
             title="🎰 Girando...",
-            description=f"Custo: {self._chip_amount(ROLETA_COST)}\nJackpot: {self._chip_amount(ROLETA_JACKPOT_CHIPS)}\n\n{board}",
+            description=(
+                f"{self._CHIP_LOSS_EMOJI} Entrada: {self._chip_amount(ROLETA_COST)}\n"
+                f"{self._CHIP_GAIN_EMOJI} Jackpot: {self._chip_amount(ROLETA_JACKPOT_CHIPS)}\n\n"
+                f"{board}"
+            ),
             color=discord.Color.blurple(),
         )
 
@@ -477,8 +490,8 @@ class AntiMzkTriggerMixin:
 
             if index in lock_steps:
                 lock_index = lock_steps.index(index)
+                self._lock_roleta_column(columns[lock_index], target_middle[lock_index])
                 locked_columns.add(lock_index)
-                columns[lock_index] = self._build_roleta_column(target_middle[lock_index])
 
             for column_index in range(3):
                 if column_index not in locked_columns:

@@ -159,7 +159,7 @@ class AntiMzkBase:
                 f"Saldo atual: {self._chip_amount(chips)}\n"
                 f"Mesa padrão: {self._chip_amount(CHIPS_DEFAULT)}"
             ),
-            color=discord.Color(ON_COLOR),
+            color=discord.Color.blurple(),
         )
         embed.set_author(name=str(member.display_name), icon_url=member.display_avatar.url)
         if chips > 0:
@@ -169,17 +169,17 @@ class AntiMzkBase:
         else:
             recarga = f"Na próxima tentativa sem saldo, seu saldo volta para {self._chip_amount(CHIPS_DEFAULT)}."
 
-        embed.add_field(name="Recarga", value=recarga, inline=False)
-        embed.add_field(name="🃏 Poker", value=f"Vitórias: **{stats.get('poker_wins', 0)}**", inline=True)
-        embed.add_field(name="<:gunforward:1484655577836683434> Buckshot", value=f"Sobreviveu: **{stats.get('buckshot_survivals', 0)}**", inline=True)
-        embed.add_field(name="🎰 Roleta", value=f"Jackpots: **{stats.get('roleta_jackpots', 0)}**", inline=True)
+        embed.add_field(name="⏳ Recarga", value=recarga, inline=False)
+        embed.add_field(name="🃏 Poker", value=f"Vitórias: **{stats.get('poker_wins', 0)}**\nDerrotas: **{stats.get('poker_losses', 0)}**", inline=True)
+        embed.add_field(name="<:gunforward:1484655577836683434> Buckshot", value=f"Sobreviveu: **{stats.get('buckshot_survivals', 0)}**\nEliminações: **{stats.get('buckshot_eliminations', 0)}**", inline=True)
+        embed.add_field(name="🎰 Roleta", value=f"Jackpots: **{stats.get('roleta_jackpots', 0)}**\nCusto por giro: {self._chip_amount(15)}", inline=True)
         embed.set_footer(text="Roleta, buckshot e poker usam esse saldo neste servidor")
         return embed
 
     def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
         rows = self.db.get_chip_leaderboard(guild.id, limit=10)
         embed = discord.Embed(
-            title=f"🏆 Rank de fichas",
+            title="🏆 Rank de fichas",
             description=f"Os maiores saldos deste servidor {self._CHIP_EMOJI}",
             color=discord.Color.gold(),
         )
@@ -187,7 +187,7 @@ class AntiMzkBase:
             embed.set_author(name=str(requester.display_name), icon_url=requester.display_avatar.url)
 
         if not rows:
-            embed.add_field(name="Top fichas", value="Ainda não há jogadores com saldo salvo.", inline=False)
+            embed.add_field(name="Top 10", value="Ainda não há jogadores com saldo salvo.", inline=False)
             embed.set_footer(text="Use _ficha para ver seu saldo")
             return embed
 
@@ -197,7 +197,7 @@ class AntiMzkBase:
             member = guild.get_member(int(row["user_id"]))
             name = member.display_name if member is not None else f"Usuário {row['user_id']}"
             prefix = medals.get(index, f"`#{index}`")
-            ranking_lines.append(f"{prefix} **{name}** — {self._chip_text(row['chips'])}")
+            ranking_lines.append(f"{prefix} **{name}** — {self._chip_amount(row['chips'])}")
         embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
 
         highlight_specs = [
