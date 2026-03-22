@@ -129,6 +129,42 @@ class AntiMzkBase:
 
 
 
+
+    def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
+        guild_id = member.guild.id
+        chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_DEFAULT)
+        remaining = 0.0
+        if chips <= 0:
+            last_reset = self.db.get_user_chip_reset_at(guild_id, member.id)
+            import time
+            now = time.time()
+            elapsed = max(0.0, now - float(last_reset or 0.0))
+            remaining = max(0.0, CHIPS_RESET_SECONDS - elapsed)
+
+        embed = discord.Embed(
+            title="🎟️ Suas fichas",
+            description=f"Saldo atual: **{chips} fichas**",
+            color=discord.Color(ON_COLOR),
+        )
+        embed.set_author(name=str(member.display_name), icon_url=member.display_avatar.url)
+        if chips > 0:
+            embed.add_field(name="Recarga", value=f"Automática para **{CHIPS_DEFAULT}** quando faltar saldo.", inline=False)
+        else:
+            if remaining > 0:
+                embed.add_field(
+                    name="Recarga",
+                    value=f"Disponível em **{self._format_chip_reset_remaining(remaining)}** para voltar a **{CHIPS_DEFAULT} fichas**.",
+                    inline=False,
+                )
+            else:
+                embed.add_field(
+                    name="Recarga",
+                    value=f"Na próxima tentativa sem saldo, suas fichas voltam para **{CHIPS_DEFAULT}**.",
+                    inline=False,
+                )
+        embed.set_footer(text="Roleta, buckshot e poker usam esse saldo neste servidor")
+        return embed
+
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:
         remaining = max(0, int(remaining_seconds))
         hours = remaining // 3600
