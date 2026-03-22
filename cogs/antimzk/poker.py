@@ -25,6 +25,7 @@ _HAND_NAMES = {
 _STARTING_STACK = 100
 _BET_SIZE = 10
 _MAX_SWAP = 3
+_MIN_BUY_IN = 15
 
 
 @dataclass
@@ -495,6 +496,9 @@ class AntiMzkPokerMixin:
 
         player_map = {player_a.id: player_a, player_b.id: player_b}
         result_texts = {player_a.id: text_a, player_b.id: text_b}
+        await self.db.set_user_chips(game.guild_id, player_a.id, game.stacks.get(player_a.id, 0))
+        await self.db.set_user_chips(game.guild_id, player_b.id, game.stacks.get(player_b.id, 0))
+
         for player_id, dm_message in list(game.dm_messages.items()):
             opponent_id = game.other_player(player_id)
             try:
@@ -548,7 +552,7 @@ class AntiMzkPokerMixin:
             description = (
                 f"Duelo entre {host.mention} e {opponent.mention}.\n"
                 f"Aceites: {host.display_name} {accepted_host} | {opponent.display_name} {accepted_opponent}\n\n"
-                "As DMs foram enviadas. Quando os dois aceitarem, a rodada começa."
+                f"As DMs foram enviadas. Quando os dois aceitarem, a rodada começa.\nBuy-in inicial no pote: **{_MIN_BUY_IN * 2} fichas**."
             )
         elif game.phase in {"pre_draw_bet", "post_draw_bet"}:
             current = guild.get_member(game.turn_id) if game.turn_id else None
@@ -776,17 +780,17 @@ class AntiMzkPokerMixin:
         if opponent.id == message.author.id:
             return True
 
-        host_ok, host_balance, host_note = await self._ensure_action_chips(guild.id, message.author.id, 1)
-        opp_ok, opp_balance, opp_note = await self._ensure_action_chips(guild.id, opponent.id, 1)
+        host_ok, host_balance, host_note = await self._try_consume_chips(guild.id, message.author.id, _MIN_BUY_IN)
+        opp_ok, opp_balance, opp_note = await self._try_consume_chips(guild.id, opponent.id, _MIN_BUY_IN)
         if not host_ok:
             try:
-                await message.channel.send(embed=self._make_poker_status_embed("🃏 Fichas insuficientes", host_note or "Você não tem fichas suficientes para jogar.", ok=False))
+                await message.channel.send(embed=self._make_poker_status_embed("🃏 Fichas insuficientes", host_note or f"Você não tem fichas suficientes para cobrir o buy-in mínimo de {_MIN_BUY_IN} fichas.", ok=False))
             except Exception:
                 pass
             return True
         if not opp_ok:
             try:
-                await message.channel.send(embed=self._make_poker_status_embed("🃏 Rival sem fichas", opp_note or f"{opponent.mention} não tem fichas suficientes para jogar.", ok=False))
+                await message.channel.send(embed=self._make_poker_status_embed("🃏 Rival sem fichas", opp_note or f"{opponent.mention} não tem fichas suficientes para cobrir o buy-in mínimo de {_MIN_BUY_IN} fichas.", ok=False))
             except Exception:
                 pass
             return True
@@ -808,6 +812,8 @@ class AntiMzkPokerMixin:
         game.stacks = {message.author.id: host_balance, opponent.id: opp_balance}
         game.round_bets = {message.author.id: 0, opponent.id: 0}
         game.exchange_counts = {message.author.id: 0, opponent.id: 0}
+        game.pot = _MIN_BUY_IN * 2
+        game.action_log.append(f"Buy-in inicial: {_MIN_BUY_IN} fichas por jogador.")
         self._poker_games[guild.id] = game
 
         try:
@@ -815,7 +821,7 @@ class AntiMzkPokerMixin:
                 embed=self._make_poker_status_embed(
                     "🃏 Convite de poker",
                     (
-                        f"Duelo entre {message.author.mention} e {opponent.mention}. Enviando as DMs com o convite e as mãos privadas..."
+                        f"Duelo entre {message.author.mention} e {opponent.mention}. Buy-in mínimo: **{_MIN_BUY_IN} fichas** por jogador. Enviando as DMs com o convite e as mãos privadas..."
                         + (f"\n{host_note}" if host_note else "")
                         + (f"\n{opponent.mention}: {opp_note}" if opp_note else "")
                     ),
