@@ -416,8 +416,8 @@ class AntiMzkTriggerMixin:
         return discord.Embed(
             title="🎰 Girando...",
             description=(
-                f"{self._CHIP_LOSS_EMOJI} Entrada: {self._chip_amount(ROLETA_COST)}\n"
-                f"{self._CHIP_GAIN_EMOJI} Jackpot: {self._chip_amount(ROLETA_JACKPOT_CHIPS)}\n\n"
+                f"Entrada: {self._chip_amount(ROLETA_COST)}\n"
+                f"Jackpot: {self._chip_amount(ROLETA_JACKPOT_CHIPS)}\n\n"
                 f"{board}"
             ),
             color=discord.Color.blurple(),
