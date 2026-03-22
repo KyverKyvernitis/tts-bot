@@ -695,14 +695,12 @@ class AntiMzkTriggerMixin:
             color = discord.Color.red()
         else:
             description = (
-                f"{self._CHIP_LOSS_EMOJI} Entrada travada: **{BUCKSHOT_STAKE} fichas** por jogador\n"
-                f"{self._CHIP_EMOJI} Participantes pagos: **{len(participants)}**\n"
-                f"{self._CHIP_GAIN_EMOJI} Pote atual: **{payout_total} fichas**"
+                f"Entrada: **{BUCKSHOT_STAKE}** {self._CHIP_EMOJI} por jogador\n"
+                f"Participantes: **{len(participants)}**\n"
+                f"{self._CHIP_GAIN_EMOJI} Pote atual: **{payout_total} {self._CHIP_EMOJI}**"
             )
             color = discord.Color.blurple()
         embed = discord.Embed(title=title, description=description, color=color)
-        if not final_text:
-            embed.add_field(name="Rodada", value="Entrou e pagou, ficou valendo até o fim.", inline=False)
         return embed
 
     async def _refresh_buckshot_message(self, guild_id: int):
@@ -867,13 +865,13 @@ class AntiMzkTriggerMixin:
             chosen_text = chosen.mention if chosen is not None else "Alguém"
             if winners:
                 final_text = (
-                    f"<:gunforward:1484655577836683434> **{chosen_text}** foi tirado da call.\n"
-                    f"{self._CHIP_GAIN_EMOJI} O pote de **{payout_total} fichas** foi dividido entre os sobreviventes."
+                    f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi tirado da call.\n"
+                    f"{self._CHIP_GAIN_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi dividido entre os sobreviventes."
                 )
             else:
                 final_text = (
-                    f"<:gunforward:1484655577836683434> **{chosen_text}** foi tirado da call.\n"
-                    f"{self._CHIP_LOSS_EMOJI} O pote de **{payout_total} fichas** foi perdido."
+                    f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi tirado da call.\n"
+                    f"{self._CHIP_LOSS_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi perdido."
                 )
 
         embed = self._make_buckshot_embed(guild, session, final_text=final_text)
