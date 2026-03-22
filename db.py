@@ -582,10 +582,16 @@ class SettingsDB:
         await self._save_user_doc(guild_id, user_id, doc)
         return new_value
 
+    def has_user_played_any_game(self, guild_id: int, user_id: int) -> bool:
+        stats = self.get_user_game_stats(guild_id, user_id)
+        return any(int(value or 0) > 0 for value in stats.values())
+
     def get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[Dict[str, int]]:
         rows: list[Dict[str, int]] = []
         for (gid, uid), doc in self.user_cache.items():
             if gid != guild_id:
+                continue
+            if not self.has_user_played_any_game(guild_id, uid):
                 continue
             try:
                 chips = max(0, int(doc.get("chips", 100) or 100))
