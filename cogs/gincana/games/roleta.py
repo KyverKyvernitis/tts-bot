@@ -184,17 +184,6 @@ class GincanaRoletaMixin:
                 return True
 
             targets = self._resolve_targets(guild, voice_channel)
-            if not targets:
-                embed = self._make_embed(
-                    "🎲 Roleta sem alvos",
-                    "Não há usuários alvo da gincana nesse canal de voz para usar a trigger **roleta**.",
-                    ok=False,
-                )
-                try:
-                    await message.channel.send(embed=embed)
-                except Exception:
-                    pass
-                return True
 
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ROLETA_COST)
             if not paid:
