@@ -47,6 +47,32 @@ class GincanaCog(GincanaCore, dcommands.Cog):
         embed = self._make_chip_balance_embed(ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
 
+
+    @dcommands.command(name="daily", aliases=["bonus", "login"])
+    async def daily(self, ctx: dcommands.Context):
+        if ctx.guild is None:
+            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            return
+        if GUILD_IDS and ctx.guild.id not in GUILD_IDS:
+            await ctx.reply(embed=self._make_embed("Indisponível aqui", "Esse comando não está habilitado neste servidor", ok=False), mention_author=False)
+            return
+        claimed, new_balance, bonus, streak = await self.db.claim_daily_bonus(ctx.guild.id, ctx.author.id)
+        if not claimed:
+            await ctx.reply(embed=self._make_embed("🎁 Daily já resgatado", f"Você já pegou seu bônus de hoje. Streak atual: **{streak}**.", ok=False), mention_author=False)
+            return
+        await self._grant_weekly_points(ctx.guild.id, ctx.author.id, max(3, bonus // 2))
+        embed = discord.Embed(
+            title="🎁 Bônus diário resgatado",
+            description=(
+                f"Você ganhou {self._chip_amount(bonus)}\n"
+                f"Streak atual: **{streak}**\n"
+                f"Novo saldo: {self._chip_amount(new_balance)}"
+            ),
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="Volte amanhã para manter a sequência")
+        await ctx.reply(embed=embed, mention_author=False)
+
     @dcommands.command(name="resetficha", aliases=["resetfichas", "rficha"])
     async def resetficha(self, ctx: dcommands.Context, member: discord.Member | None = None):
         if ctx.guild is None:

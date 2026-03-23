@@ -6,6 +6,7 @@ from .games.roleta import GincanaRoletaMixin
 from .handlers.focus import GincanaFocusMixin
 from .handlers.message_router import GincanaMessageRouterMixin
 from .services.audio import GincanaAudioMixin
+from .services.payments import GincanaPaymentMixin
 from .services.base import GincanaBase
 from .services.toggles import GincanaToggleMixin
 
@@ -19,6 +20,7 @@ class GincanaCore(
     GincanaBuckshotMixin,
     GincanaAlvoMixin,
     GincanaToggleMixin,
+    GincanaPaymentMixin,
     GincanaAudioMixin,
     GincanaBase,
 ):
