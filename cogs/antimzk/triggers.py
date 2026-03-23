@@ -1098,8 +1098,59 @@ class AntiMzkTriggerMixin:
     def _describe_target_zone(self, score: int) -> str:
         return {3: "centro", 2: "anel interno", 1: "anel externo", 0: "errou"}.get(int(score), "errou")
 
-    def _roll_target_score(self) -> int:
+    def _roll_target_modifier(self) -> dict:
         roll = random.random()
+        if roll < 0.10:
+            return {
+                "key": "small",
+                "name": "Alvo pequeno",
+                "description": "Centro mais raro, mas a rodada fica mais valiosa.",
+                "bullseye_bonus": 4,
+            }
+        if roll < 0.20:
+            return {
+                "key": "unstable",
+                "name": "Alvo instável",
+                "description": "O alvo balança mais e aumenta a chance de erro.",
+            }
+        if roll < 0.30:
+            return {
+                "key": "generous",
+                "name": "Alvo generoso",
+                "description": "Fica mais fácil acertar os anéis internos.",
+            }
+        return {
+            "key": "normal",
+            "name": "Alvo padrão",
+            "description": "Rodada normal.",
+        }
+
+    def _roll_target_score(self, modifier_key: str = "normal") -> int:
+        roll = random.random()
+        if modifier_key == "small":
+            if roll < 0.04:
+                return 3
+            if roll < 0.20:
+                return 2
+            if roll < 0.52:
+                return 1
+            return 0
+        if modifier_key == "unstable":
+            if roll < 0.05:
+                return 3
+            if roll < 0.19:
+                return 2
+            if roll < 0.44:
+                return 1
+            return 0
+        if modifier_key == "generous":
+            if roll < 0.09:
+                return 3
+            if roll < 0.31:
+                return 2
+            if roll < 0.67:
+                return 1
+            return 0
         if roll < 0.07:
             return 3
         if roll < 0.25:
@@ -1184,12 +1235,39 @@ class AntiMzkTriggerMixin:
             return "Com **2 participantes**, só **1** leva o prêmio."
         return "Use o botão para entrar e a trigger **disparar** para fechar a rodada."
 
+    def _target_bonus_for_participants(self, count: int) -> int:
+        if count >= 7:
+            return 10
+        if count >= 5:
+            return 5
+        return 0
+
+    def _build_target_special_lines(self, participants: list[discord.Member], scores: dict[int, int], placements: list[tuple[str, list[discord.Member], int]]) -> list[str]:
+        special: list[str] = []
+        bullseyes = [member for member in participants if scores.get(member.id, 0) == 3]
+        misses = [member for member in participants if scores.get(member.id, 0) <= 0]
+        if len(misses) == len(participants):
+            special.append("💨 Ninguém acertou o alvo. A rodada virou um desastre completo.")
+        if len(bullseyes) >= 2:
+            special.append(f"🎯 Chuva de bullseyes: {', '.join(member.mention for member in bullseyes)}!")
+        elif len(bullseyes) == 1 and len(participants) >= 4:
+            special.append(f"🏅 {bullseyes[0].mention} dominou a rodada com um bullseye raro.")
+        if placements:
+            top_badge, top_members, _ = placements[0]
+            if len(top_members) > 1:
+                special.append(f"🤝 O topo terminou empatado entre {', '.join(member.mention for member in top_members)}.")
+            elif top_members and scores.get(top_members[0].id, 0) >= 2 and all(scores.get(m.id, 0) < scores.get(top_members[0].id, 0) for m in participants if m.id != top_members[0].id):
+                special.append(f"🔥 {top_members[0].mention} levou a melhor com folga.")
+        return special
+
     def _make_target_embed(self, guild: discord.Guild, session: dict, *, final_text: str | None = None, aiming: bool = False) -> discord.Embed:
         participants = self._get_target_participants(guild, session)
         locked_ids = set(session.get("locked_participants", set()))
         pot_total = len(locked_ids) * ALVO_STAKE
         owner_id = int(session.get("owner_id") or 0)
         owner = guild.get_member(owner_id) if owner_id else None
+        modifier = session.get("modifier") or {"key": "normal", "name": "Alvo padrão", "description": "Rodada normal."}
+        bonus = int(session.get("bonus_chips") or 0)
 
         if final_text:
             embed = discord.Embed(
@@ -1339,6 +1417,8 @@ class AntiMzkTriggerMixin:
             final_text = "A rodada foi cancelada porque não ficaram participantes suficientes na call. As entradas foram reembolsadas."
         else:
             pot_total = len(locked_ids) * ALVO_STAKE
+            bonus_chips = int(session.get("bonus_chips") or 0)
+            modifier = session.get("modifier") or {"key": "normal", "name": "Alvo padrão", "description": "Rodada normal."}
             if message is not None:
                 try:
                     await message.edit(embed=self._make_target_embed(guild, session, aiming=True), view=view)
@@ -1437,11 +1517,14 @@ class AntiMzkTriggerMixin:
             return True
 
         view = _TargetJoinView(self, guild.id, timeout=30.0)
+        participants_now = len([m for m in voice_channel.members if not getattr(m, "bot", False)])
         session = {
             "voice_channel_id": voice_channel.id,
             "text_channel_id": message.channel.id,
             "owner_id": message.author.id,
             "locked_participants": {message.author.id},
+            "modifier": self._roll_target_modifier(),
+            "bonus_chips": self._target_bonus_for_participants(participants_now),
             "message": None,
             "view": view,
             "ended": False,
