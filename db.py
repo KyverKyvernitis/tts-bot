@@ -97,6 +97,84 @@ class SettingsDB:
             for key in stale:
                 self._resolved_tts_cache.pop(key, None)
 
+
+    def gincana_enabled(self, guild_id: int) -> bool:
+        g = self.guild_cache.get(guild_id, {})
+        if "gincana_enabled" in g:
+            return bool(g.get("gincana_enabled", True))
+        return bool(g.get("anti_mzk_enabled", True))
+
+    async def set_gincana_enabled(self, guild_id: int, value: bool):
+        doc = self._get_guild_doc(guild_id)
+        enabled = bool(value)
+        doc["gincana_enabled"] = enabled
+        doc["anti_mzk_enabled"] = enabled
+        await self._save_guild_doc(guild_id, doc)
+
+    def get_gincana_role_ids(self, guild_id: int) -> list[int]:
+        g = self.guild_cache.get(guild_id, {})
+        raw = g.get("gincana_role_ids")
+        if raw is None:
+            raw = g.get("anti_mzk_role_ids", []) or []
+        result: list[int] = []
+        for value in raw or []:
+            try:
+                result.append(int(value))
+            except (TypeError, ValueError):
+                pass
+        return result
+
+    async def add_gincana_role_id(self, guild_id: int, role_id: int) -> bool:
+        doc = self._get_guild_doc(guild_id)
+        role_ids = self.get_gincana_role_ids(guild_id)
+        role_id = int(role_id)
+        if role_id in role_ids:
+            return False
+        role_ids.append(role_id)
+        doc["gincana_role_ids"] = role_ids
+        doc["anti_mzk_role_ids"] = role_ids
+        await self._save_guild_doc(guild_id, doc)
+        return True
+
+    async def remove_gincana_role_id(self, guild_id: int, role_id: int) -> bool:
+        doc = self._get_guild_doc(guild_id)
+        role_ids = self.get_gincana_role_ids(guild_id)
+        role_id = int(role_id)
+        if role_id not in role_ids:
+            return False
+        new_role_ids = [rid for rid in role_ids if rid != role_id]
+        doc["gincana_role_ids"] = new_role_ids
+        doc["anti_mzk_role_ids"] = new_role_ids
+        await self._save_guild_doc(guild_id, doc)
+        return True
+
+    def get_gincana_staff_role_id(self, guild_id: int) -> int:
+        g = self.guild_cache.get(guild_id, {})
+        try:
+            return max(0, int(g.get("gincana_staff_role_id", g.get("anti_mzk_staff_role_id", 0)) or 0))
+        except Exception:
+            return 0
+
+    async def set_gincana_staff_role_id(self, guild_id: int, role_id: int | None):
+        doc = self._get_guild_doc(guild_id)
+        try:
+            parsed = max(0, int(role_id or 0))
+        except Exception:
+            parsed = 0
+        doc["gincana_staff_role_id"] = parsed
+        doc["anti_mzk_staff_role_id"] = parsed
+        await self._save_guild_doc(guild_id, doc)
+
+    def get_gincana_focus_map(self, guild_id: int) -> Dict[int, int]:
+        return dict(self._get_modo_censura_focus_map(guild_id))
+
+    async def toggle_gincana_focus_users(self, guild_id: int, user_ids: list[int]) -> tuple[list[int], list[int], Dict[int, int]]:
+        added, removed, current = await self.toggle_modo_censura_focus_users(guild_id, user_ids)
+        return added, removed, current
+
+    async def clear_gincana_focus_users(self, guild_id: int) -> Dict[int, int]:
+        return await self.clear_modo_censura_focus_users(guild_id)
+
     def anti_mzk_enabled(self, guild_id: int) -> bool:
         g = self.guild_cache.get(guild_id, {})
         return bool(g.get("anti_mzk_enabled", True))
