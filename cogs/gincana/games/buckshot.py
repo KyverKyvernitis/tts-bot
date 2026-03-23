@@ -102,7 +102,8 @@ class GincanaBuckshotMixin:
                 description = (
                     f"Entrada: {self._chip_amount(BUCKSHOT_STAKE)} por jogador\n"
                     f"Participantes: **{len(participants)}**\n"
-                    f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(payout_total)}"
+                    f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(payout_total)}\n\n"
+                    "Entre na rodada e veja quem sai da call quando o disparo vier."
                 )
                 color = discord.Color.blurple()
             embed = discord.Embed(title=title, description=description, color=color)
@@ -263,7 +264,10 @@ class GincanaBuckshotMixin:
                         if bonus > 0:
                             await self.db.add_user_chips(guild.id, winner.id, bonus)
                             await self.db.add_user_game_stat(guild.id, winner.id, "buckshot_survivals", 1)
+                            await self._record_game_played(guild.id, winner.id, weekly_points=8)
+                            await self._grant_weekly_points(guild.id, winner.id, max(3, bonus // 3))
                 await self.db.add_user_game_stat(guild.id, chosen.id, "buckshot_eliminations", 1)
+                await self._record_game_played(guild.id, chosen.id, weekly_points=3)
                 chosen_text = chosen.mention if chosen is not None else "Alguém"
                 if winners:
                     final_text = (

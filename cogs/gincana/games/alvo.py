@@ -69,24 +69,39 @@ class GincanaAlvoMixin:
             return {3: "centro", 2: "anel interno", 1: "anel externo", 0: "errou"}.get(int(score), "errou")
         def _roll_target_modifier(self) -> dict:
             roll = random.random()
-            if roll < 0.10:
+            if roll < 0.08:
                 return {
                     "key": "small",
                     "name": "Alvo pequeno",
-                    "description": "Centro mais raro, mas a rodada fica mais valiosa.",
+                    "description": "Centro mais raro, mas cada bullseye rende bônus extra.",
                     "bullseye_bonus": 4,
                 }
-            if roll < 0.20:
+            if roll < 0.16:
                 return {
                     "key": "unstable",
                     "name": "Alvo instável",
                     "description": "O alvo balança mais e aumenta a chance de erro.",
                 }
-            if roll < 0.30:
+            if roll < 0.24:
                 return {
                     "key": "generous",
                     "name": "Alvo generoso",
                     "description": "Fica mais fácil acertar os anéis internos.",
+                }
+            if roll < 0.32:
+                return {
+                    "key": "windy",
+                    "name": "Vento forte",
+                    "description": "Rajadas atrapalham a precisão, mas o prêmio sobe.",
+                    "pot_bonus": 6,
+                }
+            if roll < 0.40:
+                return {
+                    "key": "golden",
+                    "name": "Alvo dourado",
+                    "description": "Bullseyes valem mais e a rodada fica brilhando.",
+                    "pot_bonus": 8,
+                    "bullseye_bonus": 6,
                 }
             return {
                 "key": "normal",
@@ -117,6 +132,22 @@ class GincanaAlvoMixin:
                 if roll < 0.31:
                     return 2
                 if roll < 0.67:
+                    return 1
+                return 0
+            if modifier_key == "windy":
+                if roll < 0.05:
+                    return 3
+                if roll < 0.18:
+                    return 2
+                if roll < 0.46:
+                    return 1
+                return 0
+            if modifier_key == "golden":
+                if roll < 0.10:
+                    return 3
+                if roll < 0.27:
+                    return 2
+                if roll < 0.58:
                     return 1
                 return 0
             if roll < 0.07:
@@ -248,17 +279,19 @@ class GincanaAlvoMixin:
                 )
                 embed.add_field(name="Na mira", value=self._format_target_participants(participants), inline=False)
             else:
+                total_bonus = bonus + int(modifier.get("pot_bonus", 0) or 0)
                 embed = discord.Embed(
                     title="🎯 Tiro ao alvo aberto",
                     description=(
                         f"Entrada: {self._chip_amount(ALVO_STAKE)} por jogador\n"
                         f"Participantes: **{len(participants)}**\n"
-                        f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(pot_total)}\n\n"
+                        f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(pot_total + total_bonus)}\n\n"
                         f"{self._target_opening_text(participants)}"
                     ),
                     color=discord.Color.blurple(),
                 )
-                embed.add_field(name="Na mira", value=self._format_target_participants(participants), inline=False)
+                embed.add_field(name="🎯 Na mira", value=self._format_target_participants(participants), inline=False)
+                embed.add_field(name="🌪️ Condição da rodada", value=f"**{modifier.get('name','Alvo padrão')}**\n{modifier.get('description','Rodada normal.')}", inline=False)
                 embed.add_field(name="Como dispara", value="Entre pelo botão verde. Depois use a trigger **disparar** na call da rodada ou espere o tempo acabar.", inline=False)
                 embed.set_footer(text="Entrou, pagou e a entrada fica travada até o fim")
 
@@ -377,6 +410,7 @@ class GincanaAlvoMixin:
                 pot_total = len(locked_ids) * ALVO_STAKE
                 bonus_chips = int(session.get("bonus_chips") or 0)
                 modifier = session.get("modifier") or {"key": "normal", "name": "Alvo padrão", "description": "Rodada normal."}
+                bonus_chips += int(modifier.get("pot_bonus", 0) or 0)
                 if message is not None:
                     try:
                         await message.edit(embed=self._make_target_embed(guild, session, aiming=True), view=view)
@@ -384,13 +418,17 @@ class GincanaAlvoMixin:
                     except Exception:
                         pass
 
-                scores = {member.id: self._roll_target_score() for member in participants}
-                rewards, placements = self._allocate_target_rewards(participants, scores, pot_total)
+                scores = {member.id: self._roll_target_score(str(modifier.get("key", "normal"))) for member in participants}
+                rewards, placements = self._allocate_target_rewards(participants, scores, pot_total + bonus_chips)
                 result_lines = [f"💥 Os tiros foram disparados. {self._CHIP_GAIN_EMOJI} Pote final: {self._chip_amount(pot_total)}", ""]
                 bullseye_members: list[discord.Member] = []
                 for member in sorted(participants, key=lambda m: (-scores.get(m.id, 0), m.display_name.casefold())):
                     score = scores.get(member.id, 0)
                     icon, zone = self._target_zone_style(score)
+                    await self.db.add_user_game_stat(guild.id, member.id, "alvo_shots", 1)
+                    await self._record_game_played(guild.id, member.id, weekly_points=4 + score)
+                    if score > 0:
+                        await self.db.add_user_game_stat(guild.id, member.id, "alvo_hits", 1)
                     result_lines.append(f"{icon} {member.mention} acertou **{zone}**.")
                     if score == 3:
                         bullseye_members.append(member)
@@ -400,6 +438,12 @@ class GincanaAlvoMixin:
                     names = ", ".join(member.mention for member in bullseye_members)
                     result_lines.append("")
                     result_lines.append(f"🎯 Bullseye de destaque: {names}!")
+                    bull_bonus = int(modifier.get("bullseye_bonus", 0) or 0)
+                    if bull_bonus > 0:
+                        for member in bullseye_members:
+                            await self.db.add_user_chips(guild.id, member.id, bull_bonus)
+                            await self._grant_weekly_points(guild.id, member.id, bull_bonus)
+                        result_lines.append(f"✨ Cada bullseye recebeu um bônus de {self._chip_amount(bull_bonus)}.")
 
                 if rewards:
                     result_lines.append("")
@@ -412,6 +456,7 @@ class GincanaAlvoMixin:
                         if amount > 0:
                             await self.db.add_user_chips(guild.id, user_id, amount)
                             await self.db.add_user_game_stat(guild.id, user_id, "alvo_wins", 1)
+                            await self._grant_weekly_points(guild.id, user_id, max(5, amount // 4))
                 final_text = "\n".join(result_lines)
 
             embed = self._make_target_embed(guild, session, final_text=final_text)

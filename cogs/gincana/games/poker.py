@@ -273,11 +273,13 @@ class GincanaPokerMixin:
                 continue
             seen.add(pid)
             await self.db.add_user_game_stat(guild_id, pid, "poker_rounds", 1)
+            await self._record_game_played(guild_id, pid, weekly_points=6)
 
     async def _record_poker_result(self, guild_id: int, winner_id: int | None, loser_id: int | None = None):
         await self._record_poker_round(guild_id, winner_id, loser_id)
         if winner_id is not None:
             await self.db.add_user_game_stat(guild_id, winner_id, "poker_wins", 1)
+            await self._grant_weekly_points(guild_id, winner_id, 12)
         if loser_id is not None:
             await self.db.add_user_game_stat(guild_id, loser_id, "poker_losses", 1)
 

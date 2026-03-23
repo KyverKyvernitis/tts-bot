@@ -245,9 +245,11 @@ class GincanaRoletaMixin:
                                     await target.move_to(None, reason="gincana roleta")
                                 except Exception:
                                     pass
+                        await self._record_game_played(guild.id, message.author.id, weekly_points=12)
                         await self.db.add_user_chips(guild.id, message.author.id, ROLETA_JACKPOT_CHIPS)
                         await self.db.add_user_game_stat(guild.id, message.author.id, "roleta_jackpots", 1)
-                        summary = f"Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)} e os alvos foram tirados da call."
+                        await self._grant_weekly_points(guild.id, message.author.id, 20)
+                        summary = f"✨ A sorte sorriu para você. Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)} e os alvos foram tirados da call."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed(
@@ -257,7 +259,8 @@ class GincanaRoletaMixin:
                             success=True,
                         )
                     else:
-                        summary = f"Você perdeu {self._chip_amount(ROLETA_COST)}."
+                        await self._record_game_played(guild.id, message.author.id, weekly_points=2)
+                        summary = f"💨 Dessa vez a casa venceu. Você perdeu {self._chip_amount(ROLETA_COST)}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed(
