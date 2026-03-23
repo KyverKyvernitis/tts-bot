@@ -8,6 +8,10 @@ from .constants import _guild_scoped
 
 
 class GincanaCog(dcommands.Cog, GincanaCore):
+    def __init__(self, bot: dcommands.Bot, db):
+        dcommands.Cog.__init__(self)
+        GincanaCore.__init__(self, bot, db)
+
     @_guild_scoped()
     @app_commands.command(name="gincana", description="Gerencia as roles e modos da gincana")
     @app_commands.describe(
