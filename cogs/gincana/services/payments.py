@@ -149,6 +149,9 @@ class GincanaPaymentMixin:
             await message.channel.send(embed=self._make_embed("💸 Pagamento inválido", "Bots não podem receber fichas.", ok=False))
             return True
 
+        if inline_amount is not None:
+            return await self._start_payment_confirmation(message, target=target, amount=inline_amount)
+
         self._payment_sessions[(guild.id, message.author.id)] = {
             "target_id": target.id,
             "state": "awaiting_amount",
