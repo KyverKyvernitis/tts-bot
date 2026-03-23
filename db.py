@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, Optional
 
 import time
@@ -579,6 +580,112 @@ class SettingsDB:
 
 
 
+
+def _sao_paulo_now(self) -> datetime:
+    try:
+        return datetime.now(ZoneInfo("America/Sao_Paulo"))
+    except Exception:
+        return datetime.now(timezone.utc)
+
+def _current_daily_key(self) -> str:
+    return self._sao_paulo_now().strftime("%Y-%m-%d")
+
+def _current_week_key(self) -> str:
+    now = self._sao_paulo_now()
+    iso = now.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+def get_user_daily_status(self, guild_id: int, user_id: int) -> Dict[str, int | bool | str]:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    today = self._current_daily_key()
+    last_key = str(doc.get("daily_last_claim_key", "") or "")
+    streak = 0
+    try:
+        streak = max(0, int(doc.get("daily_streak", 0) or 0))
+    except Exception:
+        streak = 0
+    available = last_key != today
+    return {
+        "today_key": today,
+        "last_claim_key": last_key,
+        "streak": streak,
+        "available": available,
+    }
+
+async def claim_daily_bonus(self, guild_id: int, user_id: int, *, base_amount: int = 10) -> tuple[bool, int, int, int]:
+    status = self.get_user_daily_status(guild_id, user_id)
+    today = str(status["today_key"])
+    last_key = str(status["last_claim_key"])
+    current_streak = int(status["streak"])
+    if last_key == today:
+        return False, self.get_user_chips(guild_id, user_id, default=200), 0, current_streak
+
+    new_streak = 1
+    try:
+        today_dt = datetime.strptime(today, "%Y-%m-%d").date()
+        if last_key:
+            last_dt = datetime.strptime(last_key, "%Y-%m-%d").date()
+            if today_dt - last_dt == timedelta(days=1):
+                new_streak = current_streak + 1
+    except Exception:
+        new_streak = 1
+
+    bonus = int(base_amount)
+    if new_streak >= 7:
+        bonus += 10
+    elif new_streak >= 3:
+        bonus += 5
+
+    doc = self._get_user_doc(guild_id, user_id)
+    doc["daily_last_claim_key"] = today
+    doc["daily_streak"] = new_streak
+    current = self.get_user_chips(guild_id, user_id, default=200)
+    doc["chips"] = max(0, current + bonus)
+    await self._save_user_doc(guild_id, user_id, doc)
+    return True, int(doc["chips"]), bonus, new_streak
+
+def get_user_weekly_points(self, guild_id: int, user_id: int) -> int:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    if str(doc.get("weekly_points_week", "") or "") != self._current_week_key():
+        return 0
+    try:
+        return max(0, int(doc.get("weekly_points", 0) or 0))
+    except Exception:
+        return 0
+
+async def add_user_weekly_points(self, guild_id: int, user_id: int, amount: int) -> int:
+    week_key = self._current_week_key()
+    doc = self._get_user_doc(guild_id, user_id)
+    if str(doc.get("weekly_points_week", "") or "") != week_key:
+        doc["weekly_points_week"] = week_key
+        doc["weekly_points"] = 0
+    current = 0
+    try:
+        current = max(0, int(doc.get("weekly_points", 0) or 0))
+    except Exception:
+        current = 0
+    doc["weekly_points"] = max(0, current + int(amount))
+    await self._save_user_doc(guild_id, user_id, doc)
+    return int(doc["weekly_points"])
+
+def get_weekly_points_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[Dict[str, int]]:
+    rows: list[Dict[str, int]] = []
+    week_key = self._current_week_key()
+    for (gid, uid), doc in self.user_cache.items():
+        if gid != guild_id:
+            continue
+        if str(doc.get("weekly_points_week", "") or "") != week_key:
+            continue
+        try:
+            points = max(0, int(doc.get("weekly_points", 0) or 0))
+        except Exception:
+            points = 0
+        if points <= 0:
+            continue
+        rows.append({"user_id": uid, "points": points})
+    rows.sort(key=lambda item: (-item["points"], item["user_id"]))
+    return rows[: max(1, int(limit))]
+
     def get_user_chips(self, guild_id: int, user_id: int, *, default: int = 200) -> int:
         doc = self.user_cache.get((guild_id, user_id), {})
         try:
@@ -644,6 +751,7 @@ class SettingsDB:
                 return 0
 
         return {
+            "games_played": _int("games_played"),
             "poker_wins": _int("poker_wins"),
             "poker_losses": _int("poker_losses"),
             "poker_rounds": _int("poker_rounds"),
@@ -654,6 +762,10 @@ class SettingsDB:
             "alvo_bullseyes": _int("alvo_bullseyes"),
             "alvo_shots": _int("alvo_shots"),
             "alvo_hits": _int("alvo_hits"),
+            "payments_sent": _int("payments_sent"),
+            "payments_received": _int("payments_received"),
+            "chips_sent_total": _int("chips_sent_total"),
+            "chips_received_total": _int("chips_received_total"),
         }
 
     async def add_user_game_stat(self, guild_id: int, user_id: int, key: str, amount: int = 1) -> int:
