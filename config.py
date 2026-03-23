@@ -45,7 +45,7 @@ TOKEN = (os.getenv("DISCORD_TOKEN", "") or "").strip()
 TARGET_ROLE_ID = _parse_int(os.getenv("ROLE_ID", "0"), 0)
 DISABLE_TIME = _parse_int(os.getenv("DISABLE_TIME", "14400"), 14400)
 
-TRIGGER_WORD = (os.getenv("TRIGGER_WORD", "") or "").lower().strip()
+TRIGGER_WORD = (os.getenv("TRIGGER_WORD", "pinto") or "pinto").lower().strip()
 MUTE_TOGGLE_WORD = (os.getenv("MUTE_TOGGLE_WORD", "rola") or "rola").lower().strip()
 
 TARGET_USER_ID = _parse_int(os.getenv("TARGET_USER_ID", "0"), 0)
