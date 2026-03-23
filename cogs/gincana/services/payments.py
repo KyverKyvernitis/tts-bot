@@ -28,22 +28,39 @@ class GincanaPaymentMixin:
         raw_content = str(message.content or "").strip()
         if not raw_content.casefold().startswith("pay"):
             return None, None
-        if len(message.mentions) != 1:
+        mentions = [m for m in getattr(message, "mentions", []) if not getattr(m, "bot", False)]
+        if len(mentions) != 1:
             return None, None
-        target = message.mentions[0]
-        content = re.sub(r"<@!?\d+>", "", raw_content).strip()
-        if not content.casefold().startswith("pay"):
-            return None, None
-        remainder = content[3:].strip()
-        if not remainder:
-            return target, None
-        match = re.search(r"(?<!\d)(\d+)(?!\d)", remainder)
-        if match:
+        target = mentions[0]
+        amount_match = re.search(r"(?<!\d)(\d+)(?!\d)", raw_content)
+        inline_amount = None
+        if amount_match:
             try:
-                return target, int(match.group(1))
+                inline_amount = int(amount_match.group(1))
             except Exception:
-                return target, None
-        return target, None
+                inline_amount = None
+        return target, inline_amount
+
+    async def _send_payment_prompt(self, message: discord.Message, target: discord.Member) -> bool:
+        guild = message.guild
+        if guild is None:
+            return True
+        self._payment_sessions[(guild.id, message.author.id)] = {
+            "target_id": target.id,
+            "state": "awaiting_amount",
+            "channel_id": message.channel.id,
+        }
+        await message.channel.send(
+            embed=discord.Embed(
+                title="💸 Transferência iniciada",
+                description=(
+                    f"{message.author.mention}, quanto você quer enviar para {target.mention}?\n"
+                    "Envie apenas o valor no chat. Digite **cancelar** para desistir."
+                ),
+                color=discord.Color.blurple(),
+            )
+        )
+        return True
 
     async def _start_payment_confirmation(self, message: discord.Message, *, target: discord.Member, amount: int) -> bool:
         guild = message.guild
@@ -91,6 +108,19 @@ class GincanaPaymentMixin:
         if GUILD_IDS and guild.id not in GUILD_IDS:
             return False
 
+        target, inline_amount = self._parse_pay_request(message)
+        if target is not None:
+            if target.id == message.author.id:
+                await message.channel.send(embed=self._make_embed("💸 Pagamento inválido", "Você não pode enviar fichas para si mesmo.", ok=False))
+                return True
+            if target.bot:
+                await message.channel.send(embed=self._make_embed("💸 Pagamento inválido", "Bots não podem receber fichas.", ok=False))
+                return True
+            self._payment_sessions.pop((guild.id, message.author.id), None)
+            if inline_amount is not None:
+                return await self._start_payment_confirmation(message, target=target, amount=inline_amount)
+            return await self._send_payment_prompt(message, target)
+
         pending = self._payment_sessions.get((guild.id, message.author.id))
         if pending and pending.get("state") == "awaiting_amount":
             content = str(message.content or "").strip()
@@ -107,64 +137,9 @@ class GincanaPaymentMixin:
             except Exception:
                 await message.channel.send(embed=self._make_embed("💸 Valor inválido", "Envie um valor inteiro positivo ou digite **cancelar**.", ok=False))
                 return True
-            if amount <= 0:
-                await message.channel.send(embed=self._make_embed("💸 Valor inválido", "O valor precisa ser maior que zero.", ok=False))
-                return True
-            fee = max(1, int(round(amount * 0.02)))
-            total = amount + fee
-            ok, _bal, note = await self._ensure_action_chips(guild.id, message.author.id, total)
-            if not ok:
-                await message.channel.send(embed=self._make_embed("💸 Saldo insuficiente", note or "Você não tem saldo suficiente para esse pagamento.", ok=False))
-                self._payment_sessions.pop((guild.id, message.author.id), None)
-                return True
+            return await self._start_payment_confirmation(message, target=guild.get_member(int(pending["target_id"])), amount=amount)
 
-            pending["amount"] = amount
-            pending["fee"] = fee
-            pending["total"] = total
-            pending["state"] = "awaiting_target_confirm"
-            view = _PaymentConfirmView(self, (guild.id, message.author.id), timeout=60.0)
-            pending["view"] = view
-            target = guild.get_member(int(pending["target_id"]))
-            desc = (
-                f"{target.mention if target else 'O destinatário'} precisa confirmar o recebimento.\n"
-                f"Valor: {self._chip_amount(amount)}\n"
-                f"Taxa (2%): {self._chip_amount(fee)}\n"
-                f"Total debitado de {message.author.mention}: {self._chip_amount(total)}"
-            )
-            confirm_message = await message.channel.send(
-                embed=discord.Embed(title="💸 Confirmação de pagamento", description=desc, color=discord.Color.blurple()),
-                view=view,
-            )
-            pending["confirm_message"] = confirm_message
-            return True
-
-        target, inline_amount = self._parse_pay_request(message)
-        if target is None:
-            return False
-
-        if target.id == message.author.id:
-            await message.channel.send(embed=self._make_embed("💸 Pagamento inválido", "Você não pode enviar fichas para si mesmo.", ok=False))
-            return True
-        if target.bot:
-            await message.channel.send(embed=self._make_embed("💸 Pagamento inválido", "Bots não podem receber fichas.", ok=False))
-            return True
-
-        if inline_amount is not None:
-            return await self._start_payment_confirmation(message, target=target, amount=inline_amount)
-
-        self._payment_sessions[(guild.id, message.author.id)] = {
-            "target_id": target.id,
-            "state": "awaiting_amount",
-            "channel_id": message.channel.id,
-        }
-        await message.channel.send(
-            embed=discord.Embed(
-                title="💸 Transferência iniciada",
-                description=f"{message.author.mention}, quanto você quer enviar para {target.mention}?\nEnvie apenas o valor no chat. Digite **cancelar** para desistir.",
-                color=discord.Color.blurple(),
-            )
-        )
-        return True
+        return False
 
     async def _handle_payment_confirmation(self, interaction: discord.Interaction, session_key: tuple[int, int], *, accepted: bool):
         guild = interaction.guild
