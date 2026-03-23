@@ -121,6 +121,20 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         except Exception as e:
             print(f"[gincana] erro no on_message: {e!r}")
 
+    @dcommands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        try:
+            await self._handle_payment_reaction_event(payload, added=True)
+        except Exception as e:
+            print(f"[gincana] erro no on_raw_reaction_add: {e!r}")
+
+    @dcommands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        try:
+            await self._handle_payment_reaction_event(payload, added=False)
+        except Exception as e:
+            print(f"[gincana] erro no on_raw_reaction_remove: {e!r}")
+
 
 async def setup(bot: dcommands.Bot):
     await bot.add_cog(GincanaCog(bot, bot.settings_db))
