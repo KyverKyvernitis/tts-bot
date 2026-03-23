@@ -11,13 +11,17 @@ class _PaymentConfirmView(discord.ui.View):
         self.cog = cog
         self.session_key = session_key
 
-    @discord.ui.button(label="✅ Aceitar pagamento", style=discord.ButtonStyle.success)
-    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._handle_payment_confirmation(interaction, self.session_key, accepted=True)
+    @discord.ui.button(label="✅ Confirmar envio", style=discord.ButtonStyle.primary)
+    async def confirm_sender(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._handle_payment_confirmation(interaction, self.session_key, action="payer_confirm")
 
-    @discord.ui.button(label="❌ Recusar", style=discord.ButtonStyle.danger)
-    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._handle_payment_confirmation(interaction, self.session_key, accepted=False)
+    @discord.ui.button(label="✅ Aceitar pagamento", style=discord.ButtonStyle.success)
+    async def confirm_target(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._handle_payment_confirmation(interaction, self.session_key, action="target_confirm")
+
+    @discord.ui.button(label="❌ Cancelar", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._handle_payment_confirmation(interaction, self.session_key, action="cancel")
 
     async def on_timeout(self):
         await self.cog._expire_payment_session(self.session_key)
@@ -32,7 +36,11 @@ class GincanaPaymentMixin:
         if len(mentions) != 1:
             return None, None
         target = mentions[0]
-        amount_match = re.search(r"(?<!\d)(\d+)(?!\d)", raw_content)
+
+        remainder = raw_content
+        remainder = re.sub(r"^\s*pay\b", "", remainder, flags=re.IGNORECASE).strip()
+        remainder = re.sub(rf"<@!?{target.id}>", "", remainder).strip()
+        amount_match = re.search(r"\b(\d+)\b", remainder)
         inline_amount = None
         if amount_match:
             try:
@@ -40,6 +48,28 @@ class GincanaPaymentMixin:
             except Exception:
                 inline_amount = None
         return target, inline_amount
+
+    def _payment_status_text(self, confirmed: bool) -> str:
+        return "✅ Confirmado" if confirmed else "⏳ Pendente"
+
+    def _build_payment_confirm_embed(self, guild: discord.Guild, payer_id: int, session: dict) -> discord.Embed:
+        payer = guild.get_member(payer_id)
+        target = guild.get_member(int(session.get("target_id") or 0))
+        amount = int(session.get("amount") or 0)
+        fee = int(session.get("fee") or 0)
+        total = int(session.get("total") or 0)
+
+        payer_text = payer.mention if payer else "Pagador"
+        target_text = target.mention if target else "Destinatário"
+        desc = (
+            f"{payer_text} → {target_text}\n"
+            f"Valor: {self._chip_amount(amount)}\n"
+            f"Taxa: {self._chip_amount(fee)}\n"
+            f"Total: {self._chip_amount(total)}\n\n"
+            f"Pagador: {self._payment_status_text(bool(session.get('payer_confirmed')))}\n"
+            f"Destinatário: {self._payment_status_text(bool(session.get('target_confirmed')))}"
+        )
+        return discord.Embed(title="💸 Confirmar pagamento", description=desc, color=discord.Color.blurple())
 
     async def _send_payment_prompt(self, message: discord.Message, target: discord.Member) -> bool:
         guild = message.guild
@@ -52,10 +82,10 @@ class GincanaPaymentMixin:
         }
         await message.channel.send(
             embed=discord.Embed(
-                title="💸 Transferência iniciada",
+                title="💸 Pagamento",
                 description=(
-                    f"{message.author.mention}, quanto você quer enviar para {target.mention}?\n"
-                    "Envie apenas o valor no chat. Digite **cancelar** para desistir."
+                    f"Quanto você quer enviar para {target.mention}?\n"
+                    "Envie só o valor no chat ou digite **cancelar**."
                 ),
                 color=discord.Color.blurple(),
             )
@@ -77,25 +107,24 @@ class GincanaPaymentMixin:
             self._payment_sessions.pop((guild.id, message.author.id), None)
             return True
 
-        pending = self._payment_sessions.setdefault((guild.id, message.author.id), {
+        session_key = (guild.id, message.author.id)
+        pending = self._payment_sessions.setdefault(session_key, {
             "target_id": target.id,
             "channel_id": message.channel.id,
         })
-        pending["target_id"] = target.id
-        pending["amount"] = amount
-        pending["fee"] = fee
-        pending["total"] = total
-        pending["state"] = "awaiting_target_confirm"
-        view = _PaymentConfirmView(self, (guild.id, message.author.id), timeout=60.0)
+        pending.update({
+            "target_id": target.id,
+            "amount": amount,
+            "fee": fee,
+            "total": total,
+            "state": "awaiting_both_confirm",
+            "payer_confirmed": False,
+            "target_confirmed": False,
+        })
+        view = _PaymentConfirmView(self, session_key, timeout=60.0)
         pending["view"] = view
-        desc = (
-            f"{target.mention} precisa confirmar o recebimento.\n"
-            f"Valor: {self._chip_amount(amount)}\n"
-            f"Taxa (2%): {self._chip_amount(fee)}\n"
-            f"Total debitado de {message.author.mention}: {self._chip_amount(total)}"
-        )
         confirm_message = await message.channel.send(
-            embed=discord.Embed(title="💸 Confirmação de pagamento", description=desc, color=discord.Color.blurple()),
+            embed=self._build_payment_confirm_embed(guild, message.author.id, pending),
             view=view,
         )
         pending["confirm_message"] = confirm_message
@@ -126,9 +155,9 @@ class GincanaPaymentMixin:
             content = str(message.content or "").strip()
             if content.casefold() == "cancelar":
                 self._payment_sessions.pop((guild.id, message.author.id), None)
-                await message.channel.send(embed=self._make_embed("💸 Pagamento cancelado", "A transferência foi cancelada antes de informar o valor.", ok=False))
+                await message.channel.send(embed=self._make_embed("💸 Pagamento cancelado", "A transferência foi cancelada.", ok=False))
                 return True
-            amount_match = re.search(r"(?<!\d)(\d+)(?!\d)", content)
+            amount_match = re.search(r"\b(\d+)\b", content)
             if not amount_match:
                 await message.channel.send(embed=self._make_embed("💸 Valor inválido", "Envie um valor inteiro positivo ou digite **cancelar**.", ok=False))
                 return True
@@ -137,11 +166,16 @@ class GincanaPaymentMixin:
             except Exception:
                 await message.channel.send(embed=self._make_embed("💸 Valor inválido", "Envie um valor inteiro positivo ou digite **cancelar**.", ok=False))
                 return True
-            return await self._start_payment_confirmation(message, target=guild.get_member(int(pending["target_id"])), amount=amount)
+            target_member = guild.get_member(int(pending["target_id"]))
+            if target_member is None:
+                self._payment_sessions.pop((guild.id, message.author.id), None)
+                await message.channel.send(embed=self._make_embed("💸 Pagamento cancelado", "O destinatário não está mais disponível.", ok=False))
+                return True
+            return await self._start_payment_confirmation(message, target=target_member, amount=amount)
 
         return False
 
-    async def _handle_payment_confirmation(self, interaction: discord.Interaction, session_key: tuple[int, int], *, accepted: bool):
+    async def _handle_payment_confirmation(self, interaction: discord.Interaction, session_key: tuple[int, int], *, action: str):
         guild = interaction.guild
         if guild is None:
             return
@@ -152,19 +186,11 @@ class GincanaPaymentMixin:
             except Exception:
                 pass
             return
-        if interaction.user.id != int(session.get("target_id") or 0):
-            try:
-                await interaction.response.send_message("A confirmação é só para o destinatário desse pagamento.", ephemeral=True)
-            except Exception:
-                pass
-            return
 
         payer_id = int(session_key[1])
-        amount = int(session.get("amount") or 0)
-        fee = int(session.get("fee") or 0)
-        total = int(session.get("total") or 0)
+        target_id = int(session.get("target_id") or 0)
         payer = guild.get_member(payer_id)
-        target = guild.get_member(int(session.get("target_id") or 0))
+        target = guild.get_member(target_id)
         if payer is None or target is None:
             self._payment_sessions.pop(session_key, None)
             try:
@@ -173,17 +199,55 @@ class GincanaPaymentMixin:
                 pass
             return
 
-        if not accepted:
+        if action == "cancel":
+            if interaction.user.id not in {payer_id, target_id}:
+                try:
+                    await interaction.response.send_message("Só as duas partes podem cancelar esse pagamento.", ephemeral=True)
+                except Exception:
+                    pass
+                return
             self._payment_sessions.pop(session_key, None)
             try:
                 await interaction.response.edit_message(
-                    embed=self._make_embed("💸 Pagamento recusado", f"{target.mention} recusou receber {self._chip_amount(amount)}.", ok=False),
+                    embed=self._make_embed("💸 Pagamento cancelado", "A transferência foi cancelada.", ok=False),
                     view=None,
                 )
             except Exception:
                 pass
             return
 
+        if action == "payer_confirm":
+            if interaction.user.id != payer_id:
+                try:
+                    await interaction.response.send_message("Só o pagador pode confirmar o envio.", ephemeral=True)
+                except Exception:
+                    pass
+                return
+            session["payer_confirmed"] = True
+        elif action == "target_confirm":
+            if interaction.user.id != target_id:
+                try:
+                    await interaction.response.send_message("Só o destinatário pode aceitar esse pagamento.", ephemeral=True)
+                except Exception:
+                    pass
+                return
+            session["target_confirmed"] = True
+        else:
+            return
+
+        if not (session.get("payer_confirmed") and session.get("target_confirmed")):
+            try:
+                await interaction.response.edit_message(
+                    embed=self._build_payment_confirm_embed(guild, payer_id, session),
+                    view=session.get("view"),
+                )
+            except Exception:
+                pass
+            return
+
+        amount = int(session.get("amount") or 0)
+        fee = int(session.get("fee") or 0)
+        total = int(session.get("total") or 0)
         ok, _balance, note = await self._ensure_action_chips(guild.id, payer.id, total)
         if not ok:
             self._payment_sessions.pop(session_key, None)
@@ -211,7 +275,7 @@ class GincanaPaymentMixin:
                     title="✅ Pagamento concluído",
                     description=(
                         f"{payer.mention} enviou {self._chip_amount(amount)} para {target.mention}.\n"
-                        f"Taxa cobrada: {self._chip_amount(fee)}"
+                        f"Taxa: {self._chip_amount(fee)}"
                     ),
                     color=discord.Color.green(),
                 ),
@@ -227,6 +291,6 @@ class GincanaPaymentMixin:
         message = session.get("confirm_message")
         if message is not None:
             try:
-                await message.edit(embed=self._make_embed("💸 Pagamento expirado", "O destinatário não confirmou a tempo.", ok=False), view=None)
+                await message.edit(embed=self._make_embed("💸 Pagamento expirado", "O pagamento não foi confirmado a tempo.", ok=False), view=None)
             except Exception:
                 pass
