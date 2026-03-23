@@ -923,3 +923,148 @@ def get_weekly_points_leaderboard(self, guild_id: int, *, limit: int = 10) -> li
     @staticmethod
     def utcnow_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+
+# ---- gincana economy helpers rebound as SettingsDB methods ----
+def _settingsdb_get_user_chips(self, guild_id: int, user_id: int, *, default: int = 200) -> int:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    try:
+        return max(0, int(doc.get("chips", default) or default))
+    except Exception:
+        return int(default)
+
+def _settingsdb_get_user_chip_reset_at(self, guild_id: int, user_id: int) -> float:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    raw = doc.get("last_chip_reset_at", 0)
+    try:
+        return float(raw or 0)
+    except Exception:
+        return 0.0
+
+async def _settingsdb_set_user_chips(self, guild_id: int, user_id: int, chips: int):
+    doc = self._get_user_doc(guild_id, user_id)
+    doc["chips"] = max(0, int(chips))
+    await self._save_user_doc(guild_id, user_id, doc)
+
+async def _settingsdb_add_user_chips(self, guild_id: int, user_id: int, amount: int) -> int:
+    current = self.get_user_chips(guild_id, user_id)
+    new_value = max(0, current + int(amount))
+    await self.set_user_chips(guild_id, user_id, new_value)
+    return new_value
+
+async def _settingsdb_set_user_chip_reset_at(self, guild_id: int, user_id: int, timestamp: float):
+    doc = self._get_user_doc(guild_id, user_id)
+    try:
+        doc["last_chip_reset_at"] = float(timestamp or 0)
+    except Exception:
+        doc["last_chip_reset_at"] = 0.0
+    await self._save_user_doc(guild_id, user_id, doc)
+
+async def _settingsdb_maybe_reset_user_chips(self, guild_id: int, user_id: int, *, amount: int = 100, cooldown_seconds: int = 21600) -> tuple[bool, int, float]:
+    now = time.time()
+    last_reset = self.get_user_chip_reset_at(guild_id, user_id)
+    if last_reset <= 0:
+        doc = self._get_user_doc(guild_id, user_id)
+        doc["chips"] = max(0, int(amount))
+        doc["last_chip_reset_at"] = float(now)
+        await self._save_user_doc(guild_id, user_id, doc)
+        return True, int(amount), 0.0
+    remaining = max(0.0, (last_reset + float(cooldown_seconds)) - now)
+    if remaining > 0:
+        return False, self.get_user_chips(guild_id, user_id, default=200), remaining
+    doc = self._get_user_doc(guild_id, user_id)
+    doc["chips"] = max(0, int(amount))
+    doc["last_chip_reset_at"] = float(now)
+    await self._save_user_doc(guild_id, user_id, doc)
+    return True, int(amount), 0.0
+
+def _settingsdb_get_user_game_stats(self, guild_id: int, user_id: int) -> Dict[str, int]:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    stats = doc.get("game_stats", {}) or {}
+    def _int(key: str) -> int:
+        try:
+            return max(0, int(stats.get(key, 0) or 0))
+        except Exception:
+            return 0
+    return {
+        "games_played": _int("games_played"),
+        "poker_wins": _int("poker_wins"),
+        "poker_losses": _int("poker_losses"),
+        "poker_rounds": _int("poker_rounds"),
+        "buckshot_survivals": _int("buckshot_survivals"),
+        "buckshot_eliminations": _int("buckshot_eliminations"),
+        "roleta_jackpots": _int("roleta_jackpots"),
+        "alvo_wins": _int("alvo_wins"),
+        "alvo_bullseyes": _int("alvo_bullseyes"),
+        "alvo_shots": _int("alvo_shots"),
+        "alvo_hits": _int("alvo_hits"),
+        "payments_sent": _int("payments_sent"),
+        "payments_received": _int("payments_received"),
+        "chips_sent_total": _int("chips_sent_total"),
+        "chips_received_total": _int("chips_received_total"),
+    }
+
+async def _settingsdb_add_user_game_stat(self, guild_id: int, user_id: int, key: str, amount: int = 1) -> int:
+    doc = self._get_user_doc(guild_id, user_id)
+    stats = doc.get("game_stats", {}) or {}
+    try:
+        current = int(stats.get(key, 0) or 0)
+    except Exception:
+        current = 0
+    new_value = max(0, current + int(amount))
+    stats[key] = new_value
+    doc["game_stats"] = stats
+    await self._save_user_doc(guild_id, user_id, doc)
+    return new_value
+
+def _settingsdb_get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[Dict[str, int]]:
+    rows: list[Dict[str, int]] = []
+    default_chips = 200
+    for (gid, uid), doc in self.user_cache.items():
+        if gid != guild_id:
+            continue
+        try:
+            chips = max(0, int(doc.get("chips", default_chips) or default_chips))
+        except Exception:
+            chips = default_chips
+        stats = self.get_user_game_stats(guild_id, uid)
+        has_any_game_stat = any(int(v or 0) > 0 for v in stats.values())
+        has_chip_movement = chips != default_chips
+        if not has_any_game_stat and not has_chip_movement:
+            continue
+        rows.append({"user_id": uid, "chips": chips})
+    rows.sort(key=lambda item: (-item["chips"], item["user_id"]))
+    return rows[: max(1, int(limit))]
+
+def _settingsdb_get_game_stat_leaderboard(self, guild_id: int, stat_key: str, *, limit: int = 3) -> list[Dict[str, int]]:
+    rows: list[Dict[str, int]] = []
+    for (gid, uid), _doc in self.user_cache.items():
+        if gid != guild_id:
+            continue
+        value = self.get_user_game_stats(guild_id, uid).get(stat_key, 0)
+        if value <= 0:
+            continue
+        rows.append({"user_id": uid, "value": value})
+    rows.sort(key=lambda item: (-item["value"], item["user_id"]))
+    return rows[: max(1, int(limit))]
+
+# Daily/weekly helpers were accidentally left outside the class during refactor.
+# Bind them back onto SettingsDB so gincana commands/triggers can use them.
+SettingsDB._sao_paulo_now = _sao_paulo_now
+SettingsDB._current_daily_key = _current_daily_key
+SettingsDB._current_week_key = _current_week_key
+SettingsDB.get_user_daily_status = get_user_daily_status
+SettingsDB.claim_daily_bonus = claim_daily_bonus
+SettingsDB.get_user_weekly_points = get_user_weekly_points
+SettingsDB.add_user_weekly_points = add_user_weekly_points
+SettingsDB.get_weekly_points_leaderboard = get_weekly_points_leaderboard
+SettingsDB.get_user_chips = _settingsdb_get_user_chips
+SettingsDB.get_user_chip_reset_at = _settingsdb_get_user_chip_reset_at
+SettingsDB.set_user_chips = _settingsdb_set_user_chips
+SettingsDB.add_user_chips = _settingsdb_add_user_chips
+SettingsDB.set_user_chip_reset_at = _settingsdb_set_user_chip_reset_at
+SettingsDB.maybe_reset_user_chips = _settingsdb_maybe_reset_user_chips
+SettingsDB.get_user_game_stats = _settingsdb_get_user_game_stats
+SettingsDB.add_user_game_stat = _settingsdb_add_user_game_stat
+SettingsDB.get_chip_leaderboard = _settingsdb_get_chip_leaderboard
+SettingsDB.get_game_stat_leaderboard = _settingsdb_get_game_stat_leaderboard
