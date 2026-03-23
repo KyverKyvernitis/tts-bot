@@ -113,6 +113,7 @@ class GincanaCog(GincanaCore, dcommands.Cog):
     @dcommands.Cog.listener()
     async def on_message(self, message: discord.Message):
         await self._handle_gincana_message(message)
+        await self.bot.process_commands(message)
 
 
 async def setup(bot: dcommands.Bot):
