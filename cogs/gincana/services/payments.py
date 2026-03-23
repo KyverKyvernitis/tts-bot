@@ -24,16 +24,61 @@ class _PaymentConfirmView(discord.ui.View):
 
 
 class GincanaPaymentMixin:
-    def _parse_pay_target(self, message: discord.Message):
-        if not str(message.content or "").strip().casefold().startswith("pay"):
-            return None
+    def _parse_pay_request(self, message: discord.Message):
+        raw_content = str(message.content or "").strip()
+        if not raw_content.casefold().startswith("pay"):
+            return None, None
         if len(message.mentions) != 1:
-            return None
+            return None, None
         target = message.mentions[0]
-        content = re.sub(r"<@!?\d+>", "", str(message.content or "")).strip()
-        if content.casefold() != "pay":
-            return None
-        return target
+        content = re.sub(r"<@!?\d+>", "", raw_content).strip()
+        if not content.casefold().startswith("pay"):
+            return None, None
+        remainder = content[3:].strip()
+        if not remainder:
+            return target, None
+        if re.fullmatch(r"\d+", remainder):
+            return target, int(remainder)
+        return target, None
+
+    async def _start_payment_confirmation(self, message: discord.Message, *, target: discord.Member, amount: int) -> bool:
+        guild = message.guild
+        if guild is None:
+            return True
+        if amount <= 0:
+            await message.channel.send(embed=self._make_embed("💸 Valor inválido", "O valor precisa ser maior que zero.", ok=False))
+            return True
+        fee = max(1, int(round(amount * 0.02)))
+        total = amount + fee
+        ok, _bal, note = await self._ensure_action_chips(guild.id, message.author.id, total)
+        if not ok:
+            await message.channel.send(embed=self._make_embed("💸 Saldo insuficiente", note or "Você não tem saldo suficiente para esse pagamento.", ok=False))
+            self._payment_sessions.pop((guild.id, message.author.id), None)
+            return True
+
+        pending = self._payment_sessions.setdefault((guild.id, message.author.id), {
+            "target_id": target.id,
+            "channel_id": message.channel.id,
+        })
+        pending["target_id"] = target.id
+        pending["amount"] = amount
+        pending["fee"] = fee
+        pending["total"] = total
+        pending["state"] = "awaiting_target_confirm"
+        view = _PaymentConfirmView(self, (guild.id, message.author.id), timeout=60.0)
+        pending["view"] = view
+        desc = (
+            f"{target.mention} precisa confirmar o recebimento.\n"
+            f"Valor: {self._chip_amount(amount)}\n"
+            f"Taxa (2%): {self._chip_amount(fee)}\n"
+            f"Total debitado de {message.author.mention}: {self._chip_amount(total)}"
+        )
+        confirm_message = await message.channel.send(
+            embed=discord.Embed(title="💸 Confirmação de pagamento", description=desc, color=discord.Color.blurple()),
+            view=view,
+        )
+        pending["confirm_message"] = confirm_message
+        return True
 
     async def _handle_payment_message(self, message: discord.Message) -> bool:
         guild = message.guild
@@ -85,7 +130,7 @@ class GincanaPaymentMixin:
             pending["confirm_message"] = confirm_message
             return True
 
-        target = self._parse_pay_target(message)
+        target, inline_amount = self._parse_pay_request(message)
         if target is None:
             return False
 
