@@ -37,8 +37,12 @@ class GincanaPaymentMixin:
         remainder = content[3:].strip()
         if not remainder:
             return target, None
-        if re.fullmatch(r"\d+", remainder):
-            return target, int(remainder)
+        match = re.search(r"(?<!\d)(\d+)(?!\d)", remainder)
+        if match:
+            try:
+                return target, int(match.group(1))
+            except Exception:
+                return target, None
         return target, None
 
     async def _start_payment_confirmation(self, message: discord.Message, *, target: discord.Member, amount: int) -> bool:
@@ -89,15 +93,19 @@ class GincanaPaymentMixin:
 
         pending = self._payment_sessions.get((guild.id, message.author.id))
         if pending and pending.get("state") == "awaiting_amount":
-            content = str(message.content or "").strip().casefold()
-            if content == "cancelar":
+            content = str(message.content or "").strip()
+            if content.casefold() == "cancelar":
                 self._payment_sessions.pop((guild.id, message.author.id), None)
                 await message.channel.send(embed=self._make_embed("💸 Pagamento cancelado", "A transferência foi cancelada antes de informar o valor.", ok=False))
                 return True
+            amount_match = re.search(r"(?<!\d)(\d+)(?!\d)", content)
+            if not amount_match:
+                await message.channel.send(embed=self._make_embed("💸 Valor inválido", "Envie um valor inteiro positivo ou digite **cancelar**.", ok=False))
+                return True
             try:
-                amount = int(str(message.content or "").strip())
+                amount = int(amount_match.group(1))
             except Exception:
-                await message.channel.send(embed=self._make_embed("💸 Valor inválido", "Envie apenas um número inteiro positivo ou digite **cancelar**.", ok=False))
+                await message.channel.send(embed=self._make_embed("💸 Valor inválido", "Envie um valor inteiro positivo ou digite **cancelar**.", ok=False))
                 return True
             if amount <= 0:
                 await message.channel.send(embed=self._make_embed("💸 Valor inválido", "O valor precisa ser maior que zero.", ok=False))
