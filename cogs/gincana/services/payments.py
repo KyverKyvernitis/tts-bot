@@ -48,18 +48,17 @@ class GincanaPaymentMixin:
     def _build_payment_confirm_embed(self, guild: discord.Guild, payer_id: int, session: dict) -> discord.Embed:
         payer = guild.get_member(payer_id)
         target = guild.get_member(int(session.get("target_id") or 0))
-        amount = int(session.get("amount") or 0)
+        gross_amount = int(session.get("amount") or 0)
         fee = int(session.get("fee") or 0)
-        total = int(session.get("total") or 0)
+        net_amount = int(session.get("net_amount") or 0)
 
         payer_text = payer.mention if payer else "Pagador"
         target_text = target.mention if target else "Destinatário"
         desc = (
             f"{payer_text} → {target_text}\n\n"
-            f"Valor: {self._chip_amount(amount)}\n"
-            f"Valor enviado: {self._chip_amount(amount)}\n"
-            f"Imposto (2%): {self._chip_amount(fee)}\n"
-            f"Total debitado: {self._chip_amount(total)}"
+            f"Transferência: {self._chip_amount(gross_amount)}\n"
+            f"Imposto: {self._chip_amount(fee)}\n"
+            f"Recebe: {self._chip_amount(net_amount)}"
         )
         return discord.Embed(title="💸 Confirmar pagamento", description=desc, color=discord.Color.blurple())
 
@@ -91,8 +90,12 @@ class GincanaPaymentMixin:
         if amount <= 0:
             await message.channel.send(embed=self._make_embed("💸 Valor inválido", "O valor precisa ser maior que zero.", ok=False))
             return True
-        fee = max(1, int(round(amount * 0.02)))  # imposto cobrado do pagador
-        total = amount + fee
+        fee = max(1, int(round(amount * 0.02)))
+        net_amount = amount - fee
+        if net_amount <= 0:
+            await message.channel.send(embed=self._make_embed("💸 Valor inválido", "O valor é muito baixo para essa transferência.", ok=False))
+            return True
+        total = amount
         ok, _bal, note = await self._ensure_action_chips(guild.id, message.author.id, total)
         if not ok:
             await message.channel.send(embed=self._make_embed("💸 Saldo insuficiente", note or "Você não tem saldo suficiente para esse pagamento.", ok=False))
@@ -108,6 +111,7 @@ class GincanaPaymentMixin:
             "target_id": target.id,
             "amount": amount,
             "fee": fee,
+            "net_amount": net_amount,
             "total": total,
             "state": "awaiting_both_confirm",
             "payer_confirmed": False,
@@ -252,6 +256,7 @@ class GincanaPaymentMixin:
 
         amount = int(session.get("amount") or 0)
         fee = int(session.get("fee") or 0)
+        net_amount = int(session.get("net_amount") or 0)
         total = int(session.get("total") or 0)
         ok, _balance, note = await self._ensure_action_chips(guild.id, payer.id, total)
         if not ok:
@@ -266,13 +271,13 @@ class GincanaPaymentMixin:
             return
 
         await self.db.add_user_chips(guild.id, payer.id, -total)
-        await self.db.add_user_chips(guild.id, target.id, amount)
+        await self.db.add_user_chips(guild.id, target.id, net_amount)
         await self.db.add_user_game_stat(guild.id, payer.id, "payments_sent", 1)
         await self.db.add_user_game_stat(guild.id, target.id, "payments_received", 1)
-        await self.db.add_user_game_stat(guild.id, payer.id, "chips_sent_total", amount)
-        await self.db.add_user_game_stat(guild.id, target.id, "chips_received_total", amount)
-        await self._grant_weekly_points(guild.id, payer.id, max(1, amount // 10))
-        await self._grant_weekly_points(guild.id, target.id, max(1, amount // 20))
+        await self.db.add_user_game_stat(guild.id, payer.id, "chips_sent_total", total)
+        await self.db.add_user_game_stat(guild.id, target.id, "chips_received_total", net_amount)
+        await self._grant_weekly_points(guild.id, payer.id, max(1, total // 10))
+        await self._grant_weekly_points(guild.id, target.id, max(1, net_amount // 20))
         self._payment_sessions.pop(session_key, None)
         try:
             await interaction.response.edit_message(
@@ -280,7 +285,7 @@ class GincanaPaymentMixin:
                     title="✅ Pagamento concluído",
                     description=(
                         f"{payer.mention} enviou {self._chip_amount(amount)} para {target.mention}.\n"
-                        f"Imposto: {self._chip_amount(fee)}"
+                        f"Taxa: {self._chip_amount(fee)}"
                     ),
                     color=discord.Color.green(),
                 ),
