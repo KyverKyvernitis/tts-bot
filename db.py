@@ -574,6 +574,8 @@ class SettingsDB:
             "roleta_jackpots": _int("roleta_jackpots"),
             "alvo_wins": _int("alvo_wins"),
             "alvo_bullseyes": _int("alvo_bullseyes"),
+            "alvo_shots": _int("alvo_shots"),
+            "alvo_hits": _int("alvo_hits"),
         }
 
     async def add_user_game_stat(self, guild_id: int, user_id: int, key: str, amount: int = 1) -> int:
