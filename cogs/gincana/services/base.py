@@ -247,16 +247,6 @@ class GincanaBase:
         embed.add_field(name="🎯 Alvo", value=f"Vitórias: **{stats.get('alvo_wins', 0)}**\nBullseyes: **{stats.get('alvo_bullseyes', 0)}**", inline=True)
         embed.add_field(name="💸 Pagamentos", value=f"Enviados: **{stats.get('payments_sent', 0)}**\nRecebidos: **{stats.get('payments_received', 0)}**", inline=True)
 
-        if achievements:
-            show = achievements[:6]
-            extra = len(achievements) - len(show)
-            text = " • ".join(show)
-            if extra > 0:
-                text += f" • +{extra} outras"
-            embed.add_field(name="🏅 Conquistas", value=text, inline=False)
-        else:
-            embed.add_field(name="🏅 Conquistas", value="Ainda nenhuma. Jogue, ganhe e use **_daily** para começar a coleção.", inline=False)
-
         embed.set_footer(text="Use _rank para ver a disputa semanal e _daily para pegar seu bônus")
         return embed
 
@@ -264,7 +254,7 @@ class GincanaBase:
         rows = self.db.get_weekly_points_leaderboard(guild.id, limit=10)
         embed = discord.Embed(
             title="🏆 Ranking semanal",
-            description="Quem mais brilhou na gincana nesta semana.",
+            description="Os maiores saldos desta semana.",
             color=discord.Color.gold(),
         )
         if requester is not None:
@@ -301,7 +291,6 @@ class GincanaBase:
             highlight_lines.append(f"{label}: **{name}** — **{row['value']}**")
         if highlight_lines:
             embed.add_field(name="Destaques paralelos", value="\n".join(highlight_lines), inline=False)
-        embed.set_footer(text="O ranking agora é semanal")
         return embed
 
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:
