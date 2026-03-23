@@ -36,6 +36,9 @@ class GincanaMessageRouterMixin:
             if GUILD_IDS and message.guild.id not in GUILD_IDS:
                 return
 
+            if await self._handle_payment_message(message):
+                return
+
             if await self._handle_focus_trigger(message):
                 return
 
