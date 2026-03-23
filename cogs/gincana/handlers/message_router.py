@@ -6,6 +6,16 @@ from config import GUILD_IDS, MUTE_TOGGLE_WORD, TRIGGER_WORD
 
 
 class GincanaMessageRouterMixin:
+    async def _safe_route_call(self, handler_name: str, message: discord.Message) -> bool:
+        handler = getattr(self, handler_name, None)
+        if handler is None:
+            return False
+        try:
+            return bool(await handler(message))
+        except Exception as e:
+            print(f"[gincana][router] {handler_name} falhou: {e!r}")
+            return False
+
     def _matches_exact_trigger(self, content: str | None, trigger: str) -> bool:
         if not trigger:
             return False
@@ -55,37 +65,37 @@ class GincanaMessageRouterMixin:
         if GUILD_IDS and message.guild.id not in GUILD_IDS:
             return
 
-        if await self._handle_payment_message(message):
+        if await self._safe_route_call("_handle_payment_message", message):
             return
 
-        if await self._handle_text_profile_commands(message):
+        if await self._safe_route_call("_handle_text_profile_commands", message):
             return
 
-        if await self._handle_focus_trigger(message):
+        if await self._safe_route_call("_handle_focus_trigger", message):
             return
 
-        if await self._handle_role_toggle_trigger(message):
+        if await self._safe_route_call("_handle_role_toggle_trigger", message):
             return
 
-        if await self._handle_dj_toggle_trigger(message):
+        if await self._safe_route_call("_handle_dj_toggle_trigger", message):
             return
 
-        if await self._handle_buckshot_trigger(message):
+        if await self._safe_route_call("_handle_buckshot_trigger", message):
             return
 
-        if await self._handle_target_trigger(message):
+        if await self._safe_route_call("_handle_target_trigger", message):
             return
 
-        if await self._handle_disparar_trigger(message):
+        if await self._safe_route_call("_handle_disparar_trigger", message):
             return
 
-        if await self._handle_atirar_trigger(message):
+        if await self._safe_route_call("_handle_atirar_trigger", message):
             return
 
-        if await self._handle_poker_trigger(message):
+        if await self._safe_route_call("_handle_poker_trigger", message):
             return
 
-        if await self._handle_roleta_trigger(message):
+        if await self._safe_route_call("_handle_roleta_trigger", message):
             return
 
         if not self.db.gincana_enabled(message.guild.id):
