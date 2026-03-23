@@ -57,8 +57,9 @@ class GincanaPaymentMixin:
         desc = (
             f"{payer_text} → {target_text}\n\n"
             f"Valor: {self._chip_amount(amount)}\n"
-            f"Taxa: {self._chip_amount(fee)}\n"
-            f"Total: {self._chip_amount(total)}"
+            f"Valor enviado: {self._chip_amount(amount)}\n"
+            f"Imposto (2%): {self._chip_amount(fee)}\n"
+            f"Total debitado: {self._chip_amount(total)}"
         )
         return discord.Embed(title="💸 Confirmar pagamento", description=desc, color=discord.Color.blurple())
 
@@ -90,7 +91,7 @@ class GincanaPaymentMixin:
         if amount <= 0:
             await message.channel.send(embed=self._make_embed("💸 Valor inválido", "O valor precisa ser maior que zero.", ok=False))
             return True
-        fee = max(1, int(round(amount * 0.02)))
+        fee = max(1, int(round(amount * 0.02)))  # imposto cobrado do pagador
         total = amount + fee
         ok, _bal, note = await self._ensure_action_chips(guild.id, message.author.id, total)
         if not ok:
@@ -279,7 +280,7 @@ class GincanaPaymentMixin:
                     title="✅ Pagamento concluído",
                     description=(
                         f"{payer.mention} enviou {self._chip_amount(amount)} para {target.mention}.\n"
-                        f"Taxa: {self._chip_amount(fee)}"
+                        f"Imposto: {self._chip_amount(fee)}"
                     ),
                     color=discord.Color.green(),
                 ),
