@@ -26,7 +26,7 @@ from ..constants import (
 
 class GincanaAudioMixin:
         def _sfx_path(self, filename: str) -> Path:
-            return Path(__file__).resolve().parents[2] / "assets" / "sfx" / filename
+            return Path(__file__).resolve().parents[3] / "assets" / "sfx" / filename
         def _buckshot_sfx_path(self) -> Path:
             return self._sfx_path("buckshot.mp3")
         def _pinto_sfx_path(self) -> Path:
