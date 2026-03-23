@@ -200,6 +200,16 @@ class BotLocal(commands.Bot):
         if self._health_task is None or self._health_task.done():
             self._health_task = asyncio.create_task(self._health_monitor_loop())
 
+
+
+    async def on_message(self, message: discord.Message):
+        if getattr(message.author, "bot", False):
+            return
+        try:
+            await self.process_commands(message)
+        except Exception as e:
+            print(f"[bot] falha ao processar comandos: {e!r}")
+
     async def on_app_command_error(
         self,
         interaction: discord.Interaction,
