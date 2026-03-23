@@ -260,7 +260,7 @@ class GincanaRoletaMixin:
                         )
                     else:
                         await self._record_game_played(guild.id, message.author.id, weekly_points=2)
-                        summary = f"💨 Dessa vez a casa venceu. Você perdeu {self._chip_amount(ROLETA_COST)}."
+                        summary = f"Você perdeu {self._chip_amount(ROLETA_COST)}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed(
