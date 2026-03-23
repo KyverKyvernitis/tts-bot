@@ -7,7 +7,7 @@ from .cog import GincanaCore
 from .constants import _guild_scoped
 
 
-class GincanaCog(GincanaCore, dcommands.Cog):
+class GincanaCog(dcommands.Cog, GincanaCore):
     @_guild_scoped()
     @app_commands.command(name="gincana", description="Gerencia as roles e modos da gincana")
     @app_commands.describe(
