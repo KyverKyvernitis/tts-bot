@@ -23,6 +23,8 @@ class GincanaMessageRouterMixin:
 
     async def _handle_text_profile_commands(self, message: discord.Message) -> bool:
         content = str(message.content or "").strip().casefold()
+        if content.startswith("_"):
+            content = content[1:].strip()
         if content not in {"ficha", "fichas", "rank", "leaderboard", "daily", "bonus", "login"}:
             return False
         if message.guild is None:
