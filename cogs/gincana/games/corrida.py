@@ -33,9 +33,9 @@ _RACE_SPECIALS = [
 ]
 
 _RACE_IMPULSE_WINDOWS = (1, 6, 11)
-_RACE_IMPULSE_INITIAL_DELAY = 2.0
+_RACE_IMPULSE_INITIAL_DELAY = 0.0
 _RACE_IMPULSE_STEP_SECONDS = 2.0
-_RACE_IMPULSE_BUTTON_COUNT = 6
+_RACE_IMPULSE_BUTTON_COUNT = 4
 _RACE_IMPULSE_EMOJI = "⚡"
 
 
@@ -182,7 +182,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             return [
                 "# ⚡ Evento de impulso",
                 f"**Fase:** {self.stage_name}",
-                "Prepare-se. O primeiro botão acende em 2 segundos.",
+                "Prepare-se. O primeiro botão pode acender a qualquer momento.",
             ]
         return [
             "# ⚡ Evento de impulso",
@@ -192,8 +192,9 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
 
     def _rebuild(self):
         self.clear_items()
-        row1 = discord.ui.ActionRow(*self.buttons[:3])
-        row2 = discord.ui.ActionRow(*self.buttons[3:])
+        split_index = max(1, (_RACE_IMPULSE_BUTTON_COUNT + 1) // 2)
+        row1 = discord.ui.ActionRow(*self.buttons[:split_index])
+        row2 = discord.ui.ActionRow(*self.buttons[split_index:])
         container = discord.ui.Container(
             discord.ui.TextDisplay("\n".join(self._build_header_lines())),
             discord.ui.Separator(),
@@ -270,8 +271,14 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
     def _bonus_for_reaction_time(self, reaction_time: float | None) -> float:
         if reaction_time is None or reaction_time >= _RACE_IMPULSE_STEP_SECONDS:
             return 0.0
-        quality = max(0.0, 1.0 - (float(reaction_time) / _RACE_IMPULSE_STEP_SECONDS))
-        return round(0.04 + (quality * 0.16), 3)
+        reaction_time = float(reaction_time)
+        if reaction_time <= 0.35:
+            return 0.42
+        if reaction_time <= 0.75:
+            return 0.32
+        if reaction_time <= 1.20:
+            return 0.22
+        return 0.12
 
     def _apply_results(self, *, up_to_step: int | None = None):
         pending = self.session.setdefault("pending_impulse_bonus", {})
@@ -726,7 +733,8 @@ class GincanaCorridaMixin:
             session["active_impulse_message"] = event_message
             event_view.message = event_message
             await event_view.refresh_message()
-            await asyncio.sleep(_RACE_IMPULSE_INITIAL_DELAY)
+            if _RACE_IMPULSE_INITIAL_DELAY > 0:
+                await asyncio.sleep(_RACE_IMPULSE_INITIAL_DELAY)
             for step_index in range(_RACE_IMPULSE_BUTTON_COUNT):
                 if session.get("ended"):
                     break
