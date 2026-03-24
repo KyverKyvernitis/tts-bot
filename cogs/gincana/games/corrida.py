@@ -681,6 +681,18 @@ class GincanaCorridaMixin:
         try:
             await self._finish_race_lobby(guild.id, reason="manual_start", source_view=view)
         except Exception:
+            fresh_session = self._race_sessions.get(guild.id)
+            if fresh_session is not None and not fresh_session.get("ended"):
+                fresh_session["starting"] = False
+                fresh_session["started"] = False
+                fresh_session["impulse_status"] = ""
+                fresh_session["active_impulse_task"] = None
+                fresh_session["active_impulse_message"] = None
+                fresh_session["_last_render_key"] = None
+                try:
+                    await self._refresh_race_message(guild.id)
+                except Exception:
+                    pass
             try:
                 await interaction.followup.send("Não foi possível iniciar a corrida agora.", ephemeral=True)
             except Exception:
@@ -956,31 +968,6 @@ class GincanaCorridaMixin:
             self._race_sessions.pop(guild_id, None)
             return False
 
-        session["starting"] = True
-        session["started"] = True
-        session["narration"] = "📣 A corrida começou."
-        session["arrival_groups"] = []
-        session["pending_impulse_bonus"] = {}
-        session["finish_meta"] = {}
-        session["early_rank_snapshot"] = {}
-        session["best_impulse"] = None
-        session["stale_ticks"] = 0
-        session["impulse_status"] = ""
-        session["impulse_tasks"] = []
-        session["impulse_ticks_fired"] = set()
-        session["active_impulse_message"] = None
-        session["active_impulse_task"] = None
-        session["_visible_before_progress"] = {member.id: float(progress.get(member.id, 0.0)) for member in participants}
-        session["_last_render_key"] = None
-        lobby_message = session.get("message")
-        view = session.get("view")
-        if isinstance(view, (discord.ui.View, discord.ui.LayoutView)):
-            try:
-                view.stop()
-            except Exception:
-                pass
-        session["view"] = None
-
         participants = self._get_race_participants(guild, session)
         locked_ids = set(session.get("locked_participants", set()))
         if len(locked_ids) == 1:
@@ -1006,6 +993,30 @@ class GincanaCorridaMixin:
             progress[member.id] = 0.0
             state_map[member.id] = _HORSE_START
             await self._record_game_played(guild.id, member.id, weekly_points=4)
+
+        session["starting"] = True
+        session["started"] = True
+        session["narration"] = "📣 A corrida começou."
+        session["arrival_groups"] = []
+        session["pending_impulse_bonus"] = {}
+        session["finish_meta"] = {}
+        session["early_rank_snapshot"] = {}
+        session["best_impulse"] = None
+        session["stale_ticks"] = 0
+        session["impulse_status"] = ""
+        session["impulse_tasks"] = []
+        session["impulse_ticks_fired"] = set()
+        session["active_impulse_message"] = None
+        session["active_impulse_task"] = None
+        session["_visible_before_progress"] = {member.id: float(progress.get(member.id, 0.0)) for member in participants}
+        session["_last_render_key"] = None
+        view = session.get("view")
+        if isinstance(view, (discord.ui.View, discord.ui.LayoutView)):
+            try:
+                view.stop()
+            except Exception:
+                pass
+        session["view"] = None
 
         await self._refresh_race_message(guild.id)
         await asyncio.sleep(1.0)
