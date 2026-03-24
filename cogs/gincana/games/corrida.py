@@ -35,7 +35,8 @@ _RACE_SPECIALS = [
 _RACE_IMPULSE_WINDOWS = (1, 6, 11)
 _RACE_IMPULSE_INITIAL_DELAY = 0.0
 _RACE_IMPULSE_STEP_SECONDS = 2.0
-_RACE_IMPULSE_BUTTON_COUNT = 4
+_RACE_IMPULSE_BUTTON_COUNT = 6
+_RACE_IMPULSE_STAGE_COUNT = 3
 _RACE_IMPULSE_EMOJI = "⚡"
 
 
@@ -155,7 +156,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.step_index = -1
         self.active_index: int | None = None
         self.active_started_at = 0.0
-        self.order = random.sample(range(_RACE_IMPULSE_BUTTON_COUNT), _RACE_IMPULSE_BUTTON_COUNT)
+        self.order = random.sample(range(_RACE_IMPULSE_BUTTON_COUNT), _RACE_IMPULSE_STAGE_COUNT)
         self.results: dict[int, dict] = {}
         self.edit_lock = asyncio.Lock()
         self.press_lock = asyncio.Lock()
@@ -188,12 +189,12 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         return [
             "# ⚡ Evento de impulso",
             f"**Fase:** {self.stage_name}",
-            f"Aperte o botão cinza que acendeu. **Etapa {self.step_index + 1}/{_RACE_IMPULSE_BUTTON_COUNT}**",
+            f"Aperte o botão cinza que acendeu. **Etapa {self.step_index + 1}/{_RACE_IMPULSE_STAGE_COUNT}**",
         ]
 
     def _rebuild(self):
         self.clear_items()
-        split_index = max(1, (_RACE_IMPULSE_BUTTON_COUNT + 1) // 2)
+        split_index = 3
         row1 = discord.ui.ActionRow(*self.buttons[:split_index])
         row2 = discord.ui.ActionRow(*self.buttons[split_index:])
         container = discord.ui.Container(
@@ -233,10 +234,10 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             if user.id not in set(self.session.get("locked_participants", set()) or []):
                 return
 
-            entry = self.results.setdefault(user.id, {"times": [None] * _RACE_IMPULSE_BUTTON_COUNT, "credited_steps": 0})
+            entry = self.results.setdefault(user.id, {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "credited_steps": 0})
             times = entry["times"]
             current_step = int(self.step_index)
-            if current_step < 0 or current_step >= _RACE_IMPULSE_BUTTON_COUNT:
+            if current_step < 0 or current_step >= _RACE_IMPULSE_STAGE_COUNT:
                 return
             if times[current_step] is not None:
                 return
@@ -267,7 +268,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         if current_step < 0:
             return
         for user_id in set(self.session.get("locked_participants", set()) or []):
-            entry = self.results.setdefault(int(user_id), {"times": [None] * _RACE_IMPULSE_BUTTON_COUNT, "credited_steps": 0})
+            entry = self.results.setdefault(int(user_id), {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "credited_steps": 0})
             if entry["times"][current_step] is None:
                 entry["times"][current_step] = _RACE_IMPULSE_STEP_SECONDS
 
@@ -307,6 +308,11 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         valid_count = elite + fast + quick + valid
         fast_or_better = elite + fast
         quick_or_better = elite + fast + quick
+        valid_times = sorted(
+            float(reaction_time)
+            for reaction_time in times
+            if reaction_time is not None and reaction_time < _RACE_IMPULSE_STEP_SECONDS
+        )
         return {
             "elite": elite,
             "fast": fast,
@@ -315,6 +321,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             "valid_count": valid_count,
             "fast_or_better": fast_or_better,
             "quick_or_better": quick_or_better,
+            "valid_times": valid_times,
             "total_valid_time": round(total_valid_time, 6),
             "best_time": float(best_time),
         }
@@ -323,7 +330,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         valid_count = int(metrics.get("valid_count", 0) or 0)
         if valid_count <= 0 or considered_steps <= 0:
             return 0.0
-        completion_scale = min(1.0, max(0.25, considered_steps / float(_RACE_IMPULSE_BUTTON_COUNT)))
+        completion_scale = min(1.0, max(0.34, considered_steps / float(_RACE_IMPULSE_STAGE_COUNT)))
         if rank_index == 0:
             return round(0.90 * completion_scale, 3)
         if rank_index == 1:
@@ -348,13 +355,18 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         return round(bonus, 3)
 
     def _ranking_sort_key(self, user_id: int, metrics: dict[str, float | int]) -> tuple:
+        sorted_valid_times = sorted(
+            float(t) for t in (metrics.get("valid_times") or [])
+            if t is not None and t < _RACE_IMPULSE_STEP_SECONDS
+        )
+        pad = [_RACE_IMPULSE_STEP_SECONDS + 1.0] * max(0, _RACE_IMPULSE_STAGE_COUNT - len(sorted_valid_times))
+        lexicographic_times = tuple(sorted_valid_times + pad)
         return (
             -int(metrics.get("valid_count", 0) or 0),
-            -int(metrics.get("fast_or_better", 0) or 0),
-            -int(metrics.get("elite", 0) or 0),
-            -int(metrics.get("quick_or_better", 0) or 0),
+            lexicographic_times,
             float(metrics.get("total_valid_time", 0.0) or 0.0),
-            float(metrics.get("best_time", _RACE_IMPULSE_STEP_SECONDS) or _RACE_IMPULSE_STEP_SECONDS),
+            -int(metrics.get("elite", 0) or 0),
+            -int(metrics.get("fast_or_better", 0) or 0),
             int(user_id),
         )
 
@@ -362,7 +374,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         if up_to_step is None and self._results_applied:
             return
         pending = self.session.setdefault("pending_impulse_bonus", {})
-        max_step = _RACE_IMPULSE_BUTTON_COUNT - 1 if up_to_step is None else max(-1, min(_RACE_IMPULSE_BUTTON_COUNT - 1, int(up_to_step)))
+        max_step = _RACE_IMPULSE_STAGE_COUNT - 1 if up_to_step is None else max(-1, min(_RACE_IMPULSE_STAGE_COUNT - 1, int(up_to_step)))
         considered_steps = max_step + 1
         if considered_steps <= 0:
             return
@@ -370,10 +382,10 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         participants = [int(user_id) for user_id in set(self.session.get("locked_participants", set()) or [])]
         scored_entries: list[tuple[tuple, int, dict, float, float, dict]] = []
         for user_id in participants:
-            entry = self.results.setdefault(user_id, {"times": [None] * _RACE_IMPULSE_BUTTON_COUNT, "credited_steps": 0, "applied_bonus_total": 0.0})
+            entry = self.results.setdefault(user_id, {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "credited_steps": 0, "applied_bonus_total": 0.0})
             times = list(entry.get("times") or [])
-            if len(times) < _RACE_IMPULSE_BUTTON_COUNT:
-                times.extend([None] * (_RACE_IMPULSE_BUTTON_COUNT - len(times)))
+            if len(times) < _RACE_IMPULSE_STAGE_COUNT:
+                times.extend([None] * (_RACE_IMPULSE_STAGE_COUNT - len(times)))
             normalized_times: list[float] = []
             for step in range(considered_steps):
                 reaction_time = times[step]
@@ -847,7 +859,7 @@ class GincanaCorridaMixin:
                 raise discord.NotFound(response=None, message="Impulse event message disappeared")
             if _RACE_IMPULSE_INITIAL_DELAY > 0:
                 await asyncio.sleep(_RACE_IMPULSE_INITIAL_DELAY)
-            for step_index in range(_RACE_IMPULSE_BUTTON_COUNT):
+            for step_index in range(_RACE_IMPULSE_STAGE_COUNT):
                 if session.get("ended") or event_view.message is None:
                     break
                 event_view._activate_step(step_index)
