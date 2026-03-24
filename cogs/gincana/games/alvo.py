@@ -644,19 +644,31 @@ class _TargetStateView(discord.ui.LayoutView):
         modifier = session.get('modifier') or {'name': 'Alvo padrão'}
         participants = cog._get_target_participants(guild, session)
         if finished:
-            title = '# 🎯 Resultado do alvo'
-            details = session.get('result_lines') or ['A rodada terminou.']
+            summary = session.get('summary_line') or f"{cog._CHIP_GAIN_EMOJI} Prêmio: {cog._chip_amount(int(session.get('prize_total') or 0))}"
+            hits = session.get('hit_lines') or ['A rodada terminou.']
+            podium = session.get('podium_lines') or []
+            closing = session.get('closing_line') or None
+            items = [
+                discord.ui.TextDisplay('# 🎯 Resultado do alvo\n' + f"**Condição:** {modifier.get('name','Alvo padrão')}\n" + f"**Participantes:** {len(participants)}"),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(summary),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay('\n'.join(hits)),
+            ]
+            if podium:
+                items.extend([discord.ui.Separator(), discord.ui.TextDisplay('\n'.join(podium))])
+            if closing:
+                items.extend([discord.ui.Separator(), discord.ui.TextDisplay(closing)])
+            self.add_item(discord.ui.Container(*items, accent_color=discord.Color.blurple()))
         else:
-            title = '# 🎯 Rodada iniciada'
-            details = ['A mira está sendo ajustada...']
-        lines = [
-            title,
-            f"**Condição:** {modifier.get('name','Alvo padrão')}",
-            f"**Participantes:** {len(participants)}",
-            '',
-            *details,
-        ]
-        self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.blurple()))
+            lines = [
+                '# 🎯 Rodada iniciada',
+                f"**Condição:** {modifier.get('name','Alvo padrão')}",
+                f"**Participantes:** {len(participants)}",
+                '',
+                'A mira está sendo ajustada.',
+            ]
+            self.add_item(discord.ui.Container(discord.ui.TextDisplay('\n'.join(lines)), accent_color=discord.Color.blurple()))
 
 
 class GincanaAlvoMixin(GincanaAlvoMixin):
@@ -815,7 +827,8 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 pass
         scores = {member.id: self._roll_target_score(str(modifier.get('key', 'normal'))) for member in participants}
         rewards, placements = self._allocate_target_rewards(participants, scores, pot_total + bonus_chips)
-        result_lines = [f"💥 Os tiros foram disparados. {self._CHIP_GAIN_EMOJI} Pote final: {self._chip_amount(pot_total)}", ""]
+        prize_total = pot_total + bonus_chips
+        hit_lines = []
         bullseye_members = []
         for member in sorted(participants, key=lambda m: (-scores.get(m.id, 0), m.display_name.casefold())):
             score = scores.get(member.id, 0)
@@ -824,31 +837,51 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             await self._record_game_played(guild.id, member.id, weekly_points=4 + score)
             if score > 0:
                 await self.db.add_user_game_stat(guild.id, member.id, 'alvo_hits', 1)
-            result_lines.append(f"{icon} {member.mention} acertou **{zone}**.")
+            hit_lines.append(f"{icon} {member.mention} — **{zone}**")
             if score == 3:
                 bullseye_members.append(member)
                 await self.db.add_user_game_stat(guild.id, member.id, 'alvo_bullseyes', 1)
+        bonus_line = None
         if bullseye_members:
-            names = ", ".join(member.mention for member in bullseye_members)
-            result_lines += ["", f"🎯 Bullseye de destaque: {names}!"]
             bull_bonus = int(modifier.get('bullseye_bonus', 0) or 0)
             if bull_bonus > 0:
                 for member in bullseye_members:
                     await self.db.add_user_chips(guild.id, member.id, bull_bonus)
                     await self._grant_weekly_points(guild.id, member.id, bull_bonus)
-                result_lines.append(f"✨ Cada bullseye recebeu um bônus de {self._chip_amount(bull_bonus)}.")
+                bonus_line = f"✨ Bullseye bônus: {self._chip_amount(bull_bonus)} para cada acerto no centro."
+        podium_lines = []
+        winner_mentions = []
         if rewards:
-            result_lines.append("")
             for badge, members, total in placements:
                 names = ', '.join(member.mention for member in members)
-                result_lines.append(f"{badge} {names} — {self._chip_amount(total)}")
+                podium_lines.append(f"{badge} {names} — {self._chip_amount(total)}")
+                if badge == '🥇':
+                    winner_mentions.extend(member.mention for member in members)
             for user_id, amount in rewards.items():
                 if amount > 0:
                     await self.db.add_user_chips(guild.id, user_id, amount)
                     await self._grant_weekly_points(guild.id, user_id, max(3, amount // 4))
+        closing_parts = []
+        if winner_mentions:
+            if len(winner_mentions) == 1:
+                closing_parts.append(f"🔥 {winner_mentions[0]} levou a melhor.")
+            else:
+                closing_parts.append(f"🔥 {', '.join(winner_mentions)} dividiram a ponta.")
         special_lines = self._build_target_special_lines(participants, scores, placements)
         if special_lines:
-            result_lines += ["", *special_lines]
+            closing_parts.extend(line for line in special_lines if line not in closing_parts)
+        if bonus_line:
+            closing_parts.append(bonus_line)
+        session['summary_line'] = f"<:boom:1485862099308804107> Os tiros foram disparados. {self._CHIP_GAIN_EMOJI} Prêmio: {self._chip_amount(prize_total)}"
+        session['hit_lines'] = hit_lines
+        session['podium_lines'] = podium_lines
+        session['closing_line'] = '\n'.join(closing_parts[:3]) if closing_parts else None
+        session['prize_total'] = prize_total
+        result_lines = [session['summary_line'], '', *hit_lines]
+        if podium_lines:
+            result_lines += ['', *podium_lines]
+        if session['closing_line']:
+            result_lines += ['', session['closing_line']]
         final_text = "\n".join(result_lines)
         session['result_lines'] = result_lines
         if message is not None:

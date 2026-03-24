@@ -375,9 +375,9 @@ class _BuckshotJoinView(discord.ui.LayoutView):
         self.guild_id = guild_id
         self.session = session
         self.guild = guild
-        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label='💥 Entrar (0)')
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label='Entrar (0)', emoji=discord.PartialEmoji.from_str('<:propergun:1485855162198396959>'))
         self.join_button.callback = self._toggle_join
-        self.start_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label='💥 Atirar')
+        self.start_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label='Atirar', emoji='💥')
         self.start_button.callback = self._start_round
         self._build_layout()
 
@@ -386,12 +386,12 @@ class _BuckshotJoinView(discord.ui.LayoutView):
         participants = self.cog._get_buckshot_participants(self.guild, self.session)
         payout_total = len(participants) * BUCKSHOT_STAKE
         countdown = int(self.session.get('start_countdown') or 0)
-        self.join_button.label = f"💥 Entrar ({len(participants)})"
+        self.join_button.label = f"Entrar ({len(participants)})"
         if countdown > 0:
-            self.start_button.label = f"💥 Atirar ({countdown})"
+            self.start_button.label = f"Atirar ({countdown})"
             self.start_button.disabled = True
         else:
-            self.start_button.label = '💥 Atirar'
+            self.start_button.label = 'Atirar'
             self.start_button.disabled = False
         lines1 = ["# <:gunforward:1484655577836683434> Roleta russa", f"**Entrada:** {self.cog._chip_amount(BUCKSHOT_STAKE)}", f"**Pote atual:** {self.cog._chip_amount(payout_total)}", "**Lobby:** **30s**"]
         plist = [f"### Participantes ({len(participants)})"]
@@ -399,7 +399,7 @@ class _BuckshotJoinView(discord.ui.LayoutView):
             plist.extend(f"• {m.mention}" for m in participants)
         else:
             plist.append('• Ninguém entrou ainda.')
-        foot = ['Entre pelo botão verde.', 'O criador da rodada ou a staff pode começar com 💥 quando houver pelo menos 2 participantes.']
+        foot = ['Entre pelo botão abaixo.', 'O criador da rodada ou a staff pode começar quando houver pelo menos 2 participantes.']
         if countdown > 0:
             foot.append('A contagem começou e ainda dá tempo de entrar.')
         row = discord.ui.ActionRow(self.join_button, self.start_button)
@@ -563,7 +563,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 await self.db.add_user_chips(guild.id, uid, BUCKSHOT_STAKE)
             if lobby_message is not None:
                 try:
-                    await lobby_message.edit(view=_BuckshotLobbyClosedView('💥 Rodada cancelada', [
+                    await lobby_message.edit(view=_BuckshotLobbyClosedView('<a:r_gun01:1484661880323838002> Rodada cancelada', [
                         'Não ficaram participantes suficientes.',
                         'As entradas foram devolvidas.',
                     ]))
@@ -614,7 +614,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
 
         if lobby_message is not None:
             try:
-                await lobby_message.edit(view=_BuckshotLobbyClosedView('💥 Resultado do buckshot', lines))
+                await lobby_message.edit(view=_BuckshotLobbyClosedView('<:gunforward:1484655577836683434> Resultado do buckshot', lines))
             except Exception:
                 pass
         self._buckshot_sessions.pop(guild_id, None)
