@@ -52,7 +52,7 @@ class GincanaMessageRouterMixin:
                 "🕹️ **Como entra**\n"
                 "• alguns jogos abrem um lobby com botão\n"
                 "• `atirar` fecha o buckshot\n"
-                "• `disparar` fecha o alvo"
+                "• use os botões dos lobbies para começar os jogos"
             ), color=discord.Color.blurple()))
             return True
 
