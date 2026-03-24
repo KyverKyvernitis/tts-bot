@@ -245,7 +245,7 @@ class GincanaBase:
         )
         embed.add_field(name="🎰 Roleta", value=f"Jackpots: **{stats.get('roleta_jackpots', 0)}**\nCusto por giro: {self._chip_amount(ROLETA_COST)}", inline=True)
         embed.add_field(name="🎯 Alvo", value=f"Vitórias: **{stats.get('alvo_wins', 0)}**\nBullseyes: **{stats.get('alvo_bullseyes', 0)}**", inline=True)
-        embed.add_field(name="🐎 Corrida", value=f"Vitórias: **{stats.get('corrida_wins', 0)}**\nPódios: **{stats.get('corrida_podiums', 0)}**", inline=True)
+        embed.add_field(name="🐎 Corrida", value=f"Vitórias: **{stats.get('corrida_wins', 0)}**\nDerrotas: **{stats.get('corrida_losses', 0)}**\nPódios: **{stats.get('corrida_podiums', 0)}**", inline=True)
         embed.add_field(name="💸 Pagamentos", value=f"Enviados: **{stats.get('payments_sent', 0)}**\nRecebidos: **{stats.get('payments_received', 0)}**", inline=True)
 
         embed.set_footer(text="Use _rank para ver o ranking de fichas e _daily para pegar seu bônus")
