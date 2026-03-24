@@ -203,10 +203,11 @@ class GincanaCorridaMixin:
             return discord.Color.red()
         return discord.Color.orange()
 
-    def _render_race_track(self, pos: int, state_emoji: str) -> str:
-        pos = max(0, min(_CORRIDA_TRACK_LENGTH - 1, int(pos)))
-        before = "▰" * pos
-        after = "▱" * max(0, _CORRIDA_TRACK_LENGTH - pos - 1)
+    def _render_race_track(self, pos: float, state_emoji: str) -> str:
+        visual_pos = int(pos)
+        visual_pos = max(0, min(_CORRIDA_TRACK_LENGTH - 1, visual_pos))
+        before = "▰" * visual_pos
+        after = "▱" * max(0, _CORRIDA_TRACK_LENGTH - visual_pos - 1)
         return f"{before}{state_emoji}{after}"
 
     def _build_race_lines(self, guild: discord.Guild, session: dict) -> list[str]:
@@ -220,12 +221,12 @@ class GincanaCorridaMixin:
         arrival_rank = {uid: index for index, uid in enumerate(arrival_order, start=1)}
         ordered = sorted(
             participants,
-            key=lambda m: (arrival_rank.get(m.id, 9999), -int(progress_map.get(m.id, 0)), m.display_name.casefold()),
+            key=lambda m: (arrival_rank.get(m.id, 9999), -float(progress_map.get(m.id, 0.0)), m.display_name.casefold()),
         )
         lines: list[str] = []
         for index, member in enumerate(ordered, start=1):
             medal = self._race_placement_emoji(index)
-            pos = int(progress_map.get(member.id, 0))
+            pos = float(progress_map.get(member.id, 0.0))
             state_emoji = str(state_map.get(member.id) or _HORSE_START)
             if member.id in arrival_rank:
                 state_emoji = _HORSE_FINISH
@@ -256,7 +257,7 @@ class GincanaCorridaMixin:
         if not session.get("started"):
             embed.add_field(name="Entrada", value=self._chip_amount(CORRIDA_STAKE), inline=True)
             embed.add_field(name="Pote atual", value=self._chip_amount(pot_total), inline=True)
-            embed.add_field(name="Duração", value="**10s**", inline=True)
+            embed.add_field(name="Duração", value="**20s**", inline=True)
             embed.set_footer(text="Entre no lobby. O criador ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes.")
         return embed
 
@@ -322,7 +323,7 @@ class GincanaCorridaMixin:
             return
 
         locked.add(user.id)
-        session.setdefault("progress", {})[user.id] = 0
+        session.setdefault("progress", {})[user.id] = 0.0
         session.setdefault("state_map", {})[user.id] = _HORSE_START
         view.join_button.label = f"🐎 Entrar ({len(self._get_race_participants(guild, session))})"
         try:
@@ -467,7 +468,7 @@ class GincanaCorridaMixin:
             seen.add(uid)
         leftovers = sorted(
             [m for m in participants if m.id not in seen],
-            key=lambda m: (-int(progress.get(m.id, 0)), m.display_name.casefold()),
+            key=lambda m: (-float(progress.get(m.id, 0.0)), m.display_name.casefold()),
         )
         return in_order + leftovers
 
@@ -512,7 +513,7 @@ class GincanaCorridaMixin:
         progress = session.setdefault("progress", {})
         state_map = session.setdefault("state_map", {})
         for member in participants:
-            progress[member.id] = 0
+            progress[member.id] = 0.0
             state_map[member.id] = _HORSE_START
             await self._record_game_played(guild.id, member.id, weekly_points=4)
 
@@ -528,7 +529,7 @@ class GincanaCorridaMixin:
             if len(participants) < 2:
                 break
             tick_events: list[tuple[str, discord.Member]] = []
-            ordered_before = sorted(participants, key=lambda m: (-int(progress.get(m.id, 0)), m.display_name.casefold()))
+            ordered_before = sorted(participants, key=lambda m: (-float(progress.get(m.id, 0.0)), m.display_name.casefold()))
             leader_before = ordered_before[0].id if ordered_before else 0
             arrival_order: list[int] = session.setdefault("arrival_order", [])
             final_tick = tick == _CORRIDA_UPDATES - 1
@@ -539,53 +540,55 @@ class GincanaCorridaMixin:
                     state_map[member.id] = _HORSE_FINISH
                     continue
 
-                cur = int(progress.get(member.id, 0))
-                boost_chance = 0.18 + float(condition.get("boost", 0.0)) + float(special.get("boost", 0.0))
-                trip_chance = 0.14 + float(condition.get("trip", 0.0)) + float(special.get("trip", 0.0))
+                cur = float(progress.get(member.id, 0.0))
+                boost_chance = 0.16 + float(condition.get("boost", 0.0)) + float(special.get("boost", 0.0))
+                trip_chance = 0.12 + float(condition.get("trip", 0.0)) + float(special.get("trip", 0.0))
                 speed_bonus = float(condition.get("speed", 0.0)) + float(special.get("speed", 0.0))
 
-                if special.get("zebra") and cur <= 2:
-                    boost_chance += 0.08
+                if special.get("zebra") and cur <= 2.0:
+                    boost_chance += 0.07
 
                 if session.get("final_stretch") and not final_tick:
-                    boost_chance += 0.08
-                    if cur <= 4:
-                        boost_chance += 0.05
+                    boost_chance += 0.06
+                    if cur <= 4.0:
+                        boost_chance += 0.04
                     trip_chance = max(0.02, trip_chance - 0.03)
+
                 if final_tick:
-                    move = max(1, (_CORRIDA_TRACK_LENGTH - 1) - cur)
+                    move = max(0.0, (_CORRIDA_TRACK_LENGTH - 1) - cur)
                     state_map[member.id] = _HORSE_FINISH
-                elif tick == 0 and random.random() < boost_chance + 0.08:
-                    move = 3
+                elif tick == 0 and random.random() < boost_chance + 0.06:
+                    move = 1.2
                     state_map[member.id] = _HORSE_BOOST
                     tick_events.append(("boost", member))
                 elif random.random() < trip_chance:
-                    move = 0
+                    move = 0.0
                     state_map[member.id] = _HORSE_TRIP
                     tick_events.append(("trip", member))
                 else:
-                    base_min, base_max = 1, 2
-                    if speed_bonus > 0.2:
-                        base_max = 3
-                    if speed_bonus < -0.15:
-                        base_max = 2
-                        if random.random() < 0.35:
-                            base_min = 0
+                    base_move = random.uniform(0.45, 0.9)
+                    if speed_bonus > 0:
+                        base_move += min(0.18, speed_bonus * 0.35)
+                    elif speed_bonus < 0:
+                        base_move += max(-0.18, speed_bonus * 0.30)
                     if session.get("final_stretch"):
-                        base_max = min(3, base_max + 1)
-                    move = random.randint(base_min, base_max)
-                    if speed_bonus > 0 and random.random() < min(0.4, speed_bonus):
-                        move += 1
-                    move = max(0, min(3, move))
-                    state_map[member.id] = _HORSE_BOOST if move >= 3 else (_HORSE_RUN if move > 0 else _HORSE_TRIP)
-                    if move == 0:
-                        tick_events.append(("trip", member))
-                    elif move >= 3:
+                        base_move += 0.18
+                    if random.random() < boost_chance:
+                        base_move += 0.42
+                        state_map[member.id] = _HORSE_BOOST
                         tick_events.append(("boost", member))
+                    else:
+                        state_map[member.id] = _HORSE_RUN
+                    move = max(0.0, min(1.45, base_move))
 
-                new_pos = min(_CORRIDA_TRACK_LENGTH - 1, cur + move)
+                track_end = float(_CORRIDA_TRACK_LENGTH - 1)
+                if not final_tick:
+                    progress_cap = min(track_end - 0.15, ((tick + 1) / _CORRIDA_UPDATES) * track_end + (0.55 if session.get("final_stretch") else 0.2))
+                    new_pos = min(progress_cap, cur + move)
+                else:
+                    new_pos = min(track_end, cur + move)
                 progress[member.id] = new_pos
-                if new_pos >= _CORRIDA_TRACK_LENGTH - 1 and member.id not in arrival_order:
+                if final_tick and new_pos >= track_end and member.id not in arrival_order:
                     arrival_order.append(member.id)
                     state_map[member.id] = _HORSE_FINISH
 
@@ -678,7 +681,7 @@ class GincanaCorridaMixin:
             "text_channel_id": message.channel.id,
             "owner_id": message.author.id,
             "locked_participants": {message.author.id},
-            "progress": {message.author.id: 0},
+            "progress": {message.author.id: 0.0},
             "state_map": {message.author.id: _HORSE_START},
             "arrival_order": [],
             "message": None,
