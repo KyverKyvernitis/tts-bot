@@ -608,20 +608,23 @@ class GincanaCorridaMixin:
         session["ended"] = True
         total_pot = len(locked_ids) * CORRIDA_STAKE + int(session.get("bonus_pool", 0) or 0)
         rewards, placements = self._allocate_race_rewards(final_order, total_pot)
-        result_lines = self._build_race_lines(guild, session)
+        result_lines = []
         if final_order:
-            result_lines.append("")
-            result_lines.append(f"🏆 {final_order[0].mention} venceu a corrida.")
-        for badge, members, amount in placements:
-            if members and amount > 0:
-                result_lines.append(f"{badge} {members[0].mention} — {self._chip_text(amount, kind='gain')}")
-        session["narration"] = "🏁 Todo mundo cruzou a linha."
+            winner = final_order[0]
+            winner_amount = int(rewards.get(winner.id, 0) or 0)
+            result_lines.append(f"🏆 {winner.mention} venceu a corrida — {self._chip_text(winner_amount, kind='gain')}")
+        session["narration"] = "🏁 Todos cruzaram a linha."
 
         for index, member in enumerate(final_order[:3], start=1):
             await self.db.add_user_game_stat(guild.id, member.id, "corrida_podiums", 1)
             await self._grant_weekly_points(guild.id, member.id, max(3, 5 - index))
         if final_order:
             await self.db.add_user_game_stat(guild.id, final_order[0].id, "corrida_wins", 1)
+        losing_ids = set(locked_ids)
+        if final_order:
+            losing_ids.discard(final_order[0].id)
+        for user_id in losing_ids:
+            await self.db.add_user_game_stat(guild.id, int(user_id), "corrida_losses", 1)
         for user_id, amount in rewards.items():
             if amount > 0:
                 await self.db.add_user_chips(guild.id, user_id, amount)
