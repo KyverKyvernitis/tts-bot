@@ -636,6 +636,29 @@ class _TargetLobbyClosedView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.blurple()))
 
 
+
+
+class _TargetStateView(discord.ui.LayoutView):
+    def __init__(self, cog: "GincanaAlvoMixin", guild: discord.Guild, session: dict, *, finished: bool = False):
+        super().__init__(timeout=None)
+        modifier = session.get('modifier') or {'name': 'Alvo padrão'}
+        participants = cog._get_target_participants(guild, session)
+        if finished:
+            title = '# 🎯 Resultado do alvo'
+            details = session.get('result_lines') or ['A rodada terminou.']
+        else:
+            title = '# 🎯 Rodada iniciada'
+            details = ['A mira está sendo ajustada...']
+        lines = [
+            title,
+            f"**Condição:** {modifier.get('name','Alvo padrão')}",
+            f"**Participantes:** {len(participants)}",
+            '',
+            *details,
+        ]
+        self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.blurple()))
+
+
 class GincanaAlvoMixin(GincanaAlvoMixin):
     async def _refresh_target_message(self, guild_id: int):
         session = self._get_target_session(guild_id)
@@ -771,21 +794,16 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 except Exception: pass
             self._target_sessions.pop(guild_id, None)
             return True
-        if lobby_message is not None:
+        message = lobby_message
+        session['message'] = message
+        if message is not None:
             try:
-                await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada iniciada', 'A disputa começou logo abaixo.'))
+                state_view = _TargetStateView(self, guild, session, finished=False)
+                session['view'] = state_view
+                await message.edit(view=state_view)
             except Exception:
                 pass
-        text_channel = guild.get_channel(int(session.get('text_channel_id') or 0))
-        round_message = None
-        if isinstance(text_channel, discord.TextChannel):
-            try:
-                round_message = await text_channel.send(embed=self._make_target_embed(guild, session, aiming=True))
-            except Exception:
-                round_message = None
-        session['message'] = round_message
         # --- original resolution block with slight adjustments ---
-        message = round_message
         pot_total = len(locked_ids) * ALVO_STAKE
         bonus_chips = int(session.get('bonus_chips') or 0)
         modifier = session.get('modifier') or {'key': 'normal', 'name': 'Alvo padrão', 'description': 'Rodada normal.'}
@@ -832,9 +850,12 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         if special_lines:
             result_lines += ["", *special_lines]
         final_text = "\n".join(result_lines)
+        session['result_lines'] = result_lines
         if message is not None:
             try:
-                await message.edit(embed=discord.Embed(title='🎯 Resultado do alvo', description=final_text, color=discord.Color.blurple()))
+                final_view = _TargetStateView(self, guild, session, finished=True)
+                session['view'] = final_view
+                await message.edit(view=final_view)
             except Exception:
                 pass
         self._target_sessions.pop(guild_id, None)
