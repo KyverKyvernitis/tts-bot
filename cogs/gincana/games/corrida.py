@@ -278,24 +278,120 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             return 0.50
         return 0.28
 
+    def _hierarchy_metrics(self, times: list[float]) -> dict[str, float | int]:
+        elite = 0
+        fast = 0
+        quick = 0
+        valid = 0
+        total_valid_time = 0.0
+        best_time = _RACE_IMPULSE_STEP_SECONDS
+        for reaction_time in times:
+            if reaction_time is None or reaction_time >= _RACE_IMPULSE_STEP_SECONDS:
+                continue
+            reaction_time = float(reaction_time)
+            total_valid_time += reaction_time
+            best_time = min(best_time, reaction_time)
+            if reaction_time <= 0.30:
+                elite += 1
+            elif reaction_time <= 0.65:
+                fast += 1
+            elif reaction_time <= 1.10:
+                quick += 1
+            else:
+                valid += 1
+        valid_count = elite + fast + quick + valid
+        fast_or_better = elite + fast
+        quick_or_better = elite + fast + quick
+        return {
+            "elite": elite,
+            "fast": fast,
+            "quick": quick,
+            "valid": valid,
+            "valid_count": valid_count,
+            "fast_or_better": fast_or_better,
+            "quick_or_better": quick_or_better,
+            "total_valid_time": round(total_valid_time, 6),
+            "best_time": float(best_time),
+        }
+
+    def _placement_bonus_for_rank(self, rank_index: int, metrics: dict[str, float | int], considered_steps: int) -> float:
+        valid_count = int(metrics.get("valid_count", 0) or 0)
+        if valid_count <= 0 or considered_steps <= 0:
+            return 0.0
+        completion_scale = min(1.0, max(0.25, considered_steps / float(_RACE_IMPULSE_BUTTON_COUNT)))
+        if rank_index == 0:
+            return round(0.90 * completion_scale, 3)
+        if rank_index == 1:
+            return round(0.60 * completion_scale, 3)
+        if rank_index == 2:
+            return round(0.35 * completion_scale, 3)
+        if rank_index == 3:
+            return round(0.18 * completion_scale, 3)
+        return 0.0
+
+    def _consistency_bonus(self, metrics: dict[str, float | int]) -> float:
+        valid_count = int(metrics.get("valid_count", 0) or 0)
+        fast_or_better = int(metrics.get("fast_or_better", 0) or 0)
+        elite = int(metrics.get("elite", 0) or 0)
+        bonus = 0.0
+        if valid_count >= 2:
+            bonus += (valid_count - 1) * 0.12
+        if fast_or_better >= 2:
+            bonus += (fast_or_better - 1) * 0.08
+        if elite >= 2:
+            bonus += (elite - 1) * 0.05
+        return round(bonus, 3)
+
+    def _ranking_sort_key(self, user_id: int, metrics: dict[str, float | int]) -> tuple:
+        return (
+            -int(metrics.get("valid_count", 0) or 0),
+            -int(metrics.get("fast_or_better", 0) or 0),
+            -int(metrics.get("elite", 0) or 0),
+            -int(metrics.get("quick_or_better", 0) or 0),
+            float(metrics.get("total_valid_time", 0.0) or 0.0),
+            float(metrics.get("best_time", _RACE_IMPULSE_STEP_SECONDS) or _RACE_IMPULSE_STEP_SECONDS),
+            int(user_id),
+        )
+
     def _apply_results(self, *, up_to_step: int | None = None):
+        if up_to_step is None and self._results_applied:
+            return
         pending = self.session.setdefault("pending_impulse_bonus", {})
         max_step = _RACE_IMPULSE_BUTTON_COUNT - 1 if up_to_step is None else max(-1, min(_RACE_IMPULSE_BUTTON_COUNT - 1, int(up_to_step)))
-        for user_id, entry in self.results.items():
+        considered_steps = max_step + 1
+        if considered_steps <= 0:
+            return
+
+        participants = [int(user_id) for user_id in set(self.session.get("locked_participants", set()) or [])]
+        scored_entries: list[tuple[tuple, int, dict, float, float, dict]] = []
+        for user_id in participants:
+            entry = self.results.setdefault(user_id, {"times": [None] * _RACE_IMPULSE_BUTTON_COUNT, "credited_steps": 0, "applied_bonus_total": 0.0})
             times = list(entry.get("times") or [])
-            credited_steps = int(entry.get("credited_steps", 0) or 0)
-            if credited_steps > max_step:
-                continue
-            accumulated_bonus = 0.0
-            last_applied_step = credited_steps
-            for step in range(credited_steps, max_step + 1):
-                reaction_time = times[step] if step < len(times) else None
-                accumulated_bonus += self._bonus_for_reaction_time(reaction_time)
-                last_applied_step = step + 1
-            entry["credited_steps"] = last_applied_step
-            if accumulated_bonus <= 0:
-                continue
-            pending[int(user_id)] = round(float(pending.get(int(user_id), 0.0)) + accumulated_bonus, 3)
+            if len(times) < _RACE_IMPULSE_BUTTON_COUNT:
+                times.extend([None] * (_RACE_IMPULSE_BUTTON_COUNT - len(times)))
+            normalized_times: list[float] = []
+            for step in range(considered_steps):
+                reaction_time = times[step]
+                if reaction_time is None:
+                    reaction_time = _RACE_IMPULSE_STEP_SECONDS
+                normalized_times.append(float(reaction_time))
+            metrics = self._hierarchy_metrics(normalized_times)
+            speed_bonus = round(sum(self._bonus_for_reaction_time(reaction_time) for reaction_time in normalized_times), 3)
+            consistency_bonus = self._consistency_bonus(metrics)
+            scored_entries.append((self._ranking_sort_key(user_id, metrics), user_id, entry, speed_bonus, consistency_bonus, metrics))
+
+        scored_entries.sort(key=lambda item: item[0])
+        for rank_index, (_sort_key, user_id, entry, speed_bonus, consistency_bonus, metrics) in enumerate(scored_entries):
+            placement_bonus = self._placement_bonus_for_rank(rank_index, metrics, considered_steps)
+            target_bonus = round(speed_bonus + consistency_bonus + placement_bonus, 3)
+            already_applied = round(float(entry.get("applied_bonus_total", 0.0) or 0.0), 3)
+            delta = round(target_bonus - already_applied, 3)
+            entry["credited_steps"] = considered_steps
+            if delta > 0:
+                pending[user_id] = round(float(pending.get(user_id, 0.0)) + delta, 3)
+                entry["applied_bonus_total"] = round(already_applied + delta, 3)
+            else:
+                entry["applied_bonus_total"] = max(already_applied, target_bonus)
 
 
 class _RaceStateView(discord.ui.LayoutView):
