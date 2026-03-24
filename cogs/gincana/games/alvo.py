@@ -223,7 +223,7 @@ class GincanaAlvoMixin:
                 return "Os **2 melhores tiros** levam o prêmio."
             if len(participants) == 2:
                 return "Com **2 participantes**, só **1** leva o prêmio."
-            return "Use o botão para entrar e a trigger **disparar** para fechar a rodada."
+            return "Use o botão para entrar e clique em **🏁 Iniciar** para começar antes do tempo."
         def _target_bonus_for_participants(self, count: int) -> int:
             if count >= 7:
                 return 10
@@ -287,7 +287,7 @@ class GincanaAlvoMixin:
                 )
                 embed.add_field(name="🎯 Na mira", value=self._format_target_participants(participants), inline=False)
                 embed.add_field(name="🌪️ Condição da rodada", value=f"**{modifier.get('name','Alvo padrão')}**\n{modifier.get('description','Rodada normal.')}", inline=False)
-                embed.add_field(name="Como dispara", value="Entre pelo botão verde. Depois use a trigger **disparar** na call da rodada ou espere o tempo acabar.", inline=False)
+                embed.add_field(name="Como começa", value="Entre pelo botão verde. Depois clique em **🏁 Iniciar** ou espere o tempo acabar.", inline=False)
                 embed.set_footer(text="Entrou, pagou e a entrada fica travada até o fim")
 
             if owner is not None:
@@ -329,21 +329,6 @@ class GincanaAlvoMixin:
                     pass
                 return
 
-            voice_channel = self._get_target_voice_channel(guild, session)
-            if voice_channel is None:
-                await self._finish_target_round(guild.id, reason="channel_missing")
-                try:
-                    await interaction.response.send_message("A rodada foi encerrada porque o canal de voz sumiu.", ephemeral=True)
-                except Exception:
-                    pass
-                return
-
-            if getattr(user.voice, "channel", None) != voice_channel:
-                try:
-                    await interaction.response.send_message("Você precisa estar na mesma call da rodada para entrar.", ephemeral=True)
-                except Exception:
-                    pass
-                return
 
             locked = session.setdefault("locked_participants", set())
             if user.id in locked:

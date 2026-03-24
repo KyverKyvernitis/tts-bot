@@ -375,7 +375,7 @@ class _BuckshotJoinView(discord.ui.LayoutView):
         self.guild_id = guild_id
         self.session = session
         self.guild = guild
-        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label='🐎 Entrar (0)')
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label='💥 Entrar (0)')
         self.join_button.callback = self._toggle_join
         self.start_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label='💥 Atirar')
         self.start_button.callback = self._start_round
@@ -386,7 +386,7 @@ class _BuckshotJoinView(discord.ui.LayoutView):
         participants = self.cog._get_buckshot_participants(self.guild, self.session)
         payout_total = len(participants) * BUCKSHOT_STAKE
         countdown = int(self.session.get('start_countdown') or 0)
-        self.join_button.label = f"🎯 Entrar ({len(participants)})"
+        self.join_button.label = f"💥 Entrar ({len(participants)})"
         if countdown > 0:
             self.start_button.label = f"💥 Atirar ({countdown})"
             self.start_button.disabled = True
@@ -429,11 +429,10 @@ class _BuckshotJoinView(discord.ui.LayoutView):
             pass
 
 class _BuckshotLobbyClosedView(discord.ui.LayoutView):
-    def __init__(self, session: dict, title: str, detail: str):
+    def __init__(self, title: str, lines: list[str], *, color: discord.Color | None = None):
         super().__init__(timeout=None)
-        participants = len(session.get('locked_participants', set()) or [])
-        lines = [f"# {title}", f"**Participantes:** {participants}", detail]
-        self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.blurple()))
+        body = [f"# {title}", *[line for line in lines if line]]
+        self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(body)), accent_color=color or discord.Color.blurple()))
 
 class GincanaBuckshotMixin(GincanaBuckshotMixin):
     async def _refresh_buckshot_message(self, guild_id: int):
@@ -563,25 +562,36 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             for uid in locked_participants:
                 await self.db.add_user_chips(guild.id, uid, BUCKSHOT_STAKE)
             if lobby_message is not None:
-                try: await lobby_message.edit(view=_BuckshotLobbyClosedView(session, '💥 Rodada cancelada', 'Não ficaram participantes suficientes. As entradas foram devolvidas.'))
-                except Exception: pass
+                try:
+                    await lobby_message.edit(view=_BuckshotLobbyClosedView('💥 Rodada cancelada', [
+                        'Não ficaram participantes suficientes.',
+                        'As entradas foram devolvidas.',
+                    ]))
+                except Exception:
+                    pass
             self._buckshot_sessions.pop(guild_id, None)
             return True
-        if lobby_message is not None:
-            try: await lobby_message.edit(view=_BuckshotLobbyClosedView(session, '💥 Rodada iniciada', 'O disparo saiu logo abaixo.'))
-            except Exception: pass
+
         chosen = random.choice(eligible) if eligible else None
         if chosen is not None and chosen.voice and chosen.voice.channel:
-            try: await self._play_buckshot_sfx(guild, chosen.voice.channel)
-            except Exception: pass
-            try: await asyncio.sleep(0.20)
-            except Exception: pass
-            try: await chosen.move_to(None, reason='gincana buckshot')
-            except Exception: pass
+            try:
+                await self._play_buckshot_sfx(guild, chosen.voice.channel)
+            except Exception:
+                pass
+            try:
+                await asyncio.sleep(0.20)
+            except Exception:
+                pass
+            try:
+                await chosen.move_to(None, reason='gincana buckshot')
+            except Exception:
+                pass
+
         winners = [member for member in eligible if chosen is not None and member.id != chosen.id]
         payout_total = max(0, BUCKSHOT_STAKE * len(eligible))
+        lines: list[str] = []
         if chosen is None:
-            final_text = 'O disparo aconteceu... mas ninguém com entrada paga ficou elegível na rodada.'
+            lines.append('<:gunforward:1484655577836683434> O disparo aconteceu. Ninguém foi eliminado.')
         else:
             if winners:
                 payout_each = payout_total // len(winners)
@@ -595,15 +605,18 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                         await self._grant_weekly_points(guild.id, winner.id, max(3, bonus // 3))
             await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_eliminations', 1)
             await self._record_game_played(guild.id, chosen.id, weekly_points=3)
-            chosen_text = chosen.mention
+            lines.append(f"<:gunforward:1484655577836683434>💥 O disparo aconteceu. {chosen.mention} foi eliminado.")
             if winners:
-                final_text = f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi eliminado.\n{self._CHIP_GAIN_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi dividido entre os sobreviventes."
+                verbo = 'foi dividido' if payout_total == 1 else 'foram divididos'
+                lines.append(f"**{payout_total} {self._CHIP_GAIN_EMOJI}** {verbo} entre os sobreviventes.")
             else:
-                final_text = f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi eliminado.\n{self._CHIP_LOSS_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi perdido."
-        text_channel = guild.get_channel(int(session.get('text_channel_id') or 0))
-        if isinstance(text_channel, discord.TextChannel):
-            try: await text_channel.send(embed=self._make_buckshot_embed(guild, session, final_text=final_text))
-            except Exception: pass
+                lines.append(f"Ninguém sobreviveu para receber **{payout_total} {self._CHIP_LOSS_EMOJI}**.")
+
+        if lobby_message is not None:
+            try:
+                await lobby_message.edit(view=_BuckshotLobbyClosedView('💥 Resultado do buckshot', lines))
+            except Exception:
+                pass
         self._buckshot_sessions.pop(guild_id, None)
         return True
 
