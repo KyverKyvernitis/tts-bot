@@ -61,7 +61,7 @@ class GincanaAlvoMixin:
                 participants.append(member)
             return participants
         def _describe_target_zone(self, score: int) -> str:
-            return {3: "centro", 2: "anel interno", 1: "anel externo", 0: "errou"}.get(int(score), "errou")
+            return {3: "bullseye", 2: "anel interno", 1: "anel externo", 0: "fora"}.get(int(score), "fora")
         def _roll_target_modifier(self) -> dict:
             roll = random.random()
             if roll < 0.08:
@@ -848,7 +848,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 for member in bullseye_members:
                     await self.db.add_user_chips(guild.id, member.id, bull_bonus)
                     await self._grant_weekly_points(guild.id, member.id, bull_bonus)
-                bonus_line = f"✨ Bullseye bônus: {self._chip_amount(bull_bonus)} para cada acerto no centro."
+                bonus_line = f"✨ Bullseye bônus: {self._chip_amount(bull_bonus)} para cada bullseye."
         podium_lines = []
         winner_mentions = []
         winning_reward = 0
@@ -885,8 +885,8 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         session['closing_line'] = '\n'.join(closing_parts[:2]) if closing_parts else None
         session['prize_total'] = prize_total
         result_lines = [session['summary_line'], '', *hit_lines]
-        if podium_lines:
-            result_lines += ['', *podium_lines]
+        if session['podium_lines']:
+            result_lines += ['', *session['podium_lines']]
         if session['closing_line']:
             result_lines += ['', session['closing_line']]
         final_text = "\n".join(result_lines)

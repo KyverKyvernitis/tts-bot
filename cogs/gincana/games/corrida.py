@@ -420,7 +420,7 @@ class GincanaCorridaMixin:
         event_lines: list[str] = []
         for event_key, member in tick_events:
             if event_key == "boost":
-                event_lines.append(f"⚡ {member.mention} largou melhor.")
+                event_lines.append(f"⚡ {member.mention} ganhou impulso.")
             elif event_key == "trip":
                 event_lines.append(f"💥 {member.mention} tropeçou.")
             if len(event_lines) >= 2:
@@ -435,7 +435,7 @@ class GincanaCorridaMixin:
             "👀 Tudo embolado.",
             "↗️ A disputa apertou.",
             "🐎 A corrida segue aberta.",
-            "💨 Ninguém abriu folga.",
+            "👀 A corrida está acirrada.",
             "👀 Segue parelha.",
             ""
         ]
@@ -528,10 +528,11 @@ class GincanaCorridaMixin:
             leader_before = ordered_before[0].id if ordered_before else 0
             arrival_order: list[int] = session.setdefault("arrival_order", [])
             final_tick = tick == _CORRIDA_UPDATES - 1
+            track_end = float(_CORRIDA_TRACK_LENGTH - 1)
 
             for member in participants:
                 if member.id in arrival_order:
-                    progress[member.id] = _CORRIDA_TRACK_LENGTH - 1
+                    progress[member.id] = track_end
                     state_map[member.id] = _HORSE_FINISH
                     continue
 
@@ -549,41 +550,38 @@ class GincanaCorridaMixin:
                         boost_chance += 0.04
                     trip_chance = max(0.02, trip_chance - 0.03)
 
-                if final_tick:
-                    move = max(0.0, (_CORRIDA_TRACK_LENGTH - 1) - cur)
-                    state_map[member.id] = _HORSE_FINISH
-                elif tick == 0 and random.random() < boost_chance + 0.06:
-                    move = 1.2
+                if tick == 0 and random.random() < boost_chance + 0.06:
+                    move = 1.0
                     state_map[member.id] = _HORSE_BOOST
                     tick_events.append(("boost", member))
-                elif random.random() < trip_chance:
+                elif random.random() < trip_chance and not final_tick:
                     move = 0.0
                     state_map[member.id] = _HORSE_TRIP
                     tick_events.append(("trip", member))
                 else:
-                    base_move = random.uniform(0.45, 0.9)
+                    base_move = random.uniform(0.38, 0.78)
                     if speed_bonus > 0:
-                        base_move += min(0.18, speed_bonus * 0.35)
+                        base_move += min(0.16, speed_bonus * 0.30)
                     elif speed_bonus < 0:
-                        base_move += max(-0.18, speed_bonus * 0.30)
+                        base_move += max(-0.16, speed_bonus * 0.28)
                     if session.get("final_stretch"):
-                        base_move += 0.18
+                        base_move += 0.15
                     if random.random() < boost_chance:
-                        base_move += 0.42
+                        base_move += 0.34
                         state_map[member.id] = _HORSE_BOOST
                         tick_events.append(("boost", member))
                     else:
                         state_map[member.id] = _HORSE_RUN
-                    move = max(0.0, min(1.45, base_move))
+                    move = max(0.0, min(1.2, base_move))
 
-                track_end = float(_CORRIDA_TRACK_LENGTH - 1)
                 if not final_tick:
-                    progress_cap = min(track_end - 0.15, ((tick + 1) / _CORRIDA_UPDATES) * track_end + (0.55 if session.get("final_stretch") else 0.2))
+                    progress_cap = min(track_end - 0.05, ((tick + 1) / _CORRIDA_UPDATES) * track_end + (0.22 if session.get("final_stretch") else -0.05))
                     new_pos = min(progress_cap, cur + move)
                 else:
-                    new_pos = min(track_end, cur + move)
+                    remaining = max(0.0, track_end - cur)
+                    new_pos = min(track_end, cur + max(remaining, move))
                 progress[member.id] = new_pos
-                if final_tick and new_pos >= track_end and member.id not in arrival_order:
+                if new_pos >= track_end - 1e-9 and member.id not in arrival_order:
                     arrival_order.append(member.id)
                     state_map[member.id] = _HORSE_FINISH
 
@@ -594,7 +592,7 @@ class GincanaCorridaMixin:
                 session["narration"] = self._pick_race_narration(ordered_after, tick_events, tick=tick, final_tick=True)
             elif leader_after and leader_after != leader_before:
                 leader = guild.get_member(leader_after)
-                session["narration"] = f"↗️ {leader.mention} assumiu a ponta." if leader else "↗️ A ponta mudou."
+                session["narration"] = f"↗️ {leader.mention} assumiu a liderança." if leader else "↗️ A liderança mudou."
             else:
                 session["narration"] = self._pick_race_narration(ordered_after, tick_events, tick=tick)
             await self._refresh_race_message(guild.id)

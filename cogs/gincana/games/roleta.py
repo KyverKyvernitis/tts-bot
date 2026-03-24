@@ -73,8 +73,8 @@ class GincanaRoletaMixin:
                 ),
                 color=discord.Color.blurple(),
             )
-        def _make_roleta_result_embed(self, title: str, summary: str, board: str, *, success: bool) -> discord.Embed:
-            color = discord.Color.blurple() if success else discord.Color(OFF_COLOR)
+        def _make_roleta_result_embed(self, title: str, summary: str, board: str, *, success: bool, near: bool = False) -> discord.Embed:
+            color = discord.Color.blurple() if success or near else discord.Color(OFF_COLOR)
             return discord.Embed(
                 title=title,
                 description=f"{summary}\n\n{board}",
@@ -215,6 +215,11 @@ class GincanaRoletaMixin:
                 try:
                     board = self._render_roleta_board(final_columns)
 
+                    middle_digits = [column[1] for column in final_columns]
+                    counts = {digit: middle_digits.count(digit) for digit in set(middle_digits)}
+                    near_hit = max(counts.values(), default=0) >= 2
+                    bonus_hit = (not success) and (not near_hit) and random.random() < 0.08
+
                     if success:
                         chosen_channel = voice_channel if targets and isinstance(voice_channel, discord.VoiceChannel) else None
                         if chosen_channel is not None:
@@ -233,7 +238,7 @@ class GincanaRoletaMixin:
                         await self.db.add_user_chips(guild.id, message.author.id, ROLETA_JACKPOT_CHIPS)
                         await self.db.add_user_game_stat(guild.id, message.author.id, "roleta_jackpots", 1)
                         await self._grant_weekly_points(guild.id, message.author.id, 20)
-                        summary = f"✨ A sorte sorriu para você. Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)}."
+                        summary = f"Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed(
@@ -241,6 +246,35 @@ class GincanaRoletaMixin:
                             summary,
                             board,
                             success=True,
+                        )
+                    elif near_hit:
+                        near_amount = max(3, ROLETA_COST // 2)
+                        await self._record_game_played(guild.id, message.author.id, weekly_points=4)
+                        await self.db.add_user_chips(guild.id, message.author.id, near_amount)
+                        await self._grant_weekly_points(guild.id, message.author.id, 6)
+                        summary = f"Quase. Você ganhou {self._chip_text(near_amount, kind='gain')}."
+                        if chip_note:
+                            summary = f"{chip_note}\n{summary}"
+                        embed = self._make_roleta_result_embed(
+                            "🎰 Quase lá",
+                            summary,
+                            board,
+                            success=False,
+                            near=True,
+                        )
+                    elif bonus_hit:
+                        bonus_amount = max(2, ROLETA_COST // 3)
+                        await self._record_game_played(guild.id, message.author.id, weekly_points=3)
+                        await self.db.add_user_chips(guild.id, message.author.id, bonus_amount)
+                        summary = f"Giro premiado. Você ganhou {self._chip_text(bonus_amount, kind='gain')}."
+                        if chip_note:
+                            summary = f"{chip_note}\n{summary}"
+                        embed = self._make_roleta_result_embed(
+                            "🎰 Giro premiado",
+                            summary,
+                            board,
+                            success=False,
+                            near=True,
                         )
                     else:
                         await self._record_game_played(guild.id, message.author.id, weekly_points=2)

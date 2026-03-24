@@ -543,6 +543,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         if not session or session.get('ended'):
             return False
         session['ended'] = True
+        self._buckshot_last_used[guild_id] = time.time()
         task = session.get('countdown_task')
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
@@ -588,7 +589,12 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 pass
 
         winners = [member for member in eligible if chosen is not None and member.id != chosen.id]
-        payout_total = max(0, BUCKSHOT_STAKE * len(eligible))
+        player_count = len(eligible)
+        payout_total = max(0, BUCKSHOT_STAKE * player_count)
+        if player_count >= 5:
+            payout_total += 10
+        elif player_count >= 3:
+            payout_total += 5
         lines: list[str] = []
         if chosen is None:
             lines.append('<:gunforward:1484655577836683434> O disparo aconteceu. Ninguém foi eliminado.')
@@ -608,7 +614,8 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             lines.append(f"<:gunforward:1484655577836683434>💥 O disparo aconteceu. {chosen.mention} foi eliminado.")
             if winners:
                 verbo = 'foi dividido' if payout_total == 1 else 'foram divididos'
-                lines.append(f"**{payout_total} {self._CHIP_GAIN_EMOJI}** {verbo} entre os sobreviventes.")
+                prefix = 'Rodada cheia. ' if player_count >= 5 else ('Rodada forte. ' if player_count >= 3 else '')
+                lines.append(f"{prefix}**{payout_total} {self._CHIP_GAIN_EMOJI}** {verbo} entre os sobreviventes.")
             else:
                 lines.append(f"Ninguém sobreviveu para receber **{payout_total} {self._CHIP_LOSS_EMOJI}**.")
 
@@ -630,6 +637,14 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         if not self.db.gincana_enabled(guild.id):
             return True
         if self._gincana_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+        last_used = float(self._buckshot_last_used.get(guild.id, 0.0))
+        cooldown_remaining = max(0.0, (last_used + 6.0) - time.time())
+        if cooldown_remaining > 0:
+            try:
+                await message.channel.send(embed=self._make_embed('💥 Aguarde um pouco', f'Espere **{int(cooldown_remaining) + 1}s** para abrir outra rodada de buckshot.', ok=False))
+            except Exception:
+                pass
             return True
         if self._get_buckshot_session(guild.id) is not None:
             return True
