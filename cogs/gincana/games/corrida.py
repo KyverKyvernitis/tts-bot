@@ -159,6 +159,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.results: dict[int, dict] = {}
         self.edit_lock = asyncio.Lock()
         self._last_render_signature = None
+        self._results_applied = False
         self.buttons = [_RaceImpulseButton(self, idx) for idx in range(_RACE_IMPULSE_BUTTON_COUNT)]
         self._rebuild()
 
@@ -231,7 +232,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         if user.id not in set(self.session.get("locked_participants", set()) or []):
             return
 
-        entry = self.results.setdefault(user.id, {"times": [None] * _RACE_IMPULSE_BUTTON_COUNT})
+        entry = self.results.setdefault(user.id, {"times": [None] * _RACE_IMPULSE_BUTTON_COUNT, "credited_steps": 0})
         times = entry["times"]
         if times[self.step_index] is not None:
             return
@@ -262,27 +263,34 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         if current_step < 0:
             return
         for user_id in set(self.session.get("locked_participants", set()) or []):
-            entry = self.results.setdefault(int(user_id), {"times": [None] * _RACE_IMPULSE_BUTTON_COUNT})
+            entry = self.results.setdefault(int(user_id), {"times": [None] * _RACE_IMPULSE_BUTTON_COUNT, "credited_steps": 0})
             if entry["times"][current_step] is None:
                 entry["times"][current_step] = _RACE_IMPULSE_STEP_SECONDS
 
-    def _apply_results(self):
+    def _bonus_for_reaction_time(self, reaction_time: float | None) -> float:
+        if reaction_time is None or reaction_time >= _RACE_IMPULSE_STEP_SECONDS:
+            return 0.0
+        quality = max(0.0, 1.0 - (float(reaction_time) / _RACE_IMPULSE_STEP_SECONDS))
+        return round(0.04 + (quality * 0.16), 3)
+
+    def _apply_results(self, *, up_to_step: int | None = None):
         pending = self.session.setdefault("pending_impulse_bonus", {})
+        max_step = _RACE_IMPULSE_BUTTON_COUNT - 1 if up_to_step is None else max(-1, min(_RACE_IMPULSE_BUTTON_COUNT - 1, int(up_to_step)))
         for user_id, entry in self.results.items():
-            times = entry.get("times") or []
-            total_points = 0.0
-            hits = 0
-            for reaction_time in times:
-                if reaction_time is None or reaction_time >= _RACE_IMPULSE_STEP_SECONDS:
-                    continue
-                hits += 1
-                total_points += max(0.0, _RACE_IMPULSE_STEP_SECONDS - float(reaction_time)) / _RACE_IMPULSE_STEP_SECONDS
-            if hits <= 0:
+            times = list(entry.get("times") or [])
+            credited_steps = int(entry.get("credited_steps", 0) or 0)
+            if credited_steps > max_step:
                 continue
-            bonus = min(0.72, round(total_points * 0.12, 3))
-            if bonus <= 0:
+            accumulated_bonus = 0.0
+            last_applied_step = credited_steps
+            for step in range(credited_steps, max_step + 1):
+                reaction_time = times[step] if step < len(times) else None
+                accumulated_bonus += self._bonus_for_reaction_time(reaction_time)
+                last_applied_step = step + 1
+            entry["credited_steps"] = last_applied_step
+            if accumulated_bonus <= 0:
                 continue
-            pending[int(user_id)] = float(pending.get(int(user_id), 0.0)) + bonus
+            pending[int(user_id)] = round(float(pending.get(int(user_id), 0.0)) + accumulated_bonus, 3)
 
 
 class _RaceStateView(discord.ui.LayoutView):
@@ -726,11 +734,13 @@ class GincanaCorridaMixin:
                 await event_view.refresh_message()
                 await asyncio.sleep(_RACE_IMPULSE_STEP_SECONDS)
                 event_view._close_current_step()
+                event_view._apply_results(up_to_step=step_index)
                 await event_view.refresh_message()
 
             event_view.finished = True
             event_view._close_current_step()
             event_view._apply_results()
+            event_view._results_applied = True
             await event_view.refresh_message()
             participant_count = len(self._get_race_participants(guild, session))
             hit_count = sum(1 for result in event_view.results.values() if any((time_value is not None and time_value < _RACE_IMPULSE_STEP_SECONDS) for time_value in result.get("times", [])))
@@ -738,6 +748,13 @@ class GincanaCorridaMixin:
                 session["impulse_status"] = f"⚡ Impulsos de {stage_name.lower()} aplicados ({hit_count}/{participant_count})."
                 await self._refresh_race_message(guild.id)
         except asyncio.CancelledError:
+            if not event_view.finished:
+                event_view.finished = True
+                if event_view.active_index is not None:
+                    event_view._close_current_step()
+                event_view._apply_results()
+                event_view._results_applied = True
+                await event_view.refresh_message()
             raise
         except Exception:
             if event_message is None:
@@ -916,14 +933,6 @@ class GincanaCorridaMixin:
             await self._refresh_race_message(guild.id)
             tick += 1
             await asyncio.sleep(_CORRIDA_UPDATE_SECONDS)
-
-        for task in list(session.get("impulse_tasks", [])):
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
 
         await self._stop_active_impulse_event(session)
 
