@@ -26,6 +26,7 @@ class GincanaBase:
         self._target_last_used: dict[int, float] = {}
         self._poker_games: dict[int, object] = {}
         self._payment_sessions: dict[tuple[int, int], dict] = {}
+        self._race_sessions: dict[int, dict] = {}
 
     def _strip_gincana_suffix(self, name: str) -> str:
         base = str(name or "").rstrip()
@@ -210,8 +211,7 @@ class GincanaBase:
             title=f"{self._CHIP_EMOJI} Perfil de fichas",
             description=(
                 f"Saldo atual: {self._chip_amount(chips)}\n"
-                f"Pontuação semanal: **{weekly}** 🏆\n"
-                f"Conquistas desbloqueadas: **{len(achievements)}/{len(self._achievement_catalog())}**"
+                f"Semanal: **{weekly} {self._CHIP_EMOJI}**"
             ),
             color=discord.Color.blurple(),
         )
@@ -225,7 +225,7 @@ class GincanaBase:
             recarga = f"Na próxima tentativa sem saldo, seu saldo volta para {self._chip_amount(CHIPS_DEFAULT)}."
 
         partidas = int(stats.get("games_played", 0))
-        total_wins = int(stats.get("poker_wins", 0)) + int(stats.get("alvo_wins", 0)) + int(stats.get("roleta_jackpots", 0))
+        total_wins = int(stats.get("poker_wins", 0)) + int(stats.get("alvo_wins", 0)) + int(stats.get("roleta_jackpots", 0)) + int(stats.get("corrida_wins", 0))
         mira_hits = int(stats.get("alvo_hits", 0))
         mira_shots = int(stats.get("alvo_shots", 0))
         precision = f"{int((mira_hits / mira_shots) * 100)}%" if mira_shots > 0 else "0%"
@@ -245,6 +245,7 @@ class GincanaBase:
         )
         embed.add_field(name="🎰 Roleta", value=f"Jackpots: **{stats.get('roleta_jackpots', 0)}**\nCusto por giro: {self._chip_amount(ROLETA_COST)}", inline=True)
         embed.add_field(name="🎯 Alvo", value=f"Vitórias: **{stats.get('alvo_wins', 0)}**\nBullseyes: **{stats.get('alvo_bullseyes', 0)}**", inline=True)
+        embed.add_field(name="🐎 Corrida", value=f"Vitórias: **{stats.get('corrida_wins', 0)}**\nPódios: **{stats.get('corrida_podiums', 0)}**", inline=True)
         embed.add_field(name="💸 Pagamentos", value=f"Enviados: **{stats.get('payments_sent', 0)}**\nRecebidos: **{stats.get('payments_received', 0)}**", inline=True)
 
         embed.set_footer(text="Use _rank para ver a disputa semanal e _daily para pegar seu bônus")
@@ -261,8 +262,8 @@ class GincanaBase:
             embed.set_author(name=str(requester.display_name), icon_url=requester.display_avatar.url)
 
         if not rows:
-            embed.add_field(name="Top 10", value="Ainda não há pontuação semanal registrada.", inline=False)
-            embed.set_footer(text="Jogue roleta, buckshot, alvo ou poker para somar pontos")
+            embed.add_field(name="Top 10", value="Ainda não há saldo semanal registrado.", inline=False)
+            embed.set_footer(text=f"Jogue roleta, buckshot, alvo, corrida ou poker para somar {self._CHIP_EMOJI}")
             return embed
 
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -271,7 +272,7 @@ class GincanaBase:
             member = guild.get_member(int(row["user_id"]))
             name = member.display_name if member is not None else f"Usuário {row['user_id']}"
             prefix = medals.get(index, f"`#{index}`")
-            ranking_lines.append(f"{prefix} **{name}** — **{row['points']} pts**")
+            ranking_lines.append(f"{prefix} **{name}** — **{row['points']} {self._CHIP_EMOJI}**")
         embed.add_field(name="Top 10 da semana", value="\n".join(ranking_lines), inline=False)
 
         highlight_specs = [
@@ -279,6 +280,7 @@ class GincanaBase:
             ("<:gunforward:1484655577836683434> Sobrevivente", "buckshot_survivals"),
             ("🎰 Sortudo", "roleta_jackpots"),
             ("🎯 Melhor mira", "alvo_bullseyes"),
+            ("🐎 Campeão da corrida", "corrida_wins"),
         ]
         highlight_lines = []
         for label, key in highlight_specs:
