@@ -119,6 +119,49 @@ class _RaceLobbyClosedView(discord.ui.LayoutView):
         self.add_item(container)
 
 
+
+
+class _RaceStateView(discord.ui.LayoutView):
+    def __init__(self, cog: "GincanaCorridaMixin", guild: discord.Guild, session: dict, *, finished: bool = False):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild = guild
+        self.session = session
+        self.finished = finished
+
+        condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
+        special_name = str((session.get("special") or {}).get("name") or "")
+        narration = str(session.get("narration") or ("🏁 Todo mundo cruzou a linha." if finished else "📣 A corrida começou."))
+        lines = cog._build_race_lines(guild, session)
+
+        if finished:
+            title = "# 🏁 Corrida encerrada"
+        else:
+            title = "# 🔥 Reta final" if session.get("final_stretch") else "# 🐎 Corrida em andamento"
+
+        header_lines = [title, f"**Condição:** {condition_name}"]
+        if special_name:
+            header_lines.append(f"**Especial:** {special_name}")
+
+        track_lines = lines + ["", "────────", narration]
+
+        items = [
+            discord.ui.TextDisplay("\n".join(header_lines)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(track_lines)),
+        ]
+
+        result_lines = session.get("result_lines") or []
+        if finished and result_lines:
+            items.extend([
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("\n".join(result_lines)),
+            ])
+
+        container = discord.ui.Container(*items, accent_color=cog._race_color(session, finished=finished))
+        self.add_item(container)
+
+
 class GincanaCorridaMixin:
     def _get_race_session(self, guild_id: int) -> dict | None:
         session = self._race_sessions.get(guild_id)
@@ -347,10 +390,10 @@ class GincanaCorridaMixin:
         try:
             if not session.get("started"):
                 view = _RaceLobbyView(self, guild_id, session, guild, timeout=_CORRIDA_LOBBY_SECONDS)
-                session["view"] = view
-                await message.edit(view=view)
             else:
-                await message.edit(embed=self._make_race_embed(guild, session, finished=bool(session.get("ended"))), view=session.get("view"))
+                view = _RaceStateView(self, guild, session, finished=bool(session.get("ended")))
+            session["view"] = view
+            await message.edit(view=view)
         except Exception:
             pass
 
@@ -453,16 +496,6 @@ class GincanaCorridaMixin:
             await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Não ficaram participantes suficientes na call. As entradas foram devolvidas.")
             self._race_sessions.pop(guild_id, None)
             return True
-
-        text_channel = guild.get_channel(int(session.get("text_channel_id") or 0))
-        await self._close_lobby_message(session, guild, title="🏁 Corrida iniciada", detail="A corrida começou logo abaixo.")
-        race_message = None
-        if isinstance(text_channel, discord.TextChannel):
-            try:
-                race_message = await text_channel.send(embed=self._make_race_embed(guild, session, finished=False))
-            except Exception:
-                race_message = None
-        session["message"] = race_message
 
         progress = session.setdefault("progress", {})
         state_map = session.setdefault("state_map", {})
@@ -575,20 +608,13 @@ class GincanaCorridaMixin:
                 await self.db.add_user_chips(guild.id, user_id, amount)
                 await self._grant_weekly_points(guild.id, user_id, max(4, amount // 4))
 
+        session["result_lines"] = result_lines
         message = session.get("message")
         if message is not None:
             try:
-                final_embed = discord.Embed(
-                    title="🏁 Corrida encerrada",
-                    description="\n".join(result_lines + ["", "────────", "🏁 Todo mundo cruzou a linha."]),
-                    color=self._race_color(session, finished=True),
-                )
-                condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
-                special_name = str((session.get("special") or {}).get("name") or "")
-                final_embed.insert_field_at(0, name="Condição", value=condition_name, inline=True)
-                if special_name:
-                    final_embed.add_field(name="Especial", value=special_name, inline=True)
-                await message.edit(embed=final_embed, view=None)
+                final_view = _RaceStateView(self, guild, session, finished=True)
+                session["view"] = final_view
+                await message.edit(view=final_view)
             except Exception:
                 pass
 
