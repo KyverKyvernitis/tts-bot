@@ -129,7 +129,7 @@ class _RaceStateView(discord.ui.LayoutView):
 
         condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
         special_name = str((session.get("special") or {}).get("name") or "")
-        narration = str(session.get("narration") or ("🏁 Todo mundo cruzou a linha." if finished else "📣 A corrida começou."))
+        narration = str(session.get("narration") or ("🏁 Todos cruzaram a linha." if finished else "📣 A corrida começou."))
         lines = cog._build_race_lines(guild, session)
 
         if finished:
@@ -143,7 +143,7 @@ class _RaceStateView(discord.ui.LayoutView):
 
         track_lines = list(lines)
         if narration:
-            track_lines += ["", "────────", narration]
+            track_lines += ["", narration]
 
         items = [
             discord.ui.TextDisplay("\n".join(header_lines)),
@@ -416,7 +416,7 @@ class GincanaCorridaMixin:
 
     def _pick_race_narration(self, participants: list[discord.Member], tick_events: list[tuple[str, discord.Member]], *, tick: int, final_tick: bool = False) -> str:
         if final_tick:
-            return "🏁 Todo mundo cruzou a linha."
+            return "🏁 Todos cruzaram a linha."
         event_lines: list[str] = []
         for event_key, member in tick_events:
             if event_key == "boost":
@@ -610,19 +610,12 @@ class GincanaCorridaMixin:
         rewards, placements = self._allocate_race_rewards(final_order, total_pot)
         result_lines = self._build_race_lines(guild, session)
         if final_order:
-            winning_amount = 0
-            for badge, members, amount in placements:
-                if badge == '🥇' and members and amount > 0:
-                    winning_amount = amount
-                    break
             result_lines.append("")
-            result_lines.append(f"🏁 Todos cruzaram a linha.")
-            result_lines.append("")
-            if winning_amount > 0:
-                result_lines.append(f"🏆 {final_order[0].mention} venceu a corrida — {self._chip_text(winning_amount, kind='gain')}")
-            else:
-                result_lines.append(f"🏆 {final_order[0].mention} venceu a corrida.")
-        session["narration"] = ""
+            result_lines.append(f"🏆 {final_order[0].mention} venceu a corrida.")
+        for badge, members, amount in placements:
+            if members and amount > 0:
+                result_lines.append(f"{badge} {members[0].mention} — {self._chip_text(amount, kind='gain')}")
+        session["narration"] = "🏁 Todo mundo cruzou a linha."
 
         for index, member in enumerate(final_order[:3], start=1):
             await self.db.add_user_game_stat(guild.id, member.id, "corrida_podiums", 1)
