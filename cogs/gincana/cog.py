@@ -1,6 +1,7 @@
 from .commands.admin import GincanaCommandMixin
 from .games.alvo import GincanaAlvoMixin
 from .games.buckshot import GincanaBuckshotMixin
+from .games.corrida import GincanaCorridaMixin
 from .games.poker import GincanaPokerMixin
 from .games.roleta import GincanaRoletaMixin
 from .handlers.focus import GincanaFocusMixin
@@ -18,6 +19,7 @@ class GincanaCore(
     GincanaMessageRouterMixin,
     GincanaRoletaMixin,
     GincanaBuckshotMixin,
+    GincanaCorridaMixin,
     GincanaAlvoMixin,
     GincanaToggleMixin,
     GincanaPaymentMixin,
