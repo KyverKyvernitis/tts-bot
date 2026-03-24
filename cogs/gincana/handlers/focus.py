@@ -1,6 +1,6 @@
 import discord
 
-from config import GUILD_IDS, OFF_COLOR, ON_COLOR
+from config import OFF_COLOR, ON_COLOR
 
 from ..constants import _FOCUS_WORD_RE
 
@@ -77,9 +77,6 @@ class GincanaFocusMixin:
         content = (message.content or "")
         if not _FOCUS_WORD_RE.search(content):
             return False
-
-        if GUILD_IDS and guild.id not in GUILD_IDS:
-            return True
 
         if not isinstance(message.author, discord.Member):
             return True

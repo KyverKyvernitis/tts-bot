@@ -2,7 +2,7 @@ import asyncio
 
 import discord
 
-from config import GUILD_IDS, MUTE_TOGGLE_WORD, TRIGGER_WORD
+from config import MUTE_TOGGLE_WORD, TRIGGER_WORD
 
 
 class GincanaMessageRouterMixin:
@@ -25,7 +25,7 @@ class GincanaMessageRouterMixin:
         content = str(message.content or "").strip().casefold()
         if not content or content.startswith("_"):
             return False
-        if content not in {"ficha", "fichas", "rank", "leaderboard", "daily", "bonus", "login"}:
+        if content not in {"ficha", "fichas", "rank", "leaderboard", "daily", "bonus", "login", "gincanahelp", "helpgincana", "jogoshelp"}:
             return False
         if message.guild is None:
             return True
@@ -34,6 +34,26 @@ class GincanaMessageRouterMixin:
             return True
         if content in {"rank", "leaderboard"}:
             await message.channel.send(embed=self._make_chip_leaderboard_embed(message.guild, message.author))
+            return True
+        if content in {"gincanahelp", "helpgincana", "jogoshelp"}:
+            await message.channel.send(embed=discord.Embed(title="🎲 Help da gincana", description=(
+                "Jogos, fichas e atalhos da gincana em um lugar só.\n\n"
+                f"{self._CHIP_EMOJI} **Economia**\n"
+                "• `ficha` — mostra seu saldo e seus destaques\n"
+                "• `daily` — resgata o bônus diário\n"
+                "• `rank` — ranking semanal\n"
+                "• `pay @usuário valor` — transfere fichas\n\n"
+                "🎮 **Jogos**\n"
+                "• `roleta` — aposta rápida com jackpot\n"
+                "• `buckshot` — rodada de sobrevivência\n"
+                "• `alvo` — disputa de mira\n"
+                "• `corrida` — corrida de cavalos\n"
+                "• `poker` — mesa de poker\n\n"
+                "🕹️ **Como entra**\n"
+                "• alguns jogos abrem um lobby com botão\n"
+                "• `atirar` fecha o buckshot\n"
+                "• `disparar` fecha o alvo"
+            ), color=discord.Color.blurple()))
             return True
 
         claimed, new_balance, bonus, streak = await self.db.claim_daily_bonus(message.guild.id, message.author.id)
@@ -64,8 +84,6 @@ class GincanaMessageRouterMixin:
         if message.author.bot or not message.guild:
             return
 
-        if GUILD_IDS and message.guild.id not in GUILD_IDS:
-            return
 
         if await self._safe_route_call("_handle_payment_message", message):
             return
