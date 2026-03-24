@@ -248,22 +248,22 @@ class GincanaBase:
         embed.add_field(name="🐎 Corrida", value=f"Vitórias: **{stats.get('corrida_wins', 0)}**\nPódios: **{stats.get('corrida_podiums', 0)}**", inline=True)
         embed.add_field(name="💸 Pagamentos", value=f"Enviados: **{stats.get('payments_sent', 0)}**\nRecebidos: **{stats.get('payments_received', 0)}**", inline=True)
 
-        embed.set_footer(text="Use _rank para ver a disputa semanal e _daily para pegar seu bônus")
+        embed.set_footer(text="Use _rank para ver o ranking de fichas e _daily para pegar seu bônus")
         return embed
 
     def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
-        rows = self.db.get_weekly_points_leaderboard(guild.id, limit=10)
+        rows = self.db.get_chip_leaderboard(guild.id, limit=10)
         embed = discord.Embed(
-            title="🏆 Ranking semanal",
-            description="Os maiores saldos desta semana.",
+            title="🏆 Rank de fichas",
+            description="Os maiores saldos deste servidor.",
             color=discord.Color.gold(),
         )
         if requester is not None:
             embed.set_author(name=str(requester.display_name), icon_url=requester.display_avatar.url)
 
         if not rows:
-            embed.add_field(name="Top 10", value="Ainda não há saldo semanal registrado.", inline=False)
-            embed.set_footer(text=f"Jogue roleta, buckshot, alvo, corrida ou poker para somar {self._CHIP_EMOJI}")
+            embed.add_field(name="Top 10", value="Ainda não há saldo registrado.", inline=False)
+            embed.set_footer(text=f"Jogue roleta, buckshot, alvo, corrida ou poker para juntar {self._CHIP_EMOJI}")
             return embed
 
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -272,8 +272,8 @@ class GincanaBase:
             member = guild.get_member(int(row["user_id"]))
             name = member.display_name if member is not None else f"Usuário {row['user_id']}"
             prefix = medals.get(index, f"`#{index}`")
-            ranking_lines.append(f"{prefix} **{name}** — **{row['points']} {self._CHIP_EMOJI}**")
-        embed.add_field(name="Top 10 da semana", value="\n".join(ranking_lines), inline=False)
+            ranking_lines.append(f"{prefix} **{name}** — **{row.get('chips', row.get('points', 0))} {self._CHIP_EMOJI}**")
+        embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
 
         highlight_specs = [
             ("🃏 Rei do poker", "poker_wins"),
@@ -292,7 +292,7 @@ class GincanaBase:
             name = member.display_name if member is not None else f"Usuário {row['user_id']}"
             highlight_lines.append(f"{label}: **{name}** — **{row['value']}**")
         if highlight_lines:
-            embed.add_field(name="Destaque paralelo semanal", value="\n".join(highlight_lines), inline=False)
+            embed.add_field(name="Destaque paralelo", value="\n".join(highlight_lines), inline=False)
         return embed
 
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:
