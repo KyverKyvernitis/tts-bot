@@ -8,7 +8,7 @@ from config import GUILD_IDS
 
 CORRIDA_STAKE = 10
 _CORRIDA_TRACK_LENGTH = 8
-_CORRIDA_UPDATES = 5
+_CORRIDA_UPDATES = 10
 _CORRIDA_UPDATE_SECONDS = 2.0
 _CORRIDA_LOBBY_SECONDS = 20.0
 
@@ -61,7 +61,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
             header_lines.append(f"**Especial:** {special_name}")
         header_lines.append(f"**Entrada:** {self.cog._chip_amount(CORRIDA_STAKE)}")
         header_lines.append(f"**Pote atual:** {self.cog._chip_amount(pot_total)}")
-        header_lines.append("**Duração:** **10s**")
+        header_lines.append("**Duração:** **20s**")
 
         participants_lines = [f"### Participantes ({len(participants)})"]
         if participants:
@@ -143,7 +143,9 @@ class _RaceStateView(discord.ui.LayoutView):
         if special_name:
             header_lines.append(f"**Especial:** {special_name}")
 
-        track_lines = lines + ["", "────────", narration]
+        track_lines = list(lines)
+        if narration:
+            track_lines += ["", "────────", narration]
 
         items = [
             discord.ui.TextDisplay("\n".join(header_lines)),
@@ -434,12 +436,22 @@ class GincanaCorridaMixin:
         for event_key, member in tick_events:
             if event_key == "trip":
                 return f"💥 {member.mention} tropeçou."
-        if tick >= _CORRIDA_UPDATES - 2:
+        if tick >= _CORRIDA_UPDATES - 3:
             return "🏁 Últimos metros."
-        if participants:
+        if tick == 0:
+            return "📣 A corrida começou."
+        simple_lines = [
+            "👀 Tudo embolado.",
+            "↗️ A disputa apertou.",
+            "🐎 A corrida segue aberta.",
+            "💨 Ninguém abriu folga.",
+            "👀 Segue parelha.",
+            ""
+        ]
+        if participants and tick % 3 == 1:
             leader = participants[0]
-            return f"👀 {leader.mention} aparece na frente."
-        return "📣 A corrida segue aberta."
+            return f"👀 {leader.mention} na frente."
+        return random.choice(simple_lines)
 
     def _build_finalized_order(self, guild: discord.Guild, session: dict) -> list[discord.Member]:
         participants = self._get_race_participants(guild, session)
@@ -535,6 +547,11 @@ class GincanaCorridaMixin:
                 if special.get("zebra") and cur <= 2:
                     boost_chance += 0.08
 
+                if session.get("final_stretch") and not final_tick:
+                    boost_chance += 0.08
+                    if cur <= 4:
+                        boost_chance += 0.05
+                    trip_chance = max(0.02, trip_chance - 0.03)
                 if final_tick:
                     move = max(1, (_CORRIDA_TRACK_LENGTH - 1) - cur)
                     state_map[member.id] = _HORSE_FINISH
@@ -554,13 +571,17 @@ class GincanaCorridaMixin:
                         base_max = 2
                         if random.random() < 0.35:
                             base_min = 0
+                    if session.get("final_stretch"):
+                        base_max = min(3, base_max + 1)
                     move = random.randint(base_min, base_max)
                     if speed_bonus > 0 and random.random() < min(0.4, speed_bonus):
                         move += 1
                     move = max(0, min(3, move))
-                    state_map[member.id] = _HORSE_RUN if move > 0 else _HORSE_TRIP
+                    state_map[member.id] = _HORSE_BOOST if move >= 3 else (_HORSE_RUN if move > 0 else _HORSE_TRIP)
                     if move == 0:
                         tick_events.append(("trip", member))
+                    elif move >= 3:
+                        tick_events.append(("boost", member))
 
                 new_pos = min(_CORRIDA_TRACK_LENGTH - 1, cur + move)
                 progress[member.id] = new_pos
@@ -568,7 +589,7 @@ class GincanaCorridaMixin:
                     arrival_order.append(member.id)
                     state_map[member.id] = _HORSE_FINISH
 
-            session["final_stretch"] = tick >= _CORRIDA_UPDATES - 2
+            session["final_stretch"] = tick >= _CORRIDA_UPDATES - 3
             ordered_after = self._build_finalized_order(guild, session)
             leader_after = ordered_after[0].id if ordered_after else 0
             if final_tick:
