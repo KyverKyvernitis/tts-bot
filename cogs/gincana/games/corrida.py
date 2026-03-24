@@ -208,17 +208,15 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         if self.message is None:
             return
         async with self.edit_lock:
-            try:
-                signature = self._render_signature()
-                if signature == self._last_render_signature:
-                    return
-                self._rebuild()
-                await self.message.edit(view=self)
+            signature = self._render_signature()
+            if signature == self._last_render_signature:
+                return
+            self._rebuild()
+            edit_state = await self.cog._safe_edit_message_view(self.message, self)
+            if edit_state == "ok":
                 self._last_render_signature = signature
-            except discord.NotFound:
+            elif edit_state == "missing":
                 self.message = None
-            except Exception:
-                pass
 
     async def handle_press(self, interaction: discord.Interaction, button_index: int):
         user = interaction.user
@@ -272,13 +270,13 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         if reaction_time is None or reaction_time >= _RACE_IMPULSE_STEP_SECONDS:
             return 0.0
         reaction_time = float(reaction_time)
-        if reaction_time <= 0.35:
-            return 0.42
-        if reaction_time <= 0.75:
-            return 0.32
-        if reaction_time <= 1.20:
-            return 0.22
-        return 0.12
+        if reaction_time <= 0.30:
+            return 0.90
+        if reaction_time <= 0.65:
+            return 0.70
+        if reaction_time <= 1.10:
+            return 0.50
+        return 0.28
 
     def _apply_results(self, *, up_to_step: int | None = None):
         pending = self.session.setdefault("pending_impulse_bonus", {})
@@ -347,6 +345,17 @@ class _RaceStateView(discord.ui.LayoutView):
 
 
 class GincanaCorridaMixin:
+    async def _safe_edit_message_view(self, message: discord.Message | None, view: discord.ui.View | discord.ui.LayoutView) -> str:
+        if message is None:
+            return "missing"
+        try:
+            await message.edit(view=view)
+            return "ok"
+        except discord.NotFound:
+            return "missing"
+        except discord.HTTPException:
+            return "error"
+
     def _get_race_session(self, guild_id: int) -> dict | None:
         session = self._race_sessions.get(guild_id)
         if session and session.get("ended"):
@@ -451,11 +460,10 @@ class GincanaCorridaMixin:
         lobby_message = session.get("message")
         if lobby_message is None:
             return
-        try:
-            closed_view = _RaceLobbyClosedView(session, guild, title, detail)
-            await lobby_message.edit(view=closed_view)
-        except Exception:
-            pass
+        closed_view = _RaceLobbyClosedView(session, guild, title, detail)
+        edit_state = await self._safe_edit_message_view(lobby_message, closed_view)
+        if edit_state == "missing":
+            session["message"] = None
 
     async def _handle_race_button(self, interaction: discord.Interaction, view: _RaceLobbyView):
         guild = interaction.guild
@@ -586,10 +594,11 @@ class GincanaCorridaMixin:
                         old_view.stop()
                     except Exception:
                         pass
-                await message.edit(view=view)
-                session["_last_render_key"] = render_key
-            except discord.NotFound:
-                session["message"] = None
+                edit_state = await self._safe_edit_message_view(message, view)
+                if edit_state == "ok":
+                    session["_last_render_key"] = render_key
+                elif edit_state == "missing":
+                    session["message"] = None
             except Exception:
                 pass
 
@@ -733,13 +742,17 @@ class GincanaCorridaMixin:
             session["active_impulse_message"] = event_message
             event_view.message = event_message
             await event_view.refresh_message()
+            if event_view.message is None:
+                raise discord.NotFound(response=None, message="Impulse event message disappeared")
             if _RACE_IMPULSE_INITIAL_DELAY > 0:
                 await asyncio.sleep(_RACE_IMPULSE_INITIAL_DELAY)
             for step_index in range(_RACE_IMPULSE_BUTTON_COUNT):
-                if session.get("ended"):
+                if session.get("ended") or event_view.message is None:
                     break
                 event_view._activate_step(step_index)
                 await event_view.refresh_message()
+                if event_view.message is None:
+                    break
                 await asyncio.sleep(_RACE_IMPULSE_STEP_SECONDS)
                 event_view._close_current_step()
                 event_view._apply_results(up_to_step=step_index)
@@ -765,9 +778,8 @@ class GincanaCorridaMixin:
                 await event_view.refresh_message()
             raise
         except Exception:
-            if event_message is None:
-                session["impulse_status"] = f"⚡ Evento de impulso ({stage_name.lower()}) falhou."
-                await self._refresh_race_message(guild.id)
+            session["impulse_status"] = f"⚡ Evento de impulso ({stage_name.lower()}) interrompido."
+            await self._refresh_race_message(guild.id)
         finally:
             if session.get("active_impulse_message") is event_message:
                 session["active_impulse_message"] = None
@@ -992,7 +1004,9 @@ class GincanaCorridaMixin:
             try:
                 final_view = _RaceStateView(self, guild, session, finished=True)
                 session["view"] = final_view
-                await message.edit(view=final_view)
+                edit_state = await self._safe_edit_message_view(message, final_view)
+                if edit_state == "missing":
+                    session["message"] = None
             except Exception:
                 pass
 
