@@ -94,6 +94,9 @@ class GincanaMessageRouterMixin:
         if await self._safe_route_call("_handle_atirar_trigger", message):
             return
 
+        if await self._safe_route_call("_handle_corrida_trigger", message):
+            return
+
         if await self._safe_route_call("_handle_poker_trigger", message):
             return
 
