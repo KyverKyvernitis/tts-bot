@@ -365,3 +365,293 @@ class GincanaBuckshotMixin:
             await self._finish_buckshot(guild.id, reason="manual")
             await self._react_with_emoji(message, "💥", keep=True)
             return True
+
+
+# --- V2 lobby overrides ---
+class _BuckshotJoinView(discord.ui.LayoutView):
+    def __init__(self, cog: "GincanaBuckshotMixin", guild_id: int, session: dict, guild: discord.Guild, *, timeout: float = 30.0):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.session = session
+        self.guild = guild
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label='🐎 Entrar (0)')
+        self.join_button.callback = self._toggle_join
+        self.start_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label='💥 Atirar')
+        self.start_button.callback = self._start_round
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        participants = self.cog._get_buckshot_participants(self.guild, self.session)
+        payout_total = len(participants) * BUCKSHOT_STAKE
+        countdown = int(self.session.get('start_countdown') or 0)
+        self.join_button.label = f"🎯 Entrar ({len(participants)})"
+        if countdown > 0:
+            self.start_button.label = f"💥 Atirar ({countdown})"
+            self.start_button.disabled = True
+        else:
+            self.start_button.label = '💥 Atirar'
+            self.start_button.disabled = False
+        lines1 = ["# <:gunforward:1484655577836683434> Roleta russa", f"**Entrada:** {self.cog._chip_amount(BUCKSHOT_STAKE)}", f"**Pote atual:** {self.cog._chip_amount(payout_total)}", "**Lobby:** **30s**"]
+        plist = [f"### Participantes ({len(participants)})"]
+        if participants:
+            plist.extend(f"• {m.mention}" for m in participants)
+        else:
+            plist.append('• Ninguém entrou ainda.')
+        foot = ['Entre pelo botão verde.', 'O criador da rodada ou a staff pode começar com 💥 quando houver pelo menos 2 participantes.']
+        if countdown > 0:
+            foot.append('A contagem começou e ainda dá tempo de entrar.')
+        row = discord.ui.ActionRow(self.join_button, self.start_button)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(lines1)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(plist)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(foot)),
+            row,
+            accent_color=discord.Color.blurple(),
+        ))
+
+    async def _toggle_join(self, interaction: discord.Interaction):
+        await self.cog._handle_buckshot_button(interaction, self)
+
+    async def _start_round(self, interaction: discord.Interaction):
+        await self.cog._handle_buckshot_start_button(interaction, self)
+
+    async def on_timeout(self):
+        try:
+            session = self.cog._get_buckshot_session(self.guild_id)
+            if session is None or session.get('starting'):
+                return
+            await self.cog._finish_buckshot(self.guild_id, reason='timeout')
+        except Exception:
+            pass
+
+class _BuckshotLobbyClosedView(discord.ui.LayoutView):
+    def __init__(self, session: dict, title: str, detail: str):
+        super().__init__(timeout=None)
+        participants = len(session.get('locked_participants', set()) or [])
+        lines = [f"# {title}", f"**Participantes:** {participants}", detail]
+        self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.blurple()))
+
+class GincanaBuckshotMixin(GincanaBuckshotMixin):
+    async def _refresh_buckshot_message(self, guild_id: int):
+        session = self._get_buckshot_session(guild_id)
+        if session is None:
+            return
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return
+        message = session.get('lobby_message') or session.get('message')
+        view = session.get('view')
+        if message is None or view is None:
+            return
+        if hasattr(view, '_build_layout'):
+            view._build_layout()
+        try:
+            await message.edit(view=view)
+        except Exception:
+            pass
+
+    async def _handle_buckshot_button(self, interaction: discord.Interaction, view: _BuckshotJoinView):
+        guild = interaction.guild
+        if guild is None:
+            try: await interaction.response.send_message('Use esse botão dentro de um servidor.', ephemeral=True)
+            except Exception: pass
+            return
+        session = self._get_buckshot_session(guild.id)
+        if session is None or session.get('view') is not view:
+            try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
+            except Exception: pass
+            return
+        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
+        if not isinstance(member, discord.Member) or member.bot:
+            try: await interaction.response.send_message('Bots não podem participar dessa rodada.', ephemeral=True)
+            except Exception: pass
+            return
+        locked = set(session.get('locked_participants', set()) or set())
+        if member.id in locked:
+            try: await interaction.response.send_message('Você já entrou nessa rodada e sua vaga está travada.', ephemeral=True)
+            except Exception: pass
+            return
+        paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
+        if not paid:
+            try: await interaction.response.send_message(note or 'Você não tem saldo suficiente para entrar.', ephemeral=True)
+            except Exception: pass
+            return
+        manual = set(session.get('manual_participants', set()) or set())
+        manual.add(member.id)
+        session['manual_participants'] = manual
+        locked.add(member.id)
+        session['locked_participants'] = locked
+        await self._refresh_buckshot_message(guild.id)
+        try: await interaction.response.send_message(note or f"Você entrou na rodada e pagou **{BUCKSHOT_STAKE} {self._CHIP_LOSS_EMOJI}**.", ephemeral=True)
+        except Exception: pass
+
+    async def _handle_buckshot_start_button(self, interaction: discord.Interaction, view: _BuckshotJoinView):
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            try: await interaction.response.send_message('Servidor inválido.', ephemeral=True)
+            except Exception: pass
+            return
+        session = self._get_buckshot_session(guild.id)
+        if session is None or session.get('view') is not view or session.get('ended'):
+            try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
+            except Exception: pass
+            return
+        if session.get('starting'):
+            try: await interaction.response.send_message('A contagem já começou.', ephemeral=True)
+            except Exception: pass
+            return
+        is_owner = int(session.get('owner_id') or 0) == user.id
+        if not is_owner and not self._is_staff_member(user):
+            try: await interaction.response.send_message('Só o criador da rodada ou a staff pode começar.', ephemeral=True)
+            except Exception: pass
+            return
+        participants = self._get_buckshot_participants(guild, session)
+        if len(participants) < 2:
+            try: await interaction.response.send_message('A rodada precisa de pelo menos 2 participantes.', ephemeral=True)
+            except Exception: pass
+            return
+        session['starting'] = True
+        session['start_countdown'] = 5
+        task = session.get('countdown_task')
+        if task and not task.done():
+            task.cancel()
+        session['countdown_task'] = self.bot.loop.create_task(self._run_buckshot_start_countdown(guild.id, view))
+        try: await interaction.response.send_message('Contagem iniciada.', ephemeral=True)
+        except Exception: pass
+        await self._refresh_buckshot_message(guild.id)
+
+    async def _run_buckshot_start_countdown(self, guild_id: int, view: _BuckshotJoinView):
+        for remaining in range(5,0,-1):
+            session = self._get_buckshot_session(guild_id)
+            if session is None or session.get('ended') or session.get('view') is not view:
+                return
+            session['start_countdown'] = remaining
+            await self._refresh_buckshot_message(guild_id)
+            await asyncio.sleep(1)
+        session = self._get_buckshot_session(guild_id)
+        if session is None or session.get('ended') or session.get('view') is not view:
+            return
+        session['start_countdown'] = 0
+        await self._finish_buckshot(guild_id, reason='manual')
+
+    async def _finish_buckshot(self, guild_id: int, *, reason: str) -> bool:
+        session = self._buckshot_sessions.get(guild_id)
+        if not session or session.get('ended'):
+            return False
+        session['ended'] = True
+        task = session.get('countdown_task')
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            self._buckshot_sessions.pop(guild_id, None)
+            return False
+        lobby_message = session.get('lobby_message') or session.get('message')
+        view = session.get('view')
+        if isinstance(view, (discord.ui.View, discord.ui.LayoutView)):
+            try: view.stop()
+            except Exception: pass
+        participants = self._get_buckshot_participants(guild, session)
+        locked_participants = set(session.get('locked_participants', set()) or set())
+        eligible = [member for member in participants if member.id in locked_participants]
+        if len(eligible) < 2:
+            for uid in locked_participants:
+                await self.db.add_user_chips(guild.id, uid, BUCKSHOT_STAKE)
+            if lobby_message is not None:
+                try: await lobby_message.edit(view=_BuckshotLobbyClosedView(session, '💥 Rodada cancelada', 'Não ficaram participantes suficientes. As entradas foram devolvidas.'))
+                except Exception: pass
+            self._buckshot_sessions.pop(guild_id, None)
+            return True
+        if lobby_message is not None:
+            try: await lobby_message.edit(view=_BuckshotLobbyClosedView(session, '💥 Rodada iniciada', 'O disparo saiu logo abaixo.'))
+            except Exception: pass
+        chosen = random.choice(eligible) if eligible else None
+        if chosen is not None and chosen.voice and chosen.voice.channel:
+            try: await self._play_buckshot_sfx(guild, chosen.voice.channel)
+            except Exception: pass
+            try: await asyncio.sleep(0.20)
+            except Exception: pass
+            try: await chosen.move_to(None, reason='gincana buckshot')
+            except Exception: pass
+        winners = [member for member in eligible if chosen is not None and member.id != chosen.id]
+        payout_total = max(0, BUCKSHOT_STAKE * len(eligible))
+        if chosen is None:
+            final_text = 'O disparo aconteceu... mas ninguém com entrada paga ficou elegível na rodada.'
+        else:
+            if winners:
+                payout_each = payout_total // len(winners)
+                payout_remainder = payout_total % len(winners)
+                for index, winner in enumerate(winners):
+                    bonus = payout_each + (1 if index < payout_remainder else 0)
+                    if bonus > 0:
+                        await self.db.add_user_chips(guild.id, winner.id, bonus)
+                        await self.db.add_user_game_stat(guild.id, winner.id, 'buckshot_survivals', 1)
+                        await self._record_game_played(guild.id, winner.id, weekly_points=8)
+                        await self._grant_weekly_points(guild.id, winner.id, max(3, bonus // 3))
+            await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_eliminations', 1)
+            await self._record_game_played(guild.id, chosen.id, weekly_points=3)
+            chosen_text = chosen.mention
+            if winners:
+                final_text = f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi eliminado.\n{self._CHIP_GAIN_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi dividido entre os sobreviventes."
+            else:
+                final_text = f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi eliminado.\n{self._CHIP_LOSS_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi perdido."
+        text_channel = guild.get_channel(int(session.get('text_channel_id') or 0))
+        if isinstance(text_channel, discord.TextChannel):
+            try: await text_channel.send(embed=self._make_buckshot_embed(guild, session, final_text=final_text))
+            except Exception: pass
+        self._buckshot_sessions.pop(guild_id, None)
+        return True
+
+    async def _handle_buckshot_trigger(self, message: discord.Message) -> bool:
+        guild = message.guild
+        if guild is None:
+            return False
+        content = (message.content or '')
+        if not self._matches_exact_trigger(content, 'buckshot'):
+            return False
+        if not self.db.gincana_enabled(guild.id):
+            return True
+        if self._gincana_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+        if self._get_buckshot_session(guild.id) is not None:
+            return True
+        paid, _balance, note = await self._try_consume_chips(guild.id, message.author.id, BUCKSHOT_STAKE)
+        if not paid:
+            try: await message.channel.send(embed=self._make_embed('💥 Saldo insuficiente', note or 'Você não tem saldo suficiente para entrar.', ok=False))
+            except Exception: pass
+            return True
+        session = {
+            'voice_channel_id': 0,
+            'text_channel_id': message.channel.id,
+            'owner_id': message.author.id,
+            'manual_participants': {message.author.id},
+            'focus_participants': set(),
+            'locked_participants': {message.author.id},
+            'lobby_message': None,
+            'message': None,
+            'view': None,
+            'ended': False,
+            'starting': False,
+            'start_countdown': 0,
+            'countdown_task': None,
+        }
+        self._buckshot_sessions[guild.id] = session
+        view = _BuckshotJoinView(self, guild.id, session, guild, timeout=30.0)
+        session['view'] = view
+        try:
+            panel_message = await message.channel.send(view=view)
+        except Exception:
+            self._buckshot_sessions.pop(guild.id, None)
+            await self.db.add_user_chips(guild.id, message.author.id, BUCKSHOT_STAKE)
+            return True
+        session['lobby_message'] = panel_message
+        await self._react_with_emoji(message, '<a:r_gun01:1484661880323838002>', keep=True)
+        return True
+
+    async def _handle_atirar_trigger(self, message: discord.Message) -> bool:
+        return False

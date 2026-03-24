@@ -40,7 +40,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
         self.guild = guild
         self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label=f"🐎 Entrar ({len(cog._get_race_participants(guild, session))})")
         self.join_button.callback = self._join_race
-        self.start_button = discord.ui.Button(style=discord.ButtonStyle.primary, label="Iniciar", emoji="🏁")
+        self.start_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="Iniciar", emoji="🏁")
         self.start_button.callback = self._start_race
         self._build_layout()
 

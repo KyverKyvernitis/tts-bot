@@ -565,3 +565,339 @@ class GincanaAlvoMixin:
             await self._finish_target_round(guild.id, reason="manual")
             await self._react_with_emoji(message, "💥", keep=True)
             return True
+
+
+# --- V2 lobby overrides ---
+class _TargetJoinView(discord.ui.LayoutView):
+    def __init__(self, cog: "GincanaAlvoMixin", guild_id: int, session: dict, guild: discord.Guild, *, timeout: float = 30.0):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.session = session
+        self.guild = guild
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label="🎯 Entrar (0)")
+        self.join_button.callback = self._join_round
+        self.start_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="🏁 Iniciar")
+        self.start_button.callback = self._start_round
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        participants = self.cog._get_target_participants(self.guild, self.session)
+        modifier = self.session.get("modifier") or {"name": "Alvo padrão", "description": "Rodada normal."}
+        pot_total = len(self.session.get("locked_participants", set())) * ALVO_STAKE + int(self.session.get("bonus_chips") or 0) + int(modifier.get("pot_bonus", 0) or 0)
+        countdown = int(self.session.get("start_countdown") or 0)
+        if countdown > 0:
+            self.start_button.label = f"🏁 Iniciar ({countdown})"
+            self.start_button.disabled = True
+        else:
+            self.start_button.label = "🏁 Iniciar"
+            self.start_button.disabled = False
+        self.join_button.label = f"🎯 Entrar ({len(participants)})"
+
+        header = [
+            "# 🎯 Rodada aberta",
+            f"**Entrada:** {self.cog._chip_amount(ALVO_STAKE)}",
+            f"**Pote atual:** {self.cog._chip_amount(pot_total)}",
+            "**Lobby:** **30s**",
+        ]
+        info = [f"**Condição:** {modifier.get('name','Alvo padrão')}"]
+        desc = str(modifier.get('description') or '').strip()
+        if desc:
+            info.append(desc)
+        plist = [f"### Participantes ({len(participants)})"]
+        if participants:
+            plist.extend(f"• {m.mention}" for m in participants)
+        else:
+            plist.append("• Ninguém entrou ainda.")
+        foot = ["Entre pelo botão verde.", "O criador da rodada ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes."]
+        if countdown > 0:
+            foot.append("A contagem começou e ainda dá tempo de entrar.")
+        row = discord.ui.ActionRow(self.join_button, self.start_button)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(header)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(info)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(plist)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(foot)),
+            row,
+            accent_color=discord.Color.blurple(),
+        ))
+
+    async def _join_round(self, interaction: discord.Interaction):
+        await self.cog._handle_target_button(interaction, self)
+
+    async def _start_round(self, interaction: discord.Interaction):
+        await self.cog._handle_target_start_button(interaction, self)
+
+    async def on_timeout(self):
+        try:
+            session = self.cog._get_target_session(self.guild_id)
+            if session is None or session.get('starting'):
+                return
+            await self.cog._finish_target_round(self.guild_id, reason='timeout')
+        except Exception:
+            pass
+
+
+class _TargetLobbyClosedView(discord.ui.LayoutView):
+    def __init__(self, session: dict, guild: discord.Guild, title: str, detail: str):
+        super().__init__(timeout=None)
+        modifier = session.get('modifier') or {'name': 'Alvo padrão'}
+        participants = len(session.get('locked_participants', set()) or [])
+        lines = [f"# {title}", f"**Condição:** {modifier.get('name','Alvo padrão')}", f"**Participantes:** {participants}", detail]
+        self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.blurple()))
+
+
+class GincanaAlvoMixin(GincanaAlvoMixin):
+    async def _refresh_target_message(self, guild_id: int):
+        session = self._get_target_session(guild_id)
+        if session is None or session.get('ended'):
+            return
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return
+        message = session.get('lobby_message') or session.get('message')
+        view = session.get('view')
+        if message is None or view is None:
+            return
+        if hasattr(view, '_build_layout'):
+            view._build_layout()
+        try:
+            await message.edit(view=view)
+        except Exception:
+            pass
+
+    async def _handle_target_button(self, interaction: discord.Interaction, view: _TargetJoinView):
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            try: await interaction.response.send_message('Não foi possível entrar nessa rodada agora.', ephemeral=True)
+            except Exception: pass
+            return
+        session = self._get_target_session(guild.id)
+        if session is None or session.get('view') is not view or session.get('ended'):
+            try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
+            except Exception: pass
+            return
+        locked = session.setdefault('locked_participants', set())
+        if user.id in locked:
+            try: await interaction.response.send_message('Você já entrou nessa rodada e sua entrada ficou travada até o fim.', ephemeral=True)
+            except Exception: pass
+            return
+        paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE)
+        if not paid:
+            try: await interaction.response.send_message(chip_note or 'Você não tem saldo suficiente para entrar nessa rodada.', ephemeral=True)
+            except Exception: pass
+            return
+        locked.add(user.id)
+        session['bonus_chips'] = self._target_bonus_for_participants(len(locked))
+        try: await interaction.response.send_message(chip_note or f"Você entrou na rodada pagando {self._chip_amount(ALVO_STAKE)}.", ephemeral=True)
+        except Exception: pass
+        await self._refresh_target_message(guild.id)
+
+    async def _handle_target_start_button(self, interaction: discord.Interaction, view: _TargetJoinView):
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            try: await interaction.response.send_message('Servidor inválido.', ephemeral=True)
+            except Exception: pass
+            return
+        session = self._get_target_session(guild.id)
+        if session is None or session.get('view') is not view or session.get('ended'):
+            try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
+            except Exception: pass
+            return
+        if session.get('starting'):
+            try: await interaction.response.send_message('A contagem já começou.', ephemeral=True)
+            except Exception: pass
+            return
+        is_owner = int(session.get('owner_id') or 0) == user.id
+        if not is_owner and not self._is_staff_member(user):
+            try: await interaction.response.send_message('Só o criador da rodada ou a staff pode iniciar.', ephemeral=True)
+            except Exception: pass
+            return
+        participants = self._get_target_participants(guild, session)
+        if len(participants) < 2:
+            try: await interaction.response.send_message('A rodada precisa de pelo menos 2 participantes.', ephemeral=True)
+            except Exception: pass
+            return
+        session['starting'] = True
+        session['start_countdown'] = 5
+        task = session.get('countdown_task')
+        if task and not task.done():
+            task.cancel()
+        session['countdown_task'] = self.bot.loop.create_task(self._run_target_start_countdown(guild.id, view))
+        try: await interaction.response.send_message('Contagem iniciada.', ephemeral=True)
+        except Exception: pass
+        await self._refresh_target_message(guild.id)
+
+    async def _run_target_start_countdown(self, guild_id: int, view: _TargetJoinView):
+        for remaining in range(5, 0, -1):
+            session = self._get_target_session(guild_id)
+            if session is None or session.get('ended') or session.get('view') is not view:
+                return
+            session['start_countdown'] = remaining
+            await self._refresh_target_message(guild_id)
+            await asyncio.sleep(1)
+        session = self._get_target_session(guild_id)
+        if session is None or session.get('ended') or session.get('view') is not view:
+            return
+        session['start_countdown'] = 0
+        await self._finish_target_round(guild_id, reason='manual')
+
+    async def _finish_target_round(self, guild_id: int, *, reason: str) -> bool:
+        session = self._get_target_session(guild_id)
+        if session is None or session.get('ended'):
+            return False
+        session['ended'] = True
+        task = session.get('countdown_task')
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+        self._target_last_used[guild_id] = time.time()
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            self._target_sessions.pop(guild_id, None)
+            return False
+        lobby_message = session.get('lobby_message') or session.get('message')
+        view = session.get('view')
+        if isinstance(view, (discord.ui.View, discord.ui.LayoutView)):
+            try: view.stop()
+            except Exception: pass
+        locked_ids = set(session.get('locked_participants', set()))
+        participants = self._get_target_participants(guild, session)
+        if len(locked_ids) == 1:
+            only_id = next(iter(locked_ids))
+            await self.db.add_user_chips(guild.id, only_id, ALVO_STAKE)
+            if lobby_message is not None:
+                try:
+                    await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'Só 1 jogador entrou. A entrada foi devolvida.'))
+                except Exception: pass
+            self._target_sessions.pop(guild_id, None)
+            return True
+        if len(participants) < 2:
+            for user_id in locked_ids:
+                await self.db.add_user_chips(guild.id, user_id, ALVO_STAKE)
+            if lobby_message is not None:
+                try:
+                    await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'Não ficaram participantes suficientes. As entradas foram devolvidas.'))
+                except Exception: pass
+            self._target_sessions.pop(guild_id, None)
+            return True
+        if lobby_message is not None:
+            try:
+                await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada iniciada', 'A disputa começou logo abaixo.'))
+            except Exception:
+                pass
+        text_channel = guild.get_channel(int(session.get('text_channel_id') or 0))
+        round_message = None
+        if isinstance(text_channel, discord.TextChannel):
+            try:
+                round_message = await text_channel.send(embed=self._make_target_embed(guild, session, aiming=True))
+            except Exception:
+                round_message = None
+        session['message'] = round_message
+        # --- original resolution block with slight adjustments ---
+        message = round_message
+        pot_total = len(locked_ids) * ALVO_STAKE
+        bonus_chips = int(session.get('bonus_chips') or 0)
+        modifier = session.get('modifier') or {'key': 'normal', 'name': 'Alvo padrão', 'description': 'Rodada normal.'}
+        bonus_chips += int(modifier.get('pot_bonus', 0) or 0)
+        if message is not None:
+            try:
+                await asyncio.sleep(1.35)
+            except Exception:
+                pass
+        scores = {member.id: self._roll_target_score(str(modifier.get('key', 'normal'))) for member in participants}
+        rewards, placements = self._allocate_target_rewards(participants, scores, pot_total + bonus_chips)
+        result_lines = [f"💥 Os tiros foram disparados. {self._CHIP_GAIN_EMOJI} Pote final: {self._chip_amount(pot_total)}", ""]
+        bullseye_members = []
+        for member in sorted(participants, key=lambda m: (-scores.get(m.id, 0), m.display_name.casefold())):
+            score = scores.get(member.id, 0)
+            icon, zone = self._target_zone_style(score)
+            await self.db.add_user_game_stat(guild.id, member.id, 'alvo_shots', 1)
+            await self._record_game_played(guild.id, member.id, weekly_points=4 + score)
+            if score > 0:
+                await self.db.add_user_game_stat(guild.id, member.id, 'alvo_hits', 1)
+            result_lines.append(f"{icon} {member.mention} acertou **{zone}**.")
+            if score == 3:
+                bullseye_members.append(member)
+                await self.db.add_user_game_stat(guild.id, member.id, 'alvo_bullseyes', 1)
+        if bullseye_members:
+            names = ", ".join(member.mention for member in bullseye_members)
+            result_lines += ["", f"🎯 Bullseye de destaque: {names}!"]
+            bull_bonus = int(modifier.get('bullseye_bonus', 0) or 0)
+            if bull_bonus > 0:
+                for member in bullseye_members:
+                    await self.db.add_user_chips(guild.id, member.id, bull_bonus)
+                    await self._grant_weekly_points(guild.id, member.id, bull_bonus)
+                result_lines.append(f"✨ Cada bullseye recebeu um bônus de {self._chip_amount(bull_bonus)}.")
+        if rewards:
+            result_lines.append("")
+            for badge, members, total in placements:
+                names = ', '.join(member.mention for member in members)
+                result_lines.append(f"{badge} {names} — {self._chip_amount(total)}")
+            for user_id, amount in rewards.items():
+                if amount > 0:
+                    await self.db.add_user_chips(guild.id, user_id, amount)
+                    await self._grant_weekly_points(guild.id, user_id, max(3, amount // 4))
+        special_lines = self._build_target_special_lines(participants, scores, placements)
+        if special_lines:
+            result_lines += ["", *special_lines]
+        final_text = "\n".join(result_lines)
+        if message is not None:
+            try:
+                await message.edit(embed=discord.Embed(title='🎯 Resultado do alvo', description=final_text, color=discord.Color.blurple()))
+            except Exception:
+                pass
+        self._target_sessions.pop(guild_id, None)
+        return True
+
+    async def _handle_target_trigger(self, message: discord.Message) -> bool:
+        guild = message.guild
+        if guild is None:
+            return False
+        if not self._matches_exact_trigger(message.content or '', 'alvo'):
+            return False
+        if not self.db.gincana_enabled(guild.id):
+            return True
+        if self._gincana_only_kick_members(guild.id) and not self._is_staff_member(message.author):
+            return True
+        if self._get_target_session(guild.id) is not None:
+            return True
+        paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ALVO_STAKE)
+        if not paid:
+            try: await message.channel.send(embed=self._make_embed('🎯 Saldo insuficiente', chip_note or 'Você não tem saldo suficiente.', ok=False))
+            except Exception: pass
+            return True
+        session = {
+            'text_channel_id': message.channel.id,
+            'owner_id': message.author.id,
+            'locked_participants': {message.author.id},
+            'modifier': self._roll_target_modifier(),
+            'bonus_chips': self._target_bonus_for_participants(1),
+            'lobby_message': None,
+            'message': None,
+            'view': None,
+            'ended': False,
+            'starting': False,
+            'start_countdown': 0,
+            'countdown_task': None,
+        }
+        self._target_sessions[guild.id] = session
+        view = _TargetJoinView(self, guild.id, session, guild, timeout=30.0)
+        session['view'] = view
+        try:
+            panel_message = await message.channel.send(view=view)
+        except Exception:
+            self._target_sessions.pop(guild.id, None)
+            await self.db.add_user_chips(guild.id, message.author.id, ALVO_STAKE)
+            return True
+        session['lobby_message'] = panel_message
+        await self._react_with_emoji(message, '🎯', keep=True)
+        return True
+
+    async def _handle_disparar_trigger(self, message: discord.Message) -> bool:
+        return False
