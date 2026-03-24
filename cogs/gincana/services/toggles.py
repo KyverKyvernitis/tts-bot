@@ -5,7 +5,7 @@ from pathlib import Path
 
 import discord
 
-from config import GUILD_IDS, MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
+from config import MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
 
 from ..constants import (
     _ALVO_WORD_RE,
@@ -133,9 +133,6 @@ class GincanaToggleMixin:
             if not self._matches_exact_trigger(content, "pica"):
                 return False
 
-            if GUILD_IDS and guild.id not in GUILD_IDS:
-                return True
-
             if not self.db.gincana_enabled(guild.id):
                 return True
 
@@ -227,9 +224,6 @@ class GincanaToggleMixin:
             content = (message.content or "")
             if not self._matches_exact_trigger(content, "dj"):
                 return False
-
-            if GUILD_IDS and guild.id not in GUILD_IDS:
-                return True
 
             if not self.db.gincana_enabled(guild.id):
                 return True

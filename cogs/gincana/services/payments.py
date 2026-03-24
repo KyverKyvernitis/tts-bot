@@ -4,7 +4,6 @@ import time
 
 import discord
 
-from config import GUILD_IDS
 
 
 class GincanaPaymentMixin:
@@ -126,9 +125,6 @@ class GincanaPaymentMixin:
         guild = message.guild
         if guild is None or message.author.bot:
             return False
-        if GUILD_IDS and guild.id not in GUILD_IDS:
-            return False
-
         target, inline_amount = self._parse_pay_request(message)
         if target is not None:
             if target.id == message.author.id:

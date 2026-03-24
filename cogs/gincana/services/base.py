@@ -3,7 +3,7 @@ import asyncio
 import discord
 from discord.ext import commands
 
-from config import GUILD_IDS, OFF_COLOR, ON_COLOR
+from config import OFF_COLOR, ON_COLOR
 from ..constants import CHIPS_DEFAULT, CHIPS_INITIAL, CHIPS_RESET_SECONDS, ROLETA_COST
 from db import SettingsDB
 
@@ -331,8 +331,6 @@ class GincanaBase:
     async def _reject_if_not_allowed_guild(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
             embed = self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False)
-        elif GUILD_IDS and interaction.guild.id not in GUILD_IDS:
-            embed = self._make_embed("Indisponível aqui", "Esse comando não está habilitado neste servidor", ok=False)
         else:
             return False
 
