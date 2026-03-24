@@ -106,11 +106,6 @@ class GincanaMessageRouterMixin:
         if await self._safe_route_call("_handle_target_trigger", message):
             return
 
-        if await self._safe_route_call("_handle_disparar_trigger", message):
-            return
-
-        if await self._safe_route_call("_handle_atirar_trigger", message):
-            return
 
         if await self._safe_route_call("_handle_corrida_trigger", message):
             return
