@@ -1,17 +1,16 @@
 import asyncio
 import random
-import time
 
 import discord
 
 from config import GUILD_IDS
-from ..constants import CHIPS_DEFAULT
 
 
 CORRIDA_STAKE = 10
 _CORRIDA_TRACK_LENGTH = 8
 _CORRIDA_UPDATES = 5
 _CORRIDA_UPDATE_SECONDS = 2.0
+_CORRIDA_LOBBY_SECONDS = 20.0
 
 _HORSE_START = "<:horse1:1485794648239636647>"
 _HORSE_BOOST = "<:horse2:1485795177401417799>"
@@ -19,9 +18,23 @@ _HORSE_RUN = "<:horse2:1485795705745444995>"
 _HORSE_TRIP = "<:horse2:1485795938990821547>"
 _HORSE_FINISH = "<:Mine:1485797167494070524>"
 
+_RACE_CONDITIONS = [
+    {"name": "Pista seca", "boost": 0.0, "trip": 0.0, "speed": 0.0},
+    {"name": "Pista molhada", "boost": -0.02, "trip": 0.08, "speed": -0.15},
+    {"name": "Pista pesada", "boost": -0.03, "trip": 0.04, "speed": -0.25},
+    {"name": "Pista rápida", "boost": 0.08, "trip": -0.02, "speed": 0.2},
+]
+
+_RACE_SPECIALS = [
+    {"name": "Corrida turbo", "boost": 0.12, "trip": -0.03, "speed": 0.35, "bonus_pool": 0, "color": discord.Color.dark_magenta()},
+    {"name": "Corrida pesada", "boost": -0.05, "trip": 0.1, "speed": -0.25, "bonus_pool": 0, "color": discord.Color.dark_orange()},
+    {"name": "Corrida de zebra", "boost": 0.04, "trip": 0.0, "speed": 0.0, "bonus_pool": 0, "zebra": True, "color": discord.Color.purple()},
+    {"name": "Grande prêmio", "boost": 0.02, "trip": 0.0, "speed": 0.15, "bonus_pool": 10, "color": discord.Color.gold()},
+]
+
 
 class _RaceJoinView(discord.ui.View):
-    def __init__(self, cog: "GincanaCorridaMixin", guild_id: int, *, timeout: float = 20.0):
+    def __init__(self, cog: "GincanaCorridaMixin", guild_id: int, *, timeout: float = _CORRIDA_LOBBY_SECONDS):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
@@ -68,6 +81,16 @@ class GincanaCorridaMixin:
     def _race_placement_emoji(self, index: int) -> str:
         return {1: "🥇", 2: "🥈", 3: "🥉"}.get(index, "🔘")
 
+    def _race_color(self, session: dict, *, finished: bool = False) -> discord.Color:
+        if finished:
+            return discord.Color.green()
+        if not session.get("started"):
+            special = session.get("special") or {}
+            return special.get("color") or discord.Color.blurple()
+        if session.get("final_stretch"):
+            return discord.Color.red()
+        return discord.Color.orange()
+
     def _render_race_track(self, pos: int, state_emoji: str) -> str:
         pos = max(0, min(_CORRIDA_TRACK_LENGTH - 1, int(pos)))
         before = "▰" * pos
@@ -81,46 +104,47 @@ class GincanaCorridaMixin:
 
         progress_map = session.get("progress", {}) or {}
         state_map = session.get("state_map", {}) or {}
+        arrival_order = list(session.get("arrival_order", []))
+        arrival_rank = {uid: index for index, uid in enumerate(arrival_order, start=1)}
         ordered = sorted(
             participants,
-            key=lambda m: (-int(progress_map.get(m.id, 0)), m.display_name.casefold()),
+            key=lambda m: (arrival_rank.get(m.id, 9999), -int(progress_map.get(m.id, 0)), m.display_name.casefold()),
         )
         lines: list[str] = []
         for index, member in enumerate(ordered, start=1):
             medal = self._race_placement_emoji(index)
             pos = int(progress_map.get(member.id, 0))
             state_emoji = str(state_map.get(member.id) or _HORSE_START)
+            if member.id in arrival_rank:
+                state_emoji = _HORSE_FINISH
+                pos = _CORRIDA_TRACK_LENGTH - 1
             lines.append(f"{medal} {member.mention} | {self._render_race_track(pos, state_emoji)}")
         return lines
 
     def _make_race_embed(self, guild: discord.Guild, session: dict, *, finished: bool = False) -> discord.Embed:
-        participants = self._get_race_participants(guild, session)
-        pot_total = len(session.get("locked_participants", set())) * CORRIDA_STAKE
-        title = "🏁 Corrida encerrada" if finished else "🐎 Corrida aberta"
+        pot_total = len(session.get("locked_participants", set())) * CORRIDA_STAKE + int(session.get("bonus_pool", 0) or 0)
+        title = "🐎 Corrida aberta"
         if session.get("started"):
-            title = "🏁 Corrida encerrada" if finished else "🐎 Corrida em andamento"
+            title = "🏁 Corrida encerrada" if finished else ("🔥 Reta final" if session.get("final_stretch") else "🐎 Corrida em andamento")
 
+        condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
+        special_name = str((session.get("special") or {}).get("name") or "")
         narration = str(session.get("narration") or "📣 A corrida vai começar.")
         lines = self._build_race_lines(guild, session)
-        description = "\n".join(lines) + f"\n\n────────\n{narration}"
-        embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
+        description_parts = [f"Condição: **{condition_name}**"]
+        if special_name:
+            description_parts.append(f"Especial: **{special_name}**")
+        description_parts.append("")
+        description_parts.extend(lines)
+        description_parts.append("")
+        description_parts.append("────────")
+        description_parts.append(narration)
+        embed = discord.Embed(title=title, description="\n".join(description_parts), color=self._race_color(session, finished=finished))
 
         if not session.get("started"):
-            embed.add_field(
-                name="Entrada",
-                value=f"{self._chip_amount(CORRIDA_STAKE)} por jogador",
-                inline=True,
-            )
-            embed.add_field(
-                name="Pote atual",
-                value=self._chip_amount(pot_total),
-                inline=True,
-            )
-            embed.add_field(
-                name="Duração",
-                value="**10s** de corrida",
-                inline=True,
-            )
+            embed.add_field(name="Entrada", value=self._chip_amount(CORRIDA_STAKE), inline=True)
+            embed.add_field(name="Pote atual", value=self._chip_amount(pot_total), inline=True)
+            embed.add_field(name="Duração", value="**10s**", inline=True)
             embed.set_footer(text="Use o botão para entrar")
         return embed
 
@@ -212,7 +236,7 @@ class GincanaCorridaMixin:
             return rewards, [("🥇", [winner], pot_total)]
         if len(participants) <= 4:
             first_pool = int(round(pot_total * 0.75))
-            second_pool = pot_total - first_pool
+            second_pool = max(0, pot_total - first_pool)
             rewards[participants[0].id] = first_pool
             rewards[participants[1].id] = second_pool
             placements.extend([("🥇", [participants[0]], first_pool), ("🥈", [participants[1]], second_pool)])
@@ -229,17 +253,39 @@ class GincanaCorridaMixin:
             placements.append((badges[index], [participants[index]], total))
         return rewards, placements
 
-    def _pick_race_narration(self, participants: list[discord.Member], tick_events: list[tuple[str, discord.Member]]) -> str:
+    def _pick_race_narration(self, participants: list[discord.Member], tick_events: list[tuple[str, discord.Member]], *, tick: int, final_tick: bool = False) -> str:
+        if final_tick:
+            return "🏁 Todo mundo cruzou a linha."
         for event_key, member in tick_events:
             if event_key == "boost":
                 return f"⚡ {member.mention} largou melhor."
         for event_key, member in tick_events:
             if event_key == "trip":
                 return f"💥 {member.mention} tropeçou."
+        if tick >= _CORRIDA_UPDATES - 2:
+            return "🏁 Últimos metros."
         if participants:
             leader = participants[0]
             return f"👀 {leader.mention} aparece na frente."
         return "📣 A corrida segue aberta."
+
+    def _build_finalized_order(self, guild: discord.Guild, session: dict) -> list[discord.Member]:
+        participants = self._get_race_participants(guild, session)
+        progress = session.get("progress", {}) or {}
+        arrival_order = list(session.get("arrival_order", []))
+        in_order: list[discord.Member] = []
+        seen: set[int] = set()
+        for uid in arrival_order:
+            member = guild.get_member(int(uid))
+            if member is None or member not in participants:
+                continue
+            in_order.append(member)
+            seen.add(uid)
+        leftovers = sorted(
+            [m for m in participants if m.id not in seen],
+            key=lambda m: (-int(progress.get(m.id, 0)), m.display_name.casefold()),
+        )
+        return in_order + leftovers
 
     async def _finish_race_lobby(self, guild_id: int, *, reason: str) -> bool:
         session = self._get_race_session(guild_id)
@@ -252,6 +298,7 @@ class GincanaCorridaMixin:
 
         session["started"] = True
         session["narration"] = "📣 A corrida começou."
+        session["arrival_order"] = []
         message = session.get("message")
         view = session.get("view")
         if isinstance(view, discord.ui.View):
@@ -268,7 +315,6 @@ class GincanaCorridaMixin:
             only_id = next(iter(locked_ids))
             await self.db.add_user_chips(guild.id, only_id, CORRIDA_STAKE)
             session["ended"] = True
-            session["narration"] = "Corrida cancelada. A entrada foi devolvida."
             if message is not None:
                 try:
                     await message.edit(embed=self._make_embed("🐎 Corrida cancelada", "Só 1 jogador entrou. A entrada foi devolvida.", ok=False), view=view)
@@ -298,6 +344,8 @@ class GincanaCorridaMixin:
         await self._refresh_race_message(guild.id)
         await asyncio.sleep(1.0)
 
+        condition = session.get("condition") or {}
+        special = session.get("special") or {}
         for tick in range(_CORRIDA_UPDATES):
             if session.get("ended"):
                 return False
@@ -307,55 +355,85 @@ class GincanaCorridaMixin:
             tick_events: list[tuple[str, discord.Member]] = []
             ordered_before = sorted(participants, key=lambda m: (-int(progress.get(m.id, 0)), m.display_name.casefold()))
             leader_before = ordered_before[0].id if ordered_before else 0
+            arrival_order: list[int] = session.setdefault("arrival_order", [])
+            final_tick = tick == _CORRIDA_UPDATES - 1
 
             for member in participants:
+                if member.id in arrival_order:
+                    progress[member.id] = _CORRIDA_TRACK_LENGTH - 1
+                    state_map[member.id] = _HORSE_FINISH
+                    continue
+
                 cur = int(progress.get(member.id, 0))
-                if tick == 0 and random.random() < 0.22:
+                boost_chance = 0.18 + float(condition.get("boost", 0.0)) + float(special.get("boost", 0.0))
+                trip_chance = 0.14 + float(condition.get("trip", 0.0)) + float(special.get("trip", 0.0))
+                speed_bonus = float(condition.get("speed", 0.0)) + float(special.get("speed", 0.0))
+
+                if special.get("zebra") and cur <= 2:
+                    boost_chance += 0.08
+
+                if final_tick:
+                    move = max(1, (_CORRIDA_TRACK_LENGTH - 1) - cur)
+                    state_map[member.id] = _HORSE_FINISH
+                elif tick == 0 and random.random() < boost_chance + 0.08:
                     move = 3
                     state_map[member.id] = _HORSE_BOOST
                     tick_events.append(("boost", member))
-                elif cur <= 1 and tick >= 2 and random.random() < 0.14:
-                    move = 3
-                    state_map[member.id] = _HORSE_BOOST
-                    tick_events.append(("boost", member))
-                elif random.random() < 0.16:
+                elif random.random() < trip_chance:
                     move = 0
                     state_map[member.id] = _HORSE_TRIP
                     tick_events.append(("trip", member))
                 else:
-                    move = random.randint(1, 2)
-                    state_map[member.id] = _HORSE_RUN
-                progress[member.id] = min(_CORRIDA_TRACK_LENGTH - 1, cur + move)
+                    base_min, base_max = 1, 2
+                    if speed_bonus > 0.2:
+                        base_max = 3
+                    if speed_bonus < -0.15:
+                        base_max = 2
+                        if random.random() < 0.35:
+                            base_min = 0
+                    move = random.randint(base_min, base_max)
+                    if speed_bonus > 0 and random.random() < min(0.4, speed_bonus):
+                        move += 1
+                    move = max(0, min(3, move))
+                    state_map[member.id] = _HORSE_RUN if move > 0 else _HORSE_TRIP
+                    if move == 0:
+                        tick_events.append(("trip", member))
 
-            ordered_after = sorted(participants, key=lambda m: (-int(progress.get(m.id, 0)), m.display_name.casefold()))
+                new_pos = min(_CORRIDA_TRACK_LENGTH - 1, cur + move)
+                progress[member.id] = new_pos
+                if new_pos >= _CORRIDA_TRACK_LENGTH - 1 and member.id not in arrival_order:
+                    arrival_order.append(member.id)
+                    state_map[member.id] = _HORSE_FINISH
+
+            session["final_stretch"] = tick >= _CORRIDA_UPDATES - 2
+            ordered_after = self._build_finalized_order(guild, session)
             leader_after = ordered_after[0].id if ordered_after else 0
-            if tick == _CORRIDA_UPDATES - 1:
-                session["narration"] = "🏁 Últimos metros."
+            if final_tick:
+                session["narration"] = self._pick_race_narration(ordered_after, tick_events, tick=tick, final_tick=True)
             elif leader_after and leader_after != leader_before:
                 leader = guild.get_member(leader_after)
-                session["narration"] = f"↗️ {leader.mention} assumiu a ponta." if leader else "↗️ A ponta mudou de dono."
+                session["narration"] = f"↗️ {leader.mention} assumiu a ponta." if leader else "↗️ A ponta mudou."
             else:
-                session["narration"] = self._pick_race_narration(ordered_after, tick_events)
+                session["narration"] = self._pick_race_narration(ordered_after, tick_events, tick=tick)
             await self._refresh_race_message(guild.id)
             await asyncio.sleep(_CORRIDA_UPDATE_SECONDS)
 
-        participants = self._get_race_participants(guild, session)
-        final_order = sorted(participants, key=lambda m: (-int(progress.get(m.id, 0)), m.display_name.casefold()))
-        if final_order:
-            top_progress = int(progress.get(final_order[0].id, 0))
-            progress[final_order[0].id] = max(top_progress, _CORRIDA_TRACK_LENGTH - 1)
-            state_map[final_order[0].id] = _HORSE_FINISH
+        final_order = self._build_finalized_order(guild, session)
+        for member in final_order:
+            progress[member.id] = _CORRIDA_TRACK_LENGTH - 1
+            state_map[member.id] = _HORSE_FINISH
 
         session["ended"] = True
-        rewards, placements = self._allocate_race_rewards(final_order, len(locked_ids) * CORRIDA_STAKE)
+        total_pot = len(locked_ids) * CORRIDA_STAKE + int(session.get("bonus_pool", 0) or 0)
+        rewards, placements = self._allocate_race_rewards(final_order, total_pot)
         result_lines = self._build_race_lines(guild, session)
-        result_lines.append("")
         if final_order:
+            result_lines.append("")
             result_lines.append(f"🏆 {final_order[0].mention} venceu a corrida.")
         for badge, members, amount in placements:
             if members and amount > 0:
                 result_lines.append(f"{badge} {members[0].mention} — {self._chip_text(amount, kind='gain')}")
-        session["narration"] = "\n".join(result_lines[-(1 + len(placements)):]) if result_lines else "🏁 Corrida encerrada."
+        session["narration"] = "🏁 Todo mundo cruzou a linha."
 
         for index, member in enumerate(final_order[:3], start=1):
             await self.db.add_user_game_stat(guild.id, member.id, "corrida_podiums", 1)
@@ -371,9 +449,14 @@ class GincanaCorridaMixin:
             try:
                 final_embed = discord.Embed(
                     title="🏁 Corrida encerrada",
-                    description="\n".join(self._build_race_lines(guild, session) + ["", *([f"🏆 {final_order[0].mention} venceu a corrida."] if final_order else []), *[f"{badge} {members[0].mention} — {self._chip_text(amount, kind='gain')}" for badge, members, amount in placements if members and amount > 0]]),
-                    color=discord.Color.green(),
+                    description="\n".join(result_lines + ["", "────────", "🏁 Todo mundo cruzou a linha."]),
+                    color=self._race_color(session, finished=True),
                 )
+                condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
+                special_name = str((session.get("special") or {}).get("name") or "")
+                final_embed.insert_field_at(0, name="Condição", value=condition_name, inline=True)
+                if special_name:
+                    final_embed.add_field(name="Especial", value=special_name, inline=True)
                 await message.edit(embed=final_embed, view=view)
             except Exception:
                 pass
@@ -408,7 +491,11 @@ class GincanaCorridaMixin:
                 pass
             return True
 
-        view = _RaceJoinView(self, guild.id, timeout=20.0)
+        condition = random.choice(_RACE_CONDITIONS)
+        special = random.choice(_RACE_SPECIALS) if random.random() < 0.18 else None
+        bonus_pool = int((special or {}).get("bonus_pool", 0) or 0)
+
+        view = _RaceJoinView(self, guild.id, timeout=_CORRIDA_LOBBY_SECONDS)
         session = {
             "voice_channel_id": voice_channel.id,
             "text_channel_id": message.channel.id,
@@ -416,11 +503,16 @@ class GincanaCorridaMixin:
             "locked_participants": {message.author.id},
             "progress": {message.author.id: 0},
             "state_map": {message.author.id: _HORSE_START},
+            "arrival_order": [],
             "message": None,
             "view": view,
             "ended": False,
             "started": False,
+            "final_stretch": False,
             "narration": "📣 A corrida vai começar.",
+            "condition": dict(condition),
+            "special": dict(special) if special else None,
+            "bonus_pool": bonus_pool,
         }
         self._race_sessions[guild.id] = session
         view.join_button.label = f"🐎 Entrar ({len(self._get_race_participants(guild, session))})"
