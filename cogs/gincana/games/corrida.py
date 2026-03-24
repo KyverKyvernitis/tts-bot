@@ -92,7 +92,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
 
     async def on_timeout(self):
         try:
-            await self.cog._finish_race_lobby(self.guild_id, reason="timeout")
+            await self.cog._finish_race_lobby(self.guild_id, reason="timeout", source_view=self)
         except Exception:
             pass
 
@@ -373,7 +373,7 @@ class GincanaCorridaMixin:
             return
 
         try:
-            await self._finish_race_lobby(guild.id, reason="manual_start")
+            await self._finish_race_lobby(guild.id, reason="manual_start", source_view=view)
         except Exception:
             try:
                 await interaction.followup.send("Não foi possível iniciar a corrida agora.", ephemeral=True)
@@ -390,15 +390,23 @@ class GincanaCorridaMixin:
         message = session.get("message")
         if message is None:
             return
-        try:
-            if not session.get("started"):
-                view = _RaceLobbyView(self, guild_id, session, guild, timeout=_CORRIDA_LOBBY_SECONDS)
-            else:
-                view = _RaceStateView(self, guild, session, finished=bool(session.get("ended")))
-            session["view"] = view
-            await message.edit(view=view)
-        except Exception:
-            pass
+        edit_lock = session.setdefault("_edit_lock", asyncio.Lock())
+        async with edit_lock:
+            try:
+                old_view = session.get("view")
+                if not session.get("started"):
+                    view = _RaceLobbyView(self, guild_id, session, guild, timeout=_CORRIDA_LOBBY_SECONDS)
+                else:
+                    view = _RaceStateView(self, guild, session, finished=bool(session.get("ended")))
+                session["view"] = view
+                if old_view is not None and old_view is not view and isinstance(old_view, (discord.ui.View, discord.ui.LayoutView)):
+                    try:
+                        old_view.stop()
+                    except Exception:
+                        pass
+                await message.edit(view=view)
+            except Exception:
+                pass
 
     def _allocate_race_rewards(self, participants: list[discord.Member], pot_total: int) -> tuple[dict[int, int], list[tuple[str, list[discord.Member], int]]]:
         rewards: dict[int, int] = {}
@@ -472,15 +480,18 @@ class GincanaCorridaMixin:
         )
         return in_order + leftovers
 
-    async def _finish_race_lobby(self, guild_id: int, *, reason: str) -> bool:
+    async def _finish_race_lobby(self, guild_id: int, *, reason: str, source_view: discord.ui.LayoutView | None = None) -> bool:
         session = self._get_race_session(guild_id)
-        if session is None or session.get("ended"):
+        if session is None or session.get("ended") or session.get("started") or session.get("starting"):
+            return False
+        if source_view is not None and session.get("view") is not source_view:
             return False
         guild = self.bot.get_guild(guild_id)
         if guild is None:
             self._race_sessions.pop(guild_id, None)
             return False
 
+        session["starting"] = True
         session["started"] = True
         session["narration"] = "📣 A corrida começou."
         session["arrival_order"] = []
@@ -498,6 +509,7 @@ class GincanaCorridaMixin:
         if len(locked_ids) == 1:
             only_id = next(iter(locked_ids))
             await self.db.add_user_chips(guild.id, only_id, CORRIDA_STAKE)
+            session["starting"] = False
             session["ended"] = True
             await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Só 1 jogador entrou. A entrada foi devolvida.")
             self._race_sessions.pop(guild_id, None)
@@ -505,6 +517,7 @@ class GincanaCorridaMixin:
         if len(participants) < 2:
             for user_id in locked_ids:
                 await self.db.add_user_chips(guild.id, user_id, CORRIDA_STAKE)
+            session["starting"] = False
             session["ended"] = True
             await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Não ficaram participantes suficientes na call. As entradas foram devolvidas.")
             self._race_sessions.pop(guild_id, None)
@@ -632,6 +645,7 @@ class GincanaCorridaMixin:
                 await self.db.add_user_chips(guild.id, user_id, amount)
                 await self._grant_weekly_points(guild.id, user_id, max(4, amount // 4))
 
+        session["starting"] = False
         session["result_lines"] = result_lines
         message = session.get("message")
         if message is not None:
@@ -693,6 +707,8 @@ class GincanaCorridaMixin:
             "condition": dict(condition),
             "special": dict(special) if special else None,
             "bonus_pool": bonus_pool,
+            "starting": False,
+            "_edit_lock": asyncio.Lock(),
         }
         self._race_sessions[guild.id] = session
         view = _RaceLobbyView(self, guild.id, session, guild, timeout=_CORRIDA_LOBBY_SECONDS)
