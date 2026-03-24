@@ -41,9 +41,15 @@ class _RaceJoinView(discord.ui.View):
         self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label="🐎 Entrar (0)")
         self.join_button.callback = self._join_race
         self.add_item(self.join_button)
+        self.start_button = discord.ui.Button(style=discord.ButtonStyle.primary, label="Iniciar", emoji="🏁")
+        self.start_button.callback = self._start_race
+        self.add_item(self.start_button)
 
     async def _join_race(self, interaction: discord.Interaction):
         await self.cog._handle_race_button(interaction, self)
+
+    async def _start_race(self, interaction: discord.Interaction):
+        await self.cog._handle_race_start_button(interaction, self)
 
     async def on_timeout(self):
         try:
@@ -145,7 +151,7 @@ class GincanaCorridaMixin:
             embed.add_field(name="Entrada", value=self._chip_amount(CORRIDA_STAKE), inline=True)
             embed.add_field(name="Pote atual", value=self._chip_amount(pot_total), inline=True)
             embed.add_field(name="Duração", value="**10s**", inline=True)
-            embed.set_footer(text="Use o botão para entrar")
+            embed.set_footer(text="Entre no lobby. O criador ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes.")
         return embed
 
     async def _handle_race_button(self, interaction: discord.Interaction, view: _RaceJoinView):
@@ -206,6 +212,48 @@ class GincanaCorridaMixin:
         except Exception:
             pass
         await self._refresh_race_message(guild.id)
+
+
+    async def _handle_race_start_button(self, interaction: discord.Interaction, view: _RaceJoinView):
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            try:
+                await interaction.response.send_message("Servidor inválido.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        session = self._get_race_session(guild.id)
+        if session is None or session.get("ended") or session.get("started"):
+            try:
+                await interaction.response.send_message("Essa corrida já foi iniciada.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        is_owner = int(session.get("owner_id") or 0) == user.id
+        if not is_owner and not self._is_staff_member(user):
+            try:
+                await interaction.response.send_message("Só o criador da corrida ou a staff pode iniciar.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        participants = self._get_race_participants(guild, session)
+        if len(participants) < 2:
+            try:
+                await interaction.response.send_message("A corrida precisa de pelo menos 2 participantes para começar.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+
+        await self._finish_race_lobby(guild.id, reason="manual_start")
 
     async def _refresh_race_message(self, guild_id: int):
         session = self._get_race_session(guild_id)
