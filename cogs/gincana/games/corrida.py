@@ -32,9 +32,9 @@ _RACE_SPECIALS = [
     {"name": "Grande prêmio", "boost": 0.02, "trip": 0.0, "speed": 0.15, "bonus_pool": 10, "color": discord.Color.gold()},
 ]
 
-_RACE_IMPULSE_WINDOWS = (1, 7, 12)
+_RACE_IMPULSE_WINDOWS = (1, 6, 11)
 _RACE_IMPULSE_INITIAL_DELAY = 2.0
-_RACE_IMPULSE_STEP_SECONDS = 1.5
+_RACE_IMPULSE_STEP_SECONDS = 2.0
 _RACE_IMPULSE_BUTTON_COUNT = 6
 _RACE_IMPULSE_EMOJI = "⚡"
 
@@ -213,6 +213,8 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                 self._rebuild()
                 await self.message.edit(view=self)
                 self._last_render_signature = signature
+            except discord.NotFound:
+                self.message = None
             except Exception:
                 pass
 
@@ -571,6 +573,8 @@ class GincanaCorridaMixin:
                         pass
                 await message.edit(view=view)
                 session["_last_render_key"] = render_key
+            except discord.NotFound:
+                session["message"] = None
             except Exception:
                 pass
 
@@ -674,8 +678,29 @@ class GincanaCorridaMixin:
             if not immediate:
                 await asyncio.sleep(1.5)
             await message.delete()
+        except discord.NotFound:
+            pass
         except Exception:
             pass
+
+    async def _stop_active_impulse_event(self, session: dict, *, keep_status: bool = False):
+        active_task = session.get("active_impulse_task")
+        if active_task is not None:
+            session["active_impulse_task"] = None
+            if not active_task.done():
+                active_task.cancel()
+                try:
+                    await active_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+        active_message = session.get("active_impulse_message")
+        if active_message is not None:
+            session["active_impulse_message"] = None
+            await self._delete_impulse_message(active_message, immediate=True)
+        if not keep_status:
+            session["impulse_status"] = ""
 
     async def _run_race_impulse_event(self, guild: discord.Guild, session: dict, stage_name: str):
         if session.get("ended"):
@@ -684,44 +709,47 @@ class GincanaCorridaMixin:
         if channel is None or not hasattr(channel, "send"):
             return
 
-        previous_message = session.get("active_impulse_message")
-        if previous_message is not None:
-            await self._delete_impulse_message(previous_message, immediate=True)
-
         event_view = _RaceImpulseEventView(self, guild, session, stage_name)
         session["impulse_status"] = f"⚡ Evento de impulso ({stage_name.lower()}) em andamento."
         await self._refresh_race_message(guild.id)
+        event_message = None
         try:
             event_message = await channel.send(view=event_view)
-        except Exception:
-            session["impulse_status"] = f"⚡ Evento de impulso ({stage_name.lower()}) falhou."
-            await self._refresh_race_message(guild.id)
-            return
-
-        session["active_impulse_message"] = event_message
-        event_view.message = event_message
-        await event_view.refresh_message()
-        await asyncio.sleep(_RACE_IMPULSE_INITIAL_DELAY)
-        for step_index in range(_RACE_IMPULSE_BUTTON_COUNT):
-            if session.get("ended"):
-                break
-            event_view._activate_step(step_index)
+            session["active_impulse_message"] = event_message
+            event_view.message = event_message
             await event_view.refresh_message()
-            await asyncio.sleep(_RACE_IMPULSE_STEP_SECONDS)
+            await asyncio.sleep(_RACE_IMPULSE_INITIAL_DELAY)
+            for step_index in range(_RACE_IMPULSE_BUTTON_COUNT):
+                if session.get("ended"):
+                    break
+                event_view._activate_step(step_index)
+                await event_view.refresh_message()
+                await asyncio.sleep(_RACE_IMPULSE_STEP_SECONDS)
+                event_view._close_current_step()
+                await event_view.refresh_message()
+
+            event_view.finished = True
             event_view._close_current_step()
+            event_view._apply_results()
             await event_view.refresh_message()
-
-        event_view.finished = True
-        event_view._close_current_step()
-        event_view._apply_results()
-        await event_view.refresh_message()
-        participant_count = len(self._get_race_participants(guild, session))
-        hit_count = sum(1 for result in event_view.results.values() if any((time_value is not None and time_value < _RACE_IMPULSE_STEP_SECONDS) for time_value in result.get("times", [])))
-        session["impulse_status"] = f"⚡ Impulsos de {stage_name.lower()} aplicados ({hit_count}/{participant_count})."
-        await self._refresh_race_message(guild.id)
-        if session.get("active_impulse_message") is event_message:
-            session["active_impulse_message"] = None
-        await self._delete_impulse_message(event_message)
+            participant_count = len(self._get_race_participants(guild, session))
+            hit_count = sum(1 for result in event_view.results.values() if any((time_value is not None and time_value < _RACE_IMPULSE_STEP_SECONDS) for time_value in result.get("times", [])))
+            if session.get("active_impulse_message") is event_message:
+                session["impulse_status"] = f"⚡ Impulsos de {stage_name.lower()} aplicados ({hit_count}/{participant_count})."
+                await self._refresh_race_message(guild.id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if event_message is None:
+                session["impulse_status"] = f"⚡ Evento de impulso ({stage_name.lower()}) falhou."
+                await self._refresh_race_message(guild.id)
+        finally:
+            if session.get("active_impulse_message") is event_message:
+                session["active_impulse_message"] = None
+            if session.get("active_impulse_task") is asyncio.current_task():
+                session["active_impulse_task"] = None
+            if event_message is not None:
+                await self._delete_impulse_message(event_message)
 
     async def _finish_race_lobby(self, guild_id: int, *, reason: str, source_view: discord.ui.LayoutView | None = None) -> bool:
         session = self._get_race_session(guild_id)
@@ -743,6 +771,7 @@ class GincanaCorridaMixin:
         session["impulse_tasks"] = []
         session["impulse_ticks_fired"] = set()
         session["active_impulse_message"] = None
+        session["active_impulse_task"] = None
         session["_last_render_key"] = None
         lobby_message = session.get("message")
         view = session.get("view")
@@ -799,8 +828,10 @@ class GincanaCorridaMixin:
                 break
 
             if tick in _RACE_IMPULSE_WINDOWS and tick not in session.setdefault("impulse_ticks_fired", set()):
-                stage_name = {1: "Começo", 7: "Meio", 12: "Final"}.get(tick, "Impulso")
+                stage_name = {1: "Começo", 6: "Meio", 11: "Final"}.get(tick, "Impulso")
+                await self._stop_active_impulse_event(session, keep_status=True)
                 task = asyncio.create_task(self._run_race_impulse_event(guild, session, stage_name))
+                session["active_impulse_task"] = task
                 session.setdefault("impulse_tasks", []).append(task)
                 session.setdefault("impulse_ticks_fired", set()).add(tick)
 
@@ -816,31 +847,17 @@ class GincanaCorridaMixin:
                     continue
 
                 cur = float(progress.get(member.id, 0.0))
-                boost_chance = 0.16 + float(condition.get("boost", 0.0)) + float(special.get("boost", 0.0))
                 trip_chance = 0.12 + float(condition.get("trip", 0.0)) + float(special.get("trip", 0.0))
                 speed_bonus = float(condition.get("speed", 0.0)) + float(special.get("speed", 0.0))
 
-                if special.get("zebra") and cur <= 2.0:
-                    boost_chance += 0.07
-
                 if session.get("final_stretch"):
-                    boost_chance += 0.06
-                    if cur <= track_end * 0.55:
-                        boost_chance += 0.04
                     trip_chance = max(0.02, trip_chance - 0.03)
                 if tick >= _CORRIDA_UPDATES:
-                    boost_chance += 0.08
                     trip_chance = max(0.01, trip_chance - 0.05)
 
                 pending_impulse = float(session.setdefault("pending_impulse_bonus", {}).pop(member.id, 0.0) or 0.0)
-                if pending_impulse > 0:
-                    boost_chance += 0.05
 
-                if tick == 0 and random.random() < boost_chance + 0.06:
-                    move = 1.0 + pending_impulse
-                    state_map[member.id] = _HORSE_BOOST
-                    tick_events.append(("boost", member))
-                elif random.random() < trip_chance and cur < track_end - 0.5:
+                if random.random() < trip_chance and cur < track_end - 0.5:
                     move = max(0.0, pending_impulse * 0.5)
                     state_map[member.id] = _HORSE_TRIP
                     tick_events.append(("trip", member))
@@ -854,13 +871,12 @@ class GincanaCorridaMixin:
                         base_move += 0.12
                     if tick >= _CORRIDA_UPDATES:
                         base_move += 0.15
-                    if random.random() < boost_chance:
-                        base_move += 0.30
+                    move = max(0.0, min(1.3, base_move + pending_impulse))
+                    if pending_impulse > 0:
                         state_map[member.id] = _HORSE_BOOST
                         tick_events.append(("boost", member))
                     else:
                         state_map[member.id] = _HORSE_RUN
-                    move = max(0.0, min(1.3, base_move + pending_impulse))
 
                 raw_finish_score = cur + move
                 new_pos = min(track_end, raw_finish_score)
@@ -904,13 +920,12 @@ class GincanaCorridaMixin:
         for task in list(session.get("impulse_tasks", [])):
             try:
                 await task
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
 
-        active_impulse_message = session.get("active_impulse_message")
-        if active_impulse_message is not None:
-            session["active_impulse_message"] = None
-            await self._delete_impulse_message(active_impulse_message)
+        await self._stop_active_impulse_event(session)
 
         final_groups = self._build_arrival_member_groups(guild, session)
         final_order = [member for group in final_groups for member in group]
@@ -1017,6 +1032,7 @@ class GincanaCorridaMixin:
             "impulse_tasks": [],
             "impulse_ticks_fired": set(),
             "active_impulse_message": None,
+            "active_impulse_task": None,
             "_edit_lock": asyncio.Lock(),
             "_last_render_key": None,
         }
