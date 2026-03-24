@@ -422,18 +422,7 @@ class GincanaCorridaMixin:
             self._race_sessions.pop(guild_id, None)
             return True
 
-        text_channel = guild.get_channel(int(session.get("text_channel_id") or 0))
-        if lobby_message is not None:
-            try:
-                await lobby_message.delete()
-            except Exception:
-                pass
-        race_message = None
-        if isinstance(text_channel, discord.TextChannel):
-            try:
-                race_message = await text_channel.send(embed=self._make_race_embed(guild, session, finished=False))
-            except Exception:
-                race_message = None
+        race_message = lobby_message
         session["message"] = race_message
 
         progress = session.setdefault("progress", {})
