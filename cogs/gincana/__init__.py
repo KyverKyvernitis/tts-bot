@@ -2,7 +2,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands as dcommands
 
-from config import GUILD_IDS
 from .cog import GincanaCore
 from .constants import _guild_scoped
 
@@ -45,9 +44,6 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return
-        if GUILD_IDS and ctx.guild.id not in GUILD_IDS:
-            await ctx.reply(embed=self._make_embed("Indisponível aqui", "Esse comando não está habilitado neste servidor", ok=False), mention_author=False)
-            return
         embed = self._make_chip_balance_embed(ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
 
@@ -56,9 +52,6 @@ class GincanaCog(dcommands.Cog, GincanaCore):
     async def daily(self, ctx: dcommands.Context):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
-            return
-        if GUILD_IDS and ctx.guild.id not in GUILD_IDS:
-            await ctx.reply(embed=self._make_embed("Indisponível aqui", "Esse comando não está habilitado neste servidor", ok=False), mention_author=False)
             return
         claimed, new_balance, bonus, streak = await self.db.claim_daily_bonus(ctx.guild.id, ctx.author.id)
         if not claimed:
@@ -81,9 +74,6 @@ class GincanaCog(dcommands.Cog, GincanaCore):
     async def resetficha(self, ctx: dcommands.Context, member: discord.Member | None = None):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
-            return
-        if GUILD_IDS and ctx.guild.id not in GUILD_IDS:
-            await ctx.reply(embed=self._make_embed("Indisponível aqui", "Esse comando não está habilitado neste servidor", ok=False), mention_author=False)
             return
         if not isinstance(ctx.author, discord.Member) or not self._is_staff_member(ctx.author):
             await ctx.reply(embed=self._make_embed("Sem permissão", "Você precisa ser staff da gincana para resetar fichas manualmente.", ok=False), mention_author=False)
@@ -108,10 +98,39 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return
-        if GUILD_IDS and ctx.guild.id not in GUILD_IDS:
-            await ctx.reply(embed=self._make_embed("Indisponível aqui", "Esse comando não está habilitado neste servidor", ok=False), mention_author=False)
-            return
         embed = self._make_chip_leaderboard_embed(ctx.guild, ctx.author)
+        await ctx.reply(embed=embed, mention_author=False)
+
+
+    @dcommands.command(name="gincanahelp", aliases=["helpgincana", "jogoshelp"])
+    async def gincanahelp(self, ctx: dcommands.Context):
+        if ctx.guild is None:
+            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            return
+        embed = discord.Embed(
+            title="🎲 Help da gincana",
+            description=(
+                "Jogos, fichas e atalhos da gincana em um lugar só.\n\n"
+                f"{self._CHIP_EMOJI} **Economia**\n"
+                f"• `{ctx.clean_prefix}ficha` — mostra seu saldo e seus destaques\n"
+                f"• `{ctx.clean_prefix}daily` — resgata o bônus diário\n"
+                f"• `{ctx.clean_prefix}rank` — ranking semanal\n"
+                "• `pay @usuário valor` — transfere fichas\n\n"
+                "🎮 **Jogos**\n"
+                "• `roleta` — aposta rápida com jackpot\n"
+                "• `buckshot` — rodada de sobrevivência\n"
+                "• `alvo` — disputa de mira\n"
+                "• `corrida` — corrida de cavalos\n"
+                "• `poker` — mesa de poker\n\n"
+                "🕹️ **Como entra**\n"
+                "• alguns jogos abrem um lobby com botão\n"
+                "• `atirar` fecha o buckshot\n"
+                "• `disparar` fecha o alvo\n\n"
+                "A gincana agora pode ser usada fora de call também."
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Use os triggers sozinhos na mensagem para abrir os jogos")
         await ctx.reply(embed=embed, mention_author=False)
 
     @dcommands.Cog.listener()
