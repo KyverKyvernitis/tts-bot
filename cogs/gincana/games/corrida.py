@@ -33,17 +33,56 @@ _RACE_SPECIALS = [
 ]
 
 
-class _RaceJoinView(discord.ui.View):
-    def __init__(self, cog: "GincanaCorridaMixin", guild_id: int, *, timeout: float = _CORRIDA_LOBBY_SECONDS):
+class _RaceLobbyView(discord.ui.LayoutView):
+    def __init__(self, cog: "GincanaCorridaMixin", guild_id: int, session: dict, guild: discord.Guild, *, timeout: float = _CORRIDA_LOBBY_SECONDS):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
-        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label="🐎 Entrar (0)")
+        self.session = session
+        self.guild = guild
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label=f"🐎 Entrar ({len(cog._get_race_participants(guild, session))})")
         self.join_button.callback = self._join_race
-        self.add_item(self.join_button)
         self.start_button = discord.ui.Button(style=discord.ButtonStyle.primary, label="Iniciar", emoji="🏁")
         self.start_button.callback = self._start_race
-        self.add_item(self.start_button)
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        condition_name = str((self.session.get("condition") or {}).get("name") or "Pista seca")
+        special_name = str((self.session.get("special") or {}).get("name") or "")
+        participants = self.cog._get_race_participants(self.guild, self.session)
+        pot_total = len(self.session.get("locked_participants", set())) * CORRIDA_STAKE + int(self.session.get("bonus_pool", 0) or 0)
+
+        header_lines = [
+            "# 🐎 Corrida aberta",
+            f"**Condição:** {condition_name}",
+        ]
+        if special_name:
+            header_lines.append(f"**Especial:** {special_name}")
+        header_lines.append(f"**Entrada:** {self.cog._chip_amount(CORRIDA_STAKE)}")
+        header_lines.append(f"**Pote atual:** {self.cog._chip_amount(pot_total)}")
+        header_lines.append("**Duração:** **10s**")
+
+        participants_lines = [f"### Participantes ({len(participants)})"]
+        if participants:
+            participants_lines.extend(f"• {member.mention}" for member in participants)
+        else:
+            participants_lines.append("• Ninguém entrou ainda.")
+
+        info_lines = ["Confirme abaixo para entrar."]
+        info_lines.append("O criador da corrida ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes.")
+
+        row = discord.ui.ActionRow(self.join_button, self.start_button)
+        container = discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(header_lines)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(participants_lines)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(info_lines)),
+            row,
+            accent_color=discord.Color.blurple(),
+        )
+        self.add_item(container)
 
     async def _join_race(self, interaction: discord.Interaction):
         await self.cog._handle_race_button(interaction, self)
@@ -154,7 +193,7 @@ class GincanaCorridaMixin:
             embed.set_footer(text="Entre no lobby. O criador ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes.")
         return embed
 
-    async def _handle_race_button(self, interaction: discord.Interaction, view: _RaceJoinView):
+    async def _handle_race_button(self, interaction: discord.Interaction, view: _RaceLobbyView):
         guild = interaction.guild
         user = interaction.user
         if guild is None or not isinstance(user, discord.Member):
@@ -214,7 +253,7 @@ class GincanaCorridaMixin:
         await self._refresh_race_message(guild.id)
 
 
-    async def _handle_race_start_button(self, interaction: discord.Interaction, view: _RaceJoinView):
+    async def _handle_race_start_button(self, interaction: discord.Interaction, view: _RaceLobbyView):
         guild = interaction.guild
         user = interaction.user
         if guild is None or not isinstance(user, discord.Member):
@@ -263,13 +302,15 @@ class GincanaCorridaMixin:
         if guild is None:
             return
         message = session.get("message")
-        view = session.get("view")
         if message is None:
             return
         try:
-            if not session.get("started") and view is not None:
-                view.join_button.label = f"🐎 Entrar ({len(self._get_race_participants(guild, session))})"
-            await message.edit(embed=self._make_race_embed(guild, session, finished=bool(session.get("ended"))), view=view)
+            if not session.get("started"):
+                view = _RaceLobbyView(self, guild_id, session, guild, timeout=_CORRIDA_LOBBY_SECONDS)
+                session["view"] = view
+                await message.edit(view=view)
+            else:
+                await message.edit(embed=self._make_race_embed(guild, session, finished=bool(session.get("ended"))), view=session.get("view"))
         except Exception:
             pass
 
@@ -347,15 +388,14 @@ class GincanaCorridaMixin:
         session["started"] = True
         session["narration"] = "📣 A corrida começou."
         session["arrival_order"] = []
-        message = session.get("message")
+        lobby_message = session.get("message")
         view = session.get("view")
-        if isinstance(view, discord.ui.View):
-            for child in view.children:
-                child.disabled = True
+        if isinstance(view, (discord.ui.View, discord.ui.LayoutView)):
             try:
                 view.stop()
             except Exception:
                 pass
+        session["view"] = None
 
         participants = self._get_race_participants(guild, session)
         locked_ids = set(session.get("locked_participants", set()))
@@ -363,9 +403,9 @@ class GincanaCorridaMixin:
             only_id = next(iter(locked_ids))
             await self.db.add_user_chips(guild.id, only_id, CORRIDA_STAKE)
             session["ended"] = True
-            if message is not None:
+            if lobby_message is not None:
                 try:
-                    await message.edit(embed=self._make_embed("🐎 Corrida cancelada", "Só 1 jogador entrou. A entrada foi devolvida.", ok=False), view=view)
+                    await lobby_message.edit(embed=self._make_embed("🐎 Corrida cancelada", "Só 1 jogador entrou. A entrada foi devolvida.", ok=False), view=None)
                 except Exception:
                     pass
             self._race_sessions.pop(guild_id, None)
@@ -374,13 +414,27 @@ class GincanaCorridaMixin:
             for user_id in locked_ids:
                 await self.db.add_user_chips(guild.id, user_id, CORRIDA_STAKE)
             session["ended"] = True
-            if message is not None:
+            if lobby_message is not None:
                 try:
-                    await message.edit(embed=self._make_embed("🐎 Corrida cancelada", "Não ficaram participantes suficientes na call. As entradas foram devolvidas.", ok=False), view=view)
+                    await lobby_message.edit(embed=self._make_embed("🐎 Corrida cancelada", "Não ficaram participantes suficientes na call. As entradas foram devolvidas.", ok=False), view=None)
                 except Exception:
                     pass
             self._race_sessions.pop(guild_id, None)
             return True
+
+        text_channel = guild.get_channel(int(session.get("text_channel_id") or 0))
+        if lobby_message is not None:
+            try:
+                await lobby_message.delete()
+            except Exception:
+                pass
+        race_message = None
+        if isinstance(text_channel, discord.TextChannel):
+            try:
+                race_message = await text_channel.send(embed=self._make_race_embed(guild, session, finished=False))
+            except Exception:
+                race_message = None
+        session["message"] = race_message
 
         progress = session.setdefault("progress", {})
         state_map = session.setdefault("state_map", {})
@@ -493,6 +547,7 @@ class GincanaCorridaMixin:
                 await self.db.add_user_chips(guild.id, user_id, amount)
                 await self._grant_weekly_points(guild.id, user_id, max(4, amount // 4))
 
+        message = session.get("message")
         if message is not None:
             try:
                 final_embed = discord.Embed(
@@ -505,7 +560,7 @@ class GincanaCorridaMixin:
                 final_embed.insert_field_at(0, name="Condição", value=condition_name, inline=True)
                 if special_name:
                     final_embed.add_field(name="Especial", value=special_name, inline=True)
-                await message.edit(embed=final_embed, view=view)
+                await message.edit(embed=final_embed, view=None)
             except Exception:
                 pass
 
@@ -543,7 +598,6 @@ class GincanaCorridaMixin:
         special = random.choice(_RACE_SPECIALS) if random.random() < 0.18 else None
         bonus_pool = int((special or {}).get("bonus_pool", 0) or 0)
 
-        view = _RaceJoinView(self, guild.id, timeout=_CORRIDA_LOBBY_SECONDS)
         session = {
             "voice_channel_id": voice_channel.id,
             "text_channel_id": message.channel.id,
@@ -553,7 +607,7 @@ class GincanaCorridaMixin:
             "state_map": {message.author.id: _HORSE_START},
             "arrival_order": [],
             "message": None,
-            "view": view,
+            "view": None,
             "ended": False,
             "started": False,
             "final_stretch": False,
@@ -563,12 +617,10 @@ class GincanaCorridaMixin:
             "bonus_pool": bonus_pool,
         }
         self._race_sessions[guild.id] = session
-        view.join_button.label = f"🐎 Entrar ({len(self._get_race_participants(guild, session))})"
-        embed = self._make_race_embed(guild, session)
-        if chip_note:
-            embed.set_footer(text=f"{chip_note} Você já entrou na corrida.")
+        view = _RaceLobbyView(self, guild.id, session, guild, timeout=_CORRIDA_LOBBY_SECONDS)
+        session["view"] = view
         try:
-            panel_message = await message.channel.send(embed=embed, view=view)
+            panel_message = await message.channel.send(view=view)
         except Exception:
             self._race_sessions.pop(guild.id, None)
             await self.db.add_user_chips(guild.id, message.author.id, CORRIDA_STAKE)
