@@ -24,6 +24,7 @@ class GincanaBase:
         self._buckshot_sessions: dict[int, dict] = {}
         self._target_sessions: dict[int, dict] = {}
         self._target_last_used: dict[int, float] = {}
+        self._buckshot_last_used: dict[int, float] = {}
         self._poker_games: dict[int, object] = {}
         self._payment_sessions: dict[tuple[int, int], dict] = {}
         self._race_sessions: dict[int, dict] = {}
