@@ -279,8 +279,8 @@ class GincanaBase:
             ("🃏 Rei do poker", "poker_wins"),
             ("<:gunforward:1484655577836683434> Sobrevivente", "buckshot_survivals"),
             ("🎰 Sortudo", "roleta_jackpots"),
-            ("🎯 Melhor mira", "alvo_bullseyes"),
-            ("🐎 Campeão da corrida", "corrida_wins"),
+            ("🎯 Destaque do alvo", "alvo_bullseyes"),
+            ("🐎 Destaque da corrida", "corrida_wins"),
         ]
         highlight_lines = []
         for label, key in highlight_specs:
@@ -292,7 +292,7 @@ class GincanaBase:
             name = member.display_name if member is not None else f"Usuário {row['user_id']}"
             highlight_lines.append(f"{label}: **{name}** — **{row['value']}**")
         if highlight_lines:
-            embed.add_field(name="Destaques paralelos", value="\n".join(highlight_lines), inline=False)
+            embed.add_field(name="Destaque paralelo semanal", value="\n".join(highlight_lines), inline=False)
         return embed
 
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:
