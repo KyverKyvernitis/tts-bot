@@ -125,7 +125,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 "🕹️ **Como entra**\n"
                 "• alguns jogos abrem um lobby com botão\n"
                 "• `atirar` fecha o buckshot\n"
-                "• `disparar` fecha o alvo\n\n"
+                "• use os botões dos lobbies para começar os jogos\n\n"
                 "A gincana agora pode ser usada fora de call também."
             ),
             color=discord.Color.blurple(),
