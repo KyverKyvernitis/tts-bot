@@ -5,7 +5,7 @@ from pathlib import Path
 
 import discord
 
-from config import GUILD_IDS, MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
+from config import MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
 
 from ..constants import (
     _ALVO_WORD_RE,
@@ -271,12 +271,12 @@ class GincanaBuckshotMixin:
                 chosen_text = chosen.mention if chosen is not None else "Alguém"
                 if winners:
                     final_text = (
-                        f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi tirado da call.\n"
+                        f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi eliminado.\n"
                         f"{self._CHIP_GAIN_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi dividido entre os sobreviventes."
                     )
                 else:
                     final_text = (
-                        f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi tirado da call.\n"
+                        f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi eliminado.\n"
                         f"{self._CHIP_LOSS_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi perdido."
                     )
 
@@ -305,9 +305,6 @@ class GincanaBuckshotMixin:
             if not self._matches_exact_trigger(content, "buckshot"):
                 return False
 
-            if GUILD_IDS and guild.id not in GUILD_IDS:
-                return True
-
             if not self.db.gincana_enabled(guild.id):
                 return True
 
@@ -317,28 +314,15 @@ class GincanaBuckshotMixin:
             if self._get_buckshot_session(guild.id) is not None:
                 return True
 
-            author_voice = getattr(message.author, "voice", None)
-            voice_channel = getattr(author_voice, "channel", None)
-            if not isinstance(voice_channel, discord.VoiceChannel):
-                return True
+            voice_channel = getattr(getattr(message.author, "voice", None), "channel", None)
 
             view = _BuckshotJoinView(self, guild.id, timeout=30.0)
-            focus_participants: set[int] = set()
-            locked_participants: set[int] = set()
-            for member in self._iter_focused_members(guild, voice_channel):
-                if getattr(member, "bot", False):
-                    continue
-                paid, _balance, _note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
-                if paid:
-                    focus_participants.add(member.id)
-                    locked_participants.add(member.id)
-
             session = {
-                "voice_channel_id": voice_channel.id,
+                "voice_channel_id": getattr(voice_channel, "id", 0),
                 "text_channel_id": message.channel.id,
-                "manual_participants": set(),
-                "focus_participants": focus_participants,
-                "locked_participants": locked_participants,
+                "manual_participants": {message.author.id},
+                "focus_participants": set(),
+                "locked_participants": {message.author.id},
                 "message": None,
                 "view": view,
                 "ended": False,
@@ -368,9 +352,6 @@ class GincanaBuckshotMixin:
             if not self._matches_exact_trigger(content, "atirar"):
                 return False
 
-            if GUILD_IDS and guild.id not in GUILD_IDS:
-                return True
-
             if not self.db.gincana_enabled(guild.id):
                 return True
 
@@ -379,14 +360,6 @@ class GincanaBuckshotMixin:
 
             session = self._get_buckshot_session(guild.id)
             if session is None:
-                return True
-
-            voice_channel = self._get_buckshot_voice_channel(guild, session)
-            if voice_channel is None:
-                await self._finish_buckshot(guild.id, reason="manual")
-                return True
-
-            if getattr(message.author.voice, "channel", None) != voice_channel:
                 return True
 
             await self._finish_buckshot(guild.id, reason="manual")

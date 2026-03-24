@@ -5,7 +5,7 @@ from pathlib import Path
 
 import discord
 
-from config import GUILD_IDS, MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
+from config import MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
 
 from ..constants import (
     _ALVO_WORD_RE,
@@ -53,15 +53,10 @@ class GincanaAlvoMixin:
             channel = guild.get_channel(int(session.get("voice_channel_id") or 0))
             return channel if isinstance(channel, discord.VoiceChannel) else None
         def _get_target_participants(self, guild: discord.Guild, session: dict) -> list[discord.Member]:
-            voice_channel = self._get_target_voice_channel(guild, session)
-            if voice_channel is None:
-                return []
             participants: list[discord.Member] = []
             for user_id in sorted(session.get("locked_participants", set())):
                 member = guild.get_member(int(user_id))
                 if member is None or getattr(member, "bot", False):
-                    continue
-                if getattr(getattr(member, "voice", None), "channel", None) != voice_channel:
                     continue
                 participants.append(member)
             return participants
@@ -405,7 +400,7 @@ class GincanaAlvoMixin:
             elif len(participants) < 2:
                 for user_id in locked_ids:
                     await self.db.add_user_chips(guild.id, user_id, ALVO_STAKE)
-                final_text = "A rodada foi cancelada porque não ficaram participantes suficientes na call. As entradas foram reembolsadas."
+                final_text = "A rodada foi cancelada porque não ficaram participantes suficientes. As entradas foram reembolsadas."
             else:
                 pot_total = len(locked_ids) * ALVO_STAKE
                 bonus_chips = int(session.get("bonus_chips") or 0)
@@ -484,9 +479,6 @@ class GincanaAlvoMixin:
             if not self._matches_exact_trigger(content, "alvo"):
                 return False
 
-            if GUILD_IDS and guild.id not in GUILD_IDS:
-                return True
-
             if not self.db.gincana_enabled(guild.id):
                 return True
 
@@ -505,11 +497,6 @@ class GincanaAlvoMixin:
                     pass
                 return True
 
-            author_voice = getattr(message.author, "voice", None)
-            voice_channel = getattr(author_voice, "channel", None)
-            if not isinstance(voice_channel, discord.VoiceChannel):
-                return True
-
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ALVO_STAKE)
             if not paid:
                 try:
@@ -519,9 +506,8 @@ class GincanaAlvoMixin:
                 return True
 
             view = _TargetJoinView(self, guild.id, timeout=30.0)
-            participants_now = len([m for m in voice_channel.members if not getattr(m, "bot", False)])
+            participants_now = 1
             session = {
-                "voice_channel_id": voice_channel.id,
                 "text_channel_id": message.channel.id,
                 "owner_id": message.author.id,
                 "locked_participants": {message.author.id},
@@ -558,9 +544,6 @@ class GincanaAlvoMixin:
             if not self._matches_exact_trigger(content, "disparar"):
                 return False
 
-            if GUILD_IDS and guild.id not in GUILD_IDS:
-                return True
-
             if not self.db.gincana_enabled(guild.id):
                 return True
 
@@ -569,14 +552,6 @@ class GincanaAlvoMixin:
 
             session = self._get_target_session(guild.id)
             if session is None:
-                return True
-
-            voice_channel = self._get_target_voice_channel(guild, session)
-            if voice_channel is None:
-                await self._finish_target_round(guild.id, reason="channel_missing")
-                return True
-
-            if getattr(message.author.voice, "channel", None) != voice_channel:
                 return True
 
             participants = self._get_target_participants(guild, session)

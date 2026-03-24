@@ -3,8 +3,6 @@ import random
 
 import discord
 
-from config import GUILD_IDS
-
 
 CORRIDA_STAKE = 10
 _CORRIDA_TRACK_LENGTH = 8
@@ -177,15 +175,10 @@ class GincanaCorridaMixin:
         return channel if isinstance(channel, discord.VoiceChannel) else None
 
     def _get_race_participants(self, guild: discord.Guild, session: dict) -> list[discord.Member]:
-        voice_channel = self._get_race_voice_channel(guild, session)
-        if voice_channel is None:
-            return []
         participants: list[discord.Member] = []
         for user_id in sorted(session.get("locked_participants", set())):
             member = guild.get_member(int(user_id))
             if member is None or getattr(member, "bot", False):
-                continue
-            if getattr(getattr(member, "voice", None), "channel", None) != voice_channel:
                 continue
             participants.append(member)
         return participants
@@ -287,21 +280,6 @@ class GincanaCorridaMixin:
         if session is None or session.get("ended") or session.get("started"):
             try:
                 await interaction.response.send_message("Essa corrida não está mais aceitando entradas.", ephemeral=True)
-            except Exception:
-                pass
-            return
-
-        voice_channel = self._get_race_voice_channel(guild, session)
-        if voice_channel is None:
-            try:
-                await interaction.response.send_message("A corrida foi encerrada porque a call sumiu.", ephemeral=True)
-            except Exception:
-                pass
-            return
-
-        if getattr(user.voice, "channel", None) != voice_channel:
-            try:
-                await interaction.response.send_message("Você precisa estar na mesma call da corrida para entrar.", ephemeral=True)
             except Exception:
                 pass
             return
@@ -439,12 +417,16 @@ class GincanaCorridaMixin:
     def _pick_race_narration(self, participants: list[discord.Member], tick_events: list[tuple[str, discord.Member]], *, tick: int, final_tick: bool = False) -> str:
         if final_tick:
             return "🏁 Todo mundo cruzou a linha."
+        event_lines: list[str] = []
         for event_key, member in tick_events:
             if event_key == "boost":
-                return f"⚡ {member.mention} largou melhor."
-        for event_key, member in tick_events:
-            if event_key == "trip":
-                return f"💥 {member.mention} tropeçou."
+                event_lines.append(f"⚡ {member.mention} largou melhor.")
+            elif event_key == "trip":
+                event_lines.append(f"💥 {member.mention} tropeçou.")
+            if len(event_lines) >= 2:
+                break
+        if event_lines:
+            return "\n".join(event_lines[:2])
         if tick >= _CORRIDA_UPDATES - 3:
             return "🏁 Últimos metros."
         if tick == 0:
@@ -519,7 +501,7 @@ class GincanaCorridaMixin:
                 await self.db.add_user_chips(guild.id, user_id, CORRIDA_STAKE)
             session["starting"] = False
             session["ended"] = True
-            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Não ficaram participantes suficientes na call. As entradas foram devolvidas.")
+            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Não ficaram participantes suficientes. As entradas foram devolvidas.")
             self._race_sessions.pop(guild_id, None)
             return True
 
@@ -665,8 +647,6 @@ class GincanaCorridaMixin:
             return False
         if not self._matches_exact_trigger(message.content or "", "corrida"):
             return False
-        if GUILD_IDS and guild.id not in GUILD_IDS:
-            return True
         if not self.db.gincana_enabled(guild.id):
             return True
         if self._gincana_only_kick_members(guild.id) and not self._is_staff_member(message.author):
@@ -675,8 +655,6 @@ class GincanaCorridaMixin:
             return True
 
         voice_channel = getattr(getattr(message.author, "voice", None), "channel", None)
-        if not isinstance(voice_channel, discord.VoiceChannel):
-            return True
 
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, CORRIDA_STAKE)
         if not paid:
@@ -691,7 +669,7 @@ class GincanaCorridaMixin:
         bonus_pool = int((special or {}).get("bonus_pool", 0) or 0)
 
         session = {
-            "voice_channel_id": voice_channel.id,
+            "voice_channel_id": getattr(voice_channel, "id", 0),
             "text_channel_id": message.channel.id,
             "owner_id": message.author.id,
             "locked_participants": {message.author.id},

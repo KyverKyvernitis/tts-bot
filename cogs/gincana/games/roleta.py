@@ -5,7 +5,7 @@ from pathlib import Path
 
 import discord
 
-from config import GUILD_IDS, MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
+from config import MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
 
 from ..constants import (
     _ALVO_WORD_RE,
@@ -166,9 +166,6 @@ class GincanaRoletaMixin:
             if not self._matches_exact_trigger(content, "roleta"):
                 return False
 
-            if GUILD_IDS and guild.id not in GUILD_IDS:
-                return True
-
             if not self.db.gincana_enabled(guild.id):
                 return True
 
@@ -180,10 +177,7 @@ class GincanaRoletaMixin:
 
             author_voice = getattr(message.author, "voice", None)
             voice_channel = getattr(author_voice, "channel", None)
-            if not isinstance(voice_channel, discord.VoiceChannel):
-                return True
-
-            targets = self._resolve_targets(guild, voice_channel)
+            targets = self._resolve_targets(guild, voice_channel) if isinstance(voice_channel, discord.VoiceChannel) else []
 
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ROLETA_COST)
             if not paid:
@@ -222,12 +216,13 @@ class GincanaRoletaMixin:
                     board = self._render_roleta_board(final_columns)
 
                     if success:
-                        chosen_channel = voice_channel
-                        try:
-                            await self._play_roleta_sfx(guild, chosen_channel)
-                        except Exception:
-                            pass
-                        await asyncio.sleep(0.20)
+                        chosen_channel = voice_channel if targets and isinstance(voice_channel, discord.VoiceChannel) else None
+                        if chosen_channel is not None:
+                            try:
+                                await self._play_roleta_sfx(guild, chosen_channel)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.20)
                         for target in targets:
                             if target.voice and target.voice.channel:
                                 try:
@@ -238,7 +233,7 @@ class GincanaRoletaMixin:
                         await self.db.add_user_chips(guild.id, message.author.id, ROLETA_JACKPOT_CHIPS)
                         await self.db.add_user_game_stat(guild.id, message.author.id, "roleta_jackpots", 1)
                         await self._grant_weekly_points(guild.id, message.author.id, 20)
-                        summary = f"✨ A sorte sorriu para você. Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)} e os alvos foram tirados da call."
+                        summary = f"✨ A sorte sorriu para você. Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed(
@@ -261,7 +256,7 @@ class GincanaRoletaMixin:
                 except Exception:
                     if success:
                         fallback_title = "💥🎰 JACKPOT!!"
-                        fallback_text = f"Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)} e os alvos foram tirados da call."
+                        fallback_text = f"Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)}."
                         if chip_note:
                             fallback_text = f"{chip_note}\n{fallback_text}"
                     else:
