@@ -97,6 +97,28 @@ class _RaceLobbyView(discord.ui.LayoutView):
             pass
 
 
+
+
+class _RaceLobbyClosedView(discord.ui.LayoutView):
+    def __init__(self, session: dict, guild: discord.Guild, title: str, detail: str):
+        super().__init__(timeout=None)
+        condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
+        special_name = str((session.get("special") or {}).get("name") or "")
+        participants = int(len(session.get("locked_participants", set()) or []))
+
+        lines = [f"# {title}", f"**Condição:** {condition_name}"]
+        if special_name:
+            lines.append(f"**Especial:** {special_name}")
+        lines.append(f"**Participantes:** {participants}")
+        lines.append(detail)
+
+        container = discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(lines)),
+            accent_color=discord.Color.blurple(),
+        )
+        self.add_item(container)
+
+
 class GincanaCorridaMixin:
     def _get_race_session(self, guild_id: int) -> dict | None:
         session = self._race_sessions.get(guild_id)
@@ -192,6 +214,18 @@ class GincanaCorridaMixin:
             embed.add_field(name="Duração", value="**10s**", inline=True)
             embed.set_footer(text="Entre no lobby. O criador ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes.")
         return embed
+
+
+
+    async def _close_lobby_message(self, session: dict, guild: discord.Guild, *, title: str, detail: str):
+        lobby_message = session.get("message")
+        if lobby_message is None:
+            return
+        try:
+            closed_view = _RaceLobbyClosedView(session, guild, title, detail)
+            await lobby_message.edit(view=closed_view)
+        except Exception:
+            pass
 
     async def _handle_race_button(self, interaction: discord.Interaction, view: _RaceLobbyView):
         guild = interaction.guild
@@ -290,9 +324,15 @@ class GincanaCorridaMixin:
         try:
             await interaction.response.defer()
         except Exception:
-            pass
+            return
 
-        await self._finish_race_lobby(guild.id, reason="manual_start")
+        try:
+            await self._finish_race_lobby(guild.id, reason="manual_start")
+        except Exception:
+            try:
+                await interaction.followup.send("Não foi possível iniciar a corrida agora.", ephemeral=True)
+            except Exception:
+                pass
 
     async def _refresh_race_message(self, guild_id: int):
         session = self._get_race_session(guild_id)
@@ -403,26 +443,25 @@ class GincanaCorridaMixin:
             only_id = next(iter(locked_ids))
             await self.db.add_user_chips(guild.id, only_id, CORRIDA_STAKE)
             session["ended"] = True
-            if lobby_message is not None:
-                try:
-                    await lobby_message.edit(embed=self._make_embed("🐎 Corrida cancelada", "Só 1 jogador entrou. A entrada foi devolvida.", ok=False), view=None)
-                except Exception:
-                    pass
+            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Só 1 jogador entrou. A entrada foi devolvida.")
             self._race_sessions.pop(guild_id, None)
             return True
         if len(participants) < 2:
             for user_id in locked_ids:
                 await self.db.add_user_chips(guild.id, user_id, CORRIDA_STAKE)
             session["ended"] = True
-            if lobby_message is not None:
-                try:
-                    await lobby_message.edit(embed=self._make_embed("🐎 Corrida cancelada", "Não ficaram participantes suficientes na call. As entradas foram devolvidas.", ok=False), view=None)
-                except Exception:
-                    pass
+            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Não ficaram participantes suficientes na call. As entradas foram devolvidas.")
             self._race_sessions.pop(guild_id, None)
             return True
 
-        race_message = lobby_message
+        text_channel = guild.get_channel(int(session.get("text_channel_id") or 0))
+        await self._close_lobby_message(session, guild, title="🏁 Corrida iniciada", detail="A corrida começou logo abaixo.")
+        race_message = None
+        if isinstance(text_channel, discord.TextChannel):
+            try:
+                race_message = await text_channel.send(embed=self._make_race_embed(guild, session, finished=False))
+            except Exception:
+                race_message = None
         session["message"] = race_message
 
         progress = session.setdefault("progress", {})
