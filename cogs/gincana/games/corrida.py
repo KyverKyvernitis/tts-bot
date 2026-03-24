@@ -158,6 +158,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.order = random.sample(range(_RACE_IMPULSE_BUTTON_COUNT), _RACE_IMPULSE_BUTTON_COUNT)
         self.results: dict[int, dict] = {}
         self.edit_lock = asyncio.Lock()
+        self.press_lock = asyncio.Lock()
         self._last_render_signature = None
         self._results_applied = False
         self.buttons = [_RaceImpulseButton(self, idx) for idx in range(_RACE_IMPULSE_BUTTON_COUNT)]
@@ -221,26 +222,30 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
     async def handle_press(self, interaction: discord.Interaction, button_index: int):
         user = interaction.user
         try:
-            await interaction.response.defer()
+            await interaction.response.defer(thinking=False)
         except Exception:
             pass
-        if self.finished or self.active_index is None or self.step_index < 0:
-            return
-        if interaction.guild is None or not isinstance(user, discord.Member):
-            return
-        if user.id not in set(self.session.get("locked_participants", set()) or []):
-            return
+        async with self.press_lock:
+            if self.finished or self.active_index is None or self.step_index < 0:
+                return
+            if interaction.guild is None or not isinstance(user, discord.Member):
+                return
+            if user.id not in set(self.session.get("locked_participants", set()) or []):
+                return
 
-        entry = self.results.setdefault(user.id, {"times": [None] * _RACE_IMPULSE_BUTTON_COUNT, "credited_steps": 0})
-        times = entry["times"]
-        if times[self.step_index] is not None:
-            return
-        if button_index != self.active_index:
-            times[self.step_index] = _RACE_IMPULSE_STEP_SECONDS
-            return
+            entry = self.results.setdefault(user.id, {"times": [None] * _RACE_IMPULSE_BUTTON_COUNT, "credited_steps": 0})
+            times = entry["times"]
+            current_step = int(self.step_index)
+            if current_step < 0 or current_step >= _RACE_IMPULSE_BUTTON_COUNT:
+                return
+            if times[current_step] is not None:
+                return
+            if button_index != self.active_index:
+                times[current_step] = _RACE_IMPULSE_STEP_SECONDS
+                return
 
-        reaction_time = max(0.0, min(_RACE_IMPULSE_STEP_SECONDS, time.perf_counter() - self.active_started_at))
-        times[self.step_index] = reaction_time
+            reaction_time = max(0.0, min(_RACE_IMPULSE_STEP_SECONDS, time.perf_counter() - self.active_started_at))
+            times[current_step] = reaction_time
 
     def _activate_step(self, index: int):
         self.step_index = index
@@ -796,7 +801,7 @@ class GincanaCorridaMixin:
             return
         try:
             if not immediate:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(2.0)
             await message.delete()
         except discord.NotFound:
             pass
