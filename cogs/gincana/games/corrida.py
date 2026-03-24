@@ -610,12 +610,19 @@ class GincanaCorridaMixin:
         rewards, placements = self._allocate_race_rewards(final_order, total_pot)
         result_lines = self._build_race_lines(guild, session)
         if final_order:
+            winning_amount = 0
+            for badge, members, amount in placements:
+                if badge == '🥇' and members and amount > 0:
+                    winning_amount = amount
+                    break
             result_lines.append("")
-            result_lines.append(f"🏆 {final_order[0].mention} venceu a corrida.")
-        for badge, members, amount in placements:
-            if members and amount > 0:
-                result_lines.append(f"{badge} {members[0].mention} — {self._chip_text(amount, kind='gain')}")
-        session["narration"] = "🏁 Todo mundo cruzou a linha."
+            result_lines.append(f"🏁 Todos cruzaram a linha.")
+            result_lines.append("")
+            if winning_amount > 0:
+                result_lines.append(f"🏆 {final_order[0].mention} venceu a corrida — {self._chip_text(winning_amount, kind='gain')}")
+            else:
+                result_lines.append(f"🏆 {final_order[0].mention} venceu a corrida.")
+        session["narration"] = ""
 
         for index, member in enumerate(final_order[:3], start=1):
             await self.db.add_user_game_stat(guild.id, member.id, "corrida_podiums", 1)

@@ -644,7 +644,7 @@ class _TargetStateView(discord.ui.LayoutView):
         modifier = session.get('modifier') or {'name': 'Alvo padrão'}
         participants = cog._get_target_participants(guild, session)
         if finished:
-            summary = session.get('summary_line') or f"{cog._CHIP_GAIN_EMOJI} Prêmio: {cog._chip_amount(int(session.get('prize_total') or 0))}"
+            summary = session.get('summary_line') or f"<:boom:1485862099308804107> Os tiros foram disparados. Prêmio: {cog._chip_amount(int(session.get('prize_total') or 0))}"
             hits = session.get('hit_lines') or ['A rodada terminou.']
             podium = session.get('podium_lines') or []
             closing = session.get('closing_line') or None
@@ -851,31 +851,38 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 bonus_line = f"✨ Bullseye bônus: {self._chip_amount(bull_bonus)} para cada acerto no centro."
         podium_lines = []
         winner_mentions = []
+        winning_reward = 0
         if rewards:
             for badge, members, total in placements:
                 names = ', '.join(member.mention for member in members)
-                podium_lines.append(f"{badge} {names} — {self._chip_amount(total)}")
+                amount_text = self._chip_text(total, kind='gain') if badge == '🥇' else self._chip_amount(total)
+                podium_lines.append(f"{badge} {names} — {amount_text}")
                 if badge == '🥇':
                     winner_mentions.extend(member.mention for member in members)
+                    winning_reward = total
             for user_id, amount in rewards.items():
                 if amount > 0:
                     await self.db.add_user_chips(guild.id, user_id, amount)
                     await self._grant_weekly_points(guild.id, user_id, max(3, amount // 4))
         closing_parts = []
-        if winner_mentions:
-            if len(winner_mentions) == 1:
-                closing_parts.append(f"🔥 {winner_mentions[0]} levou a melhor.")
-            else:
-                closing_parts.append(f"🔥 {', '.join(winner_mentions)} dividiram a ponta.")
+        if winner_mentions and len(winner_mentions) > 1:
+            closing_parts.append(f"🔥 {', '.join(winner_mentions)} dividiram a ponta.")
         special_lines = self._build_target_special_lines(participants, scores, placements)
         if special_lines:
-            closing_parts.extend(line for line in special_lines if line not in closing_parts)
+            for line in special_lines:
+                if 'levou a melhor' in line or 'dividiram a ponta' in line:
+                    continue
+                if line not in closing_parts:
+                    closing_parts.append(line)
         if bonus_line:
             closing_parts.append(bonus_line)
-        session['summary_line'] = f"<:boom:1485862099308804107> Os tiros foram disparados. {self._CHIP_GAIN_EMOJI} Prêmio: {self._chip_amount(prize_total)}"
+        session['summary_line'] = f"<:boom:1485862099308804107> Os tiros foram disparados. Prêmio: {self._chip_amount(prize_total)}"
         session['hit_lines'] = hit_lines
-        session['podium_lines'] = podium_lines
-        session['closing_line'] = '\n'.join(closing_parts[:3]) if closing_parts else None
+        if winner_mentions and len(winner_mentions) == 1:
+            session['podium_lines'] = [f"🥇 {winner_mentions[0]} venceu — {self._chip_text(winning_reward, kind='gain')}"]
+        else:
+            session['podium_lines'] = podium_lines
+        session['closing_line'] = '\n'.join(closing_parts[:2]) if closing_parts else None
         session['prize_total'] = prize_total
         result_lines = [session['summary_line'], '', *hit_lines]
         if podium_lines:
