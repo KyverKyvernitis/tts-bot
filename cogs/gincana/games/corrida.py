@@ -899,6 +899,7 @@ class GincanaCorridaMixin:
                 if not awards:
                     session["narration"] = ""
                 await self._refresh_race_message(guild.id)
+            return awards
         except asyncio.CancelledError:
             event_view.finished = True
             if event_view.active_index is not None:
