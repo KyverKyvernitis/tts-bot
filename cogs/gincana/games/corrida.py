@@ -137,7 +137,7 @@ class _RaceLobbyClosedView(discord.ui.LayoutView):
 
 class _RaceImpulseButton(discord.ui.Button):
     def __init__(self, view: "_RaceImpulseEventView", index: int):
-        super().__init__(style=discord.ButtonStyle.secondary, label=str(index + 1), disabled=True)
+        super().__init__(style=discord.ButtonStyle.secondary, label=str(index + 1), disabled=True, custom_id=f"race_impulse:{index}")
         self._view = view
         self.index = index
 
@@ -165,6 +165,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.press_lock = asyncio.Lock()
         self._last_render_signature = None
         self._results_applied = False
+        self.activated_indices: set[int] = set()
         self.buttons = [_RaceImpulseButton(self, idx) for idx in range(_RACE_IMPULSE_BUTTON_COUNT)]
         self._rebuild()
 
@@ -227,7 +228,8 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
     async def handle_press(self, interaction: discord.Interaction, button_index: int):
         user = interaction.user
         try:
-            await interaction.response.defer(thinking=False)
+            if not interaction.response.is_done():
+                await interaction.response.defer(thinking=False)
         except Exception:
             pass
         async with self.press_lock:
@@ -256,15 +258,18 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.step_index = index
         self.active_index = self.order[index]
         self.active_started_ns = time.perf_counter_ns()
+        self.activated_indices.add(int(self.active_index))
         for idx, button in enumerate(self.buttons):
             button.disabled = idx != self.active_index
-            button.label = _RACE_IMPULSE_EMOJI if idx == self.active_index else str(idx + 1)
+            button.label = _RACE_IMPULSE_EMOJI if idx in self.activated_indices else str(idx + 1)
             button.style = discord.ButtonStyle.secondary
 
     def _close_current_step(self):
+        if self.active_index is not None:
+            self.activated_indices.add(int(self.active_index))
         for button in self.buttons:
             button.disabled = True
-            button.label = str(button.index + 1)
+            button.label = _RACE_IMPULSE_EMOJI if button.index in self.activated_indices else str(button.index + 1)
             button.style = discord.ButtonStyle.secondary
         self.active_index = None
         self.active_started_ns = 0
@@ -279,14 +284,11 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
     def _bonus_for_reaction_time(self, reaction_time: float | None) -> float:
         if reaction_time is None or reaction_time >= _RACE_IMPULSE_STEP_SECONDS:
             return 0.0
-        reaction_time = float(reaction_time)
-        if reaction_time <= 0.30:
-            return 0.90
-        if reaction_time <= 0.65:
-            return 0.70
-        if reaction_time <= 1.10:
-            return 0.50
-        return 0.28
+        step_window = max(0.5, float(_RACE_IMPULSE_STEP_SECONDS))
+        ratio = max(0.0, min(1.0, float(reaction_time) / step_window))
+        window_scale = max(1.0, 1.35 / step_window)
+        bonus = (1.15 - (0.95 * (ratio ** 0.85))) * window_scale
+        return round(max(0.0, bonus), 4)
 
     def _hierarchy_metrics(self, times: list[float]) -> dict[str, float | int]:
         elite = 0
@@ -805,49 +807,25 @@ class GincanaCorridaMixin:
         event_lines: list[str] = []
         for event_key, member in tick_events:
             if event_key == "boost":
-                event_lines.append(f"⚡ {member.mention} aproveitou muito bem o impulso.")
+                event_lines.append(f"⚡ {member.mention} ganhou impulso.")
             elif event_key == "trip":
                 event_lines.append(f"💥 {member.mention} tropeçou.")
+            if len(event_lines) >= 2:
+                break
         if event_lines:
-            return "\n".join(event_lines[:4])
-
-        progress_map = session.get("progress", {}) or {}
-        if not participants:
-            return "🐎 A corrida segue aberta."
-
-        leader = participants[0]
-        leader_progress = float(progress_map.get(leader.id, 0.0))
-        second = participants[1] if len(participants) >= 2 else None
-        second_progress = float(progress_map.get(second.id, 0.0)) if second else 0.0
-        leader_gap = leader_progress - second_progress if second else leader_progress
-
-        if second and leader_gap >= 1.15:
-            return f"📈 {leader.mention} abriu vantagem."
-        if second and leader_gap <= 0.28:
-            return f"👀 {second.mention} colou na liderança."
-
-        if len(participants) >= 4:
-            mid_a = participants[len(participants) // 2 - 1]
-            mid_b = participants[len(participants) // 2]
-            mid_gap = abs(float(progress_map.get(mid_a.id, 0.0)) - float(progress_map.get(mid_b.id, 0.0)))
-            if mid_gap <= 0.34:
-                return "🔥 A disputa pelo meio está acirrada."
-
-        if len(participants) >= 2:
-            last = participants[-1]
-            penultimate = participants[-2]
-            last_gap = float(progress_map.get(penultimate.id, 0.0)) - float(progress_map.get(last.id, 0.0))
-            if tick >= 2 and last_gap <= 0.36:
-                return f"🚀 {last.mention} tenta uma recuperação."
-
+            return "\n".join(event_lines[:2])
+        if participants and tick % 3 == 1:
+            leader = participants[0]
+            return f"👀 {leader.mention} na frente."
         if tick >= _CORRIDA_UPDATES - 3:
-            return random.choice(["🏁 Últimos metros.", "🔥 A reta final está pegando fogo.", "⚡ Tudo pode mudar na reta final."])
+            return "🏁 Últimos metros."
         return random.choice([
-            "🐎 A corrida segue aberta.",
-            "👀 O pelotão segue apertado.",
+            "👀 Tudo embolado.",
             "↗️ A disputa apertou.",
+            "🐎 A corrida segue aberta.",
             "👀 A corrida está acirrada.",
-            "⚡ Ninguém quer ceder espaço.",
+            "👀 Segue parelha.",
+            "",
         ])
 
 
@@ -1179,6 +1157,11 @@ class GincanaCorridaMixin:
         total_pot = len(locked_ids) * CORRIDA_STAKE + int(session.get("bonus_pool", 0) or 0)
         rewards, placements = self._allocate_race_rewards(final_groups, total_pot)
         result_lines: list[str] = []
+        if final_groups:
+            first_group = final_groups[0]
+            winner = first_group[0]
+            winner_amount = int(rewards.get(winner.id, 0) or 0)
+            result_lines.append(f"🏆 {winner.mention} venceu a corrida — {self._chip_text(winner_amount, kind='gain')}")
         finish_meta = session.get("finish_meta") or {}
         if len(final_order) >= 2:
             leader = final_order[0]
