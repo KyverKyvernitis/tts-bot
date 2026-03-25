@@ -385,7 +385,7 @@ class _RaceStateView(discord.ui.LayoutView):
 
         condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
         special_name = str((session.get("special") or {}).get("name") or "")
-        narration = str(session.get("narration") or ("🏁 Todos cruzaram a linha." if finished else "📣 A corrida começou."))
+        narration = str(session.get("narration") or ("🏁 Todos cruzaram a linha." if finished else ""))
         lines = cog._build_race_lines(guild, session)
 
         if finished:
@@ -499,6 +499,7 @@ class GincanaCorridaMixin:
         progress_map = session.get("progress", {}) or {}
         state_map = session.get("state_map", {}) or {}
         flash_users = {int(user_id) for user_id in (session.get("impulse_flash_users") or set())}
+        flash_levels = {int(user_id): str(level) for user_id, level in (session.get("impulse_flash_levels") or {}).items()}
         pending_kind = session.get("pending_impulse_kind", {}) or {}
         rank_map = {member.id: rank for rank, member in ordered_with_ranks}
         lines: list[str] = []
@@ -507,7 +508,13 @@ class GincanaCorridaMixin:
             pos = float(progress_map.get(member.id, 0.0))
             state_emoji = str(state_map.get(member.id) or _HORSE_START)
             if member.id in flash_users and state_emoji not in {_HORSE_FINISH, _HORSE_TRIP}:
-                state_emoji = _HORSE_DASH if str(pending_kind.get(member.id) or "").lower() == "grande" else _HORSE_BOOST
+                flash_level = str(flash_levels.get(member.id) or "").lower()
+                if flash_level == "large":
+                    state_emoji = _HORSE_DASH
+                elif flash_level in {"medium", "small"}:
+                    state_emoji = _HORSE_BOOST
+                else:
+                    state_emoji = _HORSE_DASH if str(pending_kind.get(member.id) or "").lower() == "grande" else _HORSE_BOOST
             if rank_map.get(member.id, 9999) != 9999 and state_emoji == _HORSE_FINISH:
                 pos = _CORRIDA_TRACK_LENGTH - 1
             lines.append(f"{medal} {member.mention}")
@@ -525,7 +532,7 @@ class GincanaCorridaMixin:
 
         condition_name = str((session.get("condition") or {}).get("name") or "Pista seca")
         special_name = str((session.get("special") or {}).get("name") or "")
-        narration = str(session.get("narration") or "📣 A corrida vai começar.")
+        narration = str(session.get("narration") or ("" if session.get("started") else "📣 A corrida vai começar."))
         lines = self._build_race_lines(guild, session)
         description_parts = [f"Condição: **{condition_name}**"]
         if special_name:
@@ -937,10 +944,13 @@ class GincanaCorridaMixin:
 
         session["starting"] = True
         session["started"] = True
-        session["narration"] = "📣 A corrida começou."
+        session["narration"] = ""
         session["arrival_groups"] = []
         session["pending_impulse_bonus"] = {}
         session["pending_impulse_kind"] = {}
+        session["impulse_flash_users"] = set()
+        session["impulse_flash_levels"] = {}
+        session["narration_hold_ticks"] = 0
         session["finish_meta"] = {}
         session["early_rank_snapshot"] = {}
         session["best_impulse"] = None
@@ -1096,8 +1106,10 @@ class GincanaCorridaMixin:
             session["_visible_before_progress"] = {member.id: float(progress.get(member.id, 0.0)) for member in participants}
             if tick == 2 and not session.get("early_rank_snapshot"):
                 session["early_rank_snapshot"] = {member.id: rank for rank, member in self._ordered_race_members(guild, session)}
+            hold_ticks = int(session.get("narration_hold_ticks", 0) or 0)
             if len(arrived_ids) >= len(participants):
                 session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick, final_tick=True)
+                session["narration_hold_ticks"] = 0
             elif finishers_this_tick:
                 ordered_finishers = [user_id for user_id, _score in sorted(finishers_this_tick, key=lambda item: (-item[1], item[0]))]
                 if len(ordered_finishers) > 1:
@@ -1108,15 +1120,20 @@ class GincanaCorridaMixin:
                 else:
                     finisher = guild.get_member(int(ordered_finishers[0]))
                     session["narration"] = f"🏁 {finisher.mention} cruzou a linha." if finisher else "🏁 Um corredor cruzou a linha."
-            elif leader_after and leader_after != leader_before:
-                leader = guild.get_member(leader_after)
-                if leader is not None:
-                    tick_events.append(("lead", leader))
-                session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick)
+                session["narration_hold_ticks"] = 0
+            elif hold_ticks > 0 and str(session.get("narration") or "").strip():
+                session["narration_hold_ticks"] = hold_ticks - 1
             else:
+                if leader_after and leader_after != leader_before:
+                    leader = guild.get_member(leader_after)
+                    if leader is not None:
+                        tick_events.append(("lead", leader))
                 session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick)
+                session["narration_hold_ticks"] = 0
             await self._refresh_race_message(guild.id)
-            session["impulse_flash_users"] = set()
+            if int(session.get("narration_hold_ticks", 0) or 0) <= 0:
+                session["impulse_flash_users"] = set()
+                session["impulse_flash_levels"] = {}
             tick += 1
             await asyncio.sleep(_CORRIDA_UPDATE_SECONDS)
 
@@ -1244,6 +1261,9 @@ class GincanaCorridaMixin:
             "arrival_groups": [],
             "pending_impulse_bonus": {},
             "pending_impulse_kind": {},
+            "impulse_flash_users": set(),
+            "impulse_flash_levels": {},
+            "narration_hold_ticks": 0,
             "finish_meta": {},
             "early_rank_snapshot": {},
             "best_impulse": None,
