@@ -681,7 +681,16 @@ class GincanaCorridaMixin:
             return
 
         try:
-            await self._finish_race_lobby(guild.id, reason="manual_start", source_view=view)
+            started_ok = await self._finish_race_lobby(guild.id, reason="manual_start", source_view=view, allow_when_starting=True)
+            if not started_ok:
+                fresh_session = self._race_sessions.get(guild.id)
+                if fresh_session is not None and not fresh_session.get("ended"):
+                    fresh_session["starting"] = False
+                try:
+                    await interaction.followup.send("Não foi possível iniciar a corrida agora.", ephemeral=True)
+                except Exception:
+                    pass
+                return
         except Exception:
             fresh_session = self._race_sessions.get(guild.id)
             if fresh_session is not None and not fresh_session.get("ended"):
@@ -959,9 +968,11 @@ class GincanaCorridaMixin:
             if event_message is not None:
                 await self._delete_impulse_message(event_message)
 
-    async def _finish_race_lobby(self, guild_id: int, *, reason: str, source_view: discord.ui.LayoutView | None = None) -> bool:
+    async def _finish_race_lobby(self, guild_id: int, *, reason: str, source_view: discord.ui.LayoutView | None = None, allow_when_starting: bool = False) -> bool:
         session = self._get_race_session(guild_id)
-        if session is None or session.get("ended") or session.get("started") or session.get("starting"):
+        if session is None or session.get("ended") or session.get("started"):
+            return False
+        if session.get("starting") and not allow_when_starting:
             return False
         if source_view is not None and session.get("view") is not source_view:
             return False
