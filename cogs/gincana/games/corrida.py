@@ -1093,11 +1093,11 @@ class GincanaCorridaMixin:
                     trip_chance = max(0.02, trip_chance - 0.03)
                 if tick >= _CORRIDA_UPDATES:
                     trip_chance = max(0.01, trip_chance - 0.05)
-                if pending_total > 0:
-                    trip_chance = max(0.01, trip_chance - 0.06)
 
                 pending_store = session.setdefault("pending_impulse_bonus", {})
                 pending_total = float(pending_store.get(member.id, 0.0) or 0.0)
+                if pending_total > 0:
+                    trip_chance = max(0.01, trip_chance - 0.06)
                 per_tick_cap = _RACE_IMPULSE_FINAL_STRETCH_APPLY_CAP if session.get("final_stretch") else _RACE_IMPULSE_TICK_APPLY_CAP
                 pending_impulse = min(pending_total, per_tick_cap) if pending_total > 0 else 0.0
                 if pending_impulse > 0:
