@@ -308,9 +308,9 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
     def _tier_bonus(self, tier: str, stage_name: str) -> float:
         stage_key = stage_name.strip().lower()
         bonus_table = {
-            "largada": {"pequeno": (0.70, 1.00), "medio": (1.05, 1.45), "grande": (1.55, 2.10)},
-            "meio": {"pequeno": (0.85, 1.15), "medio": (1.25, 1.75), "grande": (1.90, 2.55)},
-            "sprint final": {"pequeno": (1.00, 1.35), "medio": (1.55, 2.05), "grande": (2.25, 3.05)},
+            "largada": {"pequeno": (0.60, 0.85), "medio": (0.95, 1.25), "grande": (1.35, 1.75)},
+            "meio": {"pequeno": (0.75, 1.05), "medio": (1.15, 1.55), "grande": (1.70, 2.20)},
+            "sprint final": {"pequeno": (0.90, 1.20), "medio": (1.35, 1.80), "grande": (2.00, 2.55)},
         }
         ranges = bonus_table.get(stage_key, bonus_table["meio"])
         start, end = ranges.get(tier, (0.0, 0.0))
@@ -325,8 +325,8 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
     def _apply_results(self, *, up_to_step: int | None = None):
         if self._results_applied:
             return
-        pending = self.session.setdefault("pending_impulse_bonus", {})
-        pending_kind = self.session.setdefault("pending_impulse_kind", {})
+        active_impulses = self.session.setdefault("active_impulses", {})
+        state_map = self.session.setdefault("state_map", {})
         participants = [int(user_id) for user_id in set(self.session.get("locked_participants", set()) or [])]
 
         awarded: list[tuple[int, str, float, int]] = []
@@ -347,12 +347,13 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                 continue
             bonus = self._tier_bonus(tier, self.stage_name)
             entry["bonus"] = bonus
-            pending[user_id] = round(float(pending.get(user_id, 0.0) or 0.0) + bonus, 4)
-            pending_kind[user_id] = tier
+            active_impulses[user_id] = {"kind": str(tier), "ticks_left": 2, "per_tick": float(bonus)}
+            state_map[user_id] = self._tier_emoji(tier)
             awarded.append((user_id, tier, bonus, hits))
 
         awarded.sort(key=lambda item: ({"grande": 3, "medio": 2, "pequeno": 1}.get(item[1], 0), item[3], item[2], -item[0]), reverse=True)
         self.session["impulse_flash_users"] = {int(user_id) for user_id, _tier, _bonus, _hits in awarded}
+        self.session["impulse_flash_levels"] = {int(user_id): str(tier) for user_id, tier, _bonus, _hits in awarded}
         self.session["recent_impulse_awards"] = [
             {"user_id": int(user_id), "tier": str(tier), "bonus": float(bonus), "stage": self.stage_name, "hits": int(hits)}
             for user_id, tier, bonus, hits in awarded[:3]
@@ -369,10 +370,14 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                     mention_lines.append(f"{self._tier_emoji(tier)} {member.mention} recebeu {self._tier_label(tier)}.")
             if mention_lines:
                 self.session["narration"] = "\n".join(mention_lines)
+                self.session["narration_hold_ticks"] = 2
         else:
             self.session["recent_impulse_awards"] = []
+            self.session["narration"] = ""
+            self.session["narration_hold_ticks"] = 0
 
         self._results_applied = True
+
 
 
 class _RaceStateView(discord.ui.LayoutView):
@@ -498,23 +503,25 @@ class GincanaCorridaMixin:
 
         progress_map = session.get("progress", {}) or {}
         state_map = session.get("state_map", {}) or {}
+        active_impulses = {int(user_id): data for user_id, data in (session.get("active_impulses") or {}).items()}
         flash_users = {int(user_id) for user_id in (session.get("impulse_flash_users") or set())}
         flash_levels = {int(user_id): str(level) for user_id, level in (session.get("impulse_flash_levels") or {}).items()}
-        pending_kind = session.get("pending_impulse_kind", {}) or {}
         rank_map = {member.id: rank for rank, member in ordered_with_ranks}
         lines: list[str] = []
         for _index, (rank, member) in enumerate(ordered_with_ranks, start=1):
             medal = self._race_placement_emoji(rank)
             pos = float(progress_map.get(member.id, 0.0))
             state_emoji = str(state_map.get(member.id) or _HORSE_START)
-            if member.id in flash_users and state_emoji not in {_HORSE_FINISH, _HORSE_TRIP}:
+            impulse_state = active_impulses.get(member.id) or {}
+            impulse_kind = str((impulse_state or {}).get("kind") or "").lower()
+            if int((impulse_state or {}).get("ticks_left") or 0) > 0 and state_emoji not in {_HORSE_FINISH, _HORSE_TRIP}:
+                state_emoji = _HORSE_DASH if impulse_kind == "grande" else _HORSE_BOOST
+            elif member.id in flash_users and state_emoji not in {_HORSE_FINISH, _HORSE_TRIP}:
                 flash_level = str(flash_levels.get(member.id) or "").lower()
-                if flash_level == "large":
+                if flash_level == "grande":
                     state_emoji = _HORSE_DASH
-                elif flash_level in {"medium", "small"}:
+                elif flash_level in {"medio", "médio", "pequeno"}:
                     state_emoji = _HORSE_BOOST
-                else:
-                    state_emoji = _HORSE_DASH if str(pending_kind.get(member.id) or "").lower() == "grande" else _HORSE_BOOST
             if rank_map.get(member.id, 9999) != 9999 and state_emoji == _HORSE_FINISH:
                 pos = _CORRIDA_TRACK_LENGTH - 1
             lines.append(f"{medal} {member.mention}")
@@ -695,6 +702,8 @@ class GincanaCorridaMixin:
                     str(session.get("impulse_status") or ""),
                     tuple(sorted((int(k), round(float(v), 4)) for k, v in (session.get("progress") or {}).items())),
                     tuple(sorted((int(k), str(v)) for k, v in (session.get("state_map") or {}).items())),
+                    tuple(sorted((int(k), str(v.get("kind") or ""), int(v.get("ticks_left") or 0), round(float(v.get("per_tick") or 0.0), 4)) for k, v in (session.get("active_impulses") or {}).items())),
+                    tuple(sorted((int(k), str(v)) for k, v in (session.get("impulse_flash_levels") or {}).items())),
                     tuple(tuple(int(user_id) for user_id in group) for group in (session.get("arrival_groups") or [])),
                     tuple(str(line) for line in (session.get("result_lines") or [])),
                     tuple(sorted(int(x) for x in (session.get("locked_participants") or set()))),
@@ -946,8 +955,7 @@ class GincanaCorridaMixin:
         session["started"] = True
         session["narration"] = ""
         session["arrival_groups"] = []
-        session["pending_impulse_bonus"] = {}
-        session["pending_impulse_kind"] = {}
+        session["active_impulses"] = {}
         session["impulse_flash_users"] = set()
         session["impulse_flash_levels"] = {}
         session["narration_hold_ticks"] = 0
@@ -1026,24 +1034,16 @@ class GincanaCorridaMixin:
                 if tick >= _CORRIDA_UPDATES:
                     trip_chance = max(0.01, trip_chance - 0.05)
 
-                pending_store = session.setdefault("pending_impulse_bonus", {})
-                pending_kind_store = session.setdefault("pending_impulse_kind", {})
-                pending_total = float(pending_store.get(member.id, 0.0) or 0.0)
-                pending_kind = str(pending_kind_store.get(member.id) or "").lower()
-                if pending_total > 0:
+                active_impulses = session.setdefault("active_impulses", {})
+                impulse_state = dict(active_impulses.get(member.id) or {})
+                impulse_ticks_left = int(impulse_state.get("ticks_left") or 0)
+                impulse_kind = str(impulse_state.get("kind") or "").lower()
+                impulse_per_tick = float(impulse_state.get("per_tick") or 0.0) if impulse_ticks_left > 0 else 0.0
+                if impulse_ticks_left > 0:
                     trip_chance = max(0.01, trip_chance - 0.06)
-                per_tick_cap = 1.9 if session.get("final_stretch") else 1.55
-                pending_impulse = min(pending_total, per_tick_cap) if pending_total > 0 else 0.0
-                if pending_impulse > 0:
-                    remaining_bonus = round(max(0.0, pending_total - pending_impulse), 4)
-                    if remaining_bonus > 0:
-                        pending_store[member.id] = remaining_bonus
-                    else:
-                        pending_store.pop(member.id, None)
-                        pending_kind_store.pop(member.id, None)
 
                 if random.random() < trip_chance and cur < track_end - 0.5:
-                    move = max(0.18, pending_impulse * 0.8)
+                    move = max(0.18, impulse_per_tick * 0.8)
                     state_map[member.id] = _HORSE_TRIP
                     tick_events.append(("trip", member))
                 else:
@@ -1056,15 +1056,21 @@ class GincanaCorridaMixin:
                         base_move += 0.22
                     if tick >= _CORRIDA_UPDATES:
                         base_move += 0.30
-                    move = max(0.0, min(2.3, base_move + pending_impulse))
-                    if pending_impulse > 0:
-                        state_map[member.id] = _HORSE_DASH if pending_kind == "grande" else _HORSE_BOOST
+                    move = max(0.0, min(3.0, base_move + impulse_per_tick))
+                    if impulse_ticks_left > 0:
+                        state_map[member.id] = _HORSE_DASH if impulse_kind == "grande" else _HORSE_BOOST
                     else:
                         state_map[member.id] = _HORSE_RUN
 
                 raw_finish_score = cur + move
                 new_pos = min(track_end, raw_finish_score)
                 progress[member.id] = new_pos
+                if impulse_ticks_left > 0:
+                    remaining_ticks = impulse_ticks_left - 1
+                    if remaining_ticks > 0:
+                        active_impulses[member.id] = {"kind": impulse_kind, "ticks_left": remaining_ticks, "per_tick": impulse_per_tick}
+                    else:
+                        active_impulses.pop(member.id, None)
                 if new_pos >= track_end - 1e-9:
                     finish_score = raw_finish_score + random.random() * 1e-6
                     finishers_this_tick.append((member.id, finish_score))
@@ -1131,7 +1137,7 @@ class GincanaCorridaMixin:
                 session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick)
                 session["narration_hold_ticks"] = 0
             await self._refresh_race_message(guild.id)
-            if int(session.get("narration_hold_ticks", 0) or 0) <= 0:
+            if int(session.get("narration_hold_ticks", 0) or 0) <= 0 and not session.get("active_impulses"):
                 session["impulse_flash_users"] = set()
                 session["impulse_flash_levels"] = {}
             tick += 1
@@ -1259,8 +1265,7 @@ class GincanaCorridaMixin:
             "progress": {message.author.id: 0.0},
             "state_map": {message.author.id: _HORSE_START},
             "arrival_groups": [],
-            "pending_impulse_bonus": {},
-            "pending_impulse_kind": {},
+            "active_impulses": {},
             "impulse_flash_users": set(),
             "impulse_flash_levels": {},
             "narration_hold_ticks": 0,
