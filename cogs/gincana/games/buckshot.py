@@ -515,7 +515,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             except Exception: pass
             return
         session['starting'] = True
-        session['start_countdown'] = 5
+        session['start_countdown'] = 3
         task = session.get('countdown_task')
         if task and not task.done():
             task.cancel()
@@ -525,7 +525,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         await self._refresh_buckshot_message(guild.id)
 
     async def _run_buckshot_start_countdown(self, guild_id: int, view: _BuckshotJoinView):
-        for remaining in range(5,0,-1):
+        for remaining in range(3,0,-1):
             session = self._get_buckshot_session(guild_id)
             if session is None or session.get('ended') or session.get('view') is not view:
                 return

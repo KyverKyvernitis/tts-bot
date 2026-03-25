@@ -745,7 +745,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             except Exception: pass
             return
         session['starting'] = True
-        session['start_countdown'] = 5
+        session['start_countdown'] = 3
         task = session.get('countdown_task')
         if task and not task.done():
             task.cancel()
@@ -755,7 +755,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         await self._refresh_target_message(guild.id)
 
     async def _run_target_start_countdown(self, guild_id: int, view: _TargetJoinView):
-        for remaining in range(5, 0, -1):
+        for remaining in range(3, 0, -1):
             session = self._get_target_session(guild_id)
             if session is None or session.get('ended') or session.get('view') is not view:
                 return
