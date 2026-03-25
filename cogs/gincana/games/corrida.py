@@ -244,8 +244,9 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             if user.id not in set(self.session.get("locked_participants", set()) or []):
                 return
 
-            entry = self.results.setdefault(user.id, {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "credited_steps": 0})
+            entry = self.results.setdefault(user.id, {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT})
             times = entry["times"]
+            success = entry["success"]
             current_step = int(self.step_index)
             if current_step < 0 or current_step >= _RACE_IMPULSE_STAGE_COUNT:
                 return
@@ -253,10 +254,12 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                 return
             if button_index != self.active_index:
                 times[current_step] = _RACE_IMPULSE_STEP_SECONDS
+                success[current_step] = False
                 return
 
             reaction_time = max(0.0, min(_RACE_IMPULSE_STEP_SECONDS, (time.perf_counter_ns() - self.active_started_ns) / 1_000_000_000.0))
             times[current_step] = reaction_time
+            success[current_step] = True
 
     def _activate_step(self, index: int):
         self.step_index = index
@@ -281,11 +284,16 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         if current_step < 0:
             return
         for user_id in set(self.session.get("locked_participants", set()) or []):
-            entry = self.results.setdefault(int(user_id), {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "credited_steps": 0})
+            entry = self.results.setdefault(int(user_id), {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT})
             if entry["times"][current_step] is None:
                 entry["times"][current_step] = _RACE_IMPULSE_STEP_SECONDS
+                entry["success"][current_step] = False
 
-    def _successful_steps(self, times: list[float | None]) -> int:
+    def _successful_steps(self, entry: dict) -> int:
+        success = list(entry.get("success") or [])
+        if success:
+            return sum(1 for ok in success if bool(ok))
+        times = list(entry.get("times") or [])
         return sum(1 for reaction_time in times if reaction_time is not None and float(reaction_time) < _RACE_IMPULSE_STEP_SECONDS)
 
     def _random_impulse_tier(self, hits: int) -> str | None:
@@ -293,25 +301,25 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         if hits <= 0:
             return None
         if hits == 1:
-            return "medio" if roll < 0.25 else "pequeno"
+            return "medio" if roll < 0.35 else "pequeno"
         if hits == 2:
-            if roll < 0.22:
+            if roll < 0.35:
                 return "grande"
-            if roll < 0.72:
+            if roll < 0.82:
                 return "medio"
             return "pequeno"
-        if roll < 0.45:
+        if roll < 0.60:
             return "grande"
-        if roll < 0.90:
+        if roll < 0.95:
             return "medio"
         return "pequeno"
 
     def _tier_bonus(self, tier: str, stage_name: str) -> float:
         stage_key = stage_name.strip().lower()
         bonus_table = {
-            "largada": {"pequeno": (1.00, 1.35), "medio": (1.55, 2.00), "grande": (2.35, 2.95)},
-            "meio": {"pequeno": (1.20, 1.60), "medio": (1.80, 2.35), "grande": (2.65, 3.35)},
-            "sprint final": {"pequeno": (1.45, 1.90), "medio": (2.10, 2.75), "grande": (3.00, 3.80)},
+            "largada": {"pequeno": (1.25, 1.65), "medio": (1.95, 2.55), "grande": (2.95, 3.75)},
+            "meio": {"pequeno": (1.45, 1.90), "medio": (2.20, 2.95), "grande": (3.25, 4.20)},
+            "sprint final": {"pequeno": (1.75, 2.25), "medio": (2.55, 3.35), "grande": (3.70, 4.80)},
         }
         ranges = bonus_table.get(stage_key, bonus_table["meio"])
         start, end = ranges.get(tier, (0.0, 0.0))
@@ -336,11 +344,11 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.last_best_tier = None
 
         for user_id in participants:
-            entry = self.results.setdefault(user_id, {"times": [None] * _RACE_IMPULSE_STAGE_COUNT})
+            entry = self.results.setdefault(user_id, {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT})
             times = list(entry.get("times") or [])
             if len(times) < _RACE_IMPULSE_STAGE_COUNT:
                 times.extend([None] * (_RACE_IMPULSE_STAGE_COUNT - len(times)))
-            hits = self._successful_steps(times)
+            hits = self._successful_steps(entry)
             tier = self._random_impulse_tier(hits)
             entry["hits"] = hits
             entry["tier"] = tier
@@ -371,7 +379,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                     mention_lines.append(f"{self._tier_emoji(tier)} {member.mention} recebeu {self._tier_label(tier)}.")
             if mention_lines:
                 self.session["narration"] = "\n".join(mention_lines)
-                self.session["narration_hold_ticks"] = 2
+                self.session["narration_hold_ticks"] = 3
         else:
             self.session["recent_impulse_awards"] = []
             self.session["narration"] = ""
@@ -896,7 +904,7 @@ class GincanaCorridaMixin:
                 }
             if session.get("active_impulse_message") is event_message:
                 session["impulse_status"] = ""
-                if not awards:
+                if not awards and not str(session.get("narration") or "").strip():
                     session["narration"] = ""
                 await self._refresh_race_message(guild.id)
             return awards
@@ -1015,7 +1023,8 @@ class GincanaCorridaMixin:
                     impulse_awards = list(await self._run_race_impulse_event(guild, session, stage_name) or [])
 
             tick_events: list[tuple[str, discord.Member]] = []
-            recent_awards = impulse_awards or list(session.pop("recent_impulse_awards", []) or [])
+            recent_awards = impulse_awards or list(session.get("recent_impulse_awards", []) or [])
+            session["recent_impulse_awards"] = []
             for award in recent_awards:
                 member = guild.get_member(int(award.get("user_id") or 0))
                 tier = str(award.get("tier") or "").lower()
@@ -1139,7 +1148,7 @@ class GincanaCorridaMixin:
                 session["narration_hold_ticks"] = 0
             elif impulse_event_this_tick:
                 session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick)
-                session["narration_hold_ticks"] = 2
+                session["narration_hold_ticks"] = 3
             elif finishers_this_tick:
                 ordered_finishers = [user_id for user_id, _score in sorted(finishers_this_tick, key=lambda item: (-item[1], item[0]))][:1]
                 finisher = guild.get_member(int(ordered_finishers[0])) if ordered_finishers else None
