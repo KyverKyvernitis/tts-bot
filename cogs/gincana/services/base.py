@@ -145,6 +145,19 @@ class GincanaBase:
     def _chip_amount(self, amount: int | str) -> str:
         return f"**{amount} {self._CHIP_EMOJI}**"
 
+    def _chip_label(self) -> str:
+        return f"{self._CHIP_EMOJI} (fichas)"
+
+    def _format_rate_decimal(self, value: float) -> str:
+        return f"{round(float(value), 1):.1f}".replace('.', ',') + '%'
+
+    def _chip_summary_stats(self, stats: dict) -> tuple[int, int, int, str]:
+        wins = int(stats.get('poker_wins', 0)) + int(stats.get('alvo_wins', 0)) + int(stats.get('roleta_jackpots', 0)) + int(stats.get('corrida_wins', 0)) + int(stats.get('buckshot_survivals', 0))
+        losses = int(stats.get('poker_losses', 0)) + int(stats.get('corrida_losses', 0)) + int(stats.get('buckshot_eliminations', 0))
+        games = int(stats.get('games_played', 0))
+        rate = self._format_rate_decimal((wins / games) * 100.0) if games > 0 else '0,0%'
+        return wins, losses, games, rate
+
     async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
         await self.db.set_user_chips(guild_id, user_id, int(amount))
         await self.db.set_user_chip_reset_at(guild_id, user_id, 0.0)
@@ -197,8 +210,6 @@ class GincanaBase:
         guild_id = member.guild.id
         chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_INITIAL)
         stats = self.db.get_user_game_stats(guild_id, member.id)
-        weekly = self.db.get_user_weekly_points(guild_id, member.id)
-        achievements = self._get_unlocked_achievements(guild_id, member.id)
         remaining = 0.0
         if chips <= 0:
             import time
@@ -209,11 +220,8 @@ class GincanaBase:
             remaining = max(0.0, CHIPS_RESET_SECONDS - elapsed)
 
         embed = discord.Embed(
-            title=f"{self._CHIP_EMOJI} Perfil de fichas",
-            description=(
-                f"Saldo atual: {self._chip_amount(chips)}\n"
-                f"Semanal: **{weekly} {self._CHIP_EMOJI}**"
-            ),
+            title=f"{self._CHIP_EMOJI} Perfil",
+            description="Saldo, recarga, login diário e resumo da sua gincana.",
             color=discord.Color.blurple(),
         )
         embed.set_author(name=str(member.display_name), icon_url=member.display_avatar.url)
@@ -225,37 +233,25 @@ class GincanaBase:
         else:
             recarga = f"Na próxima tentativa sem saldo, seu saldo volta para {self._chip_amount(CHIPS_DEFAULT)}."
 
-        partidas = int(stats.get("games_played", 0))
-        total_wins = int(stats.get("poker_wins", 0)) + int(stats.get("alvo_wins", 0)) + int(stats.get("roleta_jackpots", 0)) + int(stats.get("corrida_wins", 0))
-        mira_hits = int(stats.get("alvo_hits", 0))
-        mira_shots = int(stats.get("alvo_shots", 0))
-        precision = f"{int((mira_hits / mira_shots) * 100)}%" if mira_shots > 0 else "0%"
+        wins, losses, games, rate = self._chip_summary_stats(stats)
+        summary = (
+            f"Vitórias: **{wins}**\n"
+            f"Derrotas: **{losses}**\n"
+            f"Jogos: **{games}**\n"
+            f"Taxa de vitórias: **{rate}**"
+        )
 
+        embed.add_field(name=self._chip_label(), value=f"**{chips}**", inline=False)
         embed.add_field(name="⏳ Recarga", value=recarga, inline=False)
         embed.add_field(name="🎁 Login diário", value=self._daily_bonus_text(guild_id, member.id), inline=False)
-        embed.add_field(
-            name="📊 Resumo",
-            value=f"Partidas: **{partidas}**\nVitórias marcantes: **{total_wins}**\nPrecisão no alvo: **{precision}**",
-            inline=True,
-        )
-        embed.add_field(name="🃏 Poker", value=f"Vitórias: **{stats.get('poker_wins', 0)}**\nDerrotas: **{stats.get('poker_losses', 0)}**", inline=True)
-        embed.add_field(
-            name="<:gunforward:1484655577836683434> Buckshot",
-            value=f"Sobreviveu: **{stats.get('buckshot_survivals', 0)}**\nEliminações: **{stats.get('buckshot_eliminations', 0)}**",
-            inline=True,
-        )
-        embed.add_field(name="🎰 Roleta", value=f"Jackpots: **{stats.get('roleta_jackpots', 0)}**\nCusto por giro: {self._chip_amount(ROLETA_COST)}", inline=True)
-        embed.add_field(name="🎯 Alvo", value=f"Vitórias: **{stats.get('alvo_wins', 0)}**\nBullseyes: **{stats.get('alvo_bullseyes', 0)}**", inline=True)
-        embed.add_field(name="🐎 Corrida", value=f"Vitórias: **{stats.get('corrida_wins', 0)}**\nDerrotas: **{stats.get('corrida_losses', 0)}**\nPódios: **{stats.get('corrida_podiums', 0)}**", inline=True)
-        embed.add_field(name="💸 Pagamentos", value=f"Enviados: **{stats.get('payments_sent', 0)}**\nRecebidos: **{stats.get('payments_received', 0)}**", inline=True)
-
-        embed.set_footer(text="Use _rank para ver o ranking de fichas e _daily para pegar seu bônus")
+        embed.add_field(name="📊 Resumo", value=summary, inline=False)
+        embed.set_footer(text="Use _rank para ver o ranking e _daily para pegar seu bônus")
         return embed
 
     def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
         rows = self.db.get_chip_leaderboard(guild.id, limit=10)
         embed = discord.Embed(
-            title="🏆 Rank de fichas",
+            title=f"🏆 Rank de {self._chip_label()}",
             description="Os maiores saldos deste servidor.",
             color=discord.Color.gold(),
         )
@@ -264,36 +260,47 @@ class GincanaBase:
 
         if not rows:
             embed.add_field(name="Top 10", value="Ainda não há saldo registrado.", inline=False)
-            embed.set_footer(text=f"Jogue roleta, buckshot, alvo, corrida ou poker para juntar {self._CHIP_EMOJI}")
-            return embed
+        else:
+            medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+            ranking_lines = []
+            for index, row in enumerate(rows, start=1):
+                member = guild.get_member(int(row["user_id"]))
+                name = member.display_name if member is not None else f"Usuário {row['user_id']}"
+                prefix = medals.get(index, f"`#{index}`")
+                ranking_lines.append(f"{prefix} **{name}** — **{row.get('chips', row.get('points', 0))}** {self._CHIP_EMOJI}")
+            embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
 
-        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-        ranking_lines = []
-        for index, row in enumerate(rows, start=1):
-            member = guild.get_member(int(row["user_id"]))
-            name = member.display_name if member is not None else f"Usuário {row['user_id']}"
-            prefix = medals.get(index, f"`#{index}`")
-            ranking_lines.append(f"{prefix} **{name}** — **{row.get('chips', row.get('points', 0))} {self._CHIP_EMOJI}**")
-        embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
+        if requester is not None:
+            guild_id = guild.id
+            chips = self.db.get_user_chips(guild_id, requester.id, default=CHIPS_INITIAL)
+            stats = self.db.get_user_game_stats(guild_id, requester.id)
+            remaining = 0.0
+            if chips <= 0:
+                import time
+                last_reset = self.db.get_user_chip_reset_at(guild_id, requester.id)
+                now = time.time()
+                elapsed = max(0.0, now - float(last_reset or 0.0))
+                remaining = max(0.0, CHIPS_RESET_SECONDS - elapsed)
+            if chips > 0:
+                recarga = f"Quando faltar saldo, a próxima recarga volta para {self._chip_amount(CHIPS_DEFAULT)}."
+            elif remaining > 0:
+                recarga = f"Disponível em **{self._format_chip_reset_remaining(remaining)}** para voltar a {self._chip_amount(CHIPS_DEFAULT)}."
+            else:
+                recarga = f"Na próxima tentativa sem saldo, seu saldo volta para {self._chip_amount(CHIPS_DEFAULT)}."
+            wins, losses, games, rate = self._chip_summary_stats(stats)
+            profile_lines = [
+                f"**{self._chip_label()}:** **{chips}**",
+                f"**⏳ Recarga:** {recarga}",
+                f"**🎁 Login diário:** {self._daily_bonus_text(guild_id, requester.id)}",
+                "**📊 Resumo:**",
+                f"Vitórias: **{wins}**",
+                f"Derrotas: **{losses}**",
+                f"Jogos: **{games}**",
+                f"Taxa de vitórias: **{rate}**",
+            ]
+            embed.add_field(name="Seu perfil", value="\n".join(profile_lines), inline=False)
 
-        highlight_specs = [
-            ("🃏 Rei do poker", "poker_wins"),
-            ("<:gunforward:1484655577836683434> Sobrevivente", "buckshot_survivals"),
-            ("🎰 Sortudo", "roleta_jackpots"),
-            ("🎯 Destaque do alvo", "alvo_bullseyes"),
-            ("🐎 Destaque da corrida", "corrida_wins"),
-        ]
-        highlight_lines = []
-        for label, key in highlight_specs:
-            leaders = self.db.get_game_stat_leaderboard(guild.id, key, limit=1)
-            if not leaders:
-                continue
-            row = leaders[0]
-            member = guild.get_member(int(row["user_id"]))
-            name = member.display_name if member is not None else f"Usuário {row['user_id']}"
-            highlight_lines.append(f"{label}: **{name}** — **{row['value']}**")
-        if highlight_lines:
-            embed.add_field(name="Destaque paralelo", value="\n".join(highlight_lines), inline=False)
+        embed.set_footer(text="Use _ficha para ver seu perfil")
         return embed
 
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:
