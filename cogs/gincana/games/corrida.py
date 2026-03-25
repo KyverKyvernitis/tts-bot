@@ -239,12 +239,15 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         async with self.press_lock:
             if self.finished or self.active_index is None or self.step_index < 0:
                 return
-            if interaction.guild is None or not isinstance(user, discord.Member):
+            if interaction.guild is None or user is None:
                 return
-            if user.id not in set(self.session.get("locked_participants", set()) or []):
+            user_id = int(getattr(user, "id", 0) or 0)
+            if user_id <= 0:
+                return
+            if user_id not in {int(x) for x in (self.session.get("locked_participants", set()) or [])}:
                 return
 
-            entry = self.results.setdefault(user.id, {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT})
+            entry = self.results.setdefault(user_id, {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT})
             times = entry["times"]
             success = entry["success"]
             current_step = int(self.step_index)
@@ -1030,6 +1033,13 @@ class GincanaCorridaMixin:
                 tier = str(award.get("tier") or "").lower()
                 if member is not None and tier:
                     tick_events.append((f"boost_{tier}", member))
+            if not tick_events:
+                for user_id, impulse_state in dict(session.get("active_impulses") or {}).items():
+                    if int((impulse_state or {}).get("ticks_left") or 0) >= 2:
+                        member = guild.get_member(int(user_id))
+                        tier = str((impulse_state or {}).get("kind") or "").lower()
+                        if member is not None and tier:
+                            tick_events.append((f"boost_{tier}", member))
             ordered_before = self._build_finalized_order(guild, session)
             leader_before = ordered_before[0].id if ordered_before else 0
             finishers_this_tick: list[tuple[int, float]] = []
@@ -1147,8 +1157,12 @@ class GincanaCorridaMixin:
                 session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick, final_tick=True)
                 session["narration_hold_ticks"] = 0
             elif impulse_event_this_tick:
-                session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick)
-                session["narration_hold_ticks"] = 3
+                impulse_text = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick)
+                if impulse_text.strip():
+                    session["narration"] = impulse_text
+                    session["narration_hold_ticks"] = 3
+                else:
+                    session["narration_hold_ticks"] = 0
             elif finishers_this_tick:
                 ordered_finishers = [user_id for user_id, _score in sorted(finishers_this_tick, key=lambda item: (-item[1], item[0]))][:1]
                 finisher = guild.get_member(int(ordered_finishers[0])) if ordered_finishers else None
