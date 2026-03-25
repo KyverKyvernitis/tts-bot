@@ -25,6 +25,7 @@ _RACE_CONDITIONS = [
     {"name": "Pista pesada", "boost": -0.03, "trip": 0.04, "speed": -0.25},
     {"name": "Pista rápida", "boost": 0.08, "trip": -0.02, "speed": 0.2},
 ]
+_RACE_CONDITION_WEIGHTS = (0.34, 0.28, 0.26, 0.12)
 
 _RACE_SPECIALS = [
     {"name": "Corrida turbo", "boost": 0.12, "trip": -0.03, "speed": 0.35, "bonus_pool": 0, "color": discord.Color.dark_magenta()},
@@ -324,7 +325,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
 
     def _apply_results(self, *, up_to_step: int | None = None):
         if self._results_applied:
-            return
+            return list(self.session.get("recent_impulse_awards") or [])
         active_impulses = self.session.setdefault("active_impulses", {})
         state_map = self.session.setdefault("state_map", {})
         participants = [int(user_id) for user_id in set(self.session.get("locked_participants", set()) or [])]
@@ -377,6 +378,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             self.session["narration_hold_ticks"] = 0
 
         self._results_applied = True
+        return list(self.session.get("recent_impulse_awards") or [])
 
 
 
@@ -851,10 +853,10 @@ class GincanaCorridaMixin:
 
     async def _run_race_impulse_event(self, guild: discord.Guild, session: dict, stage_name: str):
         if session.get("ended"):
-            return
+            return []
         channel = guild.get_channel(int(session.get("text_channel_id") or 0))
         if channel is None or not hasattr(channel, "send"):
-            return
+            return []
 
         event_view = _RaceImpulseEventView(self, guild, session, stage_name)
         session["impulse_status"] = f"⏸ Evento de impulso ({stage_name.lower()}) em andamento."
@@ -882,10 +884,9 @@ class GincanaCorridaMixin:
 
             event_view.finished = True
             event_view._close_current_step()
-            event_view._apply_results()
+            awards = list(event_view._apply_results() or [])
             await self._refresh_race_message(guild.id)
             await event_view.refresh_message()
-            awards = list(session.get("recent_impulse_awards") or [])
             if event_view.last_best_user_id is not None and event_view.last_best_target_bonus > float((session.get("best_impulse") or {}).get("bonus", 0.0) or 0.0):
                 session["best_impulse"] = {
                     "user_id": int(event_view.last_best_user_id),
@@ -1003,16 +1004,17 @@ class GincanaCorridaMixin:
                 break
 
             schedule = tuple(session.get("impulse_schedule") or ())
+            impulse_awards: list[dict] = []
             if schedule:
                 next_event = next(((event_tick, event_stage) for event_tick, event_stage in schedule if event_tick == tick and event_tick not in session.setdefault("impulse_ticks_fired", set())), None)
                 if next_event is not None:
                     event_tick, stage_name = next_event
                     await self._stop_active_impulse_event(session, keep_status=True)
                     session.setdefault("impulse_ticks_fired", set()).add(event_tick)
-                    await self._run_race_impulse_event(guild, session, stage_name)
+                    impulse_awards = list(await self._run_race_impulse_event(guild, session, stage_name) or [])
 
             tick_events: list[tuple[str, discord.Member]] = []
-            recent_awards = list(session.pop("recent_impulse_awards", []) or [])
+            recent_awards = impulse_awards or list(session.pop("recent_impulse_awards", []) or [])
             for award in recent_awards:
                 member = guild.get_member(int(award.get("user_id") or 0))
                 tier = str(award.get("tier") or "").lower()
@@ -1059,7 +1061,7 @@ class GincanaCorridaMixin:
                         base_move += 0.22
                     if tick >= _CORRIDA_UPDATES:
                         base_move += 0.30
-                    move = max(0.0, min(3.0, base_move + impulse_per_tick))
+                    move = max(0.0, min(4.9, base_move + impulse_per_tick))
                     if impulse_ticks_left > 0:
                         state_map[member.id] = _HORSE_DASH if impulse_kind == "grande" else _HORSE_BOOST
                     else:
@@ -1268,7 +1270,7 @@ class GincanaCorridaMixin:
                 pass
             return True
 
-        condition = random.choice(_RACE_CONDITIONS)
+        condition = random.choices(_RACE_CONDITIONS, weights=_RACE_CONDITION_WEIGHTS, k=1)[0]
         special = random.choice(_RACE_SPECIALS) if random.random() < 0.18 else None
         bonus_pool = int((special or {}).get("bonus_pool", 0) or 0)
 
