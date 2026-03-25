@@ -39,6 +39,8 @@ _RACE_IMPULSE_BUTTON_COUNT = 6
 _RACE_IMPULSE_STAGE_COUNT = 3
 _RACE_IMPULSE_EMOJI = "⚡"
 _RACE_IMPULSE_PHASE_WEIGHTS = {"largada": 0.85, "meio": 1.0, "sprint final": 1.22}
+_RACE_IMPULSE_TICK_APPLY_CAP = 0.85
+_RACE_IMPULSE_FINAL_STRETCH_APPLY_CAP = 1.05
 
 
 def _shared_rank_map(arrival_groups: list[list[int]]) -> dict[int, int]:
@@ -229,7 +231,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         user = interaction.user
         try:
             if not interaction.response.is_done():
-                await interaction.response.defer(thinking=False)
+                await interaction.response.defer()
         except Exception:
             pass
         async with self.press_lock:
@@ -284,11 +286,11 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
     def _bonus_for_reaction_time(self, reaction_time: float | None) -> float:
         if reaction_time is None or reaction_time >= _RACE_IMPULSE_STEP_SECONDS:
             return 0.0
-        step_window = max(0.5, float(_RACE_IMPULSE_STEP_SECONDS))
+        step_window = max(0.35, float(_RACE_IMPULSE_STEP_SECONDS))
         ratio = max(0.0, min(1.0, float(reaction_time) / step_window))
-        window_scale = max(1.0, 1.35 / step_window)
-        bonus = (1.15 - (0.95 * (ratio ** 0.85))) * window_scale
-        return round(max(0.0, bonus), 4)
+        # Bônus mais forte e contínuo para janela de 1s, sem depender só de faixas duras.
+        bonus = 1.28 - (1.02 * (ratio ** 0.72))
+        return round(max(0.08, bonus), 4)
 
     def _hierarchy_metrics(self, times: list[float]) -> dict[str, float | int]:
         elite = 0
@@ -338,13 +340,13 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             return 0.0
         completion_scale = min(1.0, max(0.34, considered_steps / float(_RACE_IMPULSE_STAGE_COUNT)))
         if rank_index == 0:
-            return round(0.90 * completion_scale, 3)
+            return round(1.35 * completion_scale, 3)
         if rank_index == 1:
-            return round(0.60 * completion_scale, 3)
+            return round(0.90 * completion_scale, 3)
         if rank_index == 2:
-            return round(0.35 * completion_scale, 3)
+            return round(0.55 * completion_scale, 3)
         if rank_index == 3:
-            return round(0.18 * completion_scale, 3)
+            return round(0.25 * completion_scale, 3)
         return 0.0
 
     def _consistency_bonus(self, metrics: dict[str, float | int]) -> float:
@@ -353,11 +355,11 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         elite = int(metrics.get("elite", 0) or 0)
         bonus = 0.0
         if valid_count >= 2:
-            bonus += (valid_count - 1) * 0.12
+            bonus += (valid_count - 1) * 0.22
         if fast_or_better >= 2:
-            bonus += (fast_or_better - 1) * 0.08
+            bonus += (fast_or_better - 1) * 0.14
         if elite >= 2:
-            bonus += (elite - 1) * 0.05
+            bonus += (elite - 1) * 0.08
         return round(bonus, 3)
 
     def _ranking_sort_key(self, user_id: int, metrics: dict[str, float | int]) -> tuple:
@@ -411,6 +413,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         scored_entries.sort(key=lambda item: item[0])
         self.last_best_user_id = None
         self.last_best_target_bonus = 0.0
+        gainers: list[tuple[int, float, dict]] = []
         for rank_index, (_sort_key, user_id, entry, speed_bonus, consistency_bonus, metrics) in enumerate(scored_entries):
             placement_bonus = self._placement_bonus_for_rank(rank_index, metrics, considered_steps)
             raw_bonus = speed_bonus + consistency_bonus + placement_bonus
@@ -423,10 +426,29 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                 self.last_best_user_id = user_id
                 self.last_best_target_bonus = target_bonus
             if delta > 0:
-                pending[user_id] = round(float(pending.get(user_id, 0.0)) + delta, 3)
+                pending[user_id] = round(float(pending.get(user_id, 0.0)) + delta, 4)
                 entry["applied_bonus_total"] = float(already_applied + delta)
+                gainers.append((user_id, float(delta), metrics))
             else:
                 entry["applied_bonus_total"] = max(already_applied, target_bonus)
+
+        if gainers:
+            gainers.sort(key=lambda item: (-item[1], -int(item[2].get("valid_count", 0) or 0), item[0]))
+            top_user_ids = [int(user_id) for user_id, _delta, _metrics in gainers[:2]]
+            flash_users = set(int(user_id) for user_id, _delta, _metrics in gainers)
+            self.session["impulse_flash_users"] = flash_users
+            self.session["recent_impulse_users"] = top_user_ids
+            mentions = []
+            for user_id in top_user_ids:
+                member = self.guild.get_member(int(user_id))
+                if member is not None:
+                    mentions.append(member.mention)
+            if mentions:
+                if len(mentions) == 1:
+                    self.session["narration"] = f"⚡ {mentions[0]} ganhou impulso."
+                else:
+                    self.session["narration"] = f"⚡ {mentions[0]} e {mentions[1]} ganharam impulso."
+                self.session["impulse_status"] = self.session["narration"]
 
 
 
@@ -546,12 +568,15 @@ class GincanaCorridaMixin:
 
         progress_map = session.get("progress", {}) or {}
         state_map = session.get("state_map", {}) or {}
+        flash_users = {int(user_id) for user_id in (session.get("impulse_flash_users") or set())}
         rank_map = {member.id: rank for rank, member in ordered_with_ranks}
         lines: list[str] = []
         for _index, (rank, member) in enumerate(ordered_with_ranks, start=1):
             medal = self._race_placement_emoji(rank)
             pos = float(progress_map.get(member.id, 0.0))
             state_emoji = str(state_map.get(member.id) or _HORSE_START)
+            if member.id in flash_users and state_emoji not in {_HORSE_FINISH, _HORSE_TRIP}:
+                state_emoji = _HORSE_BOOST
             if rank_map.get(member.id, 9999) != 9999 and state_emoji == _HORSE_FINISH:
                 pos = _CORRIDA_TRACK_LENGTH - 1
             lines.append(f"{medal} {member.mention}")
@@ -806,11 +831,11 @@ class GincanaCorridaMixin:
             return "🏁 Todos cruzaram a linha."
         event_lines: list[str] = []
         for event_key, member in tick_events:
-            if event_key == "boost":
+            if event_key in {"boost", "boost_award"}:
                 event_lines.append(f"⚡ {member.mention} ganhou impulso.")
             elif event_key == "trip":
                 event_lines.append(f"💥 {member.mention} tropeçou.")
-            if len(event_lines) >= 2:
+            if len(event_lines) >= 3:
                 break
         if event_lines:
             return "\n".join(event_lines[:2])
@@ -902,22 +927,28 @@ class GincanaCorridaMixin:
                 raise discord.NotFound(response=None, message="Impulse event message disappeared")
             if _RACE_IMPULSE_INITIAL_DELAY > 0:
                 await asyncio.sleep(_RACE_IMPULSE_INITIAL_DELAY)
+            if _RACE_IMPULSE_STAGE_COUNT > 0:
+                event_view._activate_step(0)
+                await event_view.refresh_message()
             for step_index in range(_RACE_IMPULSE_STAGE_COUNT):
                 if session.get("ended") or event_view.message is None:
-                    break
-                event_view._activate_step(step_index)
-                await event_view.refresh_message()
-                if event_view.message is None:
                     break
                 await asyncio.sleep(_RACE_IMPULSE_STEP_SECONDS)
                 event_view._close_current_step()
                 event_view._apply_results(up_to_step=step_index)
+                await self._refresh_race_message(guild.id)
+                next_step = step_index + 1
+                if next_step < _RACE_IMPULSE_STAGE_COUNT and event_view.message is not None and not session.get("ended"):
+                    event_view._activate_step(next_step)
+                else:
+                    event_view.finished = True
                 await event_view.refresh_message()
 
             event_view.finished = True
             event_view._close_current_step()
             event_view._apply_results()
             event_view._results_applied = True
+            await self._refresh_race_message(guild.id)
             await event_view.refresh_message()
             participant_count = len(self._get_race_participants(guild, session))
             hit_count = sum(1 for result in event_view.results.values() if any((time_value is not None and time_value < _RACE_IMPULSE_STEP_SECONDS) for time_value in result.get("times", [])))
@@ -1038,6 +1069,11 @@ class GincanaCorridaMixin:
                 session.setdefault("impulse_ticks_fired", set()).add(tick)
 
             tick_events: list[tuple[str, discord.Member]] = []
+            recent_impulse_ids = [int(user_id) for user_id in (session.pop("recent_impulse_users", []) or [])]
+            for user_id in recent_impulse_ids:
+                member = guild.get_member(int(user_id))
+                if member is not None:
+                    tick_events.append(("boost_award", member))
             ordered_before = self._build_finalized_order(guild, session)
             leader_before = ordered_before[0].id if ordered_before else 0
             finishers_this_tick: list[tuple[int, float]] = []
@@ -1057,7 +1093,16 @@ class GincanaCorridaMixin:
                 if tick >= _CORRIDA_UPDATES:
                     trip_chance = max(0.01, trip_chance - 0.05)
 
-                pending_impulse = float(session.setdefault("pending_impulse_bonus", {}).pop(member.id, 0.0) or 0.0)
+                pending_store = session.setdefault("pending_impulse_bonus", {})
+                pending_total = float(pending_store.get(member.id, 0.0) or 0.0)
+                per_tick_cap = _RACE_IMPULSE_FINAL_STRETCH_APPLY_CAP if session.get("final_stretch") else _RACE_IMPULSE_TICK_APPLY_CAP
+                pending_impulse = min(pending_total, per_tick_cap) if pending_total > 0 else 0.0
+                if pending_impulse > 0:
+                    remaining_bonus = round(max(0.0, pending_total - pending_impulse), 4)
+                    if remaining_bonus > 0:
+                        pending_store[member.id] = remaining_bonus
+                    else:
+                        pending_store.pop(member.id, None)
 
                 if random.random() < trip_chance and cur < track_end - 0.5:
                     move = max(0.0, pending_impulse * 0.5)
@@ -1142,6 +1187,7 @@ class GincanaCorridaMixin:
             else:
                 session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick)
             await self._refresh_race_message(guild.id)
+            session["impulse_flash_users"] = set()
             tick += 1
             await asyncio.sleep(_CORRIDA_UPDATE_SECONDS)
 
