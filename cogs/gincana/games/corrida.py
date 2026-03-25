@@ -34,7 +34,7 @@ _RACE_SPECIALS = [
 
 _RACE_IMPULSE_WINDOWS = (1, 6, 11)
 _RACE_IMPULSE_INITIAL_DELAY = 0.0
-_RACE_IMPULSE_STEP_SECONDS = 2.0
+_RACE_IMPULSE_STEP_SECONDS = 1.0
 _RACE_IMPULSE_BUTTON_COUNT = 6
 _RACE_IMPULSE_STAGE_COUNT = 3
 _RACE_IMPULSE_EMOJI = "⚡"
@@ -158,7 +158,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.finished = False
         self.step_index = -1
         self.active_index: int | None = None
-        self.active_started_at = 0.0
+        self.active_started_ns = 0
         self.order = random.sample(range(_RACE_IMPULSE_BUTTON_COUNT), _RACE_IMPULSE_STAGE_COUNT)
         self.results: dict[int, dict] = {}
         self.edit_lock = asyncio.Lock()
@@ -249,16 +249,16 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                 times[current_step] = _RACE_IMPULSE_STEP_SECONDS
                 return
 
-            reaction_time = max(0.0, min(_RACE_IMPULSE_STEP_SECONDS, time.perf_counter() - self.active_started_at))
+            reaction_time = max(0.0, min(_RACE_IMPULSE_STEP_SECONDS, (time.perf_counter_ns() - self.active_started_ns) / 1_000_000_000.0))
             times[current_step] = reaction_time
 
     def _activate_step(self, index: int):
         self.step_index = index
         self.active_index = self.order[index]
-        self.active_started_at = time.perf_counter()
+        self.active_started_ns = time.perf_counter_ns()
         for idx, button in enumerate(self.buttons):
             button.disabled = idx != self.active_index
-            button.label = f"{_RACE_IMPULSE_EMOJI} {idx + 1}" if idx == self.active_index else str(idx + 1)
+            button.label = _RACE_IMPULSE_EMOJI if idx == self.active_index else str(idx + 1)
             button.style = discord.ButtonStyle.secondary
 
     def _close_current_step(self):
@@ -267,7 +267,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             button.label = str(button.index + 1)
             button.style = discord.ButtonStyle.secondary
         self.active_index = None
-        self.active_started_at = 0.0
+        self.active_started_ns = 0
         current_step = self.step_index
         if current_step < 0:
             return
@@ -326,7 +326,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             "fast_or_better": fast_or_better,
             "quick_or_better": quick_or_better,
             "valid_times": valid_times,
-            "total_valid_time": round(total_valid_time, 6),
+            "total_valid_time": float(total_valid_time),
             "best_time": float(best_time),
         }
 
@@ -402,7 +402,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                     reaction_time = _RACE_IMPULSE_STEP_SECONDS
                 normalized_times.append(float(reaction_time))
             metrics = self._hierarchy_metrics(normalized_times)
-            speed_bonus = round(sum(self._bonus_for_reaction_time(reaction_time) for reaction_time in normalized_times), 3)
+            speed_bonus = float(sum(self._bonus_for_reaction_time(reaction_time) for reaction_time in normalized_times))
             consistency_bonus = self._consistency_bonus(metrics)
             scored_entries.append((self._ranking_sort_key(user_id, metrics), user_id, entry, speed_bonus, consistency_bonus, metrics))
 
@@ -412,9 +412,9 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         for rank_index, (_sort_key, user_id, entry, speed_bonus, consistency_bonus, metrics) in enumerate(scored_entries):
             placement_bonus = self._placement_bonus_for_rank(rank_index, metrics, considered_steps)
             raw_bonus = speed_bonus + consistency_bonus + placement_bonus
-            target_bonus = round(raw_bonus * phase_weight, 3)
-            already_applied = round(float(entry.get("applied_bonus_total", 0.0) or 0.0), 3)
-            delta = round(target_bonus - already_applied, 3)
+            target_bonus = float(raw_bonus * phase_weight)
+            already_applied = float(entry.get("applied_bonus_total", 0.0) or 0.0)
+            delta = float(target_bonus - already_applied)
             entry["credited_steps"] = considered_steps
             entry["last_target_bonus"] = target_bonus
             if int(metrics.get("valid_count", 0) or 0) > 0 and self.last_best_user_id is None:
@@ -422,7 +422,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                 self.last_best_target_bonus = target_bonus
             if delta > 0:
                 pending[user_id] = round(float(pending.get(user_id, 0.0)) + delta, 3)
-                entry["applied_bonus_total"] = round(already_applied + delta, 3)
+                entry["applied_bonus_total"] = float(already_applied + delta)
             else:
                 entry["applied_bonus_total"] = max(already_applied, target_bonus)
 
@@ -650,7 +650,7 @@ class GincanaCorridaMixin:
             return
 
         session = self._get_race_session(guild.id)
-        if session is None or session.get("ended") or session.get("started"):
+        if session is None or session.get("ended") or session.get("started") or session.get("starting"):
             try:
                 await interaction.response.send_message("Essa corrida já foi iniciada.", ephemeral=True)
             except Exception:
@@ -673,9 +673,11 @@ class GincanaCorridaMixin:
                 pass
             return
 
+        session["starting"] = True
         try:
             await interaction.response.defer()
         except Exception:
+            session["starting"] = False
             return
 
         try:
@@ -867,7 +869,7 @@ class GincanaCorridaMixin:
             return
         try:
             if not immediate:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
             await message.delete()
         except discord.NotFound:
             pass
@@ -1019,6 +1021,7 @@ class GincanaCorridaMixin:
         session["view"] = None
 
         await self._refresh_race_message(guild.id)
+        session["starting"] = False
         await asyncio.sleep(1.0)
 
         condition = session.get("condition") or {}
