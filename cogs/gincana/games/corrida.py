@@ -308,9 +308,9 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
     def _tier_bonus(self, tier: str, stage_name: str) -> float:
         stage_key = stage_name.strip().lower()
         bonus_table = {
-            "largada": {"pequeno": (0.60, 0.85), "medio": (0.95, 1.25), "grande": (1.35, 1.75)},
-            "meio": {"pequeno": (0.75, 1.05), "medio": (1.15, 1.55), "grande": (1.70, 2.20)},
-            "sprint final": {"pequeno": (0.90, 1.20), "medio": (1.35, 1.80), "grande": (2.00, 2.55)},
+            "largada": {"pequeno": (1.00, 1.35), "medio": (1.55, 2.00), "grande": (2.35, 2.95)},
+            "meio": {"pequeno": (1.20, 1.60), "medio": (1.80, 2.35), "grande": (2.65, 3.35)},
+            "sprint final": {"pequeno": (1.45, 1.90), "medio": (2.10, 2.75), "grande": (3.00, 3.80)},
         }
         ranges = bonus_table.get(stage_key, bonus_table["meio"])
         start, end = ranges.get(tier, (0.0, 0.0))
@@ -792,6 +792,9 @@ class GincanaCorridaMixin:
                 break
         return "\n".join(event_lines[:3])
 
+    def _has_impulse_event(self, tick_events: list[tuple[str, discord.Member]]) -> bool:
+        return any(str(event_key).startswith("boost_") for event_key, _member in tick_events)
+
 
     def _build_finalized_order(self, guild: discord.Guild, session: dict) -> list[discord.Member]:
         return [member for _rank, member in self._ordered_race_members(guild, session)]
@@ -1074,7 +1077,6 @@ class GincanaCorridaMixin:
                 if new_pos >= track_end - 1e-9:
                     finish_score = raw_finish_score + random.random() * 1e-6
                     finishers_this_tick.append((member.id, finish_score))
-                    state_map[member.id] = _HORSE_FINISH
 
             visible_before = session.get("_visible_before_progress") or {}
             visible_before = {member.id: int(float(visible_before.get(member.id, 0.0))) for member in participants}
@@ -1100,9 +1102,24 @@ class GincanaCorridaMixin:
                 finish_meta = session.setdefault("finish_meta", {})
                 already_arrived = {int(user_id) for group in arrival_groups for user_id in group}
                 ordered_finishers = [(user_id, score) for user_id, score in sorted(finishers_this_tick, key=lambda item: (-item[1], item[0])) if int(user_id) not in already_arrived]
-                for user_id, score in ordered_finishers:
+                primary_finisher = ordered_finishers[:1]
+                delayed_finishers = ordered_finishers[1:]
+                for user_id, score in primary_finisher:
                     arrival_groups.append([int(user_id)])
                     finish_meta[int(user_id)] = {"tick": tick, "score": float(score)}
+                    progress[int(user_id)] = track_end
+                    state_map[int(user_id)] = _HORSE_FINISH
+                for user_id, _score in delayed_finishers:
+                    fallback_gap = random.uniform(0.35, 1.10)
+                    progress[int(user_id)] = max(track_end - fallback_gap, track_end - 1.20)
+                    impulse_state = dict((session.get("active_impulses") or {}).get(int(user_id)) or {})
+                    delayed_kind = str(impulse_state.get("kind") or "").lower()
+                    if int(impulse_state.get("ticks_left") or 0) > 0:
+                        state_map[int(user_id)] = _HORSE_DASH if delayed_kind == "grande" else _HORSE_BOOST
+                    elif state_map.get(int(user_id)) == _HORSE_TRIP:
+                        pass
+                    else:
+                        state_map[int(user_id)] = _HORSE_RUN
                 arrived_ids = {int(user_id) for group in arrival_groups for user_id in group}
 
             leader_progress = max((float(progress.get(member.id, 0.0)) for member in participants), default=0.0)
@@ -1113,19 +1130,17 @@ class GincanaCorridaMixin:
             if tick == 2 and not session.get("early_rank_snapshot"):
                 session["early_rank_snapshot"] = {member.id: rank for rank, member in self._ordered_race_members(guild, session)}
             hold_ticks = int(session.get("narration_hold_ticks", 0) or 0)
+            impulse_event_this_tick = self._has_impulse_event(tick_events)
             if len(arrived_ids) >= len(participants):
                 session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick, final_tick=True)
                 session["narration_hold_ticks"] = 0
+            elif impulse_event_this_tick:
+                session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick)
+                session["narration_hold_ticks"] = 2
             elif finishers_this_tick:
-                ordered_finishers = [user_id for user_id, _score in sorted(finishers_this_tick, key=lambda item: (-item[1], item[0]))]
-                if len(ordered_finishers) > 1:
-                    finishers = [guild.get_member(int(user_id)) for user_id in ordered_finishers]
-                    finishers = [member for member in finishers if member is not None]
-                    names = ", ".join(member.mention for member in finishers[:3])
-                    session["narration"] = f"🏁 {names} cruzaram em sequência!" if names else "🏁 Vários corredores cruzaram a linha."
-                else:
-                    finisher = guild.get_member(int(ordered_finishers[0]))
-                    session["narration"] = f"🏁 {finisher.mention} cruzou a linha." if finisher else "🏁 Um corredor cruzou a linha."
+                ordered_finishers = [user_id for user_id, _score in sorted(finishers_this_tick, key=lambda item: (-item[1], item[0]))][:1]
+                finisher = guild.get_member(int(ordered_finishers[0])) if ordered_finishers else None
+                session["narration"] = f"🏁 {finisher.mention} cruzou a linha." if finisher else "🏁 Um corredor cruzou a linha."
                 session["narration_hold_ticks"] = 0
             elif hold_ticks > 0 and str(session.get("narration") or "").strip():
                 session["narration_hold_ticks"] = hold_ticks - 1
