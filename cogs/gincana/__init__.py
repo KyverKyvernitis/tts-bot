@@ -53,7 +53,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return
-        claimed, new_balance, bonus, streak = await self.db.claim_daily_bonus(ctx.guild.id, ctx.author.id)
+        claimed, new_balance, bonus, streak = await self._claim_daily_bonus_with_activity(ctx.guild.id, ctx.author.id)
         if not claimed:
             await ctx.reply(embed=self._make_embed("🎁 Daily já resgatado", f"Você já pegou seu bônus de hoje. Streak atual: **{streak}**.", ok=False), mention_author=False)
             return
