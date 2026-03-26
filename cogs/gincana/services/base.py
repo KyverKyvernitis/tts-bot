@@ -158,6 +158,45 @@ class GincanaBase:
         rate = self._format_rate_decimal((wins / games) * 100.0) if games > 0 else '0,0%'
         return wins, losses, games, rate
 
+    def _has_meaningful_chip_profile(self, guild_id: int, user_id: int) -> bool:
+        doc = self.db._get_user_doc(guild_id, user_id)
+        default_chips = int(CHIPS_INITIAL)
+        try:
+            chips = max(0, int(doc.get('chips', default_chips) or default_chips))
+        except Exception:
+            chips = default_chips
+
+        stats = self.db.get_user_game_stats(guild_id, user_id)
+        if any(int(v or 0) > 0 for v in stats.values()):
+            return True
+
+        if chips != default_chips:
+            return True
+
+        try:
+            if float(doc.get('last_chip_reset_at', 0) or 0) > 0:
+                return True
+        except Exception:
+            pass
+
+        if str(doc.get('daily_last_claim_key', '') or '').strip():
+            return True
+        try:
+            if int(doc.get('daily_streak', 0) or 0) > 0:
+                return True
+        except Exception:
+            pass
+
+        if str(doc.get('weekly_points_week', '') or '').strip():
+            return True
+        try:
+            if int(doc.get('weekly_points', 0) or 0) > 0:
+                return True
+        except Exception:
+            pass
+
+        return False
+
     async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
         await self.db.set_user_chips(guild_id, user_id, int(amount))
         await self.db.set_user_chip_reset_at(guild_id, user_id, 0.0)
@@ -174,6 +213,21 @@ class GincanaBase:
         doc["game_stats"] = {}
         await self.db._save_user_doc(guild_id, user_id, doc)
         return int(doc["chips"])
+
+    def _iter_active_chip_user_ids(self, guild_id: int) -> list[int]:
+        user_ids: list[int] = []
+        seen: set[int] = set()
+        for (gid, uid), _doc in getattr(self.db, 'user_cache', {}).items():
+            if gid != guild_id:
+                continue
+            uid = int(uid)
+            if uid in seen:
+                continue
+            if not self._has_meaningful_chip_profile(guild_id, uid):
+                continue
+            seen.add(uid)
+            user_ids.append(uid)
+        return sorted(user_ids)
 
     def _achievement_catalog(self) -> list[dict]:
         return [
