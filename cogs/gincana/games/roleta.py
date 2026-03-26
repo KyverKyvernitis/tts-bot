@@ -25,6 +25,9 @@ from ..constants import (
 
 
 ROLETA_JOKERS = ("🃏", "⭐")
+ROLETA_SPIN_LIMIT = 10
+ROLETA_WINDOW_SECONDS = 6 * 60 * 60
+ROLETA_DAILY_EXTRA_CAP = 1
 
 
 class GincanaRoletaMixin:
@@ -88,6 +91,96 @@ class GincanaRoletaMixin:
                 color=color,
             )
 
+        def _roleta_window_total(self, bonus_spins: int = 0) -> int:
+            return ROLETA_SPIN_LIMIT + max(0, min(ROLETA_DAILY_EXTRA_CAP, int(bonus_spins or 0)))
+
+        def _format_roleta_reset_time(self, remaining_seconds: float) -> str:
+            try:
+                total_minutes = max(1, int((float(remaining_seconds) + 59) // 60))
+            except Exception:
+                total_minutes = 1
+            hours, minutes = divmod(total_minutes, 60)
+            if hours > 0:
+                return f"{hours}h {minutes}min"
+            return f"{minutes}min"
+
+        async def _sync_roleta_spin_window(self, guild_id: int, user_id: int) -> dict[str, float | int]:
+            now = time.time()
+            doc = self.db._get_user_doc(guild_id, user_id)
+            try:
+                started_at = float(doc.get("roleta_window_started_at", 0) or 0.0)
+            except Exception:
+                started_at = 0.0
+            try:
+                used = max(0, int(doc.get("roleta_spins_used", 0) or 0))
+            except Exception:
+                used = 0
+            try:
+                bonus = max(0, min(ROLETA_DAILY_EXTRA_CAP, int(doc.get("roleta_bonus_spins", 0) or 0)))
+            except Exception:
+                bonus = 0
+            changed = False
+            if started_at <= 0 or (started_at + ROLETA_WINDOW_SECONDS) <= now:
+                started_at = now
+                used = 0
+                bonus = 0
+                doc["roleta_window_started_at"] = float(started_at)
+                doc["roleta_spins_used"] = 0
+                doc["roleta_bonus_spins"] = 0
+                changed = True
+            total = self._roleta_window_total(bonus)
+            available = max(0, total - used)
+            reset_in = max(0.0, (started_at + ROLETA_WINDOW_SECONDS) - now)
+            if changed:
+                await self.db._save_user_doc(guild_id, user_id, doc)
+            return {
+                "started_at": float(started_at),
+                "used": int(used),
+                "bonus": int(bonus),
+                "total": int(total),
+                "available": int(available),
+                "reset_in": float(reset_in),
+            }
+
+        async def _consume_roleta_spin(self, guild_id: int, user_id: int) -> dict[str, float | int]:
+            state = await self._sync_roleta_spin_window(guild_id, user_id)
+            if int(state["available"]) <= 0:
+                return state
+            doc = self.db._get_user_doc(guild_id, user_id)
+            used = int(state["used"]) + 1
+            doc["roleta_window_started_at"] = float(state["started_at"])
+            doc["roleta_spins_used"] = used
+            doc["roleta_bonus_spins"] = int(state["bonus"])
+            await self.db._save_user_doc(guild_id, user_id, doc)
+            total = int(state["total"])
+            return {
+                "started_at": float(state["started_at"]),
+                "used": used,
+                "bonus": int(state["bonus"]),
+                "total": total,
+                "available": max(0, total - used),
+                "reset_in": float(max(0.0, (float(state["started_at"]) + ROLETA_WINDOW_SECONDS) - time.time())),
+            }
+
+        async def _grant_daily_roleta_spin(self, guild_id: int, user_id: int) -> tuple[bool, dict[str, float | int]]:
+            state = await self._sync_roleta_spin_window(guild_id, user_id)
+            current_bonus = int(state["bonus"])
+            if current_bonus >= ROLETA_DAILY_EXTRA_CAP:
+                return False, state
+            doc = self.db._get_user_doc(guild_id, user_id)
+            doc["roleta_window_started_at"] = float(state["started_at"])
+            doc["roleta_spins_used"] = int(state["used"])
+            doc["roleta_bonus_spins"] = min(ROLETA_DAILY_EXTRA_CAP, current_bonus + 1)
+            await self.db._save_user_doc(guild_id, user_id, doc)
+            new_state = await self._sync_roleta_spin_window(guild_id, user_id)
+            return True, new_state
+
+        def _roleta_footer_text(self, *, state: dict[str, float | int], is_staff: bool) -> str:
+            available = int(state.get("available", 0) or 0)
+            if available <= 0 and is_staff:
+                return "Seus giros acabaram, mas como você é staff você ainda pode girar."
+            return f"Restam {available} giros • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
+
         def _roll_roleta_target_middle(self, *, success: bool) -> list[object]:
             if success:
                 return [7, 7, 7]
@@ -138,7 +231,7 @@ class GincanaRoletaMixin:
                 await message.remove_reaction(reaction_emoji, self.bot.user)
             except Exception:
                 pass
-        async def _animate_roleta_spin(self, message: discord.Message, *, target_middle: list[int]) -> tuple[discord.Message | None, list[list[int]] | None]:
+        async def _animate_roleta_spin(self, message: discord.Message, *, target_middle: list[int], footer_text: str | None = None) -> tuple[discord.Message | None, list[list[int]] | None]:
             columns = [self._build_roleta_column() for _ in range(3)]
             for idx in range(3):
                 if columns[idx][1] == target_middle[idx]:
@@ -147,7 +240,7 @@ class GincanaRoletaMixin:
                         reroll = self._build_roleta_column()
                     columns[idx] = reroll
             try:
-                spin_message = await message.channel.send(embed=self._make_roleta_spin_embed(self._render_roleta_board(columns)))
+                spin_message = await message.channel.send(embed=self._make_roleta_spin_embed(self._render_roleta_board(columns), footer_text=footer_text))
             except Exception:
                 return None, None
 
@@ -200,7 +293,7 @@ class GincanaRoletaMixin:
                 previous_board = board
 
                 try:
-                    await spin_message.edit(embed=self._make_roleta_spin_embed(board))
+                    await spin_message.edit(embed=self._make_roleta_spin_embed(board, footer_text=footer_text))
                 except Exception:
                     pass
 
@@ -223,6 +316,24 @@ class GincanaRoletaMixin:
             if guild.id in self._roleta_running_guilds:
                 return True
 
+            is_staff = isinstance(message.author, discord.Member) and self._is_staff_member(message.author)
+            roleta_state = await self._sync_roleta_spin_window(guild.id, message.author.id)
+            if int(roleta_state.get("available", 0) or 0) <= 0 and not is_staff:
+                try:
+                    wait_text = self._format_roleta_reset_time(float(roleta_state.get("reset_in", 0.0) or 0.0))
+                    embed = discord.Embed(
+                        title="🎰 Sem giros por agora",
+                        description=f"Seus {ROLETA_SPIN_LIMIT} giros acabaram. Reset em **{wait_text}**.",
+                        color=discord.Color(OFF_COLOR),
+                    )
+                    await message.channel.send(embed=embed)
+                except Exception:
+                    pass
+                return True
+            if int(roleta_state.get("available", 0) or 0) > 0:
+                roleta_state = await self._consume_roleta_spin(guild.id, message.author.id)
+            roleta_footer = self._roleta_footer_text(state=roleta_state, is_staff=is_staff)
+
             author_voice = getattr(message.author, "voice", None)
             voice_channel = getattr(author_voice, "channel", None)
             targets = self._resolve_targets(guild, voice_channel) if isinstance(voice_channel, discord.VoiceChannel) else []
@@ -244,7 +355,7 @@ class GincanaRoletaMixin:
                 success = random.randint(1, 10) == 1
                 target_middle = self._roll_roleta_target_middle(success=success)
 
-                spin_message, final_columns = await self._animate_roleta_spin(message, target_middle=target_middle)
+                spin_message, final_columns = await self._animate_roleta_spin(message, target_middle=target_middle, footer_text=roleta_footer)
 
                 if final_columns is None:
                     final_columns = [
@@ -286,6 +397,7 @@ class GincanaRoletaMixin:
                             summary,
                             board,
                             success=True,
+                            footer_text=roleta_footer,
                         )
                     elif result_kind == "joker_premium":
                         await self._record_game_played(guild.id, message.author.id, weekly_points=6)
@@ -300,6 +412,7 @@ class GincanaRoletaMixin:
                             board,
                             success=False,
                             near=True,
+                            footer_text=roleta_footer,
                         )
                     elif result_kind == "partial":
                         await self._record_game_played(guild.id, message.author.id, weekly_points=4)
@@ -314,6 +427,7 @@ class GincanaRoletaMixin:
                             board,
                             success=False,
                             near=True,
+                            footer_text=roleta_footer,
                         )
                     elif result_kind == "return":
                         await self._record_game_played(guild.id, message.author.id, weekly_points=3)
@@ -327,6 +441,7 @@ class GincanaRoletaMixin:
                             board,
                             success=False,
                             near=True,
+                            footer_text=roleta_footer,
                         )
                     else:
                         await self._record_game_played(guild.id, message.author.id, weekly_points=2)
@@ -338,6 +453,7 @@ class GincanaRoletaMixin:
                             summary,
                             board,
                             success=False,
+                            footer_text=roleta_footer,
                         )
                 except Exception:
                     if success:
@@ -355,6 +471,10 @@ class GincanaRoletaMixin:
                         fallback_text,
                         ok=success,
                     )
+                    try:
+                        embed.set_footer(text=roleta_footer)
+                    except Exception:
+                        pass
 
                 delivered = False
                 if spin_message is not None:
