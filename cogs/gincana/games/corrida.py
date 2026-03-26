@@ -945,7 +945,7 @@ class GincanaCorridaMixin:
         locked_ids = set(session.get("locked_participants", set()))
         if len(locked_ids) == 1:
             only_id = next(iter(locked_ids))
-            await self.db.add_user_chips(guild.id, only_id, CORRIDA_STAKE)
+            await self._change_user_chips(guild.id, only_id, CORRIDA_STAKE)
             session["starting"] = False
             session["ended"] = True
             await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Só 1 jogador entrou. A entrada foi devolvida.")
@@ -953,7 +953,7 @@ class GincanaCorridaMixin:
             return True
         if len(participants) < 2:
             for user_id in locked_ids:
-                await self.db.add_user_chips(guild.id, user_id, CORRIDA_STAKE)
+                await self._change_user_chips(guild.id, user_id, CORRIDA_STAKE)
             session["starting"] = False
             session["ended"] = True
             await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Não ficaram participantes suficientes. As entradas foram devolvidas.")
@@ -1252,7 +1252,7 @@ class GincanaCorridaMixin:
             await self.db.add_user_game_stat(guild.id, int(user_id), "corrida_losses", 1)
         for user_id, amount in rewards.items():
             if amount > 0:
-                await self.db.add_user_chips(guild.id, user_id, amount)
+                await self._change_user_chips(guild.id, user_id, amount)
                 await self._grant_weekly_points(guild.id, user_id, max(4, amount // 4))
 
         session["starting"] = False
@@ -1340,7 +1340,7 @@ class GincanaCorridaMixin:
             panel_message = await message.channel.send(view=view)
         except Exception:
             self._race_sessions.pop(guild.id, None)
-            await self.db.add_user_chips(guild.id, message.author.id, CORRIDA_STAKE)
+            await self._change_user_chips(guild.id, message.author.id, CORRIDA_STAKE)
             return True
 
         session["message"] = panel_message

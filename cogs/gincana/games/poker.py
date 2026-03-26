@@ -402,7 +402,7 @@ class GincanaPokerMixin:
             balance = game.stacks.get(player_id, 0)
             if game.phase == "invite":
                 balance += game.buy_in
-            await self.db.set_user_chips(game.guild_id, player_id, balance)
+            await self._set_user_chips_value(game.guild_id, player_id, balance)
         await self._disable_poker_views(game)
         if game.status_message is not None:
             try:
@@ -463,8 +463,8 @@ class GincanaPokerMixin:
         loser = guild.get_member(loser_id)
         if winner is None or loser is None:
             return
-        await self.db.set_user_chips(game.guild_id, winner_id, game.stacks.get(winner_id, 0))
-        await self.db.set_user_chips(game.guild_id, loser_id, game.stacks.get(loser_id, 0))
+        await self._set_user_chips_value(game.guild_id, winner_id, game.stacks.get(winner_id, 0))
+        await self._set_user_chips_value(game.guild_id, loser_id, game.stacks.get(loser_id, 0))
         await self._record_poker_result(game.guild_id, winner_id, loser_id)
         await self._disable_poker_views(game)
         if game.status_message is not None:
@@ -517,8 +517,8 @@ class GincanaPokerMixin:
             split_right = game.pot - split_left
             game.stacks[player_a.id] += split_left
             game.stacks[player_b.id] += split_right
-        await self.db.set_user_chips(game.guild_id, player_a.id, game.stacks.get(player_a.id, 0))
-        await self.db.set_user_chips(game.guild_id, player_b.id, game.stacks.get(player_b.id, 0))
+        await self._set_user_chips_value(game.guild_id, player_a.id, game.stacks.get(player_a.id, 0))
+        await self._set_user_chips_value(game.guild_id, player_b.id, game.stacks.get(player_b.id, 0))
         if outcome > 0:
             await self._record_poker_result(game.guild_id, player_a.id, player_b.id)
         elif outcome < 0:

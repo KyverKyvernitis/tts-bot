@@ -398,7 +398,7 @@ class GincanaRoletaMixin:
                                 except Exception:
                                     pass
                         await self._record_game_played(guild.id, message.author.id, weekly_points=12)
-                        await self.db.add_user_chips(guild.id, message.author.id, ROLETA_JACKPOT_CHIPS)
+                        await self._change_user_chips(guild.id, message.author.id, ROLETA_JACKPOT_CHIPS)
                         await self.db.add_user_game_stat(guild.id, message.author.id, "roleta_jackpots", 1)
                         await self._grant_weekly_points(guild.id, message.author.id, 20)
                         summary = f"Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)}."
@@ -413,7 +413,7 @@ class GincanaRoletaMixin:
                         )
                     elif result_kind == "joker_premium":
                         await self._record_game_played(guild.id, message.author.id, weekly_points=6)
-                        await self.db.add_user_chips(guild.id, message.author.id, result_amount)
+                        await self._change_user_chips(guild.id, message.author.id, result_amount)
                         await self._grant_weekly_points(guild.id, message.author.id, 8)
                         summary = f"Teve símbolo coringa e rendeu {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
@@ -428,7 +428,7 @@ class GincanaRoletaMixin:
                         )
                     elif result_kind == "partial":
                         await self._record_game_played(guild.id, message.author.id, weekly_points=4)
-                        await self.db.add_user_chips(guild.id, message.author.id, result_amount)
+                        await self._change_user_chips(guild.id, message.author.id, result_amount)
                         await self._grant_weekly_points(guild.id, message.author.id, 6)
                         summary = f"Esse giro rendeu {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
@@ -443,7 +443,7 @@ class GincanaRoletaMixin:
                         )
                     elif result_kind == "return":
                         await self._record_game_played(guild.id, message.author.id, weekly_points=3)
-                        await self.db.add_user_chips(guild.id, message.author.id, result_amount)
+                        await self._change_user_chips(guild.id, message.author.id, result_amount)
                         summary = f"Você recuperou {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"

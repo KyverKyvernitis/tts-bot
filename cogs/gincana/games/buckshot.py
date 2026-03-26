@@ -262,7 +262,7 @@ class GincanaBuckshotMixin:
                     for index, winner in enumerate(winners):
                         bonus = payout_each + (1 if index < payout_remainder else 0)
                         if bonus > 0:
-                            await self.db.add_user_chips(guild.id, winner.id, bonus)
+                            await self._change_user_chips(guild.id, winner.id, bonus)
                             await self.db.add_user_game_stat(guild.id, winner.id, "buckshot_survivals", 1)
                             await self._record_game_played(guild.id, winner.id, weekly_points=8)
                             await self._grant_weekly_points(guild.id, winner.id, max(3, bonus // 3))
@@ -561,7 +561,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         eligible = [member for member in participants if member.id in locked_participants]
         if len(eligible) < 2:
             for uid in locked_participants:
-                await self.db.add_user_chips(guild.id, uid, BUCKSHOT_STAKE)
+                await self._change_user_chips(guild.id, uid, BUCKSHOT_STAKE)
             if lobby_message is not None:
                 try:
                     await lobby_message.edit(view=_BuckshotLobbyClosedView('<a:r_gun01:1484661880323838002> Rodada cancelada', [
@@ -605,7 +605,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 for index, winner in enumerate(winners):
                     bonus = payout_each + (1 if index < payout_remainder else 0)
                     if bonus > 0:
-                        await self.db.add_user_chips(guild.id, winner.id, bonus)
+                        await self._change_user_chips(guild.id, winner.id, bonus)
                         await self.db.add_user_game_stat(guild.id, winner.id, 'buckshot_survivals', 1)
                         await self._record_game_played(guild.id, winner.id, weekly_points=8)
                         await self._grant_weekly_points(guild.id, winner.id, max(3, bonus // 3))
@@ -675,7 +675,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             panel_message = await message.channel.send(view=view)
         except Exception:
             self._buckshot_sessions.pop(guild.id, None)
-            await self.db.add_user_chips(guild.id, message.author.id, BUCKSHOT_STAKE)
+            await self._change_user_chips(guild.id, message.author.id, BUCKSHOT_STAKE)
             return True
         session['lobby_message'] = panel_message
         await self._react_with_emoji(message, '<a:r_gun01:1484661880323838002>', keep=True)
