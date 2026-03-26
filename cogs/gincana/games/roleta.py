@@ -73,8 +73,8 @@ class GincanaRoletaMixin:
                 "└───────────┘",
             ]
             return "```text\n" + "\n".join(lines) + "\n```"
-        def _make_roleta_spin_embed(self, board: str) -> discord.Embed:
-            return discord.Embed(
+        def _make_roleta_spin_embed(self, board: str, *, footer_text: str | None = None) -> discord.Embed:
+            embed = discord.Embed(
                 title="🎰 Girando...",
                 description=(
                     f"Entrada: {self._chip_amount(ROLETA_COST)}\n"
@@ -83,13 +83,25 @@ class GincanaRoletaMixin:
                 ),
                 color=discord.Color.blurple(),
             )
-        def _make_roleta_result_embed(self, title: str, summary: str, board: str, *, success: bool, near: bool = False) -> discord.Embed:
+            if footer_text:
+                try:
+                    embed.set_footer(text=footer_text)
+                except Exception:
+                    pass
+            return embed
+        def _make_roleta_result_embed(self, title: str, summary: str, board: str, *, success: bool, near: bool = False, footer_text: str | None = None) -> discord.Embed:
             color = discord.Color.blurple() if success or near else discord.Color(OFF_COLOR)
-            return discord.Embed(
+            embed = discord.Embed(
                 title=title,
                 description=f"{summary}\n\n{board}",
                 color=color,
             )
+            if footer_text:
+                try:
+                    embed.set_footer(text=footer_text)
+                except Exception:
+                    pass
+            return embed
 
         def _roleta_window_total(self, bonus_spins: int = 0) -> int:
             return ROLETA_SPIN_LIMIT + max(0, min(ROLETA_DAILY_EXTRA_CAP, int(bonus_spins or 0)))
