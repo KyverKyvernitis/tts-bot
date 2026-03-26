@@ -24,30 +24,37 @@ from ..constants import (
 )
 
 
+ROLETA_JOKERS = ("🃏", "⭐")
+
+
 class GincanaRoletaMixin:
-        def _random_roleta_digit(self, exclude: set[int] | None = None) -> int:
+        def _random_roleta_digit(self, exclude: set[object] | None = None) -> int:
             exclude = exclude or set()
             choices = [digit for digit in range(1, 10) if digit not in exclude]
             if not choices:
                 choices = list(range(1, 10))
             return random.choice(choices)
-        def _build_roleta_column(self, middle: int | None = None) -> list[int]:
+
+        def _random_roleta_joker(self) -> str:
+            return random.choice(ROLETA_JOKERS)
+        def _build_roleta_column(self, middle: object | None = None) -> list[object]:
             return [
                 self._random_roleta_digit(),
                 middle if middle is not None else self._random_roleta_digit(),
                 self._random_roleta_digit(),
             ]
-        def _spin_roleta_column(self, column: list[int], next_top: int | None = None):
+        def _spin_roleta_column(self, column: list[object], next_top: object | None = None):
             column.insert(0, self._random_roleta_digit() if next_top is None else next_top)
             del column[3:]
-        def _make_roleta_stop_plan(self, column: list[int], target_middle: int) -> list[int]:
+        def _make_roleta_stop_plan(self, column: list[object], target_middle: object) -> list[object]:
             first_top = self._random_roleta_digit(exclude={target_middle, column[0], column[1], column[2]})
             final_top = self._random_roleta_digit(exclude={target_middle, first_top})
             return [first_top, target_middle, final_top]
-        def _format_roleta_row(self, row: list[int], *, compact: bool = False) -> str:
+        def _format_roleta_row(self, row: list[object], *, compact: bool = False) -> str:
+            cells = [str(cell) for cell in row]
             if compact:
-                return f" {row[0]}  {row[1]}  {row[2]} "
-            return f"  {row[0]}  {row[1]}  {row[2]}  "
+                return f" {cells[0]}  {cells[1]}  {cells[2]} "
+            return f"  {cells[0]}  {cells[1]}  {cells[2]}  "
         def _render_roleta_board(self, columns: list[list[int]]) -> str:
             rows = [[columns[0][i], columns[1][i], columns[2][i]] for i in range(3)]
             top_row = self._format_roleta_row(rows[0])
@@ -80,6 +87,47 @@ class GincanaRoletaMixin:
                 description=f"{summary}\n\n{board}",
                 color=color,
             )
+
+        def _roll_roleta_target_middle(self, *, success: bool) -> list[object]:
+            if success:
+                return [7, 7, 7]
+            roll = random.random()
+            if roll < 0.05:
+                base = random.randint(1, 9)
+                joker = self._random_roleta_joker()
+                middle = [base, joker, base]
+                random.shuffle(middle)
+                return middle
+            if roll < 0.13:
+                digits = random.sample(range(1, 10), 2)
+                middle = [digits[0], digits[1], self._random_roleta_joker()]
+                random.shuffle(middle)
+                return middle
+            if roll < 0.43:
+                repeated = random.randint(1, 9)
+                other = self._random_roleta_digit(exclude={repeated})
+                middle = [repeated, repeated, other]
+                random.shuffle(middle)
+                return middle
+            while True:
+                middle = [random.randint(1, 9) for _ in range(3)]
+                if middle != [7, 7, 7] and len(set(middle)) == 3:
+                    return middle
+
+        def _evaluate_roleta_middle(self, middle_digits: list[object]) -> tuple[str, int]:
+            jokers = [value for value in middle_digits if isinstance(value, str) and value in ROLETA_JOKERS]
+            normals = [value for value in middle_digits if not (isinstance(value, str) and value in ROLETA_JOKERS)]
+            if middle_digits == [7, 7, 7]:
+                return "jackpot", ROLETA_JACKPOT_CHIPS
+            if jokers:
+                if len(set(normals)) == 1 and len(normals) == 2:
+                    return "joker_premium", 50
+                return "return", max(3, ROLETA_COST // 2)
+            if max((middle_digits.count(v) for v in set(middle_digits)), default=0) >= 2:
+                return "partial", max(3, ROLETA_COST // 2)
+            if random.random() < 0.08:
+                return "return", max(2, ROLETA_COST // 3)
+            return "loss", 0
         async def _set_roleta_reaction(self, message: discord.Message, emoji: str, *, keep: bool):
             await self._react_with_emoji(message, emoji, keep=keep)
         async def _clear_roleta_reaction(self, message: discord.Message, emoji: str):
@@ -194,14 +242,7 @@ class GincanaRoletaMixin:
             try:
                 await self._set_roleta_reaction(message, spinning_emoji, keep=True)
                 success = random.randint(1, 10) == 1
-
-                if success:
-                    target_middle = [7, 7, 7]
-                else:
-                    while True:
-                        target_middle = [random.randint(1, 9) for _ in range(3)]
-                        if target_middle != [7, 7, 7]:
-                            break
+                target_middle = self._roll_roleta_target_middle(success=success)
 
                 spin_message, final_columns = await self._animate_roleta_spin(message, target_middle=target_middle)
 
@@ -216,11 +257,10 @@ class GincanaRoletaMixin:
                     board = self._render_roleta_board(final_columns)
 
                     middle_digits = [column[1] for column in final_columns]
-                    counts = {digit: middle_digits.count(digit) for digit in set(middle_digits)}
-                    near_hit = max(counts.values(), default=0) >= 2
-                    bonus_hit = (not success) and (not near_hit) and random.random() < 0.08
+                    result_kind, result_amount = self._evaluate_roleta_middle(middle_digits)
+                    near_like = result_kind in {"partial", "return", "joker_premium"}
 
-                    if success:
+                    if result_kind == "jackpot":
                         chosen_channel = voice_channel if targets and isinstance(voice_channel, discord.VoiceChannel) else None
                         if chosen_channel is not None:
                             try:
@@ -247,30 +287,42 @@ class GincanaRoletaMixin:
                             board,
                             success=True,
                         )
-                    elif near_hit:
-                        near_amount = max(3, ROLETA_COST // 2)
-                        await self._record_game_played(guild.id, message.author.id, weekly_points=4)
-                        await self.db.add_user_chips(guild.id, message.author.id, near_amount)
-                        await self._grant_weekly_points(guild.id, message.author.id, 6)
-                        summary = f"Quase. Você ganhou {self._chip_text(near_amount, kind='gain')}."
+                    elif result_kind == "joker_premium":
+                        await self._record_game_played(guild.id, message.author.id, weekly_points=6)
+                        await self.db.add_user_chips(guild.id, message.author.id, result_amount)
+                        await self._grant_weekly_points(guild.id, message.author.id, 8)
+                        summary = f"Teve símbolo coringa e rendeu {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed(
-                            "🎰 Quase lá",
+                            "🎰 Coringa premiado",
                             summary,
                             board,
                             success=False,
                             near=True,
                         )
-                    elif bonus_hit:
-                        bonus_amount = max(2, ROLETA_COST // 3)
-                        await self._record_game_played(guild.id, message.author.id, weekly_points=3)
-                        await self.db.add_user_chips(guild.id, message.author.id, bonus_amount)
-                        summary = f"Giro premiado. Você ganhou {self._chip_text(bonus_amount, kind='gain')}."
+                    elif result_kind == "partial":
+                        await self._record_game_played(guild.id, message.author.id, weekly_points=4)
+                        await self.db.add_user_chips(guild.id, message.author.id, result_amount)
+                        await self._grant_weekly_points(guild.id, message.author.id, 6)
+                        summary = f"Esse giro rendeu {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed(
-                            "🎰 Giro premiado",
+                            "🎰 Giro parcial",
+                            summary,
+                            board,
+                            success=False,
+                            near=True,
+                        )
+                    elif result_kind == "return":
+                        await self._record_game_played(guild.id, message.author.id, weekly_points=3)
+                        await self.db.add_user_chips(guild.id, message.author.id, result_amount)
+                        summary = f"Você recuperou {self._chip_text(result_amount, kind='gain')}."
+                        if chip_note:
+                            summary = f"{chip_note}\n{summary}"
+                        embed = self._make_roleta_result_embed(
+                            "🎰 Giro de retorno",
                             summary,
                             board,
                             success=False,
