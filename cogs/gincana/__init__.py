@@ -3,7 +3,7 @@ from discord import app_commands
 from discord.ext import commands as dcommands
 
 from .cog import GincanaCore
-from .constants import _guild_scoped
+from .constants import CHIPS_DEFAULT, _guild_scoped
 
 
 class GincanaCog(dcommands.Cog, GincanaCore):
@@ -100,6 +100,34 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return
         embed = self._make_chip_leaderboard_embed(ctx.guild, ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
+
+    @dcommands.command(name="resetfichasservidor", aliases=["resetfichastodos", "resetallfichas", "rfichasall"])
+    async def resetfichasservidor(self, ctx: dcommands.Context):
+        if ctx.guild is None:
+            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            return
+        if not isinstance(ctx.author, discord.Member) or not self._is_staff_member(ctx.author):
+            await ctx.reply(embed=self._make_embed("Sem permissão", "Você precisa ser staff da gincana para resetar as fichas e o histórico do servidor.", ok=False), mention_author=False)
+            return
+
+        members = [member for member in ctx.guild.members if not member.bot]
+        total = 0
+        for member in members:
+            await self._force_full_reset_ficha_profile(ctx.guild.id, member.id, amount=CHIPS_DEFAULT)
+            total += 1
+
+        embed = discord.Embed(
+            title="♻️ Fichas do servidor resetadas",
+            description=(
+                f"Membros afetados: **{total}**\n"
+                f"Novo saldo padrão: **{CHIPS_DEFAULT} {self._CHIP_EMOJI}**\n"
+                "Resumo, taxa de vitórias, histórico, recarga e login diário foram resetados."
+            ),
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="Reset em massa aplicado pela staff")
+        await ctx.reply(embed=embed, mention_author=False)
+
 
 
     @dcommands.command(name="gincanahelp", aliases=["helpgincana", "jogoshelp"])
