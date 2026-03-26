@@ -232,14 +232,14 @@ class GincanaBase:
     def _achievement_catalog(self) -> list[dict]:
         return [
             {"key": "first_game", "name": "🎉 Primeiro sangue", "check": lambda chips, stats, weekly: stats.get("games_played", 0) >= 1},
-            {"key": "sortudo", "name": "🎰 Sortudo", "check": lambda chips, stats, weekly: stats.get("roleta_jackpots", 0) >= 1},
-            {"key": "na_mosca", "name": "🎯 Na mosca", "check": lambda chips, stats, weekly: stats.get("alvo_bullseyes", 0) >= 1},
-            {"key": "sobrevivente", "name": "💥 Sobrevivente", "check": lambda chips, stats, weekly: stats.get("buckshot_survivals", 0) >= 1},
+            {"key": "sortudo", "name": "🎰 Sortudo", "check": lambda chips, stats, weekly: stats.get('roleta_jackpots', 0) >= 1},
+            {"key": "na_mosca", "name": "🎯 Na mosca", "check": lambda chips, stats, weekly: stats.get('alvo_bullseyes', 0) >= 1},
+            {"key": "sobrevivente", "name": "💥 Sobrevivente", "check": lambda chips, stats, weekly: stats.get('buckshot_survivals', 0) >= 1},
             {"key": "veterano", "name": "🧩 Veterano", "check": lambda chips, stats, weekly: stats.get("games_played", 0) >= 25},
             {"key": "rico", "name": "💰 Rico", "check": lambda chips, stats, weekly: chips >= 400},
-            {"key": "rei_alvo", "name": "🏹 Rei do alvo", "check": lambda chips, stats, weekly: stats.get("alvo_wins", 0) >= 5},
-            {"key": "mesa_quente", "name": "🃏 Mesa quente", "check": lambda chips, stats, weekly: stats.get("poker_wins", 0) >= 3},
-            {"key": "teimoso", "name": "😤 Teimoso", "check": lambda chips, stats, weekly: (stats.get("poker_losses", 0) + stats.get("buckshot_eliminations", 0)) >= 10},
+            {"key": "rei_alvo", "name": "🏹 Rei do alvo", "check": lambda chips, stats, weekly: stats.get('alvo_wins', 0) >= 5},
+            {"key": "mesa_quente", "name": "🃏 Mesa quente", "check": lambda chips, stats, weekly: stats.get('poker_wins', 0) >= 3},
+            {"key": "teimoso", "name": "😤 Teimoso", "check": lambda chips, stats, weekly: (stats.get('poker_losses', 0) + stats.get('buckshot_eliminations', 0)) >= 10},
             {"key": "embalado", "name": "📈 Embalado", "check": lambda chips, stats, weekly: weekly >= 100},
         ]
 
@@ -274,11 +274,11 @@ class GincanaBase:
 
     def _best_game_summary(self, stats: dict) -> str:
         candidates = [
-            ((int(stats.get("corrida_wins", 0)), int(stats.get("corrida_podiums", 0))), f"**Corrida** — {int(stats.get("corrida_wins", 0))} vitórias"),
-            ((int(stats.get("alvo_wins", 0)), int(stats.get("alvo_bullseyes", 0))), f"**Alvo** — {int(stats.get("alvo_wins", 0))} vitórias"),
-            ((int(stats.get("buckshot_survivals", 0)), -int(stats.get("buckshot_eliminations", 0))), f"**Buckshot** — {int(stats.get("buckshot_survivals", 0))} sobrevivências"),
-            ((int(stats.get("poker_wins", 0)), -int(stats.get("poker_losses", 0))), f"**Poker** — {int(stats.get("poker_wins", 0))} vitórias"),
-            ((int(stats.get("roleta_jackpots", 0)), 0), f"**Roleta** — {int(stats.get("roleta_jackpots", 0))} jackpots"),
+            ((int(stats.get('corrida_wins', 0)), int(stats.get('corrida_podiums', 0))), f"**Corrida** — {int(stats.get('corrida_wins', 0))} vitórias"),
+            ((int(stats.get('alvo_wins', 0)), int(stats.get('alvo_bullseyes', 0))), f"**Alvo** — {int(stats.get('alvo_wins', 0))} vitórias"),
+            ((int(stats.get('buckshot_survivals', 0)), -int(stats.get('buckshot_eliminations', 0))), f"**Buckshot** — {int(stats.get('buckshot_survivals', 0))} sobrevivências"),
+            ((int(stats.get('poker_wins', 0)), -int(stats.get('poker_losses', 0))), f"**Poker** — {int(stats.get('poker_wins', 0))} vitórias"),
+            ((int(stats.get('roleta_jackpots', 0)), 0), f"**Roleta** — {int(stats.get('roleta_jackpots', 0))} jackpots"),
         ]
         best_score, best_text = max(candidates, key=lambda item: item[0])
         if best_score[0] <= 0:
