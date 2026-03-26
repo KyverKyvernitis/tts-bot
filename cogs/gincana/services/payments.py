@@ -224,8 +224,6 @@ class GincanaPaymentMixin:
         await self.db.add_user_game_stat(guild.id, target.id, "payments_received", 1)
         await self.db.add_user_game_stat(guild.id, payer.id, "chips_sent_total", total)
         await self.db.add_user_game_stat(guild.id, target.id, "chips_received_total", net_amount)
-        await self._grant_weekly_points(guild.id, payer.id, max(1, total // 10))
-        await self._grant_weekly_points(guild.id, target.id, max(1, net_amount // 20))
 
         self._payment_sessions.pop(session_key, None)
         message = session.get("confirm_message")

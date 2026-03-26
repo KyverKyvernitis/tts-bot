@@ -272,6 +272,19 @@ class GincanaBase:
             return f"Disponível agora em **_daily**. Streak atual: **{streak}**."
         return f"Já resgatado hoje. Streak atual: **{streak}**."
 
+    def _best_game_summary(self, stats: dict) -> str:
+        candidates = [
+            ((int(stats.get("corrida_wins", 0)), int(stats.get("corrida_podiums", 0))), f"**Corrida** — {int(stats.get("corrida_wins", 0))} vitórias"),
+            ((int(stats.get("alvo_wins", 0)), int(stats.get("alvo_bullseyes", 0))), f"**Alvo** — {int(stats.get("alvo_wins", 0))} vitórias"),
+            ((int(stats.get("buckshot_survivals", 0)), -int(stats.get("buckshot_eliminations", 0))), f"**Buckshot** — {int(stats.get("buckshot_survivals", 0))} sobrevivências"),
+            ((int(stats.get("poker_wins", 0)), -int(stats.get("poker_losses", 0))), f"**Poker** — {int(stats.get("poker_wins", 0))} vitórias"),
+            ((int(stats.get("roleta_jackpots", 0)), 0), f"**Roleta** — {int(stats.get("roleta_jackpots", 0))} jackpots"),
+        ]
+        best_score, best_text = max(candidates, key=lambda item: item[0])
+        if best_score[0] <= 0:
+            return "Ainda sem destaque"
+        return best_text
+
     def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
         guild_id = member.guild.id
         chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_INITIAL)
@@ -298,6 +311,7 @@ class GincanaBase:
             recarga = f"Na próxima tentativa sem saldo, seu saldo volta para {self._chip_amount(CHIPS_DEFAULT)}."
 
         wins, losses, games, rate = self._chip_summary_stats(stats)
+        weekly_points = self.db.get_user_weekly_points(guild_id, member.id)
         summary = (
             f"Vitórias: **{wins}**\n"
             f"Derrotas: **{losses}**\n"
@@ -308,6 +322,8 @@ class GincanaBase:
         embed.add_field(name=f"{self._CHIP_EMOJI} Fichas", value=f"**{chips}**", inline=False)
         embed.add_field(name="⏳ Recarga", value=recarga, inline=False)
         embed.add_field(name="🎁 Login diário", value=self._daily_bonus_text(guild_id, member.id), inline=False)
+        embed.add_field(name="⭐ Weekly points", value=f"**{weekly_points}**", inline=False)
+        embed.add_field(name="🎮 Melhor jogo", value=self._best_game_summary(stats), inline=False)
         embed.add_field(name="📊 Resumo", value=summary, inline=False)
         embed.set_footer(text="Use _rank para ver o ranking do servidor e _daily para pegar seu bônus")
         return embed
