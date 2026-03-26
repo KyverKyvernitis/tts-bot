@@ -618,7 +618,7 @@ async def claim_daily_bonus(self, guild_id: int, user_id: int, *, base_amount: i
     last_key = str(status["last_claim_key"])
     current_streak = int(status["streak"])
     if last_key == today:
-        return False, self.get_user_chips(guild_id, user_id, default=200), 0, current_streak
+        return False, self.get_user_chips(guild_id, user_id, default=100), 0, current_streak
 
     new_streak = 1
     try:
@@ -639,7 +639,7 @@ async def claim_daily_bonus(self, guild_id: int, user_id: int, *, base_amount: i
     doc = self._get_user_doc(guild_id, user_id)
     doc["daily_last_claim_key"] = today
     doc["daily_streak"] = new_streak
-    current = self.get_user_chips(guild_id, user_id, default=200)
+    current = self.get_user_chips(guild_id, user_id, default=100)
     doc["chips"] = max(0, current + bonus)
     await self._save_user_doc(guild_id, user_id, doc)
     return True, int(doc["chips"]), bonus, new_streak
@@ -686,7 +686,32 @@ def get_weekly_points_leaderboard(self, guild_id: int, *, limit: int = 10) -> li
     rows.sort(key=lambda item: (-item["points"], item["user_id"]))
     return rows[: max(1, int(limit))]
 
-    def get_user_chips(self, guild_id: int, user_id: int, *, default: int = 200) -> int:
+    def user_has_chip_activity(self, guild_id: int, user_id: int) -> bool:
+        doc = self.user_cache.get((guild_id, user_id), {})
+        return bool(doc.get("has_chip_activity", False))
+
+    async def set_user_chip_activity(self, guild_id: int, user_id: int, value: bool):
+        doc = self._get_user_doc(guild_id, user_id)
+        doc["has_chip_activity"] = bool(value)
+        await self._save_user_doc(guild_id, user_id, doc)
+
+    async def mark_user_chip_activity(self, guild_id: int, user_id: int):
+        if self.user_has_chip_activity(guild_id, user_id):
+            return
+        await self.set_user_chip_activity(guild_id, user_id, True)
+
+    def get_chip_activity_user_ids(self, guild_id: int) -> list[int]:
+        rows: list[int] = []
+        for (gid, uid), doc in self.user_cache.items():
+            if gid != guild_id:
+                continue
+            if not bool(doc.get("has_chip_activity", False)):
+                continue
+            rows.append(int(uid))
+        rows.sort()
+        return rows
+
+    def get_user_chips(self, guild_id: int, user_id: int, *, default: int = 100) -> int:
         doc = self.user_cache.get((guild_id, user_id), {})
         try:
             return max(0, int(doc.get("chips", default) or default))
@@ -731,7 +756,7 @@ def get_weekly_points_leaderboard(self, guild_id: int, *, limit: int = 10) -> li
             return True, int(amount), 0.0
         remaining = max(0.0, (last_reset + float(cooldown_seconds)) - now)
         if remaining > 0:
-            return False, self.get_user_chips(guild_id, user_id, default=200), remaining
+            return False, self.get_user_chips(guild_id, user_id, default=100), remaining
         doc = self._get_user_doc(guild_id, user_id)
         doc["chips"] = max(0, int(amount))
         doc["last_chip_reset_at"] = float(now)
@@ -787,21 +812,16 @@ def get_weekly_points_leaderboard(self, guild_id: int, *, limit: int = 10) -> li
 
     def get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[Dict[str, int]]:
         rows: list[Dict[str, int]] = []
-        default_chips = 200
+        default_chips = 100
         for (gid, uid), doc in self.user_cache.items():
             if gid != guild_id:
+                continue
+            if not bool(doc.get("has_chip_activity", False)):
                 continue
             try:
                 chips = max(0, int(doc.get("chips", default_chips) or default_chips))
             except Exception:
                 chips = default_chips
-
-            stats = self.get_user_game_stats(guild_id, uid)
-            has_any_game_stat = any(int(v or 0) > 0 for v in stats.values())
-            has_chip_movement = chips != default_chips
-            if not has_any_game_stat and not has_chip_movement:
-                continue
-
             rows.append({"user_id": uid, "chips": chips})
         rows.sort(key=lambda item: (-item["chips"], item["user_id"]))
         return rows[: max(1, int(limit))]
@@ -929,7 +949,32 @@ def get_weekly_points_leaderboard(self, guild_id: int, *, limit: int = 10) -> li
 
 
 # ---- gincana economy helpers rebound as SettingsDB methods ----
-def _settingsdb_get_user_chips(self, guild_id: int, user_id: int, *, default: int = 200) -> int:
+def _settingsdb_user_has_chip_activity(self, guild_id: int, user_id: int) -> bool:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    return bool(doc.get("has_chip_activity", False))
+
+def _settingsdb_get_chip_activity_user_ids(self, guild_id: int) -> list[int]:
+    rows: list[int] = []
+    for (gid, uid), doc in self.user_cache.items():
+        if gid != guild_id:
+            continue
+        if not bool(doc.get("has_chip_activity", False)):
+            continue
+        rows.append(int(uid))
+    rows.sort()
+    return rows
+
+async def _settingsdb_set_user_chip_activity(self, guild_id: int, user_id: int, value: bool):
+    doc = self._get_user_doc(guild_id, user_id)
+    doc["has_chip_activity"] = bool(value)
+    await self._save_user_doc(guild_id, user_id, doc)
+
+async def _settingsdb_mark_user_chip_activity(self, guild_id: int, user_id: int):
+    if self.user_has_chip_activity(guild_id, user_id):
+        return
+    await self.set_user_chip_activity(guild_id, user_id, True)
+
+def _settingsdb_get_user_chips(self, guild_id: int, user_id: int, *, default: int = 100) -> int:
     doc = self.user_cache.get((guild_id, user_id), {})
     try:
         return max(0, int(doc.get("chips", default) or default))
@@ -974,7 +1019,7 @@ async def _settingsdb_maybe_reset_user_chips(self, guild_id: int, user_id: int, 
         return True, int(amount), 0.0
     remaining = max(0.0, (last_reset + float(cooldown_seconds)) - now)
     if remaining > 0:
-        return False, self.get_user_chips(guild_id, user_id, default=200), remaining
+        return False, self.get_user_chips(guild_id, user_id, default=100), remaining
     doc = self._get_user_doc(guild_id, user_id)
     doc["chips"] = max(0, int(amount))
     doc["last_chip_reset_at"] = float(now)
@@ -1025,7 +1070,7 @@ async def _settingsdb_add_user_game_stat(self, guild_id: int, user_id: int, key:
 
 def _settingsdb_get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[Dict[str, int]]:
     rows: list[Dict[str, int]] = []
-    default_chips = 200
+    default_chips = 100
     for (gid, uid), doc in self.user_cache.items():
         if gid != guild_id:
             continue
@@ -1064,6 +1109,10 @@ SettingsDB.claim_daily_bonus = claim_daily_bonus
 SettingsDB.get_user_weekly_points = get_user_weekly_points
 SettingsDB.add_user_weekly_points = add_user_weekly_points
 SettingsDB.get_weekly_points_leaderboard = get_weekly_points_leaderboard
+SettingsDB.user_has_chip_activity = _settingsdb_user_has_chip_activity
+SettingsDB.get_chip_activity_user_ids = _settingsdb_get_chip_activity_user_ids
+SettingsDB.set_user_chip_activity = _settingsdb_set_user_chip_activity
+SettingsDB.mark_user_chip_activity = _settingsdb_mark_user_chip_activity
 SettingsDB.get_user_chips = _settingsdb_get_user_chips
 SettingsDB.get_user_chip_reset_at = _settingsdb_get_user_chip_reset_at
 SettingsDB.set_user_chips = _settingsdb_set_user_chips
