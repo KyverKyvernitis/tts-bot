@@ -41,7 +41,7 @@ class GincanaMessageRouterMixin:
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 "• `ficha` — mostra seu saldo e seus destaques\n"
                 "• `daily` — resgata o bônus diário\n"
-                "• `rank` — ranking semanal\n"
+                "• `rank` — ranking dos maiores saldos\n"
                 "• `pay @usuário valor` — transfere fichas\n\n"
                 "🎮 **Jogos**\n"
                 "• `roleta` — aposta rápida com jackpot\n"
@@ -56,7 +56,7 @@ class GincanaMessageRouterMixin:
             ), color=discord.Color.blurple()))
             return True
 
-        claimed, new_balance, bonus, streak = await self.db.claim_daily_bonus(message.guild.id, message.author.id)
+        claimed, new_balance, bonus, streak = await self._claim_daily_bonus_with_activity(message.guild.id, message.author.id)
         if not claimed:
             await message.channel.send(
                 embed=self._make_embed(
@@ -67,10 +67,13 @@ class GincanaMessageRouterMixin:
             )
             return True
         await self._grant_weekly_points(message.guild.id, message.author.id, max(3, bonus // 2))
+        spin_granted, _spin_state = await self._grant_daily_roleta_spin(message.guild.id, message.author.id)
+        spin_text = "Você ganhou **+1 giro de roleta**" if spin_granted else "Seu giro extra da roleta já estava disponível"
         embed = discord.Embed(
             title="🎁 Bônus diário resgatado",
             description=(
                 f"Você ganhou {self._chip_amount(bonus)}\n"
+                f"{spin_text}\n"
                 f"Streak atual: **{streak}**\n"
                 f"Novo saldo: {self._chip_amount(new_balance)}"
             ),
