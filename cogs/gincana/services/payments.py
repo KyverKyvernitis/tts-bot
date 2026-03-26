@@ -218,8 +218,7 @@ class GincanaPaymentMixin:
             await self._expire_payment_session(session_key, title="💸 Saldo insuficiente", reason=note or "O pagador não tem mais saldo suficiente.")
             return
 
-        await self.db.add_user_chips(guild.id, payer.id, -total)
-        await self.db.add_user_chips(guild.id, target.id, net_amount)
+        await self._transfer_user_chips(guild.id, payer.id, target.id, total=total, net_amount=net_amount)
         await self.db.add_user_game_stat(guild.id, payer.id, "payments_sent", 1)
         await self.db.add_user_game_stat(guild.id, target.id, "payments_received", 1)
         await self.db.add_user_game_stat(guild.id, payer.id, "chips_sent_total", total)

@@ -159,46 +159,39 @@ class GincanaBase:
         return wins, losses, games, rate
 
     def _has_meaningful_chip_profile(self, guild_id: int, user_id: int) -> bool:
-        doc = self.db._get_user_doc(guild_id, user_id)
-        default_chips = int(CHIPS_INITIAL)
-        try:
-            chips = max(0, int(doc.get('chips', default_chips) or default_chips))
-        except Exception:
-            chips = default_chips
+        return bool(self.db.user_has_chip_activity(guild_id, user_id))
 
-        stats = self.db.get_user_game_stats(guild_id, user_id)
-        if any(int(v or 0) > 0 for v in stats.values()):
-            return True
+    async def _mark_chip_activity(self, guild_id: int, user_id: int):
+        await self.db.mark_user_chip_activity(guild_id, user_id)
 
-        if chips != default_chips:
-            return True
+    async def _clear_chip_activity(self, guild_id: int, user_id: int):
+        await self.db.set_user_chip_activity(guild_id, user_id, False)
 
-        try:
-            if float(doc.get('last_chip_reset_at', 0) or 0) > 0:
-                return True
-        except Exception:
-            pass
+    async def _set_user_chips_value(self, guild_id: int, user_id: int, chips: int, *, mark_activity: bool = True) -> int:
+        await self.db.set_user_chips(guild_id, user_id, int(chips))
+        if mark_activity:
+            await self._mark_chip_activity(guild_id, user_id)
+        return self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
 
-        if str(doc.get('daily_last_claim_key', '') or '').strip():
-            return True
-        try:
-            if int(doc.get('daily_streak', 0) or 0) > 0:
-                return True
-        except Exception:
-            pass
+    async def _change_user_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True) -> int:
+        new_balance = await self.db.add_user_chips(guild_id, user_id, int(amount))
+        if mark_activity and int(amount) != 0:
+            await self._mark_chip_activity(guild_id, user_id)
+        return int(new_balance)
 
-        if str(doc.get('weekly_points_week', '') or '').strip():
-            return True
-        try:
-            if int(doc.get('weekly_points', 0) or 0) > 0:
-                return True
-        except Exception:
-            pass
+    async def _transfer_user_chips(self, guild_id: int, payer_id: int, target_id: int, *, total: int, net_amount: int) -> tuple[int, int]:
+        payer_balance = await self._change_user_chips(guild_id, payer_id, -int(total), mark_activity=True)
+        target_balance = await self._change_user_chips(guild_id, target_id, int(net_amount), mark_activity=True)
+        return payer_balance, target_balance
 
-        return False
+    async def _claim_daily_bonus_with_activity(self, guild_id: int, user_id: int, *, base_amount: int = 10) -> tuple[bool, int, int, int]:
+        claimed, new_balance, bonus, streak = await self.db.claim_daily_bonus(guild_id, user_id, base_amount=base_amount)
+        if claimed:
+            await self._mark_chip_activity(guild_id, user_id)
+        return claimed, new_balance, bonus, streak
 
     async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
-        await self.db.set_user_chips(guild_id, user_id, int(amount))
+        await self._set_user_chips_value(guild_id, user_id, int(amount), mark_activity=True)
         await self.db.set_user_chip_reset_at(guild_id, user_id, 0.0)
         return int(amount)
 
@@ -211,23 +204,12 @@ class GincanaBase:
         doc["weekly_points_week"] = ""
         doc["weekly_points"] = 0
         doc["game_stats"] = {}
+        doc["has_chip_activity"] = False
         await self.db._save_user_doc(guild_id, user_id, doc)
         return int(doc["chips"])
 
     def _iter_active_chip_user_ids(self, guild_id: int) -> list[int]:
-        user_ids: list[int] = []
-        seen: set[int] = set()
-        for (gid, uid), _doc in getattr(self.db, 'user_cache', {}).items():
-            if gid != guild_id:
-                continue
-            uid = int(uid)
-            if uid in seen:
-                continue
-            if not self._has_meaningful_chip_profile(guild_id, uid):
-                continue
-            seen.add(uid)
-            user_ids.append(uid)
-        return sorted(user_ids)
+        return list(self.db.get_chip_activity_user_ids(guild_id))
 
     def _achievement_catalog(self) -> list[dict]:
         return [
@@ -262,6 +244,7 @@ class GincanaBase:
 
     async def _record_game_played(self, guild_id: int, user_id: int, *, weekly_points: int = 0):
         await self.db.add_user_game_stat(guild_id, user_id, "games_played", 1)
+        await self._mark_chip_activity(guild_id, user_id)
         if weekly_points > 0:
             await self._grant_weekly_points(guild_id, user_id, weekly_points)
 
@@ -336,7 +319,7 @@ class GincanaBase:
             color=discord.Color.gold(),
         )
         if not rows:
-            embed.add_field(name="Top 10", value="Ainda não há saldo registrado.", inline=False)
+            embed.add_field(name="Top 10", value="Ainda não há jogadores com movimentação nas fichas.", inline=False)
         else:
             medals = {1: "🥇", 2: "🥈", 3: "🥉"}
             ranking_lines = []
@@ -368,8 +351,9 @@ class GincanaBase:
             if not reset:
                 return False, current, f"Você não tem saldo suficiente. Sua recarga de {self._chip_text(CHIPS_DEFAULT)} volta em **{self._format_chip_reset_remaining(remaining)}**."
             current = new_balance
+            await self._mark_chip_activity(guild_id, user_id)
             reset_note = f"Seu saldo foi recarregado para {self._chip_text(CHIPS_DEFAULT)}."
-        new_balance = await self.db.add_user_chips(guild_id, user_id, -int(amount))
+        new_balance = await self._change_user_chips(guild_id, user_id, -int(amount), mark_activity=True)
         return True, new_balance, reset_note
 
     async def _ensure_action_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
@@ -380,6 +364,7 @@ class GincanaBase:
             guild_id, user_id, amount=CHIPS_DEFAULT, cooldown_seconds=CHIPS_RESET_SECONDS
         )
         if reset:
+            await self._mark_chip_activity(guild_id, user_id)
             return True, new_balance, f"Seu saldo foi recarregado para {self._chip_text(CHIPS_DEFAULT)}."
         return False, current, f"Você não tem saldo suficiente. Sua recarga de {self._chip_text(CHIPS_DEFAULT)} volta em **{self._format_chip_reset_remaining(remaining)}**."
 
