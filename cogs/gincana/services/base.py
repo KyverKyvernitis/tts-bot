@@ -146,7 +146,7 @@ class GincanaBase:
         return f"**{amount} {self._CHIP_EMOJI}**"
 
     def _chip_label(self) -> str:
-        return f"{self._CHIP_EMOJI} (fichas)"
+        return f"{self._CHIP_EMOJI} Fichas"
 
     def _format_rate_decimal(self, value: float) -> str:
         return f"{round(float(value), 1):.1f}".replace('.', ',') + '%'
@@ -162,6 +162,18 @@ class GincanaBase:
         await self.db.set_user_chips(guild_id, user_id, int(amount))
         await self.db.set_user_chip_reset_at(guild_id, user_id, 0.0)
         return int(amount)
+
+    async def _force_full_reset_ficha_profile(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
+        doc = self.db._get_user_doc(guild_id, user_id)
+        doc["chips"] = max(0, int(amount))
+        doc["last_chip_reset_at"] = 0.0
+        doc["daily_last_claim_key"] = ""
+        doc["daily_streak"] = 0
+        doc["weekly_points_week"] = ""
+        doc["weekly_points"] = 0
+        doc["game_stats"] = {}
+        await self.db._save_user_doc(guild_id, user_id, doc)
+        return int(doc["chips"])
 
     def _achievement_catalog(self) -> list[dict]:
         return [
@@ -220,8 +232,6 @@ class GincanaBase:
             remaining = max(0.0, CHIPS_RESET_SECONDS - elapsed)
 
         embed = discord.Embed(
-            title=f"{self._CHIP_EMOJI} Perfil",
-            description="Saldo, recarga, login diário e resumo da sua gincana.",
             color=discord.Color.blurple(),
         )
         embed.set_author(name=str(member.display_name), icon_url=member.display_avatar.url)
@@ -241,23 +251,20 @@ class GincanaBase:
             f"Taxa de vitórias: **{rate}**"
         )
 
-        embed.add_field(name=self._chip_label(), value=f"**{chips}**", inline=False)
+        embed.add_field(name=f"{self._CHIP_EMOJI} Fichas", value=f"**{chips}**", inline=False)
         embed.add_field(name="⏳ Recarga", value=recarga, inline=False)
         embed.add_field(name="🎁 Login diário", value=self._daily_bonus_text(guild_id, member.id), inline=False)
         embed.add_field(name="📊 Resumo", value=summary, inline=False)
-        embed.set_footer(text="Use _rank para ver o ranking e _daily para pegar seu bônus")
+        embed.set_footer(text="Use _rank para ver o ranking do servidor e _daily para pegar seu bônus")
         return embed
 
     def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
         rows = self.db.get_chip_leaderboard(guild.id, limit=10)
         embed = discord.Embed(
-            title=f"🏆 Rank de {self._chip_label()}",
+            title="🏆 Rank do servidor",
             description="Os maiores saldos deste servidor.",
             color=discord.Color.gold(),
         )
-        if requester is not None:
-            embed.set_author(name=str(requester.display_name), icon_url=requester.display_avatar.url)
-
         if not rows:
             embed.add_field(name="Top 10", value="Ainda não há saldo registrado.", inline=False)
         else:
@@ -269,36 +276,6 @@ class GincanaBase:
                 prefix = medals.get(index, f"`#{index}`")
                 ranking_lines.append(f"{prefix} **{name}** — **{row.get('chips', row.get('points', 0))}** {self._CHIP_EMOJI}")
             embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
-
-        if requester is not None:
-            guild_id = guild.id
-            chips = self.db.get_user_chips(guild_id, requester.id, default=CHIPS_INITIAL)
-            stats = self.db.get_user_game_stats(guild_id, requester.id)
-            remaining = 0.0
-            if chips <= 0:
-                import time
-                last_reset = self.db.get_user_chip_reset_at(guild_id, requester.id)
-                now = time.time()
-                elapsed = max(0.0, now - float(last_reset or 0.0))
-                remaining = max(0.0, CHIPS_RESET_SECONDS - elapsed)
-            if chips > 0:
-                recarga = f"Quando faltar saldo, a próxima recarga volta para {self._chip_amount(CHIPS_DEFAULT)}."
-            elif remaining > 0:
-                recarga = f"Disponível em **{self._format_chip_reset_remaining(remaining)}** para voltar a {self._chip_amount(CHIPS_DEFAULT)}."
-            else:
-                recarga = f"Na próxima tentativa sem saldo, seu saldo volta para {self._chip_amount(CHIPS_DEFAULT)}."
-            wins, losses, games, rate = self._chip_summary_stats(stats)
-            profile_lines = [
-                f"**{self._chip_label()}:** **{chips}**",
-                f"**⏳ Recarga:** {recarga}",
-                f"**🎁 Login diário:** {self._daily_bonus_text(guild_id, requester.id)}",
-                "**📊 Resumo:**",
-                f"Vitórias: **{wins}**",
-                f"Derrotas: **{losses}**",
-                f"Jogos: **{games}**",
-                f"Taxa de vitórias: **{rate}**",
-            ]
-            embed.add_field(name="Seu perfil", value="\n".join(profile_lines), inline=False)
 
         embed.set_footer(text="Use _ficha para ver seu perfil")
         return embed
