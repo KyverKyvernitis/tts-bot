@@ -110,18 +110,29 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             await ctx.reply(embed=self._make_embed("Sem permissão", "Você precisa ser staff da gincana para resetar as fichas e o histórico do servidor.", ok=False), mention_author=False)
             return
 
-        members = [member for member in ctx.guild.members if not member.bot]
+        user_ids = self._iter_active_chip_user_ids(ctx.guild.id)
+        if not user_ids:
+            await ctx.reply(
+                embed=self._make_embed(
+                    "Nada para resetar",
+                    "Não há perfis de ficha alterados ou com histórico de jogos para resetar neste servidor.",
+                    ok=False,
+                ),
+                mention_author=False,
+            )
+            return
+
         total = 0
-        for member in members:
-            await self._force_full_reset_ficha_profile(ctx.guild.id, member.id, amount=CHIPS_DEFAULT)
+        for user_id in user_ids:
+            await self._force_full_reset_ficha_profile(ctx.guild.id, user_id, amount=CHIPS_DEFAULT)
             total += 1
 
         embed = discord.Embed(
             title="♻️ Fichas do servidor resetadas",
             description=(
-                f"Membros afetados: **{total}**\n"
+                f"Perfis afetados: **{total}**\n"
                 f"Novo saldo padrão: **{CHIPS_DEFAULT} {self._CHIP_EMOJI}**\n"
-                "Resumo, taxa de vitórias, histórico, recarga e login diário foram resetados."
+                "Resumo, taxa de vitórias, histórico, recarga e login diário foram resetados só para quem já tinha movimentação na gincana."
             ),
             color=discord.Color.green(),
         )
