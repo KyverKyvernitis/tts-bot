@@ -58,10 +58,13 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             await ctx.reply(embed=self._make_embed("🎁 Daily já resgatado", f"Você já pegou seu bônus de hoje. Streak atual: **{streak}**.", ok=False), mention_author=False)
             return
         await self._grant_weekly_points(ctx.guild.id, ctx.author.id, max(3, bonus // 2))
+        spin_granted, _spin_state = await self._grant_daily_roleta_spin(ctx.guild.id, ctx.author.id)
+        spin_text = "Você ganhou **+1 giro de roleta**" if spin_granted else "Seu giro extra da roleta já estava disponível"
         embed = discord.Embed(
             title="🎁 Bônus diário resgatado",
             description=(
                 f"Você ganhou {self._chip_amount(bonus)}\n"
+                f"{spin_text}\n"
                 f"Streak atual: **{streak}**\n"
                 f"Novo saldo: {self._chip_amount(new_balance)}"
             ),
@@ -153,7 +156,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 f"• `{ctx.clean_prefix}ficha` — mostra seu saldo e seus destaques\n"
                 f"• `{ctx.clean_prefix}daily` — resgata o bônus diário\n"
-                f"• `{ctx.clean_prefix}rank` — ranking semanal\n"
+                f"• `{ctx.clean_prefix}rank` — ranking dos maiores saldos\n"
                 "• `pay @usuário valor` — transfere fichas\n\n"
                 "🎮 **Jogos**\n"
                 "• `roleta` — aposta rápida com jackpot\n"
