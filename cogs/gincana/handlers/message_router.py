@@ -125,6 +125,9 @@ class GincanaMessageRouterMixin:
         if await self._safe_route_call("_handle_poker_trigger", message):
             return
 
+        if await self._safe_route_call("_handle_truco_trigger", message):
+            return
+
         if await self._safe_route_call("_handle_carta_trigger", message):
             return
 
