@@ -73,7 +73,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         embed.set_footer(text="Volte amanhã para manter a sequência")
         await ctx.reply(embed=embed, mention_author=False)
 
-    @dcommands.command(name="recarga")
+    @dcommands.command(name="recarga", aliases=["recarrega"])
     async def recarga(self, ctx: dcommands.Context):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
