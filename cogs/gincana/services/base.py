@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 
 from config import OFF_COLOR, ON_COLOR
-from ..constants import CHIPS_DEFAULT, CHIPS_INITIAL, CHIPS_RESET_SECONDS, ROLETA_COST
+from ..constants import CHIPS_DEFAULT, CHIPS_INITIAL, CHIPS_RECHARGE_THRESHOLD, CHIPS_RESET_SECONDS, ROLETA_COST
 from db import SettingsDB
 
 
@@ -268,30 +268,95 @@ class GincanaBase:
             return "Ainda sem destaque"
         return best_text
 
+    def _chip_recharge_state(self, guild_id: int, user_id: int) -> dict:
+        import time
+
+        chips = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
+        last_reset = self.db.get_user_chip_reset_at(guild_id, user_id)
+        now = time.time()
+        if last_reset <= 0:
+            remaining = 0.0
+        else:
+            remaining = max(0.0, (float(last_reset) + float(CHIPS_RESET_SECONDS)) - now)
+        below_threshold = chips < CHIPS_RECHARGE_THRESHOLD
+        available = below_threshold and remaining <= 0.0
+        return {
+            "chips": int(chips),
+            "remaining": float(remaining),
+            "below_threshold": bool(below_threshold),
+            "available": bool(available),
+        }
+
+    def _chip_recharge_text(self, guild_id: int, user_id: int) -> str:
+        state = self._chip_recharge_state(guild_id, user_id)
+        chips = int(state["chips"])
+        remaining = float(state["remaining"])
+        if chips >= CHIPS_RECHARGE_THRESHOLD:
+            return (
+                f"Use **recarga** quando seu saldo ficar abaixo de **{CHIPS_RECHARGE_THRESHOLD}** fichas. "
+                f"A recarga restaura seu saldo para {self._chip_amount(CHIPS_DEFAULT)} e tem cooldown de **{CHIPS_RESET_HOURS} horas**."
+            )
+        if remaining > 0:
+            return (
+                f"Disponível em **{self._format_chip_reset_remaining(remaining)}** com o trigger **recarga**. "
+                f"Seu saldo está abaixo de **{CHIPS_RECHARGE_THRESHOLD}** e a recarga volta para {self._chip_amount(CHIPS_DEFAULT)}."
+            )
+        return (
+            f"Disponível agora em **recarga**. Seu saldo está abaixo de **{CHIPS_RECHARGE_THRESHOLD}** "
+            f"e a recarga restaura para {self._chip_amount(CHIPS_DEFAULT)}."
+        )
+
+    async def _try_use_chip_recharge(self, guild_id: int, user_id: int) -> tuple[bool, int, str]:
+        state = self._chip_recharge_state(guild_id, user_id)
+        chips = int(state["chips"])
+        remaining = float(state["remaining"])
+        if chips >= CHIPS_RECHARGE_THRESHOLD:
+            return False, chips, (
+                f"A **recarga** só pode ser usada quando seu saldo estiver abaixo de **{CHIPS_RECHARGE_THRESHOLD}** fichas. "
+                f"Saldo atual: {self._chip_amount(chips)}."
+            )
+        if remaining > 0:
+            return False, chips, (
+                f"Sua **recarga** volta em **{self._format_chip_reset_remaining(remaining)}**. "
+                f"Quando liberar, ela restaura seu saldo para {self._chip_amount(CHIPS_DEFAULT)}."
+            )
+        await self._set_user_chips_value(guild_id, user_id, int(CHIPS_DEFAULT), mark_activity=True)
+        await self.db.set_user_chip_reset_at(guild_id, user_id, __import__("time").time())
+        return True, int(CHIPS_DEFAULT), (
+            f"Seu saldo foi restaurado para {self._chip_amount(CHIPS_DEFAULT)} usando **recarga**."
+        )
+
+    def _insufficient_chips_text(self, guild_id: int, user_id: int, amount: int) -> str:
+        state = self._chip_recharge_state(guild_id, user_id)
+        chips = int(state["chips"])
+        remaining = float(state["remaining"])
+        amount = max(0, int(amount))
+        if state["available"]:
+            return (
+                f"Você precisa de {self._chip_amount(amount)}, mas seu saldo atual é {self._chip_amount(chips)}. "
+                f"Como ele está abaixo de **{CHIPS_RECHARGE_THRESHOLD}**, você já pode usar **recarga** para voltar a {self._chip_amount(CHIPS_DEFAULT)}."
+            )
+        if chips < CHIPS_RECHARGE_THRESHOLD:
+            return (
+                f"Você precisa de {self._chip_amount(amount)}, mas seu saldo atual é {self._chip_amount(chips)}. "
+                f"Sua **recarga** volta em **{self._format_chip_reset_remaining(remaining)}** e restaura para {self._chip_amount(CHIPS_DEFAULT)}."
+            )
+        return (
+            f"Você precisa de {self._chip_amount(amount)}, mas seu saldo atual é {self._chip_amount(chips)}. "
+            f"A **recarga** só fica disponível quando seu saldo estiver abaixo de **{CHIPS_RECHARGE_THRESHOLD}** fichas."
+        )
+
     def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
         guild_id = member.guild.id
         chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_INITIAL)
         stats = self.db.get_user_game_stats(guild_id, member.id)
-        remaining = 0.0
-        if chips <= 0:
-            import time
-
-            last_reset = self.db.get_user_chip_reset_at(guild_id, member.id)
-            now = time.time()
-            elapsed = max(0.0, now - float(last_reset or 0.0))
-            remaining = max(0.0, CHIPS_RESET_SECONDS - elapsed)
 
         embed = discord.Embed(
             color=discord.Color.blurple(),
         )
         embed.set_author(name=str(member.display_name), icon_url=member.display_avatar.url)
 
-        if chips > 0:
-            recarga = f"Quando faltar saldo, a próxima recarga volta para {self._chip_amount(CHIPS_DEFAULT)}."
-        elif remaining > 0:
-            recarga = f"Disponível em **{self._format_chip_reset_remaining(remaining)}** para voltar a {self._chip_amount(CHIPS_DEFAULT)}."
-        else:
-            recarga = f"Na próxima tentativa sem saldo, seu saldo volta para {self._chip_amount(CHIPS_DEFAULT)}."
+        recarga = self._chip_recharge_text(guild_id, member.id)
 
         wins, losses, games, rate = self._chip_summary_stats(stats)
         weekly_points = self.db.get_user_weekly_points(guild_id, member.id)
@@ -343,30 +408,16 @@ class GincanaBase:
 
     async def _try_consume_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
         current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
-        reset_note = None
         if current < amount:
-            reset, new_balance, remaining = await self.db.maybe_reset_user_chips(
-                guild_id, user_id, amount=CHIPS_DEFAULT, cooldown_seconds=CHIPS_RESET_SECONDS
-            )
-            if not reset:
-                return False, current, f"Você não tem saldo suficiente. Sua recarga de {self._chip_text(CHIPS_DEFAULT)} volta em **{self._format_chip_reset_remaining(remaining)}**."
-            current = new_balance
-            await self._mark_chip_activity(guild_id, user_id)
-            reset_note = f"Seu saldo foi recarregado para {self._chip_text(CHIPS_DEFAULT)}."
+            return False, current, self._insufficient_chips_text(guild_id, user_id, amount)
         new_balance = await self._change_user_chips(guild_id, user_id, -int(amount), mark_activity=True)
-        return True, new_balance, reset_note
+        return True, new_balance, None
 
     async def _ensure_action_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
         current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
         if current >= amount:
             return True, current, None
-        reset, new_balance, remaining = await self.db.maybe_reset_user_chips(
-            guild_id, user_id, amount=CHIPS_DEFAULT, cooldown_seconds=CHIPS_RESET_SECONDS
-        )
-        if reset:
-            await self._mark_chip_activity(guild_id, user_id)
-            return True, new_balance, f"Seu saldo foi recarregado para {self._chip_text(CHIPS_DEFAULT)}."
-        return False, current, f"Você não tem saldo suficiente. Sua recarga de {self._chip_text(CHIPS_DEFAULT)} volta em **{self._format_chip_reset_remaining(remaining)}**."
+        return False, current, self._insufficient_chips_text(guild_id, user_id, amount)
 
     async def _reject_if_not_allowed_guild(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
