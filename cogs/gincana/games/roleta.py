@@ -260,7 +260,7 @@ class GincanaRoletaMixin:
                         reroll = self._build_roleta_column()
                     columns[idx] = reroll
             try:
-                spin_message = await message.channel.send(embed=self._make_roleta_spin_embed(self._render_carta_board(columns), footer_text=footer_text))
+                spin_message = await message.channel.send(embed=self._make_roleta_spin_embed(self._render_roleta_board(columns), footer_text=footer_text))
             except Exception:
                 return None, None
 
@@ -296,7 +296,7 @@ class GincanaRoletaMixin:
                     else:
                         self._spin_roleta_column(columns[column_index])
 
-                board = self._render_carta_board(columns)
+                board = self._render_roleta_board(columns)
                 if board == previous_board:
                     for column_index in range(3):
                         if column_index in locked_columns:
@@ -309,7 +309,7 @@ class GincanaRoletaMixin:
                                 locked_columns.add(column_index)
                         else:
                             self._spin_roleta_column(columns[column_index])
-                    board = self._render_carta_board(columns)
+                    board = self._render_roleta_board(columns)
                 previous_board = board
 
                 try:
@@ -443,7 +443,7 @@ class GincanaRoletaMixin:
 
         def _make_carta_spin_embed(self, board: str, *, footer_text: str | None = None) -> discord.Embed:
             embed = discord.Embed(
-                title="🎴 Cartas girando...",
+                title="🎴 Cartas embaralhando...",
                 description=(
                     f"Entrada: {self._chip_amount(CARTA_COST)}\n"
                     f"Jackpot: {self._chip_amount(CARTA_JACKPOT_CHIPS)}\n\n"
@@ -633,7 +633,7 @@ class GincanaRoletaMixin:
                 return True
 
             self._roleta_running_guilds.add(guild.id)
-            spinning_emoji = "<:emoji_63:1485041721573249135>"
+            spinning_emoji = "🎴"
             jackpot_emoji = "<:emoji_64:1485043651292827788>"
             lose_emoji = "<:emoji_65:1485043671077228786>"
             try:
