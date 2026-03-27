@@ -69,6 +69,7 @@ class GincanaBase:
         self._poker_games: dict[int, object] = {}
         self._payment_sessions: dict[tuple[int, int], dict] = {}
         self._race_sessions: dict[int, dict] = {}
+        self._truco_games: dict[int, object] = {}
 
     def _strip_gincana_suffix(self, name: str) -> str:
         base = str(name or "").rstrip()
@@ -327,6 +328,7 @@ class GincanaBase:
             ((int(stats.get('poker_wins', 0)), -int(stats.get('poker_losses', 0))), f"**Poker** — {int(stats.get('poker_wins', 0))} vitórias"),
             ((int(stats.get('cartas_jackpots', 0)), 0), f"**Cartas** — {int(stats.get('cartas_jackpots', 0))} jackpots"),
             ((int(stats.get('roleta_jackpots', 0)), 0), f"**Roleta** — {int(stats.get('roleta_jackpots', 0))} jackpots"),
+            ((int(stats.get('truco_wins', 0)), 0), f"**Truco** — {int(stats.get('truco_wins', 0))} vitórias"),
         ]
         best_score, best_text = max(candidates, key=lambda item: item[0])
         if best_score[0] <= 0:
