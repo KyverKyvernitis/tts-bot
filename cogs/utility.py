@@ -382,6 +382,94 @@ class Utility(commands.Cog):
         )
         pages.append(utility_page)
 
+        fichas_page = discord.Embed(
+            title="💰 Fichas",
+            description="Comandos rápidos para acompanhar saldo, bônus, recarga e ranking.",
+            color=discord.Color.orange(),
+            timestamp=discord.utils.utcnow(),
+        )
+        fichas_page.add_field(
+            name="📌 Seus atalhos principais",
+            value=(
+                f"**Saldo:** `{bot_prefix}ficha`\n"
+                f"**Daily:** `{bot_prefix}daily`\n"
+                "**Recarga:** `recarga`\n"
+                f"**Ranking:** `{bot_prefix}rank`"
+            ),
+            inline=False,
+        )
+        fichas_page.add_field(
+            name="🎁 Daily",
+            value=(
+                f"**Comando:** `{bot_prefix}daily`\n"
+                "**Uso:** resgata o bônus diário, mantém sua streak e libera os giros extras do dia."
+            ),
+            inline=False,
+        )
+        fichas_page.add_field(
+            name="🔋 Recarga",
+            value=(
+                "**Trigger:** `recarga`\n"
+                "**Uso:** restaura seu saldo para **100** quando ele estiver abaixo de **15**.\n"
+                "**Observação:** a recarga tem cooldown próprio."
+            ),
+            inline=False,
+        )
+        fichas_page.add_field(
+            name="🏆 Ranking e administração",
+            value=(
+                f"**Ranking:** `{bot_prefix}rank`\n"
+                f"**Resetar um usuário:** `{bot_prefix}resetficha @usuário`\n"
+                f"**Resetar o servidor:** `{bot_prefix}resetfichasservidor`\n"
+                "Os resets são voltados para staff."
+            ),
+            inline=False,
+        )
+        pages.append(fichas_page)
+
+        jogos_page = discord.Embed(
+            title="🎮 Jogos",
+            description="Triggers e comandos dos jogos de fichas, em um lugar só.",
+            color=discord.Color.dark_magenta(),
+            timestamp=discord.utils.utcnow(),
+        )
+        jogos_page.add_field(
+            name="🎰 Apostas rápidas",
+            value=(
+                "**Trigger:** `roleta`\n"
+                "**Trigger:** `carta` ou `cartas`\n"
+                "**Uso:** abre uma rodada rápida com limite diário de giros."
+            ),
+            inline=False,
+        )
+        jogos_page.add_field(
+            name="🔫 Rodadas e lobbies",
+            value=(
+                "**Trigger:** `buckshot`\n"
+                "**Trigger:** `alvo`\n"
+                "**Trigger:** `corrida`\n"
+                "**Uso:** abre uma rodada para entrar, disputar e receber prêmio no fim."
+            ),
+            inline=False,
+        )
+        jogos_page.add_field(
+            name="🃏 Poker",
+            value=(
+                "**Trigger:** `poker`\n"
+                "**Uso:** inicia a mesa de poker com entrada própria."
+            ),
+            inline=False,
+        )
+        jogos_page.add_field(
+            name="💸 Pagamento e atalho útil",
+            value=(
+                "**Trigger:** `pay @usuário valor`\n"
+                "**Trigger extra:** `atirar` fecha a rodada de buckshot quando ela estiver aberta."
+            ),
+            inline=False,
+        )
+        pages.append(jogos_page)
+
         if self.bot.user and self.bot.user.display_avatar:
             avatar_url = self.bot.user.display_avatar.url
             for index, embed in enumerate(pages, start=1):
