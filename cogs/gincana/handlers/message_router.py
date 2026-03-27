@@ -45,7 +45,7 @@ class GincanaMessageRouterMixin:
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 "• `ficha` — mostra seu saldo e seus destaques\n"
                 "• `daily` — resgata o bônus diário\n"
-                "• `recarga` — entrega fichas bônus quando seu saldo total fica abaixo de 15\n"
+                "• `recarga` — entrega 100 fichas bônus quando seu saldo total fica abaixo de 15\n"
                 "• `rank` — ranking dos maiores saldos\n"
                 "• `pay @usuário valor` — transfere fichas normais normais\n\n"
                 "🎮 **Jogos**\n"
