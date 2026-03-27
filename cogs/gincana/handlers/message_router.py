@@ -37,7 +37,7 @@ class GincanaMessageRouterMixin:
             return True
         if content in {"recarga", "recarrega"}:
             used, new_balance, note = await self._try_use_chip_recharge(message.guild.id, message.author.id)
-            await message.channel.send(embed=self._make_chip_recharge_embed(used, new_balance, note))
+            await message.channel.send(embed=self._make_chip_recharge_embed(message.guild.id, message.author.id, used, new_balance, note))
             return True
         if content in {"gincanahelp", "helpgincana", "jogoshelp"}:
             await message.channel.send(embed=discord.Embed(title="🎲 Help da gincana", description=(
@@ -45,9 +45,9 @@ class GincanaMessageRouterMixin:
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 "• `ficha` — mostra seu saldo e seus destaques\n"
                 "• `daily` — resgata o bônus diário\n"
-                "• `recarga` — restaura o saldo quando ele ficar abaixo de 15\n"
+                "• `recarga` — entrega fichas bônus quando seu saldo total fica abaixo de 15\n"
                 "• `rank` — ranking dos maiores saldos\n"
-                "• `pay @usuário valor` — transfere fichas\n\n"
+                "• `pay @usuário valor` — transfere fichas normais normais\n\n"
                 "🎮 **Jogos**\n"
                 "• `roleta` — aposta rápida com jackpot\n"
                 "• `buckshot` — rodada de sobrevivência\n"
@@ -61,7 +61,7 @@ class GincanaMessageRouterMixin:
             ), color=discord.Color.blurple()))
             return True
 
-        claimed, new_balance, bonus, streak = await self._claim_daily_bonus_with_activity(message.guild.id, message.author.id)
+        claimed, new_balance, bonus, bonus_bonus, streak = await self._claim_daily_bonus_with_activity(message.guild.id, message.author.id)
         if not claimed:
             await message.channel.send(
                 embed=self._make_embed(
@@ -80,10 +80,11 @@ class GincanaMessageRouterMixin:
             title="🎁 Bônus diário resgatado",
             description=(
                 f"Você ganhou {self._chip_amount(bonus)}\n"
+                f"Você ganhou {self._bonus_chip_amount(bonus_bonus)} em fichas bônus\n"
                 f"{spin_text}\n"
                 f"{carta_spin_text}\n"
                 f"Streak atual: **{streak}**\n"
-                f"Novo saldo: {self._chip_amount(new_balance)}"
+                f"Saldo atual: {self._format_compact_chip_balance(message.guild.id, message.author.id)}"
             ),
             color=discord.Color.green(),
         )
