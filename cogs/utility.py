@@ -205,7 +205,9 @@ class Utility(commands.Cog):
                 "**Página 2** • atalhos de fala por prefixo\n"
                 "**Página 3** • comandos do usuário\n"
                 "**Página 4** • comandos de servidor\n"
-                "**Página 5** • utilidades"
+                "**Página 5** • utilidades\n"
+                "**Página 6** • fichas\n"
+                "**Página 7** • jogos"
             ),
             inline=False,
         )
@@ -400,7 +402,7 @@ class Utility(commands.Cog):
             name="🎁 Daily",
             value=(
                 f"**Comando:** `{bot_prefix}daily`\n"
-                "**Uso:** resgata o bônus diário, mantém sua sequência e libera os giros extras do dia."
+                "**Uso:** resgata fichas normais, +10 fichas bônus e libera os giros extras do dia."
             ),
             inline=False,
         )
@@ -434,7 +436,7 @@ class Utility(commands.Cog):
             value=(
                 "**Trigger:** `roleta`\n"
                 "**Trigger:** `carta` ou `cartas`\n"
-                "**Uso:** faz uma rodada rápida. Cada uma tem seu próprio limite de giros."
+                "**Uso:** faz uma rodada rápida. Se faltar saldo, o jogo avisa antes de te jogar no vermelho."
             ),
             inline=False,
         )
@@ -444,7 +446,7 @@ class Utility(commands.Cog):
                 "**Trigger:** `buckshot`\n"
                 "**Trigger:** `alvo`\n"
                 "**Trigger:** `corrida`\n"
-                "**Uso:** abre uma rodada para entrar e disputar o prêmio no fim."
+                "**Uso:** abre uma rodada para entrar e disputar o prêmio no fim. Quem estiver no vermelho precisa confirmar antes de entrar."
             ),
             inline=False,
         )
@@ -460,7 +462,7 @@ class Utility(commands.Cog):
             name="💸 Pagamento e atalho útil",
             value=(
                 "**Trigger:** `pay @usuário valor`\n"
-                "**Trigger extra:** `atirar` fecha a rodada de buckshot quando ela estiver aberta."
+                "**Extra:** `atirar` fecha a rodada de buckshot quando ela estiver aberta."
             ),
             inline=False,
         )
