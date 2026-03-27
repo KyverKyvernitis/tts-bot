@@ -47,6 +47,8 @@ class PokerGame:
     phase: str = "invite"
     turn_id: int | None = None
     stacks: dict[int, int] = field(default_factory=dict)
+    stack_normal: dict[int, int] = field(default_factory=dict)
+    stack_bonus: dict[int, int] = field(default_factory=dict)
     round_bets: dict[int, int] = field(default_factory=dict)
     round_acted: set[int] = field(default_factory=set)
     pot: int = 0
@@ -178,6 +180,60 @@ class PokerSelectionView(discord.ui.View):
 
 
 class GincanaPokerMixin:
+
+    def _poker_project_stack_after_buy_in(self, guild_id: int, user_id: int, buy_in: int) -> tuple[int, int, int]:
+        chips = int(self.db.get_user_chips(guild_id, user_id, default=100) or 0)
+        bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
+        spend = max(0, int(buy_in))
+        use_bonus = min(bonus, spend)
+        remaining = spend - use_bonus
+        stack_bonus = bonus - use_bonus
+        stack_normal = chips - remaining
+        return stack_normal, stack_bonus, stack_normal + stack_bonus
+
+    def _poker_stack_text(self, game: PokerGame, player_id: int) -> str:
+        normal = int(game.stack_normal.get(player_id, 0) or 0)
+        bonus = int(game.stack_bonus.get(player_id, 0) or 0)
+        if bonus > 0:
+            return f"**{normal}** {self._CHIP_EMOJI} • **{bonus}** {self._CHIP_BONUS_EMOJI}"
+        return f"**{normal}** {self._CHIP_EMOJI}"
+
+    def _poker_total_stack(self, game: PokerGame, player_id: int) -> int:
+        return int(game.stack_normal.get(player_id, 0) or 0) + int(game.stack_bonus.get(player_id, 0) or 0)
+
+    def _consume_poker_stack(self, game: PokerGame, player_id: int, amount: int) -> bool:
+        spend = max(0, int(amount))
+        total = self._poker_total_stack(game, player_id)
+        if spend > total:
+            return False
+        bonus = int(game.stack_bonus.get(player_id, 0) or 0)
+        normal = int(game.stack_normal.get(player_id, 0) or 0)
+        use_bonus = min(bonus, spend)
+        remaining = spend - use_bonus
+        game.stack_bonus[player_id] = bonus - use_bonus
+        game.stack_normal[player_id] = normal - remaining
+        game.stacks[player_id] = self._poker_total_stack(game, player_id)
+        return True
+
+    def _add_poker_stack_normal(self, game: PokerGame, player_id: int, amount: int):
+        game.stack_normal[player_id] = int(game.stack_normal.get(player_id, 0) or 0) + max(0, int(amount))
+        game.stacks[player_id] = self._poker_total_stack(game, player_id)
+
+    async def _persist_poker_player_stack(self, guild_id: int, user_id: int, *, normal: int, bonus: int):
+        await self.db.set_user_chips(guild_id, user_id, int(normal))
+        await self.db.set_user_bonus_chips(guild_id, user_id, int(bonus))
+        await self._mark_chip_activity(guild_id, user_id)
+
+    def _poker_entry_block_note(self, guild_id: int, user_id: int, buy_in: int) -> str | None:
+        chips = int(self.db.get_user_chips(guild_id, user_id, default=100) or 0)
+        bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
+        total = chips + bonus
+        if total < int(buy_in):
+            return (
+                f"O poker precisa de {self._chip_amount(buy_in)} disponíveis sem aumentar dívida. "
+                f"Seu saldo atual é {self._format_compact_chip_balance(guild_id, user_id)}."
+            )
+        return None
     def _create_poker_deck(self) -> list[Card]:
         suits = ["♠", "♥", "♦", "♣"]
         rank_labels = {11: "J", 12: "Q", 13: "K", 14: "A"}
@@ -332,7 +388,7 @@ class GincanaPokerMixin:
             color=discord.Color.blurple(),
         )
         embed.add_field(name="Fase", value=phase_text, inline=True)
-        embed.add_field(name="Seu stack", value=f"{self._CHIP_EMOJI} **{game.stacks.get(member.id, 0)}**", inline=True)
+        embed.add_field(name="Seu stack", value=self._poker_stack_text(game, member.id), inline=True)
         embed.add_field(name="Pote", value=f"{self._CHIP_EMOJI} **{game.pot}**", inline=True)
         if game.phase in {"pre_draw_bet", "post_draw_bet"}:
             embed.add_field(name="Sua aposta", value=f"{self._CHIP_LOSS_EMOJI} **{own_bet}**", inline=True)
@@ -356,8 +412,8 @@ class GincanaPokerMixin:
             inline=False,
         )
         embed.add_field(name="Pote final", value=f"{self._CHIP_EMOJI} **{game.pot}**", inline=True)
-        embed.add_field(name="Seu stack", value=f"{self._CHIP_EMOJI} **{game.stacks.get(player.id, 0)}**", inline=True)
-        embed.add_field(name="Stack rival", value=f"{self._CHIP_EMOJI} **{game.stacks.get(opponent.id, 0)}**", inline=True)
+        embed.add_field(name="Seu stack", value=self._poker_stack_text(game, player.id), inline=True)
+        embed.add_field(name="Stack rival", value=self._poker_stack_text(game, opponent.id), inline=True)
         return embed
 
     def _make_poker_result_embed(self, player_a: discord.Member, hand_a: list[Card], player_b: discord.Member, hand_b: list[Card], outcome: int, game: PokerGame) -> discord.Embed:
@@ -374,8 +430,8 @@ class GincanaPokerMixin:
         embed = self._make_embed(title, description, ok=True)
         embed.add_field(name=f"{player_a.display_name} — {self._poker_hand_display(hand_a)}", value=self._format_hand(hand_a), inline=False)
         embed.add_field(name=f"{player_b.display_name} — {self._poker_hand_display(hand_b)}", value=self._format_hand(hand_b), inline=False)
-        embed.add_field(name=f"Stack final — {player_a.display_name}", value=f"{self._CHIP_EMOJI} **{game.stacks.get(player_a.id, 0)}**", inline=True)
-        embed.add_field(name=f"Stack final — {player_b.display_name}", value=f"{self._CHIP_EMOJI} **{game.stacks.get(player_b.id, 0)}**", inline=True)
+        embed.add_field(name=f"Stack final — {player_a.display_name}", value=self._poker_stack_text(game, player_a.id), inline=True)
+        embed.add_field(name=f"Stack final — {player_b.display_name}", value=self._poker_stack_text(game, player_b.id), inline=True)
         embed.add_field(name="Trocas reveladas", value=f"{player_a.display_name}: **{game.exchange_counts.get(player_a.id, 0)}**\n{player_b.display_name}: **{game.exchange_counts.get(player_b.id, 0)}**", inline=True)
         return embed
 
@@ -399,10 +455,13 @@ class GincanaPokerMixin:
         game.finished = True
         self._poker_games.pop(game.guild_id, None)
         for player_id in game.players:
-            balance = game.stacks.get(player_id, 0)
+            normal = int(game.stack_normal.get(player_id, 0) or 0)
+            bonus = int(game.stack_bonus.get(player_id, 0) or 0)
             if game.phase == "invite":
-                balance += game.buy_in
-            await self._set_user_chips_value(game.guild_id, player_id, balance)
+                stack_normal, stack_bonus, _total = self._poker_project_stack_after_buy_in(game.guild_id, player_id, game.buy_in)
+                normal = stack_normal + game.buy_in
+                bonus = stack_bonus
+            await self._persist_poker_player_stack(game.guild_id, player_id, normal=normal, bonus=bonus)
         await self._disable_poker_views(game)
         if game.status_message is not None:
             try:
@@ -455,7 +514,7 @@ class GincanaPokerMixin:
         game.finished = True
         self._poker_games.pop(game.guild_id, None)
         game.folded_by = loser_id
-        game.stacks[winner_id] += game.pot
+        self._add_poker_stack_normal(game, winner_id, game.pot)
         guild = self.bot.get_guild(game.guild_id)
         if guild is None:
             return
@@ -463,8 +522,8 @@ class GincanaPokerMixin:
         loser = guild.get_member(loser_id)
         if winner is None or loser is None:
             return
-        await self._set_user_chips_value(game.guild_id, winner_id, game.stacks.get(winner_id, 0))
-        await self._set_user_chips_value(game.guild_id, loser_id, game.stacks.get(loser_id, 0))
+        await self._persist_poker_player_stack(game.guild_id, winner_id, normal=game.stack_normal.get(winner_id, 0), bonus=game.stack_bonus.get(winner_id, 0))
+        await self._persist_poker_player_stack(game.guild_id, loser_id, normal=game.stack_normal.get(loser_id, 0), bonus=game.stack_bonus.get(loser_id, 0))
         await self._record_poker_result(game.guild_id, winner_id, loser_id)
         await self._disable_poker_views(game)
         if game.status_message is not None:
@@ -509,16 +568,16 @@ class GincanaPokerMixin:
 
         outcome = self._compare_poker_hands(game.hands[player_a.id], game.hands[player_b.id])
         if outcome > 0:
-            game.stacks[player_a.id] += game.pot
+            self._add_poker_stack_normal(game, player_a.id, game.pot)
         elif outcome < 0:
-            game.stacks[player_b.id] += game.pot
+            self._add_poker_stack_normal(game, player_b.id, game.pot)
         else:
             split_left = game.pot // 2
             split_right = game.pot - split_left
-            game.stacks[player_a.id] += split_left
-            game.stacks[player_b.id] += split_right
-        await self._set_user_chips_value(game.guild_id, player_a.id, game.stacks.get(player_a.id, 0))
-        await self._set_user_chips_value(game.guild_id, player_b.id, game.stacks.get(player_b.id, 0))
+            self._add_poker_stack_normal(game, player_a.id, split_left)
+            self._add_poker_stack_normal(game, player_b.id, split_right)
+        await self._persist_poker_player_stack(game.guild_id, player_a.id, normal=game.stack_normal.get(player_a.id, 0), bonus=game.stack_bonus.get(player_a.id, 0))
+        await self._persist_poker_player_stack(game.guild_id, player_b.id, normal=game.stack_normal.get(player_b.id, 0), bonus=game.stack_bonus.get(player_b.id, 0))
         if outcome > 0:
             await self._record_poker_result(game.guild_id, player_a.id, player_b.id)
         elif outcome < 0:
@@ -723,11 +782,11 @@ class GincanaPokerMixin:
         guild = self.bot.get_guild(game.guild_id)
         member = guild.get_member(player_id) if guild else None
         name = member.display_name if member else "Jogador"
-        if to_call > game.stacks.get(player_id, 0):
+        if to_call > self._poker_total_stack(game, player_id):
             await interaction.response.send_message("Você não tem fichas suficientes para pagar.", ephemeral=True)
             return
         if to_call > 0:
-            game.stacks[player_id] -= to_call
+            self._consume_poker_stack(game, player_id, to_call)
             game.round_bets[player_id] = current_bet
             game.pot += to_call
             game.action_log.append(f"{name} pagou {to_call} {self._CHIP_EMOJI}.")
@@ -754,10 +813,10 @@ class GincanaPokerMixin:
         own_bet = game.round_bets.get(player_id, 0)
         target_bet = current_bet + _BET_SIZE if current_bet > own_bet else own_bet + _BET_SIZE
         extra = target_bet - own_bet
-        if extra > game.stacks.get(player_id, 0):
+        if extra > self._poker_total_stack(game, player_id):
             await interaction.response.send_message("Você não tem fichas suficientes para essa aposta.", ephemeral=True)
             return
-        game.stacks[player_id] -= extra
+        self._consume_poker_stack(game, player_id, extra)
         game.round_bets[player_id] = target_bet
         game.pot += extra
         guild = self.bot.get_guild(game.guild_id)
@@ -828,8 +887,22 @@ class GincanaPokerMixin:
         if opponent.id == message.author.id:
             return True
 
-        host_ok, host_balance, host_note = await self._ensure_action_chips(guild.id, message.author.id, POKER_BUY_IN)
-        opp_ok, opp_balance, opp_note = await self._ensure_action_chips(guild.id, opponent.id, POKER_BUY_IN)
+        host_block_note = self._poker_entry_block_note(guild.id, message.author.id, POKER_BUY_IN)
+        opp_block_note = self._poker_entry_block_note(guild.id, opponent.id, POKER_BUY_IN)
+        if host_block_note:
+            try:
+                await message.channel.send(embed=self._make_poker_status_embed("🃏 Fichas insuficientes", host_block_note, ok=False))
+            except Exception:
+                pass
+            return True
+        if opp_block_note:
+            try:
+                await message.channel.send(embed=self._make_poker_status_embed("🃏 Rival sem fichas", f"{opponent.mention}: {opp_block_note}", ok=False))
+            except Exception:
+                pass
+            return True
+        host_ok, _host_balance, host_note = await self._ensure_action_chips(guild.id, message.author.id, POKER_BUY_IN)
+        opp_ok, _opp_balance, opp_note = await self._ensure_action_chips(guild.id, opponent.id, POKER_BUY_IN)
         if not host_ok:
             try:
                 await message.channel.send(embed=self._make_poker_status_embed("🃏 Fichas insuficientes", host_note or "Você não tem fichas suficientes para jogar.", ok=False))
@@ -842,6 +915,18 @@ class GincanaPokerMixin:
             except Exception:
                 pass
             return True
+        if self._needs_negative_confirmation(guild.id, message.author.id, POKER_BUY_IN):
+            confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, POKER_BUY_IN, title="🃏 Confirmar entrada")
+            if not confirmed:
+                return True
+        if self._needs_negative_confirmation(guild.id, opponent.id, POKER_BUY_IN):
+            confirmed = await self._confirm_negative_via_message(message.channel, user_id=opponent.id, title="🃏 Confirmar entrada", note=self._negative_transition_note(guild.id, opponent.id, POKER_BUY_IN) or "")
+            if not confirmed:
+                try:
+                    await message.channel.send(embed=self._make_poker_status_embed("🃏 Convite cancelado", f"{opponent.mention} não confirmou a entrada no poker.", ok=False))
+                except Exception:
+                    pass
+                return True
 
         game = PokerGame(
             guild_id=guild.id,
@@ -857,8 +942,10 @@ class GincanaPokerMixin:
         game.selected = {message.author.id: set(), opponent.id: set()}
         game.confirmed = {message.author.id: False, opponent.id: False}
         game.accepted = {message.author.id: False, opponent.id: False}
-        host_stack = max(0, host_balance - POKER_BUY_IN)
-        opp_stack = max(0, opp_balance - POKER_BUY_IN)
+        host_stack_normal, host_stack_bonus, host_stack = self._poker_project_stack_after_buy_in(guild.id, message.author.id, POKER_BUY_IN)
+        opp_stack_normal, opp_stack_bonus, opp_stack = self._poker_project_stack_after_buy_in(guild.id, opponent.id, POKER_BUY_IN)
+        game.stack_normal = {message.author.id: host_stack_normal, opponent.id: opp_stack_normal}
+        game.stack_bonus = {message.author.id: host_stack_bonus, opponent.id: opp_stack_bonus}
         game.stacks = {message.author.id: host_stack, opponent.id: opp_stack}
         game.round_bets = {message.author.id: POKER_BUY_IN, opponent.id: POKER_BUY_IN}
         game.pot = POKER_BUY_IN * 2
