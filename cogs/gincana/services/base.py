@@ -326,6 +326,12 @@ class GincanaBase:
             f"Seu saldo foi restaurado para {self._chip_amount(CHIPS_DEFAULT)} usando **recarga**."
         )
 
+
+    def _make_chip_recharge_embed(self, used: bool, new_balance: int, note: str) -> discord.Embed:
+        title = "🔋 Recarga concluída" if used else "🔋 Recarga indisponível"
+        description = f"{note}\nSaldo atual: {self._chip_amount(new_balance)}"
+        return self._make_embed(title, description, ok=used)
+
     def _insufficient_chips_text(self, guild_id: int, user_id: int, amount: int) -> str:
         state = self._chip_recharge_state(guild_id, user_id)
         chips = int(state["chips"])
