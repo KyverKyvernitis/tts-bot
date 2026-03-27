@@ -437,7 +437,15 @@ class GincanaBase:
 
     def _needs_negative_confirmation(self, guild_id: int, user_id: int, amount: int) -> bool:
         state = self._negative_cost_projection(guild_id, user_id, amount)
-        return int(state["chips"]) < 0 and int(state["bonus"]) <= 0 and int(state["projected_chips"]) < int(state["chips"])
+        chips = int(state["chips"])
+        bonus = int(state["bonus"])
+        projected_chips = int(state["projected_chips"])
+        projected_bonus = int(state["projected_bonus"])
+        if projected_bonus > 0:
+            return False
+        first_negative = chips >= 0 and projected_chips < 0
+        debt_increases = chips < 0 and projected_chips < chips
+        return bonus <= 0 and (first_negative or debt_increases)
 
     async def _confirm_negative_ephemeral(self, interaction: discord.Interaction, guild_id: int, user_id: int, amount: int, *, title: str = "⚠️ Confirmar entrada") -> bool:
         note = self._negative_transition_note(guild_id, user_id, amount)
