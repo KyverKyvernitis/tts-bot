@@ -33,7 +33,7 @@ CARTA_COST = 15
 CARTA_JACKPOT_CHIPS = 100
 CARTA_SYMBOLS = ("🍀", "💎", "👑", "🃏", "⭐")
 CARTA_WEIGHTS = (40, 28, 18, 10, 4)
-CARTA_SPIN_LIMIT = ROLETA_SPIN_LIMIT
+CARTA_SPIN_LIMIT = 5
 CARTA_WINDOW_SECONDS = ROLETA_WINDOW_SECONDS
 CARTA_DAILY_EXTRA_CAP = ROLETA_DAILY_EXTRA_CAP
 
@@ -393,9 +393,66 @@ class GincanaRoletaMixin:
 
         def _carta_footer_text(self, *, state: dict[str, float | int], is_staff: bool) -> str:
             available = int(state.get("available", 0) or 0)
-            if available <= 0 and is_staff:
-                return "Seus giros de cartas acabaram, mas como você é staff você ainda pode girar."
             return f"Restam {available} giros de cartas • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
+
+        def _pick_carta_result_flavor(self, result_kind: str, *, fallback: str = "") -> str:
+            options = {
+                "loss": [
+                    "Essa mão não rendeu nada.",
+                    "As cartas não encaixaram.",
+                    "Dessa vez a mão passou em branco.",
+                ],
+                "return": [
+                    "O coringa salvou parte da aposta.",
+                    "O coringa evitou a perda completa.",
+                    "O coringa segurou parte da rodada.",
+                ],
+                "partial": [
+                    "Essa mão rendeu bem.",
+                    "As cartas encaixaram.",
+                    "Foi uma boa combinação.",
+                ],
+                "premium": [
+                    "O coringa completou a combinação.",
+                    "O coringa fechou a mão.",
+                    "O coringa puxou a melhor carta da rodada.",
+                ],
+                "rare": [
+                    "Essa mão veio forte.",
+                    "As cartas bateram bonito.",
+                    "Foi uma combinação rara.",
+                ],
+                "jackpot": [
+                    "A mão bateu o prêmio máximo.",
+                    "Você acertou a mão máxima.",
+                    "As cartas vieram perfeitas.",
+                ],
+            }
+            picks = options.get(result_kind)
+            if picks:
+                return random.choice(picks)
+            return fallback or "Resultado das cartas."
+
+        def _pick_carta_hot_streak_text(self) -> str:
+            return random.choice([
+                "Você entrou em boa fase.",
+                "Sua mão esquentou.",
+                "A sequência ficou forte.",
+            ])
+
+        async def _advance_carta_hot_streak(self, guild_id: int, user_id: int, *, result_kind: str) -> tuple[int, str | None]:
+            doc = self.db._get_user_doc(guild_id, user_id)
+            try:
+                current = max(0, int(doc.get("carta_hot_streak", 0) or 0))
+            except Exception:
+                current = 0
+            counts_for_streak = result_kind in {"partial", "premium", "rare", "jackpot"}
+            new_value = current + 1 if counts_for_streak else 0
+            doc["carta_hot_streak"] = int(new_value)
+            await self.db._save_user_doc(guild_id, user_id, doc)
+            if counts_for_streak and new_value >= 2:
+                return new_value, self._pick_carta_hot_streak_text()
+            return new_value, None
 
         def _format_carta_row(self, row: list[object], *, middle: bool = False) -> str:
             cells = [str(cell) for cell in row]
@@ -608,7 +665,7 @@ class GincanaRoletaMixin:
 
             is_staff = isinstance(message.author, discord.Member) and self._is_staff_member(message.author)
             carta_state = await self._sync_carta_spin_window(guild.id, message.author.id)
-            if int(carta_state.get("available", 0) or 0) <= 0 and not is_staff:
+            if int(carta_state.get("available", 0) or 0) <= 0:
                 try:
                     wait_text = self._format_roleta_reset_time(float(carta_state.get("reset_in", 0.0) or 0.0))
                     embed = discord.Embed(
@@ -650,12 +707,16 @@ class GincanaRoletaMixin:
                 board = self._render_carta_board(final_columns)
                 middle = [column[1] for column in final_columns]
                 result_kind, result_amount, flavor = self._evaluate_carta_middle(middle)
+                flavor = self._pick_carta_result_flavor(result_kind, fallback=flavor)
+                _streak_value, streak_line = await self._advance_carta_hot_streak(guild.id, message.author.id, result_kind=result_kind)
                 if result_kind == "jackpot":
                     await self._record_game_played(guild.id, message.author.id, weekly_points=12)
                     await self._change_user_chips(guild.id, message.author.id, CARTA_JACKPOT_CHIPS)
                     await self.db.add_user_game_stat(guild.id, message.author.id, "cartas_jackpots", 1)
                     await self._grant_weekly_points(guild.id, message.author.id, 18)
                     summary = f"{flavor}\nVocê ganhou {self._chip_amount(CARTA_JACKPOT_CHIPS)}."
+                    if streak_line:
+                        summary = f"{summary}\n*{streak_line}*"
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
                     embed = self._make_carta_result_embed("🎴 JACKPOT!!", summary, board, success=True, premium=True, footer_text=carta_footer)
@@ -669,6 +730,8 @@ class GincanaRoletaMixin:
                     line = f"{flavor}\nEssa mão rendeu {self._chip_text(result_amount, kind='gain')}."
                     if result_kind == "return":
                         line = f"{flavor}\nVocê recuperou {self._chip_text(result_amount, kind='gain')}."
+                    elif streak_line:
+                        line = f"{line}\n*{streak_line}*"
                     if chip_note:
                         line = f"{chip_note}\n{line}"
                     titles = {"rare": "🎴 Mão rara", "premium": "🎴 Coringa premiado", "partial": "🎴 Boa mão", "return": "🎴 Giro de retorno"}
