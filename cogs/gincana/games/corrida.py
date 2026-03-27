@@ -606,10 +606,18 @@ class GincanaCorridaMixin:
                 pass
             return
 
+        if self._needs_negative_confirmation(guild.id, user.id, CORRIDA_STAKE):
+            confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, user.id, CORRIDA_STAKE, title="🐎 Confirmar entrada")
+            if not confirmed:
+                return
+
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, CORRIDA_STAKE)
         if not paid:
             try:
-                await interaction.response.send_message(chip_note or "Você não tem saldo suficiente para entrar nessa corrida.", ephemeral=True)
+                if interaction.response.is_done():
+                    await interaction.followup.send(chip_note or "Você não tem saldo suficiente para entrar nessa corrida.", ephemeral=True)
+                else:
+                    await interaction.response.send_message(chip_note or "Você não tem saldo suficiente para entrar nessa corrida.", ephemeral=True)
             except Exception:
                 pass
             return

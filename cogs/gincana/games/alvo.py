@@ -707,10 +707,19 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             try: await interaction.response.send_message('Você já entrou nessa rodada e sua entrada ficou travada até o fim.', ephemeral=True)
             except Exception: pass
             return
+        if self._needs_negative_confirmation(guild.id, user.id, ALVO_STAKE):
+            confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, user.id, ALVO_STAKE, title="🎯 Confirmar entrada")
+            if not confirmed:
+                return
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE)
         if not paid:
-            try: await interaction.response.send_message(chip_note or 'Você não tem saldo suficiente para entrar nessa rodada.', ephemeral=True)
-            except Exception: pass
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(chip_note or 'Você não tem saldo suficiente para entrar nessa rodada.', ephemeral=True)
+                else:
+                    await interaction.response.send_message(chip_note or 'Você não tem saldo suficiente para entrar nessa rodada.', ephemeral=True)
+            except Exception:
+                pass
             return
         locked.add(user.id)
         session['bonus_chips'] = self._target_bonus_for_participants(len(locked))

@@ -474,10 +474,19 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             try: await interaction.response.send_message('Você já entrou nessa rodada e sua vaga está travada.', ephemeral=True)
             except Exception: pass
             return
+        if self._needs_negative_confirmation(guild.id, member.id, BUCKSHOT_STAKE):
+            confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, member.id, BUCKSHOT_STAKE, title="💥 Confirmar entrada")
+            if not confirmed:
+                return
         paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
         if not paid:
-            try: await interaction.response.send_message(note or 'Você não tem saldo suficiente para entrar.', ephemeral=True)
-            except Exception: pass
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(note or 'Você não tem saldo suficiente para entrar.', ephemeral=True)
+                else:
+                    await interaction.response.send_message(note or 'Você não tem saldo suficiente para entrar.', ephemeral=True)
+            except Exception:
+                pass
             return
         manual = set(session.get('manual_participants', set()) or set())
         manual.add(member.id)
