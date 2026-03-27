@@ -4,6 +4,7 @@ import time
 
 import discord
 
+from ..constants import CHIPS_INITIAL
 
 
 class GincanaPaymentMixin:
@@ -75,9 +76,18 @@ class GincanaPaymentMixin:
             return True
 
         total = amount
-        ok, _bal, note = await self._ensure_action_chips(guild.id, message.author.id, total)
-        if not ok:
-            await message.channel.send(embed=self._make_embed("💸 Saldo insuficiente", note or "Você não tem saldo suficiente para esse pagamento.", ok=False))
+        payer_chips = self.db.get_user_chips(guild.id, message.author.id, default=CHIPS_INITIAL)
+        target_chips = self.db.get_user_chips(guild.id, target.id, default=CHIPS_INITIAL)
+        if payer_chips < 0:
+            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"Você está negativado em **{payer_chips}** {self._CHIP_LOSS_EMOJI} e não pode fazer transferências.", ok=False))
+            self._payment_sessions.pop((guild.id, message.author.id), None)
+            return True
+        if target_chips < 0:
+            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"{target.mention} está negativado e não pode participar de transferências agora.", ok=False))
+            self._payment_sessions.pop((guild.id, message.author.id), None)
+            return True
+        if payer_chips < total:
+            await message.channel.send(embed=self._make_embed("💸 Saldo insuficiente", "Esse pagamento usa só fichas normais. Fichas bônus não podem ser transferidas.", ok=False))
             self._payment_sessions.pop((guild.id, message.author.id), None)
             return True
 
@@ -213,9 +223,16 @@ class GincanaPaymentMixin:
         fee = int(session.get("fee") or 0)
         net_amount = int(session.get("net_amount") or 0)
         total = int(session.get("total") or 0)
-        ok, _balance, note = await self._ensure_action_chips(guild.id, payer.id, total)
-        if not ok:
-            await self._expire_payment_session(session_key, title="💸 Saldo insuficiente", reason=note or "O pagador não tem mais saldo suficiente.")
+        payer_chips = self.db.get_user_chips(guild.id, payer.id, default=CHIPS_INITIAL)
+        target_chips = self.db.get_user_chips(guild.id, target.id, default=CHIPS_INITIAL)
+        if payer_chips < 0:
+            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} está negativado e não pode fazer transferências.")
+            return
+        if target_chips < 0:
+            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{target.mention} está negativado e não pode participar de transferências agora.")
+            return
+        if payer_chips < total:
+            await self._expire_payment_session(session_key, title="💸 Saldo insuficiente", reason="Esse pagamento usa só fichas normais. Fichas bônus não podem ser transferidas.")
             return
 
         await self._transfer_user_chips(guild.id, payer.id, target.id, total=total, net_amount=net_amount)
