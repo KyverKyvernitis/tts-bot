@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 
 from config import OFF_COLOR, ON_COLOR
-from ..constants import CHIPS_DEFAULT, CHIPS_INITIAL, CHIPS_RECHARGE_THRESHOLD, CHIPS_RESET_SECONDS, ROLETA_COST
+from ..constants import CHIPS_DEFAULT, CHIPS_INITIAL, CHIPS_RECHARGE_THRESHOLD, CHIPS_RESET_HOURS, CHIPS_RESET_SECONDS, ROLETA_COST
 from db import SettingsDB
 
 
