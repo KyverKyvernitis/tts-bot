@@ -59,12 +59,15 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return
         await self._grant_weekly_points(ctx.guild.id, ctx.author.id, max(3, bonus // 2))
         spin_granted, _spin_state = await self._grant_daily_roleta_spin(ctx.guild.id, ctx.author.id)
+        carta_spin_granted, _carta_spin_state = await self._grant_daily_carta_spin(ctx.guild.id, ctx.author.id)
         spin_text = "Você ganhou **+1 giro de roleta**" if spin_granted else "Seu giro extra da roleta já estava disponível"
+        carta_spin_text = "Você ganhou **+1 giro de cartas**" if carta_spin_granted else "Seu giro extra de cartas já estava disponível"
         embed = discord.Embed(
             title="🎁 Bônus diário resgatado",
             description=(
                 f"Você ganhou {self._chip_amount(bonus)}\n"
                 f"{spin_text}\n"
+                f"{carta_spin_text}\n"
                 f"Streak atual: **{streak}**\n"
                 f"Novo saldo: {self._chip_amount(new_balance)}"
             ),
