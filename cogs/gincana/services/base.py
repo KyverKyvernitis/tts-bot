@@ -265,6 +265,7 @@ class GincanaBase:
             ((int(stats.get('alvo_wins', 0)), int(stats.get('alvo_bullseyes', 0))), f"**Alvo** — {int(stats.get('alvo_wins', 0))} vitórias"),
             ((int(stats.get('buckshot_survivals', 0)), -int(stats.get('buckshot_eliminations', 0))), f"**Buckshot** — {int(stats.get('buckshot_survivals', 0))} sobrevivências"),
             ((int(stats.get('poker_wins', 0)), -int(stats.get('poker_losses', 0))), f"**Poker** — {int(stats.get('poker_wins', 0))} vitórias"),
+            ((int(stats.get('cartas_jackpots', 0)), 0), f"**Cartas** — {int(stats.get('cartas_jackpots', 0))} jackpots"),
             ((int(stats.get('roleta_jackpots', 0)), 0), f"**Roleta** — {int(stats.get('roleta_jackpots', 0))} jackpots"),
         ]
         best_score, best_text = max(candidates, key=lambda item: item[0])
