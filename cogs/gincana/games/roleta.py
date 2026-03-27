@@ -33,6 +33,9 @@ CARTA_COST = 15
 CARTA_JACKPOT_CHIPS = 100
 CARTA_SYMBOLS = ("🍀", "💎", "👑", "🃏", "⭐")
 CARTA_WEIGHTS = (40, 28, 18, 10, 4)
+CARTA_SPIN_LIMIT = ROLETA_SPIN_LIMIT
+CARTA_WINDOW_SECONDS = ROLETA_WINDOW_SECONDS
+CARTA_DAILY_EXTRA_CAP = ROLETA_DAILY_EXTRA_CAP
 
 
 class GincanaRoletaMixin:
@@ -257,7 +260,7 @@ class GincanaRoletaMixin:
                         reroll = self._build_roleta_column()
                     columns[idx] = reroll
             try:
-                spin_message = await message.channel.send(embed=self._make_roleta_spin_embed(self._render_roleta_board(columns), footer_text=footer_text))
+                spin_message = await message.channel.send(embed=self._make_roleta_spin_embed(self._render_carta_board(columns), footer_text=footer_text))
             except Exception:
                 return None, None
 
@@ -293,7 +296,7 @@ class GincanaRoletaMixin:
                     else:
                         self._spin_roleta_column(columns[column_index])
 
-                board = self._render_roleta_board(columns)
+                board = self._render_carta_board(columns)
                 if board == previous_board:
                     for column_index in range(3):
                         if column_index in locked_columns:
@@ -306,7 +309,7 @@ class GincanaRoletaMixin:
                                 locked_columns.add(column_index)
                         else:
                             self._spin_roleta_column(columns[column_index])
-                    board = self._render_roleta_board(columns)
+                    board = self._render_carta_board(columns)
                 previous_board = board
 
                 try:
@@ -315,6 +318,105 @@ class GincanaRoletaMixin:
                     pass
 
             return spin_message, columns
+        def _carta_window_total(self, bonus_spins: int = 0) -> int:
+            return CARTA_SPIN_LIMIT + max(0, min(CARTA_DAILY_EXTRA_CAP, int(bonus_spins or 0)))
+
+        async def _sync_carta_spin_window(self, guild_id: int, user_id: int) -> dict[str, float | int]:
+            now = time.time()
+            doc = self.db._get_user_doc(guild_id, user_id)
+            try:
+                started_at = float(doc.get("carta_window_started_at", 0) or 0.0)
+            except Exception:
+                started_at = 0.0
+            try:
+                used = max(0, int(doc.get("carta_spins_used", 0) or 0))
+            except Exception:
+                used = 0
+            try:
+                bonus = max(0, min(CARTA_DAILY_EXTRA_CAP, int(doc.get("carta_bonus_spins", 0) or 0)))
+            except Exception:
+                bonus = 0
+            changed = False
+            if started_at <= 0 or (started_at + CARTA_WINDOW_SECONDS) <= now:
+                started_at = now
+                used = 0
+                bonus = 0
+                doc["carta_window_started_at"] = float(started_at)
+                doc["carta_spins_used"] = 0
+                doc["carta_bonus_spins"] = 0
+                changed = True
+            total = self._carta_window_total(bonus)
+            available = max(0, total - used)
+            reset_in = max(0.0, (started_at + CARTA_WINDOW_SECONDS) - now)
+            if changed:
+                await self.db._save_user_doc(guild_id, user_id, doc)
+            return {
+                "started_at": float(started_at),
+                "used": int(used),
+                "bonus": int(bonus),
+                "total": int(total),
+                "available": int(available),
+                "reset_in": float(reset_in),
+            }
+
+        async def _consume_carta_spin(self, guild_id: int, user_id: int) -> dict[str, float | int]:
+            state = await self._sync_carta_spin_window(guild_id, user_id)
+            if int(state["available"]) <= 0:
+                return state
+            doc = self.db._get_user_doc(guild_id, user_id)
+            used = int(state["used"]) + 1
+            doc["carta_window_started_at"] = float(state["started_at"])
+            doc["carta_spins_used"] = used
+            doc["carta_bonus_spins"] = int(state["bonus"])
+            await self.db._save_user_doc(guild_id, user_id, doc)
+            total = int(state["total"])
+            return {
+                "started_at": float(state["started_at"]),
+                "used": used,
+                "bonus": int(state["bonus"]),
+                "total": total,
+                "available": max(0, total - used),
+                "reset_in": float(max(0.0, (float(state["started_at"]) + CARTA_WINDOW_SECONDS) - time.time())),
+            }
+
+        async def _grant_daily_carta_spin(self, guild_id: int, user_id: int) -> tuple[bool, dict[str, float | int]]:
+            state = await self._sync_carta_spin_window(guild_id, user_id)
+            current_bonus = int(state["bonus"])
+            if current_bonus >= CARTA_DAILY_EXTRA_CAP:
+                return False, state
+            doc = self.db._get_user_doc(guild_id, user_id)
+            doc["carta_window_started_at"] = float(state["started_at"])
+            doc["carta_spins_used"] = int(state["used"])
+            doc["carta_bonus_spins"] = min(CARTA_DAILY_EXTRA_CAP, current_bonus + 1)
+            await self.db._save_user_doc(guild_id, user_id, doc)
+            return True, await self._sync_carta_spin_window(guild_id, user_id)
+
+        def _carta_footer_text(self, *, state: dict[str, float | int], is_staff: bool) -> str:
+            available = int(state.get("available", 0) or 0)
+            if available <= 0 and is_staff:
+                return "Seus giros de cartas acabaram, mas como você é staff você ainda pode girar."
+            return f"Restam {available} giros de cartas • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
+
+        def _format_carta_row(self, row: list[object], *, middle: bool = False) -> str:
+            cells = [str(cell) for cell in row]
+            row_text = f"{cells[0]}  {cells[1]}  {cells[2]}"
+            if middle:
+                return f" »{row_text}«"
+            return f"│ {row_text}  "
+
+        def _render_carta_board(self, columns: list[list[object]]) -> str:
+            rows = [[columns[0][i], columns[1][i], columns[2][i]] for i in range(3)]
+            lines = [
+                "┌────────────┐",
+                self._format_carta_row(rows[0]),
+                "├────────────┤",
+                self._format_carta_row(rows[1], middle=True),
+                "├────────────┤",
+                self._format_carta_row(rows[2]),
+                "└────────────┘",
+            ]
+            return "```text\n" + "\n".join(lines) + "\n```"
+
         def _random_carta_symbol(self, exclude: set[object] | None = None) -> str:
             exclude = exclude or set()
             choices = [symbol for symbol in CARTA_SYMBOLS if symbol not in exclude]
@@ -339,24 +441,36 @@ class GincanaRoletaMixin:
             final_top = self._random_carta_symbol(exclude={target_middle, first_top})
             return [first_top, target_middle, final_top]
 
-        def _make_carta_spin_embed(self, board: str) -> discord.Embed:
-            return discord.Embed(
-                title="🎴 Embaralhando...",
+        def _make_carta_spin_embed(self, board: str, *, footer_text: str | None = None) -> discord.Embed:
+            embed = discord.Embed(
+                title="🎴 Cartas girando...",
                 description=(
                     f"Entrada: {self._chip_amount(CARTA_COST)}\n"
                     f"Jackpot: {self._chip_amount(CARTA_JACKPOT_CHIPS)}\n\n"
                     f"{board}"
                 ),
-                color=discord.Color.from_rgb(88, 101, 242),
+                color=discord.Color.from_rgb(111, 88, 242),
             )
+            if footer_text:
+                try:
+                    embed.set_footer(text=footer_text)
+                except Exception:
+                    pass
+            return embed
 
-        def _make_carta_result_embed(self, title: str, summary: str, board: str, *, success: bool, premium: bool = False) -> discord.Embed:
-            color = discord.Color.gold() if premium else (discord.Color.green() if success else discord.Color(OFF_COLOR))
-            return discord.Embed(
+        def _make_carta_result_embed(self, title: str, summary: str, board: str, *, success: bool, premium: bool = False, footer_text: str | None = None) -> discord.Embed:
+            color = discord.Color.from_rgb(255, 201, 74) if premium else (discord.Color.from_rgb(88, 179, 104) if success else discord.Color(OFF_COLOR))
+            embed = discord.Embed(
                 title=title,
                 description=f"{summary}\n\n{board}",
                 color=color,
             )
+            if footer_text:
+                try:
+                    embed.set_footer(text=footer_text)
+                except Exception:
+                    pass
+            return embed
 
         def _roll_carta_target_middle(self) -> list[object]:
             roll = random.random()
@@ -394,7 +508,7 @@ class GincanaRoletaMixin:
             joker_count = counts.get("🃏", 0)
             star_count = counts.get("⭐", 0)
             if symbols == ["⭐", "⭐", "⭐"]:
-                return "jackpot", CARTA_JACKPOT_CHIPS, "A linha do meio bateu o prêmio máximo."
+                return "jackpot", CARTA_JACKPOT_CHIPS, "A mão bateu o prêmio máximo."
             if counts.get("🃏", 0) == 3:
                 return "rare", 80, "Trinca de coringas na linha do meio."
             if any(count == 3 for symbol, count in counts.items() if symbol != "🃏"):
@@ -421,7 +535,7 @@ class GincanaRoletaMixin:
                 return "partial", 18, "Quase bateu a mão mais rara."
             return "loss", 0, "Essa mão não rendeu nada."
 
-        async def _animate_carta_spin(self, message: discord.Message, *, target_middle: list[object]) -> tuple[discord.Message | None, list[list[object]] | None]:
+        async def _animate_carta_spin(self, message: discord.Message, *, target_middle: list[object], footer_text: str | None = None) -> tuple[discord.Message | None, list[list[object]] | None]:
             columns = [self._build_carta_column() for _ in range(3)]
             for idx in range(3):
                 if columns[idx][1] == target_middle[idx]:
@@ -430,7 +544,7 @@ class GincanaRoletaMixin:
                         reroll = self._build_carta_column()
                     columns[idx] = reroll
             try:
-                spin_message = await message.channel.send(embed=self._make_carta_spin_embed(self._render_roleta_board(columns)))
+                spin_message = await message.channel.send(embed=self._make_carta_spin_embed(self._render_carta_board(columns), footer_text=footer_text))
             except Exception:
                 return None, None
             target_duration = 4.6
@@ -457,7 +571,7 @@ class GincanaRoletaMixin:
                             locked_columns.add(column_index)
                     else:
                         self._spin_carta_column(columns[column_index])
-                board = self._render_roleta_board(columns)
+                board = self._render_carta_board(columns)
                 if board == previous_board:
                     for column_index in range(3):
                         if column_index in locked_columns:
@@ -470,10 +584,10 @@ class GincanaRoletaMixin:
                                 locked_columns.add(column_index)
                         else:
                             self._spin_carta_column(columns[column_index])
-                    board = self._render_roleta_board(columns)
+                    board = self._render_carta_board(columns)
                 previous_board = board
                 try:
-                    await spin_message.edit(embed=self._make_carta_spin_embed(board))
+                    await spin_message.edit(embed=self._make_carta_spin_embed(board, footer_text=footer_text))
                 except Exception:
                     pass
             return spin_message, columns
@@ -491,6 +605,25 @@ class GincanaRoletaMixin:
                 return True
             if guild.id in self._roleta_running_guilds:
                 return True
+
+            is_staff = isinstance(message.author, discord.Member) and self._is_staff_member(message.author)
+            carta_state = await self._sync_carta_spin_window(guild.id, message.author.id)
+            if int(carta_state.get("available", 0) or 0) <= 0 and not is_staff:
+                try:
+                    wait_text = self._format_roleta_reset_time(float(carta_state.get("reset_in", 0.0) or 0.0))
+                    embed = discord.Embed(
+                        title="🎴 Sem giros por agora",
+                        description=f"Seus {CARTA_SPIN_LIMIT} giros de cartas acabaram. Reset em **{wait_text}**.",
+                        color=discord.Color(OFF_COLOR),
+                    )
+                    await message.channel.send(embed=embed)
+                except Exception:
+                    pass
+                return True
+            if int(carta_state.get("available", 0) or 0) > 0:
+                carta_state = await self._consume_carta_spin(guild.id, message.author.id)
+            carta_footer = self._carta_footer_text(state=carta_state, is_staff=is_staff)
+
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, CARTA_COST)
             if not paid:
                 try:
@@ -498,21 +631,23 @@ class GincanaRoletaMixin:
                 except Exception:
                     pass
                 return True
+
             self._roleta_running_guilds.add(guild.id)
             spinning_emoji = "<:emoji_63:1485041721573249135>"
-            win_emoji = "<:emoji_64:1485043651292827788>"
+            jackpot_emoji = "<:emoji_64:1485043651292827788>"
             lose_emoji = "<:emoji_65:1485043671077228786>"
             try:
                 await self._set_roleta_reaction(message, spinning_emoji, keep=True)
+                result_reaction = lose_emoji
                 target_middle = self._roll_carta_target_middle()
-                spin_message, final_columns = await self._animate_carta_spin(message, target_middle=target_middle)
+                spin_message, final_columns = await self._animate_carta_spin(message, target_middle=target_middle, footer_text=carta_footer)
                 if final_columns is None:
                     final_columns = [
                         self._build_carta_column(target_middle[0]),
                         self._build_carta_column(target_middle[1]),
                         self._build_carta_column(target_middle[2]),
                     ]
-                board = self._render_roleta_board(final_columns)
+                board = self._render_carta_board(final_columns)
                 middle = [column[1] for column in final_columns]
                 result_kind, result_amount, flavor = self._evaluate_carta_middle(middle)
                 if result_kind == "jackpot":
@@ -523,8 +658,8 @@ class GincanaRoletaMixin:
                     summary = f"{flavor}\nVocê ganhou {self._chip_amount(CARTA_JACKPOT_CHIPS)}."
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
-                    embed = self._make_carta_result_embed("🎴 JACKPOT!!", summary, board, success=True, premium=True)
-                    reacted_win = True
+                    embed = self._make_carta_result_embed("🎴 JACKPOT!!", summary, board, success=True, premium=True, footer_text=carta_footer)
+                    result_reaction = jackpot_emoji
                 elif result_kind in {"rare", "premium", "partial", "return"}:
                     weekly_map = {"rare": 8, "premium": 7, "partial": 4, "return": 2}
                     await self._record_game_played(guild.id, message.author.id, weekly_points=weekly_map.get(result_kind, 3))
@@ -536,16 +671,21 @@ class GincanaRoletaMixin:
                         line = f"{flavor}\nVocê recuperou {self._chip_text(result_amount, kind='gain')}."
                     if chip_note:
                         line = f"{chip_note}\n{line}"
-                    titles = {"rare": "🎴 Mão rara", "premium": "🎴 Coringa premiado", "partial": "🎴 Mão parcial", "return": "🎴 Giro de retorno"}
-                    embed = self._make_carta_result_embed(titles.get(result_kind, "🎴 Boa mão"), line, board, success=True, premium=result_kind in {"rare", "premium"})
-                    reacted_win = True
+                    titles = {"rare": "🎴 Mão rara", "premium": "🎴 Coringa premiado", "partial": "🎴 Boa mão", "return": "🎴 Giro de retorno"}
+                    embed = self._make_carta_result_embed(titles.get(result_kind, "🎴 Boa mão"), line, board, success=True, premium=result_kind in {"rare", "premium"}, footer_text=carta_footer)
+                    if result_kind in {"return", "premium"}:
+                        result_reaction = "🃏"
+                    elif result_kind == "rare":
+                        result_reaction = "⭐"
+                    else:
+                        result_reaction = "🍀"
                 else:
                     await self._record_game_played(guild.id, message.author.id, weekly_points=2)
                     summary = f"{flavor}\nVocê perdeu {self._chip_text(CARTA_COST, kind='loss')}."
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
-                    embed = self._make_carta_result_embed("🎴 Não foi dessa vez...", summary, board, success=False, premium=False)
-                    reacted_win = False
+                    embed = self._make_carta_result_embed("🎴 Não foi dessa vez...", summary, board, success=False, premium=False, footer_text=carta_footer)
+                    result_reaction = lose_emoji
                 delivered = False
                 if spin_message is not None:
                     try:
@@ -559,10 +699,7 @@ class GincanaRoletaMixin:
                     except Exception:
                         pass
                 await self._clear_roleta_reaction(message, spinning_emoji)
-                if reacted_win:
-                    await self._set_roleta_reaction(message, win_emoji, keep=True)
-                else:
-                    await self._set_roleta_reaction(message, lose_emoji, keep=True)
+                await self._set_roleta_reaction(message, result_reaction, keep=True)
                 return True
             finally:
                 self._roleta_running_guilds.discard(guild.id)
