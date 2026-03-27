@@ -606,12 +606,15 @@ class GincanaCorridaMixin:
                 pass
             return
 
-        if self._needs_negative_confirmation(guild.id, user.id, CORRIDA_STAKE):
+        needs_negative_confirm = self._needs_negative_confirmation(guild.id, user.id, CORRIDA_STAKE)
+        if needs_negative_confirm:
             confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, user.id, CORRIDA_STAKE, title="🐎 Confirmar entrada")
             if not confirmed:
                 return
 
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, CORRIDA_STAKE)
+        if needs_negative_confirm:
+            chip_note = None
         if not paid:
             try:
                 if interaction.response.is_done():
@@ -1294,7 +1297,15 @@ class GincanaCorridaMixin:
 
         voice_channel = getattr(getattr(message.author, "voice", None), "channel", None)
 
+        needs_negative_confirm = self._needs_negative_confirmation(guild.id, message.author.id, CORRIDA_STAKE)
+        if needs_negative_confirm:
+            confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, CORRIDA_STAKE, title="🐎 Confirmar entrada")
+            if not confirmed:
+                return True
+
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, CORRIDA_STAKE)
+        if needs_negative_confirm:
+            chip_note = None
         if not paid:
             try:
                 await message.channel.send(embed=self._make_embed("🐎 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False))

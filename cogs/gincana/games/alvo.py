@@ -707,11 +707,14 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             try: await interaction.response.send_message('Você já entrou nessa rodada e sua entrada ficou travada até o fim.', ephemeral=True)
             except Exception: pass
             return
-        if self._needs_negative_confirmation(guild.id, user.id, ALVO_STAKE):
+        needs_negative_confirm = self._needs_negative_confirmation(guild.id, user.id, ALVO_STAKE)
+        if needs_negative_confirm:
             confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, user.id, ALVO_STAKE, title="🎯 Confirmar entrada")
             if not confirmed:
                 return
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE)
+        if needs_negative_confirm:
+            chip_note = None
         if not paid:
             try:
                 if interaction.response.is_done():
@@ -922,7 +925,14 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             return True
         if self._get_target_session(guild.id) is not None:
             return True
+        needs_negative_confirm = self._needs_negative_confirmation(guild.id, message.author.id, ALVO_STAKE)
+        if needs_negative_confirm:
+            confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, ALVO_STAKE, title="🎯 Confirmar entrada")
+            if not confirmed:
+                return True
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ALVO_STAKE)
+        if needs_negative_confirm:
+            chip_note = None
         if not paid:
             try: await message.channel.send(embed=self._make_embed('🎯 Saldo insuficiente', chip_note or 'Você não tem saldo suficiente.', ok=False))
             except Exception: pass

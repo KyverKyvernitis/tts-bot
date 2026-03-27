@@ -176,12 +176,15 @@ class GincanaBuckshotMixin:
                     pass
                 return
 
-            if self._needs_negative_confirmation(guild.id, member.id, BUCKSHOT_STAKE):
+            needs_negative_confirm = self._needs_negative_confirmation(guild.id, member.id, BUCKSHOT_STAKE)
+            if needs_negative_confirm:
                 confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, member.id, BUCKSHOT_STAKE, title="💥 Confirmar entrada")
                 if not confirmed:
                     return
 
             paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
+            if needs_negative_confirm:
+                note = None
             if not paid:
                 try:
                     await interaction.response.send_message(note or "Você não tem saldo suficiente para entrar.", ephemeral=True)
@@ -479,11 +482,14 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             try: await interaction.response.send_message('Você já entrou nessa rodada e sua vaga está travada.', ephemeral=True)
             except Exception: pass
             return
-        if self._needs_negative_confirmation(guild.id, member.id, BUCKSHOT_STAKE):
+        needs_negative_confirm = self._needs_negative_confirmation(guild.id, member.id, BUCKSHOT_STAKE)
+        if needs_negative_confirm:
             confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, member.id, BUCKSHOT_STAKE, title="💥 Confirmar entrada")
             if not confirmed:
                 return
         paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
+        if needs_negative_confirm:
+            note = None
         if not paid:
             try:
                 if interaction.response.is_done():
@@ -662,7 +668,14 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             return True
         if self._get_buckshot_session(guild.id) is not None:
             return True
+        needs_negative_confirm = self._needs_negative_confirmation(guild.id, message.author.id, BUCKSHOT_STAKE)
+        if needs_negative_confirm:
+            confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, BUCKSHOT_STAKE, title="💥 Confirmar entrada")
+            if not confirmed:
+                return True
         paid, _balance, note = await self._try_consume_chips(guild.id, message.author.id, BUCKSHOT_STAKE)
+        if needs_negative_confirm:
+            note = None
         if not paid:
             try: await message.channel.send(embed=self._make_embed('💥 Saldo insuficiente', note or 'Você não tem saldo suficiente para entrar.', ok=False))
             except Exception: pass

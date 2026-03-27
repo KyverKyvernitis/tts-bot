@@ -681,7 +681,14 @@ class GincanaRoletaMixin:
                 carta_state = await self._consume_carta_spin(guild.id, message.author.id)
             carta_footer = self._carta_footer_text(state=carta_state, is_staff=is_staff)
 
+            needs_negative_confirm = self._needs_negative_confirmation(guild.id, message.author.id, CARTA_COST)
+            if needs_negative_confirm:
+                confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, CARTA_COST, title="🎴 Confirmar aposta")
+                if not confirmed:
+                    return True
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, CARTA_COST)
+            if needs_negative_confirm:
+                chip_note = None
             if not paid:
                 try:
                     await message.channel.send(embed=self._make_embed("🎴 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False))
@@ -807,7 +814,14 @@ class GincanaRoletaMixin:
             voice_channel = getattr(author_voice, "channel", None)
             targets = self._resolve_targets(guild, voice_channel) if isinstance(voice_channel, discord.VoiceChannel) else []
 
+            needs_negative_confirm = self._needs_negative_confirmation(guild.id, message.author.id, ROLETA_COST)
+            if needs_negative_confirm:
+                confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, ROLETA_COST, title="🎰 Confirmar aposta")
+                if not confirmed:
+                    return True
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ROLETA_COST)
+            if needs_negative_confirm:
+                chip_note = None
             if not paid:
                 try:
                     await message.channel.send(embed=self._make_embed("🎰 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False))
