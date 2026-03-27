@@ -1074,16 +1074,13 @@ def _settingsdb_get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) ->
     for (gid, uid), doc in self.user_cache.items():
         if gid != guild_id:
             continue
+        if not bool(doc.get("has_chip_activity", False)):
+            continue
         try:
             chips = max(0, int(doc.get("chips", default_chips) or default_chips))
         except Exception:
             chips = default_chips
-        stats = self.get_user_game_stats(guild_id, uid)
-        has_any_game_stat = any(int(v or 0) > 0 for v in stats.values())
-        has_chip_movement = chips != default_chips
-        if not has_any_game_stat and not has_chip_movement:
-            continue
-        rows.append({"user_id": uid, "chips": chips})
+        rows.append({"user_id": int(uid), "chips": chips})
     rows.sort(key=lambda item: (-item["chips"], item["user_id"]))
     return rows[: max(1, int(limit))]
 
