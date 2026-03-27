@@ -158,6 +158,43 @@ class GincanaCog(dcommands.Cog, GincanaCore):
 
 
 
+
+
+    @dcommands.command(name="poker")
+    async def poker_command(self, ctx: dcommands.Context, opponent: discord.Member | None = None):
+        if ctx.guild is None:
+            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            return
+        if opponent is None:
+            await ctx.reply(embed=self._make_embed("🃏 Poker", "Use `poker @usuário` para iniciar uma partida.", ok=False), mention_author=False)
+            return
+        fake = type("_Msg", (), {})()
+        fake.guild = ctx.guild
+        fake.author = ctx.author
+        fake.channel = ctx.channel
+        fake.content = f"poker {opponent.mention}"
+        fake.mentions = [opponent]
+        handled = await self._handle_poker_trigger(fake)
+        if not handled:
+            await ctx.reply(embed=self._make_embed("🃏 Poker", "Não foi possível iniciar a partida agora.", ok=False), mention_author=False)
+
+    @dcommands.command(name="truco")
+    async def truco_command(self, ctx: dcommands.Context, opponent: discord.Member | None = None):
+        if ctx.guild is None:
+            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            return
+        if opponent is None:
+            await ctx.reply(embed=self._make_embed("🃏 Truco Paulista", "Use `truco @usuário` para desafiar alguém.", ok=False), mention_author=False)
+            return
+        fake = type("_Msg", (), {})()
+        fake.guild = ctx.guild
+        fake.author = ctx.author
+        fake.channel = ctx.channel
+        fake.content = f"truco {opponent.mention}"
+        fake.mentions = [opponent]
+        handled = await self._handle_truco_trigger(fake)
+        if not handled:
+            await ctx.reply(embed=self._make_embed("🃏 Truco Paulista", "Não foi possível iniciar a mão agora.", ok=False), mention_author=False)
     @dcommands.command(name="gincanahelp", aliases=["helpgincana", "jogoshelp"])
     async def gincanahelp(self, ctx: dcommands.Context):
         if ctx.guild is None:
