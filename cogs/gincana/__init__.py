@@ -53,7 +53,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return
-        claimed, new_balance, bonus, streak = await self._claim_daily_bonus_with_activity(ctx.guild.id, ctx.author.id)
+        claimed, new_balance, bonus, bonus_bonus, streak = await self._claim_daily_bonus_with_activity(ctx.guild.id, ctx.author.id)
         if not claimed:
             await ctx.reply(embed=self._make_embed("🎁 Daily já resgatado", f"Você já pegou seu bônus de hoje. Streak atual: **{streak}**.", ok=False), mention_author=False)
             return
@@ -66,10 +66,11 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             title="🎁 Bônus diário resgatado",
             description=(
                 f"Você ganhou {self._chip_amount(bonus)}\n"
+                f"Você ganhou {self._bonus_chip_amount(bonus_bonus)} em fichas bônus\n"
                 f"{spin_text}\n"
                 f"{carta_spin_text}\n"
                 f"Streak atual: **{streak}**\n"
-                f"Novo saldo: {self._chip_amount(new_balance)}"
+                f"Saldo atual: {self._format_compact_chip_balance(ctx.guild.id, ctx.author.id)}"
             ),
             color=discord.Color.green(),
         )
@@ -83,7 +84,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return
         used, new_balance, note = await self._try_use_chip_recharge(ctx.guild.id, ctx.author.id)
         title = "🔋 Recarga concluída" if used else "🔋 Recarga indisponível"
-        description = f"{note}\nSaldo atual: {self._chip_amount(new_balance)}"
+        description = f"{note}\nSaldo atual: {self._format_compact_chip_balance(ctx.guild.id, ctx.author.id)}"
         await ctx.reply(embed=self._make_embed(title, description, ok=used), mention_author=False)
 
     @dcommands.command(name="resetficha", aliases=["resetfichas", "rficha"])
@@ -101,8 +102,8 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             title="♻️ Fichas resetadas",
             description=(
                 f"Jogador: {target.mention}\n"
-                f"Novo saldo: {self._chip_amount(new_balance)}\n"
-                "A recarga manual por **recarga** tem cooldown de **12 horas** e só libera abaixo de **15** fichas."
+                f"Novo saldo: {self._format_compact_chip_balance(ctx.guild.id, target.id)}\n"
+                "A recarga manual por **recarga** entrega fichas bônus, tem cooldown de **12 horas** e só libera abaixo de **15** de saldo total."
             ),
             color=discord.Color.green(),
         )
@@ -148,7 +149,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             description=(
                 f"Perfis afetados: **{total}**\n"
                 f"Novo saldo padrão: **{CHIPS_DEFAULT} {self._CHIP_EMOJI}**\n"
-                "Resumo, taxa de vitórias, histórico, recarga e login diário foram resetados só para quem já tinha movimentação na gincana."
+                "Resumo, taxa de vitórias, histórico, fichas bônus, recarga e login diário foram resetados só para quem já tinha movimentação."
             ),
             color=discord.Color.green(),
         )
@@ -169,9 +170,9 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 f"• `{ctx.clean_prefix}ficha` — mostra seu saldo e seus destaques\n"
                 f"• `{ctx.clean_prefix}daily` — resgata o bônus diário\n"
-                "• `recarga` — restaura o saldo quando ele ficar abaixo de 15\n"
+                "• `recarga` — entrega fichas bônus quando seu saldo total fica abaixo de 15\n"
                 f"• `{ctx.clean_prefix}rank` — ranking dos maiores saldos\n"
-                "• `pay @usuário valor` — transfere fichas\n\n"
+                "• `pay @usuário valor` — transfere fichas normais\n\n"
                 "🎮 **Jogos**\n"
                 "• `roleta` — aposta rápida com jackpot\n"
                 "• `buckshot` — rodada de sobrevivência\n"
