@@ -5,7 +5,6 @@ from typing import Any
 
 import discord
 
-from config import GUILD_IDS
 from ..constants import POKER_BUY_IN
 
 
@@ -851,8 +850,6 @@ class GincanaPokerMixin:
         guild = message.guild
         if guild is None:
             return False
-        if GUILD_IDS and guild.id not in GUILD_IDS:
-            return True
 
         opponent = None
         for mentioned in message.mentions:

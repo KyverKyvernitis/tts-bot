@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 
 import discord
 
-from config import GUILD_IDS
 
 TRUCO_ENTRY = 10
 TRUCO_BONUS_REWARD = 10
@@ -337,7 +336,7 @@ class GincanaTrucoMixin:
 
     async def _handle_truco_trigger(self, message: discord.Message) -> bool:
         guild = message.guild
-        if guild is None or (GUILD_IDS and guild.id not in GUILD_IDS):
+        if guild is None:
             return False
         raw = str(message.content or "").strip()
         if not _TRUCO_TRIGGER_RE.match(raw):
