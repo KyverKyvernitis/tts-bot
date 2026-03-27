@@ -13,6 +13,7 @@ class _NegativeDebtConfirmView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.owner_id = int(owner_id)
         self.confirmed = False
+        self.message = None
 
     @discord.ui.button(label="Continuar", style=discord.ButtonStyle.danger)
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -36,6 +37,14 @@ class _NegativeDebtConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="Entrada cancelada.", view=None)
         self.stop()
 
+    async def on_timeout(self):
+        try:
+            for child in self.children:
+                child.disabled = True
+            if self.message is not None:
+                await self.message.edit(view=None)
+        except Exception:
+            pass
 
 
 class GincanaBase:
@@ -447,18 +456,52 @@ class GincanaBase:
         debt_increases = chips < 0 and projected_chips < chips
         return bonus <= 0 and (first_negative or debt_increases)
 
+    async def _confirm_negative_via_message(self, channel: discord.abc.Messageable, *, user_id: int, title: str, note: str) -> bool:
+        view = _NegativeDebtConfirmView(owner_id=user_id)
+        embed = self._make_embed(title, note, ok=False)
+        sent = None
+        try:
+            sent = await channel.send(embed=embed, view=view)
+            view.message = sent
+            await view.wait()
+            return bool(view.confirmed)
+        finally:
+            if sent is not None:
+                try:
+                    await sent.delete()
+                except Exception:
+                    pass
+
     async def _confirm_negative_ephemeral(self, interaction: discord.Interaction, guild_id: int, user_id: int, amount: int, *, title: str = "⚠️ Confirmar entrada") -> bool:
         note = self._negative_transition_note(guild_id, user_id, amount)
         if not note:
             return True
         view = _NegativeDebtConfirmView(owner_id=user_id)
         embed = self._make_embed(title, note, ok=False)
-        if interaction.response.is_done():
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        else:
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        await view.wait()
-        return bool(view.confirmed)
+        sent = None
+        try:
+            if interaction.response.is_done():
+                sent = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
+            else:
+                await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+                try:
+                    sent = await interaction.original_response()
+                except Exception:
+                    sent = None
+            view.message = sent
+            await view.wait()
+            return bool(view.confirmed)
+        except Exception:
+            channel = getattr(interaction, "channel", None)
+            if channel is None:
+                return False
+            return await self._confirm_negative_via_message(channel, user_id=user_id, title=title, note=note)
+
+    async def _confirm_negative_from_message(self, message: discord.Message, guild_id: int, user_id: int, amount: int, *, title: str = "⚠️ Confirmar entrada") -> bool:
+        note = self._negative_transition_note(guild_id, user_id, amount)
+        if not note:
+            return True
+        return await self._confirm_negative_via_message(message.channel, user_id=user_id, title=title, note=note)
 
     def _insufficient_chips_text(self, guild_id: int, user_id: int, amount: int) -> str:
         state = self._negative_cost_projection(guild_id, user_id, amount)
