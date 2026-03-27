@@ -192,13 +192,17 @@ class GincanaBase:
 
     async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
         await self._set_user_chips_value(guild_id, user_id, int(amount), mark_activity=True)
-        await self.db.set_user_chip_reset_at(guild_id, user_id, 0.0)
+        doc = self.db._get_user_doc(guild_id, user_id)
+        doc["last_chip_reset_at"] = 0.0
+        doc["chip_recharge_manual_initialized"] = False
+        await self.db._save_user_doc(guild_id, user_id, doc)
         return int(amount)
 
     async def _force_full_reset_ficha_profile(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
         doc = self.db._get_user_doc(guild_id, user_id)
         doc["chips"] = max(0, int(amount))
         doc["last_chip_reset_at"] = 0.0
+        doc["chip_recharge_manual_initialized"] = False
         doc["daily_last_claim_key"] = ""
         doc["daily_streak"] = 0
         doc["weekly_points_week"] = ""
@@ -272,9 +276,11 @@ class GincanaBase:
         import time
 
         chips = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
+        doc = getattr(self.db, "user_cache", {}).get((guild_id, user_id), {}) or {}
+        initialized = bool(doc.get("chip_recharge_manual_initialized", False))
         last_reset = self.db.get_user_chip_reset_at(guild_id, user_id)
         now = time.time()
-        if last_reset <= 0:
+        if not initialized or last_reset <= 0:
             remaining = 0.0
         else:
             remaining = max(0.0, (float(last_reset) + float(CHIPS_RESET_SECONDS)) - now)
@@ -285,6 +291,7 @@ class GincanaBase:
             "remaining": float(remaining),
             "below_threshold": bool(below_threshold),
             "available": bool(available),
+            "initialized": bool(initialized),
         }
 
     def _chip_recharge_text(self, guild_id: int, user_id: int) -> str:
@@ -321,7 +328,10 @@ class GincanaBase:
                 f"Quando liberar, ela restaura seu saldo para {self._chip_amount(CHIPS_DEFAULT)}."
             )
         await self._set_user_chips_value(guild_id, user_id, int(CHIPS_DEFAULT), mark_activity=True)
-        await self.db.set_user_chip_reset_at(guild_id, user_id, __import__("time").time())
+        doc = self.db._get_user_doc(guild_id, user_id)
+        doc["last_chip_reset_at"] = float(__import__("time").time())
+        doc["chip_recharge_manual_initialized"] = True
+        await self.db._save_user_doc(guild_id, user_id, doc)
         return True, int(CHIPS_DEFAULT), (
             f"Seu saldo foi restaurado para {self._chip_amount(CHIPS_DEFAULT)} usando **recarga**."
         )
