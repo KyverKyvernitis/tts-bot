@@ -8,6 +8,36 @@ from ..constants import CHIPS_DEFAULT, CHIPS_INITIAL, CHIPS_RECHARGE_THRESHOLD, 
 from db import SettingsDB
 
 
+class _NegativeDebtConfirmView(discord.ui.View):
+    def __init__(self, *, owner_id: int, timeout: float = 20.0):
+        super().__init__(timeout=timeout)
+        self.owner_id = int(owner_id)
+        self.confirmed = False
+
+    @discord.ui.button(label="Continuar", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if int(interaction.user.id) != self.owner_id:
+            await interaction.response.send_message("Essa confirmação não é para você.", ephemeral=True)
+            return
+        self.confirmed = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if int(interaction.user.id) != self.owner_id:
+            await interaction.response.send_message("Essa confirmação não é para você.", ephemeral=True)
+            return
+        self.confirmed = False
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Entrada cancelada.", view=None)
+        self.stop()
+
+
+
 class GincanaBase:
     _GINCANA_SUFFIXES = (" [ultra-censurado]", " [censurado]", " [antitts]")
     _CHIP_EMOJI = "<:emoji_63:1485041721573249135>"
@@ -368,20 +398,68 @@ class GincanaBase:
         description = f"{note}\nSaldo atual: {self._format_compact_chip_balance(guild_id, user_id)}"
         return self._make_embed(title, description, ok=used)
 
-    def _insufficient_chips_text(self, guild_id: int, user_id: int, amount: int) -> str:
+    def _negative_cost_projection(self, guild_id: int, user_id: int, amount: int) -> dict:
         chips = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
         bonus = self._get_user_bonus_chips(guild_id, user_id)
-        projected_chips, _projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, amount)
-        if projected_chips >= -self._MAX_CHIP_DEBT:
-            if chips < 0 and bonus <= 0:
+        projected_chips, projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, amount)
+        return {
+            "chips": int(chips),
+            "bonus": int(bonus),
+            "projected_chips": int(projected_chips),
+            "projected_bonus": int(projected_bonus),
+        }
+
+    def _negative_transition_note(self, guild_id: int, user_id: int, amount: int) -> str | None:
+        state = self._negative_cost_projection(guild_id, user_id, amount)
+        chips = int(state["chips"])
+        bonus = int(state["bonus"])
+        projected_chips = int(state["projected_chips"])
+        if projected_chips >= 0:
+            return None
+        first_negative = chips >= 0 and projected_chips < 0
+        debt_increases = chips < 0 and projected_chips < chips
+        if first_negative:
+            return (
+                f"Se continuar, você vai ser negativado. "
+                f"Você vai ficar com **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
+            )
+        if debt_increases:
+            if bonus <= 0:
                 return (
                     f"Você já está negativado e não tem fichas bônus. "
                     f"Se continuar, sua dívida vai para **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
                 )
             return (
-                f"Se continuar, você vai ser negativado. "
-                f"Você vai ficar com **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
+                f"As fichas bônus não cobrem toda essa aposta. "
+                f"Sua dívida vai para **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
             )
+        return None
+
+    def _needs_negative_confirmation(self, guild_id: int, user_id: int, amount: int) -> bool:
+        state = self._negative_cost_projection(guild_id, user_id, amount)
+        return int(state["chips"]) < 0 and int(state["bonus"]) <= 0 and int(state["projected_chips"]) < int(state["chips"])
+
+    async def _confirm_negative_ephemeral(self, interaction: discord.Interaction, guild_id: int, user_id: int, amount: int, *, title: str = "⚠️ Confirmar entrada") -> bool:
+        note = self._negative_transition_note(guild_id, user_id, amount)
+        if not note:
+            return True
+        view = _NegativeDebtConfirmView(owner_id=user_id)
+        embed = self._make_embed(title, note, ok=False)
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await view.wait()
+        return bool(view.confirmed)
+
+    def _insufficient_chips_text(self, guild_id: int, user_id: int, amount: int) -> str:
+        state = self._negative_cost_projection(guild_id, user_id, amount)
+        chips = int(state["chips"])
+        bonus = int(state["bonus"])
+        projected_chips = int(state["projected_chips"])
+        note = self._negative_transition_note(guild_id, user_id, amount)
+        if projected_chips >= -self._MAX_CHIP_DEBT and note:
+            return note
         state = self._chip_recharge_state(guild_id, user_id)
         remaining = float(state["remaining"])
         total = chips + bonus
@@ -496,16 +574,10 @@ class GincanaBase:
     async def _try_consume_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
         projected_chips, _projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, amount)
         current_before = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
-        bonus_before = self._get_user_bonus_chips(guild_id, user_id)
+        note = self._negative_transition_note(guild_id, user_id, amount)
         if projected_chips < -self._MAX_CHIP_DEBT:
             return False, current_before, self._insufficient_chips_text(guild_id, user_id, amount)
         new_balance = await self._change_user_chips(guild_id, user_id, -int(amount), mark_activity=True)
-        note = None
-        if new_balance < 0:
-            if current_before < 0 and bonus_before <= 0:
-                note = f"Você já está negativado e não tem fichas bônus. Se continuar, sua dívida vai para **{new_balance}** {self._CHIP_LOSS_EMOJI}."
-            else:
-                note = f"Se continuar, você vai ser negativado. Você vai ficar com **{new_balance}** {self._CHIP_LOSS_EMOJI}."
         return True, new_balance, note
 
     async def _ensure_action_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
@@ -513,12 +585,7 @@ class GincanaBase:
         current = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
         if projected_chips < -self._MAX_CHIP_DEBT:
             return False, current, self._insufficient_chips_text(guild_id, user_id, amount)
-        note = None
-        if projected_chips < 0:
-            if current < 0 and self._get_user_bonus_chips(guild_id, user_id) <= 0:
-                note = f"Você já está negativado e não tem fichas bônus. Se continuar, sua dívida vai para **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
-            else:
-                note = f"Se continuar, você vai ser negativado. Você vai ficar com **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
+        note = self._negative_transition_note(guild_id, user_id, amount)
         return True, current, note
 
     async def _reject_if_not_allowed_guild(self, interaction: discord.Interaction) -> bool:
