@@ -66,7 +66,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             title="🎁 Bônus diário resgatado",
             description=(
                 f"Você ganhou {self._chip_amount(bonus)}\n"
-                f"Você ganhou {self._bonus_chip_amount(bonus_bonus)} em fichas bônus\n"
+                f"Você ganhou {self._bonus_chip_amount(bonus_bonus)} em fichas bônus\nAs fichas bônus serão usadas antes das normais.\n"
                 f"{spin_text}\n"
                 f"{carta_spin_text}\n"
                 f"Streak atual: **{streak}**\n"
@@ -84,7 +84,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return
         used, new_balance, note = await self._try_use_chip_recharge(ctx.guild.id, ctx.author.id)
         title = "🔋 Recarga concluída" if used else "🔋 Recarga indisponível"
-        description = f"{note}\nSaldo atual: {self._format_compact_chip_balance(ctx.guild.id, ctx.author.id)}"
+        description = (f"{note}\nAs fichas bônus serão usadas antes das normais.\nSaldo atual: {self._format_compact_chip_balance(ctx.guild.id, ctx.author.id)}" if used else f"{note}\nSaldo atual: {self._format_compact_chip_balance(ctx.guild.id, ctx.author.id)}")
         await ctx.reply(embed=self._make_embed(title, description, ok=used), mention_author=False)
 
     @dcommands.command(name="resetficha", aliases=["resetfichas", "rficha"])
@@ -170,9 +170,9 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 f"• `{ctx.clean_prefix}ficha` — mostra seu saldo e seus destaques\n"
                 f"• `{ctx.clean_prefix}daily` — resgata o bônus diário\n"
-                "• `recarga` — entrega fichas bônus quando seu saldo total fica abaixo de 15\n"
+                "• `recarga` — entrega fichas bônus quando seu saldo total fica abaixo de 15\n• `pay @usuário valor` — transfere só fichas normais\n• fichas bônus saem primeiro nas apostas\n• ganhos quitam a dívida antes de voltar ao saldo normal\n"
                 f"• `{ctx.clean_prefix}rank` — ranking dos maiores saldos\n"
-                "• `pay @usuário valor` — transfere fichas normais\n\n"
+                "\n"
                 "🎮 **Jogos**\n"
                 "• `roleta` — aposta rápida com jackpot\n"
                 "• `buckshot` — rodada de sobrevivência\n"
