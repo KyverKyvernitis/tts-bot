@@ -79,15 +79,15 @@ class GincanaPaymentMixin:
         payer_chips = self.db.get_user_chips(guild.id, message.author.id, default=CHIPS_INITIAL)
         target_chips = self.db.get_user_chips(guild.id, target.id, default=CHIPS_INITIAL)
         if payer_chips < 0:
-            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"Você está negativado em **{payer_chips}** {self._CHIP_LOSS_EMOJI} e não pode fazer transferências.", ok=False))
+            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"Você está negativado em **{payer_chips}** {self._CHIP_LOSS_EMOJI} e não pode fazer transferências enquanto estiver no vermelho.", ok=False))
             self._payment_sessions.pop((guild.id, message.author.id), None)
             return True
         if target_chips < 0:
-            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"{target.mention} está negativado e não pode participar de transferências agora.", ok=False))
+            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"{target.mention} está negativado e não pode receber transferências agora.", ok=False))
             self._payment_sessions.pop((guild.id, message.author.id), None)
             return True
         if payer_chips < total:
-            await message.channel.send(embed=self._make_embed("💸 Saldo insuficiente", "Esse pagamento usa só fichas normais. Fichas bônus não podem ser transferidas.", ok=False))
+            await message.channel.send(embed=self._make_embed("💸 Saldo insuficiente", "Esse pagamento usa só fichas normais. Fichas bônus não entram no pay.", ok=False))
             self._payment_sessions.pop((guild.id, message.author.id), None)
             return True
 
@@ -229,10 +229,10 @@ class GincanaPaymentMixin:
             await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} está negativado e não pode fazer transferências.")
             return
         if target_chips < 0:
-            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{target.mention} está negativado e não pode participar de transferências agora.")
+            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{target.mention} está negativado e não pode receber transferências agora.")
             return
         if payer_chips < total:
-            await self._expire_payment_session(session_key, title="💸 Saldo insuficiente", reason="Esse pagamento usa só fichas normais. Fichas bônus não podem ser transferidas.")
+            await self._expire_payment_session(session_key, title="💸 Saldo insuficiente", reason="Esse pagamento usa só fichas normais. Fichas bônus não entram no pay.")
             return
 
         await self._transfer_user_chips(guild.id, payer.id, target.id, total=total, net_amount=net_amount)

@@ -326,16 +326,16 @@ class GincanaBase:
         if total >= CHIPS_RECHARGE_THRESHOLD:
             return (
                 f"Use **recarga** quando seu saldo total ficar abaixo de **{CHIPS_RECHARGE_THRESHOLD}**. "
-                f"A recarga entrega {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus e tem cooldown de **{CHIPS_RESET_HOURS} horas**."
+                f"Ela entrega {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus e tem cooldown de **{CHIPS_RESET_HOURS} horas**."
             )
         if remaining > 0:
             return (
                 f"Disponível em **{self._format_chip_reset_remaining(remaining)}** com o trigger **recarga**. "
-                f"Seu saldo total está abaixo de **{CHIPS_RECHARGE_THRESHOLD}** e a recarga entrega {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus."
+                f"Seu saldo total já está abaixo de **{CHIPS_RECHARGE_THRESHOLD}** e ela vai entregar {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus."
             )
         return (
             f"Disponível agora em **recarga**. Seu saldo total está abaixo de **{CHIPS_RECHARGE_THRESHOLD}** "
-            f"e a recarga entrega {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus."
+            f"e ela entrega {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus."
         )
 
     async def _try_use_chip_recharge(self, guild_id: int, user_id: int) -> tuple[bool, int, str]:
@@ -351,7 +351,7 @@ class GincanaBase:
         if remaining > 0:
             return False, chips, (
                 f"Sua **recarga** volta em **{self._format_chip_reset_remaining(remaining)}**. "
-                f"Quando liberar, ela entrega {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus."
+                f"Quando liberar, ela vai entregar {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus."
             )
         await self._change_user_bonus_chips(guild_id, user_id, int(CHIPS_DEFAULT), mark_activity=True)
         doc = self.db._get_user_doc(guild_id, user_id)
@@ -359,7 +359,7 @@ class GincanaBase:
         doc["chip_recharge_manual_initialized"] = True
         await self.db._save_user_doc(guild_id, user_id, doc)
         return True, self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL), (
-            f"Você recebeu {self._bonus_chip_amount(CHIPS_DEFAULT)} usando **recarga**."
+            f"Você recebeu {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus usando **recarga**."
         )
 
 
@@ -373,6 +373,11 @@ class GincanaBase:
         bonus = self._get_user_bonus_chips(guild_id, user_id)
         projected_chips, _projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, amount)
         if projected_chips >= -self._MAX_CHIP_DEBT:
+            if chips < 0 and bonus <= 0:
+                return (
+                    f"Você já está negativado e não tem fichas bônus. "
+                    f"Se continuar, sua dívida vai para **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
+                )
             return (
                 f"Se continuar, você vai ser negativado. "
                 f"Você vai ficar com **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
@@ -440,8 +445,13 @@ class GincanaBase:
         )
 
         balance_value = self._format_primary_chip_balance(guild_id, member.id)
+        notes: list[str] = []
         if bonus_chips > 0:
-            balance_value += "\nFichas bônus são bônus e são gastas primeiro."
+            notes.append("As fichas bônus serão usadas antes das normais.")
+        if chips < 0:
+            notes.append("Seus ganhos vão quitar a dívida primeiro.")
+        if notes:
+            balance_value += "\n" + "\n".join(notes)
         embed.add_field(name=f"{self._CHIP_EMOJI} Fichas", value=balance_value, inline=False)
         embed.add_field(name="⏳ Recarga", value=recarga, inline=False)
         embed.add_field(name="🎁 Login diário", value=self._daily_bonus_text(guild_id, member.id), inline=False)
@@ -485,12 +495,17 @@ class GincanaBase:
 
     async def _try_consume_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
         projected_chips, _projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, amount)
+        current_before = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
+        bonus_before = self._get_user_bonus_chips(guild_id, user_id)
         if projected_chips < -self._MAX_CHIP_DEBT:
-            return False, self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL), self._insufficient_chips_text(guild_id, user_id, amount)
+            return False, current_before, self._insufficient_chips_text(guild_id, user_id, amount)
         new_balance = await self._change_user_chips(guild_id, user_id, -int(amount), mark_activity=True)
         note = None
         if new_balance < 0:
-            note = f"Se continuar, você vai ser negativado. Você vai ficar com **{new_balance}** {self._CHIP_LOSS_EMOJI}."
+            if current_before < 0 and bonus_before <= 0:
+                note = f"Você já está negativado e não tem fichas bônus. Se continuar, sua dívida vai para **{new_balance}** {self._CHIP_LOSS_EMOJI}."
+            else:
+                note = f"Se continuar, você vai ser negativado. Você vai ficar com **{new_balance}** {self._CHIP_LOSS_EMOJI}."
         return True, new_balance, note
 
     async def _ensure_action_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
@@ -500,7 +515,10 @@ class GincanaBase:
             return False, current, self._insufficient_chips_text(guild_id, user_id, amount)
         note = None
         if projected_chips < 0:
-            note = f"Se continuar, você vai ser negativado. Você vai ficar com **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
+            if current < 0 and self._get_user_bonus_chips(guild_id, user_id) <= 0:
+                note = f"Você já está negativado e não tem fichas bônus. Se continuar, sua dívida vai para **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
+            else:
+                note = f"Se continuar, você vai ser negativado. Você vai ficar com **{projected_chips}** {self._CHIP_LOSS_EMOJI}."
         return True, current, note
 
     async def _reject_if_not_allowed_guild(self, interaction: discord.Interaction) -> bool:
