@@ -176,6 +176,11 @@ class GincanaBuckshotMixin:
                     pass
                 return
 
+            if self._needs_negative_confirmation(guild.id, member.id, BUCKSHOT_STAKE):
+                confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, member.id, BUCKSHOT_STAKE, title="💥 Confirmar entrada")
+                if not confirmed:
+                    return
+
             paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
             if not paid:
                 try:
