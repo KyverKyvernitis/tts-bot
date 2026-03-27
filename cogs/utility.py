@@ -402,7 +402,7 @@ class Utility(commands.Cog):
             name="🎁 Daily",
             value=(
                 f"**Comando:** `{bot_prefix}daily`\n"
-                "**Uso:** resgata fichas normais, +10 fichas bônus e libera os giros extras do dia."
+                "**Uso:** resgata fichas normais, +10 fichas bônus e libera os giros extras do dia. As fichas bônus saem antes das normais."
             ),
             inline=False,
         )
