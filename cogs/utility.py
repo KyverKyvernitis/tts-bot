@@ -383,8 +383,6 @@ class Utility(commands.Cog):
         pages.append(utility_page)
 
         fichas_page = discord.Embed(
-            title="💰 Fichas",
-            description="Comandos rápidos para acompanhar saldo, bônus, recarga e ranking.",
             color=discord.Color.orange(),
             timestamp=discord.utils.utcnow(),
         )
@@ -402,7 +400,7 @@ class Utility(commands.Cog):
             name="🎁 Daily",
             value=(
                 f"**Comando:** `{bot_prefix}daily`\n"
-                "**Uso:** resgata o bônus diário, mantém sua streak e libera os giros extras do dia."
+                "**Uso:** resgata o bônus diário, mantém sua sequência e libera os giros extras do dia."
             ),
             inline=False,
         )
@@ -428,8 +426,6 @@ class Utility(commands.Cog):
         pages.append(fichas_page)
 
         jogos_page = discord.Embed(
-            title="🎮 Jogos",
-            description="Triggers e comandos dos jogos de fichas, em um lugar só.",
             color=discord.Color.dark_magenta(),
             timestamp=discord.utils.utcnow(),
         )
@@ -438,7 +434,7 @@ class Utility(commands.Cog):
             value=(
                 "**Trigger:** `roleta`\n"
                 "**Trigger:** `carta` ou `cartas`\n"
-                "**Uso:** abre uma rodada rápida com limite diário de giros."
+                "**Uso:** faz uma rodada rápida. Cada uma tem seu próprio limite de giros."
             ),
             inline=False,
         )
@@ -448,7 +444,7 @@ class Utility(commands.Cog):
                 "**Trigger:** `buckshot`\n"
                 "**Trigger:** `alvo`\n"
                 "**Trigger:** `corrida`\n"
-                "**Uso:** abre uma rodada para entrar, disputar e receber prêmio no fim."
+                "**Uso:** abre uma rodada para entrar e disputar o prêmio no fim."
             ),
             inline=False,
         )
@@ -456,7 +452,7 @@ class Utility(commands.Cog):
             name="🃏 Poker",
             value=(
                 "**Trigger:** `poker`\n"
-                "**Uso:** inicia a mesa de poker com entrada própria."
+                "**Uso:** abre a mesa de poker com entrada própria."
             ),
             inline=False,
         )
