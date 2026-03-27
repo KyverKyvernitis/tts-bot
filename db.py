@@ -1120,3 +1120,116 @@ SettingsDB.get_user_game_stats = _settingsdb_get_user_game_stats
 SettingsDB.add_user_game_stat = _settingsdb_add_user_game_stat
 SettingsDB.get_chip_leaderboard = _settingsdb_get_chip_leaderboard
 SettingsDB.get_game_stat_leaderboard = _settingsdb_get_game_stat_leaderboard
+
+
+# ---- bonus chips / debt overrides ----
+def _settingsdb_get_user_bonus_chips(self, guild_id: int, user_id: int) -> int:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    try:
+        return max(0, int(doc.get("bonus_chips", 0) or 0))
+    except Exception:
+        return 0
+
+async def _settingsdb_set_user_bonus_chips(self, guild_id: int, user_id: int, chips: int):
+    doc = self._get_user_doc(guild_id, user_id)
+    doc["bonus_chips"] = max(0, int(chips))
+    await self._save_user_doc(guild_id, user_id, doc)
+
+async def _settingsdb_add_user_bonus_chips(self, guild_id: int, user_id: int, amount: int) -> int:
+    current = self.get_user_bonus_chips(guild_id, user_id)
+    new_value = max(0, current + int(amount))
+    await self.set_user_bonus_chips(guild_id, user_id, new_value)
+    return new_value
+
+def _settingsdb_get_user_chips(self, guild_id: int, user_id: int, *, default: int = 100) -> int:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    try:
+        return int(doc.get("chips", default) if doc.get("chips", None) is not None else default)
+    except Exception:
+        return int(default)
+
+async def _settingsdb_set_user_chips(self, guild_id: int, user_id: int, chips: int):
+    doc = self._get_user_doc(guild_id, user_id)
+    doc["chips"] = int(chips)
+    await self._save_user_doc(guild_id, user_id, doc)
+
+async def _settingsdb_add_user_chips(self, guild_id: int, user_id: int, amount: int) -> int:
+    current = self.get_user_chips(guild_id, user_id)
+    bonus = self.get_user_bonus_chips(guild_id, user_id)
+    delta = int(amount)
+    if delta >= 0:
+        # pay debt first, then normal chips
+        new_chips = current + delta
+        doc = self._get_user_doc(guild_id, user_id)
+        doc["chips"] = int(new_chips)
+        doc["bonus_chips"] = int(bonus)
+        await self._save_user_doc(guild_id, user_id, doc)
+        return int(new_chips)
+    spend = -delta
+    use_bonus = min(bonus, spend)
+    remaining = spend - use_bonus
+    new_bonus = bonus - use_bonus
+    new_chips = current - remaining
+    doc = self._get_user_doc(guild_id, user_id)
+    doc["chips"] = int(new_chips)
+    doc["bonus_chips"] = int(new_bonus)
+    await self._save_user_doc(guild_id, user_id, doc)
+    return int(new_chips)
+
+async def claim_daily_bonus(self, guild_id: int, user_id: int, *, base_amount: int = 10) -> tuple[bool, int, int, int]:
+    status = self.get_user_daily_status(guild_id, user_id)
+    today = str(status["today_key"])
+    last_key = str(status["last_claim_key"])
+    current_streak = int(status["streak"])
+    if last_key == today:
+        return False, self.get_user_chips(guild_id, user_id, default=100), 0, current_streak
+
+    new_streak = 1
+    try:
+        from datetime import datetime, timedelta
+        today_dt = datetime.strptime(today, "%Y-%m-%d").date()
+        if last_key:
+            last_dt = datetime.strptime(last_key, "%Y-%m-%d").date()
+            if today_dt - last_dt == timedelta(days=1):
+                new_streak = current_streak + 1
+    except Exception:
+        new_streak = 1
+
+    bonus = int(base_amount)
+    if new_streak >= 7:
+        bonus += 10
+    elif new_streak >= 3:
+        bonus += 5
+
+    doc = self._get_user_doc(guild_id, user_id)
+    doc["daily_last_claim_key"] = today
+    doc["daily_streak"] = new_streak
+    current = self.get_user_chips(guild_id, user_id, default=100)
+    doc["chips"] = int(current + bonus)
+    doc["bonus_chips"] = max(0, int(doc.get("bonus_chips", 0) or 0)) + 10
+    await self._save_user_doc(guild_id, user_id, doc)
+    return True, int(doc["chips"]), bonus, new_streak
+
+
+def _settingsdb_get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[dict]:
+    rows=[]
+    default_chips=100
+    for (gid,uid),doc in self.user_cache.items():
+        if gid!=guild_id: continue
+        if not bool(doc.get("has_chip_activity", False)): continue
+        try:
+            chips=int(doc.get("chips", default_chips) if doc.get("chips", None) is not None else default_chips)
+        except Exception:
+            chips=default_chips
+        rows.append({"user_id": int(uid), "chips": chips})
+    rows.sort(key=lambda item: (-item["chips"], item["user_id"]))
+    return rows[: max(1, int(limit))]
+
+SettingsDB.get_user_bonus_chips = _settingsdb_get_user_bonus_chips
+SettingsDB.set_user_bonus_chips = _settingsdb_set_user_bonus_chips
+SettingsDB.add_user_bonus_chips = _settingsdb_add_user_bonus_chips
+SettingsDB.get_user_chips = _settingsdb_get_user_chips
+SettingsDB.set_user_chips = _settingsdb_set_user_chips
+SettingsDB.add_user_chips = _settingsdb_add_user_chips
+SettingsDB.claim_daily_bonus = claim_daily_bonus
+SettingsDB.get_chip_leaderboard = _settingsdb_get_chip_leaderboard
