@@ -73,6 +73,16 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         embed.set_footer(text="Volte amanhã para manter a sequência")
         await ctx.reply(embed=embed, mention_author=False)
 
+    @dcommands.command(name="recarga")
+    async def recarga(self, ctx: dcommands.Context):
+        if ctx.guild is None:
+            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            return
+        used, new_balance, note = await self._try_use_chip_recharge(ctx.guild.id, ctx.author.id)
+        title = "🔋 Recarga concluída" if used else "🔋 Recarga indisponível"
+        description = f"{note}\nSaldo atual: {self._chip_amount(new_balance)}"
+        await ctx.reply(embed=self._make_embed(title, description, ok=used), mention_author=False)
+
     @dcommands.command(name="resetficha", aliases=["resetfichas", "rficha"])
     async def resetficha(self, ctx: dcommands.Context, member: discord.Member | None = None):
         if ctx.guild is None:
@@ -89,7 +99,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             description=(
                 f"Jogador: {target.mention}\n"
                 f"Novo saldo: {self._chip_amount(new_balance)}\n"
-                f"Próxima recarga automática: **6 horas** quando faltar saldo."
+                "A recarga manual por **recarga** tem cooldown de **12 horas** e só libera abaixo de **15** fichas."
             ),
             color=discord.Color.green(),
         )
@@ -156,6 +166,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 f"• `{ctx.clean_prefix}ficha` — mostra seu saldo e seus destaques\n"
                 f"• `{ctx.clean_prefix}daily` — resgata o bônus diário\n"
+                "• `recarga` — restaura o saldo quando ele ficar abaixo de 15\n"
                 f"• `{ctx.clean_prefix}rank` — ranking dos maiores saldos\n"
                 "• `pay @usuário valor` — transfere fichas\n\n"
                 "🎮 **Jogos**\n"
