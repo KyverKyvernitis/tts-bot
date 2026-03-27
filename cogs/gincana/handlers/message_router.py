@@ -25,7 +25,7 @@ class GincanaMessageRouterMixin:
         content = str(message.content or "").strip().casefold()
         if not content or content.startswith("_"):
             return False
-        if content not in {"ficha", "fichas", "rank", "leaderboard", "daily", "bonus", "login", "recarga", "gincanahelp", "helpgincana", "jogoshelp"}:
+        if content not in {"ficha", "fichas", "rank", "leaderboard", "daily", "bonus", "login", "recarga", "recarrega", "gincanahelp", "helpgincana", "jogoshelp"}:
             return False
         if message.guild is None:
             return True
@@ -35,11 +35,9 @@ class GincanaMessageRouterMixin:
         if content in {"rank", "leaderboard"}:
             await message.channel.send(embed=self._make_chip_leaderboard_embed(message.guild, message.author))
             return True
-        if content == "recarga":
+        if content in {"recarga", "recarrega"}:
             used, new_balance, note = await self._try_use_chip_recharge(message.guild.id, message.author.id)
-            title = "🔋 Recarga concluída" if used else "🔋 Recarga indisponível"
-            description = f"{note}\nSaldo atual: {self._chip_amount(new_balance)}"
-            await message.channel.send(embed=self._make_embed(title, description, ok=used))
+            await message.channel.send(embed=self._make_chip_recharge_embed(used, new_balance, note))
             return True
         if content in {"gincanahelp", "helpgincana", "jogoshelp"}:
             await message.channel.send(embed=discord.Embed(title="🎲 Help da gincana", description=(
