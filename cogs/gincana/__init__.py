@@ -103,7 +103,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             description=(
                 f"Jogador: {target.mention}\n"
                 f"Novo saldo: {self._format_compact_chip_balance(ctx.guild.id, target.id)}\n"
-                "A recarga manual por **recarga** entrega fichas bônus, tem cooldown de **12 horas** e só libera abaixo de **15** de saldo total."
+                "A recarga manual por **recarga** entrega **100 fichas bônus**, tem cooldown de **12 horas** e só libera abaixo de **15** de saldo total."
             ),
             color=discord.Color.green(),
         )
@@ -170,7 +170,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 f"• `{ctx.clean_prefix}ficha` — mostra seu saldo e seus destaques\n"
                 f"• `{ctx.clean_prefix}daily` — resgata o bônus diário\n"
-                "• `recarga` — entrega fichas bônus quando seu saldo total fica abaixo de 15\n• `pay @usuário valor` — transfere só fichas normais\n• fichas bônus saem primeiro nas apostas\n• ganhos quitam a dívida antes de voltar ao saldo normal\n"
+                "• `recarga` — entrega 100 fichas bônus quando seu saldo total fica abaixo de 15\n• `pay @usuário valor` — transfere só fichas normais\n• fichas bônus saem primeiro nas apostas\n• ganhos quitam a dívida antes de voltar ao saldo normal\n"
                 f"• `{ctx.clean_prefix}rank` — ranking dos maiores saldos\n"
                 "\n"
                 "🎮 **Jogos**\n"
