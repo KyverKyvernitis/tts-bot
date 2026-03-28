@@ -446,7 +446,7 @@ class GincanaTrucoMixin:
             f"{self._truco_member_mention(guild, game.players_order[0])} desafiou {self._truco_member_mention(guild, game.players_order[1])}.",
             f"**Entrada:** {self._chip_amount(TRUCO_ENTRY)} cada",
             f"**Pote inicial:** {self._chip_amount(game.pot)}",
-            "Aceite para começar a mão.",
+            "Aceite para começar o jogo.",
         ]
 
     def _truco_status_lines(self, game: TrucoGame, *, title: str = "🃏 Truco") -> dict[str, list[str]]:
@@ -466,18 +466,18 @@ class GincanaTrucoMixin:
             meta.append(f"**Vazas:** Time 1 **{team0}** × **{team1}** Time 2")
         else:
             meta.append(f"**Vazas:** **{team0}** × **{team1}**")
-        mesa = ["## Mesa atual"]
+        mesa = ["## Mesa"]
         order = self._truco_rotate_order(game.players_order, game.hand_starter_id or game.players_order[0])
         shown = False
         for uid in order:
             card = game.cards_on_table.get(uid)
-            mesa.append(f"• **{self._truco_member_name(guild, uid)}**: {self._truco_card_public_display(card) if card else '—'}")
+            mesa.append(f"**{self._truco_member_name(guild, uid)}** • {self._truco_card_public_display(card) if card else '—'}")
             shown = shown or bool(card)
         if not shown:
-            mesa.append("• Ainda não tem carta na mesa.")
+            mesa.append("Ninguém jogou carta ainda.")
         if game.table_history:
-            mesa.extend(["", "## Últimas vazas", *game.table_history[-3:]])
-        status = ["## Status", game.status_text, "Use **Ver mão** para jogar e acompanhar sua mão na DM."]
+            mesa.extend(["", "## Vazas", *game.table_history[-3:]])
+        status = ["## Status", game.status_text, "Use **Ver mão** para acompanhar o jogo na DM."]
         return {"header": duel, "meta": meta, "mesa": mesa, "status": status}
 
     def _truco_hand_lines(self, game: TrucoGame, player_id: int, *, dm_ok: bool = True) -> dict[str, list[str]]:
@@ -487,7 +487,7 @@ class GincanaTrucoMixin:
         team1 = sum(1 for x in game.round_results if x == 1)
         partner = self._truco_partner(game, player_id)
         if game.finished:
-            status = game.status_text or "Mão encerrada."
+            status = game.status_text or "Jogo encerrado."
         elif game.status == "awaiting_raise_response" and self._truco_can_answer_raise(game, player_id):
             status = f"{self._truco_member_name(guild, game.pending_raise_by or 0)} pediu {_TRUCO_RAISE_NAMES.get(game.pending_raise_to, 'aumento')}."
         elif game.status == "awaiting_raise_response":
@@ -496,30 +496,31 @@ class GincanaTrucoMixin:
             status = "É a sua vez."
         else:
             status = f"Vez de {self._truco_member_name(guild, game.turn_id or 0)}."
-        header = ["# 🃏 Truco", "## Seu painel"]
+        header = ["# 🃏 Truco", "## Seu jogo"]
         meta = [
+            f"**Pote:** {self._chip_amount(game.pot)}",
             f"**Vira:** {self._truco_card_public_display(game.vira)}",
             f"**Manilha:** {game.manilha_rank}",
-            f"**Pote:** {self._chip_amount(game.pot)}",
             f"**Vazas:** {team0} × {team1}",
         ]
         if partner:
             meta.append(f"**Parceiro:** {self._truco_member_name(guild, partner)}")
-        mesa = ["## Mesa atual"]
+        mesa = ["## Mesa"]
         order = self._truco_rotate_order(game.players_order, game.hand_starter_id or game.players_order[0])
         any_card = False
         for uid in order:
+            label = "Você" if int(uid) == int(player_id) else self._truco_member_name(guild, uid)
             card = game.cards_on_table.get(uid)
-            mesa.append(f"• **{self._truco_member_name(guild, uid)}**: {self._truco_card_public_display(card) if card else '—'}")
+            mesa.append(f"**{label}** • {self._truco_card_public_display(card) if card else '—'}")
             any_card = any_card or bool(card)
         if not any_card:
-            mesa.append("• Ainda não tem carta na mesa.")
+            mesa.append("Ninguém jogou carta ainda.")
         if game.table_history:
-            mesa.extend(["", "## Últimas vazas", *game.table_history[-3:]])
+            mesa.extend(["", "## Vazas", *game.table_history[-3:]])
         cards_lines = ["## Suas cartas"] + ([f"• {self._truco_card_display(card)}" for card in cards] if cards else ["Você já jogou todas as cartas."])
         status_lines = ["## Status", status]
         if not dm_ok:
-            status_lines.append("Não consegui usar sua DM, então mostrei a mão aqui.")
+            status_lines.append("Não consegui usar sua DM, então mostrei o jogo aqui.")
         return {"header": header, "meta": meta, "mesa": mesa, "cards": cards_lines, "status": status_lines}
 
     def _truco_status_embed(self, game: TrucoGame, *, title: str = "🃏 Truco") -> discord.Embed:
@@ -529,7 +530,7 @@ class GincanaTrucoMixin:
 
     def _truco_hand_embed(self, game: TrucoGame, player_id: int, *, dm_ok: bool = True) -> discord.Embed:
         lines = self._truco_hand_lines(game, player_id, dm_ok=dm_ok)
-        return discord.Embed(title="🃏 Sua mão", description="\n".join(lines["header"] + [""] + lines["mesa"] + [""] + lines["cards"] + [""] + lines["status"]), color=discord.Color.blurple())
+        return discord.Embed(title="🃏 Seu jogo", description="\n".join(lines["header"] + [""] + lines["mesa"] + [""] + lines["cards"] + [""] + lines["status"]), color=discord.Color.blurple())
 
     async def _truco_safe_edit(self, message, *, embed=None, view=None, content=None):
         if message is None:
@@ -651,7 +652,7 @@ class GincanaTrucoMixin:
         game.cards_on_table.clear()
         game.round_index += 1
         if hand_winner is not None or len(game.round_results) >= 3:
-            await self._finish_truco_game(game, winner_team=(hand_winner if hand_winner is not None else self._truco_team_index(game, starter) or 0), loser_id=starter, reason="mão encerrada")
+            await self._finish_truco_game(game, winner_team=(hand_winner if hand_winner is not None else self._truco_team_index(game, starter) or 0), loser_id=starter, reason="jogo encerrado")
             return
         game.hand_starter_id = starter
         game.players_order = self._truco_rotate_order(game.players_order, starter)
@@ -685,17 +686,17 @@ class GincanaTrucoMixin:
         winner_text = self._truco_team_mentions(game, guild, winner_team) if game.mode == "2v2" else self._truco_member_mention(guild, winners[0])
         loser_text = self._truco_member_mention(guild, loser_id) if guild else "Alguém"
         if reason == "correu":
-            end_line = f"{loser_text} saiu da mão."
+            end_line = f"{loser_text} saiu do jogo."
             summary = f"{winner_text} levou a rodada."
-            game.status_text = "Mão encerrada por saída."
+            game.status_text = "Jogo encerrado por saída."
         elif reason == "tempo esgotado":
             end_line = f"{loser_text} não respondeu a tempo."
             summary = f"{winner_text} levou a rodada."
-            game.status_text = "Mão encerrada por abandono."
+            game.status_text = "Jogo encerrado por abandono."
         else:
-            end_line = f"{winner_text} venceu a mão."
-            summary = "A mão foi encerrada."
-            game.status_text = "Mão encerrada com vitória normal."
+            end_line = f"{winner_text} venceu o jogo."
+            summary = "O jogo foi encerrado."
+            game.status_text = "Jogo encerrado com vitória normal."
         lines = self._truco_status_lines(game, title="🃏 Truco")
         reward_line = (
             f"{winner_text} levou **{game.pot}** {self._CHIP_GAIN_EMOJI} e ganhou **+{TRUCO_BONUS_REWARD}** {self._CHIP_BONUS_EMOJI}."
@@ -751,7 +752,7 @@ class GincanaTrucoMixin:
             return True
         ok, _current, note = await self._ensure_action_chips(guild.id, challenger.id, TRUCO_ENTRY)
         if not ok:
-            await message.channel.send(embed=self._make_embed("🃏 Truco", note or "Você não tem saldo suficiente para entrar nessa mão.", ok=False))
+            await message.channel.send(embed=self._make_embed("🃏 Truco", note or "Você não tem saldo suficiente para entrar nesse jogo.", ok=False))
             return True
         game = self._truco_make_game(guild.id, message.channel.id, "1v1", [challenger.id, opponent.id], [(challenger.id,), (opponent.id,)])
         self._truco_games[guild.id] = game
@@ -902,7 +903,7 @@ class GincanaTrucoMixin:
         self._truco_lobbies.pop(guild.id, None)
         lobby.started = True
         closed = discord.ui.LayoutView(timeout=None)
-        closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco 2v2\nOs times fecharam e a mão vai começar."), accent_color=discord.Color.dark_green()))
+        closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco 2v2\nOs times fecharam e o jogo vai começar."), accent_color=discord.Color.dark_green()))
         await self._truco_update_interaction_message(interaction, view=closed)
         await self._start_truco_game(game)
 
@@ -988,20 +989,20 @@ class GincanaTrucoMixin:
 
     async def _handle_truco_show_hand(self, interaction: discord.Interaction, game: TrucoGame):
         if interaction.user.id not in game.players:
-            await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
+            await interaction.response.send_message("Esse jogo não é seu.", ephemeral=True)
             return
         sent_dm = await self._truco_send_hand_dm(game, interaction.user.id)
         if sent_dm:
-            await interaction.response.send_message("Atualizei a sua mão na DM.", ephemeral=True)
+            await interaction.response.send_message("Atualizei o seu jogo na DM.", ephemeral=True)
             return
-        await interaction.response.send_message("Não consegui usar sua DM, então mostrei a mão aqui.", ephemeral=True, view=TrucoHandView(self, game, interaction.user.id))
+        await interaction.response.send_message("Não consegui usar sua DM, então mostrei o jogo aqui.", ephemeral=True, view=TrucoHandView(self, game, interaction.user.id))
 
     async def _handle_truco_play_card(self, interaction: discord.Interaction, game: TrucoGame, player_id: int, card_index: int):
         if interaction.user.id != player_id:
-            await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
+            await interaction.response.send_message("Esse jogo não é seu.", ephemeral=True)
             return
         if game.finished or game.status != "active":
-            await interaction.response.send_message("Essa mão não está pronta para jogada agora.", ephemeral=True)
+            await interaction.response.send_message("Esse jogo não está pronto para jogada agora.", ephemeral=True)
             return
         if player_id != game.turn_id:
             await interaction.response.send_message("Ainda não é a sua vez.", ephemeral=True)
@@ -1046,10 +1047,10 @@ class GincanaTrucoMixin:
 
     async def _handle_truco_raise(self, interaction: discord.Interaction, game: TrucoGame):
         if interaction.user.id not in game.players:
-            await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
+            await interaction.response.send_message("Esse jogo não é seu.", ephemeral=True)
             return
         if game.finished:
-            await interaction.response.send_message("A mão já terminou.", ephemeral=True)
+            await interaction.response.send_message("O jogo já terminou.", ephemeral=True)
             return
         if game.status == "awaiting_raise_response":
             if not self._truco_can_answer_raise(game, interaction.user.id):
@@ -1063,7 +1064,7 @@ class GincanaTrucoMixin:
             base = game.level
         nxt = self._truco_next_raise_level(base)
         if not nxt:
-            await interaction.response.send_message("Essa mão já chegou no máximo.", ephemeral=True)
+            await interaction.response.send_message("Esse jogo já chegou no máximo.", ephemeral=True)
             return
         requester_team = self._truco_team_index(game, interaction.user.id)
         target_contrib = self._truco_target_contrib(game, nxt)
@@ -1071,7 +1072,7 @@ class GincanaTrucoMixin:
             delta = max(0, target_contrib - int(game.contribution.get(pid, TRUCO_ENTRY)))
             ok, _cur, note = await self._ensure_action_chips(game.guild_id, pid, delta)
             if not ok:
-                await interaction.response.send_message(note or "Seu time não pode subir a mão agora.", ephemeral=True)
+                await interaction.response.send_message(note or "Seu time não pode subir o jogo agora.", ephemeral=True)
                 return
         guild = self.bot.get_guild(game.guild_id)
         game.status = "awaiting_raise_response"
@@ -1115,7 +1116,7 @@ class GincanaTrucoMixin:
         game.pending_raise_by = None
         game.pending_raise_to = None
         guild = self.bot.get_guild(game.guild_id)
-        game.status_text = f"{self._truco_member_mention(guild, interaction.user.id)} aceitou. Agora a mão vale {target_level}."
+        game.status_text = f"{self._truco_member_mention(guild, interaction.user.id)} aceitou. Agora o jogo vale {target_level}."
         if interaction.response.is_done():
             await interaction.followup.send("Aumento aceito.", ephemeral=True)
         else:
@@ -1125,12 +1126,12 @@ class GincanaTrucoMixin:
 
     async def _handle_truco_run(self, interaction: discord.Interaction, game: TrucoGame):
         if interaction.user.id not in game.players:
-            await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
+            await interaction.response.send_message("Esse jogo não é seu.", ephemeral=True)
             return
         loser_team = self._truco_team_index(game, interaction.user.id)
         winner_team = 1 - loser_team
         if interaction.response.is_done():
-            await interaction.followup.send("Você saiu da mão.", ephemeral=True)
+            await interaction.followup.send("Você saiu do jogo.", ephemeral=True)
         else:
-            await interaction.response.send_message("Você saiu da mão.", ephemeral=True)
+            await interaction.response.send_message("Você saiu do jogo.", ephemeral=True)
         await self._finish_truco_game(game, winner_team=winner_team, loser_id=interaction.user.id, reason="correu")
