@@ -70,18 +70,31 @@ class TrucoGame:
         return tuple(self.players_order)
 
 
-class TrucoChallengeView(discord.ui.View):
+class TrucoChallengeView(discord.ui.LayoutView):
     def __init__(self, cog: "GincanaTrucoMixin", game: TrucoGame):
         super().__init__(timeout=_TRUCO_INVITE_TIMEOUT)
         self.cog = cog
         self.game = game
+        self.accept_button = discord.ui.Button(label="Aceitar", style=discord.ButtonStyle.success)
+        self.decline_button = discord.ui.Button(label="Recusar", style=discord.ButtonStyle.danger)
+        self.accept_button.callback = self._accept
+        self.decline_button.callback = self._decline
+        self._build_layout()
 
-    @discord.ui.button(label="Aceitar", style=discord.ButtonStyle.success)
-    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    def _build_layout(self):
+        self.clear_items()
+        lines = self.cog._truco_challenge_lines(self.game)
+        row = discord.ui.ActionRow(self.accept_button, self.decline_button)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(lines)),
+            row,
+            accent_color=discord.Color.dark_green(),
+        ))
+
+    async def _accept(self, interaction: discord.Interaction):
         await self.cog._handle_truco_accept(interaction, self.game)
 
-    @discord.ui.button(label="Recusar", style=discord.ButtonStyle.danger)
-    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _decline(self, interaction: discord.Interaction):
         await self.cog._handle_truco_decline(interaction, self.game)
 
     async def on_timeout(self):
@@ -117,7 +130,7 @@ class Truco2v2LobbyView(discord.ui.LayoutView):
         b_mentions = [self.guild.get_member(uid).mention for uid in self.lobby.team_b if self.guild.get_member(uid)]
         creator = self.guild.get_member(self.lobby.creator_id)
         header = [
-            "# 🃏 Truco Paulista 2v2",
+            "# 🃏 Truco 2v2",
             f"**Entrada:** {self.cog._chip_amount(TRUCO_ENTRY)} cada",
             f"**Pote inicial:** {self.cog._chip_amount(40)}",
             "**Bônus dos vencedores:** +10 fichas bônus cada",
@@ -170,7 +183,7 @@ class Truco2v2LobbyView(discord.ui.LayoutView):
             pass
 
 
-class TrucoTableView(discord.ui.View):
+class TrucoTableView(discord.ui.LayoutView):
     def __init__(self, cog: "GincanaTrucoMixin", game: TrucoGame):
         super().__init__(timeout=_TRUCO_ACTION_TIMEOUT)
         self.cog = cog
@@ -181,30 +194,39 @@ class TrucoTableView(discord.ui.View):
         self.clear_items()
         hand = discord.ui.Button(label="Ver mão", style=discord.ButtonStyle.primary)
         hand.callback = self._my_hand
-        self.add_item(hand)
-        if self.game.finished:
-            return
-        if self.game.status == "awaiting_raise_response":
-            accept = discord.ui.Button(label="Aceitar", style=discord.ButtonStyle.success)
-            accept.callback = self._accept_raise
-            self.add_item(accept)
-            nxt = self.cog._truco_next_raise_label(self.game)
-            if nxt:
-                up = discord.ui.Button(label=f"Pedir {nxt}", style=discord.ButtonStyle.secondary)
-                up.callback = self._raise_action
-                self.add_item(up)
-            leave = discord.ui.Button(label="Sair", style=discord.ButtonStyle.danger)
-            leave.callback = self._run_action
-            self.add_item(leave)
-            return
-        nxt = self.cog._truco_next_raise_label(self.game)
-        if nxt:
-            up = discord.ui.Button(label=f"Pedir {nxt}", style=discord.ButtonStyle.secondary)
-            up.callback = self._raise_action
-            self.add_item(up)
-        leave = discord.ui.Button(label="Sair", style=discord.ButtonStyle.danger)
-        leave.callback = self._run_action
-        self.add_item(leave)
+        buttons = [hand]
+        if not self.game.finished:
+            if self.game.status == "awaiting_raise_response":
+                accept = discord.ui.Button(label="Aceitar", style=discord.ButtonStyle.success)
+                accept.callback = self._accept_raise
+                buttons.append(accept)
+                nxt = self.cog._truco_next_raise_label(self.game)
+                if nxt:
+                    up = discord.ui.Button(label=f"Pedir {nxt}", style=discord.ButtonStyle.secondary)
+                    up.callback = self._raise_action
+                    buttons.append(up)
+                leave = discord.ui.Button(label="Sair", style=discord.ButtonStyle.danger)
+                leave.callback = self._run_action
+                buttons.append(leave)
+            else:
+                nxt = self.cog._truco_next_raise_label(self.game)
+                if nxt:
+                    up = discord.ui.Button(label=f"Pedir {nxt}", style=discord.ButtonStyle.secondary)
+                    up.callback = self._raise_action
+                    buttons.append(up)
+                leave = discord.ui.Button(label="Sair", style=discord.ButtonStyle.danger)
+                leave.callback = self._run_action
+                buttons.append(leave)
+        lines = self.cog._truco_status_lines(self.game)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(lines["header"])),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(lines["mesa"])),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(lines["status"])),
+            discord.ui.ActionRow(*buttons),
+            accent_color=discord.Color.dark_green(),
+        ))
 
     async def _my_hand(self, interaction: discord.Interaction):
         await self.cog._handle_truco_show_hand(interaction, self.game)
@@ -228,7 +250,7 @@ class TrucoTableView(discord.ui.View):
             pass
 
 
-class TrucoHandView(discord.ui.View):
+class TrucoHandView(discord.ui.LayoutView):
     def __init__(self, cog: "GincanaTrucoMixin", game: TrucoGame, player_id: int):
         super().__init__(timeout=120.0)
         self.cog = cog
@@ -240,36 +262,43 @@ class TrucoHandView(discord.ui.View):
         self.clear_items()
         hand = self.game.hands.get(self.player_id, [])
         disabled_cards = self.game.finished or self.game.status != "active" or self.game.turn_id != self.player_id
+        card_buttons = []
         for index, card in enumerate(hand):
-            button = discord.ui.Button(label=self.cog._truco_card_display(card), style=discord.ButtonStyle.secondary, row=0, disabled=disabled_cards)
+            button = discord.ui.Button(label=self.cog._truco_card_display(card), style=discord.ButtonStyle.secondary, disabled=disabled_cards)
             async def _callback(interaction: discord.Interaction, idx=index):
                 await self.cog._handle_truco_play_card(interaction, self.game, self.player_id, idx)
             button.callback = _callback
-            self.add_item(button)
-        if self.game.finished:
-            return
-        if self.game.status == "awaiting_raise_response" and self.cog._truco_can_answer_raise(self.game, self.player_id):
-            accept = discord.ui.Button(label="Aceitar", style=discord.ButtonStyle.success, row=1)
-            accept.callback = self._accept_raise
-            self.add_item(accept)
-            nxt = self.cog._truco_next_raise_label(self.game)
-            if nxt:
-                up = discord.ui.Button(label=f"Pedir {nxt}", style=discord.ButtonStyle.primary, row=1)
-                up.callback = self._raise_action
-                self.add_item(up)
-            leave = discord.ui.Button(label="Sair", style=discord.ButtonStyle.danger, row=1)
-            leave.callback = self._run_action
-            self.add_item(leave)
-            return
-        if self.game.status == "active" and self.game.turn_id == self.player_id:
-            nxt = self.cog._truco_next_raise_label(self.game)
-            if nxt:
-                up = discord.ui.Button(label=f"Pedir {nxt}", style=discord.ButtonStyle.primary, row=1)
-                up.callback = self._raise_action
-                self.add_item(up)
-            leave = discord.ui.Button(label="Sair", style=discord.ButtonStyle.danger, row=1)
-            leave.callback = self._run_action
-            self.add_item(leave)
+            card_buttons.append(button)
+        action_buttons = []
+        if not self.game.finished:
+            if self.game.status == "awaiting_raise_response" and self.cog._truco_can_answer_raise(self.game, self.player_id):
+                accept = discord.ui.Button(label="Aceitar", style=discord.ButtonStyle.success)
+                accept.callback = self._accept_raise
+                action_buttons.append(accept)
+                nxt = self.cog._truco_next_raise_label(self.game)
+                if nxt:
+                    up = discord.ui.Button(label=f"Pedir {nxt}", style=discord.ButtonStyle.primary)
+                    up.callback = self._raise_action
+                    action_buttons.append(up)
+                leave = discord.ui.Button(label="Sair", style=discord.ButtonStyle.danger)
+                leave.callback = self._run_action
+                action_buttons.append(leave)
+            elif self.game.status == "active" and self.game.turn_id == self.player_id:
+                nxt = self.cog._truco_next_raise_label(self.game)
+                if nxt:
+                    up = discord.ui.Button(label=f"Pedir {nxt}", style=discord.ButtonStyle.primary)
+                    up.callback = self._raise_action
+                    action_buttons.append(up)
+                leave = discord.ui.Button(label="Sair", style=discord.ButtonStyle.danger)
+                leave.callback = self._run_action
+                action_buttons.append(leave)
+        lines = self.cog._truco_hand_lines(self.game, self.player_id)
+        items = [discord.ui.TextDisplay("\n".join(lines["header"])), discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines["mesa"])), discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines["cards"])), discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines["status"]))]
+        if card_buttons:
+            items.append(discord.ui.ActionRow(*card_buttons[:5]))
+        if action_buttons:
+            items.append(discord.ui.ActionRow(*action_buttons[:5]))
+        self.add_item(discord.ui.Container(*items, accent_color=discord.Color.blurple()))
 
     async def _raise_action(self, interaction: discord.Interaction):
         await self.cog._handle_truco_raise(interaction, self.game)
@@ -407,42 +436,48 @@ class GincanaTrucoMixin:
         game.pot = self._truco_target_pot(game, 1)
         return game
 
-    def _truco_status_embed(self, game: TrucoGame, *, title: str = "🃏 Truco Paulista") -> discord.Embed:
+    def _truco_challenge_lines(self, game: TrucoGame) -> list[str]:
+        guild = self.bot.get_guild(game.guild_id)
+        return [
+            "# 🃏 Truco",
+            f"{self._truco_member_mention(guild, game.players_order[0])} desafiou {self._truco_member_mention(guild, game.players_order[1])}.",
+            f"**Entrada:** {self._chip_amount(TRUCO_ENTRY)} cada",
+            f"**Pote inicial:** {self._chip_amount(game.pot)}",
+            "Aceite para começar a mão.",
+        ]
+
+    def _truco_status_lines(self, game: TrucoGame, *, title: str = "🃏 Truco") -> dict[str, list[str]]:
         guild = self.bot.get_guild(game.guild_id)
         if game.mode == "2v2":
-            desc = f"{self._truco_team_mentions(game, guild, 0)}\nvs\n{self._truco_team_mentions(game, guild, 1)}\n\nPote: **{game.pot}** {self._CHIP_EMOJI}"
+            duel = [title, f"{self._truco_team_mentions(game, guild, 0)}", "vs", f"{self._truco_team_mentions(game, guild, 1)}"]
         else:
-            desc = f"{self._truco_member_mention(guild, game.players_order[0])} vs {self._truco_member_mention(guild, game.players_order[1])}\nPote: **{game.pot}** {self._CHIP_EMOJI}"
-        embed = discord.Embed(title=title, description=desc, color=discord.Color.dark_green())
-        embed.add_field(name="Vira", value=self._truco_card_public_display(game.vira), inline=True)
-        embed.add_field(name="Manilha", value=str(game.manilha_rank or "—"), inline=True)
+            duel = [title, f"{self._truco_member_mention(guild, game.players_order[0])} vs {self._truco_member_mention(guild, game.players_order[1])}"]
+        duel.extend([
+            f"**Pote:** {self._chip_amount(game.pot)}",
+            f"**Vira:** {self._truco_card_public_display(game.vira)}",
+            f"**Manilha:** {game.manilha_rank or '—'}",
+        ])
         team0 = sum(1 for x in game.round_results if x == 0)
         team1 = sum(1 for x in game.round_results if x == 1)
         if game.mode == "2v2":
-            vazas = f"🟦 Time 1: **{team0}**\n🟥 Time 2: **{team1}**"
+            vazas = ["## Vazas", f"🟦 Time 1: **{team0}**", f"🟥 Time 2: **{team1}**"]
         else:
-            vazas = f"{self._truco_member_name(guild, game.players_order[0])}: **{team0}**\n{self._truco_member_name(guild, game.players_order[1])}: **{team1}**"
-        embed.add_field(name="Vazas", value=vazas, inline=True)
-        mesa = []
-        if game.cards_on_table:
-            for uid in self._truco_rotate_order(game.players_order, game.hand_starter_id or game.players_order[0]):
-                card = game.cards_on_table.get(uid)
-                if card:
-                    mesa.append(f"• {self._truco_member_name(guild, uid)}: {self._truco_card_public_display(card)}")
-            if not mesa:
-                mesa.append("Nenhuma carta na mesa.")
-        else:
+            vazas = ["## Vazas", f"{self._truco_member_name(guild, game.players_order[0])}: **{team0}**", f"{self._truco_member_name(guild, game.players_order[1])}: **{team1}**"]
+        mesa = ["## Mesa"]
+        order = self._truco_rotate_order(game.players_order, game.hand_starter_id or game.players_order[0])
+        shown = False
+        for uid in order:
+            card = game.cards_on_table.get(uid)
+            mesa.append(f"• {self._truco_member_name(guild, uid)}: {self._truco_card_public_display(card) if card else '—'}")
+            shown = shown or bool(card)
+        if not shown:
             mesa.append("Nenhuma carta na mesa.")
         if game.table_history:
-            mesa.append("")
-            mesa.append("Últimas vazas:")
-            mesa.extend(game.table_history[-3:])
-        embed.add_field(name="Mesa", value="\n".join(mesa), inline=False)
-        embed.add_field(name="Status", value=game.status_text, inline=False)
-        embed.set_footer(text="Sua mão e os controles ficam na DM.")
-        return embed
+            mesa.extend(["", "## Últimas vazas", *game.table_history[-3:]])
+        status = ["## Status", game.status_text, "Sua mão e seus controles ficam na DM."]
+        return {"header": duel + ["", *vazas], "mesa": mesa, "status": status}
 
-    def _truco_hand_embed(self, game: TrucoGame, player_id: int, *, dm_ok: bool = True) -> discord.Embed:
+    def _truco_hand_lines(self, game: TrucoGame, player_id: int, *, dm_ok: bool = True) -> dict[str, list[str]]:
         guild = self.bot.get_guild(game.guild_id)
         cards = game.hands.get(int(player_id), [])
         team0 = sum(1 for x in game.round_results if x == 0)
@@ -453,31 +488,51 @@ class GincanaTrucoMixin:
         elif game.status == "awaiting_raise_response" and self._truco_can_answer_raise(game, player_id):
             status = f"{self._truco_member_name(guild, game.pending_raise_by or 0)} pediu {_TRUCO_RAISE_NAMES.get(game.pending_raise_to, 'aumento')}."
         elif game.status == "awaiting_raise_response":
-            status = f"Esperando a resposta do outro time."
+            status = "Esperando a resposta do outro time."
         elif int(player_id) == game.turn_id:
             status = "É a sua vez."
         else:
             status = f"Vez de {self._truco_member_name(guild, game.turn_id or 0)}."
-        desc_lines = [
-            f"Vira: **{self._truco_card_public_display(game.vira)}**",
-            f"Manilha: **{game.manilha_rank}**",
-            f"Pote: **{game.pot}** {self._CHIP_EMOJI}",
-            f"Vazas: **{team0} x {team1}**",
+        header = [
+            "# 🃏 Sua mão",
+            f"**Vira:** {self._truco_card_public_display(game.vira)}",
+            f"**Manilha:** {game.manilha_rank}",
+            f"**Pote:** {self._chip_amount(game.pot)}",
+            f"**Vazas:** {team0} x {team1}",
         ]
         if partner:
-            desc_lines.append(f"Parceiro: **{self._truco_member_name(guild, partner)}**")
-        embed = discord.Embed(title="🃏 Sua mão", description="\n".join(desc_lines), color=discord.Color.blurple())
-        embed.add_field(name="Cartas", value="\n".join(f"• {self._truco_card_display(card)}" for card in cards) if cards else "Você já jogou todas as cartas.", inline=False)
-        embed.add_field(name="Status", value=status, inline=False)
+            header.append(f"**Parceiro:** {self._truco_member_name(guild, partner)}")
+        mesa = ["## Mesa"]
+        order = self._truco_rotate_order(game.players_order, game.hand_starter_id or game.players_order[0])
+        any_card = False
+        for uid in order:
+            card = game.cards_on_table.get(uid)
+            mesa.append(f"• {self._truco_member_name(guild, uid)}: {self._truco_card_public_display(card) if card else '—'}")
+            any_card = any_card or bool(card)
+        if not any_card:
+            mesa.append("Nenhuma carta na mesa.")
+        if game.table_history:
+            mesa.extend(["", "## Últimas vazas", *game.table_history[-3:]])
+        cards_lines = ["## Cartas"] + ([f"• {self._truco_card_display(card)}" for card in cards] if cards else ["Você já jogou todas as cartas."])
+        status_lines = ["## Status", status]
         if not dm_ok:
-            embed.set_footer(text="Não consegui usar sua DM, então mostrei a mão aqui.")
+            status_lines.append("Não consegui usar sua DM, então mostrei a mão aqui.")
+        return {"header": header, "mesa": mesa, "cards": cards_lines, "status": status_lines}
+
+    def _truco_status_embed(self, game: TrucoGame, *, title: str = "🃏 Truco") -> discord.Embed:
+        lines = self._truco_status_lines(game, title=title)
+        embed = discord.Embed(title=title, description="\n".join(lines["header"] + [""] + lines["mesa"] + [""] + lines["status"]), color=discord.Color.dark_green())
         return embed
 
-    async def _truco_safe_edit(self, message, *, embed=None, view=None):
+    def _truco_hand_embed(self, game: TrucoGame, player_id: int, *, dm_ok: bool = True) -> discord.Embed:
+        lines = self._truco_hand_lines(game, player_id, dm_ok=dm_ok)
+        return discord.Embed(title="🃏 Sua mão", description="\n".join(lines["header"] + [""] + lines["mesa"] + [""] + lines["cards"] + [""] + lines["status"]), color=discord.Color.blurple())
+
+    async def _truco_safe_edit(self, message, *, embed=None, view=None, content=None):
         if message is None:
             return
         try:
-            await message.edit(embed=embed, view=view)
+            await message.edit(content=content, embed=embed, view=view)
         except Exception:
             pass
 
@@ -490,7 +545,7 @@ class GincanaTrucoMixin:
             return
         guild = self.bot.get_guild(game.guild_id)
         game.status_text = f"Vez de {self._truco_member_mention(guild, game.turn_id)}."
-        await self._truco_safe_edit(game.status_message, embed=self._truco_status_embed(game), view=TrucoTableView(self, game))
+        await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await self._truco_refresh_private_views(game)
 
     def _truco_round_winner_team(self, game: TrucoGame) -> int | None:
@@ -536,7 +591,7 @@ class GincanaTrucoMixin:
         if len(game.cards_on_table) < expected:
             return
         game.status_text = "Resolvendo a vaza..."
-        await self._truco_safe_edit(game.status_message, embed=self._truco_status_embed(game), view=TrucoTableView(self, game))
+        await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await asyncio.sleep(0.8)
         winner_team = self._truco_round_winner_team(game)
         label = self._truco_round_label(game.round_index)
@@ -549,7 +604,7 @@ class GincanaTrucoMixin:
             game.status_text = f"{name} levou a {label.lower()} vaza."
             game.table_history.append(game.status_text)
         game.round_results.append(winner_team)
-        await self._truco_safe_edit(game.status_message, embed=self._truco_status_embed(game), view=TrucoTableView(self, game))
+        await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await self._truco_refresh_private_views(game)
         await asyncio.sleep(0.8)
         hand_winner = self._truco_hand_winner_team(game)
@@ -612,7 +667,9 @@ class GincanaTrucoMixin:
             return
         self._truco_games.pop(game.guild_id, None)
         game.finished = True
-        await self._truco_safe_edit(game.challenge_message, embed=discord.Embed(title="🃏 Truco Paulista", description="O desafio expirou porque não foi aceito a tempo.", color=discord.Color.red()), view=None)
+        closed = discord.ui.LayoutView(timeout=None)
+        closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco\nO desafio expirou porque não foi aceito a tempo."), accent_color=discord.Color.red()))
+        await self._truco_safe_edit(game.challenge_message, embed=None, view=closed)
 
     async def _handle_truco_trigger(self, message: discord.Message) -> bool:
         self._ensure_truco_state()
@@ -629,21 +686,21 @@ class GincanaTrucoMixin:
             return True
         mentions = [m for m in message.mentions if not m.bot]
         if len(mentions) != 1:
-            await message.channel.send(embed=self._make_embed("🃏 Truco Paulista", "Use `truco @usuário` para desafiar alguém.", ok=False))
+            await message.channel.send(embed=self._make_embed("🃏 Truco", "Use `truco @usuário` para desafiar alguém.", ok=False))
             return True
         challenger = message.author
         opponent = mentions[0]
         if opponent.id == challenger.id:
-            await message.channel.send(embed=self._make_embed("🃏 Truco Paulista", "Você precisa desafiar outra pessoa.", ok=False))
+            await message.channel.send(embed=self._make_embed("🃏 Truco", "Você precisa desafiar outra pessoa.", ok=False))
             return True
         ok, _current, note = await self._ensure_action_chips(guild.id, challenger.id, TRUCO_ENTRY)
         if not ok:
-            await message.channel.send(embed=self._make_embed("🃏 Truco Paulista", note or "Você não tem saldo suficiente para entrar nessa mão.", ok=False))
+            await message.channel.send(embed=self._make_embed("🃏 Truco", note or "Você não tem saldo suficiente para entrar nessa mão.", ok=False))
             return True
         game = self._truco_make_game(guild.id, message.channel.id, "1v1", [challenger.id, opponent.id], [(challenger.id,), (opponent.id,)])
         self._truco_games[guild.id] = game
         embed = discord.Embed(
-            title="🃏 Truco Paulista",
+            title="🃏 Truco",
             description=(
                 f"{challenger.mention} chamou {opponent.mention} pro truco.\n"
                 f"Entrada: **{TRUCO_ENTRY}** {self._CHIP_EMOJI} cada."
@@ -651,7 +708,7 @@ class GincanaTrucoMixin:
             color=discord.Color.dark_green(),
         )
         view = TrucoChallengeView(self, game)
-        game.challenge_message = await message.channel.send(embed=embed, view=view)
+        game.challenge_message = await message.channel.send(view=view)
         if note:
             try:
                 await message.channel.send(note)
@@ -747,14 +804,14 @@ class GincanaTrucoMixin:
         self._truco_lobbies.pop(guild.id, None)
         lobby.started = True
         closed = discord.ui.LayoutView(timeout=None)
-        closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco Paulista 2v2\nO lobby foi cancelado."), accent_color=discord.Color.red()))
+        closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco 2v2\nO lobby foi cancelado."), accent_color=discord.Color.red()))
         await interaction.response.edit_message(view=closed)
 
     async def _handle_truco2_lobby_timeout(self, lobby: TrucoLobby):
         self._truco_lobbies.pop(lobby.guild_id, None)
         if lobby.message:
             closed = discord.ui.LayoutView(timeout=None)
-            closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco Paulista 2v2\nO lobby expirou sem fechar os times."), accent_color=discord.Color.red()))
+            closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco 2v2\nO lobby expirou sem fechar os times."), accent_color=discord.Color.red()))
             try:
                 await lobby.message.edit(view=closed)
             except Exception:
@@ -789,7 +846,7 @@ class GincanaTrucoMixin:
         self._truco_lobbies.pop(guild.id, None)
         lobby.started = True
         closed = discord.ui.LayoutView(timeout=None)
-        closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco Paulista 2v2\nOs times fecharam e a mão vai começar."), accent_color=discord.Color.dark_green()))
+        closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco 2v2\nOs times fecharam e a mão vai começar."), accent_color=discord.Color.dark_green()))
         await interaction.response.edit_message(view=closed)
         await self._start_truco_game(game)
 
@@ -799,7 +856,9 @@ class GincanaTrucoMixin:
             return
         self._truco_games.pop(game.guild_id, None)
         game.finished = True
-        await interaction.response.edit_message(embed=discord.Embed(title="🃏 Truco Paulista", description=f"{interaction.user.mention} recusou o truco.", color=discord.Color.red()), view=None)
+        closed = discord.ui.LayoutView(timeout=None)
+        closed.add_item(discord.ui.Container(discord.ui.TextDisplay(f"# 🃏 Truco\n{interaction.user.mention} recusou o truco."), accent_color=discord.Color.red()))
+        await interaction.response.edit_message(embed=None, view=closed)
 
     async def _handle_truco_accept(self, interaction: discord.Interaction, game: TrucoGame):
         if interaction.user.id != game.players_order[1]:
@@ -821,7 +880,9 @@ class GincanaTrucoMixin:
         if not paid:
             await interaction.response.send_message("Não foi possível cobrar a sua entrada agora.", ephemeral=True)
             return
-        await interaction.response.edit_message(embed=discord.Embed(title="🃏 Truco Paulista", description="As cartas foram distribuídas.", color=discord.Color.dark_green()), view=None)
+        started = discord.ui.LayoutView(timeout=None)
+        started.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco\nAs cartas foram distribuídas."), accent_color=discord.Color.dark_green()))
+        await interaction.response.edit_message(embed=None, view=started)
         await self._start_truco_game(game)
 
     async def _start_truco_game(self, game: TrucoGame):
@@ -838,11 +899,11 @@ class GincanaTrucoMixin:
         game.status = "active"
         game.status_text = "Distribuindo as cartas..."
         game.challenge_message = None
-        game.status_message = await channel.send(embed=self._truco_status_embed(game), view=TrucoTableView(self, game))
-        await self._truco_safe_edit(game.status_message, embed=self._truco_status_embed(game), view=TrucoTableView(self, game))
+        game.status_message = await channel.send(view=TrucoTableView(self, game))
+        await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await asyncio.sleep(0.8)
         game.status_text = "Virando a carta..."
-        await self._truco_safe_edit(game.status_message, embed=self._truco_status_embed(game), view=TrucoTableView(self, game))
+        await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await asyncio.sleep(0.8)
         for uid in game.players:
             await self._truco_send_hand_dm(game, uid)
@@ -853,17 +914,16 @@ class GincanaTrucoMixin:
             user = self.bot.get_user(int(player_id)) or await self.bot.fetch_user(int(player_id))
         except Exception:
             return False
-        embed = self._truco_hand_embed(game, int(player_id))
         view = TrucoHandView(self, game, int(player_id))
         old = game.dm_messages.get(int(player_id))
         if old is not None:
             try:
-                await old.edit(embed=embed, view=view)
+                await old.edit(embed=None, view=view)
                 return True
             except Exception:
                 game.dm_messages.pop(int(player_id), None)
         try:
-            msg = await user.send(embed=embed, view=view)
+            msg = await user.send(view=view)
             game.dm_messages[int(player_id)] = msg
             return True
         except Exception:
@@ -879,8 +939,7 @@ class GincanaTrucoMixin:
         if sent_dm:
             await interaction.response.send_message("Atualizei a sua mão na DM.", ephemeral=True)
             return
-        embed = self._truco_hand_embed(game, interaction.user.id, dm_ok=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True, view=TrucoHandView(self, game, interaction.user.id))
+        await interaction.response.send_message("Não consegui usar sua DM, então mostrei a mão aqui.", ephemeral=True, view=TrucoHandView(self, game, interaction.user.id))
 
     async def _handle_truco_play_card(self, interaction: discord.Interaction, game: TrucoGame, player_id: int, card_index: int):
         if interaction.user.id != player_id:
@@ -901,7 +960,7 @@ class GincanaTrucoMixin:
         game.status_text = f"{self._truco_member_mention(guild, player_id)} puxou uma carta."
         game.cards_on_table[player_id] = card
         await interaction.response.edit_message(content="Carta enviada para a mesa.", embed=None, view=None)
-        await self._truco_safe_edit(game.status_message, embed=self._truco_status_embed(game), view=TrucoTableView(self, game))
+        await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await self._truco_refresh_private_views(game)
         await asyncio.sleep(0.8)
         expected = 2 if game.mode == "1v1" else 4
@@ -962,7 +1021,7 @@ class GincanaTrucoMixin:
             await interaction.followup.send("Pedido enviado.", ephemeral=True)
         else:
             await interaction.response.send_message("Pedido enviado.", ephemeral=True)
-        await self._truco_safe_edit(game.status_message, embed=self._truco_status_embed(game), view=TrucoTableView(self, game))
+        await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await self._truco_refresh_private_views(game)
 
     async def _handle_truco_accept_raise(self, interaction: discord.Interaction, game: TrucoGame):
@@ -1000,7 +1059,7 @@ class GincanaTrucoMixin:
             await interaction.followup.send("Aumento aceito.", ephemeral=True)
         else:
             await interaction.response.send_message("Aumento aceito.", ephemeral=True)
-        await self._truco_safe_edit(game.status_message, embed=self._truco_status_embed(game), view=TrucoTableView(self, game))
+        await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await self._truco_refresh_private_views(game)
 
     async def _handle_truco_run(self, interaction: discord.Interaction, game: TrucoGame):
