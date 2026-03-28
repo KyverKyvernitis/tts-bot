@@ -195,6 +195,21 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         handled = await self._handle_truco_trigger(fake)
         if not handled:
             await ctx.reply(embed=self._make_embed("🃏 Truco Paulista", "Não foi possível iniciar a mão agora.", ok=False), mention_author=False)
+
+    @dcommands.command(name="truco2", aliases=["truco2v2"])
+    async def truco2_command(self, ctx: dcommands.Context):
+        if ctx.guild is None:
+            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            return
+        fake = type("_Msg", (), {})()
+        fake.guild = ctx.guild
+        fake.author = ctx.author
+        fake.channel = ctx.channel
+        fake.content = "truco2"
+        fake.mentions = []
+        handled = await self._handle_truco_trigger(fake)
+        if not handled:
+            await ctx.reply(embed=self._make_embed("🃏 Truco Paulista 2v2", "Não foi possível abrir o lobby agora.", ok=False), mention_author=False)
     @dcommands.command(name="gincanahelp", aliases=["helpgincana", "jogoshelp"])
     async def gincanahelp(self, ctx: dcommands.Context):
         if ctx.guild is None:
