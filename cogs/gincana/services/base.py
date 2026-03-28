@@ -545,6 +545,24 @@ class GincanaBase:
     def _format_compact_chip_balance(self, guild_id: int, user_id: int) -> str:
         return self._format_primary_chip_balance(guild_id, user_id)
 
+    def _chip_spend_breakdown_text(self, guild_id: int, user_id: int, amount: int) -> str:
+        spend = max(0, int(amount))
+        bonus = self._get_user_bonus_chips(guild_id, user_id)
+        use_bonus = min(bonus, spend)
+        use_normal = spend - use_bonus
+        if use_bonus > 0 and use_normal > 0:
+            return f"Você entrou usando {self._bonus_chip_amount(use_bonus)} e {self._chip_amount(use_normal)}."
+        if use_bonus > 0:
+            return f"Você entrou usando {self._bonus_chip_amount(use_bonus)}."
+        return f"Você entrou usando {self._chip_amount(use_normal)}."
+
+    def _entry_consume_text(self, guild_id: int, user_id: int, amount: int) -> str:
+        spend_text = self._chip_spend_breakdown_text(guild_id, user_id, amount)
+        note = self._negative_transition_note(guild_id, user_id, amount)
+        if note:
+            return f"{spend_text}\n{note}"
+        return spend_text
+
     def _project_chip_state_after_cost(self, guild_id: int, user_id: int, amount: int) -> tuple[int,int]:
         chips = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
         bonus = self._get_user_bonus_chips(guild_id, user_id)
