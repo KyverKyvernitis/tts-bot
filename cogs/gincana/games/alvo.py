@@ -338,6 +338,7 @@ class GincanaAlvoMixin:
                     pass
                 return
 
+            entry_text = self._entry_consume_text(guild.id, user.id, ALVO_STAKE)
             paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE)
             if not paid:
                 try:
@@ -348,7 +349,7 @@ class GincanaAlvoMixin:
 
             locked.add(user.id)
             try:
-                await interaction.response.send_message(chip_note or f"Você entrou na rodada pagando {self._chip_amount(ALVO_STAKE)}.", ephemeral=True)
+                await interaction.response.send_message(chip_note or entry_text, ephemeral=True)
             except Exception:
                 pass
             await self._refresh_target_message(guild.id)
@@ -712,6 +713,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, user.id, ALVO_STAKE, title="🎯 Confirmar entrada")
             if not confirmed:
                 return
+        entry_text = self._entry_consume_text(guild.id, user.id, ALVO_STAKE)
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE)
         if needs_negative_confirm:
             chip_note = None
@@ -726,7 +728,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             return
         locked.add(user.id)
         session['bonus_chips'] = self._target_bonus_for_participants(len(locked))
-        try: await interaction.response.send_message(chip_note or f"Você entrou na rodada pagando {self._chip_amount(ALVO_STAKE)}.", ephemeral=True)
+        try: await interaction.response.send_message(chip_note or entry_text, ephemeral=True)
         except Exception: pass
         await self._refresh_target_message(guild.id)
 

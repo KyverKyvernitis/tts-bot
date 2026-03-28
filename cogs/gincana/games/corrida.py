@@ -612,6 +612,7 @@ class GincanaCorridaMixin:
             if not confirmed:
                 return
 
+        entry_text = self._entry_consume_text(guild.id, user.id, CORRIDA_STAKE)
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, CORRIDA_STAKE)
         if needs_negative_confirm:
             chip_note = None
@@ -630,7 +631,7 @@ class GincanaCorridaMixin:
         session.setdefault("state_map", {})[user.id] = _HORSE_START
         view.join_button.label = f"🐎 Entrar ({len(self._get_race_participants(guild, session))})"
         try:
-            await interaction.response.send_message(chip_note or f"Você entrou na corrida pagando {self._chip_amount(CORRIDA_STAKE)}.", ephemeral=True)
+            await interaction.response.send_message(chip_note or entry_text, ephemeral=True)
         except Exception:
             pass
         await self._refresh_race_message(guild.id)

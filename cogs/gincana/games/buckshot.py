@@ -182,6 +182,7 @@ class GincanaBuckshotMixin:
                 if not confirmed:
                     return
 
+            entry_text = self._entry_consume_text(guild.id, member.id, BUCKSHOT_STAKE)
             paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
             if needs_negative_confirm:
                 note = None
@@ -200,17 +201,18 @@ class GincanaBuckshotMixin:
 
             await self._refresh_buckshot_message(guild.id)
 
-            note = f"Você entrou na rodada e pagou **{BUCKSHOT_STAKE} {self._CHIP_LOSS_EMOJI}**." if not note else f"{note} Você entrou na rodada e pagou **{BUCKSHOT_STAKE} {self._CHIP_LOSS_EMOJI}**."
+            reply_text = note or entry_text
             try:
                 if interaction.response.is_done():
-                    await interaction.followup.send(note, ephemeral=True)
+                    await interaction.followup.send(reply_text, ephemeral=True)
                 else:
-                    await interaction.response.send_message(note, ephemeral=True)
+                    await interaction.response.send_message(reply_text, ephemeral=True)
             except Exception:
                 try:
                     await interaction.response.defer()
                 except Exception:
                     pass
+
         async def _finish_buckshot(self, guild_id: int, *, reason: str) -> bool:
             session = self._buckshot_sessions.get(guild_id)
             if not session or session.get("ended"):
@@ -487,6 +489,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, member.id, BUCKSHOT_STAKE, title="💥 Confirmar entrada")
             if not confirmed:
                 return
+        entry_text = self._entry_consume_text(guild.id, member.id, BUCKSHOT_STAKE)
         paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
         if needs_negative_confirm:
             note = None
@@ -505,7 +508,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         locked.add(member.id)
         session['locked_participants'] = locked
         await self._refresh_buckshot_message(guild.id)
-        try: await interaction.response.send_message(note or f"Você entrou na rodada e pagou **{BUCKSHOT_STAKE} {self._CHIP_LOSS_EMOJI}**.", ephemeral=True)
+        try: await interaction.response.send_message(note or entry_text, ephemeral=True)
         except Exception: pass
 
     async def _handle_buckshot_start_button(self, interaction: discord.Interaction, view: _BuckshotJoinView):
