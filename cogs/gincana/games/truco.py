@@ -46,6 +46,8 @@ class TrucoGame:
     level: int = 1
     status: str = "invite"
     status_text: str = "Esperando a resposta do desafio."
+    finish_reason: str | None = None
+    winner_team: int | None = None
     turn_id: int | None = None
     hand_starter_id: int | None = None
     round_index: int = 0
@@ -482,17 +484,88 @@ class GincanaTrucoMixin:
 
     def _truco_hand_lines(self, game: TrucoGame, player_id: int, *, dm_ok: bool = True) -> dict[str, list[str]]:
         guild = self.bot.get_guild(game.guild_id)
-        cards = game.hands.get(int(player_id), [])
+        pid = int(player_id)
+        cards = game.hands.get(pid, [])
         team0 = sum(1 for x in game.round_results if x == 0)
         team1 = sum(1 for x in game.round_results if x == 1)
-        partner = self._truco_partner(game, player_id)
+        partner = self._truco_partner(game, pid)
+        player_team = self._truco_team_index(game, pid)
+
         if game.finished:
-            status = game.status_text or "Jogo encerrado."
-        elif game.status == "awaiting_raise_response" and self._truco_can_answer_raise(game, player_id):
+            won = player_team is not None and player_team == game.winner_team
+            reason = game.finish_reason or "jogo encerrado"
+            if won:
+                header = ["# 🃏 Vitória"]
+            elif reason == "correu":
+                header = ["# 🃏 Você saiu"] if pid in [uid for idx, team in enumerate(game.teams) if idx != game.winner_team for uid in ()] else ["# 🃏 Derrota"]
+                # corrected below
+            elif reason == "tempo esgotado" and getattr(game, "loser_id", None) == pid:
+                header = ["# 🃏 Abandono"]
+            else:
+                header = ["# 🃏 Derrota"]
+
+            winner_mentions = self._truco_team_mentions(game, guild, game.winner_team or 0) if game.mode == "2v2" else self._truco_member_mention(guild, list(game.teams[game.winner_team or 0])[0])
+            if reason == "correu":
+                if getattr(game, "loser_id", None) == pid:
+                    header = ["# 🃏 Você saiu"]
+                    final_status = "Jogo encerrado por saída."
+                    how_line = "Você saiu do jogo."
+                else:
+                    final_status = "Jogo encerrado por saída."
+                    how_line = f"{self._truco_member_name(guild, getattr(game, 'loser_id', 0) or 0)} saiu do jogo."
+            elif reason == "tempo esgotado":
+                if getattr(game, "loser_id", None) == pid:
+                    header = ["# 🃏 Abandono"]
+                    final_status = "Jogo encerrado por abandono."
+                    how_line = "Você não respondeu a tempo."
+                else:
+                    final_status = "Jogo encerrado por abandono."
+                    how_line = f"{self._truco_member_name(guild, getattr(game, 'loser_id', 0) or 0)} não respondeu a tempo."
+            else:
+                if won:
+                    final_status = "Jogo encerrado com sua vitória."
+                    how_line = f"Você levou {team0 if player_team == 0 else team1} vaza(s)."
+                else:
+                    final_status = "Jogo encerrado com sua derrota."
+                    other = team1 if player_team == 1 else team0
+                    opp_name = self._truco_team_name(game, guild, game.winner_team or 0) if game.mode == "2v2" else self._truco_member_name(guild, list(game.teams[game.winner_team or 0])[0])
+                    how_line = f"{opp_name} levou {other} vaza(s)."
+
+            meta = [
+                f"**Pote:** {self._chip_amount(game.pot)}",
+                f"**Vira:** {self._truco_card_public_display(game.vira)}",
+                f"**Manilha:** {game.manilha_rank}",
+                f"**Vazas:** {team0} × {team1}",
+            ]
+            mesa = ["## Mesa"]
+            order = self._truco_rotate_order(game.players_order, game.hand_starter_id or game.players_order[0])
+            any_card = False
+            for uid in order:
+                label = "Você" if int(uid) == pid else self._truco_member_name(guild, uid)
+                card = game.cards_on_table.get(uid)
+                mesa.append(f"**{label}** • {self._truco_card_public_display(card) if card else '—'}")
+                any_card = any_card or bool(card)
+            if not any_card:
+                mesa.append("A mesa foi encerrada.")
+            if game.table_history:
+                mesa.extend(["", "## Vazas", *game.table_history[-3:]])
+
+            current_chips = int(self.db.get_user_chips(game.guild_id, pid, default=100) or 0)
+            current_bonus = int(self._get_user_bonus_chips(game.guild_id, pid) or 0)
+            contrib = int(game.contribution.get(pid, TRUCO_ENTRY))
+            if won:
+                share = int(game.pot / max(1, len(game.teams[game.winner_team or 0])))
+                result_lines = ["## Resultado", f"Você ganhou **{share}** {self._CHIP_GAIN_EMOJI} e **+{TRUCO_BONUS_REWARD}** {self._CHIP_BONUS_EMOJI}.", f"Total: **{current_chips}** {self._CHIP_EMOJI} • **{current_bonus}** {self._CHIP_BONUS_EMOJI}."]
+            else:
+                result_lines = ["## Resultado", f"Você perdeu **{contrib}** {self._CHIP_LOSS_EMOJI}.", f"Total: **{current_chips}** {self._CHIP_EMOJI} • **{current_bonus}** {self._CHIP_BONUS_EMOJI}."]
+            status_lines = ["## Status", how_line, final_status]
+            return {"header": header, "meta": meta, "mesa": mesa, "cards": result_lines, "status": status_lines}
+
+        if game.status == "awaiting_raise_response" and self._truco_can_answer_raise(game, pid):
             status = f"{self._truco_member_name(guild, game.pending_raise_by or 0)} pediu {_TRUCO_RAISE_NAMES.get(game.pending_raise_to, 'aumento')}."
         elif game.status == "awaiting_raise_response":
             status = "Esperando a resposta do outro lado."
-        elif int(player_id) == game.turn_id:
+        elif pid == game.turn_id:
             status = "É a sua vez."
         else:
             status = f"Vez de {self._truco_member_name(guild, game.turn_id or 0)}."
@@ -509,7 +582,7 @@ class GincanaTrucoMixin:
         order = self._truco_rotate_order(game.players_order, game.hand_starter_id or game.players_order[0])
         any_card = False
         for uid in order:
-            label = "Você" if int(uid) == int(player_id) else self._truco_member_name(guild, uid)
+            label = "Você" if int(uid) == pid else self._truco_member_name(guild, uid)
             card = game.cards_on_table.get(uid)
             mesa.append(f"**{label}** • {self._truco_card_public_display(card) if card else '—'}")
             any_card = any_card or bool(card)
@@ -714,6 +787,9 @@ class GincanaTrucoMixin:
             return
         game.finished = True
         game.status = "finished"
+        game.finish_reason = reason
+        game.winner_team = winner_team
+        game.loser_id = loser_id
         self._truco_games.pop(game.guild_id, None)
         winners = list(game.teams[winner_team])
         losers = [uid for idx, team in enumerate(game.teams) if idx != winner_team for uid in team]
