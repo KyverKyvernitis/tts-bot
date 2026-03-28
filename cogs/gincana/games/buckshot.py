@@ -633,9 +633,11 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             await self._record_game_played(guild.id, chosen.id, weekly_points=3)
             lines.append(f"<:gunforward:1484655577836683434>💥 O disparo aconteceu. {chosen.mention} foi eliminado.")
             if winners:
-                verbo = 'foi dividido' if payout_total == 1 else 'foram divididos'
-                prefix = 'Rodada cheia. ' if player_count >= 5 else ('Rodada forte. ' if player_count >= 3 else '')
-                lines.append(f"{prefix}**{payout_total} {self._CHIP_GAIN_EMOJI}** {verbo} entre os sobreviventes.")
+                payout_each = payout_total // len(winners)
+                if payout_each > 0:
+                    lines.append(f"Cada sobrevivente recebeu **{payout_each} {self._CHIP_GAIN_EMOJI}**.")
+                else:
+                    lines.append("Os sobreviventes dividiram o pote.")
             else:
                 lines.append(f"Ninguém sobreviveu para receber **{payout_total} {self._CHIP_LOSS_EMOJI}**.")
 
