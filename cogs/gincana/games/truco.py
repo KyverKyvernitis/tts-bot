@@ -255,7 +255,7 @@ class TrucoTableView(discord.ui.LayoutView):
 
 class TrucoHandView(discord.ui.LayoutView):
     def __init__(self, cog: "GincanaTrucoMixin", game: TrucoGame, player_id: int):
-        super().__init__(timeout=120.0)
+        super().__init__(timeout=_TRUCO_ACTION_TIMEOUT)
         self.cog = cog
         self.game = game
         self.player_id = int(player_id)
@@ -533,11 +533,21 @@ class GincanaTrucoMixin:
 
     async def _truco_safe_edit(self, message, *, embed=None, view=None, content=None):
         if message is None:
-            return
+            return False
         try:
-            await message.edit(content=content, embed=embed, view=view)
+            if view is not None and embed is None and content is None:
+                await message.edit(view=view)
+            else:
+                await message.edit(content=content, embed=embed, view=view)
+            return True
         except Exception:
-            pass
+            try:
+                if view is not None and embed is None:
+                    await message.edit(content=content, view=view)
+                    return True
+            except Exception:
+                pass
+        return False
 
     async def _truco_refresh_private_views(self, game: TrucoGame):
         for player_id in game.players:
@@ -653,16 +663,28 @@ class GincanaTrucoMixin:
             await self._record_game_played(game.guild_id, uid, weekly_points=2)
         guild = self.bot.get_guild(game.guild_id)
         winner_text = self._truco_team_mentions(game, guild, winner_team) if game.mode == "2v2" else self._truco_member_mention(guild, winners[0])
-        game.status_text = f"{winner_text} venceu a mão."
-        embed = self._truco_status_embed(game, title="🃏 Truco encerrado")
-        extra = f"\n{winner_text} levou **{game.pot}** {self._CHIP_GAIN_EMOJI} e cada vencedor ganhou **+{TRUCO_BONUS_REWARD}** {self._CHIP_BONUS_EMOJI}."
         if reason == "correu":
-            embed.description += "\nA mão terminou porque alguém saiu." + extra
+            end_line = "A mão terminou porque alguém saiu."
         elif reason == "tempo esgotado":
-            embed.description += "\nA mão terminou por tempo esgotado." + extra
+            end_line = "A mão terminou por tempo esgotado."
         else:
-            embed.description += extra
-        await self._truco_safe_edit(game.status_message, embed=embed, view=None)
+            end_line = "A mão foi encerrada."
+        game.status_text = f"{winner_text} venceu a mão."
+        lines = self._truco_status_lines(game, title="🃏 Truco")
+        lines["status"] = [game.status_text, end_line, f"{winner_text} levou **{game.pot}** {self._CHIP_GAIN_EMOJI} e cada vencedor ganhou **+{TRUCO_BONUS_REWARD}** {self._CHIP_BONUS_EMOJI}."]
+        closed = discord.ui.LayoutView(timeout=None)
+        closed.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(lines["header"])),
+            discord.ui.TextDisplay("\n".join(lines["meta"])),
+            accent_color=discord.Color.dark_green(),
+        ))
+        closed.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(lines["mesa"])),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(lines["status"])),
+            accent_color=discord.Color.blurple(),
+        ))
+        await self._truco_safe_edit(game.status_message, embed=None, view=closed)
         await self._truco_refresh_private_views(game)
 
     async def _expire_truco_invite(self, game: TrucoGame):
@@ -920,11 +942,10 @@ class GincanaTrucoMixin:
         view = TrucoHandView(self, game, int(player_id))
         old = game.dm_messages.get(int(player_id))
         if old is not None:
-            try:
-                await old.edit(content=None, embed=None, view=view)
+            ok = await self._truco_safe_edit(old, embed=None, view=view, content=None)
+            if ok:
                 return True
-            except Exception:
-                game.dm_messages.pop(int(player_id), None)
+            game.dm_messages.pop(int(player_id), None)
         try:
             msg = await user.send(view=view)
             game.dm_messages[int(player_id)] = msg
@@ -964,6 +985,11 @@ class GincanaTrucoMixin:
         game.cards_on_table[player_id] = card
         if not interaction.response.is_done():
             await interaction.response.defer()
+        try:
+            if interaction.message is not None:
+                await self._truco_safe_edit(interaction.message, embed=None, view=TrucoHandView(self, game, player_id), content=None)
+        except Exception:
+            pass
         await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await self._truco_refresh_private_views(game)
         await asyncio.sleep(0.8)

@@ -279,8 +279,8 @@ class GincanaBuckshotMixin:
                 chosen_text = chosen.mention if chosen is not None else "Alguém"
                 if winners:
                     final_text = (
-                        f"<:gunforward:1484655577836683434>💥 O disparo aconteceu, {chosen_text} foi eliminado.\n"
-                        f"{self._CHIP_GAIN_EMOJI} O pote de **{payout_total} {self._CHIP_EMOJI}** foi dividido entre os sobreviventes."
+                        f"<:gunforward:1484655577836683434>💥 O disparo aconteceu. {chosen_text} foi eliminado.\n"
+                        f"Cada sobrevivente recebeu **{payout_each} {self._CHIP_GAIN_EMOJI}**."
                     )
                 else:
                     final_text = (
@@ -635,12 +635,10 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             if winners:
                 payout_each = payout_total // len(winners)
                 net_each = max(0, payout_each - BUCKSHOT_STAKE)
-                if net_each > 0:
-                    lines.append(f"Cada sobrevivente lucrou **{net_each} {self._CHIP_GAIN_EMOJI}**.")
-                elif payout_each > 0:
-                    lines.append("Os sobreviventes recuperaram a entrada.")
+                if payout_each > 0:
+                    lines.append(f"Cada sobrevivente recebeu **{payout_each} {self._CHIP_GAIN_EMOJI}**.")
                 else:
-                    lines.append("Os sobreviventes dividiram o pote.")
+                    lines.append("Os sobreviventes não receberam nada.")
             else:
                 lines.append(f"Ninguém sobreviveu para receber **{payout_total} {self._CHIP_LOSS_EMOJI}**.")
 
