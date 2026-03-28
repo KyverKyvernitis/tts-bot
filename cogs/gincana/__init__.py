@@ -1,3 +1,5 @@
+import random
+import time
 import discord
 from discord import app_commands
 from discord.ext import commands as dcommands
@@ -210,6 +212,72 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         handled = await self._handle_truco_trigger(fake)
         if not handled:
             await ctx.reply(embed=self._make_embed("🃏 Truco 2v2", "Não foi possível abrir o lobby agora.", ok=False), mention_author=False)
+    async def _run_robbery(self, channel: discord.abc.Messageable, guild: discord.Guild, author: discord.Member, target: discord.Member):
+        if target.bot:
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você tentou roubar um bot. Isso foi longe demais."], ok=False))
+            return True
+        if target.id == author.id:
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Tentar roubar a si mesmo já é demais."], ok=False))
+            return True
+        if int(self.db.get_user_chips(guild.id, author.id, default=CHIPS_INITIAL) or 0) < 0:
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já está devendo (coitado). Quite a dívida antes de tentar roubar alguém."], ok=False))
+            return True
+        # cooldown
+        adoc = self.db._get_user_doc(guild.id, author.id)
+        now = time.time()
+        last = float(adoc.get('last_robbery_at', 0) or 0)
+        remaining = max(0, int((last + 21600) - now))
+        if remaining > 0:
+            h = remaining // 3600
+            m = (remaining % 3600) // 60
+            wait = f"{h}h {m}min" if h else f"{m}min"
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já aprontou demais por agora.", f"Tente de novo em **{wait}**."], ok=False))
+            return True
+        target_chips = int(self.db.get_user_chips(guild.id, target.id, default=CHIPS_INITIAL) or 0)
+        target_bonus = int(self.db.get_user_bonus_chips(guild.id, target.id) or 0)
+        if target_chips < 0:
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário já está devendo (coitado)."], ok=False))
+            return True
+        if target_chips < 20:
+            if target_bonus > 0 and target_chips <= 0:
+                await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário só tem fichas bônus."], ok=False))
+            else:
+                await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário é muito **pobre** pra ser roubado."], ok=False))
+            return True
+        # consume cooldown on attempt
+        adoc['last_robbery_at'] = float(now)
+        await self.db._save_user_doc(guild.id, author.id, adoc)
+        success = random.random() < 0.40
+        if success:
+            amount = random.randint(5, min(30, max(5, target_chips)))
+            await self._change_user_chips(guild.id, target.id, -amount, mark_activity=True)
+            await self._change_user_chips(guild.id, author.id, amount, mark_activity=True)
+            flavor = random.choice([
+                f"Você roubou {self._chip_text(amount, kind='gain')} de {target.mention}.",
+                f"O golpe encaixou. Você levou {self._chip_text(amount, kind='gain')} de {target.mention}.",
+                f"Você passou a mão em {self._chip_text(amount, kind='gain')} de {target.mention}."
+            ])
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", [flavor], ok=True, accent_color=discord.Color.dark_green()))
+            return True
+        penalty = 10
+        await self._change_user_chips(guild.id, author.id, -penalty, mark_activity=True)
+        lines = [
+            f"Você tentou roubar {target.mention}, mas foi pego no flagra.",
+            f"Você perdeu {self._chip_text(penalty, kind='loss')}."
+        ]
+        await channel.send(view=self._make_v2_notice("🕵️ Deu ruim", lines, ok=False, accent_color=discord.Color.red()))
+        return True
+
+    @dcommands.command(name="roubar", aliases=["rob"])
+    async def roubar_command(self, ctx: dcommands.Context, target: discord.Member | None = None):
+        if ctx.guild is None:
+            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            return
+        if target is None:
+            await ctx.reply(view=self._make_v2_notice("🕵️ Roubo", [f"Use `{ctx.clean_prefix}roubar @usuário` para tentar a sorte."], ok=False), mention_author=False)
+            return
+        await self._run_robbery(ctx.channel, ctx.guild, ctx.author, target)
+
     @dcommands.command(name="gincanahelp", aliases=["helpgincana", "jogoshelp"])
     async def gincanahelp(self, ctx: dcommands.Context):
         if ctx.guild is None:
