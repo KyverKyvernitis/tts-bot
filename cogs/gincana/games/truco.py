@@ -550,6 +550,50 @@ class GincanaTrucoMixin:
                 pass
         return False
 
+
+    async def _truco_probe_dm(self, user_id: int) -> bool:
+        try:
+            user = self.bot.get_user(int(user_id)) or await self.bot.fetch_user(int(user_id))
+        except Exception:
+            return False
+        try:
+            dm = user.dm_channel or await user.create_dm()
+            probe = await dm.send("🃏 Truco\nMensagem de teste para confirmar sua DM.")
+            try:
+                await probe.delete()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    async def _truco_require_dm_for_players(self, player_ids, *, interaction=None, channel=None, guild=None) -> bool:
+        missing = []
+        for uid in player_ids:
+            if not await self._truco_probe_dm(int(uid)):
+                missing.append(int(uid))
+        if not missing:
+            return True
+        if len(missing) > 1:
+            text = "Não consegui enviar mensagem direta para todos os jogadores. Habilitem as mensagens diretas do servidor e tentem novamente."
+        else:
+            mention = None
+            if guild is not None:
+                m = guild.get_member(missing[0])
+                mention = m.mention if m else None
+            if interaction is not None:
+                text = "Não consegui te enviar mensagem direta. Habilite as mensagens diretas do servidor e tente novamente."
+            else:
+                text = f"Não consegui enviar mensagem direta para {mention or 'esse jogador'}. Habilite as mensagens diretas do servidor e tente novamente."
+        if interaction is not None:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        elif channel is not None:
+            await channel.send(embed=self._make_embed("🃏 Truco", text, ok=False))
+        return False
+
     async def _truco_update_interaction_message(self, interaction: discord.Interaction, *, view: discord.ui.LayoutView | None = None, content: str | None = None):
         target = getattr(interaction, 'message', None)
         if interaction.response.is_done():
@@ -754,6 +798,8 @@ class GincanaTrucoMixin:
         if not ok:
             await message.channel.send(embed=self._make_embed("🃏 Truco", note or "Você não tem saldo suficiente para entrar nesse jogo.", ok=False))
             return True
+        if not await self._truco_require_dm_for_players([challenger.id, opponent.id], channel=message.channel, guild=guild):
+            return True
         game = self._truco_make_game(guild.id, message.channel.id, "1v1", [challenger.id, opponent.id], [(challenger.id,), (opponent.id,)])
         self._truco_games[guild.id] = game
         embed = discord.Embed(
@@ -811,6 +857,8 @@ class GincanaTrucoMixin:
             confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, user.id, TRUCO_ENTRY, title="⚠️ Confirmar entrada")
             if not confirmed:
                 return
+        if not await self._truco_require_dm_for_players([user.id], interaction=interaction, guild=guild):
+            return
         team.append(user.id)
         view._build_layout()
         await self._truco_update_interaction_message(interaction, view=view)
@@ -891,6 +939,8 @@ class GincanaTrucoMixin:
             if not ok:
                 await interaction.response.send_message(f"{self._truco_member_mention(guild, uid)} não pode entrar agora. {note or ''}".strip(), ephemeral=True)
                 return
+        if not await self._truco_require_dm_for_players(players, interaction=interaction, guild=guild):
+            return
         # consume entry now
         for uid in players:
             paid, _bal, note = await self._try_consume_chips(guild.id, uid, TRUCO_ENTRY)
@@ -929,6 +979,10 @@ class GincanaTrucoMixin:
             confirmed = await self._confirm_negative_ephemeral(interaction, game.guild_id, interaction.user.id, TRUCO_ENTRY, title="⚠️ Confirmar entrada")
             if not confirmed:
                 return
+        guild = interaction.guild
+        if guild is not None:
+            if not await self._truco_require_dm_for_players(list(game.players), interaction=interaction, guild=guild):
+                return
         paid, _b, note = await self._try_consume_chips(game.guild_id, game.players_order[0], TRUCO_ENTRY)
         if not paid:
             await interaction.response.send_message("Não foi possível cobrar a entrada do desafiante agora.", ephemeral=True)
@@ -962,8 +1016,20 @@ class GincanaTrucoMixin:
         game.status_text = "Virando a carta..."
         await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await asyncio.sleep(0.8)
+        dm_failed = []
         for uid in game.players:
-            await self._truco_send_hand_dm(game, uid)
+            ok_dm = await self._truco_send_hand_dm(game, uid)
+            if not ok_dm:
+                dm_failed.append(uid)
+        if dm_failed:
+            game.finished = True
+            self._truco_games.pop(game.guild_id, None)
+            guild = self.bot.get_guild(game.guild_id)
+            failed_mentions = ", ".join(self._truco_member_mention(guild, uid) for uid in dm_failed)
+            closed = discord.ui.LayoutView(timeout=None)
+            closed.add_item(discord.ui.Container(discord.ui.TextDisplay(f"# 🃏 Truco\nNão consegui enviar mensagem direta para {failed_mentions}. Habilitem as mensagens diretas do servidor e tentem novamente."), accent_color=discord.Color.red()))
+            await self._truco_safe_edit(game.status_message, embed=None, view=closed)
+            return
         await self._truco_show_turn(game)
 
     async def _truco_send_hand_dm(self, game: TrucoGame, player_id: int, quiet: bool = False) -> bool:
@@ -995,7 +1061,7 @@ class GincanaTrucoMixin:
         if sent_dm:
             await interaction.response.send_message("Atualizei o seu jogo na DM.", ephemeral=True)
             return
-        await interaction.response.send_message("Não consegui usar sua DM, então mostrei o jogo aqui.", ephemeral=True, view=TrucoHandView(self, game, interaction.user.id))
+        await interaction.response.send_message("Não consegui te enviar mensagem direta. Habilite as mensagens diretas do servidor e tente novamente.", ephemeral=True)
 
     async def _handle_truco_play_card(self, interaction: discord.Interaction, game: TrucoGame, player_id: int, card_index: int):
         if interaction.user.id != player_id:
