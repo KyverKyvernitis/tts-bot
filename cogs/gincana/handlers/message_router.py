@@ -92,6 +92,22 @@ class GincanaMessageRouterMixin:
         await message.channel.send(embed=embed)
         return True
 
+    async def _handle_rob_trigger(self, message: discord.Message) -> bool:
+        content = str(message.content or '').strip()
+        lowered = content.casefold()
+        if lowered.startswith('_'):
+            return False
+        if not (lowered.startswith('roubar') or lowered.startswith('rob')):
+            return False
+        if message.guild is None:
+            return True
+        if not message.mentions:
+            await message.channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Use `roubar @usuário` para tentar a sorte."], ok=False))
+            return True
+        target = message.mentions[0]
+        await self._run_robbery(message.channel, message.guild, message.author, target)
+        return True
+
     async def _handle_gincana_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
@@ -101,6 +117,9 @@ class GincanaMessageRouterMixin:
             return
 
         if await self._safe_route_call("_handle_text_profile_commands", message):
+            return
+
+        if await self._safe_route_call("_handle_rob_trigger", message):
             return
 
         if await self._safe_route_call("_handle_focus_trigger", message):
