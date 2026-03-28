@@ -478,8 +478,8 @@ class GincanaTrucoMixin:
             confirmed = await self._confirm_negative_ephemeral(interaction, game.guild_id, interaction.user.id, TRUCO_ENTRY, title="⚠️ Confirmar truco")
             if not confirmed:
                 return
-        await self._change_user_chips(game.guild_id, game.challenger_id, -TRUCO_ENTRY, mark_activity=True)
-        await self._change_user_chips(game.guild_id, game.opponent_id, -TRUCO_ENTRY, mark_activity=True)
+        await self._try_consume_chips(game.guild_id, game.challenger_id, TRUCO_ENTRY)
+        await self._try_consume_chips(game.guild_id, game.opponent_id, TRUCO_ENTRY)
         deck = self._truco_create_deck()
         game.hands = {pid: [deck.pop(), deck.pop(), deck.pop()] for pid in game.players}
         game.vira = deck.pop()
@@ -636,7 +636,7 @@ class GincanaTrucoMixin:
                 return
         for pid, delta in deltas.items():
             if delta > 0:
-                await self._change_user_chips(game.guild_id, pid, -delta, mark_activity=True)
+                await self._try_consume_chips(game.guild_id, pid, delta)
                 game.contribution[pid] = int(game.contribution.get(pid, TRUCO_ENTRY)) + delta
         game.level = target_level
         game.pot = self._truco_target_pot(target_level)
