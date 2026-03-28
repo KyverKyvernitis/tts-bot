@@ -220,12 +220,15 @@ class TrucoTableView(discord.ui.LayoutView):
         lines = self.cog._truco_status_lines(self.game)
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(lines["header"])),
-            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(lines["meta"])),
+            accent_color=discord.Color.dark_green(),
+        ))
+        self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(lines["mesa"])),
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(lines["status"])),
             discord.ui.ActionRow(*buttons),
-            accent_color=discord.Color.dark_green(),
+            accent_color=discord.Color.blurple(),
         ))
 
     async def _my_hand(self, interaction: discord.Interaction):
@@ -452,30 +455,30 @@ class GincanaTrucoMixin:
             duel = [title, f"{self._truco_team_mentions(game, guild, 0)}", "vs", f"{self._truco_team_mentions(game, guild, 1)}"]
         else:
             duel = [title, f"{self._truco_member_mention(guild, game.players_order[0])} vs {self._truco_member_mention(guild, game.players_order[1])}"]
-        duel.extend([
+        meta = [
             f"**Pote:** {self._chip_amount(game.pot)}",
             f"**Vira:** {self._truco_card_public_display(game.vira)}",
             f"**Manilha:** {game.manilha_rank or '—'}",
-        ])
+        ]
         team0 = sum(1 for x in game.round_results if x == 0)
         team1 = sum(1 for x in game.round_results if x == 1)
         if game.mode == "2v2":
-            vazas = ["## Vazas", f"🟦 Time 1: **{team0}**", f"🟥 Time 2: **{team1}**"]
+            meta.append(f"**Vazas:** Time 1 **{team0}** × **{team1}** Time 2")
         else:
-            vazas = ["## Vazas", f"{self._truco_member_name(guild, game.players_order[0])}: **{team0}**", f"{self._truco_member_name(guild, game.players_order[1])}: **{team1}**"]
-        mesa = ["## Mesa"]
+            meta.append(f"**Vazas:** **{team0}** × **{team1}**")
+        mesa = ["## Mesa atual"]
         order = self._truco_rotate_order(game.players_order, game.hand_starter_id or game.players_order[0])
         shown = False
         for uid in order:
             card = game.cards_on_table.get(uid)
-            mesa.append(f"• {self._truco_member_name(guild, uid)}: {self._truco_card_public_display(card) if card else '—'}")
+            mesa.append(f"• **{self._truco_member_name(guild, uid)}**: {self._truco_card_public_display(card) if card else '—'}")
             shown = shown or bool(card)
         if not shown:
-            mesa.append("Nenhuma carta na mesa.")
+            mesa.append("• Ainda não tem carta na mesa.")
         if game.table_history:
             mesa.extend(["", "## Últimas vazas", *game.table_history[-3:]])
-        status = ["## Status", game.status_text, "Sua mão e seus controles ficam na DM."]
-        return {"header": duel + ["", *vazas], "mesa": mesa, "status": status}
+        status = ["## Status", game.status_text, "Use **Ver mão** para jogar e acompanhar sua mão na DM."]
+        return {"header": duel, "meta": meta, "mesa": mesa, "status": status}
 
     def _truco_hand_lines(self, game: TrucoGame, player_id: int, *, dm_ok: bool = True) -> dict[str, list[str]]:
         guild = self.bot.get_guild(game.guild_id)
@@ -488,36 +491,36 @@ class GincanaTrucoMixin:
         elif game.status == "awaiting_raise_response" and self._truco_can_answer_raise(game, player_id):
             status = f"{self._truco_member_name(guild, game.pending_raise_by or 0)} pediu {_TRUCO_RAISE_NAMES.get(game.pending_raise_to, 'aumento')}."
         elif game.status == "awaiting_raise_response":
-            status = "Esperando a resposta do outro time."
+            status = "Esperando a resposta do outro lado."
         elif int(player_id) == game.turn_id:
             status = "É a sua vez."
         else:
             status = f"Vez de {self._truco_member_name(guild, game.turn_id or 0)}."
-        header = [
-            "# 🃏 Sua mão",
+        header = ["# 🃏 Truco", "## Seu painel"]
+        meta = [
             f"**Vira:** {self._truco_card_public_display(game.vira)}",
             f"**Manilha:** {game.manilha_rank}",
             f"**Pote:** {self._chip_amount(game.pot)}",
-            f"**Vazas:** {team0} x {team1}",
+            f"**Vazas:** {team0} × {team1}",
         ]
         if partner:
-            header.append(f"**Parceiro:** {self._truco_member_name(guild, partner)}")
-        mesa = ["## Mesa"]
+            meta.append(f"**Parceiro:** {self._truco_member_name(guild, partner)}")
+        mesa = ["## Mesa atual"]
         order = self._truco_rotate_order(game.players_order, game.hand_starter_id or game.players_order[0])
         any_card = False
         for uid in order:
             card = game.cards_on_table.get(uid)
-            mesa.append(f"• {self._truco_member_name(guild, uid)}: {self._truco_card_public_display(card) if card else '—'}")
+            mesa.append(f"• **{self._truco_member_name(guild, uid)}**: {self._truco_card_public_display(card) if card else '—'}")
             any_card = any_card or bool(card)
         if not any_card:
-            mesa.append("Nenhuma carta na mesa.")
+            mesa.append("• Ainda não tem carta na mesa.")
         if game.table_history:
             mesa.extend(["", "## Últimas vazas", *game.table_history[-3:]])
-        cards_lines = ["## Cartas"] + ([f"• {self._truco_card_display(card)}" for card in cards] if cards else ["Você já jogou todas as cartas."])
+        cards_lines = ["## Suas cartas"] + ([f"• {self._truco_card_display(card)}" for card in cards] if cards else ["Você já jogou todas as cartas."])
         status_lines = ["## Status", status]
         if not dm_ok:
             status_lines.append("Não consegui usar sua DM, então mostrei a mão aqui.")
-        return {"header": header, "mesa": mesa, "cards": cards_lines, "status": status_lines}
+        return {"header": header, "meta": meta, "mesa": mesa, "cards": cards_lines, "status": status_lines}
 
     def _truco_status_embed(self, game: TrucoGame, *, title: str = "🃏 Truco") -> discord.Embed:
         lines = self._truco_status_lines(game, title=title)
