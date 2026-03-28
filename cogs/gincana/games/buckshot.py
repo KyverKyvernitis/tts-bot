@@ -634,8 +634,11 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             lines.append(f"<:gunforward:1484655577836683434>💥 O disparo aconteceu. {chosen.mention} foi eliminado.")
             if winners:
                 payout_each = payout_total // len(winners)
-                if payout_each > 0:
-                    lines.append(f"Cada sobrevivente recebeu **{payout_each} {self._CHIP_GAIN_EMOJI}**.")
+                net_each = max(0, payout_each - BUCKSHOT_STAKE)
+                if net_each > 0:
+                    lines.append(f"Cada sobrevivente lucrou **{net_each} {self._CHIP_GAIN_EMOJI}**.")
+                elif payout_each > 0:
+                    lines.append("Os sobreviventes recuperaram a entrada.")
                 else:
                     lines.append("Os sobreviventes dividiram o pote.")
             else:

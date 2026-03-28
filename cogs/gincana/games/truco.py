@@ -296,7 +296,7 @@ class TrucoHandView(discord.ui.LayoutView):
                 leave.callback = self._run_action
                 action_buttons.append(leave)
         lines = self.cog._truco_hand_lines(self.game, self.player_id)
-        items = [discord.ui.TextDisplay("\n".join(lines["header"])), discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines["mesa"])), discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines["cards"])), discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines["status"]))]
+        items = [discord.ui.TextDisplay("\n".join(lines["header"])), discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines["meta"])), discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines["mesa"])), discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines["cards"])), discord.ui.Separator(), discord.ui.TextDisplay("\n".join(lines["status"]))]
         if card_buttons:
             items.append(discord.ui.ActionRow(*card_buttons[:5]))
         if action_buttons:
@@ -921,7 +921,7 @@ class GincanaTrucoMixin:
         old = game.dm_messages.get(int(player_id))
         if old is not None:
             try:
-                await old.edit(embed=None, view=view)
+                await old.edit(content=None, embed=None, view=view)
                 return True
             except Exception:
                 game.dm_messages.pop(int(player_id), None)
@@ -962,7 +962,8 @@ class GincanaTrucoMixin:
         guild = self.bot.get_guild(game.guild_id)
         game.status_text = f"{self._truco_member_mention(guild, player_id)} puxou uma carta."
         game.cards_on_table[player_id] = card
-        await interaction.response.edit_message(content="Carta enviada para a mesa.", embed=None, view=None)
+        if not interaction.response.is_done():
+            await interaction.response.defer()
         await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await self._truco_refresh_private_views(game)
         await asyncio.sleep(0.8)
