@@ -587,7 +587,11 @@ class GincanaBase:
         embed.add_field(name="⏳ Recarga", value=recarga, inline=False)
         embed.add_field(name="🎁 Login diário", value=self._daily_bonus_text(guild_id, member.id), inline=False)
         embed.add_field(name="⭐ Weekly points", value=f"**{weekly_points}**", inline=False)
+        truco_wins = int(stats.get("truco_wins", 0) or 0)
+        truco_losses = int(stats.get("truco_losses", 0) or 0)
         embed.add_field(name="🎮 Melhor jogo", value=self._best_game_summary(stats), inline=False)
+        if truco_wins > 0 or truco_losses > 0:
+            embed.add_field(name="🃏 Truco", value=f"Vitórias: **{truco_wins}**\nDerrotas: **{truco_losses}**", inline=False)
         embed.add_field(name="📊 Resumo", value=summary, inline=False)
         embed.set_footer(text="Use _rank para ver o ranking do servidor e _daily para pegar seu bônus")
         return embed
@@ -625,13 +629,20 @@ class GincanaBase:
         return f"{minutes}min"
 
     async def _try_consume_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
-        projected_chips, _projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, amount)
+        spend = max(0, int(amount))
+        projected_chips, projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, spend)
         current_before = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
-        note = self._negative_transition_note(guild_id, user_id, amount)
+        note = self._negative_transition_note(guild_id, user_id, spend)
         if projected_chips < -self._MAX_CHIP_DEBT:
-            return False, current_before, self._insufficient_chips_text(guild_id, user_id, amount)
-        new_balance = await self._change_user_chips(guild_id, user_id, -int(amount), mark_activity=True)
-        return True, new_balance, note
+            return False, current_before, self._insufficient_chips_text(guild_id, user_id, spend)
+        current_bonus = self._get_user_bonus_chips(guild_id, user_id)
+        use_bonus = min(current_bonus, spend)
+        remaining = spend - use_bonus
+        if use_bonus > 0:
+            await self._change_user_bonus_chips(guild_id, user_id, -use_bonus, mark_activity=True)
+        if remaining > 0:
+            await self._change_user_chips(guild_id, user_id, -remaining, mark_activity=True)
+        return True, projected_chips, note
 
     async def _ensure_action_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
         projected_chips, _projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, amount)
