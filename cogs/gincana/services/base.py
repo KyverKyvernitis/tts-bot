@@ -176,6 +176,15 @@ class GincanaBase:
             color=discord.Color(ON_COLOR) if ok else discord.Color(OFF_COLOR),
         )
 
+
+    def _make_v2_notice(self, title: str, lines: list[str], *, ok: bool = True, accent_color: discord.Color | None = None) -> discord.ui.LayoutView:
+        view = discord.ui.LayoutView(timeout=None)
+        color = accent_color or (discord.Color(ON_COLOR) if ok else discord.Color(OFF_COLOR))
+        body = [f"# {title}"]
+        body.extend([str(x) for x in lines if str(x).strip()])
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(body)), accent_color=color))
+        return view
+
     def _chip_text(self, amount: int | str, *, kind: str = "balance") -> str:
         emoji = self._CHIP_EMOJI
         if kind == "gain":
