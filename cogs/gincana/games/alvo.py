@@ -892,6 +892,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             for user_id, amount in rewards.items():
                 if amount > 0:
                     await self._change_user_chips(guild.id, user_id, amount)
+                    await self.db.add_user_game_stat(guild.id, user_id, 'alvo_wins', 1)
                     await self._grant_weekly_points(guild.id, user_id, max(3, amount // 4))
             for user_id, amount in bonus_rewards.items():
                 if amount > 0:
