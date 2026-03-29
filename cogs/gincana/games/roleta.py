@@ -714,6 +714,7 @@ class GincanaRoletaMixin:
                 board = self._render_carta_board(final_columns)
                 middle = [column[1] for column in final_columns]
                 result_kind, result_amount, flavor = self._evaluate_carta_middle(middle)
+                await self.db.add_user_game_stat(guild.id, message.author.id, "carta_spins", 1)
                 flavor = self._pick_carta_result_flavor(result_kind, fallback=flavor)
                 _streak_value, streak_line = await self._advance_carta_hot_streak(guild.id, message.author.id, result_kind=result_kind)
                 if result_kind == "jackpot":
