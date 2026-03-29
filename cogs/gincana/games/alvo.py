@@ -977,12 +977,13 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         view = _TargetJoinView(self, guild.id, session, guild, timeout=30.0)
         session['view'] = view
         try:
-            panel_message = await message.channel.send(embed=self._make_target_embed(guild, session), view=view)
+            panel_message = await message.channel.send(view=view)
         except Exception:
             self._target_sessions.pop(guild.id, None)
             await self._change_user_chips(guild.id, message.author.id, ALVO_STAKE)
             return True
         session['lobby_message'] = panel_message
+        session['message'] = panel_message
         await self._react_with_emoji(message, '🎯', keep=True)
         return True
 
