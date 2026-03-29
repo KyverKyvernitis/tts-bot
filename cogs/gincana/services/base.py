@@ -337,10 +337,10 @@ class GincanaBase:
         status = self.db.get_user_daily_status(guild_id, user_id)
         streak = int(status.get("streak", 0) or 0)
         if status.get("available"):
-            return f"Disponível agora em **_daily**. Streak atual: **{streak}**."
-        return f"Já resgatado hoje. Streak atual: **{streak}**."
+            return f"Disponível agora em **_daily** • Streak: **{streak}**"
+        return f"Já resgatado hoje • Streak: **{streak}**"
 
-    def _best_game_summary(self, stats: dict) -> str:
+    def _best_game_summary(self, stats: dict) -> str | None:
         roleta_wins = int(stats.get('roleta_jackpots', 0) or 0) + int(stats.get('cartas_jackpots', 0) or 0)
         candidates = [
             ((int(stats.get('truco_wins', 0) or 0), -int(stats.get('truco_losses', 0) or 0)), f"**Truco** — **{int(stats.get('truco_wins', 0) or 0)}** vitórias"),
@@ -352,7 +352,7 @@ class GincanaBase:
         ]
         best_score, best_text = max(candidates, key=lambda item: item[0])
         if best_score[0] <= 0:
-            return "Ainda sem destaque"
+            return None
         return best_text
 
     def _build_chip_game_stat_lines(self, stats: dict) -> list[str]:
@@ -678,39 +678,72 @@ class GincanaBase:
         remaining = spend - use_bonus
         return chips - remaining, bonus - use_bonus
 
-    def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
+    def _chip_rank_position_text(self, guild: discord.Guild, user_id: int) -> str | None:
+        rows = self.db.get_chip_leaderboard(guild.id, limit=1000000)
+        for index, row in enumerate(rows, start=1):
+            try:
+                if int(row.get("user_id", 0)) == int(user_id):
+                    return f"🏆 Rank: **#{index}**"
+            except Exception:
+                continue
+        return None
+
+    def _make_chip_balance_view(self, member: discord.Member) -> discord.ui.LayoutView:
         guild_id = member.guild.id
         chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_INITIAL)
         bonus_chips = self._get_user_bonus_chips(guild_id, member.id)
         stats = self.db.get_user_game_stats(guild_id, member.id)
 
-        embed = discord.Embed(
-            color=discord.Color.blurple(),
-        )
-        embed.set_author(name=str(member.display_name), icon_url=member.display_avatar.url)
-
-        recarga = self._chip_recharge_text(guild_id, member.id)
-
-        wins, losses, games, rate = self._chip_summary_stats(stats)
+        _, _, _, rate = self._chip_summary_stats(stats)
         game_stat_lines = self._build_chip_game_stat_lines(stats)
         summary_lines = list(game_stat_lines)
-        summary_lines.append(f"Taxa de vitórias: **{rate}**")
-        summary = "\n".join(summary_lines)
+        summary_lines.append(f"📈 **Taxa de vitórias**: **{rate}**")
+        summary_text = "\n".join(summary_lines)
 
-        balance_value = self._format_primary_chip_balance(guild_id, member.id)
-        notes: list[str] = []
+        balance_lines = [f"# {self._CHIP_EMOJI} Fichas", self._format_primary_chip_balance(guild_id, member.id)]
+        rank_text = self._chip_rank_position_text(member.guild, member.id)
+        if rank_text:
+            balance_lines.append(rank_text)
         if bonus_chips > 0:
-            notes.append("As fichas bônus serão usadas antes das normais.")
+            balance_lines.append("As bônus entram antes das normais.")
         if chips < 0:
-            notes.append("Seus ganhos vão quitar a dívida primeiro.")
-        if notes:
-            balance_value += "\n" + "\n".join(notes)
-        embed.add_field(name=f"{self._CHIP_EMOJI} Fichas", value=balance_value, inline=False)
-        embed.add_field(name="⏳ Recarga", value=recarga, inline=False)
-        embed.add_field(name="🎁 Login diário", value=self._daily_bonus_text(guild_id, member.id), inline=False)
-        embed.add_field(name="🎮 Melhor jogo", value=self._best_game_summary(stats), inline=False)
-        embed.add_field(name="📊 Resumo", value=summary, inline=False)
-        embed.set_footer(text="Use _rank para ver o ranking do servidor e _daily para pegar seu bônus")
+            balance_lines.append("Ganhos futuros quitam a dívida primeiro.")
+
+        utility_lines = [
+            "# ⏳ Recarga",
+            self._chip_recharge_text(guild_id, member.id),
+            "---",
+            "# 🎁 Login diário",
+            self._daily_bonus_text(guild_id, member.id),
+        ]
+        best_game = self._best_game_summary(stats)
+        if best_game:
+            utility_lines.extend(["---", "# 🎮 Melhor jogo", best_game])
+
+        summary_block_lines = ["# 📊 Resumo", summary_text, "---", "Dica: **_rank** mostra sua posição • **_daily** mantém sua streak"]
+
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(balance_lines)),
+            accent_color=discord.Color.blurple(),
+        ))
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(utility_lines)),
+            accent_color=discord.Color.orange(),
+        ))
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(summary_block_lines)),
+            accent_color=discord.Color.dark_green(),
+        ))
+        return view
+
+    def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
+        guild_id = member.guild.id
+        stats = self.db.get_user_game_stats(guild_id, member.id)
+        _, _, _, rate = self._chip_summary_stats(stats)
+        embed = discord.Embed(color=discord.Color.blurple())
+        embed.set_author(name=str(member.display_name), icon_url=member.display_avatar.url)
+        embed.description = f"{self._format_primary_chip_balance(guild_id, member.id)}\n📈 **Taxa de vitórias**: **{rate}**"
         return embed
 
     def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
