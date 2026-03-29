@@ -5,7 +5,7 @@ from discord import app_commands
 from discord.ext import commands as dcommands
 
 from .cog import GincanaCore
-from .constants import CHIPS_DEFAULT, _guild_scoped
+from .constants import CHIPS_DEFAULT, CHIPS_INITIAL, _guild_scoped
 
 
 class GincanaCog(dcommands.Cog, GincanaCore):
