@@ -87,28 +87,15 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         used, new_balance, note = await self._try_use_chip_recharge(ctx.guild.id, ctx.author.id)
         await ctx.reply(view=self._make_chip_recharge_view(ctx.guild.id, ctx.author.id, used, new_balance, note), mention_author=False)
 
-    @dcommands.command(name="resetficha", aliases=["resetfichas", "rficha"])
-    async def resetficha(self, ctx: dcommands.Context, member: discord.Member | None = None):
+    @dcommands.command(name="painelficha", aliases=["fichapainel", "adminficha"])
+    async def painelficha(self, ctx: dcommands.Context):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return
         if not isinstance(ctx.author, discord.Member) or not self._is_staff_member(ctx.author):
-            await ctx.reply(embed=self._make_embed("Sem permissão", "Você precisa ser staff da gincana para resetar fichas manualmente.", ok=False), mention_author=False)
+            await ctx.reply(view=self._make_v2_notice("Sem permissão", ["Esse painel é exclusivo da staff."], ok=False), mention_author=False)
             return
-
-        target = member or ctx.author
-        new_balance = await self._force_reset_chips(ctx.guild.id, target.id)
-        embed = discord.Embed(
-            title="♻️ Fichas resetadas",
-            description=(
-                f"Jogador: {target.mention}\n"
-                f"Novo saldo: {self._format_compact_chip_balance(ctx.guild.id, target.id)}\n"
-                "A recarga manual por **recarga** entrega **100 fichas bônus**, tem cooldown de **12 horas** e só libera abaixo de **15** de saldo total."
-            ),
-            color=discord.Color.green(),
-        )
-        embed.set_footer(text="Reset manual aplicado pela staff")
-        await ctx.reply(embed=embed, mention_author=False)
+        await ctx.reply(view=self._make_chip_admin_panel_view(ctx.author.id), mention_author=False)
 
     @dcommands.command(name="rank", aliases=["leaderboard"])
     async def rank(self, ctx: dcommands.Context):
@@ -117,47 +104,6 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return
         embed = self._make_chip_leaderboard_embed(ctx.guild, ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
-
-    @dcommands.command(name="resetfichasservidor", aliases=["resetfichastodos", "resetallfichas", "rfichasall"])
-    async def resetfichasservidor(self, ctx: dcommands.Context):
-        if ctx.guild is None:
-            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
-            return
-        if not isinstance(ctx.author, discord.Member) or not self._is_staff_member(ctx.author):
-            await ctx.reply(embed=self._make_embed("Sem permissão", "Você precisa ser staff da gincana para resetar as fichas e o histórico do servidor.", ok=False), mention_author=False)
-            return
-
-        user_ids = self._iter_active_chip_user_ids(ctx.guild.id)
-        if not user_ids:
-            await ctx.reply(
-                embed=self._make_embed(
-                    "Nada para resetar",
-                    "Não há perfis de ficha alterados ou com histórico de jogos para resetar neste servidor.",
-                    ok=False,
-                ),
-                mention_author=False,
-            )
-            return
-
-        total = 0
-        for user_id in user_ids:
-            await self._force_full_reset_ficha_profile(ctx.guild.id, user_id, amount=CHIPS_DEFAULT)
-            total += 1
-
-        embed = discord.Embed(
-            title="♻️ Fichas do servidor resetadas",
-            description=(
-                f"Perfis afetados: **{total}**\n"
-                f"Novo saldo padrão: **{CHIPS_DEFAULT} {self._CHIP_EMOJI}**\n"
-                "Resumo, taxa de vitórias, histórico, fichas bônus, recarga e login diário foram resetados só para quem já tinha movimentação."
-            ),
-            color=discord.Color.green(),
-        )
-        embed.set_footer(text="Reset em massa aplicado pela staff")
-        await ctx.reply(embed=embed, mention_author=False)
-
-
-
 
 
     @dcommands.command(name="poker")

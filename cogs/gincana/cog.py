@@ -1,4 +1,5 @@
 from .commands.admin import GincanaCommandMixin
+from .commands.chip_admin import GincanaChipAdminMixin
 from .games.alvo import GincanaAlvoMixin
 from .games.buckshot import GincanaBuckshotMixin
 from .games.corrida import GincanaCorridaMixin
@@ -15,6 +16,7 @@ from .services.toggles import GincanaToggleMixin
 
 class GincanaCore(
     GincanaCommandMixin,
+    GincanaChipAdminMixin,
     GincanaFocusMixin,
     GincanaPokerMixin,
     GincanaMessageRouterMixin,
