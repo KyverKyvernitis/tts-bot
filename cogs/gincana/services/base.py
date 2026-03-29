@@ -206,8 +206,8 @@ class GincanaBase:
         return f"{round(float(value), 1):.1f}".replace('.', ',') + '%'
 
     def _chip_summary_stats(self, stats: dict) -> tuple[int, int, int, str]:
-        wins = int(stats.get('poker_wins', 0)) + int(stats.get('alvo_wins', 0)) + int(stats.get('roleta_jackpots', 0)) + int(stats.get('corrida_wins', 0)) + int(stats.get('buckshot_survivals', 0))
-        losses = int(stats.get('poker_losses', 0)) + int(stats.get('corrida_losses', 0)) + int(stats.get('buckshot_eliminations', 0))
+        wins = int(stats.get('poker_wins', 0)) + int(stats.get('alvo_wins', 0)) + int(stats.get('roleta_jackpots', 0)) + int(stats.get('corrida_wins', 0)) + int(stats.get('buckshot_survivals', 0)) + int(stats.get('truco_wins', 0))
+        losses = int(stats.get('poker_losses', 0)) + int(stats.get('corrida_losses', 0)) + int(stats.get('buckshot_eliminations', 0)) + int(stats.get('truco_losses', 0))
         games = int(stats.get('games_played', 0))
         rate = self._format_rate_decimal((wins / games) * 100.0) if games > 0 else '0,0%'
         return wins, losses, games, rate
@@ -636,17 +636,12 @@ class GincanaBase:
             medals = {1: "🥇", 2: "🥈", 3: "🥉"}
             ranking_lines = []
             for index, row in enumerate(rows, start=1):
-                user_id = int(row["user_id"])
-                member = guild.get_member(user_id)
+                member = guild.get_member(int(row["user_id"]))
                 name = member.display_name if member is not None else f"Usuário {row['user_id']}"
                 prefix = medals.get(index, f"`#{index}`")
                 chips_val = int(row.get('chips', row.get('points', 0)) or 0)
-                bonus_val = self._get_user_bonus_chips(guild.id, user_id)
                 emoji = self._CHIP_LOSS_EMOJI if chips_val < 0 else self._CHIP_EMOJI
-                line = f"{prefix} **{name}** — **{chips_val}** {emoji}"
-                if bonus_val > 0:
-                    line += f" • **{bonus_val}** {self._CHIP_BONUS_EMOJI}"
-                ranking_lines.append(line)
+                ranking_lines.append(f"{prefix} **{name}** — **{chips_val}** {emoji}")
             embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
 
         embed.set_footer(text="Use _ficha para ver seu perfil")
