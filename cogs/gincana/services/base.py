@@ -671,12 +671,12 @@ class GincanaBase:
 
         wins, losses, games, rate = self._chip_summary_stats(stats)
         weekly_points = self.db.get_user_weekly_points(guild_id, member.id)
-        summary = (
-            f"Vitórias: **{wins}**\n"
-            f"Derrotas: **{losses}**\n"
-            f"Jogos: **{games}**\n"
-            f"Taxa de vitórias: **{rate}**"
-        )
+        game_stat_lines = self._build_chip_game_stat_lines(stats)
+        summary_lines = list(game_stat_lines)
+        if not summary_lines:
+            summary_lines.append(f"Jogos: **{games}**")
+            summary_lines.append(f"Taxa de vitórias: **{rate}**")
+        summary = "\n".join(summary_lines)
 
         balance_value = self._format_primary_chip_balance(guild_id, member.id)
         notes: list[str] = []
@@ -690,11 +690,7 @@ class GincanaBase:
         embed.add_field(name="⏳ Recarga", value=recarga, inline=False)
         embed.add_field(name="🎁 Login diário", value=self._daily_bonus_text(guild_id, member.id), inline=False)
         embed.add_field(name="⭐ Weekly points", value=f"**{weekly_points}**", inline=False)
-        truco_wins = int(stats.get("truco_wins", 0) or 0)
-        truco_losses = int(stats.get("truco_losses", 0) or 0)
         embed.add_field(name="🎮 Melhor jogo", value=self._best_game_summary(stats), inline=False)
-        if truco_wins > 0 or truco_losses > 0:
-            embed.add_field(name="🃏 Truco", value=f"Vitórias: **{truco_wins}**\nDerrotas: **{truco_losses}**", inline=False)
         embed.add_field(name="📊 Resumo", value=summary, inline=False)
         embed.set_footer(text="Use _rank para ver o ranking do servidor e _daily para pegar seu bônus")
         return embed
