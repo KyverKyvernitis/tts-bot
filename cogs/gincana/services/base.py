@@ -486,6 +486,16 @@ class GincanaBase:
             f"e ela entrega {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus."
         )
 
+    def _chip_recharge_compact_text(self, guild_id: int, user_id: int) -> str:
+        state = self._chip_recharge_state(guild_id, user_id)
+        remaining = float(state["remaining"])
+        total = int(state["chips"]) + int(state.get("bonus", 0) or 0)
+        if total >= CHIPS_RECHARGE_THRESHOLD:
+            return f"abaixo de **{CHIPS_RECHARGE_THRESHOLD}** • +{CHIPS_DEFAULT} bônus • **{CHIPS_RESET_HOURS}h**"
+        if remaining > 0:
+            return f"em **{self._format_chip_reset_remaining(remaining)}** • +{CHIPS_DEFAULT} bônus"
+        return f"disponível agora • +{CHIPS_DEFAULT} bônus"
+
     async def _try_use_chip_recharge(self, guild_id: int, user_id: int) -> tuple[bool, int, str]:
         state = self._chip_recharge_state(guild_id, user_id)
         chips = int(state["chips"])
@@ -691,52 +701,40 @@ class GincanaBase:
     def _make_chip_balance_view(self, member: discord.Member) -> discord.ui.LayoutView:
         guild_id = member.guild.id
         chips = self.db.get_user_chips(guild_id, member.id, default=CHIPS_INITIAL)
-        bonus_chips = self._get_user_bonus_chips(guild_id, member.id)
         stats = self.db.get_user_game_stats(guild_id, member.id)
 
         _, _, _, rate = self._chip_summary_stats(stats)
-        game_stat_lines = self._build_chip_game_stat_lines(stats)
-        summary_lines = list(game_stat_lines)
-        summary_lines.append(f"📈 **Taxa de vitórias**: **{rate}**")
-        summary_text = "\n".join(summary_lines)
+        summary_lines = self._build_chip_game_stat_lines(stats)
+        summary_lines.append(f"📈 **Taxa**: **{rate}**")
 
         balance_lines = [f"# {self._CHIP_EMOJI} Fichas", self._format_primary_chip_balance(guild_id, member.id)]
         rank_text = self._chip_rank_position_text(member.guild, member.id)
         if rank_text:
             balance_lines.append(rank_text)
-        if bonus_chips > 0:
-            balance_lines.append("As bônus entram antes das normais.")
+        balance_lines.append(f"🎁 Diário: {self._daily_bonus_text(guild_id, member.id)}")
+        balance_lines.append(f"⏳ Recarga: {self._chip_recharge_compact_text(guild_id, member.id)}")
         if chips < 0:
             balance_lines.append("Ganhos futuros quitam a dívida primeiro.")
 
-        utility_lines = [
-            "# ⏳ Recarga",
-            self._chip_recharge_text(guild_id, member.id),
-            "---",
-            "# 🎁 Login diário",
-            self._daily_bonus_text(guild_id, member.id),
-        ]
+        detail_lines: list[str] = []
         best_game = self._best_game_summary(stats)
         if best_game:
-            utility_lines.extend(["---", "# 🎮 Melhor jogo", best_game])
-
-        summary_block_lines = ["# 📊 Resumo", summary_text, "---", "Dica: **_rank** mostra sua posição • **_daily** mantém sua streak"]
+            detail_lines.extend(["# 🎮 Melhor jogo", best_game])
+        detail_lines.extend(["# 📊 Resumo", "
+".join(summary_lines), "Dica: **_rank** • **_daily**"])
 
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(balance_lines)),
+            discord.ui.TextDisplay("
+".join(balance_lines)),
             accent_color=discord.Color.blurple(),
         ))
         view.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(utility_lines)),
-            accent_color=discord.Color.orange(),
-        ))
-        view.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(summary_block_lines)),
+            discord.ui.TextDisplay("
+".join(detail_lines)),
             accent_color=discord.Color.dark_green(),
         ))
         return view
-
     def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
         guild_id = member.guild.id
         stats = self.db.get_user_game_stats(guild_id, member.id)
