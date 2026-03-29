@@ -37,7 +37,7 @@ class GincanaMessageRouterMixin:
             return True
         if content in {"recarga", "recarrega"}:
             used, new_balance, note = await self._try_use_chip_recharge(message.guild.id, message.author.id)
-            await message.channel.send(embed=self._make_chip_recharge_embed(message.guild.id, message.author.id, used, new_balance, note))
+            await message.channel.send(view=self._make_chip_recharge_view(message.guild.id, message.author.id, used, new_balance, note))
             return True
         if content in {"gincanahelp", "helpgincana", "jogoshelp"}:
             await message.channel.send(embed=discord.Embed(title="🎲 Help da gincana", description=(
