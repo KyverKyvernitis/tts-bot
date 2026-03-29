@@ -46,8 +46,8 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return
-        embed = self._make_chip_balance_embed(ctx.author)
-        await ctx.reply(embed=embed, mention_author=False)
+        view = self._make_chip_balance_view(ctx.author)
+        await ctx.reply(view=view, mention_author=False)
 
 
     @dcommands.command(name="daily", aliases=["bonus", "login"])
