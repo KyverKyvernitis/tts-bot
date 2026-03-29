@@ -85,9 +85,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return
         used, new_balance, note = await self._try_use_chip_recharge(ctx.guild.id, ctx.author.id)
-        title = "🔋 Recarga concluída" if used else "🔋 Recarga indisponível"
-        description = (f"{note}\nAs fichas bônus serão usadas antes das normais.\nSaldo atual: {self._format_compact_chip_balance(ctx.guild.id, ctx.author.id)}" if used else f"{note}\nSaldo atual: {self._format_compact_chip_balance(ctx.guild.id, ctx.author.id)}")
-        await ctx.reply(embed=self._make_embed(title, description, ok=used), mention_author=False)
+        await ctx.reply(view=self._make_chip_recharge_view(ctx.guild.id, ctx.author.id, used, new_balance, note), mention_author=False)
 
     @dcommands.command(name="resetficha", aliases=["resetfichas", "rficha"])
     async def resetficha(self, ctx: dcommands.Context, member: discord.Member | None = None):
