@@ -613,37 +613,58 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
 
         winners = [member for member in eligible if chosen is not None and member.id != chosen.id]
         player_count = len(eligible)
-        payout_total = max(0, BUCKSHOT_STAKE * player_count)
+        eliminated_entry_total = BUCKSHOT_STAKE if chosen is not None else 0
+        bonus_total = 0
         if player_count >= 5:
-            payout_total += 10
+            bonus_total = 10
         elif player_count >= 3:
-            payout_total += 5
+            bonus_total = 5
         lines: list[str] = []
         if chosen is None:
             lines.append('<:gunforward:1484655577836683434> O disparo aconteceu. Ninguém foi eliminado.')
         else:
+            base_each = 0
+            base_remainder = 0
+            bonus_each = 0
+            bonus_remainder = 0
             if winners:
-                payout_each = payout_total // len(winners)
-                payout_remainder = payout_total % len(winners)
+                base_each = eliminated_entry_total // len(winners)
+                base_remainder = eliminated_entry_total % len(winners)
+                bonus_each = bonus_total // len(winners) if bonus_total > 0 else 0
+                bonus_remainder = bonus_total % len(winners) if bonus_total > 0 else 0
                 for index, winner in enumerate(winners):
-                    bonus = payout_each + (1 if index < payout_remainder else 0)
-                    if bonus > 0:
-                        await self._change_user_chips(guild.id, winner.id, bonus)
+                    normal_gain = base_each + (1 if index < base_remainder else 0)
+                    bonus_gain = bonus_each + (1 if index < bonus_remainder else 0)
+                    if normal_gain > 0:
+                        await self._change_user_chips(guild.id, winner.id, normal_gain)
+                    if bonus_gain > 0:
+                        await self._change_user_bonus_chips(guild.id, winner.id, bonus_gain)
+                    if normal_gain > 0 or bonus_gain > 0:
                         await self.db.add_user_game_stat(guild.id, winner.id, 'buckshot_survivals', 1)
                         await self._record_game_played(guild.id, winner.id, weekly_points=8)
-                        await self._grant_weekly_points(guild.id, winner.id, max(3, bonus // 3))
+                        await self._grant_weekly_points(guild.id, winner.id, max(3, (normal_gain + bonus_gain) // 3))
             await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_eliminations', 1)
             await self._record_game_played(guild.id, chosen.id, weekly_points=3)
             lines.append(f"<:gunforward:1484655577836683434>💥 O disparo aconteceu. {chosen.mention} foi eliminado.")
             if winners:
-                payout_each = payout_total // len(winners)
-                net_each = max(0, payout_each - BUCKSHOT_STAKE)
-                if payout_each > 0:
-                    lines.append(f"Cada sobrevivente recebeu **{payout_each} {self._CHIP_GAIN_EMOJI}**.")
+                if base_each > 0 or bonus_each > 0 or base_remainder > 0 or bonus_remainder > 0:
+                    pieces = []
+                    base_preview = base_each + (1 if base_remainder > 0 else 0)
+                    bonus_preview = bonus_each + (1 if bonus_remainder > 0 else 0)
+                    if base_preview > 0:
+                        pieces.append(f"**{base_preview} {self._CHIP_GAIN_EMOJI}** da entrada dele")
+                    if bonus_preview > 0:
+                        pieces.append(f"**{bonus_preview} {self._CHIP_BONUS_EMOJI}** de bônus")
+                    if len(pieces) == 2:
+                        lines.append(f"Cada sobrevivente recebeu {pieces[0]} e {pieces[1]}.")
+                    elif len(pieces) == 1:
+                        lines.append(f"Cada sobrevivente recebeu {pieces[0]}.")
+                    else:
+                        lines.append("Os sobreviventes não receberam nada.")
                 else:
                     lines.append("Os sobreviventes não receberam nada.")
             else:
-                lines.append(f"Ninguém sobreviveu para receber **{payout_total} {self._CHIP_LOSS_EMOJI}**.")
+                lines.append(f"Ninguém sobreviveu para receber a entrada de **{eliminated_entry_total} {self._CHIP_LOSS_EMOJI}**.")
 
         if lobby_message is not None:
             try:
