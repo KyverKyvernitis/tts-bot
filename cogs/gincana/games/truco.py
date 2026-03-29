@@ -456,7 +456,10 @@ class GincanaTrucoMixin:
         if game.mode == "2v2":
             duel = [title, f"{self._truco_team_mentions(game, guild, 0)}", "vs", f"{self._truco_team_mentions(game, guild, 1)}"]
         else:
-            duel = [title, f"{self._truco_member_mention(guild, game.players_order[0])} vs {self._truco_member_mention(guild, game.players_order[1])}"]
+            duel = [
+                title,
+                f"{self._truco_member_mention(guild, list(game.teams[0])[0])} vs {self._truco_member_mention(guild, list(game.teams[1])[0])}",
+            ]
         meta = [
             f"**Pote:** {self._chip_amount(game.pot)}",
             f"**Vira:** {self._truco_card_public_display(game.vira)}",
@@ -497,8 +500,7 @@ class GincanaTrucoMixin:
             if won:
                 header = ["# 🃏 Vitória"]
             elif reason == "correu":
-                header = ["# 🃏 Você saiu"] if pid in [uid for idx, team in enumerate(game.teams) if idx != game.winner_team for uid in ()] else ["# 🃏 Derrota"]
-                # corrected below
+                header = ["# 🃏 Derrota"]
             elif reason == "tempo esgotado" and getattr(game, "loser_id", None) == pid:
                 header = ["# 🃏 Abandono"]
             else:
@@ -527,7 +529,7 @@ class GincanaTrucoMixin:
                     how_line = f"Você levou {team0 if player_team == 0 else team1} vaza(s)."
                 else:
                     final_status = "Jogo encerrado com sua derrota."
-                    other = team1 if player_team == 1 else team0
+                    other = team1 if player_team == 0 else team0
                     opp_name = self._truco_team_name(game, guild, game.winner_team or 0) if game.mode == "2v2" else self._truco_member_name(guild, list(game.teams[game.winner_team or 0])[0])
                     how_line = f"{opp_name} levou {other} vaza(s)."
 
@@ -751,7 +753,23 @@ class GincanaTrucoMixin:
             game.status_text = f"A {label.lower()} vaza empatou."
             game.table_history.append(game.status_text)
         else:
-            name = self._truco_team_name(game, guild, winner_team) if game.mode == "2v2" else self._truco_member_name(guild, game.players_order[winner_team])
+            if game.mode == "2v2":
+                name = self._truco_team_name(game, guild, winner_team)
+            else:
+                winning_players = [
+                    pid for pid in game.cards_on_table.keys()
+                    if self._truco_team_index(game, pid) == winner_team
+                ]
+                if winning_players:
+                    winner_pid = max(
+                        winning_players,
+                        key=lambda pid: self._truco_card_strength_key(
+                            game.cards_on_table[pid], game.manilha_rank or ""
+                        ),
+                    )
+                else:
+                    winner_pid = list(game.teams[winner_team])[0]
+                name = self._truco_member_name(guild, winner_pid)
             game.status_text = f"{name} levou a {label.lower()} vaza."
             game.table_history.append(game.status_text)
         game.round_results.append(winner_team)
