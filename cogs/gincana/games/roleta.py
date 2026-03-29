@@ -837,6 +837,7 @@ class GincanaRoletaMixin:
             try:
                 await self._set_roleta_reaction(message, spinning_emoji, keep=True)
                 success = random.randint(1, 10) == 1
+                await self.db.add_user_game_stat(guild.id, message.author.id, "roleta_spins", 1)
                 target_middle = self._roll_roleta_target_middle(success=success)
 
                 spin_message, final_columns = await self._animate_roleta_spin(message, target_middle=target_middle, footer_text=roleta_footer)

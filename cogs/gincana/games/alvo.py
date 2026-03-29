@@ -597,7 +597,7 @@ class _TargetJoinView(discord.ui.LayoutView):
             f"**Pote atual:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(bonus_total)}" if bonus_total > 0 else ""),
             "**Lobby:** **30s**",
         ]
-        info = [f"**Condição:** {modifier.get('name','Alvo padrão')}", f"**Pote base:** {self._chip_amount(pot_total)}" + (f" • Bônus: {self._bonus_chip_amount(bonus_total)}" if bonus_total > 0 else "")]
+        info = [f"**Condição:** {modifier.get('name','Alvo padrão')}", f"**Pote base:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(bonus_total)}" if bonus_total > 0 else "")]
         desc = str(modifier.get('description') or '').strip()
         if desc:
             info.append(desc)
@@ -858,6 +858,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         for member in sorted(participants, key=lambda m: (-scores.get(m.id, 0), m.display_name.casefold())):
             score = scores.get(member.id, 0)
             icon, zone = self._target_zone_style(score)
+            await self.db.add_user_game_stat(guild.id, member.id, 'alvo_games', 1)
             await self.db.add_user_game_stat(guild.id, member.id, 'alvo_shots', 1)
             await self._record_game_played(guild.id, member.id, weekly_points=4 + score)
             if score > 0:
@@ -976,7 +977,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         view = _TargetJoinView(self, guild.id, session, guild, timeout=30.0)
         session['view'] = view
         try:
-            panel_message = await message.channel.send(view=view)
+            panel_message = await message.channel.send(embed=self._make_target_embed(guild, session), view=view)
         except Exception:
             self._target_sessions.pop(guild.id, None)
             await self._change_user_chips(guild.id, message.author.id, ALVO_STAKE)
