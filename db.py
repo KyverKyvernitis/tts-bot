@@ -794,6 +794,7 @@ def get_weekly_points_leaderboard(self, guild_id: int, *, limit: int = 10) -> li
             "corrida_wins": _int("corrida_wins"),
             "corrida_losses": _int("corrida_losses"),
             "corrida_podiums": _int("corrida_podiums"),
+            "truco_games": _int("truco_games"),
             "truco_wins": _int("truco_wins"),
             "truco_losses": _int("truco_losses"),
             "payments_sent": _int("payments_sent"),
