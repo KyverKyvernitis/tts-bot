@@ -503,13 +503,11 @@ class GincanaBase:
         total = chips + int(state.get("bonus", 0) or 0)
         if total >= CHIPS_RECHARGE_THRESHOLD:
             return False, chips, (
-                f"A **recarga** só pode ser usada quando seu saldo total estiver abaixo de **{CHIPS_RECHARGE_THRESHOLD}**. "
-                f"Saldo atual: {self._format_compact_chip_balance(guild_id, user_id)}."
+                f"Use **_recarga** apenas abaixo de **{CHIPS_RECHARGE_THRESHOLD}**."
             )
         if remaining > 0:
             return False, chips, (
-                f"Sua **recarga** volta em **{self._format_chip_reset_remaining(remaining)}**. "
-                f"Quando liberar, ela vai entregar {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus."
+                f"Sua recarga volta em **{self._format_chip_reset_remaining(remaining)}**."
             )
         await self._change_user_bonus_chips(guild_id, user_id, int(CHIPS_DEFAULT), mark_activity=True)
         doc = self.db._get_user_doc(guild_id, user_id)
@@ -517,14 +515,36 @@ class GincanaBase:
         doc["chip_recharge_manual_initialized"] = True
         await self.db._save_user_doc(guild_id, user_id, doc)
         return True, self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL), (
-            f"Você recebeu {self._bonus_chip_amount(CHIPS_DEFAULT)} em fichas bônus usando **recarga**."
+            f"Você recebeu **{CHIPS_DEFAULT}** {self._CHIP_BONUS_EMOJI}."
         )
 
 
-    def _make_chip_recharge_embed(self, guild_id: int, user_id: int, used: bool, new_balance: int, note: str) -> discord.Embed:
-        title = "🔋 Recarga concluída" if used else "🔋 Recarga indisponível"
-        description = f"{note}\nSaldo atual: {self._format_compact_chip_balance(guild_id, user_id)}"
-        return self._make_embed(title, description, ok=used)
+    def _make_chip_recharge_view(self, guild_id: int, user_id: int, used: bool, new_balance: int, note: str) -> discord.ui.LayoutView:
+        view = discord.ui.LayoutView(timeout=None)
+        if used:
+            lines = [
+                "# 🔋 Recarga usada",
+                note,
+                f"Novo saldo: {self._format_primary_chip_balance(guild_id, user_id)}",
+            ]
+            color = discord.Color.dark_green()
+        else:
+            lines = ["# 🔋 Recarga indisponível", note]
+            state = self._chip_recharge_state(guild_id, user_id)
+            total = int(state["chips"]) + int(state.get("bonus", 0) or 0)
+            if total >= CHIPS_RECHARGE_THRESHOLD:
+                lines.append(f"Saldo atual: {self._format_compact_chip_balance(guild_id, user_id)}")
+            else:
+                remaining = float(state["remaining"])
+                lines.append(f"Saldo atual: {self._format_compact_chip_balance(guild_id, user_id)}")
+                if remaining > 0:
+                    lines.append(f"Volta em: **{self._format_chip_reset_remaining(remaining)}**")
+            color = discord.Color.red()
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(lines)),
+            accent_color=color,
+        ))
+        return view
 
     def _negative_cost_projection(self, guild_id: int, user_id: int, amount: int) -> dict:
         chips = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
