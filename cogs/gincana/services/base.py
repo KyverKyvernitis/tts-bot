@@ -344,8 +344,8 @@ class GincanaBase:
         roleta_wins = int(stats.get('roleta_jackpots', 0) or 0) + int(stats.get('cartas_jackpots', 0) or 0)
         candidates = [
             ((int(stats.get('truco_wins', 0) or 0), -int(stats.get('truco_losses', 0) or 0)), f"**Truco** — **{int(stats.get('truco_wins', 0) or 0)}** vitórias"),
-            ((int(stats.get('corrida_wins', 0) or 0), int(stats.get('corrida_podiums', 0) or 0)), f"**Corrida** — **{int(stats.get('corrida_wins', 0) or 0)}** vitórias"),
-            ((int(stats.get('alvo_wins', 0) or 0), int(stats.get('alvo_bullseyes', 0) or 0)), f"**Alvo** — **{int(stats.get('alvo_wins', 0) or 0)}** vitórias"),
+            ((int(stats.get('corrida_wins', 0) or 0), -int(stats.get('corrida_losses', 0) or 0)), f"**Corrida** — **{int(stats.get('corrida_wins', 0) or 0)}** vitórias"),
+            ((int(stats.get('alvo_wins', 0) or 0), -max(0, int(stats.get('alvo_games', 0) or 0) - int(stats.get('alvo_wins', 0) or 0))), f"**Alvo** — **{int(stats.get('alvo_wins', 0) or 0)}** vitórias"),
             ((int(stats.get('poker_wins', 0) or 0), -int(stats.get('poker_losses', 0) or 0)), f"**Poker** — **{int(stats.get('poker_wins', 0) or 0)}** vitórias"),
             ((int(stats.get('buckshot_survivals', 0) or 0), -int(stats.get('buckshot_eliminations', 0) or 0)), f"**Buckshot** — **{int(stats.get('buckshot_survivals', 0) or 0)}** vitórias"),
             ((roleta_wins, 0), f"**Roleta** — **{roleta_wins}** vitórias"),
@@ -368,7 +368,9 @@ class GincanaBase:
 
         truco_wins = int(stats.get('truco_wins', 0) or 0)
         truco_losses = int(stats.get('truco_losses', 0) or 0)
-        truco_games = truco_wins + truco_losses
+        truco_games = int(stats.get('truco_games', 0) or 0)
+        if truco_games <= 0:
+            truco_games = truco_wins + truco_losses
         if truco_games > 0:
             line = f"🃏 **Jogos de truco**: **{truco_games}**"
             parts: list[str] = []
@@ -398,8 +400,7 @@ class GincanaBase:
         corrida_games = corrida_wins + corrida_losses
         corrida_podiums = int(stats.get('corrida_podiums', 0) or 0)
         if corrida_games > 0 or corrida_podiums > 0:
-            left_total = corrida_games if corrida_games > 0 else corrida_podiums
-            line = f"🏇 **Corridas**: **{left_total}**"
+            line = f"🏇 **Corridas**: **{corrida_games if corrida_games > 0 else corrida_podiums}**"
             parts = []
             if corrida_wins > 0:
                 parts.append(f"Vitórias: **{corrida_wins}**")
