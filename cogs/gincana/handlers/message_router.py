@@ -30,7 +30,7 @@ class GincanaMessageRouterMixin:
         if message.guild is None:
             return True
         if content in {"ficha", "fichas"}:
-            await message.channel.send(embed=self._make_chip_balance_embed(message.author))
+            await message.channel.send(view=self._make_chip_balance_view(message.author))
             return True
         if content in {"rank", "leaderboard"}:
             await message.channel.send(embed=self._make_chip_leaderboard_embed(message.guild, message.author))
