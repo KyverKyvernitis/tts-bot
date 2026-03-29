@@ -344,6 +344,82 @@ class GincanaBase:
             return "Ainda sem destaque"
         return best_text
 
+    def _build_chip_game_stat_lines(self, stats: dict) -> list[str]:
+        lines: list[str] = []
+
+        buckshot_total = int(stats.get('buckshot_survivals', 0) or 0) + int(stats.get('buckshot_eliminations', 0) or 0)
+        buckshot_deaths = int(stats.get('buckshot_eliminations', 0) or 0)
+        if buckshot_total > 0:
+            line = f"<:propergun:1485855162198396959> Buckshots: {buckshot_total}"
+            if buckshot_deaths > 0:
+                line += f" (Morreu: {buckshot_deaths} vezes)"
+            lines.append(line)
+
+        truco_games = int(stats.get('truco_wins', 0) or 0) + int(stats.get('truco_losses', 0) or 0)
+        truco_wins = int(stats.get('truco_wins', 0) or 0)
+        truco_losses = int(stats.get('truco_losses', 0) or 0)
+        if truco_games > 0:
+            parts = [f"🃏 Jogos de truco: {truco_games}"]
+            right = []
+            if truco_wins > 0:
+                right.append(f"Vitórias: {truco_wins}")
+            if truco_losses > 0:
+                right.append(f"Derrotas: {truco_losses}")
+            if right:
+                parts.append(" • ".join(right))
+            lines.append(" - ".join(parts))
+
+        roleta_spins = int(stats.get('roleta_spins', 0) or 0) + int(stats.get('carta_spins', 0) or 0)
+        roleta_jackpots = int(stats.get('roleta_jackpots', 0) or 0) + int(stats.get('cartas_jackpots', 0) or 0)
+        if roleta_spins <= 0 and roleta_jackpots > 0:
+            roleta_spins = roleta_jackpots
+        if roleta_spins > 0 or roleta_jackpots > 0:
+            parts = []
+            if roleta_spins > 0:
+                parts.append(f"🎰 Giros: {roleta_spins}")
+            if roleta_jackpots > 0:
+                parts.append(f"Jackpots: {roleta_jackpots}")
+            if parts:
+                lines.append(" • ".join(parts))
+
+        corrida_games = int(stats.get('corrida_wins', 0) or 0) + int(stats.get('corrida_losses', 0) or 0)
+        corrida_wins = int(stats.get('corrida_wins', 0) or 0)
+        corrida_podiums = int(stats.get('corrida_podiums', 0) or 0)
+        if corrida_games > 0 or corrida_podiums > 0:
+            left = f"🏇 Corridas: {corrida_games if corrida_games > 0 else corrida_podiums}"
+            right = []
+            if corrida_wins > 0:
+                right.append(f"Vitórias: {corrida_wins}")
+            if corrida_podiums > 0:
+                right.append(f"Pódios: {corrida_podiums}")
+            lines.append(f"{left} - {' • '.join(right)}" if right else left)
+
+        alvo_games = int(stats.get('alvo_games', 0) or 0)
+        alvo_wins = int(stats.get('alvo_wins', 0) or 0)
+        alvo_bullseyes = int(stats.get('alvo_bullseyes', 0) or 0)
+        if alvo_games > 0 or alvo_wins > 0 or alvo_bullseyes > 0:
+            left = f"🎯 Alvos: {alvo_games if alvo_games > 0 else alvo_wins}"
+            right = []
+            if alvo_wins > 0:
+                right.append(f"Vitórias: {alvo_wins}")
+            if alvo_bullseyes > 0:
+                right.append(f"Bullseyes: {alvo_bullseyes}")
+            lines.append(f"{left} - {' • '.join(right)}" if right else left)
+
+        poker_games = int(stats.get('poker_rounds', 0) or 0)
+        poker_wins = int(stats.get('poker_wins', 0) or 0)
+        poker_losses = int(stats.get('poker_losses', 0) or 0)
+        if poker_games > 0 or poker_wins > 0 or poker_losses > 0:
+            left = f"🂡 Pokers: {poker_games if poker_games > 0 else poker_wins + poker_losses}"
+            right = []
+            if poker_wins > 0:
+                right.append(f"Vitórias: {poker_wins}")
+            if poker_losses > 0:
+                right.append(f"Derrotas: {poker_losses}")
+            lines.append(f"{left} - {' • '.join(right)}" if right else left)
+
+        return lines
+
     def _chip_recharge_state(self, guild_id: int, user_id: int) -> dict:
         import time
 
