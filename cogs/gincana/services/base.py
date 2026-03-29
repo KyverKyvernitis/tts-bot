@@ -640,8 +640,12 @@ class GincanaBase:
                 name = member.display_name if member is not None else f"Usuário {row['user_id']}"
                 prefix = medals.get(index, f"`#{index}`")
                 chips_val = int(row.get('chips', row.get('points', 0)) or 0)
+                bonus_val = self._get_user_bonus_chips(guild.id, int(row["user_id"]))
                 emoji = self._CHIP_LOSS_EMOJI if chips_val < 0 else self._CHIP_EMOJI
-                ranking_lines.append(f"{prefix} **{name}** — **{chips_val}** {emoji}")
+                balance_text = f"**{chips_val}** {emoji}"
+                if bonus_val > 0:
+                    balance_text += f" • **{bonus_val}** {self._CHIP_BONUS_EMOJI}"
+                ranking_lines.append(f"{prefix} **{name}** — {balance_text}")
             embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
 
         embed.set_footer(text="Use _ficha para ver seu perfil")
