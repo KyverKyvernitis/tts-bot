@@ -206,9 +206,20 @@ class GincanaBase:
         return f"{round(float(value), 1):.1f}".replace('.', ',') + '%'
 
     def _chip_summary_stats(self, stats: dict) -> tuple[int, int, int, str]:
-        wins = int(stats.get('poker_wins', 0)) + int(stats.get('alvo_wins', 0)) + int(stats.get('roleta_jackpots', 0)) + int(stats.get('corrida_wins', 0)) + int(stats.get('buckshot_survivals', 0)) + int(stats.get('truco_wins', 0))
-        losses = int(stats.get('poker_losses', 0)) + int(stats.get('corrida_losses', 0)) + int(stats.get('buckshot_eliminations', 0)) + int(stats.get('truco_losses', 0))
-        games = int(stats.get('games_played', 0))
+        wins = (
+            int(stats.get('poker_wins', 0) or 0)
+            + int(stats.get('alvo_wins', 0) or 0)
+            + int(stats.get('corrida_wins', 0) or 0)
+            + int(stats.get('buckshot_survivals', 0) or 0)
+            + int(stats.get('truco_wins', 0) or 0)
+        )
+        losses = (
+            int(stats.get('poker_losses', 0) or 0)
+            + int(stats.get('corrida_losses', 0) or 0)
+            + int(stats.get('buckshot_eliminations', 0) or 0)
+            + int(stats.get('truco_losses', 0) or 0)
+        )
+        games = wins + losses
         rate = self._format_rate_decimal((wins / games) * 100.0) if games > 0 else '0,0%'
         return wins, losses, games, rate
 
@@ -330,14 +341,14 @@ class GincanaBase:
         return f"Já resgatado hoje. Streak atual: **{streak}**."
 
     def _best_game_summary(self, stats: dict) -> str:
+        roleta_wins = int(stats.get('roleta_jackpots', 0) or 0) + int(stats.get('cartas_jackpots', 0) or 0)
         candidates = [
-            ((int(stats.get('corrida_wins', 0)), int(stats.get('corrida_podiums', 0))), f"**Corrida** — {int(stats.get('corrida_wins', 0))} vitórias"),
-            ((int(stats.get('alvo_wins', 0)), int(stats.get('alvo_bullseyes', 0))), f"**Alvo** — {int(stats.get('alvo_wins', 0))} vitórias"),
-            ((int(stats.get('buckshot_survivals', 0)), -int(stats.get('buckshot_eliminations', 0))), f"**Buckshot** — {int(stats.get('buckshot_survivals', 0))} sobrevivências"),
-            ((int(stats.get('poker_wins', 0)), -int(stats.get('poker_losses', 0))), f"**Poker** — {int(stats.get('poker_wins', 0))} vitórias"),
-            ((int(stats.get('cartas_jackpots', 0)), 0), f"**Cartas** — {int(stats.get('cartas_jackpots', 0))} jackpots"),
-            ((int(stats.get('roleta_jackpots', 0)), 0), f"**Roleta** — {int(stats.get('roleta_jackpots', 0))} jackpots"),
-            ((int(stats.get('truco_wins', 0)), 0), f"**Truco** — {int(stats.get('truco_wins', 0))} vitórias"),
+            ((int(stats.get('truco_wins', 0) or 0), -int(stats.get('truco_losses', 0) or 0)), f"**Truco** — **{int(stats.get('truco_wins', 0) or 0)}** vitórias"),
+            ((int(stats.get('corrida_wins', 0) or 0), int(stats.get('corrida_podiums', 0) or 0)), f"**Corrida** — **{int(stats.get('corrida_wins', 0) or 0)}** vitórias"),
+            ((int(stats.get('alvo_wins', 0) or 0), int(stats.get('alvo_bullseyes', 0) or 0)), f"**Alvo** — **{int(stats.get('alvo_wins', 0) or 0)}** vitórias"),
+            ((int(stats.get('poker_wins', 0) or 0), -int(stats.get('poker_losses', 0) or 0)), f"**Poker** — **{int(stats.get('poker_wins', 0) or 0)}** vitórias"),
+            ((int(stats.get('buckshot_survivals', 0) or 0), -int(stats.get('buckshot_eliminations', 0) or 0)), f"**Buckshot** — **{int(stats.get('buckshot_survivals', 0) or 0)}** vitórias"),
+            ((roleta_wins, 0), f"**Roleta** — **{roleta_wins}** vitórias"),
         ]
         best_score, best_text = max(candidates, key=lambda item: item[0])
         if best_score[0] <= 0:
@@ -350,24 +361,24 @@ class GincanaBase:
         buckshot_total = int(stats.get('buckshot_survivals', 0) or 0) + int(stats.get('buckshot_eliminations', 0) or 0)
         buckshot_deaths = int(stats.get('buckshot_eliminations', 0) or 0)
         if buckshot_total > 0:
-            line = f"<:propergun:1485855162198396959> Buckshots: {buckshot_total}"
+            line = f"<:propergun:1485855162198396959> **Buckshots**: **{buckshot_total}**"
             if buckshot_deaths > 0:
-                line += f" (Morreu: {buckshot_deaths} vezes)"
+                line += f" (Morreu: **{buckshot_deaths}×**)"
             lines.append(line)
 
-        truco_games = int(stats.get('truco_wins', 0) or 0) + int(stats.get('truco_losses', 0) or 0)
         truco_wins = int(stats.get('truco_wins', 0) or 0)
         truco_losses = int(stats.get('truco_losses', 0) or 0)
+        truco_games = truco_wins + truco_losses
         if truco_games > 0:
-            parts = [f"🃏 Jogos de truco: {truco_games}"]
-            right = []
+            line = f"🃏 **Jogos de truco**: **{truco_games}**"
+            parts: list[str] = []
             if truco_wins > 0:
-                right.append(f"Vitórias: {truco_wins}")
+                parts.append(f"Vitórias: **{truco_wins}**")
             if truco_losses > 0:
-                right.append(f"Derrotas: {truco_losses}")
-            if right:
-                parts.append(" • ".join(right))
-            lines.append(" - ".join(parts))
+                parts.append(f"Derrotas: **{truco_losses}**")
+            if parts:
+                line += f" - {' • '.join(parts)}"
+            lines.append(line)
 
         roleta_spins = int(stats.get('roleta_spins', 0) or 0) + int(stats.get('carta_spins', 0) or 0)
         roleta_jackpots = int(stats.get('roleta_jackpots', 0) or 0) + int(stats.get('cartas_jackpots', 0) or 0)
@@ -376,47 +387,57 @@ class GincanaBase:
         if roleta_spins > 0 or roleta_jackpots > 0:
             parts = []
             if roleta_spins > 0:
-                parts.append(f"🎰 Giros: {roleta_spins}")
+                parts.append(f"🎰 **Giros**: **{roleta_spins}**")
             if roleta_jackpots > 0:
-                parts.append(f"Jackpots: {roleta_jackpots}")
+                parts.append(f"Jackpots: **{roleta_jackpots}**")
             if parts:
                 lines.append(" • ".join(parts))
 
-        corrida_games = int(stats.get('corrida_wins', 0) or 0) + int(stats.get('corrida_losses', 0) or 0)
         corrida_wins = int(stats.get('corrida_wins', 0) or 0)
+        corrida_losses = int(stats.get('corrida_losses', 0) or 0)
+        corrida_games = corrida_wins + corrida_losses
         corrida_podiums = int(stats.get('corrida_podiums', 0) or 0)
         if corrida_games > 0 or corrida_podiums > 0:
-            left = f"🏇 Corridas: {corrida_games if corrida_games > 0 else corrida_podiums}"
-            right = []
+            left_total = corrida_games if corrida_games > 0 else corrida_podiums
+            line = f"🏇 **Corridas**: **{left_total}**"
+            parts = []
             if corrida_wins > 0:
-                right.append(f"Vitórias: {corrida_wins}")
+                parts.append(f"Vitórias: **{corrida_wins}**")
             if corrida_podiums > 0:
-                right.append(f"Pódios: {corrida_podiums}")
-            lines.append(f"{left} - {' • '.join(right)}" if right else left)
+                parts.append(f"Pódios: **{corrida_podiums}**")
+            if parts:
+                line += f" - {' • '.join(parts)}"
+            lines.append(line)
 
         alvo_games = int(stats.get('alvo_games', 0) or 0)
         alvo_wins = int(stats.get('alvo_wins', 0) or 0)
         alvo_bullseyes = int(stats.get('alvo_bullseyes', 0) or 0)
         if alvo_games > 0 or alvo_wins > 0 or alvo_bullseyes > 0:
-            left = f"🎯 Alvos: {alvo_games if alvo_games > 0 else alvo_wins}"
-            right = []
+            left_total = alvo_games if alvo_games > 0 else alvo_wins
+            line = f"🎯 **Alvos**: **{left_total}**"
+            parts = []
             if alvo_wins > 0:
-                right.append(f"Vitórias: {alvo_wins}")
+                parts.append(f"Vitórias: **{alvo_wins}**")
             if alvo_bullseyes > 0:
-                right.append(f"Bullseyes: {alvo_bullseyes}")
-            lines.append(f"{left} - {' • '.join(right)}" if right else left)
+                parts.append(f"Bullseyes: **{alvo_bullseyes}**")
+            if parts:
+                line += f" - {' • '.join(parts)}"
+            lines.append(line)
 
         poker_games = int(stats.get('poker_rounds', 0) or 0)
         poker_wins = int(stats.get('poker_wins', 0) or 0)
         poker_losses = int(stats.get('poker_losses', 0) or 0)
         if poker_games > 0 or poker_wins > 0 or poker_losses > 0:
-            left = f"🂡 Pokers: {poker_games if poker_games > 0 else poker_wins + poker_losses}"
-            right = []
+            left_total = poker_games if poker_games > 0 else (poker_wins + poker_losses)
+            line = f"🂡 **Pokers**: **{left_total}**"
+            parts = []
             if poker_wins > 0:
-                right.append(f"Vitórias: {poker_wins}")
+                parts.append(f"Vitórias: **{poker_wins}**")
             if poker_losses > 0:
-                right.append(f"Derrotas: {poker_losses}")
-            lines.append(f"{left} - {' • '.join(right)}" if right else left)
+                parts.append(f"Derrotas: **{poker_losses}**")
+            if parts:
+                line += f" - {' • '.join(parts)}"
+            lines.append(line)
 
         return lines
 
@@ -670,12 +691,9 @@ class GincanaBase:
         recarga = self._chip_recharge_text(guild_id, member.id)
 
         wins, losses, games, rate = self._chip_summary_stats(stats)
-        weekly_points = self.db.get_user_weekly_points(guild_id, member.id)
         game_stat_lines = self._build_chip_game_stat_lines(stats)
         summary_lines = list(game_stat_lines)
-        if not summary_lines:
-            summary_lines.append(f"Jogos: **{games}**")
-            summary_lines.append(f"Taxa de vitórias: **{rate}**")
+        summary_lines.append(f"Taxa de vitórias: **{rate}**")
         summary = "\n".join(summary_lines)
 
         balance_value = self._format_primary_chip_balance(guild_id, member.id)
@@ -689,7 +707,6 @@ class GincanaBase:
         embed.add_field(name=f"{self._CHIP_EMOJI} Fichas", value=balance_value, inline=False)
         embed.add_field(name="⏳ Recarga", value=recarga, inline=False)
         embed.add_field(name="🎁 Login diário", value=self._daily_bonus_text(guild_id, member.id), inline=False)
-        embed.add_field(name="⭐ Weekly points", value=f"**{weekly_points}**", inline=False)
         embed.add_field(name="🎮 Melhor jogo", value=self._best_game_summary(stats), inline=False)
         embed.add_field(name="📊 Resumo", value=summary, inline=False)
         embed.set_footer(text="Use _rank para ver o ranking do servidor e _daily para pegar seu bônus")
