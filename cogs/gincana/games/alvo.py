@@ -500,7 +500,6 @@ class GincanaAlvoMixin:
                     pass
                 return True
 
-            view = _TargetJoinView(self, guild.id, timeout=30.0)
             participants_now = 1
             session = {
                 "text_channel_id": message.channel.id,
@@ -513,9 +512,10 @@ class GincanaAlvoMixin:
                 "ended": False,
                 "timeout_task": None,
             }
+            view = _TargetJoinView(self, guild.id, session, guild, timeout=30.0)
+            session["view"] = view
             self._target_sessions[guild.id] = session
 
-            view.join_button.label = f"🎯 Entrar ({len(self._get_target_participants(guild, session))})"
             embed = self._make_target_embed(guild, session)
             if chip_note:
                 embed.set_footer(text=f"{chip_note} Entrou, pagou e a entrada fica travada até o fim.")

@@ -811,7 +811,10 @@ class GincanaTrucoMixin:
         self._truco_games.pop(game.guild_id, None)
         winners = list(game.teams[winner_team])
         losers = [uid for idx, team in enumerate(game.teams) if idx != winner_team for uid in team]
+        all_players = [uid for team in game.teams for uid in team]
         share = int(game.pot / max(1, len(winners)))
+        for uid in all_players:
+            await self.db.add_user_game_stat(game.guild_id, uid, "truco_games", 1)
         for uid in winners:
             await self.db.add_user_game_stat(game.guild_id, uid, "truco_wins", 1)
             await self._record_game_played(game.guild_id, uid, weekly_points=6)
