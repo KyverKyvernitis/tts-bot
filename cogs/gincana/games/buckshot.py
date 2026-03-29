@@ -272,7 +272,7 @@ class GincanaBuckshotMixin:
                     for index, winner in enumerate(winners):
                         bonus = payout_each + (1 if index < payout_remainder else 0)
                         if bonus > 0:
-                            await self._change_user_chips(guild.id, winner.id, bonus)
+                            await self._change_user_bonus_chips(guild.id, winner.id, bonus)
                             await self.db.add_user_game_stat(guild.id, winner.id, "buckshot_survivals", 1)
                             await self._record_game_played(guild.id, winner.id, weekly_points=8)
                             await self._grant_weekly_points(guild.id, winner.id, max(3, bonus // 3))
@@ -282,7 +282,7 @@ class GincanaBuckshotMixin:
                 if winners:
                     final_text = (
                         f"<:gunforward:1484655577836683434>💥 O disparo aconteceu. {chosen_text} foi eliminado.\n"
-                        f"Cada sobrevivente recebeu **{payout_each} {self._CHIP_GAIN_EMOJI}**."
+                        f"Cada sobrevivente recebeu **{payout_each} {self._CHIP_BONUS_EMOJI}** de bônus."
                     )
                 else:
                     final_text = (

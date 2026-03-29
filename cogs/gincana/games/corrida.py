@@ -72,7 +72,8 @@ class _RaceLobbyView(discord.ui.LayoutView):
         condition_name = str((self.session.get("condition") or {}).get("name") or "Pista seca")
         special_name = str((self.session.get("special") or {}).get("name") or "")
         participants = self.cog._get_race_participants(self.guild, self.session)
-        pot_total = len(self.session.get("locked_participants", set())) * CORRIDA_STAKE + int(self.session.get("bonus_pool", 0) or 0)
+        pot_total = len(self.session.get("locked_participants", set())) * CORRIDA_STAKE
+        bonus_pool = int(self.session.get("bonus_pool", 0) or 0)
 
         header_lines = [
             "# 🐎 Corrida aberta",
@@ -81,7 +82,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
         if special_name:
             header_lines.append(f"**Especial:** {special_name}")
         header_lines.append(f"**Entrada:** {self.cog._chip_amount(CORRIDA_STAKE)}")
-        header_lines.append(f"**Pote atual:** {self.cog._chip_amount(pot_total)}")
+        header_lines.append(f"**Pote atual:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(bonus_pool)}" if bonus_pool > 0 else ""))
         header_lines.append(f"**Duração:** **{_CORRIDA_DURATION_SECONDS}s**")
 
         participants_lines = [f"### Participantes ({len(participants)})"]
@@ -545,7 +546,8 @@ class GincanaCorridaMixin:
         return lines
 
     def _make_race_embed(self, guild: discord.Guild, session: dict, *, finished: bool = False) -> discord.Embed:
-        pot_total = len(session.get("locked_participants", set())) * CORRIDA_STAKE + int(session.get("bonus_pool", 0) or 0)
+        pot_total = len(session.get("locked_participants", set())) * CORRIDA_STAKE
+        bonus_pool = int(session.get("bonus_pool", 0) or 0)
         title = "🐎 Corrida aberta"
         if session.get("started"):
             title = "🏁 Corrida encerrada" if finished else ("🔥 Reta final" if session.get("final_stretch") else "🐎 Corrida em andamento")
@@ -566,7 +568,7 @@ class GincanaCorridaMixin:
 
         if not session.get("started"):
             embed.add_field(name="Entrada", value=self._chip_amount(CORRIDA_STAKE), inline=True)
-            embed.add_field(name="Pote atual", value=self._chip_amount(pot_total), inline=True)
+            embed.add_field(name="Pote atual", value=self._chip_amount(pot_total) + (f" • Bônus: {self._bonus_chip_amount(bonus_pool)}" if bonus_pool > 0 else ""), inline=True)
             embed.add_field(name="Duração", value=f"**{_CORRIDA_DURATION_SECONDS}s**", inline=True)
             embed.set_footer(text="Entre no lobby. O criador ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes.")
         return embed
@@ -1205,14 +1207,20 @@ class GincanaCorridaMixin:
             state_map[member.id] = _HORSE_FINISH
 
         session["ended"] = True
-        total_pot = len(locked_ids) * CORRIDA_STAKE + int(session.get("bonus_pool", 0) or 0)
+        total_pot = len(locked_ids) * CORRIDA_STAKE
+        bonus_pool = int(session.get("bonus_pool", 0) or 0)
         rewards, placements = self._allocate_race_rewards(final_groups, total_pot)
+        bonus_rewards, _bonus_placements = self._allocate_race_rewards(final_groups, bonus_pool) if bonus_pool > 0 else ({}, [])
         result_lines: list[str] = []
         if final_groups:
             first_group = final_groups[0]
             winner = first_group[0]
             winner_amount = int(rewards.get(winner.id, 0) or 0)
-            result_lines.append(f"🏆 {winner.mention} venceu a corrida — {self._chip_text(winner_amount, kind='gain')}")
+            winner_bonus = int(bonus_rewards.get(winner.id, 0) or 0)
+            winner_text = self._chip_text(winner_amount, kind='gain')
+            if winner_bonus > 0:
+                winner_text += f" + {self._bonus_chip_amount(winner_bonus)}"
+            result_lines.append(f"🏆 {winner.mention} venceu a corrida — {winner_text}")
         finish_meta = session.get("finish_meta") or {}
         if len(final_order) >= 2:
             leader = final_order[0]
@@ -1266,6 +1274,9 @@ class GincanaCorridaMixin:
             if amount > 0:
                 await self._change_user_chips(guild.id, user_id, amount)
                 await self._grant_weekly_points(guild.id, user_id, max(4, amount // 4))
+        for user_id, amount in bonus_rewards.items():
+            if amount > 0:
+                await self._change_user_bonus_chips(guild.id, user_id, amount)
 
         session["starting"] = False
         session["result_lines"] = result_lines[:3]

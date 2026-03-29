@@ -280,7 +280,9 @@ class GincanaAlvoMixin:
                     description=(
                         f"Entrada: {self._chip_amount(ALVO_STAKE)} por jogador\n"
                         f"Participantes: **{len(participants)}**\n"
-                        f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(pot_total + total_bonus)}\n\n"
+                        f"{self._CHIP_GAIN_EMOJI} Pote atual: {self._chip_amount(pot_total)}\n"
+                        + (f"{self._CHIP_BONUS_EMOJI} Bônus da rodada: {self._bonus_chip_amount(total_bonus)}\n" if total_bonus > 0 else "")
+                        + "\n"
                         f"{self._target_opening_text(participants)}"
                     ),
                     color=discord.Color.blurple(),
@@ -400,8 +402,12 @@ class GincanaAlvoMixin:
                         pass
 
                 scores = {member.id: self._roll_target_score(str(modifier.get("key", "normal"))) for member in participants}
-                rewards, placements = self._allocate_target_rewards(participants, scores, pot_total + bonus_chips)
-                result_lines = [f"💥 Os tiros foram disparados. {self._CHIP_GAIN_EMOJI} Pote final: {self._chip_amount(pot_total)}", ""]
+                rewards, placements = self._allocate_target_rewards(participants, scores, pot_total)
+                bonus_rewards, _bonus_placements = self._allocate_target_rewards(participants, scores, bonus_chips) if bonus_chips > 0 else ({}, [])
+                result_lines = [f"💥 Os tiros foram disparados. {self._CHIP_GAIN_EMOJI} Pote base: {self._chip_amount(pot_total)}"]
+                if bonus_chips > 0:
+                    result_lines.append(f"{self._CHIP_BONUS_EMOJI} Bônus da rodada: {self._bonus_chip_amount(bonus_chips)}")
+                result_lines.append("")
                 bullseye_members: list[discord.Member] = []
                 for member in sorted(participants, key=lambda m: (-scores.get(m.id, 0), m.display_name.casefold())):
                     score = scores.get(member.id, 0)
@@ -422,9 +428,9 @@ class GincanaAlvoMixin:
                     bull_bonus = int(modifier.get("bullseye_bonus", 0) or 0)
                     if bull_bonus > 0:
                         for member in bullseye_members:
-                            await self._change_user_chips(guild.id, member.id, bull_bonus)
+                            await self._change_user_bonus_chips(guild.id, member.id, bull_bonus)
                             await self._grant_weekly_points(guild.id, member.id, bull_bonus)
-                        result_lines.append(f"✨ Cada bullseye recebeu um bônus de {self._chip_amount(bull_bonus)}.")
+                        result_lines.append(f"✨ Cada bullseye recebeu um bônus de {self._bonus_chip_amount(bull_bonus)}.")
 
                 if rewards:
                     result_lines.append("")
@@ -438,6 +444,9 @@ class GincanaAlvoMixin:
                             await self._change_user_chips(guild.id, user_id, amount)
                             await self.db.add_user_game_stat(guild.id, user_id, "alvo_wins", 1)
                             await self._grant_weekly_points(guild.id, user_id, max(5, amount // 4))
+                    for user_id, amount in bonus_rewards.items():
+                        if amount > 0:
+                            await self._change_user_bonus_chips(guild.id, user_id, amount)
                 final_text = "\n".join(result_lines)
 
             embed = self._make_target_embed(guild, session, final_text=final_text)
@@ -571,7 +580,8 @@ class _TargetJoinView(discord.ui.LayoutView):
         self.clear_items()
         participants = self.cog._get_target_participants(self.guild, self.session)
         modifier = self.session.get("modifier") or {"name": "Alvo padrão", "description": "Rodada normal."}
-        pot_total = len(self.session.get("locked_participants", set())) * ALVO_STAKE + int(self.session.get("bonus_chips") or 0) + int(modifier.get("pot_bonus", 0) or 0)
+        pot_total = len(self.session.get("locked_participants", set())) * ALVO_STAKE
+        bonus_total = int(self.session.get("bonus_chips") or 0) + int(modifier.get("pot_bonus", 0) or 0)
         countdown = int(self.session.get("start_countdown") or 0)
         if countdown > 0:
             self.start_button.label = f"🏁 Iniciar ({countdown})"
@@ -584,10 +594,10 @@ class _TargetJoinView(discord.ui.LayoutView):
         header = [
             "# 🎯 Rodada aberta",
             f"**Entrada:** {self.cog._chip_amount(ALVO_STAKE)}",
-            f"**Pote atual:** {self.cog._chip_amount(pot_total)}",
+            f"**Pote atual:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(bonus_total)}" if bonus_total > 0 else ""),
             "**Lobby:** **30s**",
         ]
-        info = [f"**Condição:** {modifier.get('name','Alvo padrão')}"]
+        info = [f"**Condição:** {modifier.get('name','Alvo padrão')}", f"**Pote base:** {self._chip_amount(pot_total)}" + (f" • Bônus: {self._bonus_chip_amount(bonus_total)}" if bonus_total > 0 else "")]
         desc = str(modifier.get('description') or '').strip()
         if desc:
             info.append(desc)
@@ -840,8 +850,9 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             except Exception:
                 pass
         scores = {member.id: self._roll_target_score(str(modifier.get('key', 'normal'))) for member in participants}
-        rewards, placements = self._allocate_target_rewards(participants, scores, pot_total + bonus_chips)
-        prize_total = pot_total + bonus_chips
+        rewards, placements = self._allocate_target_rewards(participants, scores, pot_total)
+        bonus_rewards, _bonus_placements = self._allocate_target_rewards(participants, scores, bonus_chips) if bonus_chips > 0 else ({}, [])
+        prize_total = pot_total
         hit_lines = []
         bullseye_members = []
         for member in sorted(participants, key=lambda m: (-scores.get(m.id, 0), m.display_name.casefold())):
@@ -860,9 +871,9 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             bull_bonus = int(modifier.get('bullseye_bonus', 0) or 0)
             if bull_bonus > 0:
                 for member in bullseye_members:
-                    await self._change_user_chips(guild.id, member.id, bull_bonus)
+                    await self._change_user_bonus_chips(guild.id, member.id, bull_bonus)
                     await self._grant_weekly_points(guild.id, member.id, bull_bonus)
-                bonus_line = f"✨ Bullseye bônus: {self._chip_amount(bull_bonus)} para cada bullseye."
+                bonus_line = f"✨ Bullseye bônus: {self._bonus_chip_amount(bull_bonus)} para cada bullseye."
         podium_lines = []
         winner_mentions = []
         winning_reward = 0
@@ -870,6 +881,9 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             for badge, members, total in placements:
                 names = ', '.join(member.mention for member in members)
                 amount_text = self._chip_text(total, kind='gain') if badge == '🥇' else self._chip_amount(total)
+                bonus_total = int(bonus_rewards.get(members[0].id, 0) or 0) if len(members) == 1 else sum(int(bonus_rewards.get(member.id, 0) or 0) for member in members)
+                if bonus_total > 0:
+                    amount_text += f" + {self._bonus_chip_amount(bonus_total)}"
                 podium_lines.append(f"{badge} {names} — {amount_text}")
                 if badge == '🥇':
                     winner_mentions.extend(member.mention for member in members)
@@ -878,6 +892,9 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 if amount > 0:
                     await self._change_user_chips(guild.id, user_id, amount)
                     await self._grant_weekly_points(guild.id, user_id, max(3, amount // 4))
+            for user_id, amount in bonus_rewards.items():
+                if amount > 0:
+                    await self._change_user_bonus_chips(guild.id, user_id, amount)
         closing_parts = []
         if winner_mentions and len(winner_mentions) > 1:
             closing_parts.append(f"🔥 {', '.join(winner_mentions)} dividiram a ponta.")
@@ -890,7 +907,9 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                     closing_parts.append(line)
         if bonus_line:
             closing_parts.append(bonus_line)
-        session['summary_line'] = f"<:boom:1485862099308804107> Os tiros foram disparados. Prêmio: {self._chip_amount(prize_total)}"
+        session['summary_line'] = f"<:boom:1485862099308804107> Os tiros foram disparados. Pote base: {self._chip_amount(prize_total)}"
+        if bonus_chips > 0:
+            session['summary_line'] += f" • Bônus: {self._bonus_chip_amount(bonus_chips)}"
         session['hit_lines'] = hit_lines
         if winner_mentions and len(winner_mentions) == 1:
             session['podium_lines'] = [f"🥇 {winner_mentions[0]} venceu — {self._chip_text(winning_reward, kind='gain')}"]
