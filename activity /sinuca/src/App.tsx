@@ -282,8 +282,6 @@ export default function App() {
         </section>
       ) : null}
 
-        </section>
-      ) : null}
 
       {screen === "room" && room ? (
         <>
