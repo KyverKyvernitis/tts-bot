@@ -42,7 +42,7 @@ function resolveSocketUrl() {
   const configured = import.meta.env.VITE_SINUCA_WS_URL as string | undefined;
   if (configured) return configured;
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${protocol}://${window.location.host}/api/ws`;
+  return `${protocol}://${window.location.host}/ws`;
 }
 
 function formatStatus(room: RoomSnapshot) {
@@ -52,13 +52,11 @@ function formatStatus(room: RoomSnapshot) {
 }
 
 function formatRoomCount(count: number) {
-  if (count === 1) return "1 mesa aberta";
-  return `${count} mesas abertas`;
+  return count === 1 ? "1 mesa aberta" : `${count} mesas abertas`;
 }
 
 function formatBalance(balance: BalanceSnapshot) {
-  if (balance.bonusChips > 0) return `Fichas: ${balance.chips} + ${balance.bonusChips} bônus`;
-  return `Fichas: ${balance.chips}`;
+  return balance.bonusChips > 0 ? `Fichas: ${balance.chips} + ${balance.bonusChips} bônus` : `Fichas: ${balance.chips}`;
 }
 
 export default function App() {
@@ -126,6 +124,16 @@ export default function App() {
     socket.addEventListener("open", () => {
       setConnectionState("connected");
       setErrorMessage(null);
+      socket.send(JSON.stringify({
+        type: "init_context",
+        payload: {
+          userId: state.currentUser.userId,
+          displayName: state.currentUser.displayName,
+          guildId: state.context.guildId,
+          channelId: state.context.channelId,
+          instanceId: state.context.instanceId,
+        },
+      }));
       requestRooms();
       requestBalance();
     });
@@ -138,20 +146,17 @@ export default function App() {
           setErrorMessage(payload.message);
           return;
         }
-
         if (payload.type === "room_state") {
           setRoom(payload.payload);
           setScreen("room");
           setErrorMessage(null);
           return;
         }
-
         if (payload.type === "room_list") {
           setRooms(payload.payload);
           setErrorMessage(null);
           return;
         }
-
         if (payload.type === "session_context") {
           setState((current) => ({
             ...current,
@@ -169,26 +174,20 @@ export default function App() {
           }));
           return;
         }
-
         if (payload.type === "balance_state") {
           setBalance(payload.payload);
           return;
         }
-
         if (payload.type === "balance_debug") {
           setBalanceDebug(payload.payload);
           console.log("[sinuca balance_debug]", payload.payload);
-          return;
         }
       } catch {
         setErrorMessage("resposta inválida do servidor");
       }
     });
 
-    socket.addEventListener("close", () => {
-      setConnectionState("offline");
-    });
-
+    socket.addEventListener("close", () => setConnectionState("offline"));
     socket.addEventListener("error", () => {
       setConnectionState("offline");
       setErrorMessage("não foi possível conectar ao servidor da activity");
@@ -198,8 +197,7 @@ export default function App() {
       socket.close();
       socketRef.current = null;
     };
-  }, [state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.userId]);
-
+  }, [state.context.channelId, state.context.guildId, state.context.instanceId, state.context.mode, state.currentUser.displayName, state.currentUser.userId]);
 
   useEffect(() => {
     if (connectionState !== "connected") return;
@@ -209,9 +207,7 @@ export default function App() {
 
   useEffect(() => {
     if (screen !== "list" || connectionState !== "connected") return;
-    const interval = window.setInterval(() => {
-      requestRooms();
-    }, 2500);
+    const interval = window.setInterval(() => requestRooms(), 2500);
     return () => window.clearInterval(interval);
   }, [connectionState, screen, state.context.channelId, state.context.guildId, state.context.mode]);
 
@@ -232,9 +228,7 @@ export default function App() {
   return (
     <main
       className="app-shell"
-      style={{
-        backgroundImage: `linear-gradient(180deg, rgba(4, 10, 17, 0.12), rgba(4, 10, 17, 0.46)), url(${lobbyBackground})`,
-      }}
+      style={{ backgroundImage: `linear-gradient(180deg, rgba(4, 10, 17, 0.12), rgba(4, 10, 17, 0.46)), url(${lobbyBackground})` }}
     >
       <header className="hero-card hero-card--compact hero-card--landscape">
         <div className="hero-card__copy">
@@ -254,18 +248,17 @@ export default function App() {
             <button
               className="menu-button menu-button--create"
               type="button"
-              onClick={() => {
-                sendMessage({
-                  type: "create_room",
-                  payload: {
-                    instanceId,
-                    guildId: state.context.guildId,
-                    channelId: state.context.channelId,
-                    userId: state.currentUser.userId,
-                    displayName: state.currentUser.displayName,
-                  },
-                });
-              }}
+              onClick={() => sendMessage({
+                type: "create_room",
+                payload: {
+                  instanceId,
+                  guildId: state.context.guildId,
+                  channelId: state.context.channelId,
+                  mode: state.context.mode,
+                  userId: state.currentUser.userId,
+                  displayName: state.currentUser.displayName,
+                },
+              })}
             >
               <span className="menu-button__eyebrow">Nova mesa</span>
               <strong>Criar mesa</strong>
@@ -299,12 +292,8 @@ export default function App() {
           </div>
 
           <div className="list-header list-header--simple">
-            <div>
-              <h2>Mesas abertas</h2>
-            </div>
-            <div className="list-summary list-summary--single">
-              <strong>{formatRoomCount(rooms.length)}</strong>
-            </div>
+            <div><h2>Mesas abertas</h2></div>
+            <div className="list-summary list-summary--single"><strong>{formatRoomCount(rooms.length)}</strong></div>
           </div>
 
           <div className="room-list-stack">
@@ -330,16 +319,10 @@ export default function App() {
                     className="primary-button"
                     type="button"
                     disabled={entry.players.length >= 2}
-                    onClick={() => {
-                      sendMessage({
-                        type: "join_room",
-                        payload: {
-                          roomId: entry.roomId,
-                          userId: state.currentUser.userId,
-                          displayName: state.currentUser.displayName,
-                        },
-                      });
-                    }}
+                    onClick={() => sendMessage({
+                      type: "join_room",
+                      payload: { roomId: entry.roomId, userId: state.currentUser.userId, displayName: state.currentUser.displayName },
+                    })}
                   >
                     {entry.players.length >= 2 ? "Mesa cheia" : "Entrar"}
                   </button>
@@ -378,22 +361,10 @@ export default function App() {
 
           <StatusCard title="Sala da partida" subtitle="Lobby da mesa antes do início da partida de sinuca.">
             <div className="lobby-card lobby-card--room">
-              <div>
-                <span className="lobby-card__label">Anfitrião</span>
-                <strong>{room.hostDisplayName}</strong>
-              </div>
-              <div>
-                <span className="lobby-card__label">Jogadores</span>
-                <strong>{room.players.length}/2</strong>
-              </div>
-              <div>
-                <span className="lobby-card__label">Entrada</span>
-                <strong>{room.stakeLabel}</strong>
-              </div>
-              <div>
-                <span className="lobby-card__label">Estado</span>
-                <strong>{formatStatus(room)}</strong>
-              </div>
+              <div><span className="lobby-card__label">Anfitrião</span><strong>{room.hostDisplayName}</strong></div>
+              <div><span className="lobby-card__label">Jogadores</span><strong>{room.players.length}/2</strong></div>
+              <div><span className="lobby-card__label">Entrada</span><strong>{room.stakeLabel}</strong></div>
+              <div><span className="lobby-card__label">Estado</span><strong>{formatStatus(room)}</strong></div>
             </div>
 
             <ul className="player-list player-list--room">
@@ -425,23 +396,35 @@ export default function App() {
               <button
                 className={`primary-button ${currentPlayer?.ready ? "primary-button--muted" : ""}`}
                 type="button"
-                onClick={() => sendMessage({
-                  type: "set_ready",
-                  payload: { roomId: room.roomId, userId: state.currentUser.userId, ready: !currentPlayer?.ready },
-                })}
+                onClick={() => sendMessage({ type: "set_ready", payload: { roomId: room.roomId, userId: state.currentUser.userId, ready: !currentPlayer?.ready } })}
               >
                 {currentPlayer?.ready ? "Cancelar pronto" : "Pronto"}
               </button>
             </div>
 
-            <p className="plain-copy">
-              {canStart
-                ? "Os dois jogadores estão prontos."
-                : "A partida começa quando os dois estiverem prontos."}
-            </p>
+            <p className="plain-copy">{canStart ? "Os dois jogadores estão prontos." : "A partida começa quando os dois estiverem prontos."}</p>
             {errorMessage && connectionState !== "offline" ? <p className="error-copy">{errorMessage}</p> : null}
           </StatusCard>
         </>
+      ) : null}
+
+      {shouldShowBalanceDebug && balanceDebug ? (
+        <section className="debug-card">
+          <h3>Debug de fichas</h3>
+          <ul className="kv-list">
+            <li><span>Session user</span><strong>{balanceDebug.sessionUserId ?? "null"}</strong></li>
+            <li><span>Request user</span><strong>{balanceDebug.requestUserId ?? "null"}</strong></li>
+            <li><span>Session guild</span><strong>{balanceDebug.sessionGuildId ?? "null"}</strong></li>
+            <li><span>Request guild</span><strong>{balanceDebug.requestGuildId ?? "null"}</strong></li>
+            <li><span>Mongo</span><strong>{balanceDebug.mongoConnected ? "on" : "off"}</strong></li>
+            <li><span>Query</span><strong>{JSON.stringify(balanceDebug.query)}</strong></li>
+            <li><span>Doc</span><strong>{balanceDebug.docFound ? "encontrado" : "não encontrado"}</strong></li>
+            <li><span>Campos</span><strong>{balanceDebug.docKeys.join(", ") || "nenhum"}</strong></li>
+            <li><span>Chips raw</span><strong>{String(balanceDebug.rawChips)}</strong></li>
+            <li><span>Bônus raw</span><strong>{String(balanceDebug.rawBonusChips)}</strong></li>
+            <li><span>Nota</span><strong>{balanceDebug.note}</strong></li>
+          </ul>
+        </section>
       ) : null}
     </main>
   );
