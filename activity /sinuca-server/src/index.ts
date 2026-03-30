@@ -1,5 +1,7 @@
 import express from "express";
 import { createServer } from "http";
+import { MongoClient } from "mongodb";
+import type { WebSocket } from "ws";
 import { WebSocketServer } from "ws";
 import {
   addPlayer,
@@ -13,7 +15,7 @@ import {
   toSnapshot,
   unsubscribeSocket,
 } from "./rooms.js";
-import type { ClientMessage, ServerMessage } from "./messages.js";
+import type { BalanceSnapshot, ClientMessage, ListRoomsPayload, ServerMessage } from "./messages.js";
 import { getInitialRuleSet } from "./gameRules.js";
 
 const app = express();
@@ -23,9 +25,39 @@ app.get("/health", (_req, res) => {
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
+const contextWatchers = new Map<string, Set<WebSocket>>();
+const socketContext = new Map<WebSocket, string>();
 
-function send(ws: import("ws").WebSocket, payload: ServerMessage) {
+const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI || "";
+const mongoDbName = process.env.MONGODB_DB || process.env.MONGO_DB_NAME || process.env.MONGODB_DB_NAME || "chat_revive";
+const mongoCollectionName = process.env.MONGODB_COLLECTION || process.env.MONGO_COLLECTION_NAME || process.env.MONGODB_COLLECTION_NAME || "settings";
+let mongoClient: MongoClient | null = null;
+
+function send(ws: WebSocket, payload: ServerMessage) {
   ws.send(JSON.stringify(payload));
+}
+
+function contextKey(payload: ListRoomsPayload) {
+  return `${payload.mode}:${payload.guildId ?? ""}:${payload.channelId ?? ""}`;
+}
+
+function watchContext(ws: WebSocket, payload: ListRoomsPayload) {
+  const nextKey = contextKey(payload);
+  const previous = socketContext.get(ws);
+  if (previous && previous !== nextKey) {
+    contextWatchers.get(previous)?.delete(ws);
+  }
+  const bucket = contextWatchers.get(nextKey) ?? new Set<WebSocket>();
+  bucket.add(ws);
+  contextWatchers.set(nextKey, bucket);
+  socketContext.set(ws, nextKey);
+}
+
+function unwatchContext(ws: WebSocket) {
+  const previous = socketContext.get(ws);
+  if (!previous) return;
+  contextWatchers.get(previous)?.delete(ws);
+  socketContext.delete(ws);
 }
 
 function broadcastRoom(roomId: string) {
@@ -37,10 +69,40 @@ function broadcastRoom(roomId: string) {
   }
 }
 
+function broadcastRoomList(payload: ListRoomsPayload) {
+  const watchers = contextWatchers.get(contextKey(payload));
+  if (!watchers || watchers.size === 0) return;
+  const message: ServerMessage = { type: "room_list", payload: listRooms(payload).map(toSnapshot) };
+  for (const client of watchers) {
+    send(client, message);
+  }
+}
+
+async function ensureMongo() {
+  if (!mongoUri) return null;
+  if (!mongoClient) {
+    mongoClient = new MongoClient(mongoUri);
+    await mongoClient.connect();
+  }
+  return mongoClient.db(mongoDbName).collection(mongoCollectionName);
+}
+
+async function fetchBalance(guildId: string, userId: string): Promise<BalanceSnapshot> {
+  const coll = await ensureMongo();
+  if (!coll) return { chips: 0, bonusChips: 0 };
+  const doc = await coll.findOne({ type: "user", guild_id: Number(guildId), user_id: Number(userId) }, { projection: { chips: 1, bonus_chips: 1 } });
+  const chips = Number(doc?.chips ?? 100);
+  const bonusChips = Number(doc?.bonus_chips ?? 0);
+  return {
+    chips: Number.isFinite(chips) ? chips : 100,
+    bonusChips: Number.isFinite(bonusChips) ? bonusChips : 0,
+  };
+}
+
 wss.on("connection", (ws) => {
   send(ws, { type: "ready" });
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     let data: ClientMessage;
     try {
       data = JSON.parse(raw.toString()) as ClientMessage;
@@ -55,7 +117,17 @@ wss.on("connection", (ws) => {
     }
 
     if (data.type === "list_rooms") {
+      watchContext(ws, data.payload);
       send(ws, { type: "room_list", payload: listRooms(data.payload).map(toSnapshot) });
+      return;
+    }
+
+    if (data.type === "get_balance") {
+      try {
+        send(ws, { type: "balance_state", payload: await fetchBalance(data.payload.guildId, data.payload.userId) });
+      } catch {
+        send(ws, { type: "balance_state", payload: { chips: 100, bonusChips: 0 } });
+      }
       return;
     }
 
@@ -64,10 +136,7 @@ wss.on("connection", (ws) => {
       const room = createRoom(instanceId, guildId, channelId, userId, displayName);
       subscribeSocket(room.roomId, ws);
       send(ws, { type: "room_state", payload: toSnapshot(room) });
-      send(ws, {
-        type: "room_list",
-        payload: listRooms({ guildId, channelId, mode: room.mode }).map(toSnapshot),
-      });
+      broadcastRoomList({ guildId, channelId, mode: room.mode });
       return;
     }
 
@@ -79,6 +148,7 @@ wss.on("connection", (ws) => {
       }
       subscribeSocket(room.roomId, ws);
       broadcastRoom(room.roomId);
+      broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
       return;
     }
 
@@ -88,15 +158,9 @@ wss.on("connection", (ws) => {
       unsubscribeSocket(ws);
       if (room) {
         broadcastRoom(room.roomId);
-        send(ws, {
-          type: "room_list",
-          payload: listRooms({ guildId: room.guildId, channelId: room.channelId, mode: room.mode }).map(toSnapshot),
-        });
+        broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
       } else if (previous) {
-        send(ws, {
-          type: "room_list",
-          payload: listRooms({ guildId: previous.guildId, channelId: previous.channelId, mode: previous.mode }).map(toSnapshot),
-        });
+        broadcastRoomList({ guildId: previous.guildId, channelId: previous.channelId, mode: previous.mode });
       }
       return;
     }
@@ -108,11 +172,13 @@ wss.on("connection", (ws) => {
         return;
       }
       broadcastRoom(room.roomId);
+      broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
     }
   });
 
   ws.on("close", () => {
     unsubscribeSocket(ws);
+    unwatchContext(ws);
   });
 });
 
