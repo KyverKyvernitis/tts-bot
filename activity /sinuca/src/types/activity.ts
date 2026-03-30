@@ -14,6 +14,14 @@ export interface ActivityUser {
   displayName: string;
 }
 
+export interface SessionContextPayload {
+  userId: string | null;
+  displayName: string | null;
+  guildId: string | null;
+  channelId: string | null;
+  instanceId: string | null;
+}
+
 export interface RoomPlayer {
   userId: string;
   displayName: string;
