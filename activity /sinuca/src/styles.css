@@ -1,0 +1,144 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #eef6f0;
+  background: #0f1913;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top, rgba(53, 111, 70, 0.24), transparent 38%),
+    linear-gradient(180deg, #132018 0%, #0d1510 100%);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  width: min(980px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 24px 0 32px;
+}
+
+.hero-card,
+.status-card {
+  border: 1px solid rgba(184, 214, 192, 0.14);
+  background: rgba(20, 31, 24, 0.88);
+  border-radius: 22px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+}
+
+.hero-card {
+  padding: 24px;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.hero-card h1,
+.status-card h2 {
+  margin: 0;
+  letter-spacing: -0.02em;
+}
+
+.hero-card p,
+.status-card p,
+.plain-copy {
+  margin: 8px 0 0;
+  color: #bfd3c4;
+  line-height: 1.5;
+}
+
+.hero-card__eyebrow {
+  display: inline-block;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #9bc9a8;
+  margin-bottom: 8px;
+}
+
+.mode-pill {
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mode-pill--server {
+  background: rgba(67, 137, 86, 0.18);
+  color: #9fe8b2;
+}
+
+.mode-pill--casual {
+  background: rgba(120, 140, 214, 0.16);
+  color: #bdc9ff;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 16px 0;
+}
+
+.status-card {
+  padding: 18px 20px;
+}
+
+.status-card__head p {
+  font-size: 14px;
+}
+
+.kv-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.kv-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(184, 214, 192, 0.08);
+}
+
+.kv-list li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.kv-list span {
+  color: #9eb3a3;
+}
+
+.kv-list strong {
+  color: #eef6f0;
+  text-align: right;
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    width: min(100vw - 20px, 980px);
+    padding-top: 12px;
+  }
+
+  .hero-card {
+    flex-direction: column;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
