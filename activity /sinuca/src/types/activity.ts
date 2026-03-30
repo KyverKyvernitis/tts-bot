@@ -1,4 +1,5 @@
 export type ActivityMode = "server" | "casual";
+export type RoomStatus = "waiting" | "ready" | "in_game";
 
 export interface ActivityContext {
   mode: ActivityMode;
@@ -16,14 +17,20 @@ export interface ActivityUser {
 export interface RoomPlayer {
   userId: string;
   displayName: string;
+  ready: boolean;
 }
 
 export interface RoomSnapshot {
+  roomId: string;
   instanceId: string;
   guildId: string | null;
   channelId: string | null;
   mode: ActivityMode;
+  hostUserId: string;
+  hostDisplayName: string;
   players: RoomPlayer[];
+  status: RoomStatus;
+  stakeLabel: string;
   createdAt: number;
 }
 
