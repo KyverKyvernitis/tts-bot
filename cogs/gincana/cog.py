@@ -10,6 +10,7 @@ from .handlers.focus import GincanaFocusMixin
 from .handlers.message_router import GincanaMessageRouterMixin
 from .services.audio import GincanaAudioMixin
 from .services.payments import GincanaPaymentMixin
+from .services.sinuca_service import GincanaSinucaMixin
 from .services.base import GincanaBase
 from .services.toggles import GincanaToggleMixin
 
@@ -27,6 +28,7 @@ class GincanaCore(
     GincanaAlvoMixin,
     GincanaToggleMixin,
     GincanaPaymentMixin,
+    GincanaSinucaMixin,
     GincanaAudioMixin,
     GincanaBase,
 ):
