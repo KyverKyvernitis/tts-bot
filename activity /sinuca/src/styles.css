@@ -33,9 +33,10 @@ button {
 
 .hero-card,
 .status-card,
-.action-card,
 .room-entry-card,
-.empty-card {
+.empty-card,
+.menu-button,
+.home-footer-strip {
   border: 1px solid rgba(184, 214, 192, 0.14);
   background: rgba(20, 31, 24, 0.88);
   border-radius: 22px;
@@ -43,11 +44,21 @@ button {
 }
 
 .hero-card {
-  padding: 24px;
+  padding: 22px 22px 18px;
   display: flex;
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
+}
+
+.hero-card__copy {
+  max-width: 650px;
+}
+
+.hero-card__meta {
+  display: grid;
+  gap: 10px;
+  justify-items: end;
 }
 
 .hero-card h1,
@@ -61,7 +72,6 @@ button {
 .status-card p,
 .plain-copy,
 .error-copy,
-.action-card small,
 .empty-card {
   margin: 8px 0 0;
   color: #bfd3c4;
@@ -69,8 +79,8 @@ button {
 }
 
 .hero-card__eyebrow,
-.action-card__eyebrow,
-.room-entry-card__eyebrow {
+.room-entry-card__eyebrow,
+.menu-button__eyebrow {
   display: inline-block;
   font-size: 12px;
   text-transform: uppercase;
@@ -100,51 +110,82 @@ button {
   color: #bdc9ff;
 }
 
+.mode-pill--stake {
+  background: rgba(255, 255, 255, 0.06);
+  color: #edf5ef;
+}
+
 .status-badge--in_game {
   background: rgba(237, 161, 83, 0.16);
   color: #ffd18d;
 }
 
-.context-strip {
+.home-lobby {
+  display: grid;
+  gap: 18px;
+}
+
+.menu-buttons,
+.room-list-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.menu-button {
+  min-height: 170px;
+  text-align: left;
+  cursor: pointer;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  color: #eef6f0;
+  position: relative;
+  overflow: hidden;
+  background: transparent;
+}
+
+.menu-button::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.94;
+}
+
+.menu-button > * {
+  position: relative;
+  z-index: 1;
+}
+
+.menu-button--create::before {
+  background: linear-gradient(135deg, rgba(34, 94, 59, 0.95) 0%, rgba(18, 49, 31, 0.94) 100%);
+}
+
+.menu-button--join::before {
+  background: linear-gradient(135deg, rgba(24, 50, 78, 0.95) 0%, rgba(18, 29, 48, 0.94) 100%);
+}
+
+.menu-button strong {
+  font-size: 34px;
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+}
+
+.home-footer-strip {
   display: flex;
   justify-content: space-between;
   gap: 16px;
   align-items: center;
-  margin: 12px 0 16px;
-  padding: 12px 16px;
-  border: 1px solid rgba(184, 214, 192, 0.1);
-  border-radius: 16px;
+  padding: 14px 18px;
+  color: #d6e6db;
   background: rgba(15, 24, 18, 0.7);
-  color: #cfe1d5;
+  border-radius: 18px;
 }
 
-.action-grid,
-.room-list-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-}
-
-.action-card,
 .room-entry-card,
 .empty-card {
   padding: 20px;
-}
-
-.action-card {
-  text-align: left;
-  cursor: pointer;
-}
-
-.action-card strong {
-  display: block;
-  font-size: 28px;
-  margin-bottom: 6px;
-  color: #eef6f0;
-}
-
-.action-card--secondary {
-  background: rgba(19, 30, 39, 0.88);
 }
 
 .grid {
@@ -229,7 +270,7 @@ button {
 
 .primary-button:hover,
 .chip-button:hover,
-.action-card:hover {
+.menu-button:hover {
   transform: translateY(-1px);
 }
 
@@ -268,6 +309,10 @@ button {
 
 .error-copy {
   color: #ffb6b6;
+}
+
+.error-copy--home {
+  margin-top: -4px;
 }
 
 .lobby-card {
@@ -313,17 +358,29 @@ button {
 
   .hero-card,
   .room-entry-card__head,
-  .context-strip,
-  .toolbar-row {
+  .toolbar-row,
+  .home-footer-strip {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .hero-card__meta {
+    justify-items: stretch;
   }
 
   .grid,
   .lobby-card,
   .lobby-card--room,
-  .action-grid,
-  .room-list-grid {
+  .room-list-grid,
+  .menu-buttons {
     grid-template-columns: 1fr;
+  }
+
+  .menu-button {
+    min-height: 140px;
+  }
+
+  .menu-button strong {
+    font-size: 30px;
   }
 }

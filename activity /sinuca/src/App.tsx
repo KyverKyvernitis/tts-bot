@@ -150,66 +150,71 @@ export default function App() {
   const heroTitle = useMemo(() => {
     if (screen === "list") return "Mesas abertas";
     if (screen === "room") return room ? `Mesa de ${room.hostDisplayName}` : "Sala da partida";
-    return "Lobby da sinuca";
+    return "Sinuca 8-ball";
   }, [room, screen]);
 
   const heroSubtitle = useMemo(() => {
-    if (screen === "list") return "Veja as mesas abertas no contexto atual e escolha uma para entrar.";
-    if (screen === "room") return "Sala pré-partida da mesa 8-ball pool. Os dois jogadores entram aqui antes da partida.";
-    return "Escolha entre abrir uma mesa nova ou entrar em uma mesa já criada no contexto atual.";
+    if (screen === "list") return "Escolha uma mesa aberta para entrar na próxima partida.";
+    if (screen === "room") return "Sala pré-partida da mesa antes de abrir a mesa de sinuca.";
+    return "Crie uma mesa ou entre em uma partida já aberta no servidor.";
   }, [screen]);
 
   return (
     <main className="app-shell">
       <header className="hero-card">
-        <div>
+        <div className="hero-card__copy">
           <span className="hero-card__eyebrow">Sinuca Activity</span>
           <h1>{heroTitle}</h1>
           <p>{heroSubtitle}</p>
         </div>
-        <div className={`mode-pill mode-pill--${state.context.mode}`}>{lobbyLabel}</div>
+        <div className="hero-card__meta">
+          <div className={`mode-pill mode-pill--${state.context.mode}`}>{lobbyLabel}</div>
+          <div className="mode-pill mode-pill--stake">{entryLabel}</div>
+        </div>
       </header>
 
-      <div className="context-strip">
-        <span>{entryLabel}</span>
-        <strong>{connectionState === "connected" ? "online" : connectionState}</strong>
-      </div>
-
       {screen === "home" ? (
-        <section className="action-grid">
-          <button
-            className="action-card"
-            type="button"
-            onClick={() => {
-              sendMessage({
-                type: "create_room",
-                payload: {
-                  instanceId,
-                  guildId: state.context.guildId,
-                  channelId: state.context.channelId,
-                  userId: state.currentUser.userId,
-                  displayName: state.currentUser.displayName,
-                },
-              });
-            }}
-          >
-            <span className="action-card__eyebrow">8-ball pool</span>
-            <strong>Criar partida</strong>
-            <small>Abra uma mesa nova e vire o anfitrião da partida.</small>
-          </button>
+        <section className="home-lobby">
+          <div className="menu-buttons">
+            <button
+              className="menu-button menu-button--create"
+              type="button"
+              onClick={() => {
+                sendMessage({
+                  type: "create_room",
+                  payload: {
+                    instanceId,
+                    guildId: state.context.guildId,
+                    channelId: state.context.channelId,
+                    userId: state.currentUser.userId,
+                    displayName: state.currentUser.displayName,
+                  },
+                });
+              }}
+            >
+              <span className="menu-button__eyebrow">Nova mesa</span>
+              <strong>Criar partida</strong>
+            </button>
 
-          <button
-            className="action-card action-card--secondary"
-            type="button"
-            onClick={() => {
-              setScreen("list");
-              refreshRooms();
-            }}
-          >
-            <span className="action-card__eyebrow">Mesas abertas</span>
-            <strong>Entrar em partida</strong>
-            <small>Veja a lista de mesas abertas e escolha em qual entrar.</small>
-          </button>
+            <button
+              className="menu-button menu-button--join"
+              type="button"
+              onClick={() => {
+                setScreen("list");
+                refreshRooms();
+              }}
+            >
+              <span className="menu-button__eyebrow">Mesas abertas</span>
+              <strong>Entrar em partida</strong>
+            </button>
+          </div>
+
+          <div className="home-footer-strip">
+            <span>{state.context.mode === "server" ? "Servidor com fichas" : "Partida casual"}</span>
+            <strong>{rooms.length} mesa{rooms.length === 1 ? "" : "s"} aberta{rooms.length === 1 ? "" : "s"}</strong>
+          </div>
+
+          {errorMessage && connectionState === "connected" ? <p className="error-copy error-copy--home">{errorMessage}</p> : null}
         </section>
       ) : null}
 
