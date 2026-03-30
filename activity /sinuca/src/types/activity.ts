@@ -53,3 +53,22 @@ export interface ActivityBootstrap {
   context: ActivityContext;
   currentUser: ActivityUser;
 }
+
+export interface BalanceDebugSnapshot {
+  source: string;
+  sessionUserId: string | null;
+  sessionGuildId: string | null;
+  requestUserId: string | null;
+  requestGuildId: string | null;
+  mongoConnected: boolean;
+  mongoDbName: string;
+  mongoCollectionName: string;
+  query: Record<string, number | string | null>;
+  docFound: boolean;
+  docKeys: string[];
+  rawChips: unknown;
+  rawBonusChips: unknown;
+  normalizedChips: number;
+  normalizedBonusChips: number;
+  note: string;
+}
