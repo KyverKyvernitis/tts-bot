@@ -680,22 +680,35 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             await self._record_game_played(guild.id, chosen.id, weekly_points=3)
             lines.append(f"{'<a:uzi:1487936659692458054>💥' if is_golden else '<:gunforward:1484655577836683434>💥'} O disparo aconteceu. {chosen.mention} foi eliminado.")
             if winners:
-                if base_each > 0 or bonus_each > 0 or base_remainder > 0 or bonus_remainder > 0:
-                    pieces = []
-                    base_preview = base_each + (1 if base_remainder > 0 else 0)
-                    bonus_preview = bonus_each + (1 if bonus_remainder > 0 else 0)
-                    if base_preview > 0:
-                        pieces.append(f"**{base_preview} {self._CHIP_GAIN_EMOJI}** da entrada do eliminado")
-                    if bonus_preview > 0:
-                        pieces.append(f"**{bonus_preview} {self._CHIP_BONUS_EMOJI}** de bônus")
-                    if len(pieces) == 2:
-                        lines.append(f"Cada sobrevivente recebeu {pieces[0]} e {pieces[1]}.")
-                    elif len(pieces) == 1:
-                        lines.append(f"Cada sobrevivente recebeu {pieces[0]}.")
+                winner_count = len(winners)
+                max_normal_gain = base_each + (1 if base_remainder > 0 else 0)
+                min_normal_gain = base_each
+                max_bonus_gain = bonus_each + (1 if bonus_remainder > 0 else 0)
+                min_bonus_gain = bonus_each
+
+                if base_each > 0 or base_remainder > 0:
+                    if base_remainder == 0:
+                        lines.append(
+                            f"A entrada do eliminado (**{eliminated_entry_total} {self._CHIP_GAIN_EMOJI}**) foi dividida entre **{winner_count}** sobreviventes: **{base_each} {self._CHIP_GAIN_EMOJI}** para cada um."
+                        )
                     else:
-                        lines.append("Os sobreviventes não receberam nada.")
-                else:
+                        lines.append(
+                            f"A entrada do eliminado (**{eliminated_entry_total} {self._CHIP_GAIN_EMOJI}**) foi dividida entre **{winner_count}** sobreviventes: **{max_normal_gain} {self._CHIP_GAIN_EMOJI}** para alguns e **{min_normal_gain} {self._CHIP_GAIN_EMOJI}** para os demais."
+                        )
+
+                if bonus_total > 0:
+                    if bonus_remainder == 0:
+                        lines.append(
+                            f"Bônus da rodada: **{bonus_each} {self._CHIP_BONUS_EMOJI}** para cada sobrevivente."
+                        )
+                    else:
+                        lines.append(
+                            f"Bônus da rodada: **{max_bonus_gain} {self._CHIP_BONUS_EMOJI}** para alguns e **{min_bonus_gain} {self._CHIP_BONUS_EMOJI}** para os demais."
+                        )
+
+                if (base_each <= 0 and base_remainder <= 0) and (bonus_total <= 0):
                     lines.append("Os sobreviventes não receberam nada.")
+
                 if is_golden and winners:
                     lines.append(f"Bônus dourado: cada sobrevivente recebeu **+{golden_bonus_each} {self._CHIP_BONUS_EMOJI}**.")
             else:
