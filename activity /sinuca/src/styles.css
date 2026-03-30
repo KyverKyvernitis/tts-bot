@@ -12,7 +12,8 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
-    radial-gradient(circle at top, rgba(53, 111, 70, 0.24), transparent 38%),
+    radial-gradient(circle at top left, rgba(109, 162, 116, 0.18), transparent 24%),
+    radial-gradient(circle at top right, rgba(72, 130, 90, 0.16), transparent 22%),
     linear-gradient(180deg, #132018 0%, #0d1510 100%);
 }
 
@@ -20,14 +21,21 @@ body {
   min-height: 100vh;
 }
 
+button {
+  font: inherit;
+}
+
 .app-shell {
-  width: min(980px, calc(100vw - 32px));
+  width: min(1000px, calc(100vw - 32px));
   margin: 0 auto;
   padding: 24px 0 32px;
 }
 
 .hero-card,
-.status-card {
+.status-card,
+.action-card,
+.room-entry-card,
+.empty-card {
   border: 1px solid rgba(184, 214, 192, 0.14);
   background: rgba(20, 31, 24, 0.88);
   border-radius: 22px;
@@ -43,7 +51,8 @@ body {
 }
 
 .hero-card h1,
-.status-card h2 {
+.status-card h2,
+.room-entry-card h3 {
   margin: 0;
   letter-spacing: -0.02em;
 }
@@ -51,13 +60,17 @@ body {
 .hero-card p,
 .status-card p,
 .plain-copy,
-.error-copy {
+.error-copy,
+.action-card small,
+.empty-card {
   margin: 8px 0 0;
   color: #bfd3c4;
   line-height: 1.5;
 }
 
-.hero-card__eyebrow {
+.hero-card__eyebrow,
+.action-card__eyebrow,
+.room-entry-card__eyebrow {
   display: inline-block;
   font-size: 12px;
   text-transform: uppercase;
@@ -66,7 +79,8 @@ body {
   margin-bottom: 8px;
 }
 
-.mode-pill {
+.mode-pill,
+.status-badge {
   white-space: nowrap;
   border-radius: 999px;
   padding: 10px 14px;
@@ -74,14 +88,63 @@ body {
   font-weight: 700;
 }
 
-.mode-pill--server {
+.mode-pill--server,
+.status-badge--ready {
   background: rgba(67, 137, 86, 0.18);
   color: #9fe8b2;
 }
 
-.mode-pill--casual {
+.mode-pill--casual,
+.status-badge--waiting {
   background: rgba(120, 140, 214, 0.16);
   color: #bdc9ff;
+}
+
+.status-badge--in_game {
+  background: rgba(237, 161, 83, 0.16);
+  color: #ffd18d;
+}
+
+.context-strip {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  margin: 12px 0 16px;
+  padding: 12px 16px;
+  border: 1px solid rgba(184, 214, 192, 0.1);
+  border-radius: 16px;
+  background: rgba(15, 24, 18, 0.7);
+  color: #cfe1d5;
+}
+
+.action-grid,
+.room-list-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.action-card,
+.room-entry-card,
+.empty-card {
+  padding: 20px;
+}
+
+.action-card {
+  text-align: left;
+  cursor: pointer;
+}
+
+.action-card strong {
+  display: block;
+  font-size: 28px;
+  margin-bottom: 6px;
+  color: #eef6f0;
+}
+
+.action-card--secondary {
+  background: rgba(19, 30, 39, 0.88);
 }
 
 .grid {
@@ -127,6 +190,10 @@ body {
   padding-bottom: 0;
 }
 
+.kv-list--compact li {
+  padding: 8px 0;
+}
+
 .kv-list span,
 .player-list small,
 .lobby-card__label {
@@ -135,8 +202,68 @@ body {
 
 .kv-list strong,
 .player-list span,
-.lobby-card strong {
+.lobby-card strong,
+.room-entry-card h3 {
   color: #eef6f0;
+}
+
+.toolbar-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.toolbar-row--end {
+  justify-content: flex-end;
+}
+
+.primary-button,
+.chip-button {
+  border: 0;
+  border-radius: 14px;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: transform 0.16s ease, opacity 0.16s ease;
+}
+
+.primary-button:hover,
+.chip-button:hover,
+.action-card:hover {
+  transform: translateY(-1px);
+}
+
+.primary-button {
+  background: linear-gradient(180deg, #2e7446 0%, #1f5e36 100%);
+  color: #eef6f0;
+  font-weight: 700;
+}
+
+.primary-button--muted,
+.primary-button:disabled {
+  opacity: 0.68;
+}
+
+.chip-button {
+  background: rgba(37, 54, 43, 0.95);
+  color: #d1e2d7;
+}
+
+.chip-button--active {
+  background: rgba(67, 137, 86, 0.22);
+  color: #9fe8b2;
+}
+
+.room-entry-card__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.empty-card {
+  grid-column: 1 / -1;
 }
 
 .error-copy {
@@ -148,6 +275,10 @@ body {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.lobby-card--room {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .lobby-card > div {
@@ -170,18 +301,29 @@ body {
   justify-content: flex-start !important;
 }
 
+.player-list--room li > div {
+  display: grid;
+}
+
 @media (max-width: 720px) {
   .app-shell {
-    width: min(100vw - 20px, 980px);
+    width: min(100vw - 20px, 1000px);
     padding-top: 12px;
   }
 
-  .hero-card {
+  .hero-card,
+  .room-entry-card__head,
+  .context-strip,
+  .toolbar-row {
     flex-direction: column;
+    align-items: stretch;
   }
 
   .grid,
-  .lobby-card {
+  .lobby-card,
+  .lobby-card--room,
+  .action-grid,
+  .room-list-grid {
     grid-template-columns: 1fr;
   }
 }
