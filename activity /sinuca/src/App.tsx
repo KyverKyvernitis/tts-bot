@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { bootstrapDiscord } from "./sdk/discord";
-import type { ActivityBootstrap, BalanceSnapshot, RoomSnapshot } from "./types/activity";
+import type { ActivityBootstrap, BalanceSnapshot, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 
@@ -34,7 +34,8 @@ type IncomingMessage =
   | { type: "error"; message: string }
   | { type: "room_state"; payload: RoomSnapshot }
   | { type: "room_list"; payload: RoomSnapshot[] }
-  | { type: "balance_state"; payload: BalanceSnapshot };
+  | { type: "balance_state"; payload: BalanceSnapshot }
+  | { type: "session_context"; payload: SessionContextPayload };
 
 function resolveSocketUrl() {
   const configured = import.meta.env.VITE_SINUCA_WS_URL as string | undefined;
@@ -149,8 +150,27 @@ export default function App() {
           return;
         }
 
+        if (payload.type === "session_context") {
+          setState((current) => ({
+            ...current,
+            context: {
+              ...current.context,
+              guildId: payload.payload.guildId ?? current.context.guildId,
+              channelId: payload.payload.channelId ?? current.context.channelId,
+              instanceId: payload.payload.instanceId ?? current.context.instanceId,
+              mode: payload.payload.guildId ? "server" : current.context.mode,
+            },
+            currentUser: {
+              userId: payload.payload.userId ?? current.currentUser.userId,
+              displayName: payload.payload.displayName ?? current.currentUser.displayName,
+            },
+          }));
+          return;
+        }
+
         if (payload.type === "balance_state") {
           setBalance(payload.payload);
+          return;
         }
       } catch {
         setErrorMessage("resposta inválida do servidor");
@@ -171,6 +191,13 @@ export default function App() {
       socketRef.current = null;
     };
   }, [state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.userId]);
+
+
+  useEffect(() => {
+    if (connectionState !== "connected") return;
+    requestRooms();
+    requestBalance();
+  }, [connectionState, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.userId]);
 
   useEffect(() => {
     if (screen !== "list" || connectionState !== "connected") return;
