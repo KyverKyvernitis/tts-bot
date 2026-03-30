@@ -2,6 +2,7 @@ import { Common, DiscordSDK } from "@discord/embedded-app-sdk";
 import type { ActivityBootstrap, ActivityContext, ActivityUser } from "../types/activity";
 
 let sdk: DiscordSDK | null = null;
+const cachedUserStorageKey = "sinuca_activity_cached_user";
 
 type DiscordSdkWithContext = DiscordSDK & {
   guildId?: string | null;
@@ -13,11 +14,12 @@ function buildFallbackUser(): ActivityUser {
   const params = new URLSearchParams(window.location.search);
   const queryUserId = params.get("user_id") ?? params.get("userId");
   const queryDisplay = params.get("display_name") ?? params.get("displayName");
-  const seed = queryUserId ?? crypto.randomUUID();
+  const cached = readCachedUser();
+  const seed = queryUserId ?? cached?.userId ?? crypto.randomUUID();
 
   return {
     userId: seed,
-    displayName: queryDisplay ?? `Jogador ${seed.slice(0, 4)}`,
+    displayName: queryDisplay ?? cached?.displayName ?? `Jogador ${seed.slice(0, 4)}`,
   };
 }
 
@@ -36,14 +38,37 @@ function readContextFromQuery(): ActivityContext {
   };
 }
 
-function mergeContext(base: ActivityContext, discord: DiscordSdkWithContext | null): ActivityContext {
+function mergeContext(queryContext: ActivityContext, discord: DiscordSdkWithContext | null): ActivityContext {
   return {
-    mode: discord?.guildId ?? base.guildId ? "server" : base.mode,
-    guildId: discord?.guildId ?? base.guildId,
-    channelId: discord?.channelId ?? base.channelId,
-    instanceId: discord?.instanceId ?? base.instanceId,
-    source: base.source,
+    mode: queryContext.guildId ? "server" : (discord?.guildId ? "server" : queryContext.mode),
+    guildId: queryContext.guildId ?? discord?.guildId ?? null,
+    channelId: queryContext.channelId ?? discord?.channelId ?? null,
+    instanceId: queryContext.instanceId ?? discord?.instanceId ?? null,
+    source: queryContext.source,
   };
+}
+
+function readCachedUser(): ActivityUser | null {
+  try {
+    const raw = window.sessionStorage.getItem(cachedUserStorageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<ActivityUser>;
+    if (typeof parsed.userId !== "string" || !parsed.userId.trim()) return null;
+    return {
+      userId: parsed.userId,
+      displayName: typeof parsed.displayName === "string" && parsed.displayName.trim() ? parsed.displayName : `Jogador ${parsed.userId.slice(0, 4)}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedUser(user: ActivityUser) {
+  try {
+    window.sessionStorage.setItem(cachedUserStorageKey, JSON.stringify(user));
+  } catch {
+    // ignore sessionStorage failures in embedded browsers
+  }
 }
 
 export function getDiscordSdk(): DiscordSDK | null {
@@ -66,58 +91,32 @@ async function lockLandscape(discord: DiscordSDK) {
   }
 }
 
-async function exchangeCode(code: string): Promise<string | null> {
-  const response = await fetch("/api/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code }),
-  });
-  if (!response.ok) return null;
-  const data = (await response.json()) as { access_token?: string };
-  return typeof data.access_token === "string" ? data.access_token : null;
-}
-
-async function authenticateCurrentUser(discord: DiscordSDK, fallback: ActivityUser): Promise<ActivityUser> {
-  try {
-    const { code } = await discord.commands.authorize({
-      client_id: import.meta.env.VITE_DISCORD_CLIENT_ID,
-      response_type: "code",
-      state: "sinuca-activity",
-      prompt: "none",
-      scope: ["identify", "guilds", "guilds.members.read"],
-    });
-    if (!code) return fallback;
-
-    const accessToken = await exchangeCode(code);
-    if (!accessToken) return fallback;
-
-    const auth = await discord.commands.authenticate({ access_token: accessToken });
-    const user = auth?.user;
-    if (!user?.id) return fallback;
-
-    return {
-      userId: String(user.id),
-      displayName: String(user.global_name ?? user.username ?? fallback.displayName),
-    };
-  } catch {
-    return fallback;
-  }
-}
-
-async function resolveParticipantFallback(discord: DiscordSDK, fallback: ActivityUser): Promise<ActivityUser> {
+async function resolveParticipantUser(discord: DiscordSDK, fallback: ActivityUser): Promise<ActivityUser> {
   try {
     const response = await discord.commands.getInstanceConnectedParticipants();
     const participants = response?.participants ?? [];
-    if (participants.length !== 1) return fallback;
-    const participant = participants[0];
-    if (!participant?.id) return fallback;
-    return {
-      userId: String(participant.id),
-      displayName: String(participant.global_name ?? participant.username ?? fallback.displayName),
-    };
+    if (participants.length === 1 && participants[0]?.id) {
+      const participant = participants[0];
+      return {
+        userId: String(participant.id),
+        displayName: String(participant.global_name ?? participant.username ?? fallback.displayName),
+      };
+    }
+
+    const cached = readCachedUser();
+    if (cached) {
+      const matched = participants.find((participant) => String(participant.id) === cached.userId);
+      if (matched?.id) {
+        return {
+          userId: String(matched.id),
+          displayName: String(matched.global_name ?? matched.username ?? cached.displayName),
+        };
+      }
+    }
   } catch {
-    return fallback;
+    // ignore participant lookup failures and keep fallback user
   }
+  return fallback;
 }
 
 export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
@@ -139,10 +138,8 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
     await discord.ready();
     await lockLandscape(discord);
     const context = mergeContext(queryContext, discord as DiscordSdkWithContext);
-    const authenticatedUser = await authenticateCurrentUser(discord, fallbackUser);
-    const currentUser = authenticatedUser.userId !== fallbackUser.userId
-      ? authenticatedUser
-      : await resolveParticipantFallback(discord, fallbackUser);
+    const currentUser = await resolveParticipantUser(discord, fallbackUser);
+    writeCachedUser(currentUser);
 
     return {
       sdkReady: true,
