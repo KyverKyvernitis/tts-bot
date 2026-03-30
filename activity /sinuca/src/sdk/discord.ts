@@ -1,7 +1,19 @@
 import { DiscordSDK } from "@discord/embedded-app-sdk";
-import type { ActivityBootstrap, ActivityContext } from "../types/activity";
+import type { ActivityBootstrap, ActivityContext, ActivityUser } from "../types/activity";
 
 let sdk: DiscordSDK | null = null;
+
+function buildFallbackUser(): ActivityUser {
+  const params = new URLSearchParams(window.location.search);
+  const queryUserId = params.get("user_id") ?? params.get("userId");
+  const queryDisplay = params.get("display_name") ?? params.get("displayName");
+  const seed = queryUserId ?? crypto.randomUUID();
+
+  return {
+    userId: seed,
+    displayName: queryDisplay ?? `Jogador ${seed.slice(0, 4)}`,
+  };
+}
 
 function readContextFromQuery(): ActivityContext {
   const params = new URLSearchParams(window.location.search);
@@ -29,6 +41,7 @@ export function getDiscordSdk(): DiscordSDK | null {
 export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
   const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined) ?? null;
   const context = readContextFromQuery();
+  const currentUser = buildFallbackUser();
   const discord = getDiscordSdk();
 
   if (!discord) {
@@ -36,6 +49,7 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
       sdkReady: false,
       clientId,
       context: { ...context, source: "fallback" },
+      currentUser,
     };
   }
 
@@ -45,12 +59,14 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
       sdkReady: true,
       clientId,
       context,
+      currentUser,
     };
   } catch {
     return {
       sdkReady: false,
       clientId,
       context: { ...context, source: "fallback" },
+      currentUser,
     };
   }
 }
