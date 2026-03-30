@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { bootstrapDiscord } from "./sdk/discord";
-import type { ActivityBootstrap, BalanceSnapshot, RoomSnapshot, SessionContextPayload } from "./types/activity";
+import type { ActivityBootstrap, BalanceDebugSnapshot, BalanceSnapshot, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 
@@ -35,6 +35,7 @@ type IncomingMessage =
   | { type: "room_state"; payload: RoomSnapshot }
   | { type: "room_list"; payload: RoomSnapshot[] }
   | { type: "balance_state"; payload: BalanceSnapshot }
+  | { type: "balance_debug"; payload: BalanceDebugSnapshot }
   | { type: "session_context"; payload: SessionContextPayload };
 
 function resolveSocketUrl() {
@@ -68,6 +69,7 @@ export default function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [balance, setBalance] = useState<BalanceSnapshot>(initialBalance);
+  const [balanceDebug, setBalanceDebug] = useState<BalanceDebugSnapshot | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -172,6 +174,12 @@ export default function App() {
           setBalance(payload.payload);
           return;
         }
+
+        if (payload.type === "balance_debug") {
+          setBalanceDebug(payload.payload);
+          console.log("[sinuca balance_debug]", payload.payload);
+          return;
+        }
       } catch {
         setErrorMessage("resposta inválida do servidor");
       }
@@ -206,6 +214,8 @@ export default function App() {
     }, 2500);
     return () => window.clearInterval(interval);
   }, [connectionState, screen, state.context.channelId, state.context.guildId, state.context.mode]);
+
+  const shouldShowBalanceDebug = isServer && balance.chips === 0;
 
   const heroTitle = useMemo(() => {
     if (screen === "list") return "Mesas abertas";

@@ -489,3 +489,28 @@ button:focus-visible {
     font-size: 2.2rem;
   }
 }
+
+
+.debug-card {
+  margin-top: 12px;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 22px;
+  background: rgba(6, 12, 20, 0.68);
+  backdrop-filter: blur(10px);
+  padding: 14px 16px;
+  color: rgba(255,255,255,0.92);
+}
+.debug-card__title {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+.debug-card__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: 8px 14px;
+  font-size: 12px;
+}
+.debug-card__grid div { display:flex; flex-direction:column; gap:2px; }
+.debug-card__grid strong { color: rgba(255,255,255,0.72); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.debug-card__grid span { word-break: break-word; }
