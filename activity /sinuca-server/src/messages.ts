@@ -37,6 +37,14 @@ export interface BalancePayload {
   userId: string;
 }
 
+export interface SessionContextPayload {
+  userId: string | null;
+  displayName: string | null;
+  guildId: string | null;
+  channelId: string | null;
+  instanceId: string | null;
+}
+
 export type ClientMessage =
   | { type: "create_room"; payload: CreateRoomPayload }
   | { type: "join_room"; payload: JoinRoomPayload }
@@ -44,6 +52,7 @@ export type ClientMessage =
   | { type: "set_ready"; payload: ReadyPayload }
   | { type: "list_rooms"; payload: ListRoomsPayload }
   | { type: "get_balance"; payload: BalancePayload }
+  | { type: "init_context"; payload: SessionContextPayload }
   | { type: "ping" };
 
 export interface RoomSnapshot {
@@ -82,14 +91,6 @@ export interface BalanceDebugSnapshot {
   normalizedChips: number;
   normalizedBonusChips: number;
   note: string;
-}
-
-export interface SessionContextPayload {
-  userId: string | null;
-  displayName: string | null;
-  guildId: string | null;
-  channelId: string | null;
-  instanceId: string | null;
 }
 
 export type ServerMessage =

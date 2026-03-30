@@ -27,8 +27,53 @@ import type {
 import { getInitialRuleSet } from "./gameRules.js";
 
 const app = express();
+app.use(express.json());
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true, rules: getInitialRuleSet() });
+});
+
+const discordClientId = process.env.VITE_DISCORD_CLIENT_ID || process.env.DISCORD_CLIENT_ID || "";
+const discordClientSecret = process.env.DISCORD_CLIENT_SECRET || process.env.CLIENT_SECRET || "";
+const discordRedirectUri = process.env.DISCORD_REDIRECT_URI || `https://${process.env.PUBLIC_HOST || "osakaagiota.duckdns.org"}`;
+
+app.post("/token", async (req, res) => {
+  const code = typeof req.body?.code === "string" ? req.body.code : "";
+  if (!code) {
+    res.status(400).json({ error: "missing_code" });
+    return;
+  }
+  if (!discordClientId || !discordClientSecret) {
+    res.status(500).json({ error: "oauth_not_configured" });
+    return;
+  }
+
+  try {
+    const params = new URLSearchParams();
+    params.set("client_id", discordClientId);
+    params.set("client_secret", discordClientSecret);
+    params.set("grant_type", "authorization_code");
+    params.set("code", code);
+    params.set("redirect_uri", discordRedirectUri);
+
+    const response = await fetch("https://discord.com/api/v10/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params,
+    });
+
+    const data = await response.json() as { access_token?: string; error?: string; error_description?: string };
+    if (!response.ok || !data.access_token) {
+      console.error("[sinuca-oauth] token exchange failed", response.status, data);
+      res.status(502).json({ error: data.error ?? "token_exchange_failed", detail: data.error_description ?? null });
+      return;
+    }
+
+    res.json({ access_token: data.access_token });
+  } catch (error) {
+    console.error("[sinuca-oauth] token exchange error", error);
+    res.status(500).json({ error: "token_exchange_exception" });
+  }
 });
 
 const server = createServer(app);
@@ -105,20 +150,13 @@ function normalizeIntString(value: unknown): string | null {
 
 function decodeProxyPayload(req: IncomingMessage): SessionContextPayload {
   const encoded = req.headers["x-discord-proxy-payload"];
-  const result: SessionContextPayload = {
-    userId: null,
-    displayName: null,
-    guildId: null,
-    channelId: null,
-    instanceId: null,
-  };
+  const result: SessionContextPayload = { userId: null, displayName: null, guildId: null, channelId: null, instanceId: null };
   if (!encoded || Array.isArray(encoded)) return result;
   try {
     const decoded = JSON.parse(Buffer.from(encoded, "base64").toString("utf-8")) as Record<string, any>;
     const user = decoded.user ?? decoded.member?.user ?? null;
     result.userId = normalizeIntString(decoded.user_id ?? decoded.userId ?? decoded.discord_user_id ?? user?.id ?? (Array.isArray(decoded.users) ? decoded.users[0] : null));
-    result.displayName =
-      normalizeIntString(decoded.display_name ?? decoded.displayName ?? decoded.member?.nick ?? user?.global_name ?? user?.username) ?? null;
+    result.displayName = normalizeIntString(decoded.display_name ?? decoded.displayName ?? decoded.member?.nick ?? user?.global_name ?? user?.username) ?? null;
     result.guildId = normalizeIntString(decoded.guild_id ?? decoded.guildId ?? decoded.location?.guild_id);
     result.channelId = normalizeIntString(decoded.channel_id ?? decoded.channelId ?? decoded.location?.channel_id);
     result.instanceId = normalizeIntString(decoded.instance_id ?? decoded.instanceId);
@@ -126,6 +164,16 @@ function decodeProxyPayload(req: IncomingMessage): SessionContextPayload {
     // ignore malformed proxy payloads and fall back to client hints
   }
   return result;
+}
+
+function mergeSession(base: SessionContextPayload, incoming: SessionContextPayload): SessionContextPayload {
+  return {
+    userId: incoming.userId ?? base.userId,
+    displayName: incoming.displayName ?? base.displayName,
+    guildId: incoming.guildId ?? base.guildId,
+    channelId: incoming.channelId ?? base.channelId,
+    instanceId: incoming.instanceId ?? base.instanceId,
+  };
 }
 
 function mergeWithSession<T extends Record<string, any>>(payload: T, session: SessionContextPayload): T {
@@ -170,6 +218,7 @@ async function fetchBalance(guildId: string, userId: string, session?: SessionCo
       },
     };
   }
+
   const doc = await coll.findOne(query, { projection: { chips: 1, bonus_chips: 1, guild_id: 1, user_id: 1, type: 1 } });
   const chips = Number(doc?.chips ?? 100);
   const bonusChips = Number(doc?.bonus_chips ?? 0);
@@ -222,24 +271,6 @@ async function pushBalance(ws: WebSocket, guildId: string, userId: string, force
     console.error("[sinuca-balance-error]", error);
     if (force) {
       send(ws, { type: "balance_state", payload: { chips: 100, bonusChips: 0 } });
-      send(ws, { type: "balance_debug", payload: {
-        source: "exception",
-        sessionUserId: socketSession.get(ws)?.userId ?? null,
-        sessionGuildId: socketSession.get(ws)?.guildId ?? null,
-        requestUserId: userId,
-        requestGuildId: guildId,
-        mongoConnected: Boolean(mongoUri),
-        mongoDbName,
-        mongoCollectionName,
-        query: { type: "user", guild_id: Number(guildId), user_id: Number(userId) },
-        docFound: false,
-        docKeys: [],
-        rawChips: null,
-        rawBonusChips: null,
-        normalizedChips: 100,
-        normalizedBonusChips: 0,
-        note: error instanceof Error ? error.message : "erro desconhecido ao buscar saldo",
-      } });
     }
   }
 }
@@ -284,6 +315,18 @@ wss.on("connection", (ws, req) => {
 
     if (data.type === "ping") {
       send(ws, { type: "pong" });
+      return;
+    }
+
+    if (data.type === "init_context") {
+      const nextSession = mergeSession(activeSession, data.payload);
+      socketSession.set(ws, nextSession);
+      send(ws, { type: "session_context", payload: nextSession });
+      console.log("[sinuca-session-client]", JSON.stringify(nextSession));
+      if (nextSession.guildId && nextSession.userId) {
+        watchBalance(ws, nextSession.guildId, nextSession.userId);
+        await pushBalance(ws, nextSession.guildId, nextSession.userId, true);
+      }
       return;
     }
 
@@ -396,9 +439,7 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-server.on("close", () => {
-  clearInterval(balanceTicker);
-});
+server.on("close", () => clearInterval(balanceTicker));
 
 const port = Number(process.env.PORT || 8787);
 server.listen(port, () => {
