@@ -155,9 +155,9 @@ export default function App() {
   }, [room, screen]);
 
   const heroSubtitle = useMemo(() => {
-    if (screen === "list") return "Escolha uma mesa aberta para entrar na próxima partida.";
-    if (screen === "room") return "Sala pré-partida da mesa antes de abrir a mesa de sinuca.";
-    return "Crie uma mesa ou entre em uma partida já aberta no servidor.";
+    if (screen === "list") return "Veja as mesas abertas e entre em uma delas.";
+    if (screen === "room") return "Aguarde o segundo jogador e marque pronto.";
+    return "Crie uma mesa ou entre em uma já aberta.";
   }, [screen]);
 
   return (
@@ -195,7 +195,7 @@ export default function App() {
             >
               <span className="menu-button__eyebrow">Nova mesa</span>
               <strong>Criar mesa</strong>
-              <small>Abra uma sala nova e assuma a primeira tacada da organização.</small>
+              <small>Abra uma mesa nova.</small>
             </button>
 
             <button
@@ -208,12 +208,12 @@ export default function App() {
             >
               <span className="menu-button__eyebrow">Mesas abertas</span>
               <strong>Entrar</strong>
-              <small>Veja as mesas prontas no servidor e escolha onde jogar.</small>
+              <small>Veja as mesas abertas.</small>
             </button>
           </div>
 
           <div className="home-footer-strip">
-            <span>{state.context.mode === "server" ? "Servidor com fichas" : "Partida casual"}</span>
+            <span>{state.context.mode === "server" ? "Servidor com fichas" : "Mesa casual"}</span>
             <strong>{rooms.length} mesa{rooms.length === 1 ? "" : "s"} aberta{rooms.length === 1 ? "" : "s"}</strong>
           </div>
         </section>
@@ -230,7 +230,7 @@ export default function App() {
             <div>
               <span className="menu-button__eyebrow">Mesas abertas</span>
               <h2>Escolha uma mesa</h2>
-              <p>Entre na próxima partida disponível do contexto atual.</p>
+              <p>Escolha uma mesa para entrar.</p>
             </div>
             <div className="list-summary">
               <span>{rooms.length} mesa{rooms.length === 1 ? "" : "s"} aberta{rooms.length === 1 ? "" : "s"}</span>
@@ -240,7 +240,7 @@ export default function App() {
 
           <div className="room-list-stack">
             {rooms.length === 0 ? (
-              <div className="empty-card empty-card--soft">Nenhuma mesa aberta agora. Crie a primeira mesa.</div>
+              <div className="empty-card empty-card--soft">Nenhuma mesa aberta no momento.</div>
             ) : (
               rooms.map((entry) => (
                 <article key={entry.roomId} className="room-entry-card room-entry-card--soft">
@@ -339,7 +339,7 @@ export default function App() {
                   <strong>{player.ready ? "pronto" : "aguardando"}</strong>
                 </li>
               ))}
-              {room.players.length < 2 ? <li className="player-list__ghost">Aguardando segundo jogador…</li> : null}
+              {room.players.length < 2 ? <li className="player-list__ghost">Aguardando outro jogador…</li> : null}
             </ul>
 
             <div className="toolbar-row toolbar-row--end">
@@ -369,8 +369,8 @@ export default function App() {
 
             <p className="plain-copy">
               {canStart
-                ? "Os dois jogadores estão prontos. No próximo patch, essa sala já parte direto para a mesa da partida."
-                : "A mesa de sinuca só começa quando os dois jogadores estiverem presentes e marcados como prontos."}
+                ? "Os dois jogadores estão prontos."
+                : "A partida começa quando os dois estiverem prontos."}
             </p>
             {errorMessage && connectionState !== "offline" ? <p className="error-copy">{errorMessage}</p> : null}
           </StatusCard>
