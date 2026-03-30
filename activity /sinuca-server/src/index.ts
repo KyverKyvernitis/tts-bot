@@ -1,6 +1,7 @@
 import express from "express";
 import { createServer } from "http";
 import { MongoClient } from "mongodb";
+import type { IncomingMessage } from "http";
 import type { WebSocket } from "ws";
 import { WebSocketServer } from "ws";
 import {
@@ -15,7 +16,13 @@ import {
   toSnapshot,
   unsubscribeSocket,
 } from "./rooms.js";
-import type { BalanceSnapshot, ClientMessage, ListRoomsPayload, ServerMessage } from "./messages.js";
+import type {
+  BalanceSnapshot,
+  ClientMessage,
+  ListRoomsPayload,
+  ServerMessage,
+  SessionContextPayload,
+} from "./messages.js";
 import { getInitialRuleSet } from "./gameRules.js";
 
 const app = express();
@@ -27,6 +34,8 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 const contextWatchers = new Map<string, Set<WebSocket>>();
 const socketContext = new Map<WebSocket, string>();
+const socketSession = new Map<WebSocket, SessionContextPayload>();
+const balanceWatchers = new Map<WebSocket, { guildId: string; userId: string; lastSent: string }>();
 
 const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI || "";
 const mongoDbName = process.env.MONGODB_DB || process.env.MONGO_DB_NAME || process.env.MONGODB_DB_NAME || "chat_revive";
@@ -87,10 +96,55 @@ async function ensureMongo() {
   return mongoClient.db(mongoDbName).collection(mongoCollectionName);
 }
 
+function normalizeIntString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).trim();
+  return raw ? raw : null;
+}
+
+function decodeProxyPayload(req: IncomingMessage): SessionContextPayload {
+  const encoded = req.headers["x-discord-proxy-payload"];
+  const result: SessionContextPayload = {
+    userId: null,
+    displayName: null,
+    guildId: null,
+    channelId: null,
+    instanceId: null,
+  };
+  if (!encoded || Array.isArray(encoded)) return result;
+  try {
+    const decoded = JSON.parse(Buffer.from(encoded, "base64").toString("utf-8")) as Record<string, any>;
+    const user = decoded.user ?? decoded.member?.user ?? null;
+    result.userId = normalizeIntString(decoded.user_id ?? decoded.userId ?? decoded.discord_user_id ?? user?.id ?? (Array.isArray(decoded.users) ? decoded.users[0] : null));
+    result.displayName =
+      normalizeIntString(decoded.display_name ?? decoded.displayName ?? decoded.member?.nick ?? user?.global_name ?? user?.username) ?? null;
+    result.guildId = normalizeIntString(decoded.guild_id ?? decoded.guildId ?? decoded.location?.guild_id);
+    result.channelId = normalizeIntString(decoded.channel_id ?? decoded.channelId ?? decoded.location?.channel_id);
+    result.instanceId = normalizeIntString(decoded.instance_id ?? decoded.instanceId);
+  } catch {
+    // ignore malformed proxy payloads and fall back to client hints
+  }
+  return result;
+}
+
+function mergeWithSession<T extends Record<string, any>>(payload: T, session: SessionContextPayload): T {
+  return {
+    ...payload,
+    guildId: payload.guildId ?? session.guildId,
+    channelId: payload.channelId ?? session.channelId,
+    userId: payload.userId ?? session.userId,
+    displayName: payload.displayName ?? session.displayName,
+    instanceId: payload.instanceId ?? session.instanceId,
+  };
+}
+
 async function fetchBalance(guildId: string, userId: string): Promise<BalanceSnapshot> {
   const coll = await ensureMongo();
-  if (!coll) return { chips: 0, bonusChips: 0 };
-  const doc = await coll.findOne({ type: "user", guild_id: Number(guildId), user_id: Number(userId) }, { projection: { chips: 1, bonus_chips: 1 } });
+  if (!coll) return { chips: 100, bonusChips: 0 };
+  const doc = await coll.findOne(
+    { type: "user", guild_id: Number(guildId), user_id: Number(userId) },
+    { projection: { chips: 1, bonus_chips: 1 } },
+  );
   const chips = Number(doc?.chips ?? 100);
   const bonusChips = Number(doc?.bonus_chips ?? 0);
   return {
@@ -99,8 +153,46 @@ async function fetchBalance(guildId: string, userId: string): Promise<BalanceSna
   };
 }
 
-wss.on("connection", (ws) => {
+function watchBalance(ws: WebSocket, guildId: string | null | undefined, userId: string | null | undefined) {
+  if (!guildId || !userId) {
+    balanceWatchers.delete(ws);
+    return;
+  }
+  balanceWatchers.set(ws, { guildId, userId, lastSent: "" });
+}
+
+async function pushBalance(ws: WebSocket, guildId: string, userId: string, force = false) {
+  try {
+    const payload = await fetchBalance(guildId, userId);
+    const nextKey = JSON.stringify(payload);
+    const current = balanceWatchers.get(ws);
+    if (!current) return;
+    if (!force && current.lastSent === nextKey) return;
+    current.lastSent = nextKey;
+    send(ws, { type: "balance_state", payload });
+  } catch {
+    if (force) {
+      send(ws, { type: "balance_state", payload: { chips: 100, bonusChips: 0 } });
+    }
+  }
+}
+
+const balanceTicker = setInterval(() => {
+  for (const [ws, watch] of balanceWatchers.entries()) {
+    if (ws.readyState !== 1) continue;
+    void pushBalance(ws, watch.guildId, watch.userId);
+  }
+}, 2000);
+
+wss.on("connection", (ws, req) => {
+  const session = decodeProxyPayload(req);
+  socketSession.set(ws, session);
   send(ws, { type: "ready" });
+  send(ws, { type: "session_context", payload: session });
+  if (session.guildId && session.userId) {
+    watchBalance(ws, session.guildId, session.userId);
+    void pushBalance(ws, session.guildId, session.userId, true);
+  }
 
   ws.on("message", async (raw) => {
     let data: ClientMessage;
@@ -111,37 +203,52 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    const activeSession = socketSession.get(ws) ?? session;
+
     if (data.type === "ping") {
       send(ws, { type: "pong" });
       return;
     }
 
     if (data.type === "list_rooms") {
-      watchContext(ws, data.payload);
-      send(ws, { type: "room_list", payload: listRooms(data.payload).map(toSnapshot) });
+      const merged = mergeWithSession(data.payload, activeSession);
+      watchContext(ws, merged);
+      send(ws, { type: "room_list", payload: listRooms(merged).map(toSnapshot) });
       return;
     }
 
     if (data.type === "get_balance") {
-      try {
-        send(ws, { type: "balance_state", payload: await fetchBalance(data.payload.guildId, data.payload.userId) });
-      } catch {
+      const merged = mergeWithSession(data.payload, activeSession);
+      if (!merged.guildId || !merged.userId) {
         send(ws, { type: "balance_state", payload: { chips: 100, bonusChips: 0 } });
+        return;
       }
+      watchBalance(ws, merged.guildId, merged.userId);
+      await pushBalance(ws, merged.guildId, merged.userId, true);
       return;
     }
 
     if (data.type === "create_room") {
-      const { instanceId, guildId, channelId, userId, displayName } = data.payload;
-      const room = createRoom(instanceId, guildId, channelId, userId, displayName);
+      const merged = mergeWithSession(data.payload, activeSession);
+      const { instanceId, guildId, channelId, userId, displayName } = merged;
+      if (!instanceId || !userId || !displayName) {
+        send(ws, { type: "error", message: "sessão da activity incompleta" });
+        return;
+      }
+      const room = createRoom(instanceId, guildId ?? null, channelId ?? null, userId, displayName);
       subscribeSocket(room.roomId, ws);
       send(ws, { type: "room_state", payload: toSnapshot(room) });
-      broadcastRoomList({ guildId, channelId, mode: room.mode });
+      broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
       return;
     }
 
     if (data.type === "join_room") {
-      const room = addPlayer(data.payload.roomId, data.payload.userId, data.payload.displayName);
+      const merged = mergeWithSession(data.payload, activeSession);
+      if (!merged.userId || !merged.displayName) {
+        send(ws, { type: "error", message: "jogador da activity não identificado" });
+        return;
+      }
+      const room = addPlayer(merged.roomId, merged.userId, merged.displayName);
       if (!room) {
         send(ws, { type: "error", message: "mesa não encontrada" });
         return;
@@ -153,8 +260,13 @@ wss.on("connection", (ws) => {
     }
 
     if (data.type === "leave_room") {
-      const previous = getRoom(data.payload.roomId);
-      const room = removePlayer(data.payload.roomId, data.payload.userId);
+      const merged = mergeWithSession(data.payload, activeSession);
+      const previous = getRoom(merged.roomId);
+      if (!merged.userId) {
+        send(ws, { type: "error", message: "jogador da activity não identificado" });
+        return;
+      }
+      const room = removePlayer(merged.roomId, merged.userId);
       unsubscribeSocket(ws);
       if (room) {
         broadcastRoom(room.roomId);
@@ -166,7 +278,12 @@ wss.on("connection", (ws) => {
     }
 
     if (data.type === "set_ready") {
-      const room = setPlayerReady(data.payload.roomId, data.payload.userId, data.payload.ready);
+      const merged = mergeWithSession(data.payload, activeSession);
+      if (!merged.userId) {
+        send(ws, { type: "error", message: "jogador da activity não identificado" });
+        return;
+      }
+      const room = setPlayerReady(merged.roomId, merged.userId, merged.ready);
       if (!room) {
         send(ws, { type: "error", message: "mesa não encontrada" });
         return;
@@ -179,7 +296,13 @@ wss.on("connection", (ws) => {
   ws.on("close", () => {
     unsubscribeSocket(ws);
     unwatchContext(ws);
+    balanceWatchers.delete(ws);
+    socketSession.delete(ws);
   });
+});
+
+server.on("close", () => {
+  clearInterval(balanceTicker);
 });
 
 const port = Number(process.env.PORT || 8787);

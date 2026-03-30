@@ -65,8 +65,17 @@ export interface BalanceSnapshot {
   bonusChips: number;
 }
 
+export interface SessionContextPayload {
+  userId: string | null;
+  displayName: string | null;
+  guildId: string | null;
+  channelId: string | null;
+  instanceId: string | null;
+}
+
 export type ServerMessage =
   | { type: "ready" }
+  | { type: "session_context"; payload: SessionContextPayload }
   | { type: "pong" }
   | { type: "room_state"; payload: RoomSnapshot }
   | { type: "room_list"; payload: RoomSnapshot[] }
