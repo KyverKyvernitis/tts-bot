@@ -5,7 +5,7 @@ import time
 import discord
 
 
-CORRIDA_STAKE = 10
+CORRIDA_STAKE = 20
 _CORRIDA_TRACK_LENGTH = 18
 _CORRIDA_UPDATES = 10
 _CORRIDA_UPDATE_SECONDS = 2.0
@@ -1262,8 +1262,9 @@ class GincanaCorridaMixin:
             if rank <= 3:
                 await self.db.add_user_game_stat(guild.id, member.id, "corrida_podiums", 1)
                 await self._grant_weekly_points(guild.id, member.id, max(3, 5 - rank))
-        if final_groups and len(final_groups[0]) == 1:
-            await self.db.add_user_game_stat(guild.id, final_groups[0][0].id, "corrida_wins", 1)
+        if final_groups:
+            for first_place_member in final_groups[0]:
+                await self.db.add_user_game_stat(guild.id, first_place_member.id, "corrida_wins", 1)
         losing_ids = set(locked_ids)
         if final_groups:
             for winner in final_groups[0]:
