@@ -1,4 +1,4 @@
-import { DiscordSDK } from "@discord/embedded-app-sdk";
+import { Common, DiscordSDK } from "@discord/embedded-app-sdk";
 import type { ActivityBootstrap, ActivityContext, ActivityUser } from "../types/activity";
 
 let sdk: DiscordSDK | null = null;
@@ -38,6 +38,18 @@ export function getDiscordSdk(): DiscordSDK | null {
   return sdk;
 }
 
+async function lockLandscape(discord: DiscordSDK) {
+  try {
+    await discord.commands.setOrientationLockState({
+      lock_state: Common.OrientationLockStateTypeObject.LANDSCAPE,
+      picture_in_picture_lock_state: Common.OrientationLockStateTypeObject.LANDSCAPE,
+      grid_lock_state: Common.OrientationLockStateTypeObject.LANDSCAPE,
+    });
+  } catch {
+    // ignore orientation lock failures; portal config still acts as fallback
+  }
+}
+
 export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
   const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined) ?? null;
   const context = readContextFromQuery();
@@ -55,6 +67,7 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
 
   try {
     await discord.ready();
+    await lockLandscape(discord);
     return {
       sdkReady: true,
       clientId,
