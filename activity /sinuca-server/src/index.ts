@@ -1,7 +1,18 @@
 import express from "express";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
-import { addPlayer, getOrCreateRoom, subscribeSocket, toSnapshot, unsubscribeSocket } from "./rooms.js";
+import {
+  addPlayer,
+  createRoom,
+  getRoom,
+  getSubscribers,
+  listRooms,
+  removePlayer,
+  setPlayerReady,
+  subscribeSocket,
+  toSnapshot,
+  unsubscribeSocket,
+} from "./rooms.js";
 import type { ClientMessage, ServerMessage } from "./messages.js";
 import { getInitialRuleSet } from "./gameRules.js";
 
@@ -15,6 +26,15 @@ const wss = new WebSocketServer({ server, path: "/ws" });
 
 function send(ws: import("ws").WebSocket, payload: ServerMessage) {
   ws.send(JSON.stringify(payload));
+}
+
+function broadcastRoom(roomId: string) {
+  const room = getRoom(roomId);
+  if (!room) return;
+  const payload: ServerMessage = { type: "room_state", payload: toSnapshot(room) };
+  for (const client of getSubscribers(roomId)) {
+    send(client, payload);
+  }
 }
 
 wss.on("connection", (ws) => {
@@ -34,25 +54,60 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    if (data.type === "list_rooms") {
+      send(ws, { type: "room_list", payload: listRooms(data.payload).map(toSnapshot) });
+      return;
+    }
+
     if (data.type === "create_room") {
-      const { instanceId, guildId, channelId } = data.payload;
-      const room = getOrCreateRoom(instanceId, guildId, channelId);
-      subscribeSocket(instanceId, ws);
+      const { instanceId, guildId, channelId, userId, displayName } = data.payload;
+      const room = createRoom(instanceId, guildId, channelId, userId, displayName);
+      subscribeSocket(room.roomId, ws);
       send(ws, { type: "room_state", payload: toSnapshot(room) });
+      send(ws, {
+        type: "room_list",
+        payload: listRooms({ guildId, channelId, mode: room.mode }).map(toSnapshot),
+      });
       return;
     }
 
     if (data.type === "join_room") {
-      const { instanceId, userId, displayName } = data.payload;
-      const room = addPlayer(instanceId, userId, displayName);
+      const room = addPlayer(data.payload.roomId, data.payload.userId, data.payload.displayName);
       if (!room) {
-        send(ws, { type: "error", message: "sala não encontrada" });
+        send(ws, { type: "error", message: "mesa não encontrada" });
         return;
       }
-      const payload: ServerMessage = { type: "room_state", payload: toSnapshot(room) };
-      for (const client of subscribeSocket(instanceId, ws)) {
-        send(client, payload);
+      subscribeSocket(room.roomId, ws);
+      broadcastRoom(room.roomId);
+      return;
+    }
+
+    if (data.type === "leave_room") {
+      const previous = getRoom(data.payload.roomId);
+      const room = removePlayer(data.payload.roomId, data.payload.userId);
+      unsubscribeSocket(ws);
+      if (room) {
+        broadcastRoom(room.roomId);
+        send(ws, {
+          type: "room_list",
+          payload: listRooms({ guildId: room.guildId, channelId: room.channelId, mode: room.mode }).map(toSnapshot),
+        });
+      } else if (previous) {
+        send(ws, {
+          type: "room_list",
+          payload: listRooms({ guildId: previous.guildId, channelId: previous.channelId, mode: previous.mode }).map(toSnapshot),
+        });
       }
+      return;
+    }
+
+    if (data.type === "set_ready") {
+      const room = setPlayerReady(data.payload.roomId, data.payload.userId, data.payload.ready);
+      if (!room) {
+        send(ws, { type: "error", message: "mesa não encontrada" });
+        return;
+      }
+      broadcastRoom(room.roomId);
     }
   });
 
