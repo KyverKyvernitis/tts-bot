@@ -1,0 +1,15 @@
+[Unit]
+Description=Sinuca Activity Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tts-bot/activity /sinuca-server
+EnvironmentFile=/opt/tts-bot/activity /sinuca-server/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
