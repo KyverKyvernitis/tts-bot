@@ -1,3 +1,4 @@
+import type { WebSocket } from "ws";
 import type { RoomSnapshot } from "./messages";
 
 interface PlayerRef {
@@ -15,6 +16,7 @@ interface RoomRecord {
 }
 
 const rooms = new Map<string, RoomRecord>();
+const roomSockets = new Map<string, Set<WebSocket>>();
 
 export function getOrCreateRoom(instanceId: string, guildId?: string | null, channelId?: string | null): RoomRecord {
   const found = rooms.get(instanceId);
@@ -29,6 +31,7 @@ export function getOrCreateRoom(instanceId: string, guildId?: string | null, cha
     players: [],
   };
   rooms.set(instanceId, room);
+  roomSockets.set(instanceId, new Set());
   return room;
 }
 
@@ -41,6 +44,19 @@ export function addPlayer(instanceId: string, userId: string, displayName: strin
     room.players.push({ userId, displayName });
   }
   return room;
+}
+
+export function subscribeSocket(instanceId: string, ws: WebSocket): Set<WebSocket> {
+  const bucket = roomSockets.get(instanceId) ?? new Set<WebSocket>();
+  bucket.add(ws);
+  roomSockets.set(instanceId, bucket);
+  return bucket;
+}
+
+export function unsubscribeSocket(ws: WebSocket) {
+  for (const bucket of roomSockets.values()) {
+    bucket.delete(ws);
+  }
 }
 
 export function toSnapshot(room: RoomRecord): RoomSnapshot {

@@ -1,7 +1,7 @@
 import express from "express";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
-import { addPlayer, getOrCreateRoom, toSnapshot } from "./rooms";
+import { addPlayer, getOrCreateRoom, subscribeSocket, toSnapshot, unsubscribeSocket } from "./rooms";
 import type { ClientMessage, ServerMessage } from "./messages";
 import { getInitialRuleSet } from "./gameRules";
 
@@ -37,6 +37,7 @@ wss.on("connection", (ws) => {
     if (data.type === "create_room") {
       const { instanceId, guildId, channelId } = data.payload;
       const room = getOrCreateRoom(instanceId, guildId, channelId);
+      subscribeSocket(instanceId, ws);
       send(ws, { type: "room_state", payload: toSnapshot(room) });
       return;
     }
@@ -48,8 +49,15 @@ wss.on("connection", (ws) => {
         send(ws, { type: "error", message: "sala não encontrada" });
         return;
       }
-      send(ws, { type: "room_state", payload: toSnapshot(room) });
+      const payload: ServerMessage = { type: "room_state", payload: toSnapshot(room) };
+      for (const client of subscribeSocket(instanceId, ws)) {
+        send(client, payload);
+      }
     }
+  });
+
+  ws.on("close", () => {
+    unsubscribeSocket(ws);
   });
 });
 
