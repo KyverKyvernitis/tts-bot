@@ -34,6 +34,11 @@ export interface RoomSnapshot {
   createdAt: number;
 }
 
+export interface BalanceSnapshot {
+  chips: number;
+  bonusChips: number;
+}
+
 export interface ActivityBootstrap {
   sdkReady: boolean;
   clientId: string | null;
