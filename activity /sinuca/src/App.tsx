@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { bootstrapDiscord } from "./sdk/discord";
 import type { ActivityBootstrap, RoomSnapshot } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
+import lobbyBackground from "./assets/lobby-bg.png";
 
 const initialState: ActivityBootstrap = {
   sdkReady: false,
@@ -160,8 +161,8 @@ export default function App() {
   }, [screen]);
 
   return (
-    <main className="app-shell">
-      <header className="hero-card">
+    <main className="app-shell" style={{ backgroundImage: `linear-gradient(180deg, rgba(3, 11, 18, 0.28), rgba(3, 9, 15, 0.82)), url(${lobbyBackground})` }}>
+      <header className="hero-card hero-card--compact">
         <div className="hero-card__copy">
           <span className="hero-card__eyebrow">Sinuca Activity</span>
           <h1>{heroTitle}</h1>
@@ -175,7 +176,7 @@ export default function App() {
 
       {screen === "home" ? (
         <section className="home-lobby">
-          <div className="menu-buttons">
+          <div className="menu-buttons menu-buttons--home">
             <button
               className="menu-button menu-button--create"
               type="button"
@@ -193,7 +194,8 @@ export default function App() {
               }}
             >
               <span className="menu-button__eyebrow">Nova mesa</span>
-              <strong>Criar partida</strong>
+              <strong>Criar mesa</strong>
+              <small>Abra uma sala nova e assuma a primeira tacada da organização.</small>
             </button>
 
             <button
@@ -205,7 +207,8 @@ export default function App() {
               }}
             >
               <span className="menu-button__eyebrow">Mesas abertas</span>
-              <strong>Entrar em partida</strong>
+              <strong>Entrar</strong>
+              <small>Veja as mesas prontas no servidor e escolha onde jogar.</small>
             </button>
           </div>
 
@@ -213,24 +216,34 @@ export default function App() {
             <span>{state.context.mode === "server" ? "Servidor com fichas" : "Partida casual"}</span>
             <strong>{rooms.length} mesa{rooms.length === 1 ? "" : "s"} aberta{rooms.length === 1 ? "" : "s"}</strong>
           </div>
-
-          {errorMessage && connectionState === "connected" ? <p className="error-copy error-copy--home">{errorMessage}</p> : null}
         </section>
       ) : null}
 
       {screen === "list" ? (
-        <StatusCard title="Lista de mesas" subtitle="Mesas abertas neste contexto da activity.">
-          <div className="toolbar-row">
+        <section className="lobby-panel">
+          <div className="toolbar-row toolbar-row--top">
             <button className="chip-button" type="button" onClick={() => setScreen("home")}>Voltar</button>
             <button className="chip-button chip-button--active" type="button" onClick={refreshRooms}>Atualizar</button>
           </div>
 
-          <div className="room-list-grid">
+          <div className="list-header">
+            <div>
+              <span className="menu-button__eyebrow">Mesas abertas</span>
+              <h2>Escolha uma mesa</h2>
+              <p>Entre na próxima partida disponível do contexto atual.</p>
+            </div>
+            <div className="list-summary">
+              <span>{rooms.length} mesa{rooms.length === 1 ? "" : "s"} aberta{rooms.length === 1 ? "" : "s"}</span>
+              <strong>{entryLabel}</strong>
+            </div>
+          </div>
+
+          <div className="room-list-stack">
             {rooms.length === 0 ? (
-              <div className="empty-card">Nenhuma mesa aberta agora. Crie a primeira partida.</div>
+              <div className="empty-card empty-card--soft">Nenhuma mesa aberta agora. Crie a primeira mesa.</div>
             ) : (
               rooms.map((entry) => (
-                <article key={entry.roomId} className="room-entry-card">
+                <article key={entry.roomId} className="room-entry-card room-entry-card--soft">
                   <div className="room-entry-card__head">
                     <div>
                       <span className="room-entry-card__eyebrow">Mesa aberta</span>
@@ -239,11 +252,11 @@ export default function App() {
                     <span className={`status-badge status-badge--${entry.status}`}>{formatStatus(entry)}</span>
                   </div>
 
-                  <ul className="kv-list kv-list--compact">
-                    <li><span>Jogadores</span><strong>{entry.players.length}/2</strong></li>
-                    <li><span>Modo</span><strong>{entry.mode === "server" ? "com fichas" : "casual"}</strong></li>
-                    <li><span>Entrada</span><strong>{entry.stakeLabel}</strong></li>
-                  </ul>
+                  <div className="room-entry-card__meta">
+                    <span>{entry.players.length}/2 jogadores</span>
+                    <span>{entry.mode === "server" ? "com fichas" : "casual"}</span>
+                    <span>{entry.stakeLabel}</span>
+                  </div>
 
                   <button
                     className="primary-button"
@@ -266,22 +279,29 @@ export default function App() {
               ))
             )}
           </div>
-        </StatusCard>
+        </section>
+      ) : null}
+
+        </section>
       ) : null}
 
       {screen === "room" && room ? (
         <>
+          <div className="toolbar-row toolbar-row--top toolbar-row--room">
+            <button className="chip-button" type="button" onClick={() => { setRoom(null); setScreen("list"); refreshRooms(); }}>Voltar</button>
+          </div>
+
           <div className="grid grid--tight">
-            <StatusCard title="Sessão" subtitle="Contexto detectado ao abrir a activity">
+            <StatusCard title="Mesa" subtitle="Resumo da sala antes do início da partida.">
               <ul className="kv-list">
-                <li><span>Mesa</span><strong>{room.roomId}</strong></li>
-                <li><span>Modo</span><strong>{room.mode === "server" ? "server" : "casual"}</strong></li>
-                <li><span>Conexão</span><strong>{connectionState}</strong></li>
+                <li><span>Mesa</span><strong>{room.hostDisplayName}</strong></li>
+                <li><span>Modo</span><strong>{room.mode === "server" ? "com fichas" : "casual"}</strong></li>
+                <li><span>Entrada</span><strong>{room.stakeLabel}</strong></li>
                 <li><span>Canal</span><strong>{state.context.channelId ?? "fora de servidor"}</strong></li>
               </ul>
             </StatusCard>
 
-            <StatusCard title="Jogador local" subtitle="Quem entrou automaticamente nesta instância">
+            <StatusCard title="Seu perfil" subtitle="Jogador que entrou nesta activity">
               <ul className="kv-list">
                 <li><span>Nome</span><strong>{state.currentUser.displayName}</strong></li>
                 <li><span>ID</span><strong>{state.currentUser.userId}</strong></li>
@@ -354,7 +374,7 @@ export default function App() {
                 ? "Os dois jogadores estão prontos. No próximo patch, essa sala já parte direto para a mesa da partida."
                 : "A mesa de sinuca só começa quando os dois jogadores estiverem presentes e marcados como prontos."}
             </p>
-            {errorMessage ? <p className="error-copy">{errorMessage}</p> : null}
+            {errorMessage && connectionState !== "offline" ? <p className="error-copy">{errorMessage}</p> : null}
           </StatusCard>
         </>
       ) : null}
