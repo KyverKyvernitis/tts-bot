@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { bootstrapDiscord } from "./sdk/discord";
-import type { ActivityBootstrap, RoomSnapshot } from "./types/activity";
+import type { ActivityBootstrap, BalanceSnapshot, RoomSnapshot } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 
@@ -20,6 +20,11 @@ const initialState: ActivityBootstrap = {
   },
 };
 
+const initialBalance: BalanceSnapshot = {
+  chips: 0,
+  bonusChips: 0,
+};
+
 type ConnectionState = "connecting" | "connected" | "offline";
 type LobbyScreen = "home" | "list" | "room";
 
@@ -28,7 +33,8 @@ type IncomingMessage =
   | { type: "pong" }
   | { type: "error"; message: string }
   | { type: "room_state"; payload: RoomSnapshot }
-  | { type: "room_list"; payload: RoomSnapshot[] };
+  | { type: "room_list"; payload: RoomSnapshot[] }
+  | { type: "balance_state"; payload: BalanceSnapshot };
 
 function resolveSocketUrl() {
   const configured = import.meta.env.VITE_SINUCA_WS_URL as string | undefined;
@@ -43,6 +49,16 @@ function formatStatus(room: RoomSnapshot) {
   return "aguardando";
 }
 
+function formatRoomCount(count: number) {
+  if (count === 1) return "1 mesa aberta";
+  return `${count} mesas abertas`;
+}
+
+function formatBalance(balance: BalanceSnapshot) {
+  if (balance.bonusChips > 0) return `Fichas: ${balance.chips} + ${balance.bonusChips} bônus`;
+  return `Fichas: ${balance.chips}`;
+}
+
 export default function App() {
   const [state, setState] = useState<ActivityBootstrap>(initialState);
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
@@ -50,6 +66,7 @@ export default function App() {
   const [screen, setScreen] = useState<LobbyScreen>("home");
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [balance, setBalance] = useState<BalanceSnapshot>(initialBalance);
   const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -63,8 +80,7 @@ export default function App() {
   }, []);
 
   const instanceId = state.context.instanceId ?? `local-${state.currentUser.userId}`;
-  const lobbyLabel = state.context.mode === "server" ? "com fichas" : "casual";
-  const entryLabel = state.context.mode === "server" ? "Entrada: 25 fichas" : "Partida casual sem fichas";
+  const isServer = state.context.mode === "server";
   const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId);
   const canStart = room?.players.length === 2 && room.players.every((player) => player.ready);
 
@@ -77,13 +93,24 @@ export default function App() {
     socket.send(JSON.stringify(payload));
   };
 
-  const refreshRooms = () => {
+  const requestRooms = () => {
     sendMessage({
       type: "list_rooms",
       payload: {
         mode: state.context.mode,
         guildId: state.context.guildId,
         channelId: state.context.channelId,
+      },
+    });
+  };
+
+  const requestBalance = () => {
+    if (!isServer || !state.context.guildId) return;
+    sendMessage({
+      type: "get_balance",
+      payload: {
+        guildId: state.context.guildId,
+        userId: state.currentUser.userId,
       },
     });
   };
@@ -96,16 +123,8 @@ export default function App() {
     socket.addEventListener("open", () => {
       setConnectionState("connected");
       setErrorMessage(null);
-      socket.send(
-        JSON.stringify({
-          type: "list_rooms",
-          payload: {
-            mode: state.context.mode,
-            guildId: state.context.guildId,
-            channelId: state.context.channelId,
-          },
-        }),
-      );
+      requestRooms();
+      requestBalance();
     });
 
     socket.addEventListener("message", (event) => {
@@ -127,6 +146,11 @@ export default function App() {
         if (payload.type === "room_list") {
           setRooms(payload.payload);
           setErrorMessage(null);
+          return;
+        }
+
+        if (payload.type === "balance_state") {
+          setBalance(payload.payload);
         }
       } catch {
         setErrorMessage("resposta inválida do servidor");
@@ -146,7 +170,15 @@ export default function App() {
       socket.close();
       socketRef.current = null;
     };
-  }, [state.context.channelId, state.context.guildId, state.context.mode]);
+  }, [state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.userId]);
+
+  useEffect(() => {
+    if (screen !== "list" || connectionState !== "connected") return;
+    const interval = window.setInterval(() => {
+      requestRooms();
+    }, 2500);
+    return () => window.clearInterval(interval);
+  }, [connectionState, screen, state.context.channelId, state.context.guildId, state.context.mode]);
 
   const heroTitle = useMemo(() => {
     if (screen === "list") return "Mesas abertas";
@@ -161,22 +193,27 @@ export default function App() {
   }, [screen]);
 
   return (
-    <main className="app-shell" style={{ backgroundImage: `linear-gradient(180deg, rgba(3, 11, 18, 0.28), rgba(3, 9, 15, 0.82)), url(${lobbyBackground})` }}>
-      <header className="hero-card hero-card--compact">
+    <main
+      className="app-shell"
+      style={{
+        backgroundImage: `linear-gradient(180deg, rgba(4, 10, 17, 0.12), rgba(4, 10, 17, 0.46)), url(${lobbyBackground})`,
+      }}
+    >
+      <header className="hero-card hero-card--compact hero-card--landscape">
         <div className="hero-card__copy">
           <span className="hero-card__eyebrow">Sinuca Activity</span>
           <h1>{heroTitle}</h1>
           <p>{heroSubtitle}</p>
         </div>
         <div className="hero-card__meta">
-          <div className={`mode-pill mode-pill--${state.context.mode}`}>{lobbyLabel}</div>
-          <div className="mode-pill mode-pill--stake">{entryLabel}</div>
+          {isServer ? <div className="mode-pill mode-pill--server">{formatBalance(balance)}</div> : null}
+          {isServer ? <div className="mode-pill mode-pill--stake">Entrada: 25 fichas</div> : null}
         </div>
       </header>
 
       {screen === "home" ? (
-        <section className="home-lobby">
-          <div className="menu-buttons menu-buttons--home">
+        <section className="home-lobby home-lobby--landscape">
+          <div className="menu-buttons menu-buttons--home menu-buttons--compact">
             <button
               className="menu-button menu-button--create"
               type="button"
@@ -203,7 +240,7 @@ export default function App() {
               type="button"
               onClick={() => {
                 setScreen("list");
-                refreshRooms();
+                requestRooms();
               }}
             >
               <span className="menu-button__eyebrow">Mesas abertas</span>
@@ -212,29 +249,24 @@ export default function App() {
             </button>
           </div>
 
-          <div className="home-footer-strip">
-            <span>{state.context.mode === "server" ? "Servidor com fichas" : "Mesa casual"}</span>
-            <strong>{rooms.length} mesa{rooms.length === 1 ? "" : "s"} aberta{rooms.length === 1 ? "" : "s"}</strong>
+          <div className="home-footer-strip home-footer-strip--simple">
+            <strong>{formatRoomCount(rooms.length)}</strong>
           </div>
         </section>
       ) : null}
 
       {screen === "list" ? (
-        <section className="lobby-panel">
-          <div className="toolbar-row toolbar-row--top">
+        <section className="lobby-panel lobby-panel--compact">
+          <div className="toolbar-row toolbar-row--top toolbar-row--single">
             <button className="chip-button" type="button" onClick={() => setScreen("home")}>Voltar</button>
-            <button className="chip-button chip-button--active" type="button" onClick={refreshRooms}>Atualizar</button>
           </div>
 
-          <div className="list-header">
+          <div className="list-header list-header--simple">
             <div>
-              <span className="menu-button__eyebrow">Mesas abertas</span>
-              <h2>Escolha uma mesa</h2>
-              <p>Escolha uma mesa para entrar.</p>
+              <h2>Mesas abertas</h2>
             </div>
-            <div className="list-summary">
-              <span>{rooms.length} mesa{rooms.length === 1 ? "" : "s"} aberta{rooms.length === 1 ? "" : "s"}</span>
-              <strong>{entryLabel}</strong>
+            <div className="list-summary list-summary--single">
+              <strong>{formatRoomCount(rooms.length)}</strong>
             </div>
           </div>
 
@@ -254,8 +286,7 @@ export default function App() {
 
                   <div className="room-entry-card__meta">
                     <span>{entry.players.length}/2 jogadores</span>
-                    <span>{entry.mode === "server" ? "com fichas" : "casual"}</span>
-                    <span>{entry.stakeLabel}</span>
+                    {entry.mode === "server" ? <span>{entry.stakeLabel}</span> : <span>casual</span>}
                   </div>
 
                   <button
@@ -282,11 +313,10 @@ export default function App() {
         </section>
       ) : null}
 
-
       {screen === "room" && room ? (
         <>
           <div className="toolbar-row toolbar-row--top toolbar-row--room">
-            <button className="chip-button" type="button" onClick={() => { setRoom(null); setScreen("list"); refreshRooms(); }}>Voltar</button>
+            <button className="chip-button" type="button" onClick={() => { setRoom(null); setScreen("list"); requestRooms(); }}>Voltar</button>
           </div>
 
           <div className="grid grid--tight">
@@ -350,7 +380,7 @@ export default function App() {
                   sendMessage({ type: "leave_room", payload: { roomId: room.roomId, userId: state.currentUser.userId } });
                   setRoom(null);
                   setScreen("list");
-                  refreshRooms();
+                  requestRooms();
                 }}
               >
                 Sair
