@@ -61,6 +61,7 @@ function formatBalance(balance: BalanceSnapshot) {
 
 export default function App() {
   const [state, setState] = useState<ActivityBootstrap>(initialState);
+  const [bootstrapped, setBootstrapped] = useState(false);
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
   const [rooms, setRooms] = useState<RoomSnapshot[]>([]);
   const [screen, setScreen] = useState<LobbyScreen>("home");
@@ -73,7 +74,12 @@ export default function App() {
   useEffect(() => {
     let mounted = true;
     bootstrapDiscord().then((next) => {
-      if (mounted) setState(next);
+      if (!mounted) return;
+      setState(next);
+      setBootstrapped(true);
+    }).catch(() => {
+      if (!mounted) return;
+      setBootstrapped(true);
     });
     return () => {
       mounted = false;
@@ -117,6 +123,8 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!bootstrapped) return;
+
     const socket = new WebSocket(resolveSocketUrl());
     socketRef.current = socket;
     setConnectionState("connecting");
@@ -197,19 +205,19 @@ export default function App() {
       socket.close();
       socketRef.current = null;
     };
-  }, [state.context.channelId, state.context.guildId, state.context.instanceId, state.context.mode, state.currentUser.displayName, state.currentUser.userId]);
+  }, [bootstrapped, state.context.channelId, state.context.guildId, state.context.instanceId, state.context.mode, state.currentUser.displayName, state.currentUser.userId]);
 
   useEffect(() => {
-    if (connectionState !== "connected") return;
+    if (!bootstrapped || connectionState !== "connected") return;
     requestRooms();
     requestBalance();
-  }, [connectionState, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.userId]);
+  }, [bootstrapped, connectionState, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.userId]);
 
   useEffect(() => {
-    if (screen !== "list" || connectionState !== "connected") return;
+    if (!bootstrapped || screen !== "list" || connectionState !== "connected") return;
     const interval = window.setInterval(() => requestRooms(), 2500);
     return () => window.clearInterval(interval);
-  }, [connectionState, screen, state.context.channelId, state.context.guildId, state.context.mode]);
+  }, [bootstrapped, connectionState, screen, state.context.channelId, state.context.guildId, state.context.mode]);
 
   const shouldShowBalanceDebug = isServer && balance.chips === 0;
 
