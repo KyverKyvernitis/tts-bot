@@ -1,5 +1,5 @@
 import type { WebSocket } from "ws";
-import type { RoomSnapshot } from "./messages";
+import type { RoomSnapshot } from "./messages.js";
 
 interface PlayerRef {
   userId: string;

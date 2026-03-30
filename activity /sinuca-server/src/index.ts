@@ -1,9 +1,9 @@
 import express from "express";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
-import { addPlayer, getOrCreateRoom, subscribeSocket, toSnapshot, unsubscribeSocket } from "./rooms";
-import type { ClientMessage, ServerMessage } from "./messages";
-import { getInitialRuleSet } from "./gameRules";
+import { addPlayer, getOrCreateRoom, subscribeSocket, toSnapshot, unsubscribeSocket } from "./rooms.js";
+import type { ClientMessage, ServerMessage } from "./messages.js";
+import { getInitialRuleSet } from "./gameRules.js";
 
 const app = express();
 app.get("/health", (_req, res) => {
