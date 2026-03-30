@@ -65,6 +65,25 @@ export interface BalanceSnapshot {
   bonusChips: number;
 }
 
+export interface BalanceDebugSnapshot {
+  source: string;
+  sessionUserId: string | null;
+  sessionGuildId: string | null;
+  requestUserId: string | null;
+  requestGuildId: string | null;
+  mongoConnected: boolean;
+  mongoDbName: string;
+  mongoCollectionName: string;
+  query: Record<string, number | string | null>;
+  docFound: boolean;
+  docKeys: string[];
+  rawChips: unknown;
+  rawBonusChips: unknown;
+  normalizedChips: number;
+  normalizedBonusChips: number;
+  note: string;
+}
+
 export interface SessionContextPayload {
   userId: string | null;
   displayName: string | null;
@@ -80,4 +99,5 @@ export type ServerMessage =
   | { type: "room_state"; payload: RoomSnapshot }
   | { type: "room_list"; payload: RoomSnapshot[] }
   | { type: "balance_state"; payload: BalanceSnapshot }
+  | { type: "balance_debug"; payload: BalanceDebugSnapshot }
   | { type: "error"; message: string };

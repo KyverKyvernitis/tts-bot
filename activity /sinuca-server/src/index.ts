@@ -17,6 +17,7 @@ import {
   unsubscribeSocket,
 } from "./rooms.js";
 import type {
+  BalanceDebugSnapshot,
   BalanceSnapshot,
   ClientMessage,
   ListRoomsPayload,
@@ -138,19 +139,64 @@ function mergeWithSession<T extends Record<string, any>>(payload: T, session: Se
   };
 }
 
-async function fetchBalance(guildId: string, userId: string): Promise<BalanceSnapshot> {
+interface BalanceLookupResult {
+  balance: BalanceSnapshot;
+  debug: BalanceDebugSnapshot;
+}
+
+async function fetchBalance(guildId: string, userId: string, session?: SessionContextPayload): Promise<BalanceLookupResult> {
   const coll = await ensureMongo();
-  if (!coll) return { chips: 100, bonusChips: 0 };
-  const doc = await coll.findOne(
-    { type: "user", guild_id: Number(guildId), user_id: Number(userId) },
-    { projection: { chips: 1, bonus_chips: 1 } },
-  );
+  const query = { type: "user", guild_id: Number(guildId), user_id: Number(userId) };
+  if (!coll) {
+    return {
+      balance: { chips: 100, bonusChips: 0 },
+      debug: {
+        source: "fallback_no_mongo",
+        sessionUserId: session?.userId ?? null,
+        sessionGuildId: session?.guildId ?? null,
+        requestUserId: userId,
+        requestGuildId: guildId,
+        mongoConnected: false,
+        mongoDbName,
+        mongoCollectionName,
+        query,
+        docFound: false,
+        docKeys: [],
+        rawChips: null,
+        rawBonusChips: null,
+        normalizedChips: 100,
+        normalizedBonusChips: 0,
+        note: "mongo indisponível; usando fallback 100/0",
+      },
+    };
+  }
+  const doc = await coll.findOne(query, { projection: { chips: 1, bonus_chips: 1, guild_id: 1, user_id: 1, type: 1 } });
   const chips = Number(doc?.chips ?? 100);
   const bonusChips = Number(doc?.bonus_chips ?? 0);
-  return {
+  const balance = {
     chips: Number.isFinite(chips) ? chips : 100,
     bonusChips: Number.isFinite(bonusChips) ? bonusChips : 0,
   };
+  const debug: BalanceDebugSnapshot = {
+    source: doc ? "mongo_doc" : "mongo_default",
+    sessionUserId: session?.userId ?? null,
+    sessionGuildId: session?.guildId ?? null,
+    requestUserId: userId,
+    requestGuildId: guildId,
+    mongoConnected: true,
+    mongoDbName,
+    mongoCollectionName,
+    query,
+    docFound: Boolean(doc),
+    docKeys: doc ? Object.keys(doc).sort() : [],
+    rawChips: doc?.chips ?? null,
+    rawBonusChips: doc?.bonus_chips ?? null,
+    normalizedChips: balance.chips,
+    normalizedBonusChips: balance.bonusChips,
+    note: doc ? "consulta executada" : "documento do usuário não encontrado com essa guild/user",
+  };
+  console.log("[sinuca-balance]", JSON.stringify(debug));
+  return { balance, debug };
 }
 
 function watchBalance(ws: WebSocket, guildId: string | null | undefined, userId: string | null | undefined) {
@@ -163,16 +209,37 @@ function watchBalance(ws: WebSocket, guildId: string | null | undefined, userId:
 
 async function pushBalance(ws: WebSocket, guildId: string, userId: string, force = false) {
   try {
-    const payload = await fetchBalance(guildId, userId);
-    const nextKey = JSON.stringify(payload);
+    const session = socketSession.get(ws);
+    const result = await fetchBalance(guildId, userId, session);
+    const nextKey = JSON.stringify(result.balance);
     const current = balanceWatchers.get(ws);
     if (!current) return;
     if (!force && current.lastSent === nextKey) return;
     current.lastSent = nextKey;
-    send(ws, { type: "balance_state", payload });
-  } catch {
+    send(ws, { type: "balance_state", payload: result.balance });
+    send(ws, { type: "balance_debug", payload: result.debug });
+  } catch (error) {
+    console.error("[sinuca-balance-error]", error);
     if (force) {
       send(ws, { type: "balance_state", payload: { chips: 100, bonusChips: 0 } });
+      send(ws, { type: "balance_debug", payload: {
+        source: "exception",
+        sessionUserId: socketSession.get(ws)?.userId ?? null,
+        sessionGuildId: socketSession.get(ws)?.guildId ?? null,
+        requestUserId: userId,
+        requestGuildId: guildId,
+        mongoConnected: Boolean(mongoUri),
+        mongoDbName,
+        mongoCollectionName,
+        query: { type: "user", guild_id: Number(guildId), user_id: Number(userId) },
+        docFound: false,
+        docKeys: [],
+        rawChips: null,
+        rawBonusChips: null,
+        normalizedChips: 100,
+        normalizedBonusChips: 0,
+        note: error instanceof Error ? error.message : "erro desconhecido ao buscar saldo",
+      } });
     }
   }
 }
@@ -189,6 +256,16 @@ wss.on("connection", (ws, req) => {
   socketSession.set(ws, session);
   send(ws, { type: "ready" });
   send(ws, { type: "session_context", payload: session });
+  console.log("[sinuca-session]", JSON.stringify({
+    userId: session.userId,
+    displayName: session.displayName,
+    guildId: session.guildId,
+    channelId: session.channelId,
+    instanceId: session.instanceId,
+    proxyPayload: req.headers["x-discord-proxy-payload"] ? "present" : "missing",
+    origin: req.headers.origin ?? null,
+    ua: req.headers["user-agent"] ?? null,
+  }));
   if (session.guildId && session.userId) {
     watchBalance(ws, session.guildId, session.userId);
     void pushBalance(ws, session.guildId, session.userId, true);
@@ -221,6 +298,24 @@ wss.on("connection", (ws, req) => {
       const merged = mergeWithSession(data.payload, activeSession);
       if (!merged.guildId || !merged.userId) {
         send(ws, { type: "balance_state", payload: { chips: 100, bonusChips: 0 } });
+        send(ws, { type: "balance_debug", payload: {
+          source: "missing_identifiers",
+          sessionUserId: activeSession.userId ?? null,
+          sessionGuildId: activeSession.guildId ?? null,
+          requestUserId: merged.userId ?? null,
+          requestGuildId: merged.guildId ?? null,
+          mongoConnected: Boolean(mongoUri),
+          mongoDbName,
+          mongoCollectionName,
+          query: { type: "user", guild_id: merged.guildId ? Number(merged.guildId) : null, user_id: merged.userId ? Number(merged.userId) : null },
+          docFound: false,
+          docKeys: [],
+          rawChips: null,
+          rawBonusChips: null,
+          normalizedChips: 100,
+          normalizedBonusChips: 0,
+          note: "guildId ou userId ausente na sessão/request",
+        } });
         return;
       }
       watchBalance(ws, merged.guildId, merged.userId);
