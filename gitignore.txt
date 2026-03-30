@@ -1,0 +1,68 @@
+# backups / arquivos temporários locais
+*.bak
+*.tmp
+*.swp
+*.swo
+
+# logs
+*.log
+*.log.*
+logs/
+*.out
+*.gz
+
+# package manager logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# pastas locais da VPS
+backups/
+tmp_audio/
+
+# estados temporários dos scripts
+.update_last_state
+.healthcheck_fail_count
+.healthcheck_last_alert
+.healthcheck_starting_since
+.resource_alert_state
+
+# cache / python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ambientes virtuais
+.venv/
+venv/
+env/
+.venv-py310-backup/
+
+# env / segredos
+.env
+.env.*
+!.env.example
+google-credentials.json
+
+# node / vite / build
+node_modules/
+dist/
+build/
+.npm/
+*.tsbuildinfo
+
+# activity (pasta com espaço no nome)
+activity /sinuca/.env
+activity /sinuca/.env.save
+activity /sinuca/node_modules/
+activity /sinuca/dist/
+activity /sinuca/tsconfig.tsbuildinfo
+activity /sinuca-server/.env
+activity /sinuca-server/node_modules/
+activity /sinuca-server/dist/
+activity /sinuca-server/tsconfig.tsbuildinfo
+
+# sistema / editor
+.DS_Store
+Thumbs.db
