@@ -50,7 +50,8 @@ body {
 
 .hero-card p,
 .status-card p,
-.plain-copy {
+.plain-copy,
+.error-copy {
   margin: 8px 0 0;
   color: #bfd3c4;
   line-height: 1.5;
@@ -90,6 +91,10 @@ body {
   margin: 16px 0;
 }
 
+.grid--tight {
+  margin-bottom: 16px;
+}
+
 .status-card {
   padding: 18px 20px;
 }
@@ -98,7 +103,8 @@ body {
   font-size: 14px;
 }
 
-.kv-list {
+.kv-list,
+.player-list {
   list-style: none;
   padding: 0;
   margin: 0;
@@ -106,7 +112,8 @@ body {
   gap: 10px;
 }
 
-.kv-list li {
+.kv-list li,
+.player-list li {
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -114,18 +121,53 @@ body {
   border-bottom: 1px solid rgba(184, 214, 192, 0.08);
 }
 
-.kv-list li:last-child {
+.kv-list li:last-child,
+.player-list li:last-child {
   border-bottom: 0;
   padding-bottom: 0;
 }
 
-.kv-list span {
+.kv-list span,
+.player-list small,
+.lobby-card__label {
   color: #9eb3a3;
 }
 
-.kv-list strong {
+.kv-list strong,
+.player-list span,
+.lobby-card strong {
   color: #eef6f0;
-  text-align: right;
+}
+
+.error-copy {
+  color: #ffb6b6;
+}
+
+.lobby-card {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.lobby-card > div {
+  border: 1px solid rgba(184, 214, 192, 0.12);
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(31, 46, 36, 0.78);
+}
+
+.lobby-card__label {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.player-list__ghost {
+  color: #9eb3a3;
+  justify-content: flex-start !important;
 }
 
 @media (max-width: 720px) {
@@ -138,7 +180,8 @@ body {
     flex-direction: column;
   }
 
-  .grid {
+  .grid,
+  .lobby-card {
     grid-template-columns: 1fr;
   }
 }
