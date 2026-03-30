@@ -685,7 +685,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                     base_preview = base_each + (1 if base_remainder > 0 else 0)
                     bonus_preview = bonus_each + (1 if bonus_remainder > 0 else 0)
                     if base_preview > 0:
-                        pieces.append(f"**{base_preview} {self._CHIP_GAIN_EMOJI}** da entrada dele")
+                        pieces.append(f"**{base_preview} {self._CHIP_GAIN_EMOJI}** da entrada do eliminado")
                     if bonus_preview > 0:
                         pieces.append(f"**{bonus_preview} {self._CHIP_BONUS_EMOJI}** de bônus")
                     if len(pieces) == 2:
