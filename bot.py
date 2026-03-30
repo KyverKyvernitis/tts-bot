@@ -109,19 +109,25 @@ class BotLocal(commands.Bot):
                 raise
 
         should_sync = str(os.getenv("SYNC_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        allow_global_sync = str(os.getenv("SYNC_GLOBAL_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
         if should_sync:
-            synced_global = await self.tree.sync()
-            print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced_global)}")
-            for cmd in synced_global:
-                name = getattr(cmd, "name", None) or str(cmd)
-                print(f"[SYNC][GLOBAL] /{name}")
-
             health_guild_id = 927002914449424404
             guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
             guild_ids.add(health_guild_id)
 
+            if allow_global_sync:
+                synced_global = await self.tree.sync()
+                print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced_global)}")
+                for cmd in synced_global:
+                    name = getattr(cmd, "name", None) or str(cmd)
+                    print(f"[SYNC][GLOBAL] /{name}")
+            else:
+                print("[SYNC] Sync global pulado para preservar o Entry Point da Activity do Discord.")
+                print("[SYNC] Use SYNC_GLOBAL_SLASH_COMMANDS=true somente se você souber preservar manualmente o comando Launch.")
+
             for guild_id in sorted(guild_ids):
                 guild_obj = discord.Object(id=guild_id)
+                self.tree.copy_global_to(guild=guild_obj)
                 synced_guild = await self.tree.sync(guild=guild_obj)
                 print(f"[SYNC] Slash commands sincronizados na guild {guild_id}: {len(synced_guild)}")
                 for cmd in synced_guild:
