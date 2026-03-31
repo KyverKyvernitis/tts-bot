@@ -76,6 +76,7 @@ export default function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [authBusy, setAuthBusy] = useState(false);
+  const [authDebug, setAuthDebug] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [balance, setBalance] = useState<BalanceSnapshot>(initialBalance);
   const [balanceLoaded, setBalanceLoaded] = useState(false);
@@ -110,9 +111,11 @@ export default function App() {
     setAuthBusy(true);
     setErrorMessage(null);
     try {
+      setAuthDebug("authorize:start");
       const user = await authorizeDiscordUser();
       if (!user || !isResolvedDiscordUserId(user.userId)) {
         setAuthState("needs_consent");
+        setAuthDebug("authorize:failed");
         setErrorMessage("não foi possível confirmar sua conta agora; a activity não recebeu uma identidade válida");
         return;
       }
@@ -120,7 +123,11 @@ export default function App() {
         ...current,
         currentUser: user,
       }));
+      setAuthDebug("authorize:ok");
       setAuthState("ready");
+    } catch (error) {
+      setAuthDebug(`authorize:exception:${error instanceof Error ? error.message : "unknown"}`);
+      setErrorMessage("falha ao abrir o fluxo de autorização");
     } finally {
       setAuthBusy(false);
     }
