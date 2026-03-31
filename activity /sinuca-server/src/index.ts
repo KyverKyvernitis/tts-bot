@@ -33,6 +33,24 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, rules: getInitialRuleSet() });
 });
 
+
+app.get("/session", (req, res) => {
+  const session = decodeProxyPayload(req);
+  console.log("[sinuca-proxy-session]", JSON.stringify({
+    userId: session.userId,
+    displayName: session.displayName,
+    guildId: session.guildId,
+    channelId: session.channelId,
+    instanceId: session.instanceId,
+    proxyPayload: req.headers["x-discord-proxy-payload"] ? "present" : "missing",
+    origin: req.headers.origin ?? null,
+    referer: req.headers.referer ?? null,
+    ua: req.headers["user-agent"] ?? null,
+  }));
+  res.json(session);
+});
+
+
 const discordClientId = process.env.VITE_DISCORD_CLIENT_ID || process.env.DISCORD_CLIENT_ID || "";
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET || process.env.CLIENT_SECRET || "";
 const discordRedirectUri = process.env.DISCORD_REDIRECT_URI || `https://${process.env.PUBLIC_HOST || "osakaagiota.duckdns.org"}`;
