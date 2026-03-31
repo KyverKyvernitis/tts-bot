@@ -94,12 +94,16 @@ function writeCachedToken(token: string) {
   }
 }
 
-async function exchangeCode(code: string): Promise<string | null> {
+function getRedirectUri(): string {
+  return (import.meta.env.VITE_DISCORD_REDIRECT_URI as string | undefined) ?? window.location.origin;
+}
+
+async function exchangeCode(code: string, redirectUri: string): Promise<string | null> {
   try {
     const response = await fetch("/api/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
+      body: JSON.stringify({ code, redirect_uri: redirectUri }),
     });
     const data = await response.json() as { access_token?: string };
     return typeof data.access_token === "string" && data.access_token ? data.access_token : null;
@@ -131,7 +135,42 @@ function clearCachedToken() {
   }
 }
 
-async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityUser, _clientId: string | null): Promise<ActivityUser> {
+function clearCachedUser() {
+  try {
+    window.localStorage.removeItem(cachedUserStorageKey);
+    window.sessionStorage.removeItem(cachedUserStorageKey);
+  } catch {
+    // ignore storage failures
+  }
+}
+
+async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, promptMode: "none" | undefined): Promise<ActivityUser | null> {
+  const redirectUri = getRedirectUri();
+  try {
+    const authorize = await discord.commands.authorize({
+      client_id: clientId,
+      response_type: "code",
+      state: `sinuca-auth-${promptMode ?? "consent"}`,
+      prompt: promptMode,
+      redirect_uri: redirectUri,
+      scope: ["identify"],
+    } as never);
+    const code = (authorize as { code?: string }).code;
+    if (!code) return null;
+    const accessToken = await exchangeCode(code, redirectUri);
+    if (!accessToken) return null;
+    writeCachedToken(accessToken);
+    const authenticated = await authenticateAccessToken(discord, accessToken);
+    if (!authenticated) return null;
+    const refined = await refineDisplayNameFromParticipants(discord, authenticated);
+    writeCachedUser(refined);
+    return refined;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityUser, clientId: string | null): Promise<ActivityUser> {
   const cachedToken = readCachedToken();
   if (cachedToken) {
     const fromCachedToken = await authenticateAccessToken(discord, cachedToken);
@@ -140,6 +179,14 @@ async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityU
       return fromCachedToken;
     }
     clearCachedToken();
+    clearCachedUser();
+  }
+
+  if (clientId) {
+    const silentUser = await authorizeAndAuthenticate(discord, clientId, "none");
+    if (silentUser) {
+      return silentUser;
+    }
   }
 
   return fallback;
@@ -152,22 +199,7 @@ export async function authorizeDiscordUser(): Promise<ActivityUser | null> {
   if (!discord || !clientId) return null;
   try {
     await discord.ready();
-    const authorize = await discord.commands.authorize({
-      client_id: clientId,
-      response_type: "code",
-      state: "sinuca-auth-manual",
-      scope: ["identify"],
-    } as never);
-    const code = (authorize as { code?: string }).code;
-    if (!code) return null;
-    const accessToken = await exchangeCode(code);
-    if (!accessToken) return null;
-    writeCachedToken(accessToken);
-    const authenticated = await authenticateAccessToken(discord, accessToken);
-    if (!authenticated) return null;
-    const refined = await refineDisplayNameFromParticipants(discord, authenticated);
-    writeCachedUser(refined);
-    return refined;
+    return await authorizeAndAuthenticate(discord, clientId, undefined);
   } catch {
     return null;
   }
