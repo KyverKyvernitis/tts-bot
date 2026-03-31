@@ -29,7 +29,8 @@ import { getInitialRuleSet } from "./gameRules.js";
 const app = express();
 app.use(express.json());
 
-app.get("/health", (_req, res) => {
+app.get("/health", (req, res) => {
+  console.log("[sinuca-health]", JSON.stringify({ origin: req.headers.origin ?? null, ua: req.headers["user-agent"] ?? null }));
   res.json({ ok: true, rules: getInitialRuleSet() });
 });
 
@@ -48,7 +49,7 @@ app.get("/session", (req, res) => {
     referer: req.headers.referer ?? null,
     ua: req.headers["user-agent"] ?? null,
   }));
-  res.json(session);
+  res.json({ ...session, proxyPayload: req.headers["x-discord-proxy-payload"] ? "present" : "missing", hasProxyPayload: Boolean(req.headers["x-discord-proxy-payload"]) });
 });
 
 
