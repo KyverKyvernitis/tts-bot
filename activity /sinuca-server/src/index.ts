@@ -80,17 +80,12 @@ app.get("/api/session", handleSession);
 
 const discordClientId = process.env.VITE_DISCORD_CLIENT_ID || process.env.DISCORD_CLIENT_ID || "";
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET || process.env.CLIENT_SECRET || "";
-const discordRedirectUri = process.env.DISCORD_REDIRECT_URI || process.env.VITE_DISCORD_REDIRECT_URI || "";
-
-async function exchangeDiscordCode(code: string, redirectUri: string | null): Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }> {
-  const effectiveRedirectUri = (redirectUri && String(redirectUri).trim()) || discordRedirectUri || null;
+async function exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }> {
   console.log("[sinuca-oauth] token request", JSON.stringify({
     hasCode: Boolean(code),
     codeLength: code.length,
     hasClientId: Boolean(discordClientId),
     hasClientSecret: Boolean(discordClientSecret),
-    hasRedirectUri: Boolean(effectiveRedirectUri),
-    redirectUri: effectiveRedirectUri,
   }));
 
   if (!code) {
@@ -99,9 +94,6 @@ async function exchangeDiscordCode(code: string, redirectUri: string | null): Pr
   if (!discordClientId || !discordClientSecret) {
     return { ok: false, accessToken: null, error: "oauth_not_configured", detail: null };
   }
-  if (!effectiveRedirectUri) {
-    return { ok: false, accessToken: null, error: "missing_redirect_uri", detail: null };
-  }
 
   try {
     const params = new URLSearchParams();
@@ -109,7 +101,6 @@ async function exchangeDiscordCode(code: string, redirectUri: string | null): Pr
     params.set("client_secret", discordClientSecret);
     params.set("grant_type", "authorization_code");
     params.set("code", code);
-    params.set("redirect_uri", effectiveRedirectUri);
 
     const response = await fetch("https://discord.com/api/v10/oauth2/token", {
       method: "POST",
@@ -146,10 +137,9 @@ async function exchangeDiscordCode(code: string, redirectUri: string | null): Pr
 
 function handleTokenRequest(req: Request, res: Response) {
   const code = typeof req.body?.code === "string" ? req.body.code : "";
-  const redirectUri = typeof req.body?.redirectUri === "string" ? req.body.redirectUri : null;
-  void exchangeDiscordCode(code, redirectUri).then((result) => {
+  void exchangeDiscordCode(code).then((result) => {
     if (!result.ok || !result.accessToken) {
-      res.status(result.error === "missing_code" || result.error === "missing_redirect_uri" ? 400 : result.error === "oauth_not_configured" ? 500 : 502).json({ error: result.error, detail: result.detail });
+      res.status(result.error === "missing_code" ? 400 : result.error === "oauth_not_configured" ? 500 : 502).json({ error: result.error, detail: result.detail });
       return;
     }
     res.json({ access_token: result.accessToken });
@@ -482,8 +472,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
     if (data.type === "exchange_token") {
       const code = typeof data.payload?.code === "string" ? data.payload.code : "";
-      const redirectUri = typeof data.payload?.redirectUri === "string" ? data.payload.redirectUri : null;
-      const result = await exchangeDiscordCode(code, redirectUri);
+      const result = await exchangeDiscordCode(code);
       send(ws, {
         type: "oauth_token_result",
         payload: {
