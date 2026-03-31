@@ -4,6 +4,12 @@ import type { ActivityBootstrap, BalanceDebugSnapshot, BalanceSnapshot, RoomSnap
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 
+const DISCORD_ID_RE = /^\d{17,20}$/;
+
+function isResolvedDiscordUserId(value: string | null | undefined): value is string {
+  return typeof value === "string" && DISCORD_ID_RE.test(value);
+}
+
 const initialState: ActivityBootstrap = {
   sdkReady: false,
   clientId: null,
@@ -15,8 +21,8 @@ const initialState: ActivityBootstrap = {
     source: "fallback",
   },
   currentUser: {
-    userId: "local-preview",
-    displayName: "Jogador local",
+    userId: "pending-auth",
+    displayName: "Carregando jogador...",
   },
 };
 
@@ -91,6 +97,7 @@ export default function App() {
 
   const instanceId = state.context.instanceId ?? `local-${state.currentUser.userId}`;
   const isServer = state.context.mode === "server";
+  const resolvedUser = isResolvedDiscordUserId(state.currentUser.userId);
   const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId);
   const canStart = room?.players.length === 2 && room.players.every((player) => player.ready);
 
@@ -120,7 +127,7 @@ export default function App() {
       type: "get_balance",
       payload: {
         guildId: state.context.guildId,
-        userId: state.currentUser.userId,
+        userId: resolvedUser ? state.currentUser.userId : null,
       },
     });
   };
@@ -158,20 +165,28 @@ export default function App() {
           return;
         }
         if (payload.type === "session_context") {
-          setState((current) => ({
-            ...current,
-            context: {
-              ...current.context,
-              guildId: payload.payload.guildId && payload.payload.guildId !== "null" ? payload.payload.guildId : current.context.guildId,
-              channelId: payload.payload.channelId && payload.payload.channelId !== "null" ? payload.payload.channelId : current.context.channelId,
-              instanceId: payload.payload.instanceId && payload.payload.instanceId !== "null" ? payload.payload.instanceId : current.context.instanceId,
-              mode: (payload.payload.guildId && payload.payload.guildId !== "null") ? "server" : current.context.mode,
-            },
-            currentUser: {
-              userId: payload.payload.userId && payload.payload.userId !== "null" ? payload.payload.userId : current.currentUser.userId,
-              displayName: payload.payload.displayName && payload.payload.displayName !== "null" ? payload.payload.displayName : current.currentUser.displayName,
-            },
-          }));
+          setState((current) => {
+            const nextUserId = payload.payload.userId && payload.payload.userId !== "null" && isResolvedDiscordUserId(payload.payload.userId)
+              ? payload.payload.userId
+              : current.currentUser.userId;
+            const nextDisplayName = payload.payload.displayName && payload.payload.displayName !== "null"
+              ? payload.payload.displayName
+              : current.currentUser.displayName;
+            return {
+              ...current,
+              context: {
+                ...current.context,
+                guildId: payload.payload.guildId && payload.payload.guildId !== "null" ? payload.payload.guildId : current.context.guildId,
+                channelId: payload.payload.channelId && payload.payload.channelId !== "null" ? payload.payload.channelId : current.context.channelId,
+                instanceId: payload.payload.instanceId && payload.payload.instanceId !== "null" ? payload.payload.instanceId : current.context.instanceId,
+                mode: (payload.payload.guildId && payload.payload.guildId !== "null") ? "server" : current.context.mode,
+              },
+              currentUser: {
+                userId: nextUserId,
+                displayName: nextDisplayName,
+              },
+            };
+          });
           return;
         }
         if (payload.type === "balance_state") {
@@ -209,7 +224,7 @@ export default function App() {
     socket.send(JSON.stringify({
       type: "init_context",
       payload: {
-        userId: state.currentUser.userId,
+        userId: resolvedUser ? state.currentUser.userId : null,
         displayName: state.currentUser.displayName,
         guildId: state.context.guildId,
         channelId: state.context.channelId,
@@ -218,13 +233,13 @@ export default function App() {
     }));
     initSentRef.current = true;
     requestRooms();
-  }, [bootstrapped, connectionState, state.context.channelId, state.context.guildId, state.context.instanceId, state.currentUser.displayName, state.currentUser.userId]);
+  }, [bootstrapped, connectionState, resolvedUser, state.context.channelId, state.context.guildId, state.context.instanceId, state.currentUser.displayName, state.currentUser.userId]);
 
   useEffect(() => {
     if (!bootstrapped || connectionState !== "connected") return;
-    if (!state.context.guildId || !state.currentUser.userId || state.currentUser.userId === "local-preview") return;
+    if (!state.context.guildId || !resolvedUser) return;
     requestBalance();
-  }, [bootstrapped, connectionState, state.context.guildId, state.currentUser.userId]);
+  }, [bootstrapped, connectionState, resolvedUser, state.context.guildId, state.currentUser.userId]);
 
   useEffect(() => {
     if (!bootstrapped || screen !== "list" || connectionState !== "connected") return;
@@ -269,6 +284,7 @@ export default function App() {
             <button
               className="menu-button menu-button--create"
               type="button"
+              disabled={!resolvedUser}
               onClick={() => sendMessage({
                 type: "create_room",
                 payload: {
@@ -282,8 +298,8 @@ export default function App() {
               })}
             >
               <span className="menu-button__eyebrow">Nova mesa</span>
-              <strong>Criar mesa</strong>
-              <small>Abra uma mesa nova.</small>
+              <strong>{resolvedUser ? "Criar mesa" : "Identificando conta..."}</strong>
+              <small>{resolvedUser ? "Abra uma mesa nova." : "Aguarde a activity confirmar sua conta do Discord."}</small>
             </button>
 
             <button
@@ -339,13 +355,13 @@ export default function App() {
                   <button
                     className="primary-button"
                     type="button"
-                    disabled={entry.players.length >= 2}
+                    disabled={!resolvedUser || entry.players.length >= 2}
                     onClick={() => sendMessage({
                       type: "join_room",
                       payload: { roomId: entry.roomId, userId: state.currentUser.userId, displayName: state.currentUser.displayName },
                     })}
                   >
-                    {entry.players.length >= 2 ? "Mesa cheia" : "Entrar"}
+                    {!resolvedUser ? "Identificando..." : entry.players.length >= 2 ? "Mesa cheia" : "Entrar"}
                   </button>
                 </article>
               ))
