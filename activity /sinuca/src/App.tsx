@@ -24,6 +24,7 @@ const initialState: ActivityBootstrap = {
     userId: "pending-auth",
     displayName: "Carregando jogador...",
   },
+  bootDebug: [],
 };
 
 const initialBalance: BalanceSnapshot = {
@@ -223,6 +224,12 @@ export default function App() {
               },
             };
           });
+          if (payload.payload.userId && payload.payload.userId !== "null" && isResolvedDiscordUserId(payload.payload.userId)) {
+            setAuthState("ready");
+            setAuthDebug(`ws-session:resolved:${payload.payload.userId}`);
+          } else {
+            setAuthDebug(`ws-session:pending:${payload.payload.userId ?? "null"}`);
+          }
           return;
         }
         if (payload.type === "balance_state") {
@@ -499,6 +506,8 @@ export default function App() {
         <section className="debug-card">
           <h3>Debug de fichas</h3>
           <div className="debug-grid">
+            <span>Boot</span><strong>{state.bootDebug.length ? state.bootDebug.join(" • ") : "sem debug"}</strong>
+            <span>Auth</span><strong>{authDebug ?? "sem evento"}</strong>
             <span>Session user</span><strong>{balanceDebug?.sessionUserId ?? state.currentUser.userId ?? "não recebido"}</strong>
             <span>Request user</span><strong>{balanceDebug?.requestUserId ?? state.currentUser.userId ?? "não recebido"}</strong>
             <span>Session guild</span><strong>{balanceDebug?.sessionGuildId ?? state.context.guildId ?? "não recebido"}</strong>
