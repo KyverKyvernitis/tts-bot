@@ -52,6 +52,7 @@ export interface ActivityBootstrap {
   clientId: string | null;
   context: ActivityContext;
   currentUser: ActivityUser;
+  bootDebug: string[];
 }
 
 export interface BalanceDebugSnapshot {
