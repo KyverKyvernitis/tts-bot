@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { bootstrapDiscord } from "./sdk/discord";
+import { authorizeDiscordUser, bootstrapDiscord } from "./sdk/discord";
 import type { ActivityBootstrap, BalanceDebugSnapshot, BalanceSnapshot, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
@@ -32,6 +32,7 @@ const initialBalance: BalanceSnapshot = {
 };
 
 type ConnectionState = "connecting" | "connected" | "offline";
+type AuthState = "checking" | "ready" | "needs_consent";
 type LobbyScreen = "home" | "list" | "room";
 
 type IncomingMessage =
@@ -73,6 +74,8 @@ export default function App() {
   const [rooms, setRooms] = useState<RoomSnapshot[]>([]);
   const [screen, setScreen] = useState<LobbyScreen>("home");
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
+  const [authState, setAuthState] = useState<AuthState>("checking");
+  const [authBusy, setAuthBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [balance, setBalance] = useState<BalanceSnapshot>(initialBalance);
   const [balanceLoaded, setBalanceLoaded] = useState(false);
@@ -85,6 +88,7 @@ export default function App() {
     bootstrapDiscord().then((next) => {
       if (!mounted) return;
       setState(next);
+      setAuthState(isResolvedDiscordUserId(next.currentUser.userId) ? "ready" : "needs_consent");
       setBootstrapped(true);
     }).catch(() => {
       if (!mounted) return;
@@ -100,6 +104,31 @@ export default function App() {
   const resolvedUser = isResolvedDiscordUserId(state.currentUser.userId);
   const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId);
   const canStart = room?.players.length === 2 && room.players.every((player) => player.ready);
+
+  const handleAuthorize = async () => {
+    if (authBusy) return;
+    setAuthBusy(true);
+    setErrorMessage(null);
+    try {
+      const user = await authorizeDiscordUser();
+      if (!user || !isResolvedDiscordUserId(user.userId)) {
+        setAuthState("needs_consent");
+        setErrorMessage("não foi possível confirmar sua conta agora");
+        return;
+      }
+      setState((current) => ({
+        ...current,
+        currentUser: user,
+      }));
+      setAuthState("ready");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    setAuthState(resolvedUser ? "ready" : "needs_consent");
+  }, [resolvedUser]);
 
   const sendMessage = (payload: object) => {
     const socket = socketRef.current;
@@ -122,7 +151,7 @@ export default function App() {
   };
 
   const requestBalance = () => {
-    if (!isServer || !state.context.guildId) return;
+    if (!isServer || !state.context.guildId || authState !== "ready") return;
     sendMessage({
       type: "get_balance",
       payload: {
@@ -233,13 +262,13 @@ export default function App() {
     }));
     initSentRef.current = true;
     requestRooms();
-  }, [bootstrapped, connectionState, resolvedUser, state.context.channelId, state.context.guildId, state.context.instanceId, state.currentUser.displayName, state.currentUser.userId]);
+  }, [authState, bootstrapped, connectionState, resolvedUser, state.context.channelId, state.context.guildId, state.context.instanceId, state.currentUser.displayName, state.currentUser.userId]);
 
   useEffect(() => {
     if (!bootstrapped || connectionState !== "connected") return;
     if (!state.context.guildId || !resolvedUser) return;
     requestBalance();
-  }, [bootstrapped, connectionState, resolvedUser, state.context.guildId, state.currentUser.userId]);
+  }, [authState, bootstrapped, connectionState, resolvedUser, state.context.guildId, state.currentUser.userId]);
 
   useEffect(() => {
     if (!bootstrapped || screen !== "list" || connectionState !== "connected") return;
@@ -284,22 +313,29 @@ export default function App() {
             <button
               className="menu-button menu-button--create"
               type="button"
-              disabled={!resolvedUser}
-              onClick={() => sendMessage({
-                type: "create_room",
-                payload: {
-                  instanceId,
-                  guildId: state.context.guildId,
-                  channelId: state.context.channelId,
-                  mode: state.context.mode,
-                  userId: state.currentUser.userId,
-                  displayName: state.currentUser.displayName,
-                },
-              })}
+              disabled={authBusy}
+              aria-busy={authBusy}
+              onClick={() => {
+                if (!resolvedUser) {
+                  void handleAuthorize();
+                  return;
+                }
+                sendMessage({
+                  type: "create_room",
+                  payload: {
+                    instanceId,
+                    guildId: state.context.guildId,
+                    channelId: state.context.channelId,
+                    mode: state.context.mode,
+                    userId: state.currentUser.userId,
+                    displayName: state.currentUser.displayName,
+                  },
+                });
+              }}
             >
               <span className="menu-button__eyebrow">Nova mesa</span>
-              <strong>{resolvedUser ? "Criar mesa" : "Identificando conta..."}</strong>
-              <small>{resolvedUser ? "Abra uma mesa nova." : "Aguarde a activity confirmar sua conta do Discord."}</small>
+              <strong>{resolvedUser ? "Criar mesa" : authBusy ? "Autorizando conta..." : "Autorizar conta"}</strong>
+              <small>{resolvedUser ? "Abra uma mesa nova." : authBusy ? "Confirme a janela de autorização do Discord." : "Toque para confirmar sua conta e liberar as fichas."}</small>
             </button>
 
             <button
@@ -355,13 +391,19 @@ export default function App() {
                   <button
                     className="primary-button"
                     type="button"
-                    disabled={!resolvedUser || entry.players.length >= 2}
-                    onClick={() => sendMessage({
-                      type: "join_room",
-                      payload: { roomId: entry.roomId, userId: state.currentUser.userId, displayName: state.currentUser.displayName },
-                    })}
+                    disabled={authBusy || entry.players.length >= 2}
+                    onClick={() => {
+                      if (!resolvedUser) {
+                        void handleAuthorize();
+                        return;
+                      }
+                      sendMessage({
+                        type: "join_room",
+                        payload: { roomId: entry.roomId, userId: state.currentUser.userId, displayName: state.currentUser.displayName },
+                      });
+                    }}
                   >
-                    {!resolvedUser ? "Identificando..." : entry.players.length >= 2 ? "Mesa cheia" : "Entrar"}
+                    {!resolvedUser ? (authBusy ? "Autorizando..." : "Autorizar") : entry.players.length >= 2 ? "Mesa cheia" : "Entrar"}
                   </button>
                 </article>
               ))
@@ -440,6 +482,7 @@ export default function App() {
             </div>
 
             <p className="plain-copy">{canStart ? "Os dois jogadores estão prontos." : "A partida começa quando os dois estiverem prontos."}</p>
+            {authState === "needs_consent" && !resolvedUser ? <p className="plain-copy">Autorize sua conta para usar fichas, criar mesa e entrar em partida.</p> : null}
             {errorMessage && connectionState !== "offline" ? <p className="error-copy">{errorMessage}</p> : null}
           </StatusCard>
         </>
