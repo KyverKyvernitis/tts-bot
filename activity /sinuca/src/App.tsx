@@ -8,7 +8,7 @@ import {
   writeCachedToken,
   writeCachedUser,
 } from "./sdk/discord";
-import type { ActivityBootstrap, BalanceDebugSnapshot, BalanceSnapshot, RoomSnapshot, SessionContextPayload } from "./types/activity";
+import type { ActivityBootstrap, ActivityUser, BalanceDebugSnapshot, BalanceSnapshot, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 
@@ -44,6 +44,8 @@ type ConnectionState = "connecting" | "connected" | "offline";
 type AuthState = "checking" | "ready" | "needs_consent";
 type LobbyScreen = "home" | "list" | "room";
 
+type OAuthExchangeResult = { ok: boolean; accessToken: string | null; error: string | null; detail: string | null };
+
 type IncomingMessage =
   | { type: "ready" }
   | { type: "pong" }
@@ -54,6 +56,18 @@ type IncomingMessage =
   | { type: "balance_debug"; payload: BalanceDebugSnapshot }
   | { type: "session_context"; payload: SessionContextPayload }
   | { type: "oauth_token_result"; payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null } };
+
+function joinBaseAndPath(base: string, path: string) {
+  const normalizedBase = base.endsWith("/") ? base.slice(0, -1) : base;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${normalizedBase}${normalizedPath}`;
+}
+
+function resolveApiUrl(path: string) {
+  const configured = import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined;
+  if (configured) return joinBaseAndPath(configured, path);
+  return `${window.location.origin}/api${path.startsWith("/") ? path : `/${path}`}`;
+}
 
 function resolveSocketUrl() {
   const configured = import.meta.env.VITE_SINUCA_WS_URL as string | undefined;
@@ -97,7 +111,7 @@ export default function App() {
   const [balanceLoaded, setBalanceLoaded] = useState(false);
   const [balanceDebug, setBalanceDebug] = useState<BalanceDebugSnapshot | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const initSentRef = useRef(false);
+  const lastInitKeyRef = useRef<string | null>(null);
   const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
   const silentAttemptedRef = useRef(false);
 
@@ -124,7 +138,7 @@ export default function App() {
   const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId);
   const canStart = room?.players.length === 2 && room.players.every((player) => player.ready);
 
-  const waitForOAuthTokenResult = () => new Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }>((resolve, reject) => {
+  const waitForOAuthTokenResult = (): Promise<OAuthExchangeResult> => new Promise<OAuthExchangeResult>((resolve, reject) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       reject(new Error("socket_offline"));
@@ -143,34 +157,78 @@ export default function App() {
     };
   });
 
-  const runAuthorizeFlow = async (promptMode: "none" | "consent") => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return { user: null, debug: `authorize:socket_offline:${promptMode}` };
+  const exchangeTokenOverHttp = async (code: string): Promise<OAuthExchangeResult> => {
+    const candidates = [
+      resolveApiUrl("/token"),
+      `${window.location.origin}/token`,
+    ].filter((value, index, array) => array.indexOf(value) === index);
+
+    for (const url of candidates) {
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code }),
+        });
+        const raw = await response.text();
+        let parsed: { access_token?: string; error?: string; detail?: string } | null = null;
+        try {
+          parsed = raw ? JSON.parse(raw) as { access_token?: string; error?: string; detail?: string } : null;
+        } catch {
+          parsed = null;
+        }
+
+        if (response.ok && typeof parsed?.access_token === "string" && parsed.access_token) {
+          return {
+            ok: true,
+            accessToken: parsed.access_token,
+            error: null,
+            detail: `http_ok:${response.status}:${url}`,
+          };
+        }
+
+        const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
+        setAuthDebug(`authorize:http_failed:${response.status}:${detail}`);
+      } catch (error) {
+        setAuthDebug(`authorize:http_exception:${error instanceof Error ? error.message : "unknown"}`);
+      }
     }
 
+    return {
+      ok: false,
+      accessToken: null,
+      error: "http_exchange_failed",
+      detail: null,
+    };
+  };
+
+  const runAuthorizeFlow = async (promptMode: "none" | "consent"): Promise<{ user: ActivityUser | null; debug: string }> => {
     const authorizeResult = await authorizeDiscordCode(promptMode);
     if (!authorizeResult.code) {
       return { user: null, debug: authorizeResult.debug };
     }
 
-    setAuthDebug(`${authorizeResult.debug}:exchange_ws:start`);
-    socket.send(JSON.stringify({
-      type: "exchange_token",
-      payload: { code: authorizeResult.code },
-    }));
+    setAuthDebug(`${authorizeResult.debug}:exchange_http:start`);
+    let tokenResult = await exchangeTokenOverHttp(authorizeResult.code);
 
-    let tokenResult;
-    try {
-      tokenResult = await waitForOAuthTokenResult();
-    } catch (error) {
-      return { user: null, debug: `authorize:exchange_ws_exception:${promptMode}:${error instanceof Error ? error.message : "unknown"}` };
+    if ((!tokenResult.ok || !tokenResult.accessToken) && socketRef.current?.readyState === WebSocket.OPEN) {
+      setAuthDebug(`${authorizeResult.debug}:exchange_ws:fallback`);
+      socketRef.current.send(JSON.stringify({
+        type: "exchange_token",
+        payload: { code: authorizeResult.code },
+      }));
+
+      try {
+        tokenResult = await waitForOAuthTokenResult();
+      } catch (error) {
+        return { user: null, debug: `authorize:exchange_failed:${promptMode}:${error instanceof Error ? error.message : "unknown"}` };
+      }
     }
 
     if (!tokenResult.ok || !tokenResult.accessToken) {
       return {
         user: null,
-        debug: `authorize:exchange_ws_failed:${promptMode}:${tokenResult.error ?? "unknown"}:${tokenResult.detail ?? "no_detail"}`,
+        debug: `authorize:exchange_failed:${promptMode}:${tokenResult.error ?? "unknown"}:${tokenResult.detail ?? "no_detail"}`,
       };
     }
 
@@ -255,15 +313,18 @@ export default function App() {
   useEffect(() => {
     if (!bootstrapped) return;
 
-    const socket = new WebSocket(resolveSocketUrl());
+    const nextSocketUrl = resolveSocketUrl();
+    setAuthDebug((current) => current ?? `ws:connecting:${nextSocketUrl}`);
+    const socket = new WebSocket(nextSocketUrl);
     socketRef.current = socket;
-    initSentRef.current = false;
+    lastInitKeyRef.current = null;
     oauthWaiterRef.current = null;
     setConnectionState("connecting");
 
     socket.addEventListener("open", () => {
       setConnectionState("connected");
       setErrorMessage(null);
+      setAuthDebug((current: string | null) => current ? `${current} • ws:open` : "ws:open");
     });
 
     socket.addEventListener("message", (event) => {
@@ -335,10 +396,14 @@ export default function App() {
       }
     });
 
-    socket.addEventListener("close", () => setConnectionState("offline"));
+    socket.addEventListener("close", (event) => {
+      setConnectionState("offline");
+      setAuthDebug((current: string | null) => current ? `${current} • ws:close:${event.code}` : `ws:close:${event.code}`);
+    });
     socket.addEventListener("error", () => {
       setConnectionState("offline");
       setErrorMessage("não foi possível conectar ao servidor da activity");
+      setAuthDebug((current: string | null) => current ? `${current} • ws:error` : "ws:error");
     });
 
     return () => {
@@ -352,26 +417,29 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped || connectionState !== "connected") return;
-    if (initSentRef.current) return;
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
+    const initPayload = {
+      userId: resolvedUser ? state.currentUser.userId : null,
+      displayName: state.currentUser.displayName,
+      guildId: state.context.guildId,
+      channelId: state.context.channelId,
+      instanceId: state.context.instanceId,
+    };
+    const nextInitKey = JSON.stringify(initPayload);
+    if (lastInitKeyRef.current === nextInitKey) return;
+
     socket.send(JSON.stringify({
       type: "init_context",
-      payload: {
-        userId: resolvedUser ? state.currentUser.userId : null,
-        displayName: state.currentUser.displayName,
-        guildId: state.context.guildId,
-        channelId: state.context.channelId,
-        instanceId: state.context.instanceId,
-      },
+      payload: initPayload,
     }));
-    initSentRef.current = true;
+    lastInitKeyRef.current = nextInitKey;
     requestRooms();
   }, [bootstrapped, connectionState, resolvedUser, state.context.channelId, state.context.guildId, state.context.instanceId, state.currentUser.displayName, state.currentUser.userId]);
 
   useEffect(() => {
-    if (!bootstrapped || connectionState !== "connected") return;
+    if (!bootstrapped) return;
     if (resolvedUser) return;
     if (authBusy) return;
     if (silentAttemptedRef.current) return;
@@ -390,7 +458,7 @@ export default function App() {
       }
       setAuthState("needs_consent");
     })();
-  }, [authBusy, bootstrapped, connectionState, resolvedUser]);
+  }, [authBusy, bootstrapped, resolvedUser]);
 
   useEffect(() => {
     if (!bootstrapped || connectionState !== "connected") return;
