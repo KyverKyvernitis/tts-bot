@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { authorizeDiscordUser, bootstrapDiscord } from "./sdk/discord";
+import {
+  authorizeDiscordCode,
+  authenticateDiscordAccessToken,
+  bootstrapDiscord,
+  clearCachedToken,
+  getDiscordSdk,
+  writeCachedToken,
+  writeCachedUser,
+} from "./sdk/discord";
 import type { ActivityBootstrap, BalanceDebugSnapshot, BalanceSnapshot, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
@@ -44,13 +52,19 @@ type IncomingMessage =
   | { type: "room_list"; payload: RoomSnapshot[] }
   | { type: "balance_state"; payload: BalanceSnapshot }
   | { type: "balance_debug"; payload: BalanceDebugSnapshot }
-  | { type: "session_context"; payload: SessionContextPayload };
+  | { type: "session_context"; payload: SessionContextPayload }
+  | { type: "oauth_token_result"; payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null } };
 
 function resolveSocketUrl() {
   const configured = import.meta.env.VITE_SINUCA_WS_URL as string | undefined;
-  if (configured) return configured;
+  if (configured) {
+    const url = new URL(configured, window.location.origin);
+    if (!url.search && window.location.search) url.search = window.location.search;
+    return url.toString();
+  }
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${protocol}://${window.location.host}/ws`;
+  const base = `${protocol}://${window.location.host}/ws`;
+  return window.location.search ? `${base}${window.location.search}` : base;
 }
 
 function formatStatus(room: RoomSnapshot) {
@@ -84,6 +98,8 @@ export default function App() {
   const [balanceDebug, setBalanceDebug] = useState<BalanceDebugSnapshot | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const initSentRef = useRef(false);
+  const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
+  const silentAttemptedRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
@@ -108,13 +124,79 @@ export default function App() {
   const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId);
   const canStart = room?.players.length === 2 && room.players.every((player) => player.ready);
 
+  const waitForOAuthTokenResult = () => new Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }>((resolve, reject) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      reject(new Error("socket_offline"));
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      if (oauthWaiterRef.current) oauthWaiterRef.current = null;
+      reject(new Error("oauth_timeout"));
+    }, 15000);
+
+    oauthWaiterRef.current = (payload) => {
+      window.clearTimeout(timeout);
+      oauthWaiterRef.current = null;
+      resolve(payload);
+    };
+  });
+
+  const runAuthorizeFlow = async (promptMode: "none" | "consent") => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return { user: null, debug: `authorize:socket_offline:${promptMode}` };
+    }
+
+    const authorizeResult = await authorizeDiscordCode(promptMode);
+    if (!authorizeResult.code) {
+      return { user: null, debug: authorizeResult.debug };
+    }
+
+    setAuthDebug(`${authorizeResult.debug}:exchange_ws:start`);
+    socket.send(JSON.stringify({
+      type: "exchange_token",
+      payload: { code: authorizeResult.code },
+    }));
+
+    let tokenResult;
+    try {
+      tokenResult = await waitForOAuthTokenResult();
+    } catch (error) {
+      return { user: null, debug: `authorize:exchange_ws_exception:${promptMode}:${error instanceof Error ? error.message : "unknown"}` };
+    }
+
+    if (!tokenResult.ok || !tokenResult.accessToken) {
+      return {
+        user: null,
+        debug: `authorize:exchange_ws_failed:${promptMode}:${tokenResult.error ?? "unknown"}:${tokenResult.detail ?? "no_detail"}`,
+      };
+    }
+
+    const discord = getDiscordSdk();
+    if (!discord) {
+      return { user: null, debug: `authorize:sdk_missing_after_exchange:${promptMode}` };
+    }
+
+    const authenticated = await authenticateDiscordAccessToken(discord, tokenResult.accessToken);
+    if (!authenticated || !isResolvedDiscordUserId(authenticated.userId)) {
+      clearCachedToken();
+      return { user: null, debug: `authorize:authenticate_failed:${promptMode}` };
+    }
+
+    writeCachedToken(tokenResult.accessToken);
+    writeCachedUser(authenticated);
+    return { user: authenticated, debug: `authorize:ok:${promptMode}` };
+  };
+
   const handleAuthorize = async () => {
     if (authBusy) return;
     setAuthBusy(true);
     setErrorMessage(null);
     try {
-      setAuthDebug("authorize:start");
-      const result = await authorizeDiscordUser();
+      setAuthDebug("authorize:consent:start");
+      const result = await runAuthorizeFlow("consent");
       setAuthDebug(result.debug);
       const user = result.user;
       if (!user || !isResolvedDiscordUserId(user.userId)) {
@@ -122,7 +204,7 @@ export default function App() {
         setErrorMessage("não foi possível confirmar sua conta agora; a activity não recebeu uma identidade válida");
         return;
       }
-      setState((current) => ({
+      setState((current: ActivityBootstrap) => ({
         ...current,
         currentUser: user,
       }));
@@ -176,6 +258,7 @@ export default function App() {
     const socket = new WebSocket(resolveSocketUrl());
     socketRef.current = socket;
     initSentRef.current = false;
+    oauthWaiterRef.current = null;
     setConnectionState("connecting");
 
     socket.addEventListener("open", () => {
@@ -187,6 +270,10 @@ export default function App() {
       try {
         const payload = JSON.parse(event.data as string) as IncomingMessage;
 
+        if (payload.type === "oauth_token_result") {
+          if (oauthWaiterRef.current) oauthWaiterRef.current(payload.payload);
+          return;
+        }
         if (payload.type === "error") {
           setErrorMessage(payload.message);
           return;
@@ -203,13 +290,14 @@ export default function App() {
           return;
         }
         if (payload.type === "session_context") {
-          setState((current) => {
+          setState((current: ActivityBootstrap) => {
             const nextUserId = payload.payload.userId && payload.payload.userId !== "null" && isResolvedDiscordUserId(payload.payload.userId)
               ? payload.payload.userId
               : current.currentUser.userId;
             const nextDisplayName = payload.payload.displayName && payload.payload.displayName !== "null"
               ? payload.payload.displayName
               : current.currentUser.displayName;
+            const nextMode = (payload.payload.guildId && payload.payload.guildId !== "null") ? "server" : current.context.mode;
             return {
               ...current,
               context: {
@@ -217,7 +305,7 @@ export default function App() {
                 guildId: payload.payload.guildId && payload.payload.guildId !== "null" ? payload.payload.guildId : current.context.guildId,
                 channelId: payload.payload.channelId && payload.payload.channelId !== "null" ? payload.payload.channelId : current.context.channelId,
                 instanceId: payload.payload.instanceId && payload.payload.instanceId !== "null" ? payload.payload.instanceId : current.context.instanceId,
-                mode: (payload.payload.guildId && payload.payload.guildId !== "null") ? "server" : current.context.mode,
+                mode: nextMode,
               },
               currentUser: {
                 userId: nextUserId,
@@ -254,6 +342,9 @@ export default function App() {
     });
 
     return () => {
+      if (oauthWaiterRef.current) {
+        oauthWaiterRef.current({ ok: false, accessToken: null, error: "socket_closed", detail: null });
+      }
       socket.close();
       socketRef.current = null;
     };
@@ -277,7 +368,29 @@ export default function App() {
     }));
     initSentRef.current = true;
     requestRooms();
-  }, [authState, bootstrapped, connectionState, resolvedUser, state.context.channelId, state.context.guildId, state.context.instanceId, state.currentUser.displayName, state.currentUser.userId]);
+  }, [bootstrapped, connectionState, resolvedUser, state.context.channelId, state.context.guildId, state.context.instanceId, state.currentUser.displayName, state.currentUser.userId]);
+
+  useEffect(() => {
+    if (!bootstrapped || connectionState !== "connected") return;
+    if (resolvedUser) return;
+    if (authBusy) return;
+    if (silentAttemptedRef.current) return;
+
+    silentAttemptedRef.current = true;
+    setAuthState("checking");
+    setAuthDebug("authorize:none:start");
+
+    void (async () => {
+      const result = await runAuthorizeFlow("none");
+      setAuthDebug(result.debug);
+      if (result.user && isResolvedDiscordUserId(result.user.userId)) {
+        setState((current: ActivityBootstrap) => ({ ...current, currentUser: result.user! }));
+        setAuthState("ready");
+        return;
+      }
+      setAuthState("needs_consent");
+    })();
+  }, [authBusy, bootstrapped, connectionState, resolvedUser]);
 
   useEffect(() => {
     if (!bootstrapped || connectionState !== "connected") return;
@@ -522,6 +635,7 @@ export default function App() {
             <span>Nota</span><strong>{balanceDebug?.note ?? "snapshot não recebido"}</strong>
           </div>
         </section>
-      ) : null}    </main>
+      ) : null}
+    </main>
   );
 }
