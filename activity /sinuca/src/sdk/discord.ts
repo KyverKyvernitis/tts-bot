@@ -237,7 +237,7 @@ async function resolveAuthenticatedUser(
     bootDebug.push("cached-token:none");
   }
 
-  bootDebug.push("session-http:skipped:ws_only");
+  bootDebug.push("session-http:deferred");
   bootDebug.push("user:fallback-pending-auth");
   return fallback;
 }
