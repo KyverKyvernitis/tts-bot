@@ -113,10 +113,11 @@ export default function App() {
     setErrorMessage(null);
     try {
       setAuthDebug("authorize:start");
-      const user = await authorizeDiscordUser();
+      const result = await authorizeDiscordUser();
+      setAuthDebug(result.debug);
+      const user = result.user;
       if (!user || !isResolvedDiscordUserId(user.userId)) {
         setAuthState("needs_consent");
-        setAuthDebug("authorize:failed");
         setErrorMessage("não foi possível confirmar sua conta agora; a activity não recebeu uma identidade válida");
         return;
       }
@@ -124,7 +125,6 @@ export default function App() {
         ...current,
         currentUser: user,
       }));
-      setAuthDebug("authorize:ok");
       setAuthState("ready");
     } catch (error) {
       setAuthDebug(`authorize:exception:${error instanceof Error ? error.message : "unknown"}`);
