@@ -39,6 +39,7 @@ export interface BalancePayload {
 
 export interface ExchangeTokenPayload {
   code: string;
+  redirectUri?: string | null;
 }
 
 export interface SessionContextPayload {
