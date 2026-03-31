@@ -31,6 +31,7 @@ const initialState: ActivityBootstrap = {
   currentUser: {
     userId: "pending-auth",
     displayName: "Carregando jogador...",
+    avatarUrl: null,
   },
   bootDebug: [],
 };
@@ -341,7 +342,7 @@ export default function App() {
       return { user: null, debug: `authorize:sdk_missing_after_exchange:${promptMode}` };
     }
 
-    const authenticated = await authenticateDiscordAccessToken(discord, tokenResult.accessToken);
+    const authenticated = await authenticateDiscordAccessToken(discord, tokenResult.accessToken, state.context.guildId);
     if (!authenticated || !isResolvedDiscordUserId(authenticated.userId)) {
       clearCachedToken();
       return { user: null, debug: `authorize:authenticate_failed:${promptMode}` };
@@ -495,6 +496,7 @@ export default function App() {
                 mode: nextMode,
               },
               currentUser: {
+                ...current.currentUser,
                 userId: nextUserId,
                 displayName: nextDisplayName,
               },
@@ -695,18 +697,18 @@ export default function App() {
         </section>
       ) : null}
 
-      {screen === "create" ? (
+            {screen === "create" ? (
         <section className="lobby-panel lobby-panel--compact lobby-panel--create">
-          <div className="list-topbar list-topbar--create">
+          <div className="list-topbar list-topbar--create list-topbar--compact-create">
             <button className="chip-button chip-button--back" type="button" onClick={() => setScreen("home")}>Voltar</button>
             <div className="list-topbar__count">1/2 jogadores</div>
           </div>
 
-          <div className="create-layout">
-            <div className="create-preview-card">
+          <div className="create-layout create-layout--dense">
+            <div className="create-preview-card create-preview-card--dense">
               <div className="create-preview-card__eyebrow">Prévia da mesa</div>
-              <div className="room-entry-card__showdown room-entry-card__showdown--create">
-                <div className="participant-slot participant-slot--filled">
+              <div className="create-preview-shell">
+                <div className="participant-slot participant-slot--filled participant-slot--compact">
                   <div className="participant-slot__avatar-wrap">
                     <img className="participant-slot__avatar" src={resolvePlayerAvatar({ userId: state.currentUser.userId, avatarUrl: state.currentUser.avatarUrl ?? null })} alt={state.currentUser.displayName} />
                   </div>
@@ -714,9 +716,12 @@ export default function App() {
                   <small className="participant-slot__role">você</small>
                 </div>
 
-                <div className="participant-slot__versus">vs.</div>
+                <div className="create-center-pill">
+                  <strong>1/2 jogadores</strong>
+                  <span>{createTableType === "stake" ? `${createStake} fichas` : "casual"}</span>
+                </div>
 
-                <div className="participant-slot participant-slot--ghost">
+                <div className="participant-slot participant-slot--ghost participant-slot--compact">
                   <div className="participant-slot__avatar-wrap participant-slot__avatar-wrap--ghost">
                     <div className="participant-slot__unknown">?</div>
                   </div>
@@ -724,32 +729,17 @@ export default function App() {
                   <small className="participant-slot__role">vaga aberta</small>
                 </div>
               </div>
-
-              <div className="create-summary-strip">
-                <div>
-                  <span>Modo</span>
-                  <strong>{createTableType === "stake" ? "Com entrada" : "Casual"}</strong>
-                </div>
-                <div>
-                  <span>Entrada</span>
-                  <strong>{createSummaryLabel}</strong>
-                </div>
-                <div>
-                  <span>Jogadores</span>
-                  <strong>2</strong>
-                </div>
-              </div>
             </div>
 
-            <div className="create-config-card">
-              <div className="create-config-block">
+            <div className="create-config-card create-config-card--dense">
+              <div className="create-config-block create-config-block--tight">
                 <div className="create-config-block__head">
                   <strong>Tipo da mesa</strong>
-                  <span>{isServer ? "Escolha entre mesa casual ou com entrada." : "Fora de servidor, a mesa é casual."}</span>
+                  <span>{isServer ? "Escolha entre casual ou com entrada." : "Fora de servidor, a mesa é casual."}</span>
                 </div>
 
-{canChooseStakeMode ? (
-                  <div className="create-toggle-group">
+                {canChooseStakeMode ? (
+                  <div className="create-toggle-group create-toggle-group--dense">
                     <button
                       type="button"
                       className={`chip-button create-toggle ${createTableType === "stake" ? "chip-button--active" : ""}`}
@@ -766,20 +756,20 @@ export default function App() {
                     </button>
                   </div>
                 ) : (
-                  <div className="create-toggle-group create-toggle-group--single">
+                  <div className="create-toggle-group create-toggle-group--single create-toggle-group--dense">
                     <button type="button" className="chip-button create-toggle chip-button--active" disabled>Casual</button>
                   </div>
                 )}
               </div>
 
               {isServer && createTableType === "stake" ? (
-                <div className="create-config-block">
+                <div className="create-config-block create-config-block--tight">
                   <div className="create-config-block__head">
                     <strong>Entrada</strong>
                     <span>Escolha o valor para abrir a mesa.</span>
                   </div>
 
-                  <div className="create-toggle-group create-toggle-group--stakes">
+                  <div className="create-toggle-group create-toggle-group--stakes create-toggle-group--stakes-compact">
                     {createStakeOptions.map((stake) => (
                       <button
                         key={stake}
@@ -794,16 +784,14 @@ export default function App() {
                 </div>
               ) : null}
 
-              <div className="create-config-block create-config-block--summary">
-                <div className="create-config-block__head">
+              <div className="create-config-block create-config-block--summary create-config-block--tight">
+                <div className="create-config-block__head create-config-block__head--compact">
                   <strong>Resumo</strong>
-                  <span>Abra a mesa e aguarde outro jogador entrar.</span>
                 </div>
 
-                <ul className="kv-list kv-list--compact">
+                <ul className="kv-list kv-list--compact kv-list--summary-tight">
                   <li><span>Modo</span><strong>{createTableType === "stake" ? "Com entrada" : "Casual"}</strong></li>
                   <li><span>Entrada</span><strong>{createSummaryLabel}</strong></li>
-                  <li><span>Jogadores</span><strong>2</strong></li>
                 </ul>
 
                 {isServer && createTableType === "stake" && !balanceLoaded ? (

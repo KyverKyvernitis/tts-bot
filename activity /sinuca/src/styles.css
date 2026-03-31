@@ -642,13 +642,18 @@ button:focus-visible {
 }
 
 .lobby-panel--create {
-  padding-top: 10px;
+  padding-top: 8px;
 }
 
 .create-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
-  gap: 14px;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.create-layout--dense {
+  gap: 12px;
 }
 
 .create-preview-card,
@@ -656,65 +661,71 @@ button:focus-visible {
   border: 1px solid rgba(232, 242, 255, 0.10);
   border-radius: 24px;
   background: rgba(7, 21, 31, 0.16);
-  padding: 16px;
+  padding: 14px;
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
 }
 
 .create-preview-card {
   display: grid;
-  gap: 14px;
+  gap: 12px;
+}
+
+.create-preview-card--dense,
+.create-config-card--dense {
+  padding: 14px;
 }
 
 .create-preview-card__eyebrow {
   font-family: var(--font-ui);
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: rgba(214, 241, 255, 0.62);
 }
 
-.room-entry-card__showdown--create {
-  min-height: 220px;
-}
-
-.create-summary-strip {
+.create-preview-shell {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
 }
 
-.create-summary-strip > div {
+.create-center-pill {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  min-width: 124px;
+  padding: 10px 12px;
   border: 1px solid rgba(232, 242, 255, 0.10);
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.04);
-  padding: 12px 13px;
 }
 
-.create-summary-strip span,
+.create-center-pill strong {
+  font-family: var(--font-ui);
+  color: #f5f9ff;
+  font-size: 0.82rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.create-center-pill span,
 .create-config-block__head span {
   display: block;
-  color: rgba(221, 234, 246, 0.7);
-  line-height: 1.3;
+  color: rgba(221, 234, 246, 0.72);
+  line-height: 1.28;
 }
 
-.create-summary-strip span {
-  font-family: var(--font-ui);
-  font-size: 0.68rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  margin-bottom: 5px;
-}
-
-.create-summary-strip strong {
-  color: #f4f9ff;
-  font-size: 1rem;
+.create-center-pill span {
+  font-size: 0.9rem;
+  color: rgba(236, 244, 252, 0.84);
 }
 
 .create-config-card {
   display: grid;
-  gap: 12px;
+  gap: 10px;
   align-content: start;
 }
 
@@ -722,29 +733,46 @@ button:focus-visible {
   border: 1px solid rgba(232, 242, 255, 0.10);
   border-radius: 22px;
   background: rgba(255, 255, 255, 0.04);
-  padding: 14px;
+  padding: 13px;
   display: grid;
-  gap: 12px;
+  gap: 10px;
+}
+
+.create-config-block--tight {
+  padding: 12px 13px;
+  gap: 10px;
 }
 
 .create-config-block__head {
   display: grid;
-  gap: 4px;
+  gap: 3px;
 }
 
 .create-config-block__head strong {
   color: #f4f9ff;
-  font-size: 1.02rem;
+  font-size: 1rem;
+}
+
+.create-config-block__head--compact {
+  margin-bottom: 2px;
 }
 
 .create-toggle-group {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
+}
+
+.create-toggle-group--dense {
+  gap: 8px;
 }
 
 .create-toggle-group--stakes {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.create-toggle-group--stakes-compact {
+  gap: 8px;
 }
 
 .create-toggle-group--single {
@@ -752,20 +780,24 @@ button:focus-visible {
 }
 
 .create-toggle {
-  min-height: 56px;
+  min-height: 48px;
   justify-content: center;
   text-align: center;
   font-family: var(--font-ui);
-  font-size: 0.86rem;
-  letter-spacing: 0.06em;
+  font-size: 0.82rem;
+  letter-spacing: 0.05em;
 }
 
 .create-toggle--stake {
-  font-size: 1rem;
+  font-size: 0.96rem;
 }
 
 .kv-list--compact li {
-  padding: 8px 0;
+  padding: 7px 0;
+}
+
+.kv-list--summary-tight li {
+  padding: 6px 0;
 }
 
 .create-config-block--summary {
@@ -779,6 +811,7 @@ button:focus-visible {
 .create-submit {
   width: 100%;
   justify-self: stretch;
+  min-height: 54px;
 }
 
 .list-topbar {
@@ -787,6 +820,10 @@ button:focus-visible {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 14px;
+}
+
+.list-topbar--compact-create {
+  margin-bottom: 10px;
 }
 
 .list-topbar__count {
@@ -833,6 +870,18 @@ button:focus-visible {
   background: rgba(255, 255, 255, 0.04);
 }
 
+.participant-slot--compact {
+  min-height: 128px;
+  padding: 10px 10px;
+  gap: 6px;
+}
+
+.participant-slot--compact .participant-slot__avatar-wrap {
+  width: 64px;
+  height: 64px;
+}
+
+
 .participant-slot--ghost {
   background: rgba(255, 255, 255, 0.025);
 }
@@ -870,7 +919,7 @@ button:focus-visible {
 }
 
 .participant-slot__name {
-  font-size: 0.96rem;
+  font-size: 0.92rem;
   color: #f4f9ff;
   max-width: 12rem;
   overflow: hidden;
@@ -881,7 +930,7 @@ button:focus-visible {
 .participant-slot__role {
   font-family: var(--font-ui);
   color: rgba(221, 234, 246, 0.62);
-  font-size: 0.7rem;
+  font-size: 0.66rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -914,17 +963,21 @@ button:focus-visible {
 
 @media (max-width: 920px) {
   .create-layout,
-  .room-entry-card__showdown {
+  .room-entry-card__showdown,
+  .create-preview-shell {
     grid-template-columns: 1fr;
   }
 
-  .create-summary-strip,
   .create-toggle-group--stakes {
     grid-template-columns: 1fr;
   }
 
   .participant-slot__versus {
     display: none;
+  }
+
+  .create-center-pill {
+    width: 100%;
   }
 
   .room-entry-card__footer {
