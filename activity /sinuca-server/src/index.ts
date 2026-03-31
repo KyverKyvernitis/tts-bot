@@ -36,29 +36,46 @@ app.get("/health", (req, res) => {
 
 
 app.get("/session", (req, res) => {
-  console.log("[sinuca-proxy-session]", JSON.stringify({ hasProxyPayload: Boolean(req.headers["x-discord-proxy-payload"]), origin: req.headers.origin ?? null, ua: req.headers["user-agent"] ?? null }));
-  const session = decodeProxyPayload(req);
+  console.log("[sinuca-proxy-session]", JSON.stringify({
+    hasProxyPayload: Boolean(req.headers["x-discord-proxy-payload"]),
+    origin: req.headers.origin ?? null,
+    referer: req.headers.referer ?? null,
+    url: req.url ?? null,
+    ua: req.headers["user-agent"] ?? null,
+  }));
+  const session = resolveRequestSession(req);
   console.log("[sinuca-proxy-session]", JSON.stringify({
     userId: session.userId,
     displayName: session.displayName,
     guildId: session.guildId,
     channelId: session.channelId,
     instanceId: session.instanceId,
+    sessionSource: session.sessionSource,
     proxyPayload: req.headers["x-discord-proxy-payload"] ? "present" : "missing",
     origin: req.headers.origin ?? null,
     referer: req.headers.referer ?? null,
     ua: req.headers["user-agent"] ?? null,
   }));
-  res.json({ ...session, proxyPayload: req.headers["x-discord-proxy-payload"] ? "present" : "missing", hasProxyPayload: Boolean(req.headers["x-discord-proxy-payload"]) });
+  res.json({
+    ...session,
+    proxyPayload: req.headers["x-discord-proxy-payload"] ? "present" : "missing",
+    hasProxyPayload: Boolean(req.headers["x-discord-proxy-payload"]),
+  });
 });
 
 
 const discordClientId = process.env.VITE_DISCORD_CLIENT_ID || process.env.DISCORD_CLIENT_ID || "";
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET || process.env.CLIENT_SECRET || "";
-const discordRedirectUri = process.env.DISCORD_REDIRECT_URI || `https://${process.env.PUBLIC_HOST || "osakaagiota.duckdns.org"}`;
 
 app.post("/token", async (req, res) => {
   const code = typeof req.body?.code === "string" ? req.body.code : "";
+  console.log("[sinuca-oauth] token request", JSON.stringify({
+    hasCode: Boolean(code),
+    codeLength: code.length,
+    bodyKeys: req.body && typeof req.body === "object" ? Object.keys(req.body).sort() : [],
+    hasClientId: Boolean(discordClientId),
+    hasClientSecret: Boolean(discordClientSecret),
+  }));
   if (!code) {
     res.status(400).json({ error: "missing_code" });
     return;
@@ -74,8 +91,6 @@ app.post("/token", async (req, res) => {
     params.set("client_secret", discordClientSecret);
     params.set("grant_type", "authorization_code");
     params.set("code", code);
-    params.set("redirect_uri", discordRedirectUri);
-    console.log("[sinuca-oauth] exchanging code", JSON.stringify({ redirectUri: discordRedirectUri, codeLength: code.length }));
 
     const response = await fetch("https://discord.com/api/v10/oauth2/token", {
       method: "POST",
@@ -83,7 +98,17 @@ app.post("/token", async (req, res) => {
       body: params,
     });
 
-    const data = await response.json() as { access_token?: string; error?: string; error_description?: string };
+    const raw = await response.text();
+    console.log("[sinuca-oauth] token response", JSON.stringify({ status: response.status, body: raw.slice(0, 240) || "empty" }));
+
+    let data: { access_token?: string; error?: string; error_description?: string } = {};
+    try {
+      data = JSON.parse(raw) as { access_token?: string; error?: string; error_description?: string };
+    } catch {
+      res.status(502).json({ error: "token_invalid_json", detail: raw.slice(0, 240) || null });
+      return;
+    }
+
     if (!response.ok || !data.access_token) {
       console.error("[sinuca-oauth] token exchange failed", response.status, data);
       res.status(502).json({ error: data.error ?? "token_exchange_failed", detail: data.error_description ?? null });
@@ -167,6 +192,45 @@ function normalizeIntString(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   const raw = String(value).trim();
   return raw ? raw : null;
+}
+
+function parseQuerySession(urlValue: string | undefined | null): Partial<SessionContextPayload> {
+  if (!urlValue) return {};
+  try {
+    const url = new URL(urlValue, "https://sinuca.local");
+    return {
+      userId: normalizeIntString(url.searchParams.get("user_id") ?? url.searchParams.get("userId")),
+      displayName: normalizeIntString(url.searchParams.get("display_name") ?? url.searchParams.get("displayName")),
+      guildId: normalizeIntString(url.searchParams.get("guild_id") ?? url.searchParams.get("guildId")),
+      channelId: normalizeIntString(url.searchParams.get("channel_id") ?? url.searchParams.get("channelId")),
+      instanceId: normalizeIntString(url.searchParams.get("instance_id") ?? url.searchParams.get("instanceId")),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function mergeNullableSession(base: SessionContextPayload, incoming: Partial<SessionContextPayload>): SessionContextPayload {
+  return {
+    userId: incoming.userId ?? base.userId,
+    displayName: incoming.displayName ?? base.displayName,
+    guildId: incoming.guildId ?? base.guildId,
+    channelId: incoming.channelId ?? base.channelId,
+    instanceId: incoming.instanceId ?? base.instanceId,
+  };
+}
+
+function resolveRequestSession(req: IncomingMessage): SessionContextPayload & { sessionSource: string } {
+  const fromProxy = decodeProxyPayload(req);
+  const fromPath = parseQuerySession(req.url ?? null);
+  const fromReferer = parseQuerySession(typeof req.headers.referer === "string" ? req.headers.referer : null);
+  const merged = mergeNullableSession(mergeNullableSession(fromProxy, fromPath), fromReferer);
+  const sessionSource = fromProxy.userId || fromProxy.guildId || fromProxy.channelId || fromProxy.instanceId
+    ? "proxy"
+    : (fromPath.guildId || fromPath.channelId || fromPath.instanceId || fromReferer.guildId || fromReferer.channelId || fromReferer.instanceId)
+      ? "url_hint"
+      : "empty";
+  return { ...merged, sessionSource };
 }
 
 function decodeProxyPayload(req: IncomingMessage): SessionContextPayload {
