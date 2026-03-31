@@ -693,7 +693,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "sessão da activity incompleta" });
         return;
       }
-      const room = createRoom(instanceId, guildId ?? null, channelId ?? null, userId, displayName);
+      const room = createRoom(instanceId, guildId ?? null, channelId ?? null, userId, displayName, merged.avatarUrl ?? null, { tableType: merged.tableType ?? null, stakeChips: merged.stakeChips ?? null });
       subscribeSocket(room.roomId, ws);
       send(ws, { type: "room_state", payload: toSnapshot(room) });
       broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
@@ -706,7 +706,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "jogador da activity não identificado" });
         return;
       }
-      const room = addPlayer(merged.roomId, merged.userId, merged.displayName);
+      const room = addPlayer(merged.roomId, merged.userId, merged.displayName, merged.avatarUrl ?? null);
       if (!room) {
         send(ws, { type: "error", message: "mesa não encontrada" });
         return;

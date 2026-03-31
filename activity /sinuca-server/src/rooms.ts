@@ -1,5 +1,5 @@
 import type { WebSocket } from "ws";
-import type { ListRoomsPayload, RoomSnapshot, RoomStatus } from "./messages.js";
+import type { ListRoomsPayload, RoomSnapshot, RoomStatus, TableType } from "./messages.js";
 
 interface PlayerRef {
   userId: string;
@@ -14,6 +14,8 @@ interface RoomRecord {
   guildId: string | null;
   channelId: string | null;
   mode: "server" | "casual";
+  tableType: TableType;
+  stakeChips: number | null;
   hostUserId: string;
   hostDisplayName: string;
   players: PlayerRef[];
@@ -43,19 +45,33 @@ function sameContext(room: RoomRecord, payload: ListRoomsPayload) {
   return room.guildId === (payload.guildId ?? null) && room.channelId === (payload.channelId ?? null);
 }
 
-export function createRoom(instanceId: string, guildId: string | null | undefined, channelId: string | null | undefined, userId: string, displayName: string, avatarUrl?: string | null): RoomRecord {
+export function createRoom(
+  instanceId: string,
+  guildId: string | null | undefined,
+  channelId: string | null | undefined,
+  userId: string,
+  displayName: string,
+  avatarUrl?: string | null,
+  options?: { tableType?: TableType | null; stakeChips?: number | null },
+): RoomRecord {
   const mode = guildId ? "server" : "casual";
+  const allowedStake = new Set([10, 25, 50]);
+  const requestedTableType = options?.tableType === "casual" ? "casual" : "stake";
+  const tableType: TableType = mode === "server" ? requestedTableType : "casual";
+  const normalizedStake = tableType === "stake" && allowedStake.has(Number(options?.stakeChips)) ? Number(options?.stakeChips) : 25;
   const room: RoomRecord = {
     roomId: makeRoomId(mode),
     instanceId,
     guildId: guildId ?? null,
     channelId: channelId ?? null,
     mode,
+    tableType,
+    stakeChips: tableType === "stake" ? normalizedStake : null,
     hostUserId: userId,
     hostDisplayName: displayName,
     players: [{ userId, displayName, ready: false, avatarUrl: avatarUrl ?? null }],
     status: "waiting",
-    stakeLabel: mode === "server" ? "25 fichas" : "casual",
+    stakeLabel: tableType === "stake" ? `${normalizedStake} fichas` : "casual",
     createdAt: Date.now(),
   };
   rooms.set(room.roomId, room);
@@ -146,6 +162,8 @@ export function toSnapshot(room: RoomRecord): RoomSnapshot {
     guildId: room.guildId,
     channelId: room.channelId,
     mode: room.mode,
+    tableType: room.tableType,
+    stakeChips: room.stakeChips,
     hostUserId: room.hostUserId,
     hostDisplayName: room.hostDisplayName,
     players: room.players,

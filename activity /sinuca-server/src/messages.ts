@@ -1,4 +1,5 @@
 export type RoomMode = "server" | "casual";
+export type TableType = "stake" | "casual";
 export type RoomStatus = "waiting" | "ready" | "in_game";
 
 export interface ContextPayload {
@@ -12,6 +13,8 @@ export interface CreateRoomPayload extends ContextPayload {
   userId: string;
   displayName: string;
   avatarUrl?: string | null;
+  tableType?: TableType | null;
+  stakeChips?: number | null;
 }
 
 export interface JoinRoomPayload {
@@ -68,6 +71,8 @@ export interface RoomSnapshot {
   guildId: string | null;
   channelId: string | null;
   mode: RoomMode;
+  tableType: TableType;
+  stakeChips: number | null;
   hostUserId: string;
   hostDisplayName: string;
   players: Array<{ userId: string; displayName: string; ready: boolean; avatarUrl?: string | null }>;
