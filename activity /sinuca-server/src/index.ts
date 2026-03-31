@@ -137,7 +137,16 @@ async function exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessT
 
 function handleTokenRequest(req: Request, res: Response) {
   const code = typeof req.body?.code === "string" ? req.body.code : "";
+  console.log("[sinuca-token-route]", JSON.stringify({
+    url: req.url ?? null,
+    origin: req.headers.origin ?? null,
+    referer: req.headers.referer ?? null,
+    ua: req.headers["user-agent"] ?? null,
+    hasCode: Boolean(code),
+    codePrefix: code ? code.slice(0, 12) : null,
+  }));
   void exchangeDiscordCode(code).then((result) => {
+    console.log("[sinuca-token-route-result]", JSON.stringify({ ok: result.ok, error: result.error, detail: result.detail }));
     if (!result.ok || !result.accessToken) {
       res.status(result.error === "missing_code" ? 400 : result.error === "oauth_not_configured" ? 500 : 502).json({ error: result.error, detail: result.detail });
       return;
