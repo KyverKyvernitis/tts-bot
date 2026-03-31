@@ -3,6 +3,7 @@ import type { ActivityBootstrap, ActivityContext, ActivityUser } from "../types/
 
 let sdk: DiscordSDK | null = null;
 const cachedUserStorageKey = "sinuca_activity_cached_user";
+const cachedTokenStorageKey = "sinuca_activity_access_token";
 
 type DiscordSdkWithContext = DiscordSDK & {
   guildId?: string | null;
@@ -10,16 +11,20 @@ type DiscordSdkWithContext = DiscordSDK & {
   instanceId?: string | null;
 };
 
-function buildFallbackUser(): ActivityUser {
+function isDiscordSnowflake(value: string | null | undefined): value is string {
+  return typeof value === "string" && /^\d{17,20}$/.test(value);
+}
+
+function buildPendingUser(): ActivityUser {
   const params = new URLSearchParams(window.location.search);
   const queryUserId = params.get("user_id") ?? params.get("userId");
   const queryDisplay = params.get("display_name") ?? params.get("displayName");
   const cached = readCachedUser();
-  const seed = queryUserId ?? cached?.userId ?? crypto.randomUUID();
+  const userId = isDiscordSnowflake(queryUserId) ? queryUserId : (isDiscordSnowflake(cached?.userId) ? cached.userId : "pending-auth");
 
   return {
-    userId: seed,
-    displayName: queryDisplay ?? cached?.displayName ?? `Jogador ${seed.slice(0, 4)}`,
+    userId,
+    displayName: queryDisplay ?? cached?.displayName ?? "Carregando jogador...",
   };
 }
 
@@ -50,7 +55,7 @@ function mergeContext(queryContext: ActivityContext, discord: DiscordSdkWithCont
 
 function readCachedUser(): ActivityUser | null {
   try {
-    const raw = window.sessionStorage.getItem(cachedUserStorageKey);
+    const raw = window.sessionStorage.getItem(cachedUserStorageKey) ?? window.localStorage.getItem(cachedUserStorageKey);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<ActivityUser>;
     if (typeof parsed.userId !== "string" || !parsed.userId.trim()) return null;
@@ -66,9 +71,102 @@ function readCachedUser(): ActivityUser | null {
 function writeCachedUser(user: ActivityUser) {
   try {
     window.sessionStorage.setItem(cachedUserStorageKey, JSON.stringify(user));
+    window.localStorage.setItem(cachedUserStorageKey, JSON.stringify(user));
   } catch {
-    // ignore sessionStorage failures in embedded browsers
+    // ignore storage failures in embedded browsers
   }
+}
+
+function readCachedToken(): string | null {
+  try {
+    return window.localStorage.getItem(cachedTokenStorageKey) || window.sessionStorage.getItem(cachedTokenStorageKey);
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedToken(token: string) {
+  try {
+    window.localStorage.setItem(cachedTokenStorageKey, token);
+    window.sessionStorage.setItem(cachedTokenStorageKey, token);
+  } catch {
+    // ignore storage failures
+  }
+}
+
+async function exchangeCode(code: string): Promise<string | null> {
+  try {
+    const response = await fetch("/api/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const data = await response.json() as { access_token?: string };
+    return typeof data.access_token === "string" && data.access_token ? data.access_token : null;
+  } catch {
+    return null;
+  }
+}
+
+async function authenticateAccessToken(discord: DiscordSDK, accessToken: string): Promise<ActivityUser | null> {
+  try {
+    const authenticated = await discord.commands.authenticate({ access_token: accessToken });
+    const user = (authenticated as { user?: { id?: string; global_name?: string | null; username?: string | null } }).user;
+    if (!isDiscordSnowflake(user?.id)) return null;
+    return {
+      userId: user.id,
+      displayName: user.global_name ?? user.username ?? `Jogador ${user.id.slice(-4)}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityUser, clientId: string | null): Promise<ActivityUser> {
+  const cachedToken = readCachedToken();
+  if (cachedToken) {
+    const fromCachedToken = await authenticateAccessToken(discord, cachedToken);
+    if (fromCachedToken) {
+      writeCachedUser(fromCachedToken);
+      return fromCachedToken;
+    }
+  }
+
+  if (!clientId) return fallback;
+
+  const attemptAuthorize = async (prompt: "none" | "consent"): Promise<ActivityUser | null> => {
+    try {
+      const authorize = await discord.commands.authorize({
+        client_id: clientId,
+        response_type: "code",
+        state: "sinuca-auth",
+        prompt,
+        scope: ["identify"],
+      });
+      const code = (authorize as { code?: string }).code;
+      if (!code) return null;
+      const accessToken = await exchangeCode(code);
+      if (!accessToken) return null;
+      writeCachedToken(accessToken);
+      return await authenticateAccessToken(discord, accessToken);
+    } catch {
+      return null;
+    }
+  };
+
+  const silent = await attemptAuthorize("none");
+  if (silent) {
+    writeCachedUser(silent);
+    return silent;
+  }
+
+  const interactive = await attemptAuthorize("consent");
+  if (interactive) {
+    writeCachedUser(interactive);
+    return interactive;
+  }
+
+  return fallback;
 }
 
 export function getDiscordSdk(): DiscordSDK | null {
@@ -91,39 +189,28 @@ async function lockLandscape(discord: DiscordSDK) {
   }
 }
 
-async function resolveParticipantUser(discord: DiscordSDK, fallback: ActivityUser): Promise<ActivityUser> {
+async function refineDisplayNameFromParticipants(discord: DiscordSDK, user: ActivityUser): Promise<ActivityUser> {
   try {
     const response = await discord.commands.getInstanceConnectedParticipants();
     const participants = response?.participants ?? [];
-
-    const cached = readCachedUser();
-    if (cached) {
-      const matched = participants.find((participant) => String(participant.id) === cached.userId);
-      if (matched?.id) {
-        return {
-          userId: String(matched.id),
-          displayName: String(matched.global_name ?? matched.username ?? cached.displayName),
-        };
-      }
-    }
-
-    const firstValid = participants.find((participant) => participant?.id);
-    if (firstValid?.id) {
-      return {
-        userId: String(firstValid.id),
-        displayName: String(firstValid.global_name ?? firstValid.username ?? fallback.displayName),
-      };
-    }
+    const candidate = participants.find((participant) => {
+      const maybeUserId = String((participant as { user_id?: string }).user_id ?? "");
+      return maybeUserId && maybeUserId === user.userId;
+    });
+    if (!candidate) return user;
+    return {
+      userId: user.userId,
+      displayName: String((candidate as { global_name?: string; username?: string }).global_name ?? (candidate as { username?: string }).username ?? user.displayName),
+    };
   } catch {
-    // ignore participant lookup failures and keep fallback user
+    return user;
   }
-  return fallback;
 }
 
 export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
   const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined) ?? null;
   const queryContext = readContextFromQuery();
-  const fallbackUser = buildFallbackUser();
+  const fallbackUser = buildPendingUser();
   const discord = getDiscordSdk();
 
   if (!discord) {
@@ -139,8 +226,11 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
     await discord.ready();
     await lockLandscape(discord);
     const context = mergeContext(queryContext, discord as DiscordSdkWithContext);
-    const currentUser = await resolveParticipantUser(discord, fallbackUser);
-    writeCachedUser(currentUser);
+    const authenticatedUser = await resolveAuthenticatedUser(discord, fallbackUser, clientId);
+    const currentUser = await refineDisplayNameFromParticipants(discord, authenticatedUser);
+    if (isDiscordSnowflake(currentUser.userId)) {
+      writeCachedUser(currentUser);
+    }
 
     return {
       sdkReady: true,
