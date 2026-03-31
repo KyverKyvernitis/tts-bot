@@ -610,8 +610,8 @@ export default function App() {
       </header>
 
       {screen === "home" ? (
-        <section className="home-lobby home-lobby--landscape">
-          <div className="menu-buttons menu-buttons--home menu-buttons--compact">
+        <section className="home-lobby home-lobby--landscape home-lobby--streamlined">
+          <div className="menu-buttons menu-buttons--home menu-buttons--compact menu-buttons--hero">
             <button
               className="menu-button menu-button--create"
               type="button"
@@ -653,23 +653,6 @@ export default function App() {
               <small>Veja as mesas abertas.</small>
             </button>
           </div>
-
-          <section className="lobby-panel lobby-panel--home">
-            <div className="list-header list-header--simple">
-              <div>
-                <h2>Mesas abertas</h2>
-                <p>{rooms.length === 0 ? "Crie uma para começar." : "Veja as mesas abertas e entre em uma delas."}</p>
-              </div>
-              <div className="list-summary list-summary--single">
-                <strong>{formatRoomCount(rooms.length)}</strong>
-              </div>
-            </div>
-
-            <div className="empty-card empty-card--soft empty-card--home">
-              <strong>{rooms.length === 0 ? "Nenhuma mesa aberta" : `${formatRoomCount(rooms.length)}`}</strong>
-              <span>{rooms.length === 0 ? "Crie uma para começar." : "Toque em Entrar para ver a lista."}</span>
-            </div>
-          </section>
         </section>
       ) : null}
 
