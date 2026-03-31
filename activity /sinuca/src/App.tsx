@@ -55,7 +55,8 @@ function formatRoomCount(count: number) {
   return count === 1 ? "1 mesa aberta" : `${count} mesas abertas`;
 }
 
-function formatBalance(balance: BalanceSnapshot) {
+function formatBalance(balance: BalanceSnapshot, loaded: boolean) {
+  if (!loaded) return "Fichas: --";
   return balance.bonusChips > 0 ? `Fichas: ${balance.chips} + ${balance.bonusChips} bônus` : `Fichas: ${balance.chips}`;
 }
 
@@ -68,8 +69,10 @@ export default function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [balance, setBalance] = useState<BalanceSnapshot>(initialBalance);
+  const [balanceLoaded, setBalanceLoaded] = useState(false);
   const [balanceDebug, setBalanceDebug] = useState<BalanceDebugSnapshot | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const initSentRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
@@ -127,23 +130,12 @@ export default function App() {
 
     const socket = new WebSocket(resolveSocketUrl());
     socketRef.current = socket;
+    initSentRef.current = false;
     setConnectionState("connecting");
 
     socket.addEventListener("open", () => {
       setConnectionState("connected");
       setErrorMessage(null);
-      socket.send(JSON.stringify({
-        type: "init_context",
-        payload: {
-          userId: state.currentUser.userId,
-          displayName: state.currentUser.displayName,
-          guildId: state.context.guildId,
-          channelId: state.context.channelId,
-          instanceId: state.context.instanceId,
-        },
-      }));
-      requestRooms();
-      requestBalance();
     });
 
     socket.addEventListener("message", (event) => {
@@ -170,20 +162,21 @@ export default function App() {
             ...current,
             context: {
               ...current.context,
-              guildId: payload.payload.guildId ?? current.context.guildId,
-              channelId: payload.payload.channelId ?? current.context.channelId,
-              instanceId: payload.payload.instanceId ?? current.context.instanceId,
-              mode: payload.payload.guildId ? "server" : current.context.mode,
+              guildId: payload.payload.guildId && payload.payload.guildId !== "null" ? payload.payload.guildId : current.context.guildId,
+              channelId: payload.payload.channelId && payload.payload.channelId !== "null" ? payload.payload.channelId : current.context.channelId,
+              instanceId: payload.payload.instanceId && payload.payload.instanceId !== "null" ? payload.payload.instanceId : current.context.instanceId,
+              mode: (payload.payload.guildId && payload.payload.guildId !== "null") ? "server" : current.context.mode,
             },
             currentUser: {
-              userId: payload.payload.userId ?? current.currentUser.userId,
-              displayName: payload.payload.displayName ?? current.currentUser.displayName,
+              userId: payload.payload.userId && payload.payload.userId !== "null" ? payload.payload.userId : current.currentUser.userId,
+              displayName: payload.payload.displayName && payload.payload.displayName !== "null" ? payload.payload.displayName : current.currentUser.displayName,
             },
           }));
           return;
         }
         if (payload.type === "balance_state") {
           setBalance(payload.payload);
+          setBalanceLoaded(true);
           return;
         }
         if (payload.type === "balance_debug") {
@@ -205,13 +198,33 @@ export default function App() {
       socket.close();
       socketRef.current = null;
     };
-  }, [bootstrapped, state.context.channelId, state.context.guildId, state.context.instanceId, state.context.mode, state.currentUser.displayName, state.currentUser.userId]);
+  }, [bootstrapped]);
 
   useEffect(() => {
     if (!bootstrapped || connectionState !== "connected") return;
+    if (initSentRef.current) return;
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+    socket.send(JSON.stringify({
+      type: "init_context",
+      payload: {
+        userId: state.currentUser.userId,
+        displayName: state.currentUser.displayName,
+        guildId: state.context.guildId,
+        channelId: state.context.channelId,
+        instanceId: state.context.instanceId,
+      },
+    }));
+    initSentRef.current = true;
     requestRooms();
+  }, [bootstrapped, connectionState, state.context.channelId, state.context.guildId, state.context.instanceId, state.currentUser.displayName, state.currentUser.userId]);
+
+  useEffect(() => {
+    if (!bootstrapped || connectionState !== "connected") return;
+    if (!state.context.guildId || !state.currentUser.userId || state.currentUser.userId === "local-preview") return;
     requestBalance();
-  }, [bootstrapped, connectionState, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.userId]);
+  }, [bootstrapped, connectionState, state.context.guildId, state.currentUser.userId]);
 
   useEffect(() => {
     if (!bootstrapped || screen !== "list" || connectionState !== "connected") return;
@@ -219,7 +232,7 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, [bootstrapped, connectionState, screen, state.context.channelId, state.context.guildId, state.context.mode]);
 
-  const shouldShowBalanceDebug = isServer && balance.chips === 0;
+  const shouldShowBalanceDebug = isServer && (!balanceLoaded || balance.chips === 0);
 
   const heroTitle = useMemo(() => {
     if (screen === "list") return "Mesas abertas";
@@ -245,7 +258,7 @@ export default function App() {
           <p>{heroSubtitle}</p>
         </div>
         <div className="hero-card__meta">
-          {isServer ? <div className="mode-pill mode-pill--server">{formatBalance(balance)}</div> : null}
+          {isServer ? <div className="mode-pill mode-pill--server">{formatBalance(balance, balanceLoaded)}</div> : null}
           {isServer ? <div className="mode-pill mode-pill--stake">Entrada: 25 fichas</div> : null}
         </div>
       </header>
@@ -416,24 +429,23 @@ export default function App() {
         </>
       ) : null}
 
-      {shouldShowBalanceDebug && balanceDebug ? (
+      {shouldShowBalanceDebug ? (
         <section className="debug-card">
           <h3>Debug de fichas</h3>
-          <ul className="kv-list">
-            <li><span>Session user</span><strong>{balanceDebug.sessionUserId ?? "null"}</strong></li>
-            <li><span>Request user</span><strong>{balanceDebug.requestUserId ?? "null"}</strong></li>
-            <li><span>Session guild</span><strong>{balanceDebug.sessionGuildId ?? "null"}</strong></li>
-            <li><span>Request guild</span><strong>{balanceDebug.requestGuildId ?? "null"}</strong></li>
-            <li><span>Mongo</span><strong>{balanceDebug.mongoConnected ? "on" : "off"}</strong></li>
-            <li><span>Query</span><strong>{JSON.stringify(balanceDebug.query)}</strong></li>
-            <li><span>Doc</span><strong>{balanceDebug.docFound ? "encontrado" : "não encontrado"}</strong></li>
-            <li><span>Campos</span><strong>{balanceDebug.docKeys.join(", ") || "nenhum"}</strong></li>
-            <li><span>Chips raw</span><strong>{String(balanceDebug.rawChips)}</strong></li>
-            <li><span>Bônus raw</span><strong>{String(balanceDebug.rawBonusChips)}</strong></li>
-            <li><span>Nota</span><strong>{balanceDebug.note}</strong></li>
-          </ul>
+          <div className="debug-grid">
+            <span>Session user</span><strong>{balanceDebug?.sessionUserId ?? state.currentUser.userId ?? "não recebido"}</strong>
+            <span>Request user</span><strong>{balanceDebug?.requestUserId ?? state.currentUser.userId ?? "não recebido"}</strong>
+            <span>Session guild</span><strong>{balanceDebug?.sessionGuildId ?? state.context.guildId ?? "não recebido"}</strong>
+            <span>Request guild</span><strong>{balanceDebug?.requestGuildId ?? state.context.guildId ?? "não recebido"}</strong>
+            <span>Mongo</span><strong>{balanceDebug ? (balanceDebug.mongoConnected ? "on" : "off") : "snapshot não recebido"}</strong>
+            <span>Query</span><strong>{balanceDebug ? JSON.stringify(balanceDebug.query) : "snapshot não recebido"}</strong>
+            <span>Doc</span><strong>{balanceDebug ? (balanceDebug.docFound ? "encontrado" : "não encontrado") : "snapshot não recebido"}</strong>
+            <span>Campos</span><strong>{balanceDebug ? (balanceDebug.docKeys.join(", ") || "nenhum") : "snapshot não recebido"}</strong>
+            <span>Chips raw</span><strong>{balanceDebug ? String(balanceDebug.rawChips) : "snapshot não recebido"}</strong>
+            <span>Bônus raw</span><strong>{balanceDebug ? String(balanceDebug.rawBonusChips) : "snapshot não recebido"}</strong>
+            <span>Nota</span><strong>{balanceDebug?.note ?? "snapshot não recebido"}</strong>
+          </div>
         </section>
-      ) : null}
-    </main>
+      ) : null}    </main>
   );
 }
