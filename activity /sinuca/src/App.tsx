@@ -63,19 +63,47 @@ function joinBaseAndPath(base: string, path: string) {
   return `${normalizedBase}${normalizedPath}`;
 }
 
-function resolveApiUrl(path: string) {
-  const configured = import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined;
-  if (configured) return joinBaseAndPath(configured, path);
-  return `${window.location.origin}/api${path.startsWith("/") ? path : `/${path}`}`;
+function getProxyBaseCandidates() {
+  const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined)?.trim();
+  const values: string[] = [];
+  if (clientId) values.push(`https://${clientId}.discordsays.com`);
+  if (typeof window !== "undefined" && window.location?.origin) values.push(window.location.origin);
+  return values.filter((value, index, array) => value && array.indexOf(value) === index);
+}
+
+function resolveApiCandidates(path: string) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const configured = (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim();
+  const candidates: string[] = [];
+
+  if (configured) candidates.push(joinBaseAndPath(configured, normalizedPath));
+
+  for (const proxyBase of getProxyBaseCandidates()) {
+    candidates.push(joinBaseAndPath(proxyBase, `/api${normalizedPath}`));
+    candidates.push(joinBaseAndPath(proxyBase, normalizedPath));
+  }
+
+  candidates.push(`/api${normalizedPath}`);
+  candidates.push(normalizedPath);
+  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
 }
 
 function resolveSocketUrl() {
-  const configured = import.meta.env.VITE_SINUCA_WS_URL as string | undefined;
+  const configured = (import.meta.env.VITE_SINUCA_WS_URL as string | undefined)?.trim();
   if (configured) {
     const url = new URL(configured, window.location.origin);
     if (!url.search && window.location.search) url.search = window.location.search;
     return url.toString();
   }
+
+  const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined)?.trim();
+  if (clientId) {
+    const proxyUrl = new URL(`https://${clientId}.discordsays.com/ws`);
+    proxyUrl.protocol = "wss:";
+    proxyUrl.search = window.location.search ?? "";
+    return proxyUrl.toString();
+  }
+
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const base = `${protocol}://${window.location.host}/ws`;
   return window.location.search ? `${base}${window.location.search}` : base;
@@ -157,10 +185,7 @@ export default function App() {
   });
 
   const exchangeTokenOverHttp = async (code: string): Promise<OAuthExchangeResult> => {
-    const candidates = [
-      resolveApiUrl("/token"),
-      `${window.location.origin}/token`,
-    ].filter((value, index, array) => array.indexOf(value) === index);
+    const candidates = resolveApiCandidates("/token");
 
     for (const url of candidates) {
       try {
@@ -187,9 +212,9 @@ export default function App() {
         }
 
         const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
-        setAuthDebug(`authorize:http_failed:${response.status}:${detail}`);
+        setAuthDebug(`authorize:http_failed:${response.status}:${detail}:${url}`);
       } catch (error) {
-        setAuthDebug(`authorize:http_exception:${error instanceof Error ? error.message : "unknown"}`);
+        setAuthDebug(`authorize:http_exception:${error instanceof Error ? error.message : "unknown"}:${url}`);
       }
     }
 
