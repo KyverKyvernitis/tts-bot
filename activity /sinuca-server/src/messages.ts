@@ -11,12 +11,14 @@ export interface CreateRoomPayload extends ContextPayload {
   instanceId: string;
   userId: string;
   displayName: string;
+  avatarUrl?: string | null;
 }
 
 export interface JoinRoomPayload {
   roomId: string;
   userId: string;
   displayName: string;
+  avatarUrl?: string | null;
 }
 
 export interface LeaveRoomPayload {
@@ -68,7 +70,7 @@ export interface RoomSnapshot {
   mode: RoomMode;
   hostUserId: string;
   hostDisplayName: string;
-  players: Array<{ userId: string; displayName: string; ready: boolean }>;
+  players: Array<{ userId: string; displayName: string; ready: boolean; avatarUrl?: string | null }>;
   status: RoomStatus;
   stakeLabel: string;
   createdAt: number;

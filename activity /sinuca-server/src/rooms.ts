@@ -5,6 +5,7 @@ interface PlayerRef {
   userId: string;
   displayName: string;
   ready: boolean;
+  avatarUrl?: string | null;
 }
 
 interface RoomRecord {
@@ -42,7 +43,7 @@ function sameContext(room: RoomRecord, payload: ListRoomsPayload) {
   return room.guildId === (payload.guildId ?? null) && room.channelId === (payload.channelId ?? null);
 }
 
-export function createRoom(instanceId: string, guildId: string | null | undefined, channelId: string | null | undefined, userId: string, displayName: string): RoomRecord {
+export function createRoom(instanceId: string, guildId: string | null | undefined, channelId: string | null | undefined, userId: string, displayName: string, avatarUrl?: string | null): RoomRecord {
   const mode = guildId ? "server" : "casual";
   const room: RoomRecord = {
     roomId: makeRoomId(mode),
@@ -52,7 +53,7 @@ export function createRoom(instanceId: string, guildId: string | null | undefine
     mode,
     hostUserId: userId,
     hostDisplayName: displayName,
-    players: [{ userId, displayName, ready: false }],
+    players: [{ userId, displayName, ready: false, avatarUrl: avatarUrl ?? null }],
     status: "waiting",
     stakeLabel: mode === "server" ? "25 fichas" : "casual",
     createdAt: Date.now(),
@@ -72,15 +73,16 @@ export function getRoom(roomId: string): RoomRecord | null {
   return rooms.get(roomId) ?? null;
 }
 
-export function addPlayer(roomId: string, userId: string, displayName: string): RoomRecord | null {
+export function addPlayer(roomId: string, userId: string, displayName: string, avatarUrl?: string | null): RoomRecord | null {
   const room = rooms.get(roomId);
   if (!room) return null;
   const existing = room.players.find((player) => player.userId === userId);
   if (existing) {
     existing.displayName = displayName;
+    existing.avatarUrl = avatarUrl ?? existing.avatarUrl ?? null;
   } else {
     if (room.players.length >= 2) return room;
-    room.players.push({ userId, displayName, ready: false });
+    room.players.push({ userId, displayName, ready: false, avatarUrl: avatarUrl ?? null });
   }
   room.status = computeStatus(room);
   return room;
