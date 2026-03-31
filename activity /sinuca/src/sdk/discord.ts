@@ -47,6 +47,63 @@ function buildDiscordAvatarUrl(userId: string, avatarHash: string | null | undef
   }
 }
 
+function buildDiscordGuildAvatarUrl(guildId: string, userId: string, avatarHash: string | null | undefined): string | null {
+  if (!guildId || !avatarHash || !avatarHash.trim()) return null;
+  return `https://cdn.discordapp.com/guilds/${guildId}/users/${userId}/avatars/${avatarHash}.png?size=128`;
+}
+
+function pickFirstString(...values: Array<unknown>): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
+function resolveParticipantAvatarValue(userId: string, ...values: Array<unknown>): string | null {
+  const raw = pickFirstString(...values);
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return buildDiscordAvatarUrl(userId, raw);
+}
+
+async function fetchDiscordJson<T>(accessToken: string, path: string): Promise<T | null> {
+  try {
+    const response = await fetch(`https://discord.com/api/v10${path}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+    if (!response.ok) return null;
+    return await response.json() as T;
+  } catch {
+    return null;
+  }
+}
+
+async function enrichAuthenticatedUser(accessToken: string, baseUser: ActivityUser, guildId: string | null | undefined): Promise<ActivityUser> {
+  const nextUser: ActivityUser = { ...baseUser };
+
+  const profile = await fetchDiscordJson<Record<string, unknown>>(accessToken, '/users/@me');
+  const profileUserId = pickFirstString(profile?.id, baseUser.userId);
+  if (isDiscordSnowflake(profileUserId)) {
+    nextUser.userId = profileUserId;
+    nextUser.displayName = pickFirstString(profile?.global_name, profile?.username, baseUser.displayName) ?? baseUser.displayName;
+    const globalAvatarHash = pickFirstString(profile?.avatar);
+    nextUser.avatarUrl = buildDiscordAvatarUrl(profileUserId, globalAvatarHash) ?? nextUser.avatarUrl ?? null;
+  }
+
+  if (guildId && isDiscordSnowflake(nextUser.userId)) {
+    const member = await fetchDiscordJson<Record<string, unknown>>(accessToken, `/users/@me/guilds/${guildId}/member`);
+    const guildAvatarHash = pickFirstString(member?.avatar);
+    const guildAvatarUrl = buildDiscordGuildAvatarUrl(guildId, nextUser.userId, guildAvatarHash);
+    if (guildAvatarUrl) {
+      nextUser.avatarUrl = guildAvatarUrl;
+    }
+  }
+
+  return nextUser;
+}
+
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     const bits = [error.name, error.message].filter(Boolean);
@@ -84,6 +141,7 @@ function buildPendingUser(): ActivityUser {
   return {
     userId,
     displayName: queryDisplay ?? cached?.displayName ?? "Conta não identificada",
+    avatarUrl: cached?.avatarUrl ?? null,
   };
 }
 
@@ -121,6 +179,7 @@ function readCachedUser(): ActivityUser | null {
     return {
       userId: parsed.userId,
       displayName: typeof parsed.displayName === "string" && parsed.displayName.trim() ? parsed.displayName : `Jogador ${parsed.userId.slice(0, 4)}`,
+      avatarUrl: typeof parsed.avatarUrl === "string" && parsed.avatarUrl.trim() ? parsed.avatarUrl : null,
     };
   } catch {
     return null;
@@ -171,7 +230,7 @@ export function clearCachedUser() {
   }
 }
 
-export async function authenticateDiscordAccessToken(discord: DiscordSDK, accessToken: string): Promise<ActivityUser | null> {
+export async function authenticateDiscordAccessToken(discord: DiscordSDK, accessToken: string, guildId?: string | null): Promise<ActivityUser | null> {
   try {
     const authenticated = await discord.commands.authenticate({ access_token: accessToken });
     if (!authenticated) {
@@ -183,11 +242,11 @@ export async function authenticateDiscordAccessToken(discord: DiscordSDK, access
       console.error("[sinuca-auth] authenticate returned invalid user", user ?? null);
       return null;
     }
-    return {
+    return await enrichAuthenticatedUser(accessToken, {
       userId: user.id,
       displayName: user.global_name ?? user.username ?? `Jogador ${user.id.slice(-4)}`,
       avatarUrl: buildDiscordAvatarUrl(user.id, (user as { avatar?: string | null }).avatar ?? null),
-    };
+    }, guildId ?? null);
   } catch (error) {
     console.error("[sinuca-auth] authenticate exception", error);
     return null;
@@ -205,7 +264,7 @@ export async function authorizeDiscordCode(promptMode: AuthorizePromptMode): Pro
       response_type: "code",
       state: `sinuca-auth-${promptMode}`,
       prompt: promptMode,
-      scope: ["identify"],
+      scope: ["identify", "guilds.members.read"],
     } as never);
 
     const code = (authorize as { code?: string | null }).code ?? null;
@@ -251,8 +310,15 @@ async function refineDisplayNameFromParticipants(discord: DiscordSDK, user: Acti
     });
     if (!candidate) return user;
     return {
+      ...user,
       userId: user.userId,
       displayName: String((candidate as { global_name?: string; username?: string }).global_name ?? (candidate as { username?: string }).username ?? user.displayName),
+      avatarUrl: resolveParticipantAvatarValue(
+        user.userId,
+        (candidate as { avatar_url?: string | null }).avatar_url,
+        (candidate as { avatarUrl?: string | null }).avatarUrl,
+        (candidate as { avatar?: string | null }).avatar,
+      ) ?? user.avatarUrl ?? null,
     };
   } catch {
     return user;
@@ -263,11 +329,12 @@ async function resolveAuthenticatedUser(
   discord: DiscordSDK,
   fallback: ActivityUser,
   bootDebug: string[],
+  guildId: string | null | undefined,
 ): Promise<ActivityUser> {
   const cachedToken = readCachedToken();
   if (cachedToken) {
     bootDebug.push("cached-token:found");
-    const fromCachedToken = await authenticateDiscordAccessToken(discord, cachedToken);
+    const fromCachedToken = await authenticateDiscordAccessToken(discord, cachedToken, guildId ?? (discord as DiscordSdkWithContext | null)?.guildId ?? null);
     if (fromCachedToken) {
       bootDebug.push("cached-token:auth-ok");
       const refined = await refineDisplayNameFromParticipants(discord, fromCachedToken);
@@ -323,7 +390,7 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
   bootDebug.push("orientation:done");
 
   const context = mergeContext(queryContext, discord as DiscordSdkWithContext);
-  const currentUser = await resolveAuthenticatedUser(discord, fallbackUser, bootDebug);
+  const currentUser = await resolveAuthenticatedUser(discord, fallbackUser, bootDebug, context.guildId);
   if (isDiscordSnowflake(currentUser.userId)) {
     bootDebug.push(`current-user:resolved:${currentUser.userId}`);
   } else {
