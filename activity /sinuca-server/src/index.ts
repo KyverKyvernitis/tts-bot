@@ -1,4 +1,4 @@
-import express from "express";
+import express, { type Request, type Response } from "express";
 import { createServer } from "http";
 import { MongoClient } from "mongodb";
 import type { IncomingMessage } from "http";
@@ -29,13 +29,15 @@ import { getInitialRuleSet } from "./gameRules.js";
 const app = express();
 app.use(express.json());
 
-app.get("/health", (req, res) => {
-  console.log("[sinuca-health]", JSON.stringify({ origin: req.headers.origin ?? null, ua: req.headers["user-agent"] ?? null }));
+function handleHealth(req: Request, res: Response) {
+  console.log("[sinuca-health]", JSON.stringify({ origin: req.headers.origin ?? null, ua: req.headers["user-agent"] ?? null, url: req.url ?? null }));
   res.json({ ok: true, rules: getInitialRuleSet() });
-});
+}
 
+app.get("/health", handleHealth);
+app.get("/api/health", handleHealth);
 
-app.get("/session", (req, res) => {
+function handleSession(req: Request, res: Response) {
   console.log("[sinuca-proxy-session]", JSON.stringify({
     hasProxyPayload: Boolean(req.headers["x-discord-proxy-payload"]),
     origin: req.headers.origin ?? null,
@@ -61,28 +63,27 @@ app.get("/session", (req, res) => {
     proxyPayload: req.headers["x-discord-proxy-payload"] ? "present" : "missing",
     hasProxyPayload: Boolean(req.headers["x-discord-proxy-payload"]),
   });
-});
+}
 
+app.get("/session", handleSession);
+app.get("/api/session", handleSession);
 
 const discordClientId = process.env.VITE_DISCORD_CLIENT_ID || process.env.DISCORD_CLIENT_ID || "";
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET || process.env.CLIENT_SECRET || "";
 
-app.post("/token", async (req, res) => {
-  const code = typeof req.body?.code === "string" ? req.body.code : "";
+async function exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }> {
   console.log("[sinuca-oauth] token request", JSON.stringify({
     hasCode: Boolean(code),
     codeLength: code.length,
-    bodyKeys: req.body && typeof req.body === "object" ? Object.keys(req.body).sort() : [],
     hasClientId: Boolean(discordClientId),
     hasClientSecret: Boolean(discordClientSecret),
   }));
+
   if (!code) {
-    res.status(400).json({ error: "missing_code" });
-    return;
+    return { ok: false, accessToken: null, error: "missing_code", detail: null };
   }
   if (!discordClientId || !discordClientSecret) {
-    res.status(500).json({ error: "oauth_not_configured" });
-    return;
+    return { ok: false, accessToken: null, error: "oauth_not_configured", detail: null };
   }
 
   try {
@@ -105,22 +106,42 @@ app.post("/token", async (req, res) => {
     try {
       data = JSON.parse(raw) as { access_token?: string; error?: string; error_description?: string };
     } catch {
-      res.status(502).json({ error: "token_invalid_json", detail: raw.slice(0, 240) || null });
-      return;
+      return { ok: false, accessToken: null, error: "token_invalid_json", detail: raw.slice(0, 240) || null };
     }
 
     if (!response.ok || !data.access_token) {
       console.error("[sinuca-oauth] token exchange failed", response.status, data);
-      res.status(502).json({ error: data.error ?? "token_exchange_failed", detail: data.error_description ?? null });
-      return;
+      return {
+        ok: false,
+        accessToken: null,
+        error: data.error ?? "token_exchange_failed",
+        detail: data.error_description ?? null,
+      };
     }
 
-    res.json({ access_token: data.access_token });
+    return { ok: true, accessToken: data.access_token, error: null, detail: null };
   } catch (error) {
     console.error("[sinuca-oauth] token exchange error", error);
-    res.status(500).json({ error: "token_exchange_exception" });
+    return { ok: false, accessToken: null, error: "token_exchange_exception", detail: null };
   }
-});
+}
+
+function handleTokenRequest(req: Request, res: Response) {
+  const code = typeof req.body?.code === "string" ? req.body.code : "";
+  void exchangeDiscordCode(code).then((result) => {
+    if (!result.ok || !result.accessToken) {
+      res.status(result.error === "missing_code" ? 400 : result.error === "oauth_not_configured" ? 500 : 502).json({ error: result.error, detail: result.detail });
+      return;
+    }
+    res.json({ access_token: result.accessToken });
+  }).catch((error) => {
+    console.error("[sinuca-oauth] token route unhandled error", error);
+    res.status(500).json({ error: "token_exchange_exception" });
+  });
+}
+
+app.post("/token", handleTokenRequest);
+app.post("/api/token", handleTokenRequest);
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
@@ -386,8 +407,15 @@ const balanceTicker = setInterval(() => {
   }
 }, 2000);
 
-wss.on("connection", (ws, req) => {
-  const session = decodeProxyPayload(req);
+wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+  const resolved = resolveRequestSession(req);
+  const session: SessionContextPayload = {
+    userId: resolved.userId,
+    displayName: resolved.displayName,
+    guildId: resolved.guildId,
+    channelId: resolved.channelId,
+    instanceId: resolved.instanceId,
+  };
   socketSession.set(ws, session);
   send(ws, { type: "ready" });
   send(ws, { type: "session_context", payload: session });
@@ -397,19 +425,22 @@ wss.on("connection", (ws, req) => {
     guildId: session.guildId,
     channelId: session.channelId,
     instanceId: session.instanceId,
+    sessionSource: resolved.sessionSource,
     proxyPayload: req.headers["x-discord-proxy-payload"] ? "present" : "missing",
     origin: req.headers.origin ?? null,
     ua: req.headers["user-agent"] ?? null,
+    url: req.url ?? null,
   }));
   if (session.guildId && session.userId) {
     watchBalance(ws, session.guildId, session.userId);
     void pushBalance(ws, session.guildId, session.userId, true);
   }
 
-  ws.on("message", async (raw) => {
+  ws.on("message", async (raw: unknown) => {
     let data: ClientMessage;
     try {
-      data = JSON.parse(raw.toString()) as ClientMessage;
+      const rawText = typeof raw === "string" ? raw : (raw as { toString?: (encoding?: string) => string })?.toString?.("utf-8") ?? String(raw);
+      data = JSON.parse(rawText) as ClientMessage;
     } catch {
       send(ws, { type: "error", message: "payload inválido" });
       return;
@@ -419,6 +450,21 @@ wss.on("connection", (ws, req) => {
 
     if (data.type === "ping") {
       send(ws, { type: "pong" });
+      return;
+    }
+
+    if (data.type === "exchange_token") {
+      const code = typeof data.payload?.code === "string" ? data.payload.code : "";
+      const result = await exchangeDiscordCode(code);
+      send(ws, {
+        type: "oauth_token_result",
+        payload: {
+          ok: result.ok,
+          accessToken: result.accessToken,
+          error: result.error,
+          detail: result.detail,
+        },
+      });
       return;
     }
 

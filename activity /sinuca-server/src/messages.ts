@@ -37,6 +37,10 @@ export interface BalancePayload {
   userId: string | null;
 }
 
+export interface ExchangeTokenPayload {
+  code: string;
+}
+
 export interface SessionContextPayload {
   userId: string | null;
   displayName: string | null;
@@ -53,6 +57,7 @@ export type ClientMessage =
   | { type: "list_rooms"; payload: ListRoomsPayload }
   | { type: "get_balance"; payload: BalancePayload }
   | { type: "init_context"; payload: SessionContextPayload }
+  | { type: "exchange_token"; payload: ExchangeTokenPayload }
   | { type: "ping" };
 
 export interface RoomSnapshot {
@@ -93,6 +98,13 @@ export interface BalanceDebugSnapshot {
   note: string;
 }
 
+export interface OAuthTokenResultPayload {
+  ok: boolean;
+  accessToken: string | null;
+  error: string | null;
+  detail: string | null;
+}
+
 export type ServerMessage =
   | { type: "ready" }
   | { type: "session_context"; payload: SessionContextPayload }
@@ -101,4 +113,5 @@ export type ServerMessage =
   | { type: "room_list"; payload: RoomSnapshot[] }
   | { type: "balance_state"; payload: BalanceSnapshot }
   | { type: "balance_debug"; payload: BalanceDebugSnapshot }
+  | { type: "oauth_token_result"; payload: OAuthTokenResultPayload }
   | { type: "error"; message: string };
