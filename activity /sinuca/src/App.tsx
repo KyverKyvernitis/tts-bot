@@ -8,7 +8,7 @@ import {
   writeCachedToken,
   writeCachedUser,
 } from "./sdk/discord";
-import type { ActivityBootstrap, ActivityUser, BalanceDebugSnapshot, BalanceSnapshot, RoomSnapshot, SessionContextPayload } from "./types/activity";
+import type { ActivityBootstrap, ActivityUser, BalanceDebugSnapshot, BalanceSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 
@@ -98,7 +98,26 @@ function formatStatus(room: RoomSnapshot) {
 }
 
 function formatRoomCount(count: number) {
-  return count === 1 ? "1 mesa aberta" : `${count} mesas abertas`;
+  return count === 1 ? "1 aberta" : `${count} abertas`;
+}
+
+function defaultDiscordAvatarUrl(userId: string) {
+  try {
+    const index = Number((BigInt(userId) >> 22n) % 6n);
+    return `https://cdn.discordapp.com/embed/avatars/${index}.png`;
+  } catch {
+    return "https://cdn.discordapp.com/embed/avatars/0.png";
+  }
+}
+
+function buildPlayerTag(player: Pick<RoomPlayer, "displayName">) {
+  const label = player.displayName?.trim() || "jogador";
+  return label.startsWith("@") ? label : `@${label}`;
+}
+
+function resolvePlayerAvatar(player: Pick<RoomPlayer, "userId" | "avatarUrl">) {
+  if (player.avatarUrl) return player.avatarUrl;
+  return defaultDiscordAvatarUrl(player.userId);
 }
 
 export default function App() {
@@ -642,6 +661,7 @@ export default function App() {
                       mode: state.context.mode,
                       userId: state.currentUser.userId,
                       displayName: state.currentUser.displayName,
+                      avatarUrl: state.currentUser.avatarUrl ?? null,
                     },
                   });
                 }}
@@ -669,60 +689,82 @@ export default function App() {
       ) : null}
 
       {screen === "list" ? (
-        <section className="lobby-panel lobby-panel--compact">
-          <div className="toolbar-row toolbar-row--top toolbar-row--single">
-            <button className="chip-button" type="button" onClick={() => setScreen("home")}>Voltar</button>
+        <section className="lobby-panel lobby-panel--compact lobby-panel--list">
+          <div className="list-topbar">
+            <button className="chip-button chip-button--back" type="button" onClick={() => setScreen("home")}>Voltar</button>
+            <div className="list-topbar__count">{formatRoomCount(rooms.length)}</div>
           </div>
 
-          <div className="list-header list-header--simple">
-            <div>
-              <h2>Mesas abertas</h2>
-              <p>{rooms.length === 0 ? "Crie uma para começar." : "Veja as mesas abertas e entre em uma delas."}</p>
-            </div>
-            <div className="list-summary list-summary--single"><strong>{formatRoomCount(rooms.length)}</strong></div>
-          </div>
-
-          <div className="room-list-stack">
+          <div className="room-list-stack room-list-stack--immersive">
             {rooms.length === 0 ? (
-              <div className="empty-card empty-card--soft empty-card--home">
+              <div className="empty-card empty-card--soft empty-card--home empty-card--list">
                 <strong>Nenhuma mesa aberta</strong>
                 <span>Crie uma para começar.</span>
               </div>
             ) : (
-              rooms.map((entry) => (
-                <article key={entry.roomId} className="room-entry-card room-entry-card--soft">
-                  <div className="room-entry-card__head">
-                    <div>
-                      <span className="room-entry-card__eyebrow">Mesa aberta</span>
-                      <h3>Mesa de {entry.hostDisplayName}</h3>
+              rooms.map((entry) => {
+                const host = entry.players.find((player) => player.userId === entry.hostUserId) ?? entry.players[0];
+                const opponent = entry.players.find((player) => player.userId !== entry.hostUserId) ?? null;
+                return (
+                  <article key={entry.roomId} className="room-entry-card room-entry-card--soft room-entry-card--showdown">
+                    <div className="room-entry-card__showdown">
+                      <div className="participant-slot participant-slot--filled">
+                        <div className="participant-slot__avatar-wrap">
+                          <img className="participant-slot__avatar" src={resolvePlayerAvatar(host)} alt={host.displayName} />
+                        </div>
+                        <span className="participant-slot__name">{buildPlayerTag(host)}</span>
+                        <small className="participant-slot__role">criador</small>
+                      </div>
+
+                      <div className="participant-slot__versus">vs.</div>
+
+                      {opponent ? (
+                        <div className="participant-slot participant-slot--filled">
+                          <div className="participant-slot__avatar-wrap">
+                            <img className="participant-slot__avatar" src={resolvePlayerAvatar(opponent)} alt={opponent.displayName} />
+                          </div>
+                          <span className="participant-slot__name">{buildPlayerTag(opponent)}</span>
+                          <small className="participant-slot__role">jogador</small>
+                        </div>
+                      ) : (
+                        <div className="participant-slot participant-slot--ghost">
+                          <div className="participant-slot__avatar-wrap participant-slot__avatar-wrap--ghost">
+                            <div className="participant-slot__unknown">?</div>
+                          </div>
+                          <span className="participant-slot__name">Aguardando jogador</span>
+                          <small className="participant-slot__role">vaga aberta</small>
+                        </div>
+                      )}
                     </div>
-                    <span className={`status-badge status-badge--${entry.status}`}>{formatStatus(entry)}</span>
-                  </div>
 
-                  <div className="room-entry-card__meta">
-                    <span>{entry.players.length}/2 jogadores</span>
-                    {entry.mode === "server" ? <span>{entry.stakeLabel}</span> : <span>casual</span>}
-                  </div>
+                    <div className="room-entry-card__footer">
+                      <div className="room-entry-card__meta room-entry-card__meta--row">
+                        <span>{entry.players.length}/2 jogadores</span>
+                        {entry.mode === "server" ? <span>{entry.stakeLabel}</span> : <span>casual</span>}
+                        <span className={`status-badge status-badge--${entry.status}`}>{formatStatus(entry)}</span>
+                      </div>
 
-                  <button
-                    className="primary-button"
-                    type="button"
-                    disabled={authBusy || entry.players.length >= 2}
-                    onClick={() => {
-                      if (!resolvedUser) {
-                        void handleAuthorize();
-                        return;
-                      }
-                      sendMessage({
-                        type: "join_room",
-                        payload: { roomId: entry.roomId, userId: state.currentUser.userId, displayName: state.currentUser.displayName },
-                      });
-                    }}
-                  >
-                    {!resolvedUser ? (authBusy ? "Autorizando..." : "Autorizar") : entry.players.length >= 2 ? "Mesa cheia" : "Entrar"}
-                  </button>
-                </article>
-              ))
+                      <button
+                        className="primary-button"
+                        type="button"
+                        disabled={authBusy || entry.players.length >= 2}
+                        onClick={() => {
+                          if (!resolvedUser) {
+                            void handleAuthorize();
+                            return;
+                          }
+                          sendMessage({
+                            type: "join_room",
+                            payload: { roomId: entry.roomId, userId: state.currentUser.userId, displayName: state.currentUser.displayName, avatarUrl: state.currentUser.avatarUrl ?? null },
+                          });
+                        }}
+                      >
+                        {!resolvedUser ? (authBusy ? "Autorizando..." : "Autorizar") : entry.players.length >= 2 ? "Mesa cheia" : "Entrar"}
+                      </button>
+                    </div>
+                  </article>
+                );
+              })
             )}
           </div>
         </section>
