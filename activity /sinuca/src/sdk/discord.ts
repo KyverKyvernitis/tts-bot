@@ -184,15 +184,12 @@ export async function authenticateDiscordAccessToken(discord: DiscordSDK, access
 export async function authorizeDiscordCode(promptMode: AuthorizePromptMode): Promise<AuthorizeCodeResult> {
   const discord = getDiscordSdk();
   const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined) ?? null;
-  const redirectUri = getOAuthRedirectUri();
   if (!discord || !clientId) return { code: null, debug: "authorize:sdk_or_client_missing" };
-  if (!redirectUri) return { code: null, debug: "authorize:redirect_uri_missing" };
 
   try {
     const authorize = await discord.commands.authorize({
       client_id: clientId,
       response_type: "code",
-      redirect_uri: redirectUri,
       state: `sinuca-auth-${promptMode}`,
       prompt: promptMode,
       scope: ["identify"],
@@ -200,13 +197,13 @@ export async function authorizeDiscordCode(promptMode: AuthorizePromptMode): Pro
 
     const code = (authorize as { code?: string | null }).code ?? null;
     if (!code) {
-      console.error("[sinuca-auth] authorize returned without code", { promptMode, redirectUri });
+      console.error("[sinuca-auth] authorize returned without code", { promptMode });
       return { code: null, debug: `authorize:no_code:${promptMode}` };
     }
 
     return { code, debug: `authorize:code_ok:${promptMode}` };
   } catch (error) {
-    console.error("[sinuca-auth] authorize exception", { error, promptMode, redirectUri });
+    console.error("[sinuca-auth] authorize exception", { error, promptMode });
     return { code: null, debug: `authorize:exception:${promptMode}:${getErrorMessage(error)}` };
   }
 }
