@@ -88,7 +88,7 @@ button:focus-visible {
 }
 
 .hero-card {
-  padding: 11px 15px;
+  padding: 10px 14px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
@@ -267,7 +267,7 @@ button:focus-visible {
 }
 
 .menu-button {
-  min-height: 84px;
+  min-height: 80px;
   text-align: left;
   cursor: pointer;
   padding: 15px 19px;
@@ -602,7 +602,7 @@ button:focus-visible {
   }
 
   .menu-button {
-    min-height: 118px;
+    min-height: 104px;
     padding: 18px;
   }
 
@@ -793,7 +793,7 @@ button:focus-visible {
 }
 
 .kv-list--compact li {
-  padding: 7px 0;
+  padding: 5px 0;
 }
 
 .kv-list--summary-tight li {
@@ -811,7 +811,7 @@ button:focus-visible {
 .create-submit {
   width: 100%;
   justify-self: stretch;
-  min-height: 54px;
+  min-height: 50px;
 }
 
 .list-topbar {
@@ -871,7 +871,7 @@ button:focus-visible {
 }
 
 .participant-slot--compact {
-  min-height: 128px;
+  min-height: 104px;
   padding: 10px 10px;
   gap: 6px;
 }
@@ -1017,20 +1017,20 @@ button:focus-visible {
 
 .participant-slot--create-main,
 .participant-slot--room-main {
-  min-height: 118px;
+  min-height: 104px;
   padding: 10px 10px 12px;
   gap: 6px;
 }
 
 .participant-slot--create-main .participant-slot__avatar-wrap,
 .participant-slot--room-main .participant-slot__avatar-wrap {
-  width: 68px;
-  height: 68px;
+  width: 62px;
+  height: 62px;
 }
 
 .create-center-pill--final {
-  min-width: 138px;
-  padding: 12px 10px;
+  min-width: 132px;
+  padding: 10px 10px;
   align-self: center;
 }
 
@@ -1052,12 +1052,12 @@ button:focus-visible {
 }
 
 .create-config-card--final {
-  gap: 8px;
+  gap: 6px;
 }
 
 .create-config-card--final .create-config-block {
-  padding: 11px 12px;
-  gap: 8px;
+  padding: 10px 12px;
+  gap: 6px;
 }
 
 .create-config-card--final .create-config-block__head {
@@ -1126,4 +1126,100 @@ button:focus-visible {
   .room-stage__actions {
     grid-template-columns: 1fr;
   }
+}
+
+
+.create-layout--final {
+  gap: 10px;
+}
+
+.create-preview-card--final {
+  gap: 8px;
+}
+
+.create-preview-shell--final {
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+
+.create-config-block--summary {
+  margin-top: -2px;
+}
+
+.create-config-block--summary .create-config-block__head strong {
+  font-size: 0.9rem;
+}
+
+.kv-list--summary-tight {
+  gap: 0;
+}
+
+.kv-list--summary-tight li {
+  padding: 4px 0;
+}
+
+.create-config-block--summary .create-submit {
+  margin-top: 4px;
+  min-height: 48px;
+}
+
+.create-config-block--summary .kv-list strong {
+  font-size: 0.96rem;
+}
+
+.create-config-block--summary .kv-list span {
+  font-size: 0.96rem;
+}
+
+.create-toggle-group--dense {
+  gap: 6px;
+}
+
+.create-toggle-group--stakes-compact {
+  gap: 6px;
+}
+
+.list-topbar--create .list-topbar__count {
+  opacity: 0.9;
+}
+
+
+.create-preview-card--final {
+  padding: 10px;
+}
+
+.create-preview-shell--final {
+  gap: 8px;
+}
+
+.create-center-pill--final strong {
+  font-size: 0.76rem;
+}
+
+.create-center-pill--final span {
+  font-size: 0.82rem;
+}
+
+.create-config-card--final {
+  align-self: start;
+}
+
+.create-config-card--final .create-config-block--summary {
+  padding-top: 9px;
+  padding-bottom: 10px;
+}
+
+.create-config-card--final .create-config-block--summary .create-config-block__head {
+  margin-bottom: 0;
+}
+
+.create-config-card--final .create-config-block--summary .create-config-block__head strong {
+  font-size: 0.88rem;
+}
+
+.create-config-card--final .create-config-block--summary .kv-list {
+  margin-top: -1px;
+}
+
+.create-config-card--final .create-config-block--summary .create-submit {
+  margin-top: 2px;
 }

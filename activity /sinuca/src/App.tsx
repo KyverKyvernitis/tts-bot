@@ -392,9 +392,19 @@ export default function App() {
       setCreateTableType("casual");
       return;
     }
-    setCreateTableType((current) => current === "casual" ? current : "stake");
-    setCreateStake((current) => createStakeOptions.includes(current as typeof createStakeOptions[number]) ? current : 25);
+    setCreateTableType("stake");
+    setCreateStake(25);
   }, [isServer]);
+
+  useEffect(() => {
+    if (screen !== "create") return;
+    if (!isServer) {
+      setCreateTableType("casual");
+      return;
+    }
+    setCreateTableType((current) => current === "stake" || current === "casual" ? current : "stake");
+    setCreateStake((current) => createStakeOptions.includes(current as typeof createStakeOptions[number]) ? current : 25);
+  }, [isServer, screen]);
 
 
   const sendMessage = (payload: object) => {
@@ -693,6 +703,12 @@ export default function App() {
                 className="menu-button menu-button--create"
                 type="button"
                 onClick={() => {
+                  if (isServer) {
+                    setCreateTableType("stake");
+                    setCreateStake(25);
+                  } else {
+                    setCreateTableType("casual");
+                  }
                   setScreen("create");
                 }}
               >
@@ -722,7 +738,7 @@ export default function App() {
         <section className="lobby-panel lobby-panel--compact lobby-panel--create">
           <div className="list-topbar list-topbar--create list-topbar--compact-create">
             <button className="chip-button chip-button--back" type="button" onClick={() => setScreen("home")}>Voltar</button>
-            <div className="list-topbar__count">Preparando mesa</div>
+            <div className="list-topbar__count">{isFriendlyTable ? "Partida amistosa" : `${createStake} fichas`}</div>
           </div>
 
           <div className="create-layout create-layout--final">
@@ -756,7 +772,7 @@ export default function App() {
               <div className="create-config-block create-config-block--tight">
                 <div className="create-config-block__head">
                   <strong>{isServer ? "Tipo da partida" : "Partida amistosa"}</strong>
-                  <span>{isServer ? "Valendo fichas vem por padrão. Se quiser, abra uma partida amistosa." : "Fora de servidor, a mesa é sempre amistosa."}</span>
+                  <span>{isServer ? "Valendo fichas fica selecionado por padrão." : "Fora de servidor, a mesa é sempre amistosa."}</span>
                 </div>
 
                 {canChooseStakeMode ? (
@@ -787,7 +803,7 @@ export default function App() {
                 <div className="create-config-block create-config-block--tight">
                   <div className="create-config-block__head">
                     <strong>Entrada</strong>
-                    <span>25 fichas é o padrão, mas você pode mudar antes de abrir a mesa.</span>
+                    <span>25 fichas já vem selecionado por padrão.</span>
                   </div>
 
                   <div className="create-toggle-group create-toggle-group--stakes create-toggle-group--stakes-compact">
@@ -813,7 +829,6 @@ export default function App() {
                 <ul className="kv-list kv-list--compact kv-list--summary-tight">
                   <li><span>Modo</span><strong>{createModeLabel}</strong></li>
                   {!isFriendlyTable ? <li><span>Entrada</span><strong>{createStake} fichas</strong></li> : null}
-                  <li><span>Jogadores</span><strong>2</strong></li>
                 </ul>
 
                 {isServer && createTableType === "stake" && !balanceLoaded ? (
