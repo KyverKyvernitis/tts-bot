@@ -641,6 +641,146 @@ button:focus-visible {
   padding-top: 10px;
 }
 
+.lobby-panel--create {
+  padding-top: 10px;
+}
+
+.create-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 14px;
+}
+
+.create-preview-card,
+.create-config-card {
+  border: 1px solid rgba(232, 242, 255, 0.10);
+  border-radius: 24px;
+  background: rgba(7, 21, 31, 0.16);
+  padding: 16px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.create-preview-card {
+  display: grid;
+  gap: 14px;
+}
+
+.create-preview-card__eyebrow {
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(214, 241, 255, 0.62);
+}
+
+.room-entry-card__showdown--create {
+  min-height: 220px;
+}
+
+.create-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.create-summary-strip > div {
+  border: 1px solid rgba(232, 242, 255, 0.10);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 12px 13px;
+}
+
+.create-summary-strip span,
+.create-config-block__head span {
+  display: block;
+  color: rgba(221, 234, 246, 0.7);
+  line-height: 1.3;
+}
+
+.create-summary-strip span {
+  font-family: var(--font-ui);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 5px;
+}
+
+.create-summary-strip strong {
+  color: #f4f9ff;
+  font-size: 1rem;
+}
+
+.create-config-card {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.create-config-block {
+  border: 1px solid rgba(232, 242, 255, 0.10);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.create-config-block__head {
+  display: grid;
+  gap: 4px;
+}
+
+.create-config-block__head strong {
+  color: #f4f9ff;
+  font-size: 1.02rem;
+}
+
+.create-toggle-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.create-toggle-group--stakes {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.create-toggle-group--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.create-toggle {
+  min-height: 56px;
+  justify-content: center;
+  text-align: center;
+  font-family: var(--font-ui);
+  font-size: 0.86rem;
+  letter-spacing: 0.06em;
+}
+
+.create-toggle--stake {
+  font-size: 1rem;
+}
+
+.kv-list--compact li {
+  padding: 8px 0;
+}
+
+.create-config-block--summary {
+  gap: 10px;
+}
+
+.create-config-block__warning {
+  margin: 0;
+}
+
+.create-submit {
+  width: 100%;
+  justify-self: stretch;
+}
+
 .list-topbar {
   display: flex;
   align-items: center;
@@ -773,7 +913,13 @@ button:focus-visible {
 }
 
 @media (max-width: 920px) {
+  .create-layout,
   .room-entry-card__showdown {
+    grid-template-columns: 1fr;
+  }
+
+  .create-summary-strip,
+  .create-toggle-group--stakes {
     grid-template-columns: 1fr;
   }
 
