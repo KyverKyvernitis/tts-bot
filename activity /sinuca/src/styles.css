@@ -1,10 +1,15 @@
+@import url("https://fonts.googleapis.com/css2?family=Audiowide&family=Orbitron:wght@500;600;700&display=swap");
+
 * {
   box-sizing: border-box;
   -webkit-tap-highlight-color: transparent;
 }
 
 :root {
-  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-body: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Audiowide", var(--font-body);
+  --font-ui: "Orbitron", var(--font-body);
+  font-family: var(--font-body);
   color: #eef6f0;
   background: #06111c;
 }
@@ -83,7 +88,7 @@ button:focus-visible {
 }
 
 .hero-card {
-  padding: 12px 16px;
+  padding: 11px 15px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
@@ -91,12 +96,20 @@ button:focus-visible {
 }
 
 .hero-card--compact h1 {
-  font-size: clamp(1.9rem, 2.7vw, 3rem);
+  font-size: clamp(1.88rem, 2.65vw, 2.95rem);
 }
 
 .hero-card__copy {
   max-width: 600px;
 }
+
+.hero-card h1 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  text-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+
 
 .hero-card__meta {
   min-width: 0;
@@ -133,48 +146,56 @@ button:focus-visible {
 .room-entry-card__eyebrow,
 .menu-button__eyebrow {
   display: inline-block;
-  font-size: 12px;
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: rgba(214, 241, 255, 0.72);
-  margin-bottom: 10px;
+  letter-spacing: 0.18em;
+  color: rgba(214, 241, 255, 0.58);
+  margin-bottom: 8px;
 }
 
 .mode-pill,
 .status-badge {
   white-space: nowrap;
   border-radius: 999px;
-  padding: 14px 20px;
-  font-size: 15px;
+  padding: 13px 18px;
+  font-family: var(--font-ui);
+  font-size: 12px;
   font-weight: 700;
+  letter-spacing: 0.08em;
   border: 1px solid rgba(236, 246, 255, 0.12);
   background: rgba(255, 255, 255, 0.07);
   color: #f2f8ff;
 }
 
 .hero-stat {
-  min-width: 118px;
-  padding: 9px 13px;
-  border-radius: 18px;
-  border: 1px solid rgba(238, 246, 255, 0.14);
-  background: rgba(7, 19, 30, 0.2);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+  min-width: 108px;
+  padding: 8px 12px;
+  border-radius: 17px;
+  border: 1px solid rgba(238, 246, 255, 0.12);
+  background: rgba(7, 19, 30, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
 }
 
 .hero-stat span {
   display: block;
   margin-bottom: 4px;
-  font-size: 11px;
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: rgba(214, 241, 255, 0.72);
+  letter-spacing: 0.14em;
+  color: rgba(214, 241, 255, 0.66);
 }
 
 .hero-stat strong {
   display: block;
+  font-family: var(--font-ui);
+  font-weight: 700;
   color: #f4f9ff;
-  font-size: 1.1rem;
-  letter-spacing: -0.03em;
+  font-size: 1rem;
+  letter-spacing: 0.01em;
 }
 
 .hero-stat--chips {
@@ -186,7 +207,7 @@ button:focus-visible {
 }
 
 .hero-stat--entry {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.065);
 }
 
 .mode-pill--server,
@@ -246,10 +267,10 @@ button:focus-visible {
 }
 
 .menu-button {
-  min-height: 86px;
+  min-height: 84px;
   text-align: left;
   cursor: pointer;
-  padding: 16px 20px;
+  padding: 15px 19px;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
@@ -257,10 +278,10 @@ button:focus-visible {
   color: #f4f9ff;
   border-radius: 24px;
   border: 1px solid rgba(238, 246, 255, 0.14);
-  background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
+  background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.018));
   backdrop-filter: blur(5px);
   -webkit-backdrop-filter: blur(5px);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 8px 20px rgba(0,0,0,0.06);
   transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
   user-select: none;
 }
@@ -281,15 +302,15 @@ button:focus-visible {
 }
 
 .menu-button--create {
-  background: linear-gradient(180deg, rgba(126, 255, 244, 0.08), rgba(8, 49, 63, 0.10));
+  background: linear-gradient(180deg, rgba(126, 255, 244, 0.075), rgba(8, 49, 63, 0.095));
 }
 
 .menu-button--join {
-  background: linear-gradient(180deg, rgba(89, 138, 255, 0.10), rgba(7, 26, 62, 0.12));
+  background: linear-gradient(180deg, rgba(89, 138, 255, 0.085), rgba(7, 26, 62, 0.105));
 }
 
 .menu-button--authorize {
-  min-height: 96px;
+  min-height: 92px;
   background: linear-gradient(180deg, rgba(109, 225, 191, 0.14), rgba(14, 59, 50, 0.16));
 }
 
@@ -629,18 +650,22 @@ button:focus-visible {
 }
 
 .list-topbar__count {
-  color: rgba(236, 244, 252, 0.9);
-  font-size: 0.98rem;
-  letter-spacing: 0.02em;
+  font-family: var(--font-ui);
+  color: rgba(236, 244, 252, 0.84);
+  font-size: 0.86rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .chip-button--back {
-  padding: 10px 18px;
-  border-radius: 20px;
+  padding: 9px 15px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.045);
 }
 
 .room-list-stack--immersive {
-  gap: 14px;
+  gap: 12px;
 }
 
 .room-entry-card--showdown {
@@ -714,14 +739,18 @@ button:focus-visible {
 }
 
 .participant-slot__role {
-  color: rgba(221, 234, 246, 0.66);
-  font-size: 0.82rem;
-  text-transform: lowercase;
+  font-family: var(--font-ui);
+  color: rgba(221, 234, 246, 0.62);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .participant-slot__versus {
-  color: rgba(236, 244, 252, 0.7);
-  font-size: 1rem;
+  font-family: var(--font-ui);
+  color: rgba(236, 244, 252, 0.64);
+  font-size: 0.94rem;
+  font-weight: 600;
   letter-spacing: 0.18em;
   text-transform: uppercase;
 }
@@ -736,10 +765,11 @@ button:focus-visible {
 .room-entry-card__meta--row {
   margin-bottom: 0;
   align-items: center;
+  font-size: 0.92rem;
 }
 
 .empty-card--list {
-  min-height: 128px;
+  min-height: 120px;
 }
 
 @media (max-width: 920px) {
