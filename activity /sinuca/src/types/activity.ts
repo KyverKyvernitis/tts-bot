@@ -12,6 +12,7 @@ export interface ActivityContext {
 export interface ActivityUser {
   userId: string;
   displayName: string;
+  avatarUrl?: string | null;
 }
 
 export interface SessionContextPayload {
@@ -26,6 +27,7 @@ export interface RoomPlayer {
   userId: string;
   displayName: string;
   ready: boolean;
+  avatarUrl?: string | null;
 }
 
 export interface RoomSnapshot {
