@@ -265,8 +265,9 @@ async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, p
   }
 }
 
-async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityUser, clientId: string | null, proxySession: SessionContextPayload | null): Promise<ActivityUser> {
+async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityUser, proxySession: SessionContextPayload | null, bootDebug: string[]): Promise<ActivityUser> {
   if (isDiscordSnowflake(proxySession?.userId)) {
+    bootDebug.push("proxy-session:user-ok");
     const userFromProxy: ActivityUser = {
       userId: proxySession.userId,
       displayName: proxySession?.displayName ?? fallback.displayName ?? `Jogador ${proxySession.userId.slice(-4)}`,
@@ -277,37 +278,39 @@ async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityU
 
   const cachedToken = readCachedToken();
   if (cachedToken) {
+    bootDebug.push("cached-token:found");
     const fromCachedToken = await authenticateAccessToken(discord, cachedToken);
     if (fromCachedToken) {
+      bootDebug.push("cached-token:auth-ok");
       writeCachedUser(fromCachedToken);
       return fromCachedToken;
     }
+    bootDebug.push("cached-token:auth-failed");
     clearCachedToken();
     clearCachedUser();
+  } else {
+    bootDebug.push("cached-token:none");
   }
 
   try {
     const response = await discord.commands.getInstanceConnectedParticipants();
     const participants = response?.participants ?? [];
+    bootDebug.push(`participants:${participants.length}`);
     if (participants.length === 1) {
       const participant = participants[0] as { id?: string; global_name?: string | null; username?: string | null };
       if (isDiscordSnowflake(participant.id)) {
+        bootDebug.push("participants:single-user-ok");
         const singleUser = { userId: participant.id, displayName: participant.global_name ?? participant.username ?? fallback.displayName };
         writeCachedUser(singleUser);
         return singleUser;
       }
     }
   } catch (error) {
-    console.error('[sinuca-auth] getInstanceConnectedParticipants failed', error);
+    bootDebug.push(`participants:error:${error instanceof Error ? error.message : "unknown"}`);
+    console.error("[sinuca-auth] getInstanceConnectedParticipants failed", error);
   }
 
-  if (clientId) {
-    const silentUser = await authorizeAndAuthenticate(discord, clientId, "none");
-    if (silentUser) {
-      return silentUser;
-    }
-  }
-
+  bootDebug.push("user:fallback-pending-auth");
   return fallback;
 }
 
@@ -367,48 +370,72 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
   const queryContext = readContextFromQuery();
   const fallbackUser = buildPendingUser();
   const discord = getDiscordSdk();
+  const bootDebug: string[] = [];
 
   if (!discord) {
+    bootDebug.push("sdk:missing");
     return {
       sdkReady: false,
       clientId,
       context: { ...queryContext, source: "fallback" },
       currentUser: fallbackUser,
+      bootDebug,
     };
   }
 
   try {
+    bootDebug.push("sdk:ready:start");
     await discord.ready();
-    await lockLandscape(discord);
-    const proxySession = await fetchProxySessionContext();
-    const context = {
-      ...mergeContext(queryContext, discord as DiscordSdkWithContext),
-      guildId: proxySession?.guildId ?? mergeContext(queryContext, discord as DiscordSdkWithContext).guildId,
-      channelId: proxySession?.channelId ?? mergeContext(queryContext, discord as DiscordSdkWithContext).channelId,
-      instanceId: proxySession?.instanceId ?? mergeContext(queryContext, discord as DiscordSdkWithContext).instanceId,
-      mode: (proxySession?.guildId ?? mergeContext(queryContext, discord as DiscordSdkWithContext).guildId) ? "server" : mergeContext(queryContext, discord as DiscordSdkWithContext).mode,
-    };
-    const authenticatedUser = await resolveAuthenticatedUser(discord, fallbackUser, clientId, proxySession);
-    const baseUser = proxySession?.displayName && isDiscordSnowflake(authenticatedUser.userId)
-      ? { ...authenticatedUser, displayName: proxySession.displayName }
-      : authenticatedUser;
-    const currentUser = await refineDisplayNameFromParticipants(discord, baseUser);
-    if (isDiscordSnowflake(currentUser.userId)) {
-      writeCachedUser(currentUser);
-    }
-
-    return {
-      sdkReady: true,
-      clientId,
-      context,
-      currentUser,
-    };
-  } catch {
+    bootDebug.push("sdk:ready:ok");
+  } catch (error) {
+    bootDebug.push(`sdk:ready:error:${error instanceof Error ? error.message : "unknown"}`);
     return {
       sdkReady: false,
       clientId,
       context: { ...queryContext, source: "fallback" },
       currentUser: fallbackUser,
+      bootDebug,
     };
   }
+
+  await lockLandscape(discord);
+  bootDebug.push("orientation:done");
+
+  let proxySession: SessionContextPayload | null = null;
+  try {
+    bootDebug.push("proxy-session:start");
+    proxySession = await fetchProxySessionContext();
+    bootDebug.push(proxySession ? `proxy-session:ok:${proxySession.userId ?? "no-user"}:${proxySession.guildId ?? "no-guild"}` : "proxy-session:empty");
+  } catch (error) {
+    bootDebug.push(`proxy-session:error:${error instanceof Error ? error.message : "unknown"}`);
+  }
+
+  const mergedContext = mergeContext(queryContext, discord as DiscordSdkWithContext);
+  const context = {
+    ...mergedContext,
+    guildId: proxySession?.guildId ?? mergedContext.guildId,
+    channelId: proxySession?.channelId ?? mergedContext.channelId,
+    instanceId: proxySession?.instanceId ?? mergedContext.instanceId,
+    mode: (proxySession?.guildId ?? mergedContext.guildId) ? "server" : mergedContext.mode,
+  };
+
+  const authenticatedUser = await resolveAuthenticatedUser(discord, fallbackUser, proxySession, bootDebug);
+  const baseUser = proxySession?.displayName && isDiscordSnowflake(authenticatedUser.userId)
+    ? { ...authenticatedUser, displayName: proxySession.displayName }
+    : authenticatedUser;
+  const currentUser = await refineDisplayNameFromParticipants(discord, baseUser);
+  if (isDiscordSnowflake(currentUser.userId)) {
+    writeCachedUser(currentUser);
+    bootDebug.push(`current-user:resolved:${currentUser.userId}`);
+  } else {
+    bootDebug.push(`current-user:pending:${currentUser.userId}`);
+  }
+
+  return {
+    sdkReady: true,
+    clientId,
+    context,
+    currentUser,
+    bootDebug,
+  };
 }
