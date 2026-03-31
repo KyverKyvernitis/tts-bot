@@ -33,8 +33,8 @@ export interface ReadyPayload {
 export interface ListRoomsPayload extends ContextPayload {}
 
 export interface BalancePayload {
-  guildId: string;
-  userId: string;
+  guildId: string | null;
+  userId: string | null;
 }
 
 export interface SessionContextPayload {

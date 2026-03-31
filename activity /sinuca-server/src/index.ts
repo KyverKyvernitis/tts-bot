@@ -197,7 +197,7 @@ async function fetchBalance(guildId: string, userId: string, session?: SessionCo
   const query = { type: "user", guild_id: Number(guildId), user_id: Number(userId) };
   if (!coll) {
     return {
-      balance: { chips: 100, bonusChips: 0 },
+      balance: { chips: 0, bonusChips: 0 },
       debug: {
         source: "fallback_no_mongo",
         sessionUserId: session?.userId ?? null,
@@ -212,18 +212,18 @@ async function fetchBalance(guildId: string, userId: string, session?: SessionCo
         docKeys: [],
         rawChips: null,
         rawBonusChips: null,
-        normalizedChips: 100,
+        normalizedChips: 0,
         normalizedBonusChips: 0,
-        note: "mongo indisponível; usando fallback 100/0",
+        note: "mongo indisponível; usando fallback 0/0",
       },
     };
   }
 
   const doc = await coll.findOne(query, { projection: { chips: 1, bonus_chips: 1, guild_id: 1, user_id: 1, type: 1 } });
-  const chips = Number(doc?.chips ?? 100);
+  const chips = Number(doc?.chips ?? 0);
   const bonusChips = Number(doc?.bonus_chips ?? 0);
   const balance = {
-    chips: Number.isFinite(chips) ? chips : 100,
+    chips: Number.isFinite(chips) ? chips : 0,
     bonusChips: Number.isFinite(bonusChips) ? bonusChips : 0,
   };
   const debug: BalanceDebugSnapshot = {
@@ -338,6 +338,7 @@ wss.on("connection", (ws, req) => {
     }
 
     if (data.type === "init_context") {
+      console.log("[sinuca-init-context]", JSON.stringify(data.payload));
       const nextSession = mergeSession(activeSession, data.payload);
       socketSession.set(ws, nextSession);
       send(ws, { type: "session_context", payload: nextSession });
@@ -358,6 +359,7 @@ wss.on("connection", (ws, req) => {
 
     if (data.type === "get_balance") {
       const merged = mergeWithSession(data.payload, activeSession);
+      console.log("[sinuca-get-balance]", JSON.stringify({ activeSession, request: data.payload, merged }));
       if (!merged.guildId || !merged.userId) {
         send(ws, { type: "balance_state", payload: { chips: 0, bonusChips: 0 } });
         send(ws, { type: "balance_debug", payload: {
