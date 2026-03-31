@@ -11,16 +11,22 @@ interface AuthorizeResult {
   debug: string;
 }
 
-let sdk: DiscordSDK | null = null;
-const cachedUserStorageKey = "sinuca_activity_cached_user";
-const cachedTokenStorageKey = "sinuca_activity_access_token";
-const pkceVerifierStorageKey = "sinuca_activity_pkce_verifier";
+interface TokenExchangeResult {
+  accessToken: string | null;
+  debug: string;
+}
+
+type AuthorizePromptMode = "none" | "consent";
 
 type DiscordSdkWithContext = DiscordSDK & {
   guildId?: string | null;
   channelId?: string | null;
   instanceId?: string | null;
 };
+
+let sdk: DiscordSDK | null = null;
+const cachedUserStorageKey = "sinuca_activity_cached_user";
+const cachedTokenStorageKey = "sinuca_activity_access_token";
 
 function isDiscordSnowflake(value: string | null | undefined): value is string {
   return typeof value === "string" && /^\d{17,20}$/.test(value);
@@ -30,6 +36,12 @@ function normalizeIntString(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  return "unknown";
 }
 
 function buildPendingUser(): ActivityUser {
@@ -111,42 +123,6 @@ function writeCachedToken(token: string) {
   }
 }
 
-async function exchangeCode(code: string, codeVerifier: string | null): Promise<string | null> {
-  try {
-    const response = await fetch("/api/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, code_verifier: codeVerifier }),
-    });
-    const data = await response.json() as { access_token?: string; error?: string; detail?: string | null };
-    if (!response.ok || typeof data.access_token !== "string" || !data.access_token) {
-      console.error("[sinuca-auth] exchange failed", data.error ?? "token_exchange_failed", data.detail ?? null);
-      return { user: null, debug: `authorize:no_code:${promptMode ?? "consent"}` };
-    }
-    return data.access_token;
-  } catch (error) {
-    console.error("[sinuca-auth] exchange exception", error);
-    return null;
-  }
-}
-
-async function authenticateAccessToken(discord: DiscordSDK, accessToken: string): Promise<ActivityUser | null> {
-  try {
-    const authenticated = await discord.commands.authenticate({ access_token: accessToken });
-    const user = (authenticated as { user?: { id?: string; global_name?: string | null; username?: string | null } }).user;
-    if (!isDiscordSnowflake(user?.id)) {
-      console.error("[sinuca-auth] authenticate returned invalid user", user ?? null);
-      return null;
-    }
-    return {
-      userId: user.id,
-      displayName: user.global_name ?? user.username ?? `Jogador ${user.id.slice(-4)}`,
-    };
-  } catch {
-    return null;
-  }
-}
-
 function clearCachedToken() {
   try {
     window.localStorage.removeItem(cachedTokenStorageKey);
@@ -165,43 +141,59 @@ function clearCachedUser() {
   }
 }
 
-function readPkceVerifier(): string | null {
+async function exchangeCode(code: string): Promise<TokenExchangeResult> {
   try {
-    return window.sessionStorage.getItem(pkceVerifierStorageKey) || window.localStorage.getItem(pkceVerifierStorageKey);
-  } catch {
+    const response = await fetch("/api/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const raw = await response.text();
+    let data: { access_token?: string; error?: string; detail?: string | null } = {};
+    try {
+      data = JSON.parse(raw) as { access_token?: string; error?: string; detail?: string | null };
+    } catch {
+      return {
+        accessToken: null,
+        debug: `token:json_invalid:${response.status}:${raw.slice(0, 80) || "empty"}`,
+      };
+    }
+
+    if (!response.ok || typeof data.access_token !== "string" || !data.access_token) {
+      console.error("[sinuca-auth] exchange failed", data.error ?? "token_exchange_failed", data.detail ?? null);
+      return {
+        accessToken: null,
+        debug: `token:http_${response.status}:${data.error ?? "token_exchange_failed"}`,
+      };
+    }
+
+    return { accessToken: data.access_token, debug: `token:http_${response.status}:ok` };
+  } catch (error) {
+    console.error("[sinuca-auth] exchange exception", error);
+    return { accessToken: null, debug: `token:exception:${getErrorMessage(error)}` };
+  }
+}
+
+async function authenticateAccessToken(discord: DiscordSDK, accessToken: string): Promise<ActivityUser | null> {
+  try {
+    const authenticated = await discord.commands.authenticate({ access_token: accessToken });
+    if (!authenticated) {
+      console.error("[sinuca-auth] authenticate returned null");
+      return null;
+    }
+    const user = (authenticated as { user?: { id?: string; global_name?: string | null; username?: string | null } }).user;
+    if (!isDiscordSnowflake(user?.id)) {
+      console.error("[sinuca-auth] authenticate returned invalid user", user ?? null);
+      return null;
+    }
+    return {
+      userId: user.id,
+      displayName: user.global_name ?? user.username ?? `Jogador ${user.id.slice(-4)}`,
+    };
+  } catch (error) {
+    console.error("[sinuca-auth] authenticate exception", error);
     return null;
   }
-}
-
-function writePkceVerifier(verifier: string) {
-  try {
-    window.sessionStorage.setItem(pkceVerifierStorageKey, verifier);
-    window.localStorage.setItem(pkceVerifierStorageKey, verifier);
-  } catch {
-    // ignore storage failures
-  }
-}
-
-function clearPkceVerifier() {
-  try {
-    window.sessionStorage.removeItem(pkceVerifierStorageKey);
-    window.localStorage.removeItem(pkceVerifierStorageKey);
-  } catch {
-    // ignore storage failures
-  }
-}
-
-function base64Url(bytes: Uint8Array): string {
-  const binary = Array.from(bytes).map((b) => String.fromCharCode(b)).join('');
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
-async function createPkcePair(): Promise<{ verifier: string; challenge: string }> {
-  const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
-  const verifier = base64Url(verifierBytes);
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
-  const challenge = base64Url(new Uint8Array(digest));
-  return { verifier, challenge };
 }
 
 async function fetchProxySessionContext(): Promise<ProxySessionResult> {
@@ -215,11 +207,12 @@ async function fetchProxySessionContext(): Promise<ProxySessionResult> {
     });
     debug.push(`health:http:${healthResponse.status}`);
   } catch (error) {
-    debug.push(`health:error:${error instanceof Error ? error.message : "unknown"}`);
+    debug.push(`health:error:${getErrorMessage(error)}`);
   }
 
   try {
-    const response = await fetch("/api/session", {
+    const params = new URLSearchParams(window.location.search);
+    const response = await fetch(`/api/session?${params.toString()}`, {
       method: "GET",
       headers: { "Accept": "application/json" },
       cache: "no-store",
@@ -232,81 +225,90 @@ async function fetchProxySessionContext(): Promise<ProxySessionResult> {
       console.error("[sinuca-auth] proxy session failed", response.status, raw);
       return { session: null, debug };
     }
-    let data: (SessionContextPayload & { proxyPayload?: string; hasProxyPayload?: boolean }) | null = null;
+    let data: (SessionContextPayload & { proxyPayload?: string; hasProxyPayload?: boolean; sessionSource?: string }) | null = null;
     try {
-      data = JSON.parse(raw) as SessionContextPayload & { proxyPayload?: string; hasProxyPayload?: boolean };
+      data = JSON.parse(raw) as SessionContextPayload & { proxyPayload?: string; hasProxyPayload?: boolean; sessionSource?: string };
     } catch (error) {
-      debug.push(`session:json:error:${error instanceof Error ? error.message : "unknown"}`);
+      debug.push(`session:json:error:${getErrorMessage(error)}`);
       return { session: null, debug };
     }
     const hasContext = Boolean(data?.userId || data?.guildId || data?.channelId || data?.instanceId);
     debug.push(`session:proxy:${data?.proxyPayload ?? (data?.hasProxyPayload ? "present" : "unknown")}`);
+    debug.push(`session:source:${data?.sessionSource ?? "unknown"}`);
     debug.push(`session:user:${data?.userId ?? "null"}`);
     debug.push(`session:guild:${data?.guildId ?? "null"}`);
     console.error("[sinuca-auth] proxy session", data);
-    return { session: hasContext ? {
-      userId: normalizeIntString(data?.userId),
-      displayName: typeof data?.displayName === 'string' && data.displayName.trim() ? data.displayName.trim() : null,
-      guildId: normalizeIntString(data?.guildId),
-      channelId: normalizeIntString(data?.channelId),
-      instanceId: normalizeIntString(data?.instanceId),
-    } : null, debug };
+    return {
+      session: hasContext ? {
+        userId: normalizeIntString(data?.userId),
+        displayName: typeof data?.displayName === "string" && data.displayName.trim() ? data.displayName.trim() : null,
+        guildId: normalizeIntString(data?.guildId),
+        channelId: normalizeIntString(data?.channelId),
+        instanceId: normalizeIntString(data?.instanceId),
+      } : null,
+      debug,
+    };
   } catch (error) {
-    debug.push(`session:error:${error instanceof Error ? error.message : "unknown"}`);
+    debug.push(`session:error:${getErrorMessage(error)}`);
     return { session: null, debug };
   }
 }
 
-
-async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, promptMode: "none" | undefined): Promise<AuthorizeResult> {
+async function authorizeAndAuthenticate(
+  discord: DiscordSDK,
+  clientId: string,
+  promptMode: AuthorizePromptMode,
+): Promise<AuthorizeResult> {
   try {
-    const pkce = await createPkcePair();
-    writePkceVerifier(pkce.verifier);
-    const authorizeInput: Record<string, unknown> = {
+    const authorize = await discord.commands.authorize({
       client_id: clientId,
       response_type: "code",
-      state: `sinuca-auth-${promptMode ?? "consent"}`,
+      state: `sinuca-auth-${promptMode}`,
+      prompt: promptMode,
       scope: ["identify"],
-      code_challenge: pkce.challenge,
-      code_challenge_method: "S256",
-    };
-    if (promptMode === "none") {
-      authorizeInput.prompt = "none";
-    }
-    const authorize = await discord.commands.authorize(authorizeInput as never);
-    const code = (authorize as { code?: string }).code;
+    } as never);
+
+    const code = (authorize as { code?: string | null }).code ?? null;
     if (!code) {
-      console.error("[sinuca-auth] authorize returned without code", { promptMode: promptMode ?? "consent" });
-      clearPkceVerifier();
-      return null;
+      console.error("[sinuca-auth] authorize returned without code", { promptMode });
+      return { user: null, debug: `authorize:no_code:${promptMode}` };
     }
-    const verifier = readPkceVerifier();
-    const accessToken = await exchangeCode(code, verifier);
-    clearPkceVerifier();
-    if (!accessToken) return { user: null, debug: "authorize:exchange_failed" };
-    writeCachedToken(accessToken);
-    const authenticated = await authenticateAccessToken(discord, accessToken);
+
+    const tokenResult = await exchangeCode(code);
+    if (!tokenResult.accessToken) {
+      return { user: null, debug: `authorize:exchange_failed:${promptMode}:${tokenResult.debug}` };
+    }
+
+    writeCachedToken(tokenResult.accessToken);
+    const authenticated = await authenticateAccessToken(discord, tokenResult.accessToken);
     if (!authenticated) {
       console.error("[sinuca-auth] authenticate failed after token exchange");
       clearCachedToken();
-      return { user: null, debug: "authorize:authenticate_failed" };
+      clearCachedUser();
+      return { user: null, debug: `authorize:authenticate_failed:${promptMode}` };
     }
+
     const refined = await refineDisplayNameFromParticipants(discord, authenticated);
     writeCachedUser(refined);
-    return { user: refined, debug: "authorize:ok" };
+    return { user: refined, debug: `authorize:ok:${promptMode}` };
   } catch (error) {
-    clearPkceVerifier();
     console.error("[sinuca-auth] authorize/authenticate exception", error);
-    return { user: null, debug: `authorize:exception:${error instanceof Error ? error.message : "unknown"}` };
+    return { user: null, debug: `authorize:exception:${promptMode}:${getErrorMessage(error)}` };
   }
 }
 
-async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityUser, proxySession: SessionContextPayload | null, bootDebug: string[]): Promise<ActivityUser> {
+async function resolveAuthenticatedUser(
+  discord: DiscordSDK,
+  clientId: string | null,
+  fallback: ActivityUser,
+  proxySession: SessionContextPayload | null,
+  bootDebug: string[],
+): Promise<ActivityUser> {
   if (isDiscordSnowflake(proxySession?.userId)) {
     bootDebug.push("proxy-session:user-ok");
     const userFromProxy: ActivityUser = {
       userId: proxySession.userId,
-      displayName: proxySession?.displayName ?? fallback.displayName ?? `Jogador ${proxySession.userId.slice(-4)}`,
+      displayName: proxySession.displayName ?? fallback.displayName ?? `Jogador ${proxySession.userId.slice(-4)}`,
     };
     writeCachedUser(userFromProxy);
     return userFromProxy;
@@ -328,28 +330,22 @@ async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityU
     bootDebug.push("cached-token:none");
   }
 
-  try {
-    const response = await discord.commands.getInstanceConnectedParticipants();
-    const participants = response?.participants ?? [];
-    bootDebug.push(`participants:${participants.length}`);
-    if (participants.length === 1) {
-      const participant = participants[0] as { id?: string; global_name?: string | null; username?: string | null };
-      if (isDiscordSnowflake(participant.id)) {
-        bootDebug.push("participants:single-user-ok");
-        const singleUser = { userId: participant.id, displayName: participant.global_name ?? participant.username ?? fallback.displayName };
-        writeCachedUser(singleUser);
-        return singleUser;
-      }
+  if (clientId) {
+    bootDebug.push("authorize:none:start");
+    const silentAuth = await authorizeAndAuthenticate(discord, clientId, "none");
+    bootDebug.push(silentAuth.debug);
+    if (silentAuth.user && isDiscordSnowflake(silentAuth.user.userId)) {
+      bootDebug.push("authorize:none:user-ok");
+      return silentAuth.user;
     }
-  } catch (error) {
-    bootDebug.push(`participants:error:${error instanceof Error ? error.message : "unknown"}`);
-    console.error("[sinuca-auth] getInstanceConnectedParticipants failed", error);
+  } else {
+    bootDebug.push("authorize:none:skipped:no_client_id");
   }
 
+  bootDebug.push("participants:skipped_for_identity");
   bootDebug.push("user:fallback-pending-auth");
   return fallback;
 }
-
 
 export async function authorizeDiscordUser(): Promise<AuthorizeResult> {
   const discord = getDiscordSdk();
@@ -357,9 +353,9 @@ export async function authorizeDiscordUser(): Promise<AuthorizeResult> {
   if (!discord || !clientId) return { user: null, debug: "authorize:sdk_or_client_missing" };
   try {
     await discord.ready();
-    return await authorizeAndAuthenticate(discord, clientId, undefined);
+    return await authorizeAndAuthenticate(discord, clientId, "consent");
   } catch (error) {
-    return { user: null, debug: `authorize:ready_failed:${error instanceof Error ? error.message : "unknown"}` };
+    return { user: null, debug: `authorize:ready_failed:${getErrorMessage(error)}` };
   }
 }
 
@@ -386,8 +382,8 @@ async function lockLandscape(discord: DiscordSDK) {
 async function refineDisplayNameFromParticipants(discord: DiscordSDK, user: ActivityUser): Promise<ActivityUser> {
   try {
     const response = await discord.commands.getInstanceConnectedParticipants();
-    const participants = response?.participants ?? [];
-    const candidate = participants.find((participant) => {
+    const participants = (response?.participants ?? []) as Array<Record<string, unknown>>;
+    const candidate = participants.find((participant: Record<string, unknown>) => {
       const maybeUserId = String((participant as { id?: string; user_id?: string }).id ?? (participant as { user_id?: string }).user_id ?? "");
       return maybeUserId && maybeUserId === user.userId;
     });
@@ -424,7 +420,7 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
     await discord.ready();
     bootDebug.push("sdk:ready:ok");
   } catch (error) {
-    bootDebug.push(`sdk:ready:error:${error instanceof Error ? error.message : "unknown"}`);
+    bootDebug.push(`sdk:ready:error:${getErrorMessage(error)}`);
     return {
       sdkReady: false,
       clientId,
@@ -445,7 +441,7 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
     bootDebug.push(...proxyResult.debug.map((entry) => `proxy:${entry}`));
     bootDebug.push(proxySession ? `proxy-session:ok:${proxySession.userId ?? "no-user"}:${proxySession.guildId ?? "no-guild"}` : "proxy-session:empty");
   } catch (error) {
-    bootDebug.push(`proxy-session:error:${error instanceof Error ? error.message : "unknown"}`);
+    bootDebug.push(`proxy-session:error:${getErrorMessage(error)}`);
   }
 
   const mergedContext = mergeContext(queryContext, discord as DiscordSdkWithContext);
@@ -457,7 +453,7 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
     mode: (proxySession?.guildId ?? mergedContext.guildId) ? "server" : mergedContext.mode,
   };
 
-  const authenticatedUser = await resolveAuthenticatedUser(discord, fallbackUser, proxySession, bootDebug);
+  const authenticatedUser = await resolveAuthenticatedUser(discord, clientId, fallbackUser, proxySession, bootDebug);
   const baseUser = proxySession?.displayName && isDiscordSnowflake(authenticatedUser.userId)
     ? { ...authenticatedUser, displayName: proxySession.displayName }
     : authenticatedUser;
