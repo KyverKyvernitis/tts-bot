@@ -123,6 +123,7 @@ export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const lastInitKeyRef = useRef<string | null>(null);
   const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
+  const balanceReceiptRef = useRef<number>(0);
 
   useEffect(() => {
     let mounted = true;
@@ -165,6 +166,49 @@ export default function App() {
       resolve(payload);
     };
   });
+
+  const fetchBalanceOverHttp = async (reason: string) => {
+    if (!isServer || !state.context.guildId || !resolvedUser) return false;
+
+    const attempts: string[] = [];
+    const candidates = resolveApiCandidates("/balance");
+    for (const baseUrl of candidates) {
+      const requestUrl = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}guildId=${encodeURIComponent(state.context.guildId)}&userId=${encodeURIComponent(state.currentUser.userId)}`;
+      try {
+        const response = await fetch(requestUrl, {
+          method: "GET",
+          credentials: "same-origin",
+        });
+        const raw = await response.text();
+        let parsed: { balance?: BalanceSnapshot; debug?: BalanceDebugSnapshot; error?: string; detail?: string } | null = null;
+        try {
+          parsed = raw ? JSON.parse(raw) as { balance?: BalanceSnapshot; debug?: BalanceDebugSnapshot; error?: string; detail?: string } : null;
+        } catch {
+          parsed = null;
+        }
+
+        if (response.ok && parsed?.balance && parsed?.debug) {
+          balanceReceiptRef.current = Date.now();
+          setBalance(parsed.balance);
+          setBalanceLoaded(true);
+          setBalanceDebug(parsed.debug);
+          setAuthDebug((current) => current ? `${current} • balance:http_ok:${reason}:${baseUrl}:${response.status}` : `balance:http_ok:${reason}:${baseUrl}:${response.status}`);
+          return true;
+        }
+
+        const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
+        attempts.push(`${baseUrl}:${response.status}:${detail}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "unknown";
+        attempts.push(`${baseUrl}:exception:${message}`);
+      }
+    }
+
+    if (attempts.length) {
+      setAuthDebug((current) => current ? `${current} • balance:http_failed:${reason}:${attempts.join(" | ")}` : `balance:http_failed:${reason}:${attempts.join(" | ")}`);
+    }
+    return false;
+  };
 
   const exchangeTokenOverHttp = async (code: string): Promise<OAuthExchangeResult> => {
     const baseCandidates = resolveApiCandidates("/token");
@@ -339,14 +383,27 @@ export default function App() {
   };
 
   const requestBalance = () => {
-    if (!isServer || !state.context.guildId || authState !== "ready") return;
-    sendMessage({
+    if (!isServer || !state.context.guildId || authState !== "ready" || !resolvedUser) return;
+
+    const socket = socketRef.current;
+    const requestStartedAt = Date.now();
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      void fetchBalanceOverHttp("socket_unavailable");
+      return;
+    }
+
+    socket.send(JSON.stringify({
       type: "get_balance",
       payload: {
         guildId: state.context.guildId,
-        userId: resolvedUser ? state.currentUser.userId : null,
+        userId: state.currentUser.userId,
       },
-    });
+    }));
+
+    window.setTimeout(() => {
+      if (balanceReceiptRef.current >= requestStartedAt) return;
+      void fetchBalanceOverHttp("ws_timeout_fallback");
+    }, 1500);
   };
 
   useEffect(() => {
@@ -422,11 +479,13 @@ export default function App() {
           return;
         }
         if (payload.type === "balance_state") {
+          balanceReceiptRef.current = Date.now();
           setBalance(payload.payload);
           setBalanceLoaded(true);
           return;
         }
         if (payload.type === "balance_debug") {
+          balanceReceiptRef.current = Date.now();
           setBalanceDebug(payload.payload);
           console.log("[sinuca balance_debug]", payload.payload);
         }
@@ -488,10 +547,21 @@ export default function App() {
   }, [bootstrapped, resolvedUser]);
 
   useEffect(() => {
-    if (!bootstrapped || connectionState !== "connected") return;
+    if (!bootstrapped) return;
     if (!state.context.guildId || !resolvedUser) return;
     requestBalance();
   }, [authState, bootstrapped, connectionState, resolvedUser, state.context.guildId, state.currentUser.userId]);
+
+  useEffect(() => {
+    if (!bootstrapped || !isServer || !resolvedUser || !state.context.guildId) return;
+    if (connectionState === "connected") return;
+
+    void fetchBalanceOverHttp("offline_initial");
+    const interval = window.setInterval(() => {
+      void fetchBalanceOverHttp("offline_poll");
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [bootstrapped, connectionState, isServer, resolvedUser, state.context.guildId, state.currentUser.userId]);
 
   useEffect(() => {
     if (!bootstrapped || screen !== "list" || connectionState !== "connected") return;
