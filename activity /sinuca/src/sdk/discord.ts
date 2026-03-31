@@ -1,5 +1,5 @@
 import { Common, DiscordSDK } from "@discord/embedded-app-sdk";
-import type { ActivityBootstrap, ActivityContext, ActivityUser } from "../types/activity";
+import type { ActivityBootstrap, ActivityContext, ActivityUser, SessionContextPayload } from "../types/activity";
 
 let sdk: DiscordSDK | null = null;
 const cachedUserStorageKey = "sinuca_activity_cached_user";
@@ -13,6 +13,12 @@ type DiscordSdkWithContext = DiscordSDK & {
 
 function isDiscordSnowflake(value: string | null | undefined): value is string {
   return typeof value === "string" && /^\d{17,20}$/.test(value);
+}
+
+function normalizeIntString(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
 }
 
 function buildPendingUser(): ActivityUser {
@@ -148,6 +154,30 @@ function clearCachedUser() {
   }
 }
 
+async function fetchProxySessionContext(): Promise<SessionContextPayload | null> {
+  try {
+    const response = await fetch("/api/session", {
+      method: "GET",
+      headers: { "Accept": "application/json" },
+      cache: "no-store",
+      credentials: "include",
+    });
+    if (!response.ok) return null;
+    const data = await response.json() as SessionContextPayload & { proxyPayload?: string };
+    const hasContext = Boolean(data.userId || data.guildId || data.channelId || data.instanceId);
+    return hasContext ? {
+      userId: normalizeIntString(data.userId),
+      displayName: typeof data.displayName === 'string' && data.displayName.trim() ? data.displayName.trim() : null,
+      guildId: normalizeIntString(data.guildId),
+      channelId: normalizeIntString(data.channelId),
+      instanceId: normalizeIntString(data.instanceId),
+    } : null;
+  } catch {
+    return null;
+  }
+}
+
+
 async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, promptMode: "none" | undefined): Promise<ActivityUser | null> {
   try {
     const authorizeInput: Record<string, unknown> = {
@@ -183,7 +213,16 @@ async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, p
   }
 }
 
-async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityUser, clientId: string | null): Promise<ActivityUser> {
+async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityUser, clientId: string | null, proxySession: SessionContextPayload | null): Promise<ActivityUser> {
+  if (isDiscordSnowflake(proxySession?.userId)) {
+    const userFromProxy: ActivityUser = {
+      userId: proxySession.userId,
+      displayName: proxySession?.displayName ?? fallback.displayName ?? `Jogador ${proxySession.userId.slice(-4)}`,
+    };
+    writeCachedUser(userFromProxy);
+    return userFromProxy;
+  }
+
   const cachedToken = readCachedToken();
   if (cachedToken) {
     const fromCachedToken = await authenticateAccessToken(discord, cachedToken);
@@ -274,9 +313,19 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
   try {
     await discord.ready();
     await lockLandscape(discord);
-    const context = mergeContext(queryContext, discord as DiscordSdkWithContext);
-    const authenticatedUser = await resolveAuthenticatedUser(discord, fallbackUser, clientId);
-    const currentUser = await refineDisplayNameFromParticipants(discord, authenticatedUser);
+    const proxySession = await fetchProxySessionContext();
+    const context = {
+      ...mergeContext(queryContext, discord as DiscordSdkWithContext),
+      guildId: proxySession?.guildId ?? mergeContext(queryContext, discord as DiscordSdkWithContext).guildId,
+      channelId: proxySession?.channelId ?? mergeContext(queryContext, discord as DiscordSdkWithContext).channelId,
+      instanceId: proxySession?.instanceId ?? mergeContext(queryContext, discord as DiscordSdkWithContext).instanceId,
+      mode: (proxySession?.guildId ?? mergeContext(queryContext, discord as DiscordSdkWithContext).guildId) ? "server" : mergeContext(queryContext, discord as DiscordSdkWithContext).mode,
+    };
+    const authenticatedUser = await resolveAuthenticatedUser(discord, fallbackUser, clientId, proxySession);
+    const baseUser = proxySession?.displayName && isDiscordSnowflake(authenticatedUser.userId)
+      ? { ...authenticatedUser, displayName: proxySession.displayName }
+      : authenticatedUser;
+    const currentUser = await refineDisplayNameFromParticipants(discord, baseUser);
     if (isDiscordSnowflake(currentUser.userId)) {
       writeCachedUser(currentUser);
     }
