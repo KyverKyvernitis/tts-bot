@@ -23,8 +23,27 @@ function isDiscordSnowflake(value: string | null | undefined): value is string {
 }
 
 function getErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message;
+  if (error instanceof Error) {
+    const bits = [error.name, error.message].filter(Boolean);
+    return bits.length ? bits.join(":") : "error";
+  }
   if (typeof error === "string" && error.trim()) return error;
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>;
+    const pieces: string[] = [];
+    for (const key of ["code", "message", "error", "name", "type", "status", "detail"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim()) pieces.push(`${key}=${value}`);
+      else if (typeof value === "number" || typeof value === "boolean") pieces.push(`${key}=${String(value)}`);
+    }
+    if (pieces.length) return pieces.join(",");
+    try {
+      const raw = JSON.stringify(error);
+      if (raw && raw !== "{}") return raw;
+    } catch {
+      // ignore stringify failures
+    }
+  }
   return "unknown";
 }
 
@@ -155,7 +174,6 @@ export async function authorizeDiscordCode(promptMode: AuthorizePromptMode): Pro
   if (!discord || !clientId) return { code: null, debug: "authorize:sdk_or_client_missing" };
 
   try {
-    await discord.ready();
     const authorize = await discord.commands.authorize({
       client_id: clientId,
       response_type: "code",
