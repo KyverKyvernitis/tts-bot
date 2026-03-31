@@ -217,7 +217,9 @@ button:focus-visible {
 }
 
 .home-lobby--streamlined {
-  align-content: start;
+  min-height: clamp(250px, 31vh, 340px);
+  display: flex;
+  align-items: flex-end;
 }
 
 .menu-buttons,
@@ -231,7 +233,16 @@ button:focus-visible {
 }
 
 .menu-buttons--hero {
-  margin-top: 2px;
+  width: 100%;
+  margin-top: 0;
+}
+
+.menu-buttons--hero-late {
+  margin-top: clamp(22px, 8vh, 72px);
+}
+
+.menu-buttons--single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .menu-button {
@@ -275,6 +286,11 @@ button:focus-visible {
 
 .menu-button--join {
   background: linear-gradient(180deg, rgba(89, 138, 255, 0.10), rgba(7, 26, 62, 0.12));
+}
+
+.menu-button--authorize {
+  min-height: 96px;
+  background: linear-gradient(180deg, rgba(109, 225, 191, 0.14), rgba(14, 59, 50, 0.16));
 }
 
 .menu-button strong {

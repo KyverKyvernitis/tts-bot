@@ -611,48 +611,60 @@ export default function App() {
 
       {screen === "home" ? (
         <section className="home-lobby home-lobby--landscape home-lobby--streamlined">
-          <div className="menu-buttons menu-buttons--home menu-buttons--compact menu-buttons--hero">
-            <button
-              className="menu-button menu-button--create"
-              type="button"
-              disabled={authBusy}
-              aria-busy={authBusy}
-              onClick={() => {
-                if (!resolvedUser) {
+          {!resolvedUser ? (
+            <div className="menu-buttons menu-buttons--single menu-buttons--compact menu-buttons--hero menu-buttons--hero-late">
+              <button
+                className="menu-button menu-button--authorize"
+                type="button"
+                disabled={authBusy}
+                aria-busy={authBusy}
+                onClick={() => {
                   void handleAuthorize();
-                  return;
-                }
-                sendMessage({
-                  type: "create_room",
-                  payload: {
-                    instanceId,
-                    guildId: state.context.guildId,
-                    channelId: state.context.channelId,
-                    mode: state.context.mode,
-                    userId: state.currentUser.userId,
-                    displayName: state.currentUser.displayName,
-                  },
-                });
-              }}
-            >
-              <span className="menu-button__eyebrow">Mesa nova</span>
-              <strong>{resolvedUser ? "Criar mesa" : authBusy ? "Autorizando conta..." : "Autorizar conta"}</strong>
-              <small>{resolvedUser ? "Abra uma mesa." : authBusy ? "Confirme a janela de autorização do Discord." : "Toque para liberar sua conta."}</small>
-            </button>
+                }}
+              >
+                <span className="menu-button__eyebrow">Conta Discord</span>
+                <strong>{authBusy ? "Autorizando conta..." : "Autorizar conta"}</strong>
+                <small>{authBusy ? "Confirme a janela de autorização do Discord." : "Autorize para criar mesa, entrar e usar fichas."}</small>
+              </button>
+            </div>
+          ) : (
+            <div className="menu-buttons menu-buttons--home menu-buttons--compact menu-buttons--hero menu-buttons--hero-late">
+              <button
+                className="menu-button menu-button--create"
+                type="button"
+                onClick={() => {
+                  sendMessage({
+                    type: "create_room",
+                    payload: {
+                      instanceId,
+                      guildId: state.context.guildId,
+                      channelId: state.context.channelId,
+                      mode: state.context.mode,
+                      userId: state.currentUser.userId,
+                      displayName: state.currentUser.displayName,
+                    },
+                  });
+                }}
+              >
+                <span className="menu-button__eyebrow">Mesa nova</span>
+                <strong>Criar mesa</strong>
+                <small>Abra uma mesa.</small>
+              </button>
 
-            <button
-              className="menu-button menu-button--join"
-              type="button"
-              onClick={() => {
-                setScreen("list");
-                requestRooms();
-              }}
-            >
-              <span className="menu-button__eyebrow">Mesas abertas</span>
-              <strong>Entrar</strong>
-              <small>Veja as mesas abertas.</small>
-            </button>
-          </div>
+              <button
+                className="menu-button menu-button--join"
+                type="button"
+                onClick={() => {
+                  setScreen("list");
+                  requestRooms();
+                }}
+              >
+                <span className="menu-button__eyebrow">Mesas abertas</span>
+                <strong>Entrar</strong>
+                <small>Veja as mesas abertas.</small>
+              </button>
+            </div>
+          )}
         </section>
       ) : null}
 
