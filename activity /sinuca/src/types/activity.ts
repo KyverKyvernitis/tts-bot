@@ -1,4 +1,5 @@
 export type ActivityMode = "server" | "casual";
+export type TableType = "stake" | "casual";
 export type RoomStatus = "waiting" | "ready" | "in_game";
 
 export interface ActivityContext {
@@ -36,6 +37,8 @@ export interface RoomSnapshot {
   guildId: string | null;
   channelId: string | null;
   mode: ActivityMode;
+  tableType: TableType;
+  stakeChips: number | null;
   hostUserId: string;
   hostDisplayName: string;
   players: RoomPlayer[];
