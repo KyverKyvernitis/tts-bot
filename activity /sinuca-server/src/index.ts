@@ -44,6 +44,7 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 app.use((req, _res, next) => {
   console.log("[sinuca-http]", JSON.stringify({
     method: req.method,
@@ -152,12 +153,17 @@ async function exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessT
 }
 
 function handleTokenRequest(req: Request, res: Response) {
-  const code = typeof req.body?.code === "string" ? req.body.code : "";
+  const bodyCode = typeof req.body?.code === "string" ? req.body.code : "";
+  const queryCode = typeof req.query?.code === "string" ? req.query.code : "";
+  const code = bodyCode || queryCode;
+  const codeSource = bodyCode ? "body" : (queryCode ? "query" : "missing");
   console.log("[sinuca-token-route]", JSON.stringify({
+    method: req.method,
     url: req.url ?? null,
     origin: req.headers.origin ?? null,
     referer: req.headers.referer ?? null,
     ua: req.headers["user-agent"] ?? null,
+    codeSource,
     hasCode: Boolean(code),
     codePrefix: code ? code.slice(0, 12) : null,
   }));
@@ -176,6 +182,8 @@ function handleTokenRequest(req: Request, res: Response) {
 
 app.post("/token", handleTokenRequest);
 app.post("/api/token", handleTokenRequest);
+app.get("/token", handleTokenRequest);
+app.get("/api/token", handleTokenRequest);
 
 const server = createServer(app);
 server.on("upgrade", (req) => {
