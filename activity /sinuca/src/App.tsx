@@ -113,7 +113,6 @@ export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const lastInitKeyRef = useRef<string | null>(null);
   const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
-  const silentAttemptedRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
@@ -253,7 +252,7 @@ export default function App() {
     setAuthBusy(true);
     setErrorMessage(null);
     try {
-      setAuthDebug("authorize:consent:start");
+      setAuthDebug("authorize:consent:start:user_gesture");
       const result = await runAuthorizeFlow("consent");
       setAuthDebug(result.debug);
       const user = result.user;
@@ -269,7 +268,7 @@ export default function App() {
       setAuthState("ready");
     } catch (error) {
       setAuthDebug(`authorize:exception:${error instanceof Error ? error.message : "unknown"}`);
-      setErrorMessage("falha ao abrir o fluxo de autorização");
+      setErrorMessage("falha ao abrir o fluxo de autorização; veja o debug logo abaixo");
     } finally {
       setAuthBusy(false);
     }
@@ -440,25 +439,13 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped) return;
-    if (resolvedUser) return;
-    if (authBusy) return;
-    if (silentAttemptedRef.current) return;
-
-    silentAttemptedRef.current = true;
-    setAuthState("checking");
-    setAuthDebug("authorize:none:start");
-
-    void (async () => {
-      const result = await runAuthorizeFlow("none");
-      setAuthDebug(result.debug);
-      if (result.user && isResolvedDiscordUserId(result.user.userId)) {
-        setState((current: ActivityBootstrap) => ({ ...current, currentUser: result.user! }));
-        setAuthState("ready");
-        return;
-      }
-      setAuthState("needs_consent");
-    })();
-  }, [authBusy, bootstrapped, resolvedUser]);
+    if (resolvedUser) {
+      setAuthState("ready");
+      return;
+    }
+    setAuthState("needs_consent");
+    setAuthDebug((current) => current ?? "authorize:waiting_for_user_tap");
+  }, [bootstrapped, resolvedUser]);
 
   useEffect(() => {
     if (!bootstrapped || connectionState !== "connected") return;
