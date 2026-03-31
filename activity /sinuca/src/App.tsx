@@ -113,7 +113,7 @@ export default function App() {
       const user = await authorizeDiscordUser();
       if (!user || !isResolvedDiscordUserId(user.userId)) {
         setAuthState("needs_consent");
-        setErrorMessage("não foi possível confirmar sua conta agora; tente novamente");
+        setErrorMessage("não foi possível confirmar sua conta agora; a activity não recebeu uma identidade válida");
         return;
       }
       setState((current) => ({
