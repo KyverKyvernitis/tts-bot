@@ -4,6 +4,7 @@ import type { ActivityBootstrap, ActivityContext, ActivityUser, SessionContextPa
 let sdk: DiscordSDK | null = null;
 const cachedUserStorageKey = "sinuca_activity_cached_user";
 const cachedTokenStorageKey = "sinuca_activity_access_token";
+const pkceVerifierStorageKey = "sinuca_activity_pkce_verifier";
 
 type DiscordSdkWithContext = DiscordSDK & {
   guildId?: string | null;
@@ -100,12 +101,12 @@ function writeCachedToken(token: string) {
   }
 }
 
-async function exchangeCode(code: string): Promise<string | null> {
+async function exchangeCode(code: string, codeVerifier: string | null): Promise<string | null> {
   try {
     const response = await fetch("/api/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
+      body: JSON.stringify({ code, code_verifier: codeVerifier }),
     });
     const data = await response.json() as { access_token?: string; error?: string; detail?: string | null };
     if (!response.ok || typeof data.access_token !== "string" || !data.access_token) {
@@ -154,6 +155,45 @@ function clearCachedUser() {
   }
 }
 
+function readPkceVerifier(): string | null {
+  try {
+    return window.sessionStorage.getItem(pkceVerifierStorageKey) || window.localStorage.getItem(pkceVerifierStorageKey);
+  } catch {
+    return null;
+  }
+}
+
+function writePkceVerifier(verifier: string) {
+  try {
+    window.sessionStorage.setItem(pkceVerifierStorageKey, verifier);
+    window.localStorage.setItem(pkceVerifierStorageKey, verifier);
+  } catch {
+    // ignore storage failures
+  }
+}
+
+function clearPkceVerifier() {
+  try {
+    window.sessionStorage.removeItem(pkceVerifierStorageKey);
+    window.localStorage.removeItem(pkceVerifierStorageKey);
+  } catch {
+    // ignore storage failures
+  }
+}
+
+function base64Url(bytes: Uint8Array): string {
+  const binary = Array.from(bytes).map((b) => String.fromCharCode(b)).join('');
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+async function createPkcePair(): Promise<{ verifier: string; challenge: string }> {
+  const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
+  const verifier = base64Url(verifierBytes);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  const challenge = base64Url(new Uint8Array(digest));
+  return { verifier, challenge };
+}
+
 async function fetchProxySessionContext(): Promise<SessionContextPayload | null> {
   try {
     const response = await fetch("/api/session", {
@@ -162,9 +202,13 @@ async function fetchProxySessionContext(): Promise<SessionContextPayload | null>
       cache: "no-store",
       credentials: "include",
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      console.error("[sinuca-auth] proxy session failed", response.status);
+      return null;
+    }
     const data = await response.json() as SessionContextPayload & { proxyPayload?: string };
     const hasContext = Boolean(data.userId || data.guildId || data.channelId || data.instanceId);
+    console.error("[sinuca-auth] proxy session", data);
     return hasContext ? {
       userId: normalizeIntString(data.userId),
       displayName: typeof data.displayName === 'string' && data.displayName.trim() ? data.displayName.trim() : null,
@@ -180,11 +224,15 @@ async function fetchProxySessionContext(): Promise<SessionContextPayload | null>
 
 async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, promptMode: "none" | undefined): Promise<ActivityUser | null> {
   try {
+    const pkce = await createPkcePair();
+    writePkceVerifier(pkce.verifier);
     const authorizeInput: Record<string, unknown> = {
       client_id: clientId,
       response_type: "code",
       state: `sinuca-auth-${promptMode ?? "consent"}`,
       scope: ["identify"],
+      code_challenge: pkce.challenge,
+      code_challenge_method: "S256",
     };
     if (promptMode === "none") {
       authorizeInput.prompt = "none";
@@ -193,9 +241,12 @@ async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, p
     const code = (authorize as { code?: string }).code;
     if (!code) {
       console.error("[sinuca-auth] authorize returned without code", { promptMode: promptMode ?? "consent" });
+      clearPkceVerifier();
       return null;
     }
-    const accessToken = await exchangeCode(code);
+    const verifier = readPkceVerifier();
+    const accessToken = await exchangeCode(code, verifier);
+    clearPkceVerifier();
     if (!accessToken) return null;
     writeCachedToken(accessToken);
     const authenticated = await authenticateAccessToken(discord, accessToken);
@@ -208,6 +259,7 @@ async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, p
     writeCachedUser(refined);
     return refined;
   } catch (error) {
+    clearPkceVerifier();
     console.error("[sinuca-auth] authorize/authenticate exception", error);
     return null;
   }
@@ -232,6 +284,21 @@ async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityU
     }
     clearCachedToken();
     clearCachedUser();
+  }
+
+  try {
+    const response = await discord.commands.getInstanceConnectedParticipants();
+    const participants = response?.participants ?? [];
+    if (participants.length === 1) {
+      const participant = participants[0] as { id?: string; global_name?: string | null; username?: string | null };
+      if (isDiscordSnowflake(participant.id)) {
+        const singleUser = { userId: participant.id, displayName: participant.global_name ?? participant.username ?? fallback.displayName };
+        writeCachedUser(singleUser);
+        return singleUser;
+      }
+    }
+  } catch (error) {
+    console.error('[sinuca-auth] getInstanceConnectedParticipants failed', error);
   }
 
   if (clientId) {
@@ -282,7 +349,7 @@ async function refineDisplayNameFromParticipants(discord: DiscordSDK, user: Acti
     const response = await discord.commands.getInstanceConnectedParticipants();
     const participants = response?.participants ?? [];
     const candidate = participants.find((participant) => {
-      const maybeUserId = String((participant as { user_id?: string }).user_id ?? "");
+      const maybeUserId = String((participant as { id?: string; user_id?: string }).id ?? (participant as { user_id?: string }).user_id ?? "");
       return maybeUserId && maybeUserId === user.userId;
     });
     if (!candidate) return user;
