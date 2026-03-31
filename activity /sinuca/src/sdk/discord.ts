@@ -95,13 +95,6 @@ async function resolveParticipantUser(discord: DiscordSDK, fallback: ActivityUse
   try {
     const response = await discord.commands.getInstanceConnectedParticipants();
     const participants = response?.participants ?? [];
-    if (participants.length === 1 && participants[0]?.id) {
-      const participant = participants[0];
-      return {
-        userId: String(participant.id),
-        displayName: String(participant.global_name ?? participant.username ?? fallback.displayName),
-      };
-    }
 
     const cached = readCachedUser();
     if (cached) {
@@ -112,6 +105,14 @@ async function resolveParticipantUser(discord: DiscordSDK, fallback: ActivityUse
           displayName: String(matched.global_name ?? matched.username ?? cached.displayName),
         };
       }
+    }
+
+    const firstValid = participants.find((participant) => participant?.id);
+    if (firstValid?.id) {
+      return {
+        userId: String(firstValid.id),
+        displayName: String(firstValid.global_name ?? firstValid.username ?? fallback.displayName),
+      };
     }
   } catch {
     // ignore participant lookup failures and keep fallback user
