@@ -39,7 +39,6 @@ const discordRedirectUri = process.env.DISCORD_REDIRECT_URI || `https://${proces
 
 app.post("/token", async (req, res) => {
   const code = typeof req.body?.code === "string" ? req.body.code : "";
-  const requestRedirectUri = typeof req.body?.redirect_uri === "string" ? req.body.redirect_uri : "";
   if (!code) {
     res.status(400).json({ error: "missing_code" });
     return;
@@ -55,7 +54,8 @@ app.post("/token", async (req, res) => {
     params.set("client_secret", discordClientSecret);
     params.set("grant_type", "authorization_code");
     params.set("code", code);
-    params.set("redirect_uri", requestRedirectUri || discordRedirectUri);
+    params.set("redirect_uri", discordRedirectUri);
+    console.log("[sinuca-oauth] exchanging code", JSON.stringify({ redirectUri: discordRedirectUri, codeLength: code.length }));
 
     const response = await fetch("https://discord.com/api/v10/oauth2/token", {
       method: "POST",
