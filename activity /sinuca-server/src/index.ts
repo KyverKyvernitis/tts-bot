@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from "express";
 import { createServer } from "http";
-import { MongoClient } from "mongodb";
+import { Long, MongoClient } from "mongodb";
 import type { IncomingMessage } from "http";
 import type { WebSocket } from "ws";
 import { WebSocketServer } from "ws";
@@ -343,6 +343,37 @@ function mergeWithSession<T extends Record<string, any>>(payload: T, session: Se
   };
 }
 
+
+
+function toMongoLong(value: string | null | undefined): Long | null {
+  const normalized = normalizeIntString(value);
+  if (!normalized || !/^\d+$/.test(normalized)) return null;
+  try {
+    return Long.fromString(normalized, true);
+  } catch {
+    return null;
+  }
+}
+
+function buildBalanceQuery(guildId: string, userId: string): { mongo: { type: string; guild_id: Long | string; user_id: Long | string }; debug: Record<string, string | null> } {
+  const normalizedGuildId = normalizeIntString(guildId);
+  const normalizedUserId = normalizeIntString(userId);
+  const guildLong = toMongoLong(normalizedGuildId);
+  const userLong = toMongoLong(normalizedUserId);
+
+  return {
+    mongo: {
+      type: "user",
+      guild_id: guildLong ?? normalizedGuildId ?? "",
+      user_id: userLong ?? normalizedUserId ?? "",
+    },
+    debug: {
+      type: "user",
+      guild_id: normalizedGuildId,
+      user_id: normalizedUserId,
+    },
+  };
+}
 interface BalanceLookupResult {
   balance: BalanceSnapshot;
   debug: BalanceDebugSnapshot;
@@ -350,7 +381,7 @@ interface BalanceLookupResult {
 
 async function fetchBalance(guildId: string, userId: string, session?: SessionContextPayload): Promise<BalanceLookupResult> {
   const coll = await ensureMongo();
-  const query = { type: "user", guild_id: Number(guildId), user_id: Number(userId) };
+  const querySpec = buildBalanceQuery(guildId, userId);
   if (!coll) {
     return {
       balance: { chips: 0, bonusChips: 0 },
@@ -363,7 +394,7 @@ async function fetchBalance(guildId: string, userId: string, session?: SessionCo
         mongoConnected: false,
         mongoDbName,
         mongoCollectionName,
-        query,
+        query: querySpec.debug,
         docFound: false,
         docKeys: [],
         rawChips: null,
@@ -375,7 +406,17 @@ async function fetchBalance(guildId: string, userId: string, session?: SessionCo
     };
   }
 
-  const doc = await coll.findOne(query, { projection: { chips: 1, bonus_chips: 1, guild_id: 1, user_id: 1, type: 1 } });
+  let doc = await coll.findOne(querySpec.mongo, { projection: { chips: 1, bonus_chips: 1, guild_id: 1, user_id: 1, type: 1 } });
+  let querySource = querySpec.mongo.guild_id instanceof Long || querySpec.mongo.user_id instanceof Long ? "mongo_long" : "mongo_string";
+
+  if (!doc) {
+    const stringQuery = { type: "user", guild_id: querySpec.debug.guild_id ?? "", user_id: querySpec.debug.user_id ?? "" };
+    if (stringQuery.guild_id && stringQuery.user_id) {
+      doc = await coll.findOne(stringQuery, { projection: { chips: 1, bonus_chips: 1, guild_id: 1, user_id: 1, type: 1 } });
+      if (doc) querySource = "mongo_string";
+    }
+  }
+
   const chips = Number(doc?.chips ?? 0);
   const bonusChips = Number(doc?.bonus_chips ?? 0);
   const balance = {
@@ -383,7 +424,7 @@ async function fetchBalance(guildId: string, userId: string, session?: SessionCo
     bonusChips: Number.isFinite(bonusChips) ? bonusChips : 0,
   };
   const debug: BalanceDebugSnapshot = {
-    source: doc ? "mongo_doc" : "mongo_default",
+    source: doc ? querySource : "mongo_default",
     sessionUserId: session?.userId ?? null,
     sessionGuildId: session?.guildId ?? null,
     requestUserId: userId,
@@ -391,7 +432,7 @@ async function fetchBalance(guildId: string, userId: string, session?: SessionCo
     mongoConnected: true,
     mongoDbName,
     mongoCollectionName,
-    query,
+    query: querySpec.debug,
     docFound: Boolean(doc),
     docKeys: doc ? Object.keys(doc).sort() : [],
     rawChips: doc?.chips ?? null,
@@ -436,7 +477,7 @@ async function handleBalance(req: Request, res: Response) {
       mongoConnected: Boolean(mongoUri),
       mongoDbName,
       mongoCollectionName,
-      query: { type: "user", guild_id: guildId ? Number(guildId) : null, user_id: userId ? Number(userId) : null },
+      query: { type: "user", guild_id: guildId ?? null, user_id: userId ?? null },
       docFound: false,
       docKeys: [],
       rawChips: null,
@@ -463,7 +504,7 @@ async function handleBalance(req: Request, res: Response) {
       mongoConnected: Boolean(mongoUri),
       mongoDbName,
       mongoCollectionName,
-      query: { type: "user", guild_id: Number(guildId), user_id: Number(userId) },
+      query: { type: "user", guild_id: guildId, user_id: userId },
       docFound: false,
       docKeys: [],
       rawChips: null,
@@ -514,7 +555,7 @@ async function pushBalance(ws: WebSocket, guildId: string, userId: string, force
         mongoConnected: Boolean(mongoUri),
         mongoDbName,
         mongoCollectionName,
-        query: { type: "user", guild_id: Number(guildId), user_id: Number(userId) },
+        query: { type: "user", guild_id: guildId, user_id: userId },
         docFound: false,
         docKeys: [],
         rawChips: null,
