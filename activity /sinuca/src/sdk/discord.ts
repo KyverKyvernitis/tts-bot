@@ -134,13 +134,13 @@ async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityU
 
   if (!clientId) return fallback;
 
-  const attemptAuthorize = async (prompt: "none" | "consent"): Promise<ActivityUser | null> => {
+  const attemptAuthorize = async (): Promise<ActivityUser | null> => {
     try {
       const authorize = await discord.commands.authorize({
         client_id: clientId,
         response_type: "code",
         state: "sinuca-auth",
-        prompt,
+        prompt: "none",
         scope: ["identify"],
       });
       const code = (authorize as { code?: string }).code;
@@ -154,16 +154,10 @@ async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityU
     }
   };
 
-  const silent = await attemptAuthorize("none");
+  const silent = await attemptAuthorize();
   if (silent) {
     writeCachedUser(silent);
     return silent;
-  }
-
-  const interactive = await attemptAuthorize("consent");
-  if (interactive) {
-    writeCachedUser(interactive);
-    return interactive;
   }
 
   return fallback;
