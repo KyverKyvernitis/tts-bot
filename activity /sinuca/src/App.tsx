@@ -90,6 +90,7 @@ export default function App() {
     bootstrapDiscord().then((next) => {
       if (!mounted) return;
       setState(next);
+      setAuthDebug(next.bootDebug.length ? next.bootDebug[next.bootDebug.length - 1] : null);
       setAuthState(isResolvedDiscordUserId(next.currentUser.userId) ? "ready" : "needs_consent");
       setBootstrapped(true);
     }).catch(() => {
