@@ -1,6 +1,16 @@
 import { Common, DiscordSDK } from "@discord/embedded-app-sdk";
 import type { ActivityBootstrap, ActivityContext, ActivityUser, SessionContextPayload } from "../types/activity";
 
+interface ProxySessionResult {
+  session: SessionContextPayload | null;
+  debug: string[];
+}
+
+interface AuthorizeResult {
+  user: ActivityUser | null;
+  debug: string;
+}
+
 let sdk: DiscordSDK | null = null;
 const cachedUserStorageKey = "sinuca_activity_cached_user";
 const cachedTokenStorageKey = "sinuca_activity_access_token";
@@ -111,7 +121,7 @@ async function exchangeCode(code: string, codeVerifier: string | null): Promise<
     const data = await response.json() as { access_token?: string; error?: string; detail?: string | null };
     if (!response.ok || typeof data.access_token !== "string" || !data.access_token) {
       console.error("[sinuca-auth] exchange failed", data.error ?? "token_exchange_failed", data.detail ?? null);
-      return null;
+      return { user: null, debug: `authorize:no_code:${promptMode ?? "consent"}` };
     }
     return data.access_token;
   } catch (error) {
@@ -194,7 +204,20 @@ async function createPkcePair(): Promise<{ verifier: string; challenge: string }
   return { verifier, challenge };
 }
 
-async function fetchProxySessionContext(): Promise<SessionContextPayload | null> {
+async function fetchProxySessionContext(): Promise<ProxySessionResult> {
+  const debug: string[] = [];
+  try {
+    const healthResponse = await fetch("/api/health", {
+      method: "GET",
+      headers: { "Accept": "application/json" },
+      cache: "no-store",
+      credentials: "include",
+    });
+    debug.push(`health:http:${healthResponse.status}`);
+  } catch (error) {
+    debug.push(`health:error:${error instanceof Error ? error.message : "unknown"}`);
+  }
+
   try {
     const response = await fetch("/api/session", {
       method: "GET",
@@ -202,27 +225,40 @@ async function fetchProxySessionContext(): Promise<SessionContextPayload | null>
       cache: "no-store",
       credentials: "include",
     });
+    debug.push(`session:http:${response.status}`);
+    const raw = await response.text();
+    debug.push(`session:text:${raw.slice(0, 120).replace(/\s+/g, " ") || "empty"}`);
     if (!response.ok) {
-      console.error("[sinuca-auth] proxy session failed", response.status);
-      return null;
+      console.error("[sinuca-auth] proxy session failed", response.status, raw);
+      return { session: null, debug };
     }
-    const data = await response.json() as SessionContextPayload & { proxyPayload?: string };
-    const hasContext = Boolean(data.userId || data.guildId || data.channelId || data.instanceId);
+    let data: (SessionContextPayload & { proxyPayload?: string; hasProxyPayload?: boolean }) | null = null;
+    try {
+      data = JSON.parse(raw) as SessionContextPayload & { proxyPayload?: string; hasProxyPayload?: boolean };
+    } catch (error) {
+      debug.push(`session:json:error:${error instanceof Error ? error.message : "unknown"}`);
+      return { session: null, debug };
+    }
+    const hasContext = Boolean(data?.userId || data?.guildId || data?.channelId || data?.instanceId);
+    debug.push(`session:proxy:${data?.proxyPayload ?? (data?.hasProxyPayload ? "present" : "unknown")}`);
+    debug.push(`session:user:${data?.userId ?? "null"}`);
+    debug.push(`session:guild:${data?.guildId ?? "null"}`);
     console.error("[sinuca-auth] proxy session", data);
-    return hasContext ? {
-      userId: normalizeIntString(data.userId),
-      displayName: typeof data.displayName === 'string' && data.displayName.trim() ? data.displayName.trim() : null,
-      guildId: normalizeIntString(data.guildId),
-      channelId: normalizeIntString(data.channelId),
-      instanceId: normalizeIntString(data.instanceId),
-    } : null;
-  } catch {
-    return null;
+    return { session: hasContext ? {
+      userId: normalizeIntString(data?.userId),
+      displayName: typeof data?.displayName === 'string' && data.displayName.trim() ? data.displayName.trim() : null,
+      guildId: normalizeIntString(data?.guildId),
+      channelId: normalizeIntString(data?.channelId),
+      instanceId: normalizeIntString(data?.instanceId),
+    } : null, debug };
+  } catch (error) {
+    debug.push(`session:error:${error instanceof Error ? error.message : "unknown"}`);
+    return { session: null, debug };
   }
 }
 
 
-async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, promptMode: "none" | undefined): Promise<ActivityUser | null> {
+async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, promptMode: "none" | undefined): Promise<AuthorizeResult> {
   try {
     const pkce = await createPkcePair();
     writePkceVerifier(pkce.verifier);
@@ -247,21 +283,21 @@ async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, p
     const verifier = readPkceVerifier();
     const accessToken = await exchangeCode(code, verifier);
     clearPkceVerifier();
-    if (!accessToken) return null;
+    if (!accessToken) return { user: null, debug: "authorize:exchange_failed" };
     writeCachedToken(accessToken);
     const authenticated = await authenticateAccessToken(discord, accessToken);
     if (!authenticated) {
       console.error("[sinuca-auth] authenticate failed after token exchange");
       clearCachedToken();
-      return null;
+      return { user: null, debug: "authorize:authenticate_failed" };
     }
     const refined = await refineDisplayNameFromParticipants(discord, authenticated);
     writeCachedUser(refined);
-    return refined;
+    return { user: refined, debug: "authorize:ok" };
   } catch (error) {
     clearPkceVerifier();
     console.error("[sinuca-auth] authorize/authenticate exception", error);
-    return null;
+    return { user: null, debug: `authorize:exception:${error instanceof Error ? error.message : "unknown"}` };
   }
 }
 
@@ -315,15 +351,15 @@ async function resolveAuthenticatedUser(discord: DiscordSDK, fallback: ActivityU
 }
 
 
-export async function authorizeDiscordUser(): Promise<ActivityUser | null> {
+export async function authorizeDiscordUser(): Promise<AuthorizeResult> {
   const discord = getDiscordSdk();
   const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined) ?? null;
-  if (!discord || !clientId) return null;
+  if (!discord || !clientId) return { user: null, debug: "authorize:sdk_or_client_missing" };
   try {
     await discord.ready();
     return await authorizeAndAuthenticate(discord, clientId, undefined);
-  } catch {
-    return null;
+  } catch (error) {
+    return { user: null, debug: `authorize:ready_failed:${error instanceof Error ? error.message : "unknown"}` };
   }
 }
 
@@ -404,7 +440,9 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
   let proxySession: SessionContextPayload | null = null;
   try {
     bootDebug.push("proxy-session:start");
-    proxySession = await fetchProxySessionContext();
+    const proxyResult = await fetchProxySessionContext();
+    proxySession = proxyResult.session;
+    bootDebug.push(...proxyResult.debug.map((entry) => `proxy:${entry}`));
     bootDebug.push(proxySession ? `proxy-session:ok:${proxySession.userId ?? "no-user"}:${proxySession.guildId ?? "no-guild"}` : "proxy-session:empty");
   } catch (error) {
     bootDebug.push(`proxy-session:error:${error instanceof Error ? error.message : "unknown"}`);
