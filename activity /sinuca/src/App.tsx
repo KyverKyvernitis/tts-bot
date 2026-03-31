@@ -5,6 +5,7 @@ import {
   bootstrapDiscord,
   clearCachedToken,
   getDiscordSdk,
+  getOAuthRedirectUri,
   writeCachedToken,
   writeCachedUser,
 } from "./sdk/discord";
@@ -156,7 +157,7 @@ export default function App() {
     };
   });
 
-  const exchangeTokenOverHttp = async (code: string): Promise<OAuthExchangeResult> => {
+  const exchangeTokenOverHttp = async (code: string, redirectUri: string | null): Promise<OAuthExchangeResult> => {
     const candidates = [
       resolveApiUrl("/token"),
       `${window.location.origin}/token`,
@@ -167,7 +168,7 @@ export default function App() {
         const response = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code }),
+          body: JSON.stringify({ code, redirectUri }),
         });
         const raw = await response.text();
         let parsed: { access_token?: string; error?: string; detail?: string } | null = null;
@@ -202,19 +203,24 @@ export default function App() {
   };
 
   const runAuthorizeFlow = async (promptMode: "none" | "consent"): Promise<{ user: ActivityUser | null; debug: string }> => {
+    const redirectUri = getOAuthRedirectUri();
     const authorizeResult = await authorizeDiscordCode(promptMode);
     if (!authorizeResult.code) {
       return { user: null, debug: authorizeResult.debug };
     }
 
+    if (!redirectUri) {
+      return { user: null, debug: `authorize:redirect_uri_missing:${promptMode}` };
+    }
+
     setAuthDebug(`${authorizeResult.debug}:exchange_http:start`);
-    let tokenResult = await exchangeTokenOverHttp(authorizeResult.code);
+    let tokenResult = await exchangeTokenOverHttp(authorizeResult.code, redirectUri);
 
     if ((!tokenResult.ok || !tokenResult.accessToken) && socketRef.current?.readyState === WebSocket.OPEN) {
       setAuthDebug(`${authorizeResult.debug}:exchange_ws:fallback`);
       socketRef.current.send(JSON.stringify({
         type: "exchange_token",
-        payload: { code: authorizeResult.code },
+        payload: { code: authorizeResult.code, redirectUri },
       }));
 
       try {
