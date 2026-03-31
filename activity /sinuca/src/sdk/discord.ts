@@ -18,6 +18,19 @@ let sdk: DiscordSDK | null = null;
 const cachedUserStorageKey = "sinuca_activity_cached_user";
 const cachedTokenStorageKey = "sinuca_activity_access_token";
 
+export function getOAuthRedirectUri(): string | null {
+  const configured = (import.meta.env.VITE_DISCORD_REDIRECT_URI as string | undefined)?.trim();
+  if (configured) return configured;
+  if (typeof window === "undefined") return null;
+  const currentHref = window.location.href;
+  if (!currentHref) return null;
+  try {
+    return new URL("/", currentHref).toString();
+  } catch {
+    return window.location.origin || null;
+  }
+}
+
 function isDiscordSnowflake(value: string | null | undefined): value is string {
   return typeof value === "string" && /^\d{17,20}$/.test(value);
 }
@@ -171,12 +184,15 @@ export async function authenticateDiscordAccessToken(discord: DiscordSDK, access
 export async function authorizeDiscordCode(promptMode: AuthorizePromptMode): Promise<AuthorizeCodeResult> {
   const discord = getDiscordSdk();
   const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined) ?? null;
+  const redirectUri = getOAuthRedirectUri();
   if (!discord || !clientId) return { code: null, debug: "authorize:sdk_or_client_missing" };
+  if (!redirectUri) return { code: null, debug: "authorize:redirect_uri_missing" };
 
   try {
     const authorize = await discord.commands.authorize({
       client_id: clientId,
       response_type: "code",
+      redirect_uri: redirectUri,
       state: `sinuca-auth-${promptMode}`,
       prompt: promptMode,
       scope: ["identify"],
@@ -184,13 +200,13 @@ export async function authorizeDiscordCode(promptMode: AuthorizePromptMode): Pro
 
     const code = (authorize as { code?: string | null }).code ?? null;
     if (!code) {
-      console.error("[sinuca-auth] authorize returned without code", { promptMode });
+      console.error("[sinuca-auth] authorize returned without code", { promptMode, redirectUri });
       return { code: null, debug: `authorize:no_code:${promptMode}` };
     }
 
     return { code, debug: `authorize:code_ok:${promptMode}` };
   } catch (error) {
-    console.error("[sinuca-auth] authorize exception", error);
+    console.error("[sinuca-auth] authorize exception", { error, promptMode, redirectUri });
     return { code: null, debug: `authorize:exception:${promptMode}:${getErrorMessage(error)}` };
   }
 }
