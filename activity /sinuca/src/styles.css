@@ -83,15 +83,15 @@ button:focus-visible {
 }
 
 .hero-card {
-  padding: 18px 22px;
+  padding: 16px 20px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
+  gap: 12px;
   align-items: center;
 }
 
 .hero-card--compact h1 {
-  font-size: clamp(2rem, 3.4vw, 3.6rem);
+  font-size: clamp(2rem, 3vw, 3.2rem);
 }
 
 .hero-card__copy {
@@ -99,10 +99,15 @@ button:focus-visible {
 }
 
 .hero-card__meta {
-  min-width: 290px;
-  display: grid;
+  min-width: 0;
+}
+
+.hero-card__meta--hud {
+  display: flex;
   gap: 10px;
-  justify-items: stretch;
+  align-items: stretch;
+  justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 .hero-card h1,
@@ -147,6 +152,43 @@ button:focus-visible {
   color: #f2f8ff;
 }
 
+.hero-stat {
+  min-width: 128px;
+  padding: 10px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(238, 246, 255, 0.14);
+  background: rgba(7, 19, 30, 0.2);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+}
+
+.hero-stat span {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(214, 241, 255, 0.72);
+}
+
+.hero-stat strong {
+  display: block;
+  color: #f4f9ff;
+  font-size: 1.1rem;
+  letter-spacing: -0.03em;
+}
+
+.hero-stat--chips {
+  background: rgba(26, 98, 68, 0.24);
+}
+
+.hero-stat--bonus {
+  background: rgba(103, 86, 26, 0.24);
+}
+
+.hero-stat--entry {
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .mode-pill--server,
 .status-badge--ready,
 .chip-button--active {
@@ -185,7 +227,7 @@ button:focus-visible {
 }
 
 .menu-button {
-  min-height: 108px;
+  min-height: 96px;
   text-align: left;
   cursor: pointer;
   padding: 18px 22px;
@@ -228,7 +270,7 @@ button:focus-visible {
 }
 
 .menu-button strong {
-  font-size: clamp(1.9rem, 2.6vw, 3rem);
+  font-size: clamp(1.8rem, 2.35vw, 2.7rem);
   line-height: 0.98;
   letter-spacing: -0.05em;
 }
@@ -236,10 +278,10 @@ button:focus-visible {
 .menu-button small {
   display: block;
   margin-top: 8px;
-  max-width: 20rem;
+  max-width: 18rem;
   color: rgba(233, 242, 250, 0.86);
-  font-size: 1.02rem;
-  line-height: 1.25;
+  font-size: 0.96rem;
+  line-height: 1.22;
 }
 
 .home-footer-strip {
@@ -272,7 +314,7 @@ button:focus-visible {
   justify-content: space-between;
   gap: 16px;
   align-items: end;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .list-header--simple {
@@ -284,6 +326,10 @@ button:focus-visible {
   gap: 4px;
   justify-items: end;
   color: rgba(230, 240, 248, 0.9);
+}
+
+.list-summary strong {
+  font-size: 1rem;
 }
 
 .list-summary--single {
@@ -298,6 +344,27 @@ button:focus-visible {
 .room-entry-card--soft,
 .empty-card--soft {
   background: rgba(7, 21, 31, 0.16);
+}
+
+.lobby-panel--home {
+  padding: 14px 18px;
+}
+
+.empty-card--home {
+  display: grid;
+  gap: 6px;
+  min-height: 104px;
+  align-content: center;
+}
+
+.empty-card--home strong {
+  font-size: 1.18rem;
+  letter-spacing: -0.03em;
+  color: #f4f9ff;
+}
+
+.empty-card--home span {
+  color: rgba(233, 242, 250, 0.84);
 }
 
 .room-entry-card__head {
@@ -472,6 +539,15 @@ button:focus-visible {
   .hero-card__meta,
   .list-summary {
     justify-items: stretch;
+  }
+
+  .hero-card__meta--hud {
+    justify-content: stretch;
+  }
+
+  .hero-stat {
+    min-width: 0;
+    flex: 1 1 0;
   }
 
   .menu-buttons--home,

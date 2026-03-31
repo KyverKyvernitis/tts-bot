@@ -101,11 +101,6 @@ function formatRoomCount(count: number) {
   return count === 1 ? "1 mesa aberta" : `${count} mesas abertas`;
 }
 
-function formatBalance(balance: BalanceSnapshot, loaded: boolean) {
-  if (!loaded) return "Fichas: --";
-  return balance.bonusChips > 0 ? `Fichas: ${balance.chips} + ${balance.bonusChips} bônus` : `Fichas: ${balance.chips}`;
-}
-
 export default function App() {
   const [state, setState] = useState<ActivityBootstrap>(initialState);
   const [bootstrapped, setBootstrapped] = useState(false);
@@ -574,7 +569,7 @@ export default function App() {
   const heroTitle = useMemo(() => {
     if (screen === "list") return "Mesas abertas";
     if (screen === "room") return room ? `Mesa de ${room.hostDisplayName}` : "Sala da partida";
-    return "Sinuca 8-ball";
+    return "Sinuca de Femboy";
   }, [room, screen]);
 
   const heroSubtitle = useMemo(() => {
@@ -590,14 +585,28 @@ export default function App() {
     >
       <header className="hero-card hero-card--compact hero-card--landscape">
         <div className="hero-card__copy">
-          <span className="hero-card__eyebrow">Sinuca Activity</span>
+          <span className="hero-card__eyebrow">Lobby</span>
           <h1>{heroTitle}</h1>
           <p>{heroSubtitle}</p>
         </div>
-        <div className="hero-card__meta">
-          {isServer ? <div className="mode-pill mode-pill--server">{formatBalance(balance, balanceLoaded)}</div> : null}
-          {isServer ? <div className="mode-pill mode-pill--stake">Entrada: 25 fichas</div> : null}
-        </div>
+        {isServer ? (
+          <div className="hero-card__meta hero-card__meta--hud">
+            <div className="hero-stat hero-stat--chips">
+              <span>Fichas</span>
+              <strong>{balanceLoaded ? balance.chips : "..."}</strong>
+            </div>
+            {balanceLoaded && balance.bonusChips > 0 ? (
+              <div className="hero-stat hero-stat--bonus">
+                <span>Bônus</span>
+                <strong>{balance.bonusChips}</strong>
+              </div>
+            ) : null}
+            <div className="hero-stat hero-stat--entry">
+              <span>Entrada</span>
+              <strong>25 fichas</strong>
+            </div>
+          </div>
+        ) : null}
       </header>
 
       {screen === "home" ? (
@@ -626,9 +635,9 @@ export default function App() {
                 });
               }}
             >
-              <span className="menu-button__eyebrow">Nova mesa</span>
+              <span className="menu-button__eyebrow">Mesa nova</span>
               <strong>{resolvedUser ? "Criar mesa" : authBusy ? "Autorizando conta..." : "Autorizar conta"}</strong>
-              <small>{resolvedUser ? "Abra uma mesa nova." : authBusy ? "Confirme a janela de autorização do Discord." : "Toque para confirmar sua conta e liberar as fichas."}</small>
+              <small>{resolvedUser ? "Abra uma mesa." : authBusy ? "Confirme a janela de autorização do Discord." : "Toque para liberar sua conta."}</small>
             </button>
 
             <button
@@ -645,9 +654,22 @@ export default function App() {
             </button>
           </div>
 
-          <div className="home-footer-strip home-footer-strip--simple">
-            <strong>{formatRoomCount(rooms.length)}</strong>
-          </div>
+          <section className="lobby-panel lobby-panel--home">
+            <div className="list-header list-header--simple">
+              <div>
+                <h2>Mesas abertas</h2>
+                <p>{rooms.length === 0 ? "Crie uma para começar." : "Veja as mesas abertas e entre em uma delas."}</p>
+              </div>
+              <div className="list-summary list-summary--single">
+                <strong>{formatRoomCount(rooms.length)}</strong>
+              </div>
+            </div>
+
+            <div className="empty-card empty-card--soft empty-card--home">
+              <strong>{rooms.length === 0 ? "Nenhuma mesa aberta" : `${formatRoomCount(rooms.length)}`}</strong>
+              <span>{rooms.length === 0 ? "Crie uma para começar." : "Toque em Entrar para ver a lista."}</span>
+            </div>
+          </section>
         </section>
       ) : null}
 
@@ -658,13 +680,19 @@ export default function App() {
           </div>
 
           <div className="list-header list-header--simple">
-            <div><h2>Mesas abertas</h2></div>
+            <div>
+              <h2>Mesas abertas</h2>
+              <p>{rooms.length === 0 ? "Crie uma para começar." : "Veja as mesas abertas e entre em uma delas."}</p>
+            </div>
             <div className="list-summary list-summary--single"><strong>{formatRoomCount(rooms.length)}</strong></div>
           </div>
 
           <div className="room-list-stack">
             {rooms.length === 0 ? (
-              <div className="empty-card empty-card--soft">Nenhuma mesa aberta no momento.</div>
+              <div className="empty-card empty-card--soft empty-card--home">
+                <strong>Nenhuma mesa aberta</strong>
+                <span>Crie uma para começar.</span>
+              </div>
             ) : (
               rooms.map((entry) => (
                 <article key={entry.roomId} className="room-entry-card room-entry-card--soft">
