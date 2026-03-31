@@ -28,6 +28,16 @@ import { getInitialRuleSet } from "./gameRules.js";
 
 const app = express();
 app.use(express.json());
+app.use((req, _res, next) => {
+  console.log("[sinuca-http]", JSON.stringify({
+    method: req.method,
+    url: req.url ?? null,
+    origin: req.headers.origin ?? null,
+    referer: req.headers.referer ?? null,
+    ua: req.headers["user-agent"] ?? null,
+  }));
+  next();
+});
 
 function handleHealth(req: Request, res: Response) {
   console.log("[sinuca-health]", JSON.stringify({ origin: req.headers.origin ?? null, ua: req.headers["user-agent"] ?? null, url: req.url ?? null }));
@@ -144,6 +154,14 @@ app.post("/token", handleTokenRequest);
 app.post("/api/token", handleTokenRequest);
 
 const server = createServer(app);
+server.on("upgrade", (req) => {
+  console.log("[sinuca-upgrade]", JSON.stringify({
+    url: req.url ?? null,
+    origin: req.headers.origin ?? null,
+    referer: req.headers.referer ?? null,
+    ua: req.headers["user-agent"] ?? null,
+  }));
+});
 const wss = new WebSocketServer({ server, path: "/ws" });
 const contextWatchers = new Map<string, Set<WebSocket>>();
 const socketContext = new Map<WebSocket, string>();
