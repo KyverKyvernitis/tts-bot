@@ -94,20 +94,21 @@ function writeCachedToken(token: string) {
   }
 }
 
-function getRedirectUri(): string {
-  return (import.meta.env.VITE_DISCORD_REDIRECT_URI as string | undefined) ?? window.location.origin;
-}
-
-async function exchangeCode(code: string, redirectUri: string): Promise<string | null> {
+async function exchangeCode(code: string): Promise<string | null> {
   try {
     const response = await fetch("/api/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, redirect_uri: redirectUri }),
+      body: JSON.stringify({ code }),
     });
-    const data = await response.json() as { access_token?: string };
-    return typeof data.access_token === "string" && data.access_token ? data.access_token : null;
-  } catch {
+    const data = await response.json() as { access_token?: string; error?: string; detail?: string | null };
+    if (!response.ok || typeof data.access_token !== "string" || !data.access_token) {
+      console.error("[sinuca-auth] exchange failed", data.error ?? "token_exchange_failed", data.detail ?? null);
+      return null;
+    }
+    return data.access_token;
+  } catch (error) {
+    console.error("[sinuca-auth] exchange exception", error);
     return null;
   }
 }
@@ -116,7 +117,10 @@ async function authenticateAccessToken(discord: DiscordSDK, accessToken: string)
   try {
     const authenticated = await discord.commands.authenticate({ access_token: accessToken });
     const user = (authenticated as { user?: { id?: string; global_name?: string | null; username?: string | null } }).user;
-    if (!isDiscordSnowflake(user?.id)) return null;
+    if (!isDiscordSnowflake(user?.id)) {
+      console.error("[sinuca-auth] authenticate returned invalid user", user ?? null);
+      return null;
+    }
     return {
       userId: user.id,
       displayName: user.global_name ?? user.username ?? `Jogador ${user.id.slice(-4)}`,
@@ -145,27 +149,36 @@ function clearCachedUser() {
 }
 
 async function authorizeAndAuthenticate(discord: DiscordSDK, clientId: string, promptMode: "none" | undefined): Promise<ActivityUser | null> {
-  const redirectUri = getRedirectUri();
   try {
-    const authorize = await discord.commands.authorize({
+    const authorizeInput: Record<string, unknown> = {
       client_id: clientId,
       response_type: "code",
       state: `sinuca-auth-${promptMode ?? "consent"}`,
-      prompt: promptMode,
-      redirect_uri: redirectUri,
       scope: ["identify"],
-    } as never);
+    };
+    if (promptMode === "none") {
+      authorizeInput.prompt = "none";
+    }
+    const authorize = await discord.commands.authorize(authorizeInput as never);
     const code = (authorize as { code?: string }).code;
-    if (!code) return null;
-    const accessToken = await exchangeCode(code, redirectUri);
+    if (!code) {
+      console.error("[sinuca-auth] authorize returned without code", { promptMode: promptMode ?? "consent" });
+      return null;
+    }
+    const accessToken = await exchangeCode(code);
     if (!accessToken) return null;
     writeCachedToken(accessToken);
     const authenticated = await authenticateAccessToken(discord, accessToken);
-    if (!authenticated) return null;
+    if (!authenticated) {
+      console.error("[sinuca-auth] authenticate failed after token exchange");
+      clearCachedToken();
+      return null;
+    }
     const refined = await refineDisplayNameFromParticipants(discord, authenticated);
     writeCachedUser(refined);
     return refined;
-  } catch {
+  } catch (error) {
+    console.error("[sinuca-auth] authorize/authenticate exception", error);
     return null;
   }
 }
