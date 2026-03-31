@@ -35,6 +35,7 @@ app.get("/health", (_req, res) => {
 
 
 app.get("/session", (req, res) => {
+  console.log("[sinuca-proxy-session]", JSON.stringify({ hasProxyPayload: Boolean(req.headers["x-discord-proxy-payload"]), origin: req.headers.origin ?? null, ua: req.headers["user-agent"] ?? null }));
   const session = decodeProxyPayload(req);
   console.log("[sinuca-proxy-session]", JSON.stringify({
     userId: session.userId,
