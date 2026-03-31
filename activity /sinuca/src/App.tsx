@@ -63,24 +63,14 @@ function joinBaseAndPath(base: string, path: string) {
   return `${normalizedBase}${normalizedPath}`;
 }
 
-function getProxyBaseCandidates() {
-  const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined)?.trim();
-  const values: string[] = [];
-  if (clientId) values.push(`https://${clientId}.discordsays.com`);
-  if (typeof window !== "undefined" && window.location?.origin) values.push(window.location.origin);
-  return values.filter((value, index, array) => value && array.indexOf(value) === index);
-}
-
 function resolveApiCandidates(path: string) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   const configured = (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim();
   const candidates: string[] = [];
 
-  if (configured) candidates.push(joinBaseAndPath(configured, normalizedPath));
-
-  for (const proxyBase of getProxyBaseCandidates()) {
-    candidates.push(joinBaseAndPath(proxyBase, `/api${normalizedPath}`));
-    candidates.push(joinBaseAndPath(proxyBase, normalizedPath));
+  if (configured) {
+    candidates.push(joinBaseAndPath(configured, `/api${normalizedPath}`));
+    candidates.push(joinBaseAndPath(configured, normalizedPath));
   }
 
   candidates.push(`/api${normalizedPath}`);
@@ -96,17 +86,9 @@ function resolveSocketUrl() {
     return url.toString();
   }
 
-  const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined)?.trim();
-  if (clientId) {
-    const proxyUrl = new URL(`https://${clientId}.discordsays.com/ws`);
-    proxyUrl.protocol = "wss:";
-    proxyUrl.search = window.location.search ?? "";
-    return proxyUrl.toString();
-  }
-
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const base = `${protocol}://${window.location.host}/ws`;
-  return window.location.search ? `${base}${window.location.search}` : base;
+  const socketUrl = new URL(`/ws${window.location.search ?? ""}`, `${protocol}://${window.location.host}`);
+  return socketUrl.toString();
 }
 
 function formatStatus(room: RoomSnapshot) {
@@ -186,12 +168,14 @@ export default function App() {
 
   const exchangeTokenOverHttp = async (code: string): Promise<OAuthExchangeResult> => {
     const candidates = resolveApiCandidates("/token");
+    const attempts: string[] = [];
 
     for (const url of candidates) {
       try {
         const response = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
           body: JSON.stringify({ code }),
         });
         const raw = await response.text();
@@ -212,9 +196,12 @@ export default function App() {
         }
 
         const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
+        attempts.push(`${response.status}:${url}:${detail}`);
         setAuthDebug(`authorize:http_failed:${response.status}:${detail}:${url}`);
       } catch (error) {
-        setAuthDebug(`authorize:http_exception:${error instanceof Error ? error.message : "unknown"}:${url}`);
+        const message = error instanceof Error ? error.message : "unknown";
+        attempts.push(`exception:${url}:${message}`);
+        setAuthDebug(`authorize:http_exception:${message}:${url}`);
       }
     }
 
@@ -222,7 +209,7 @@ export default function App() {
       ok: false,
       accessToken: null,
       error: "http_exchange_failed",
-      detail: null,
+      detail: attempts.length ? attempts.join(" | ") : null,
     };
   };
 
