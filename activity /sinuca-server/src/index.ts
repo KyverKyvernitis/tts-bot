@@ -404,6 +404,83 @@ async function fetchBalance(guildId: string, userId: string, session?: SessionCo
   return { balance, debug };
 }
 
+async function handleBalance(req: Request, res: Response) {
+  const session = resolveRequestSession(req);
+  const bodyGuildId = typeof req.body?.guildId === "string" ? req.body.guildId : null;
+  const bodyUserId = typeof req.body?.userId === "string" ? req.body.userId : null;
+  const queryGuildId = typeof req.query?.guildId === "string" ? req.query.guildId : null;
+  const queryUserId = typeof req.query?.userId === "string" ? req.query.userId : null;
+  const guildId = bodyGuildId ?? queryGuildId ?? session.guildId;
+  const userId = bodyUserId ?? queryUserId ?? session.userId;
+
+  console.log("[sinuca-balance-http]", JSON.stringify({
+    method: req.method,
+    url: req.url ?? null,
+    sessionGuildId: session.guildId,
+    sessionUserId: session.userId,
+    bodyGuildId,
+    bodyUserId,
+    queryGuildId,
+    queryUserId,
+    resolvedGuildId: guildId,
+    resolvedUserId: userId,
+  }));
+
+  if (!guildId || !userId) {
+    const debug: BalanceDebugSnapshot = {
+      source: "missing_identifiers",
+      sessionUserId: session.userId ?? null,
+      sessionGuildId: session.guildId ?? null,
+      requestUserId: userId ?? null,
+      requestGuildId: guildId ?? null,
+      mongoConnected: Boolean(mongoUri),
+      mongoDbName,
+      mongoCollectionName,
+      query: { type: "user", guild_id: guildId ? Number(guildId) : null, user_id: userId ? Number(userId) : null },
+      docFound: false,
+      docKeys: [],
+      rawChips: null,
+      rawBonusChips: null,
+      normalizedChips: 0,
+      normalizedBonusChips: 0,
+      note: "guildId ou userId ausente no fallback HTTP",
+    };
+    res.status(200).json({ balance: { chips: 0, bonusChips: 0 }, debug });
+    return;
+  }
+
+  try {
+    const result = await fetchBalance(guildId, userId, session);
+    res.json({ balance: result.balance, debug: result.debug });
+  } catch (error) {
+    console.error("[sinuca-balance-http-error]", error);
+    const debug: BalanceDebugSnapshot = {
+      source: "balance_error",
+      sessionUserId: session.userId ?? null,
+      sessionGuildId: session.guildId ?? null,
+      requestUserId: userId,
+      requestGuildId: guildId,
+      mongoConnected: Boolean(mongoUri),
+      mongoDbName,
+      mongoCollectionName,
+      query: { type: "user", guild_id: Number(guildId), user_id: Number(userId) },
+      docFound: false,
+      docKeys: [],
+      rawChips: null,
+      rawBonusChips: null,
+      normalizedChips: 0,
+      normalizedBonusChips: 0,
+      note: "erro ao buscar saldo via fallback HTTP",
+    };
+    res.status(200).json({ balance: { chips: 0, bonusChips: 0 }, debug });
+  }
+}
+
+app.get("/balance", handleBalance);
+app.get("/api/balance", handleBalance);
+app.post("/balance", handleBalance);
+app.post("/api/balance", handleBalance);
+
 function watchBalance(ws: WebSocket, guildId: string | null | undefined, userId: string | null | undefined) {
   if (!guildId || !userId) {
     balanceWatchers.delete(ws);
