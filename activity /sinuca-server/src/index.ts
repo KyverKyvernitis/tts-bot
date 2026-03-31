@@ -265,12 +265,31 @@ async function pushBalance(ws: WebSocket, guildId: string, userId: string, force
     if (!current) return;
     if (!force && current.lastSent === nextKey) return;
     current.lastSent = nextKey;
+    console.log("[sinuca-balance-push]", JSON.stringify({ guildId, userId, force, nextKey, source: result.debug.source, docFound: result.debug.docFound }));
     send(ws, { type: "balance_state", payload: result.balance });
     send(ws, { type: "balance_debug", payload: result.debug });
   } catch (error) {
     console.error("[sinuca-balance-error]", error);
     if (force) {
-      send(ws, { type: "balance_state", payload: { chips: 100, bonusChips: 0 } });
+      send(ws, { type: "balance_state", payload: { chips: 0, bonusChips: 0 } });
+      send(ws, { type: "balance_debug", payload: {
+        source: "balance_error",
+        sessionUserId: session?.userId ?? null,
+        sessionGuildId: session?.guildId ?? null,
+        requestUserId: userId,
+        requestGuildId: guildId,
+        mongoConnected: Boolean(mongoUri),
+        mongoDbName,
+        mongoCollectionName,
+        query: { type: "user", guild_id: Number(guildId), user_id: Number(userId) },
+        docFound: false,
+        docKeys: [],
+        rawChips: null,
+        rawBonusChips: null,
+        normalizedChips: 0,
+        normalizedBonusChips: 0,
+        note: "erro ao buscar saldo",
+      } });
     }
   }
 }
@@ -340,7 +359,7 @@ wss.on("connection", (ws, req) => {
     if (data.type === "get_balance") {
       const merged = mergeWithSession(data.payload, activeSession);
       if (!merged.guildId || !merged.userId) {
-        send(ws, { type: "balance_state", payload: { chips: 100, bonusChips: 0 } });
+        send(ws, { type: "balance_state", payload: { chips: 0, bonusChips: 0 } });
         send(ws, { type: "balance_debug", payload: {
           source: "missing_identifiers",
           sessionUserId: activeSession.userId ?? null,
