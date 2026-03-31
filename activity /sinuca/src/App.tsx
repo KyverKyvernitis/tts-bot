@@ -128,7 +128,7 @@ export default function App() {
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
   const [rooms, setRooms] = useState<RoomSnapshot[]>([]);
   const [screen, setScreen] = useState<LobbyScreen>("home");
-  const [createTableType, setCreateTableType] = useState<TableType>("casual");
+  const [createTableType, setCreateTableType] = useState<TableType>("stake");
   const [createStake, setCreateStake] = useState<number>(25);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [authState, setAuthState] = useState<AuthState>("checking");
@@ -165,9 +165,12 @@ export default function App() {
   const resolvedUser = isResolvedDiscordUserId(state.currentUser.userId);
   const createStakeOptions = [10, 25, 50] as const;
   const canChooseStakeMode = isServer;
+  const isFriendlyTable = !isServer || createTableType === "casual";
+  const createModeLabel = isFriendlyTable ? "Partida amistosa" : "Valendo fichas";
   const canAffordSelectedStake = !isServer || createTableType !== "stake" ? true : balanceLoaded && balance.chips >= createStake;
-  const createSummaryLabel = createTableType === "stake" ? `${createStake} fichas` : "casual";
   const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId);
+  const roomHostPlayer = room?.players.find((player) => player.userId === room.hostUserId) ?? room?.players[0] ?? null;
+  const roomOpponentPlayer = room?.players.find((player) => player.userId !== room.hostUserId) ?? null;
   const canStart = room?.players.length === 2 && room.players.every((player) => player.ready);
 
   const waitForOAuthTokenResult = (): Promise<OAuthExchangeResult> => new Promise<OAuthExchangeResult>((resolve, reject) => {
@@ -389,7 +392,8 @@ export default function App() {
       setCreateTableType("casual");
       return;
     }
-    setCreateTableType((current) => (current === "stake" || current === "casual") ? current : "stake");
+    setCreateTableType((current) => current === "casual" ? current : "stake");
+    setCreateStake((current) => createStakeOptions.includes(current as typeof createStakeOptions[number]) ? current : 25);
   }, [isServer]);
 
 
@@ -606,16 +610,33 @@ export default function App() {
   const heroTitle = useMemo(() => {
     if (screen === "create") return "Criar mesa";
     if (screen === "list") return "Mesas abertas";
-    if (screen === "room") return room ? `Mesa de ${room.hostDisplayName}` : "Sala da partida";
+    if (screen === "room") return room ? `Sala de ${room.hostDisplayName}` : "Sala da mesa";
     return "Sinuca de Femboy";
   }, [room, screen]);
 
   const heroSubtitle = useMemo(() => {
     if (screen === "create") return "Configure a mesa e abra para outro jogador entrar.";
-    if (screen === "list") return "Veja as mesas abertas e entre em uma delas.";
-    if (screen === "room") return "Aguarde o segundo jogador e marque pronto.";
+    if (screen === "list") return "Entre em uma mesa aberta.";
+    if (screen === "room") return "Aguarde o outro jogador e marque pronto quando quiser começar.";
     return "Crie uma mesa ou entre em uma já aberta.";
   }, [screen]);
+
+  const heroEyebrow = useMemo(() => {
+    if (screen === "create") return "Mesa nova";
+    if (screen === "list") return "Salas";
+    if (screen === "room") return "Sala";
+    return "Lobby";
+  }, [screen]);
+
+  const heroSecondaryLabel = useMemo(() => {
+    if (screen === "create") {
+      return isFriendlyTable ? { label: "Modo", value: "Amistosa" } : { label: "Entrada", value: `${createStake} fichas` };
+    }
+    if (screen === "room" && room) {
+      return room.tableType === "stake" ? { label: "Entrada", value: room.stakeLabel } : { label: "Modo", value: "Amistosa" };
+    }
+    return { label: "Entrada", value: "25 fichas" };
+  }, [createStake, isFriendlyTable, room, screen]);
 
   return (
     <main
@@ -624,7 +645,7 @@ export default function App() {
     >
       <header className="hero-card hero-card--compact hero-card--landscape">
         <div className="hero-card__copy">
-          <span className="hero-card__eyebrow">Lobby</span>
+          <span className="hero-card__eyebrow">{heroEyebrow}</span>
           <h1>{heroTitle}</h1>
           <p>{heroSubtitle}</p>
         </div>
@@ -641,8 +662,8 @@ export default function App() {
               </div>
             ) : null}
             <div className="hero-stat hero-stat--entry">
-              <span>Entrada</span>
-              <strong>{screen === "create" ? createSummaryLabel : "25 fichas"}</strong>
+              <span>{heroSecondaryLabel.label}</span>
+              <strong>{heroSecondaryLabel.value}</strong>
             </div>
           </div>
         ) : null}
@@ -701,14 +722,13 @@ export default function App() {
         <section className="lobby-panel lobby-panel--compact lobby-panel--create">
           <div className="list-topbar list-topbar--create list-topbar--compact-create">
             <button className="chip-button chip-button--back" type="button" onClick={() => setScreen("home")}>Voltar</button>
-            <div className="list-topbar__count">1/2 jogadores</div>
+            <div className="list-topbar__count">Preparando mesa</div>
           </div>
 
-          <div className="create-layout create-layout--dense">
-            <div className="create-preview-card create-preview-card--dense">
-              <div className="create-preview-card__eyebrow">Prévia da mesa</div>
-              <div className="create-preview-shell">
-                <div className="participant-slot participant-slot--filled participant-slot--compact">
+          <div className="create-layout create-layout--final">
+            <div className="create-preview-card create-preview-card--final">
+              <div className="create-preview-shell create-preview-shell--final">
+                <div className="participant-slot participant-slot--filled participant-slot--compact participant-slot--create-main">
                   <div className="participant-slot__avatar-wrap">
                     <img className="participant-slot__avatar" src={resolvePlayerAvatar({ userId: state.currentUser.userId, avatarUrl: state.currentUser.avatarUrl ?? null })} alt={state.currentUser.displayName} />
                   </div>
@@ -716,12 +736,13 @@ export default function App() {
                   <small className="participant-slot__role">você</small>
                 </div>
 
-                <div className="create-center-pill">
+                <div className="create-center-pill create-center-pill--final">
                   <strong>1/2 jogadores</strong>
-                  <span>{createTableType === "stake" ? `${createStake} fichas` : "casual"}</span>
+                  <span>{createModeLabel}</span>
+                  {!isFriendlyTable ? <em>{createStake} fichas</em> : null}
                 </div>
 
-                <div className="participant-slot participant-slot--ghost participant-slot--compact">
+                <div className="participant-slot participant-slot--ghost participant-slot--compact participant-slot--create-main">
                   <div className="participant-slot__avatar-wrap participant-slot__avatar-wrap--ghost">
                     <div className="participant-slot__unknown">?</div>
                   </div>
@@ -731,11 +752,11 @@ export default function App() {
               </div>
             </div>
 
-            <div className="create-config-card create-config-card--dense">
+            <div className="create-config-card create-config-card--final">
               <div className="create-config-block create-config-block--tight">
                 <div className="create-config-block__head">
-                  <strong>Tipo da mesa</strong>
-                  <span>{isServer ? "Escolha entre casual ou com entrada." : "Fora de servidor, a mesa é casual."}</span>
+                  <strong>{isServer ? "Tipo da partida" : "Partida amistosa"}</strong>
+                  <span>{isServer ? "Valendo fichas vem por padrão. Se quiser, abra uma partida amistosa." : "Fora de servidor, a mesa é sempre amistosa."}</span>
                 </div>
 
                 {canChooseStakeMode ? (
@@ -745,19 +766,19 @@ export default function App() {
                       className={`chip-button create-toggle ${createTableType === "stake" ? "chip-button--active" : ""}`}
                       onClick={() => setCreateTableType("stake")}
                     >
-                      Com entrada
+                      Valendo fichas
                     </button>
                     <button
                       type="button"
                       className={`chip-button create-toggle ${createTableType === "casual" ? "chip-button--active" : ""}`}
                       onClick={() => setCreateTableType("casual")}
                     >
-                      Casual
+                      Partida amistosa
                     </button>
                   </div>
                 ) : (
                   <div className="create-toggle-group create-toggle-group--single create-toggle-group--dense">
-                    <button type="button" className="chip-button create-toggle chip-button--active" disabled>Casual</button>
+                    <button type="button" className="chip-button create-toggle chip-button--active" disabled>Partida amistosa</button>
                   </div>
                 )}
               </div>
@@ -766,7 +787,7 @@ export default function App() {
                 <div className="create-config-block create-config-block--tight">
                   <div className="create-config-block__head">
                     <strong>Entrada</strong>
-                    <span>Escolha o valor para abrir a mesa.</span>
+                    <span>25 fichas é o padrão, mas você pode mudar antes de abrir a mesa.</span>
                   </div>
 
                   <div className="create-toggle-group create-toggle-group--stakes create-toggle-group--stakes-compact">
@@ -790,8 +811,9 @@ export default function App() {
                 </div>
 
                 <ul className="kv-list kv-list--compact kv-list--summary-tight">
-                  <li><span>Modo</span><strong>{createTableType === "stake" ? "Com entrada" : "Casual"}</strong></li>
-                  <li><span>Entrada</span><strong>{createSummaryLabel}</strong></li>
+                  <li><span>Modo</span><strong>{createModeLabel}</strong></li>
+                  {!isFriendlyTable ? <li><span>Entrada</span><strong>{createStake} fichas</strong></li> : null}
+                  <li><span>Jogadores</span><strong>2</strong></li>
                 </ul>
 
                 {isServer && createTableType === "stake" && !balanceLoaded ? (
@@ -888,7 +910,7 @@ export default function App() {
                     <div className="room-entry-card__footer">
                       <div className="room-entry-card__meta room-entry-card__meta--row">
                         <span>{entry.players.length}/2 jogadores</span>
-                        {entry.tableType === "stake" ? <span>{entry.stakeLabel}</span> : <span>casual</span>}
+                        {entry.tableType === "stake" ? <span>{entry.stakeLabel}</span> : <span>amistosa</span>}
                         <span className={`status-badge status-badge--${entry.status}`}>{formatStatus(entry)}</span>
                       </div>
 
@@ -919,79 +941,105 @@ export default function App() {
       ) : null}
 
       {screen === "room" && room ? (
-        <>
-          <div className="toolbar-row toolbar-row--top toolbar-row--room">
-            <button className="chip-button" type="button" onClick={() => { setRoom(null); setScreen("list"); requestRooms(); }}>Voltar</button>
+        <section className="lobby-panel lobby-panel--compact lobby-panel--room-stage">
+          <div className="list-topbar list-topbar--room-stage">
+            <button className="chip-button chip-button--back" type="button" onClick={() => { setRoom(null); setScreen("list"); requestRooms(); }}>Voltar</button>
+            <div className="list-topbar__count">{room.players.length}/2 jogadores</div>
           </div>
 
-          <div className="grid grid--tight">
-            <StatusCard title="Mesa" subtitle="Resumo da sala antes do início da partida.">
-              <ul className="kv-list">
-                <li><span>Mesa</span><strong>{room.hostDisplayName}</strong></li>
-                <li><span>Modo</span><strong>{room.tableType === "stake" ? "com entrada" : "casual"}</strong></li>
-                <li><span>Entrada</span><strong>{room.stakeLabel}</strong></li>
-                <li><span>Canal</span><strong>{state.context.channelId ?? "fora de servidor"}</strong></li>
-              </ul>
-            </StatusCard>
-
-            <StatusCard title="Seu perfil" subtitle="Jogador que entrou nesta activity">
-              <ul className="kv-list">
-                <li><span>Nome</span><strong>{state.currentUser.displayName}</strong></li>
-                <li><span>ID</span><strong>{state.currentUser.userId}</strong></li>
-                <li><span>SDK</span><strong>{state.sdkReady ? "pronto" : "fallback"}</strong></li>
-                <li><span>Pronto</span><strong>{currentPlayer?.ready ? "sim" : "não"}</strong></li>
-              </ul>
-            </StatusCard>
-          </div>
-
-          <StatusCard title="Sala da partida" subtitle="Lobby da mesa antes do início da partida de sinuca.">
-            <div className="lobby-card lobby-card--room">
-              <div><span className="lobby-card__label">Anfitrião</span><strong>{room.hostDisplayName}</strong></div>
-              <div><span className="lobby-card__label">Jogadores</span><strong>{room.players.length}/2</strong></div>
-              <div><span className="lobby-card__label">Entrada</span><strong>{room.stakeLabel}</strong></div>
-              <div><span className="lobby-card__label">Estado</span><strong>{formatStatus(room)}</strong></div>
-            </div>
-
-            <ul className="player-list player-list--room">
-              {room.players.map((player) => (
-                <li key={player.userId}>
-                  <div>
-                    <span>{player.displayName}</span>
-                    <small>{player.userId === room.hostUserId ? "anfitrião" : "jogador"}</small>
+          <div className="room-stage room-stage--final">
+            <div className="create-preview-card room-stage__preview">
+              <div className="create-preview-shell create-preview-shell--room">
+                <div className="participant-slot participant-slot--filled participant-slot--room-main">
+                  <div className="participant-slot__avatar-wrap">
+                    <img className="participant-slot__avatar" src={resolvePlayerAvatar(roomHostPlayer ?? room.players[0])} alt={room.hostDisplayName} />
                   </div>
-                  <strong>{player.ready ? "pronto" : "aguardando"}</strong>
-                </li>
-              ))}
-              {room.players.length < 2 ? <li className="player-list__ghost">Aguardando outro jogador…</li> : null}
-            </ul>
+                  <span className="participant-slot__name">{buildPlayerTag(roomHostPlayer ?? room.players[0])}</span>
+                  <small className="participant-slot__role">anfitrião</small>
+                  <span className={`room-ready-badge ${roomHostPlayer?.ready ? "room-ready-badge--ready" : ""}`}>
+                    {roomHostPlayer?.ready ? "pronto" : "aguardando"}
+                  </span>
+                </div>
 
-            <div className="toolbar-row toolbar-row--end">
-              <button
-                className="chip-button"
-                type="button"
-                onClick={() => {
-                  sendMessage({ type: "leave_room", payload: { roomId: room.roomId, userId: state.currentUser.userId } });
-                  setRoom(null);
-                  setScreen("list");
-                  requestRooms();
-                }}
-              >
-                Sair
-              </button>
-              <button
-                className={`primary-button ${currentPlayer?.ready ? "primary-button--muted" : ""}`}
-                type="button"
-                onClick={() => sendMessage({ type: "set_ready", payload: { roomId: room.roomId, userId: state.currentUser.userId, ready: !currentPlayer?.ready } })}
-              >
-                {currentPlayer?.ready ? "Cancelar pronto" : "Pronto"}
-              </button>
+                <div className="create-center-pill create-center-pill--final create-center-pill--room">
+                  <strong>{room.players.length}/2 jogadores</strong>
+                  <span>{room.tableType === "stake" ? "Valendo fichas" : "Partida amistosa"}</span>
+                  <em>{room.tableType === "stake" ? room.stakeLabel : "Amistosa"}</em>
+                  <small className={`status-badge status-badge--${room.status}`}>{formatStatus(room)}</small>
+                </div>
+
+                {roomOpponentPlayer ? (
+                  <div className="participant-slot participant-slot--filled participant-slot--room-main">
+                    <div className="participant-slot__avatar-wrap">
+                      <img className="participant-slot__avatar" src={resolvePlayerAvatar(roomOpponentPlayer)} alt={roomOpponentPlayer.displayName} />
+                    </div>
+                    <span className="participant-slot__name">{buildPlayerTag(roomOpponentPlayer)}</span>
+                    <small className="participant-slot__role">jogador</small>
+                    <span className={`room-ready-badge ${roomOpponentPlayer?.ready ? "room-ready-badge--ready" : ""}`}>
+                      {roomOpponentPlayer?.ready ? "pronto" : "aguardando"}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="participant-slot participant-slot--ghost participant-slot--room-main">
+                    <div className="participant-slot__avatar-wrap participant-slot__avatar-wrap--ghost">
+                      <div className="participant-slot__unknown">?</div>
+                    </div>
+                    <span className="participant-slot__name">Aguardando adversário</span>
+                    <small className="participant-slot__role">vaga aberta</small>
+                    <span className="room-ready-badge">aguardando</span>
+                  </div>
+                )}
+              </div>
             </div>
 
-            <p className="plain-copy">{canStart ? "Os dois jogadores estão prontos." : "A partida começa quando os dois estiverem prontos."}</p>
-            {authState === "needs_consent" && !resolvedUser ? <p className="plain-copy">Autorize sua conta para usar fichas, criar mesa e entrar em partida.</p> : null}
-            {errorMessage && connectionState !== "offline" ? <p className="error-copy">{errorMessage}</p> : null}
-          </StatusCard>
-        </>
+            <div className="create-config-card room-stage__details">
+              <div className="create-config-block create-config-block--tight">
+                <div className="create-config-block__head">
+                  <strong>Resumo da mesa</strong>
+                  <span>Deixe a mesa aberta e aguarde o outro jogador entrar.</span>
+                </div>
+                <ul className="kv-list kv-list--compact kv-list--summary-tight">
+                  <li><span>Modo</span><strong>{room.tableType === "stake" ? "Valendo fichas" : "Partida amistosa"}</strong></li>
+                  {room.tableType === "stake" ? <li><span>Entrada</span><strong>{room.stakeLabel}</strong></li> : null}
+                  <li><span>Jogadores</span><strong>{room.players.length}/2</strong></li>
+                  <li><span>Canal</span><strong>{state.context.channelId ?? "fora de servidor"}</strong></li>
+                </ul>
+              </div>
+
+              <div className="create-config-block create-config-block--tight">
+                <div className="create-config-block__head">
+                  <strong>Estado da sala</strong>
+                  <span>{canStart ? "Os dois jogadores estão prontos." : "A partida começa quando os dois estiverem prontos."}</span>
+                </div>
+
+                <div className="room-stage__actions">
+                  <button
+                    className="chip-button room-stage__leave"
+                    type="button"
+                    onClick={() => {
+                      sendMessage({ type: "leave_room", payload: { roomId: room.roomId, userId: state.currentUser.userId } });
+                      setRoom(null);
+                      setScreen("list");
+                      requestRooms();
+                    }}
+                  >
+                    {room.players.length === 1 && currentPlayer?.userId === room.hostUserId ? "Fechar mesa" : "Sair"}
+                  </button>
+                  <button
+                    className={`primary-button room-stage__ready ${currentPlayer?.ready ? "primary-button--muted" : ""}`}
+                    type="button"
+                    onClick={() => sendMessage({ type: "set_ready", payload: { roomId: room.roomId, userId: state.currentUser.userId, ready: !currentPlayer?.ready } })}
+                  >
+                    {currentPlayer?.ready ? "Cancelar pronto" : "Marcar pronto"}
+                  </button>
+                </div>
+
+                {authState === "needs_consent" && !resolvedUser ? <p className="plain-copy">Autorize sua conta para usar fichas, criar mesa e entrar em partida.</p> : null}
+                {errorMessage && connectionState !== "offline" ? <p className="error-copy">{errorMessage}</p> : null}
+              </div>
+            </div>
+          </div>
+        </section>
       ) : null}
 
       {shouldShowBalanceDebug ? (
