@@ -35,6 +35,18 @@ function isDiscordSnowflake(value: string | null | undefined): value is string {
   return typeof value === "string" && /^\d{17,20}$/.test(value);
 }
 
+function buildDiscordAvatarUrl(userId: string, avatarHash: string | null | undefined): string | null {
+  if (avatarHash && avatarHash.trim()) {
+    return `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.png?size=128`;
+  }
+  try {
+    const index = Number((BigInt(userId) >> 22n) % 6n);
+    return `https://cdn.discordapp.com/embed/avatars/${index}.png`;
+  } catch {
+    return null;
+  }
+}
+
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     const bits = [error.name, error.message].filter(Boolean);
@@ -174,6 +186,7 @@ export async function authenticateDiscordAccessToken(discord: DiscordSDK, access
     return {
       userId: user.id,
       displayName: user.global_name ?? user.username ?? `Jogador ${user.id.slice(-4)}`,
+      avatarUrl: buildDiscordAvatarUrl(user.id, (user as { avatar?: string | null }).avatar ?? null),
     };
   } catch (error) {
     console.error("[sinuca-auth] authenticate exception", error);
