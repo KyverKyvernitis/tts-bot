@@ -257,8 +257,8 @@ function watchBalance(ws: WebSocket, guildId: string | null | undefined, userId:
 }
 
 async function pushBalance(ws: WebSocket, guildId: string, userId: string, force = false) {
+  const session = socketSession.get(ws);
   try {
-    const session = socketSession.get(ws);
     const result = await fetchBalance(guildId, userId, session);
     const nextKey = JSON.stringify(result.balance);
     const current = balanceWatchers.get(ws);
