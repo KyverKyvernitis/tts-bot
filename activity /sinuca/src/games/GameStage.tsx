@@ -334,122 +334,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [aimAngle, cueBall, power]);
 
   return (
-    <section className="game-stage-shell game-stage-shell--mobile">
-      <div className="game-mobile-topbar">
-        <button className="game-mobile-exit" type="button" disabled={exitBusy} onClick={onExit}>
-          {exitBusy ? "Saindo..." : (isHost ? "Fechar sala" : "Sair")}
-        </button>
-
-        <div className="game-mobile-hud">
-          <div className={`game-mobile-player ${game.turnUserId === host?.userId ? "game-mobile-player--active" : ""}`}>
-            <div className="game-mobile-player__avatar">
-              {host?.avatarUrl ? <img src={host.avatarUrl} alt={cleanName(host.displayName)} /> : <span>{playerInitials(host)}</span>}
-            </div>
-            <div className="game-mobile-player__info">
-              <strong>{cleanName(host?.displayName ?? "Anfitrião")}</strong>
-              <div className="game-mobile-pips">
-                {Array.from({ length: 7 }).map((_, index) => (
-                  <span key={`host-${index}`} className={`game-mobile-pip ${index < hostPocketed ? "game-mobile-pip--filled" : ""}`} />
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="game-mobile-center">
-            <span className="game-mobile-center__badge">{cueLabel}</span>
-            <strong>{statusText}</strong>
-            <small>{phaseText}</small>
-          </div>
-
-          <div className={`game-mobile-player game-mobile-player--right ${game.turnUserId === guest?.userId ? "game-mobile-player--active" : ""}`}>
-            <div className="game-mobile-player__info game-mobile-player__info--right">
-              <strong>{cleanName(guest?.displayName ?? "Aguardando")}</strong>
-              <div className="game-mobile-pips game-mobile-pips--right">
-                {Array.from({ length: 7 }).map((_, index) => (
-                  <span key={`guest-${index}`} className={`game-mobile-pip ${index < guestPocketed ? "game-mobile-pip--filled" : ""}`} />
-                ))}
-              </div>
-            </div>
-            <div className="game-mobile-player__avatar">
-              {guest?.avatarUrl ? <img src={guest.avatarUrl} alt={cleanName(guest.displayName)} /> : <span>{playerInitials(guest)}</span>}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="game-mobile-main">
-        <div
-          ref={powerRailRef}
-          className={`game-power-rail ${canShoot ? "game-power-rail--active" : ""}`}
-          onPointerDown={handlePowerDown}
-          onPointerMove={handlePowerMove}
-          onPointerUp={handlePowerUp}
-          onPointerLeave={handlePowerUp}
-        >
-          <div className="game-power-rail__track">
-            <div className="game-power-rail__fill" style={{ height: `${Math.round(power * 100)}%` }} />
-            <div className="game-power-rail__knob" style={{ bottom: `calc(${Math.round(power * 100)}% - 10px)` }} />
-          </div>
-          <div className="game-power-rail__value">{Math.round(power * 100)}</div>
-        </div>
-
-        <div className="game-mobile-table-wrap">
-          <div className="game-mobile-table-viewport">
-            <div
-              ref={tableRef}
-              className={`pool-table pool-table--mobile ${canInteract ? "pool-table--interactive" : ""}`}
-              onPointerDown={handleTablePointerDown}
-              onPointerMove={handleTablePointerMove}
-              onPointerUp={handleTablePointerUp}
-              onPointerLeave={handleTablePointerUp}
-            >
-              <div className="pool-table__felt" />
-              <div className="pool-table__head-string" />
-              <div className="pool-table__head-spot" />
-              {Array.from({ length: 6 }).map((_, index) => (
-                <span key={`pocket-${index}`} className={`pool-pocket pool-pocket--${index + 1}`} />
-              ))}
-
-              {needEightCall && isMyTurn ? POCKETS.map((pocket) => (
-                <button
-                  key={pocket.id}
-                  type="button"
-                  className={`pool-pocket-target ${selectedPocket === pocket.id ? "pool-pocket-target--active" : ""}`}
-                  style={{ left: `${pocket.x}px`, top: `${pocket.y}px` }}
-                  onClick={() => setSelectedPocket(pocket.id)}
-                >
-                  {pocket.id}
-                </button>
-              )) : null}
-
-              {aimGuide && !animating && isMyTurn && cueBall ? (
-                <>
-                  <div
-                    className="pool-aim-line"
-                    style={{
-                      left: `${aimGuide.left}px`,
-                      top: `${aimGuide.top}px`,
-                      width: `${aimGuide.length}px`,
-                      transform: `translateY(-1px) rotate(${aimGuide.angle}rad)`,
-                    }}
-                  />
-                  <div className="pool-aim-ring" style={{ left: `${aimGuide.ringX}px`, top: `${aimGuide.ringY}px` }} />
-                  <div className="pool-ghost-dot" style={{ left: `${aimGuide.ghostX}px`, top: `${aimGuide.ghostY}px` }} />
-                  <div
-                    className="pool-cue"
-                    style={{
-                      left: `${cueBall.x}px`,
-                      top: `${cueBall.y}px`,
-                      transform: `translate(-50%, -50%) rotate(${aimGuide.angle}rad) translateX(${-aimGuide.cueOffset}px)`,
-                    }}
-                  />
-                </>
-              ) : null}
-
-              {displayBalls.map((ball) => {
-                if (ball.pocketed) return null;
-                const meta = resolveBallMeta(ball.number);
-                return (
     <section className="game-ref">
       <div className="game-ref__top">
         <button
@@ -511,6 +395,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             <div className="game-ref__power-fill" style={{ height: `${Math.round(power * 100)}%` }} />
             <div className="game-ref__power-knob" style={{ bottom: `calc(${Math.round(power * 100)}% - 11px)` }} />
           </div>
+          <div className="game-ref__power-value">{Math.round(power * 100)}</div>
         </div>
 
         <div className="game-ref__table-shell">
@@ -590,5 +475,4 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       </div>
     </section>
   );
-
 }
