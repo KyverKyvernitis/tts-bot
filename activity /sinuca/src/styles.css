@@ -1403,3 +1403,143 @@ button:focus-visible {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+
+.hero-card {
+  padding: 9px 12px;
+  gap: 10px;
+}
+
+.hero-card--compact h1 {
+  font-size: clamp(1.72rem, 2.35vw, 2.5rem);
+}
+
+.hero-card p {
+  margin-top: 6px;
+  font-size: 0.94rem;
+}
+
+.list-topbar--room-stage-compact {
+  margin-bottom: 8px;
+}
+
+.room-stage__top-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.room-stage__top-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(236, 246, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(236, 244, 252, 0.84);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.room-stage--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.room-stage__preview--compact {
+  gap: 10px;
+  padding: 10px;
+}
+
+.room-stage__players {
+  gap: 8px;
+}
+
+.room-stage__preview--compact .participant-slot--room-main {
+  min-height: 84px;
+  padding: 8px;
+  gap: 4px;
+}
+
+.room-stage__preview--compact .participant-slot--room-main .participant-slot__avatar-wrap {
+  width: 52px;
+  height: 52px;
+}
+
+.room-stage__preview--compact .participant-slot__name {
+  font-size: 0.88rem;
+  max-width: 10rem;
+}
+
+.room-stage__preview--compact .participant-slot__role {
+  font-size: 0.62rem;
+}
+
+.room-stage__footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, auto);
+  gap: 10px;
+  align-items: center;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.room-stage__status-inline {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.room-stage__status-inline span {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(227, 236, 246, 0.66);
+}
+
+.room-stage__status-inline strong {
+  color: #f4fbff;
+  font-size: 0.96rem;
+}
+
+.room-stage__status-inline small {
+  color: rgba(229, 238, 248, 0.78);
+  font-size: 0.88rem;
+  line-height: 1.28;
+}
+
+.room-stage__actions {
+  gap: 8px;
+}
+
+.room-stage__leave {
+  min-height: 36px;
+  padding-inline: 12px;
+}
+
+.room-stage__ready {
+  min-height: 40px;
+}
+
+.room-ready-badge {
+  padding: 5px 9px;
+  font-size: 9px;
+}
+
+@media (max-width: 920px) {
+  .room-stage__footer {
+    grid-template-columns: 1fr;
+  }
+
+  .room-stage__top-meta {
+    justify-content: flex-start;
+  }
+}
