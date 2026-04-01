@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   authorizeDiscordCode,
   authenticateDiscordAccessToken,
@@ -11,6 +11,7 @@ import {
 import type { ActivityBootstrap, ActivityUser, BalanceDebugSnapshot, BalanceSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
+import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.wav";
 
 const DISCORD_ID_RE = /^\d{17,20}$/;
 
@@ -142,6 +143,7 @@ export default function App() {
   const lastInitKeyRef = useRef<string | null>(null);
   const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
   const balanceReceiptRef = useRef<number>(0);
+  const uiClickAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -159,6 +161,35 @@ export default function App() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    const audio = new Audio(clickTone);
+    audio.preload = "auto";
+    audio.volume = 0.14;
+    uiClickAudioRef.current = audio;
+
+    return () => {
+      uiClickAudioRef.current = null;
+      audio.pause();
+      audio.src = "";
+    };
+  }, []);
+
+  const playUiClick = () => {
+    const audio = uiClickAudioRef.current;
+    if (!audio) return;
+    try {
+      audio.currentTime = 0;
+      void audio.play().catch(() => {});
+    } catch {}
+  };
+
+  const handleShellClickCapture = (event: MouseEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement | null;
+    const button = target?.closest("button") as HTMLButtonElement | null;
+    if (!button || button.disabled) return;
+    playUiClick();
+  };
 
   const instanceId = state.context.instanceId ?? `local-${state.currentUser.userId}`;
   const isServer = state.context.mode === "server";
@@ -652,6 +683,7 @@ export default function App() {
     <main
       className="app-shell"
       style={{ backgroundImage: `linear-gradient(180deg, rgba(4, 10, 17, 0.12), rgba(4, 10, 17, 0.46)), url(${lobbyBackground})` }}
+      onClickCapture={handleShellClickCapture}
     >
       <header className="hero-card hero-card--compact hero-card--landscape">
         <div className="hero-card__copy">
@@ -770,9 +802,9 @@ export default function App() {
 
             <div className="create-config-card create-config-card--final">
               <div className="create-config-block create-config-block--tight">
-                <div className="create-config-block__head">
+                <div className="create-config-block__head create-config-block__head--inline">
                   <strong>{isServer ? "Tipo da partida" : "Partida amistosa"}</strong>
-                  <span>{isServer ? "Valendo fichas fica selecionado por padrão." : "Fora de servidor, a mesa é sempre amistosa."}</span>
+                  {isServer ? <small className="create-config-block__value">{createModeLabel}</small> : null}
                 </div>
 
                 {canChooseStakeMode ? (
@@ -801,9 +833,9 @@ export default function App() {
 
               {isServer && createTableType === "stake" ? (
                 <div className="create-config-block create-config-block--tight">
-                  <div className="create-config-block__head">
+                  <div className="create-config-block__head create-config-block__head--inline">
                     <strong>Entrada</strong>
-                    <span>25 fichas já vem selecionado por padrão.</span>
+                    <small className="create-config-block__value">{createStake} fichas</small>
                   </div>
 
                   <div className="create-toggle-group create-toggle-group--stakes create-toggle-group--stakes-compact">
