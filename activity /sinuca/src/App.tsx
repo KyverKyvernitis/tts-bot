@@ -71,7 +71,7 @@ function joinBaseAndPath(base: string, path: string) {
 function resolvePublicBaseCandidates() {
   const configuredApiBase = (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim();
   const configuredPublicHost = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim();
-  const candidates: string[] = [];
+  const candidates: string[] = [window.location.origin];
 
   if (configuredApiBase) {
     candidates.push(configuredApiBase);
@@ -83,20 +83,21 @@ function resolvePublicBaseCandidates() {
     candidates.push(withScheme);
   }
 
-  candidates.push(window.location.origin);
   return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
 }
 
 function resolveApiCandidates(path: string) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const candidates: string[] = [];
+  const candidates: string[] = [`/api${normalizedPath}`];
 
   for (const base of resolvePublicBaseCandidates()) {
     candidates.push(joinBaseAndPath(base, `/api${normalizedPath}`));
+  }
+
+  for (const base of resolvePublicBaseCandidates()) {
     candidates.push(joinBaseAndPath(base, normalizedPath));
   }
 
-  candidates.push(`/api${normalizedPath}`);
   candidates.push(normalizedPath);
   return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
 }
@@ -109,15 +110,18 @@ function resolveSocketUrl() {
     return url.toString();
   }
 
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const relativeSocketUrl = new URL(`/ws${window.location.search ?? ""}`, `${protocol}://${window.location.host}`);
+
   const configuredPublicHost = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || DEFAULT_PUBLIC_HOST;
   if (configuredPublicHost) {
     const host = configuredPublicHost.replace(/^https?:\/\//i, "").replace(/\/$/, "");
-    return `wss://${host}/ws${window.location.search ?? ""}`;
+    if (host && host !== window.location.host) {
+      return relativeSocketUrl.toString();
+    }
   }
 
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const socketUrl = new URL(`/ws${window.location.search ?? ""}`, `${protocol}://${window.location.host}`);
-  return socketUrl.toString();
+  return relativeSocketUrl.toString();
 }
 
 function formatStatus(room: RoomSnapshot) {
@@ -147,6 +151,17 @@ function cleanPlayerName(player: Pick<RoomPlayer, "displayName">) {
 function resolvePlayerAvatar(player: Pick<RoomPlayer, "userId" | "avatarUrl">) {
   if (player.avatarUrl) return player.avatarUrl;
   return defaultDiscordAvatarUrl(player.userId);
+}
+
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs = 2500) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 export default function App() {
@@ -343,7 +358,7 @@ export default function App() {
 
     for (const variant of requestVariants) {
       try {
-        const response = await fetch(variant.url, variant.init);
+        const response = await fetchWithTimeout(variant.url, variant.init, 4000);
         const raw = await response.text();
         let parsed: { access_token?: string; error?: string; detail?: string } | null = null;
         try {
@@ -387,7 +402,7 @@ export default function App() {
         url.searchParams.set("mode", state.context.mode);
         if (state.context.guildId) url.searchParams.set("guildId", state.context.guildId);
         if (state.context.channelId) url.searchParams.set("channelId", state.context.channelId);
-        const response = await fetch(url.toString(), { method: "GET", credentials: "same-origin" });
+        const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" });
         const raw = await response.text();
         const parsed = raw ? JSON.parse(raw) as { rooms?: RoomSnapshot[]; error?: string } : null;
         if (response.ok && Array.isArray(parsed?.rooms)) {
@@ -411,7 +426,7 @@ export default function App() {
     const attempts: string[] = [];
     for (const baseUrl of resolveApiCandidates(`/rooms/${encodeURIComponent(roomId)}`)) {
       try {
-        const response = await fetch(baseUrl, { method: "GET", credentials: "same-origin" });
+        const response = await fetchWithTimeout(baseUrl, { method: "GET", credentials: "same-origin" });
         const raw = await response.text();
         const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
         if (response.ok) {
@@ -437,7 +452,7 @@ export default function App() {
     const attempts: string[] = [];
     for (const baseUrl of resolveApiCandidates(path)) {
       try {
-        const response = await fetch(baseUrl, {
+        const response = await fetchWithTimeout(baseUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "same-origin",
