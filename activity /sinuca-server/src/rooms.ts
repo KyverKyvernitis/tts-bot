@@ -1,14 +1,14 @@
 import type { WebSocket } from "ws";
 import type { ListRoomsPayload, RoomSnapshot, RoomStatus, TableType } from "./messages.js";
 
-interface PlayerRef {
+export interface PlayerRef {
   userId: string;
   displayName: string;
   ready: boolean;
   avatarUrl?: string | null;
 }
 
-interface RoomRecord {
+export interface RoomRecord {
   roomId: string;
   instanceId: string;
   guildId: string | null;
@@ -34,7 +34,7 @@ function makeRoomId(mode: "server" | "casual") {
 }
 
 function computeStatus(room: RoomRecord): RoomStatus {
-  if (room.status === "in_game") return room.status;
+  if (room.status === "in_game" && room.players.length >= 2) return "in_game";
   if (room.players.length >= 2 && room.players.every((player) => player.ready)) return "ready";
   return "waiting";
 }
@@ -195,6 +195,13 @@ export function setRoomStake(roomId: string, hostUserId: string, options?: { tab
   }
 
   room.status = computeStatus(room);
+  return room;
+}
+
+export function setRoomInGame(roomId: string, inGame: boolean): RoomRecord | null {
+  const room = rooms.get(roomId);
+  if (!room) return null;
+  room.status = inGame ? "in_game" : computeStatus({ ...room, status: "waiting" });
   return room;
 }
 

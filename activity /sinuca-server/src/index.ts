@@ -13,6 +13,7 @@ import {
   listRooms,
   removePlayer,
   setPlayerReady,
+  setRoomInGame,
   setRoomStake,
   subscribeSocket,
   toSnapshot,
@@ -27,6 +28,7 @@ import type {
   SessionContextPayload,
 } from "./messages.js";
 import { getInitialRuleSet } from "./gameRules.js";
+import { getGameSnapshot, removeGame, startGameForRoom, takeShot } from "./gameState.js";
 
 const app = express();
 
@@ -259,6 +261,16 @@ function broadcastRoomList(payload: ListRoomsPayload) {
   }
 }
 
+
+function broadcastGame(roomId: string) {
+  const game = getGameSnapshot(roomId);
+  if (!game) return;
+  const payload: ServerMessage = { type: "game_state", payload: game };
+  for (const client of getSubscribers(roomId)) {
+    send(client, payload);
+  }
+}
+
 function normalizeRoomMode(value: unknown, fallbackGuildId?: string | null): "server" | "casual" {
   if (value === "server") return "server";
   if (value === "casual") return "casual";
@@ -347,6 +359,10 @@ async function handleLeaveRoomHttp(req: Request, res: Response) {
     return;
   }
   const previous = getRoom(roomId);
+  if (previous?.status === "in_game") {
+    removeGame(roomId);
+    setRoomInGame(roomId, false);
+  }
   const room = shouldCloseRoom && previous && previous.hostUserId === userId
     ? null
     : removePlayer(roomId, userId);
@@ -416,14 +432,96 @@ async function handleUpdateStakeRoomHttp(req: Request, res: Response) {
   res.json({ room: toSnapshot(room) });
 }
 
+async function handleGetGameHttp(req: Request, res: Response) {
+  const roomId = normalizeIntString(req.params?.roomId ?? firstString(req.body?.roomId) ?? firstString(req.query?.roomId));
+  const sinceSeq = Number(firstString(req.body?.sinceSeq) ?? firstString(req.query?.sinceSeq) ?? 0);
+  if (!roomId) {
+    res.status(400).json({ error: "missing_room_id" });
+    return;
+  }
+  const game = getGameSnapshot(roomId, Number.isFinite(sinceSeq) ? sinceSeq : 0);
+  res.json({ game });
+}
+
+async function handleStartGameHttp(req: Request, res: Response) {
+  const session = resolveRequestSession(req);
+  const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
+  const roomId = normalizeIntString(merged.roomId);
+  const userId = normalizeIntString(merged.userId);
+  if (!roomId || !userId) {
+    res.status(400).json({ error: "missing_start_identifiers" });
+    return;
+  }
+  const room = getRoom(roomId);
+  if (!room) {
+    res.status(404).json({ error: "room_not_found" });
+    return;
+  }
+  if (room.hostUserId !== userId) {
+    res.status(403).json({ error: "only_host_can_start" });
+    return;
+  }
+  const opponent = room.players.find((player) => player.userId !== room.hostUserId);
+  if (!opponent || !opponent.ready) {
+    res.status(409).json({ error: "room_not_ready" });
+    return;
+  }
+  setRoomInGame(roomId, true);
+  const game = startGameForRoom(room);
+  broadcastRoom(roomId);
+  broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+  broadcastGame(roomId);
+  res.json({ game, room: toSnapshot(getRoom(roomId) ?? room) });
+}
+
+async function handleShootGameHttp(req: Request, res: Response) {
+  const session = resolveRequestSession(req);
+  const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
+  const roomId = normalizeIntString(merged.roomId);
+  const userId = normalizeIntString(merged.userId);
+  const angle = Number(merged.angle ?? 0);
+  const power = Number(merged.power ?? 0);
+  if (!roomId || !userId) {
+    res.status(400).json({ error: "missing_shot_identifiers" });
+    return;
+  }
+  const room = getRoom(roomId);
+  if (!room || room.status !== "in_game") {
+    res.status(404).json({ error: "game_not_found" });
+    return;
+  }
+  const before = getGameSnapshot(roomId);
+  if (!before) {
+    res.status(404).json({ error: "game_not_found" });
+    return;
+  }
+  if (before.turnUserId !== userId) {
+    res.status(409).json({ error: "not_your_turn", game: before });
+    return;
+  }
+  const game = takeShot(roomId, userId, angle, power);
+  if (!game) {
+    res.status(404).json({ error: "game_not_found" });
+    return;
+  }
+  broadcastGame(roomId);
+  res.json({ game });
+}
+
 app.get("/rooms", handleListRoomsHttp);
 app.get("/api/rooms", handleListRoomsHttp);
 app.post("/rooms", handleListRoomsHttp);
 app.post("/api/rooms", handleListRoomsHttp);
 app.get("/rooms/:roomId", handleGetRoomHttp);
 app.get("/api/rooms/:roomId", handleGetRoomHttp);
+app.get("/games/:roomId", handleGetGameHttp);
+app.get("/api/games/:roomId", handleGetGameHttp);
 app.post("/rooms/create", handleCreateRoomHttp);
 app.post("/api/rooms/create", handleCreateRoomHttp);
+app.post("/games/start", handleStartGameHttp);
+app.post("/api/games/start", handleStartGameHttp);
+app.post("/games/shoot", handleShootGameHttp);
+app.post("/api/games/shoot", handleShootGameHttp);
 app.post("/rooms/join", handleJoinRoomHttp);
 app.post("/api/rooms/join", handleJoinRoomHttp);
 app.post("/rooms/leave", handleLeaveRoomHttp);
@@ -671,6 +769,15 @@ async function handleBalance(req: Request, res: Response) {
   }
   if (action === "room_stake") {
     return void handleUpdateStakeRoomHttp(req, res);
+  }
+  if (action === "game_get") {
+    return void handleGetGameHttp(req, res);
+  }
+  if (action === "game_start") {
+    return void handleStartGameHttp(req, res);
+  }
+  if (action === "game_shoot") {
+    return void handleShootGameHttp(req, res);
   }
   const bodyGuildId = typeof req.body?.guildId === "string" ? req.body.guildId : null;
   const bodyUserId = typeof req.body?.userId === "string" ? req.body.userId : null;
@@ -954,6 +1061,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         return;
       }
       const shouldCloseRoom = booleanish(merged.closeRoom, false);
+      if (previous?.status === "in_game") {
+        removeGame(merged.roomId);
+        setRoomInGame(merged.roomId, false);
+      }
       const room = shouldCloseRoom && previous && previous.hostUserId === merged.userId
         ? null
         : removePlayer(merged.roomId, merged.userId);
@@ -969,6 +1080,50 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       } else if (previous) {
         broadcastRoomList({ guildId: previous.guildId, channelId: previous.channelId, mode: previous.mode });
       }
+      return;
+    }
+
+    if (data.type === "start_game") {
+      const merged = mergeWithSession(data.payload, activeSession);
+      const room = getRoom(merged.roomId);
+      if (!merged.userId || !room) {
+        send(ws, { type: "error", message: "mesa não encontrada" });
+        return;
+      }
+      if (room.hostUserId !== merged.userId) {
+        send(ws, { type: "error", message: "apenas o anfitrião pode iniciar" });
+        return;
+      }
+      const opponent = room.players.find((player) => player.userId !== room.hostUserId);
+      if (!opponent || !opponent.ready) {
+        send(ws, { type: "error", message: "o adversário ainda não está pronto" });
+        return;
+      }
+      setRoomInGame(room.roomId, true);
+      startGameForRoom(room);
+      broadcastRoom(room.roomId);
+      broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+      broadcastGame(room.roomId);
+      return;
+    }
+
+    if (data.type === "take_shot") {
+      const merged = mergeWithSession(data.payload, activeSession);
+      if (!merged.userId) {
+        send(ws, { type: "error", message: "jogador da activity não identificado" });
+        return;
+      }
+      const game = getGameSnapshot(merged.roomId);
+      if (!game) {
+        send(ws, { type: "error", message: "partida não encontrada" });
+        return;
+      }
+      if (game.turnUserId !== merged.userId) {
+        send(ws, { type: "error", message: "não é sua vez" });
+        return;
+      }
+      takeShot(merged.roomId, merged.userId, Number(merged.angle ?? 0), Number(merged.power ?? 0));
+      broadcastGame(merged.roomId);
       return;
     }
 

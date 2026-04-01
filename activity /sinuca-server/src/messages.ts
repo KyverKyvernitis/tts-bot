@@ -1,6 +1,7 @@
 export type RoomMode = "server" | "casual";
 export type TableType = "stake" | "casual";
 export type RoomStatus = "waiting" | "ready" | "in_game";
+export type GameStatus = "waiting_shot" | "finished";
 
 export interface ContextPayload {
   guildId?: string | null;
@@ -36,6 +37,63 @@ export interface ReadyPayload {
   ready: boolean;
 }
 
+export interface StartGamePayload {
+  roomId: string;
+  userId: string;
+}
+
+export interface ShootPayload {
+  roomId: string;
+  userId: string;
+  angle: number;
+  power: number;
+}
+
+export interface GameBallSnapshot {
+  id: string;
+  number: number;
+  x: number;
+  y: number;
+  pocketed: boolean;
+}
+
+export interface GameShotFrameBall {
+  id: string;
+  x: number;
+  y: number;
+  pocketed: boolean;
+}
+
+export interface GameShotFrame {
+  balls: GameShotFrameBall[];
+}
+
+export interface GameShotSnapshot {
+  seq: number;
+  shooterUserId: string;
+  nextTurnUserId: string;
+  pocketedNumbers: number[];
+  cuePocketed: boolean;
+  frames: GameShotFrame[];
+  createdAt: number;
+}
+
+export interface GameSnapshot {
+  gameId: string;
+  roomId: string;
+  hostUserId: string;
+  guestUserId: string | null;
+  tableType: TableType;
+  stakeChips: number | null;
+  status: GameStatus;
+  turnUserId: string;
+  shotSequence: number;
+  balls: GameBallSnapshot[];
+  createdAt: number;
+  updatedAt: number;
+  lastShot: GameShotSnapshot | null;
+}
+
 export interface ListRoomsPayload extends ContextPayload {}
 
 export interface BalancePayload {
@@ -64,6 +122,8 @@ export type ClientMessage =
   | { type: "get_balance"; payload: BalancePayload }
   | { type: "init_context"; payload: SessionContextPayload }
   | { type: "exchange_token"; payload: ExchangeTokenPayload }
+  | { type: "start_game"; payload: StartGamePayload }
+  | { type: "take_shot"; payload: ShootPayload }
   | { type: "ping" };
 
 export interface RoomSnapshot {
@@ -119,6 +179,7 @@ export type ServerMessage =
   | { type: "pong" }
   | { type: "room_state"; payload: RoomSnapshot }
   | { type: "room_list"; payload: RoomSnapshot[] }
+  | { type: "game_state"; payload: GameSnapshot }
   | { type: "balance_state"; payload: BalanceSnapshot }
   | { type: "balance_debug"; payload: BalanceDebugSnapshot }
   | { type: "oauth_token_result"; payload: OAuthTokenResultPayload }
