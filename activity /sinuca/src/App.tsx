@@ -1400,10 +1400,11 @@ export default function App() {
 
   return (
     <main
-      className="app-shell"
+      className={`app-shell ${screen === "game" ? "app-shell--game" : ""}`}
       style={{ backgroundImage: `linear-gradient(180deg, rgba(4, 10, 17, 0.12), rgba(4, 10, 17, 0.46)), url(${lobbyBackground})` }}
       onClickCapture={handleShellClickCapture}
     >
+      {screen !== "game" ? (
       <header className={`hero-card hero-card--compact hero-card--landscape ${(createEntryMenuOpen || roomEntryMenuOpen) ? "hero-card--menu-open" : ""}`}>
         <div className="hero-card__copy">
           <span className="hero-card__eyebrow">{heroEyebrow}</span>
@@ -1488,6 +1489,7 @@ export default function App() {
           </div>
         ) : null}
       </header>
+      ) : null}
 
       {screen === "home" ? (
         <section className="home-lobby home-lobby--landscape home-lobby--streamlined">
