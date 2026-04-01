@@ -1,12 +1,31 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { GameBallSnapshot, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
+import type { BallGroup, GameBallSnapshot, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
 
-const TABLE_WIDTH = 1000;
-const TABLE_HEIGHT = 560;
-const BALL_SIZE = 28;
+const TABLE_WIDTH = 1200;
+const TABLE_HEIGHT = 600;
+const BALL_SIZE = 24;
 const BALL_RADIUS = BALL_SIZE / 2;
+const TABLE_MIN_X = 54 + BALL_RADIUS;
+const TABLE_MAX_X = TABLE_WIDTH - 54 - BALL_RADIUS;
+const TABLE_MIN_Y = 44 + BALL_RADIUS;
+const TABLE_MAX_Y = TABLE_HEIGHT - 44 - BALL_RADIUS;
+const BREAK_MAX_X = TABLE_WIDTH * 0.27;
+const POCKETS = [
+  { id: 1, x: 48, y: 38 },
+  { id: 2, x: TABLE_WIDTH / 2, y: 26 },
+  { id: 3, x: TABLE_WIDTH - 48, y: 38 },
+  { id: 4, x: 48, y: TABLE_HEIGHT - 38 },
+  { id: 5, x: TABLE_WIDTH / 2, y: TABLE_HEIGHT - 26 },
+  { id: 6, x: TABLE_WIDTH - 48, y: TABLE_HEIGHT - 38 },
+] as const;
 
-type ShotInput = { angle: number; power: number };
+type ShotInput = {
+  angle: number;
+  power: number;
+  cueX?: number | null;
+  cueY?: number | null;
+  calledPocket?: number | null;
+};
 
 type Props = {
   room: RoomSnapshot;
@@ -18,6 +37,8 @@ type Props = {
   onExit: () => void;
 };
 
+type PointerMode = "idle" | "aim" | "place";
+
 function cleanName(name: string) {
   return (name || "jogador").replace(/^@+/, "").trim() || "jogador";
 }
@@ -28,12 +49,34 @@ function playerInitials(player: RoomPlayer | null | undefined) {
   return pieces.map((piece) => piece[0]?.toUpperCase() ?? "").join("") || source[0]?.toUpperCase() || "J";
 }
 
+function ballColor(number: number) {
+  const map: Record<number, string> = {
+    1: "#f4d144",
+    2: "#2a5ce0",
+    3: "#d83a3d",
+    4: "#6c42ca",
+    5: "#e48225",
+    6: "#2b9b53",
+    7: "#8a2f21",
+    8: "#16181c",
+    9: "#f4d144",
+    10: "#2a5ce0",
+    11: "#d83a3d",
+    12: "#6c42ca",
+    13: "#e48225",
+    14: "#2b9b53",
+    15: "#8a2f21",
+  };
+  return map[number] ?? "#eef4ff";
+}
+
 function resolveBallMeta(number: number) {
-  if (number === 0) return { label: "", className: "cue" };
-  if (number === 8) return { label: "8", className: "eight" };
+  if (number === 0) return { label: "", className: "cue", color: "#f6fbff" };
+  if (number === 8) return { label: "8", className: "eight", color: ballColor(number) };
   return {
     label: String(number),
     className: number >= 9 ? "stripe" : "solid",
+    color: ballColor(number),
   };
 }
 
@@ -45,32 +88,55 @@ function frameToDisplayBalls(frameBalls: GameShotFrameBall[], previousBalls: Gam
   });
 }
 
+function groupOfNumber(number: number): BallGroup | null {
+  if (number >= 1 && number <= 7) return "solids";
+  if (number >= 9 && number <= 15) return "stripes";
+  return null;
+}
+
+function clampCuePosition(x: number, y: number, breakOnly: boolean) {
+  return {
+    x: Math.min(breakOnly ? BREAK_MAX_X : TABLE_MAX_X, Math.max(TABLE_MIN_X, x)),
+    y: Math.min(TABLE_MAX_Y, Math.max(TABLE_MIN_Y, y)),
+  };
+}
+
 export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, onShoot, onExit }: Props) {
   const [displayBalls, setDisplayBalls] = useState<GameBallSnapshot[]>(game.balls);
-  const [power, setPower] = useState(0.62);
+  const [power, setPower] = useState(0.58);
   const [aimAngle, setAimAngle] = useState(0);
-  const [aiming, setAiming] = useState(false);
-  const [powerDragging, setPowerDragging] = useState(false);
+  const [pointerMode, setPointerMode] = useState<PointerMode>("idle");
   const [animating, setAnimating] = useState(false);
   const [animatingSeq, setAnimatingSeq] = useState<number>(0);
+  const [selectedPocket, setSelectedPocket] = useState<number | null>(null);
   const tableRef = useRef<HTMLDivElement | null>(null);
   const powerRailRef = useRef<HTMLDivElement | null>(null);
   const animationRef = useRef<number | null>(null);
   const lastAnimatedSeqRef = useRef<number>(0);
+  const powerMovedRef = useRef(false);
 
   const host = room.players.find((player) => player.userId === room.hostUserId) ?? room.players[0] ?? null;
   const guest = room.players.find((player) => player.userId !== room.hostUserId) ?? null;
-  const currentTurnName = game.turnUserId === host?.userId ? host?.displayName : guest?.displayName ?? host?.displayName;
+  const isHost = currentUserId === room.hostUserId;
+  const currentPlayer = isHost ? host : guest;
+  const opponentPlayer = isHost ? guest : host;
+  const myGroup = isHost ? game.hostGroup : game.guestGroup;
+  const opponentGroup = isHost ? game.guestGroup : game.hostGroup;
   const cueBall = displayBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
   const isMyTurn = game.turnUserId === currentUserId;
-  const isHost = currentUserId === room.hostUserId;
-  const canShoot = Boolean(cueBall && isMyTurn && !animating && !shootBusy);
+  const canInteract = Boolean(cueBall && isMyTurn && !animating && !shootBusy && game.status !== "finished");
+  const isBallInHand = game.ballInHandUserId === currentUserId && canInteract;
   const cueLabel = game.tableType === "casual" ? "Amistoso" : `${game.stakeChips ?? 0}`;
+  const isOpenTable = !game.hostGroup || !game.guestGroup;
+  const myRemaining = displayBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === myGroup).length;
+  const opponentRemaining = displayBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === opponentGroup).length;
+  const needEightCall = !isOpenTable && myGroup !== null && myRemaining === 0;
+  const canShoot = Boolean(canInteract && (!needEightCall || selectedPocket !== null));
 
   useEffect(() => {
     if (animating) return;
     setDisplayBalls(game.balls);
-  }, [animating, game.balls, game.shotSequence]);
+  }, [animating, game.balls]);
 
   useEffect(() => {
     if (animating) return;
@@ -115,87 +181,153 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   useEffect(() => {
     if (!cueBall) return;
     setAimAngle(0);
-  }, [cueBall, game.gameId]);
+  }, [cueBall?.id, game.gameId]);
+
+  useEffect(() => {
+    if (!needEightCall) setSelectedPocket(null);
+  }, [needEightCall]);
+
+
+  const pointToLocal = (clientX: number, clientY: number) => {
+    if (!tableRef.current) return null;
+    const rect = tableRef.current.getBoundingClientRect();
+    return {
+      x: ((clientX - rect.left) / rect.width) * TABLE_WIDTH,
+      y: ((clientY - rect.top) / rect.height) * TABLE_HEIGHT,
+    };
+  };
 
   const updateAimFromPoint = (clientX: number, clientY: number) => {
-    if (!cueBall || !tableRef.current) return;
-    const rect = tableRef.current.getBoundingClientRect();
-    const scaleX = TABLE_WIDTH / rect.width;
-    const scaleY = TABLE_HEIGHT / rect.height;
-    const localX = (clientX - rect.left) * scaleX;
-    const localY = (clientY - rect.top) * scaleY;
-    setAimAngle(Math.atan2(localY - cueBall.y, localX - cueBall.x));
+    if (!cueBall) return;
+    const point = pointToLocal(clientX, clientY);
+    if (!point) return;
+    setAimAngle(Math.atan2(point.y - cueBall.y, point.x - cueBall.x));
+  };
+
+  const updateCuePositionFromPoint = (clientX: number, clientY: number) => {
+    if (!cueBall) return;
+    const point = pointToLocal(clientX, clientY);
+    if (!point) return;
+    const next = clampCuePosition(point.x, point.y, game.shotSequence === 0);
+    setDisplayBalls((current) => current.map((ball) => (ball.number === 0 ? { ...ball, x: next.x, y: next.y, pocketed: false } : ball)));
   };
 
   const updatePowerFromClientY = (clientY: number) => {
     if (!powerRailRef.current) return;
     const rect = powerRailRef.current.getBoundingClientRect();
     const ratio = 1 - (clientY - rect.top) / rect.height;
-    const clamped = Math.max(0.18, Math.min(1, ratio));
+    const clamped = Math.max(0.12, Math.min(1, ratio));
     setPower(clamped);
   };
 
-  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!canShoot) return;
-    setAiming(true);
+  const handleTablePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!cueBall || !canInteract) return;
+    const point = pointToLocal(event.clientX, event.clientY);
+    if (!point) return;
+    const distanceToCue = Math.hypot(point.x - cueBall.x, point.y - cueBall.y);
+    if (isBallInHand && distanceToCue <= 36) {
+      setPointerMode("place");
+      updateCuePositionFromPoint(event.clientX, event.clientY);
+      return;
+    }
+    setPointerMode("aim");
     updateAimFromPoint(event.clientX, event.clientY);
   };
 
-  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!aiming) return;
-    updateAimFromPoint(event.clientX, event.clientY);
+  const handleTablePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (pointerMode === "place") updateCuePositionFromPoint(event.clientX, event.clientY);
+    if (pointerMode === "aim") updateAimFromPoint(event.clientX, event.clientY);
   };
 
-  const handlePointerUp = () => {
-    setAiming(false);
+  const handleTablePointerUp = () => {
+    setPointerMode("idle");
   };
 
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!canShoot) return;
-    setPowerDragging(true);
+    powerMovedRef.current = false;
     updatePowerFromClientY(event.clientY);
   };
 
   const handlePowerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!powerDragging) return;
+    if ((event.buttons & 1) !== 1) return;
+    powerMovedRef.current = true;
     updatePowerFromClientY(event.clientY);
   };
 
-  const handlePowerUp = () => {
-    setPowerDragging(false);
+  const handleShoot = async () => {
+    if (!canShoot || !cueBall) return;
+    await onShoot({
+      angle: aimAngle,
+      power,
+      cueX: isBallInHand ? cueBall.x : null,
+      cueY: isBallInHand ? cueBall.y : null,
+      calledPocket: needEightCall ? selectedPocket : null,
+    });
   };
 
-  const handleShoot = async () => {
-    if (!canShoot) return;
-    await onShoot({ angle: aimAngle, power });
+  const handlePowerUp = () => {
+    if (powerMovedRef.current && canShoot && !shootBusy) {
+      void handleShoot();
+    }
+    powerMovedRef.current = false;
   };
+
+  const hostPocketed = myGroup && isHost
+    ? 7 - myRemaining
+    : opponentGroup && !isHost
+      ? 7 - opponentRemaining
+      : displayBalls.filter((ball) => ball.pocketed && ball.number !== 0 && ball.number !== 8 && groupOfNumber(ball.number) === game.hostGroup).length;
+  const guestPocketed = myGroup && !isHost
+    ? 7 - myRemaining
+    : opponentGroup && isHost
+      ? 7 - opponentRemaining
+      : displayBalls.filter((ball) => ball.pocketed && ball.number !== 0 && ball.number !== 8 && groupOfNumber(ball.number) === game.guestGroup).length;
+
+  const statusText = game.status === "finished"
+    ? game.winnerUserId === currentUserId
+      ? "Você venceu"
+      : "Você perdeu"
+    : game.foulReason && !animating
+      ? `Falta: ${game.foulReason}`
+      : isBallInHand
+        ? "Bola na mão"
+        : animating
+          ? `Tacada ${animatingSeq}`
+          : isMyTurn
+            ? needEightCall
+              ? "Chame a caçapa da 8"
+              : "Sua vez"
+            : `Vez de ${cleanName((game.turnUserId === host?.userId ? host : guest)?.displayName ?? "oponente")}`;
+
+  const phaseText = game.status === "finished"
+    ? "Fim de partida"
+    : game.phase === "break"
+      ? "Break"
+      : game.phase === "open_table"
+        ? "Mesa aberta"
+        : game.phase === "eight_ball"
+          ? "Bola 8"
+          : myGroup === "solids"
+            ? "Você: lisas"
+            : myGroup === "stripes"
+              ? "Você: listradas"
+              : "Sem grupo";
 
   const aimGuide = useMemo(() => {
     if (!cueBall) return null;
-    const cueOffset = 74 + power * 88;
     return {
       left: cueBall.x,
       top: cueBall.y,
       angle: aimAngle,
-      length: 430,
-      cueOffset,
-      ghostX: cueBall.x + Math.cos(aimAngle) * 226,
-      ghostY: cueBall.y + Math.sin(aimAngle) * 226,
-      markerX: cueBall.x + Math.cos(aimAngle) * 270,
-      markerY: cueBall.y + Math.sin(aimAngle) * 270,
+      length: 500,
+      cueOffset: 240 + power * 120,
+      ghostX: cueBall.x + Math.cos(aimAngle) * 240,
+      ghostY: cueBall.y + Math.sin(aimAngle) * 240,
+      ringX: cueBall.x + Math.cos(aimAngle) * 286,
+      ringY: cueBall.y + Math.sin(aimAngle) * 286,
     };
   }, [aimAngle, cueBall, power]);
-
-  const statusText = animating
-    ? `Tacada ${animatingSeq}`
-    : canShoot
-      ? "Sua vez"
-      : isMyTurn
-        ? "Bolas em movimento"
-        : `Vez de ${cleanName(currentTurnName ?? "jogador")}`;
-
-  const hostPocketed = displayBalls.filter((ball) => ball.pocketed && ball.number !== 0 && ball.number !== 8).slice(0, 7).length;
-  const guestPocketed = Math.max(0, displayBalls.filter((ball) => ball.pocketed && ball.number !== 0 && ball.number !== 8).length - hostPocketed);
 
   return (
     <section className="game-stage-shell game-stage-shell--mobile">
@@ -222,7 +354,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           <div className="game-mobile-center">
             <span className="game-mobile-center__badge">{cueLabel}</span>
             <strong>{statusText}</strong>
-            <small>{game.shotSequence === 0 ? "Break" : `Tacada ${game.shotSequence}`}</small>
+            <small>{phaseText}</small>
           </div>
 
           <div className={`game-mobile-player game-mobile-player--right ${game.turnUserId === guest?.userId ? "game-mobile-player--active" : ""}`}>
@@ -252,7 +384,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         >
           <div className="game-power-rail__track">
             <div className="game-power-rail__fill" style={{ height: `${Math.round(power * 100)}%` }} />
-            <div className="game-power-rail__knob" style={{ bottom: `calc(${Math.round(power * 100)}% - 12px)` }} />
+            <div className="game-power-rail__knob" style={{ bottom: `calc(${Math.round(power * 100)}% - 10px)` }} />
           </div>
           <div className="game-power-rail__value">{Math.round(power * 100)}</div>
         </div>
@@ -261,11 +393,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           <div className="game-mobile-table-viewport">
             <div
               ref={tableRef}
-              className={`pool-table pool-table--mobile ${canShoot ? "pool-table--interactive" : ""}`}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              onPointerLeave={handlePointerUp}
+              className={`pool-table pool-table--mobile ${canInteract ? "pool-table--interactive" : ""}`}
+              onPointerDown={handleTablePointerDown}
+              onPointerMove={handleTablePointerMove}
+              onPointerUp={handleTablePointerUp}
+              onPointerLeave={handleTablePointerUp}
             >
               <div className="pool-table__felt" />
               <div className="pool-table__head-string" />
@@ -274,7 +406,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
                 <span key={`pocket-${index}`} className={`pool-pocket pool-pocket--${index + 1}`} />
               ))}
 
-              {aimGuide && !animating && isMyTurn ? (
+              {needEightCall && isMyTurn ? POCKETS.map((pocket) => (
+                <button
+                  key={pocket.id}
+                  type="button"
+                  className={`pool-pocket-target ${selectedPocket === pocket.id ? "pool-pocket-target--active" : ""}`}
+                  style={{ left: `${pocket.x}px`, top: `${pocket.y}px` }}
+                  onClick={() => setSelectedPocket(pocket.id)}
+                >
+                  {pocket.id}
+                </button>
+              )) : null}
+
+              {aimGuide && !animating && isMyTurn && cueBall ? (
                 <>
                   <div
                     className="pool-aim-line"
@@ -285,20 +429,14 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
                       transform: `translateY(-1px) rotate(${aimGuide.angle}rad)`,
                     }}
                   />
-                  <div
-                    className="pool-aim-ring"
-                    style={{ left: `${aimGuide.markerX}px`, top: `${aimGuide.markerY}px` }}
-                  />
-                  <div
-                    className="pool-ghost-dot"
-                    style={{ left: `${aimGuide.ghostX}px`, top: `${aimGuide.ghostY}px` }}
-                  />
+                  <div className="pool-aim-ring" style={{ left: `${aimGuide.ringX}px`, top: `${aimGuide.ringY}px` }} />
+                  <div className="pool-ghost-dot" style={{ left: `${aimGuide.ghostX}px`, top: `${aimGuide.ghostY}px` }} />
                   <div
                     className="pool-cue"
                     style={{
-                      left: `${aimGuide.left}px`,
-                      top: `${aimGuide.top}px`,
-                      transform: `translate(-100%, -50%) rotate(${aimGuide.angle}rad) translateX(${-aimGuide.cueOffset}px)`,
+                      left: `${cueBall.x}px`,
+                      top: `${cueBall.y}px`,
+                      transform: `translate(-50%, -50%) rotate(${aimGuide.angle}rad) translateX(${-aimGuide.cueOffset}px)`,
                     }}
                   />
                 </>
@@ -311,7 +449,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
                   <div
                     key={ball.id}
                     className={`pool-ball pool-ball--${meta.className}`}
-                    style={{ left: `${ball.x - BALL_RADIUS}px`, top: `${ball.y - BALL_RADIUS}px` }}
+                    style={{
+                      left: `${ball.x - BALL_RADIUS}px`,
+                      top: `${ball.y - BALL_RADIUS}px`,
+                      ['--ball-color' as string]: meta.color,
+                    }}
                   >
                     {meta.label ? <span>{meta.label}</span> : null}
                   </div>
@@ -320,10 +462,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             </div>
           </div>
         </div>
-
-        <button className="game-shoot-fab" type="button" disabled={!canShoot || shootBusy} onClick={handleShoot}>
-          {shootBusy ? "..." : "Tacar"}
-        </button>
       </div>
     </section>
   );
