@@ -95,6 +95,11 @@ button:focus-visible {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
+  overflow: visible;
+}
+
+.hero-card--menu-open {
+  z-index: 60;
 }
 
 .hero-card--compact h1 {
@@ -1818,6 +1823,11 @@ button:focus-visible {
   min-width: 100%;
 }
 
+.hero-card__meta--hud,
+.entry-selector--hero {
+  overflow: visible;
+}
+
 .entry-selector__trigger strong {
   font-family: var(--font-ui);
   font-size: 0.94rem;
@@ -1859,7 +1869,7 @@ button:focus-visible {
   transform: translateY(-4px);
   pointer-events: none;
   transition: opacity 0.16s ease, transform 0.16s ease;
-  z-index: 20;
+  z-index: 120;
 }
 
 .entry-selector__menu--open {

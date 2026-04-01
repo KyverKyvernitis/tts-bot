@@ -191,6 +191,7 @@ export default function App() {
   const [balanceDebug, setBalanceDebug] = useState<BalanceDebugSnapshot | null>(null);
   const [roomEntryMenuOpen, setRoomEntryMenuOpen] = useState(false);
   const [createEntryMenuOpen, setCreateEntryMenuOpen] = useState(false);
+  const [createRoomBusy, setCreateRoomBusy] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const roomEntryMenuRef = useRef<HTMLDivElement | null>(null);
   const createEntryMenuRef = useRef<HTMLDivElement | null>(null);
@@ -318,6 +319,13 @@ export default function App() {
       ? "Você está pronto. Aguarde o anfitrião iniciar."
       : "Marque pronto quando estiver preparado.";
   const formatStakeOptionLabel = (stake: number) => stake === 0 ? "Amistoso" : `${stake}`;
+
+  useEffect(() => {
+    if (screen === "create" && createPreviewRoom) {
+      setRoom(createPreviewRoom);
+      setScreen("room");
+    }
+  }, [createPreviewRoom, screen]);
 
   const waitForOAuthTokenResult = (): Promise<OAuthExchangeResult> => new Promise<OAuthExchangeResult>((resolve, reject) => {
     const socket = socketRef.current;
@@ -619,7 +627,9 @@ export default function App() {
     return null;
   };
 
-  const createRoomOverHttp = async (reason: string) => {
+  const createRoomOverHttp = async (reason: string, override?: { stake: number; tableType: TableType }) => {
+    const nextStake = override?.stake ?? createStake;
+    const nextTableType = override?.tableType ?? createTableType;
     const result = await postRoomActionOverHttp("/rooms/create", {
       instanceId,
       guildId: state.context.guildId,
@@ -628,8 +638,8 @@ export default function App() {
       userId: state.currentUser.userId,
       displayName: state.currentUser.displayName,
       avatarUrl: state.currentUser.avatarUrl ?? null,
-      tableType: isServer ? (createStake === 0 ? "casual" : "stake") : "casual",
-      stakeChips: isServer && createStake > 0 ? createStake : null,
+      tableType: isServer ? nextTableType : "casual",
+      stakeChips: isServer && nextTableType === "stake" && nextStake > 0 ? nextStake : null,
     }, reason);
     if (result?.room) {
       setRoom(result.room);
@@ -1093,7 +1103,7 @@ export default function App() {
       style={{ backgroundImage: `linear-gradient(180deg, rgba(4, 10, 17, 0.12), rgba(4, 10, 17, 0.46)), url(${lobbyBackground})` }}
       onClickCapture={handleShellClickCapture}
     >
-      <header className="hero-card hero-card--compact hero-card--landscape">
+      <header className={`hero-card hero-card--compact hero-card--landscape ${(createEntryMenuOpen || roomEntryMenuOpen) ? "hero-card--menu-open" : ""}`}>
         <div className="hero-card__copy">
           <span className="hero-card__eyebrow">{heroEyebrow}</span>
           <h1>{heroTitle}</h1>
@@ -1201,22 +1211,31 @@ export default function App() {
               <button
                 className="menu-button menu-button--create"
                 type="button"
+                disabled={createRoomBusy}
                 onClick={() => {
-                  setRoom(null);
-                  setCreateDraftRoomId(null);
+                  if (createRoomBusy) return;
                   const nextStake = isServer ? 25 : 0;
                   const nextTableType: TableType = isServer ? "stake" : "casual";
+                  setRoom(null);
+                  setCreateDraftRoomId(null);
                   setCreateTableType(nextTableType);
                   setCreateStake(nextStake);
-                  setScreen("create");
-                  window.setTimeout(() => {
-                    void createRoomOverHttp("home_click_create");
-                  }, 0);
+                  setCreateEntryMenuOpen(false);
+                  setRoomEntryMenuOpen(false);
+                  setCreateRoomBusy(true);
+                  void (async () => {
+                    const nextRoom = await createRoomOverHttp("home_click_create", { stake: nextStake, tableType: nextTableType });
+                    if (nextRoom) {
+                      setRoom(nextRoom);
+                      setScreen("room");
+                    }
+                    setCreateRoomBusy(false);
+                  })();
                 }}
               >
                 <span className="menu-button__eyebrow">Mesa nova</span>
-                <strong>Criar mesa</strong>
-                <small>Abra uma mesa.</small>
+                <strong>{createRoomBusy ? "Abrindo mesa..." : "Criar mesa"}</strong>
+                <small>{createRoomBusy ? "Entrando na sala..." : "Abra uma mesa."}</small>
               </button>
 
               <button
