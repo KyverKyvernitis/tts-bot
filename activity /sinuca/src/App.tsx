@@ -280,7 +280,6 @@ export default function App() {
   const dmCreateStakeOptions = [0] as const;
   const createStakeOptions: readonly number[] = isServer ? serverCreateStakeOptions : dmCreateStakeOptions;
   const isFriendlyTable = !isServer || createStake === 0 || createTableType === "casual";
-  const createModeLabel = isFriendlyTable ? "Partida amistosa" : "Valendo fichas";
   const canAffordSelectedStake = !isServer || createStake === 0 ? true : balanceLoaded && balance.chips >= createStake;
   const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId);
   const roomHostPlayer = room?.players.find((player) => player.userId === room.hostUserId) ?? room?.players[0] ?? null;
@@ -291,7 +290,6 @@ export default function App() {
   const isRoomHost = room ? room.hostUserId === state.currentUser.userId : false;
   const canHostStart = Boolean(room && room.players.length === 2 && roomOpponentPlayer?.ready);
   const roomStakeOptions = [0, 10, 25, 30, 50] as const;
-  const roomMetaLabel = "Entrada";
   const roomStatusText = !roomOpponentPlayer
     ? "aguardando adversário"
     : canHostStart
@@ -1078,6 +1076,7 @@ export default function App() {
   }, [screen]);
 
   const heroSecondaryLabel = useMemo(() => {
+    if (!isServer) return null;
     if (screen === "create") {
       return { label: "Entrada", value: isFriendlyTable ? "Amistosa" : `${createStake} fichas` };
     }
@@ -1085,7 +1084,9 @@ export default function App() {
       return { label: "Entrada", value: room.tableType === "stake" ? room.stakeLabel : "Amistosa" };
     }
     return null;
-  }, [createStake, isFriendlyTable, room, screen]);
+  }, [createStake, isFriendlyTable, isServer, room, screen]);
+
+  const heroEntryEditable = Boolean(isServer && heroSecondaryLabel && (screen === "create" || (screen === "room" && room && isRoomHost)));
 
   return (
     <main
@@ -1112,10 +1113,67 @@ export default function App() {
               </div>
             ) : null}
             {heroSecondaryLabel ? (
-              <div className="hero-stat hero-stat--entry">
-                <span>{heroSecondaryLabel.label}</span>
-                <strong>{heroSecondaryLabel.value}</strong>
-              </div>
+              heroEntryEditable ? (
+                <div
+                  ref={screen === "create" ? createEntryMenuRef : roomEntryMenuRef}
+                  className={`entry-selector entry-selector--hero ${screen === "create" ? (createEntryMenuOpen ? "entry-selector--open" : "") : (roomEntryMenuOpen ? "entry-selector--open" : "")}`}
+                >
+                  <button
+                    className="entry-selector__trigger entry-selector__trigger--hero"
+                    type="button"
+                    onClick={() => {
+                      if (screen === "create") {
+                        setCreateEntryMenuOpen((current) => !current);
+                        setRoomEntryMenuOpen(false);
+                        return;
+                      }
+                      setRoomEntryMenuOpen((current) => !current);
+                      setCreateEntryMenuOpen(false);
+                    }}
+                  >
+                    <span className="entry-selector__trigger-copy">
+                      <span className="entry-selector__label">{heroSecondaryLabel.label}</span>
+                      <strong>{heroSecondaryLabel.value}</strong>
+                    </span>
+                    <span className={`entry-selector__chevron ${(screen === "create" ? createEntryMenuOpen : roomEntryMenuOpen) ? "entry-selector__chevron--open" : ""}`}>v</span>
+                  </button>
+                  <div className={`entry-selector__menu entry-selector__menu--hero ${(screen === "create" ? createEntryMenuOpen : roomEntryMenuOpen) ? "entry-selector__menu--open" : ""}`}>
+                    {(screen === "create" ? createStakeOptions : roomStakeOptions).map((stake) => {
+                      const active = screen === "create"
+                        ? createStake === stake
+                        : stake === 0
+                          ? room?.tableType !== "stake"
+                          : room?.tableType === "stake" && room?.stakeChips === stake;
+                      return (
+                        <button
+                          key={stake}
+                          type="button"
+                          className={`entry-selector__option ${active ? "entry-selector__option--active" : ""}`}
+                          onClick={() => {
+                            if (screen === "create") {
+                              setCreateEntryMenuOpen(false);
+                              if (active) return;
+                              setCreateStake(stake);
+                              setCreateTableType(stake === 0 ? "casual" : "stake");
+                              return;
+                            }
+                            setRoomEntryMenuOpen(false);
+                            if (!room || active) return;
+                            void updateRoomStakeOverHttp(room.roomId, stake, "http_primary_stake");
+                          }}
+                        >
+                          {formatStakeOptionLabel(stake)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div className="hero-stat hero-stat--entry">
+                  <span>{heroSecondaryLabel.label}</span>
+                  <strong>{heroSecondaryLabel.value}</strong>
+                </div>
+              )
             ) : null}
           </div>
         ) : null}
@@ -1232,38 +1290,6 @@ export default function App() {
                 <div className="create-preview-footer__meta">
                   <strong>{createPreviewRoom ? `${createPreviewRoom.players.length}/2 jogadores` : "1/2 jogadores"}</strong>
                   <small>{createPreviewOpponentPlayer ? "Mesa aberta" : "Aguardando adversário"}</small>
-                </div>
-
-                <div ref={createEntryMenuRef} className={`entry-selector entry-selector--create ${createEntryMenuOpen ? "entry-selector--open" : ""}`}>
-                  <button
-                    className="entry-selector__trigger entry-selector__trigger--create"
-                    type="button"
-                    onClick={() => setCreateEntryMenuOpen((current) => !current)}
-                  >
-                    <span className="entry-selector__label">Entrada</span>
-                    <strong>{isFriendlyTable ? "Amistosa" : `${createStake} fichas`}</strong>
-                    <span className={`entry-selector__chevron ${createEntryMenuOpen ? "entry-selector__chevron--open" : ""}`}>v</span>
-                  </button>
-                  <div className={`entry-selector__menu ${createEntryMenuOpen ? "entry-selector__menu--open" : ""}`}>
-                    {createStakeOptions.map((stake) => {
-                      const active = createStake === stake;
-                      return (
-                        <button
-                          key={stake}
-                          type="button"
-                          className={`entry-selector__option ${active ? "entry-selector__option--active" : ""}`}
-                          onClick={() => {
-                            setCreateEntryMenuOpen(false);
-                            if (active) return;
-                            setCreateStake(stake);
-                            setCreateTableType(stake === 0 ? "casual" : "stake");
-                          }}
-                        >
-                          {formatStakeOptionLabel(stake)}
-                        </button>
-                      );
-                    })}
-                  </div>
                 </div>
 
                 {!resolvedUser ? (
@@ -1424,41 +1450,7 @@ export default function App() {
               </div>
 
               <div className="room-stage__footer room-stage__footer--tight">
-                <div className="room-stage__status-inline room-stage__status-inline--compact">
-                  <span>{roomMetaLabel}</span>
-                  {isRoomHost ? (
-                    <div ref={roomEntryMenuRef} className={`entry-selector ${roomEntryMenuOpen ? "entry-selector--open" : ""}`}>
-                      <button
-                        className="entry-selector__trigger"
-                        type="button"
-                        onClick={() => setRoomEntryMenuOpen((current) => !current)}
-                      >
-                        <strong>{roomStakeDisplay}</strong>
-                        <span className={`entry-selector__chevron ${roomEntryMenuOpen ? "entry-selector__chevron--open" : ""}`}>v</span>
-                      </button>
-                      <div className={`entry-selector__menu ${roomEntryMenuOpen ? "entry-selector__menu--open" : ""}`}>
-                        {roomStakeOptions.map((stake) => {
-                          const active = stake === 0 ? room.tableType !== "stake" : room.tableType === "stake" && room.stakeChips === stake;
-                          return (
-                            <button
-                              key={stake}
-                              type="button"
-                              className={`entry-selector__option ${active ? "entry-selector__option--active" : ""}`}
-                              onClick={() => {
-                                setRoomEntryMenuOpen(false);
-                                if (!room || active) return;
-                                void updateRoomStakeOverHttp(room.roomId, stake, "http_primary_stake");
-                              }}
-                            >
-                              {formatStakeOptionLabel(stake)}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ) : (
-                    <strong>{roomStakeDisplay}</strong>
-                  )}
+                <div className="room-stage__status-inline room-stage__status-inline--compact room-stage__status-inline--copy-only">
                   <small>{roomStatusText}</small>
                 </div>
 
