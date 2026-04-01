@@ -293,7 +293,7 @@ async function handleCreateRoomHttp(req: Request, res: Response) {
   const guildId = normalizeIntString(merged.guildId);
   const channelId = normalizeIntString(merged.channelId);
   const userId = normalizeIntString(merged.userId);
-  const displayName = normalizeIntString(merged.displayName);
+  const displayName = firstString(merged.displayName);
   const avatarUrl = firstString(merged.avatarUrl);
   const requestedTableType = merged.tableType === "casual" ? "casual" : "stake";
   const stakeChips = typeof merged.stakeChips === "number" ? merged.stakeChips : Number(merged.stakeChips ?? 0);
@@ -316,7 +316,7 @@ async function handleJoinRoomHttp(req: Request, res: Response) {
   const merged = mergeWithSession(req.body ?? {}, session);
   const roomId = normalizeIntString(merged.roomId);
   const userId = normalizeIntString(merged.userId);
-  const displayName = normalizeIntString(merged.displayName);
+  const displayName = firstString(merged.displayName);
   const avatarUrl = firstString(merged.avatarUrl);
   console.log("[sinuca-join-room-http-request]", JSON.stringify({ session, merged: { roomId, userId, displayName, avatarUrl } }));
   if (!roomId || !userId || !displayName) {
