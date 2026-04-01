@@ -1065,6 +1065,23 @@ button:focus-visible {
   align-items: stretch;
 }
 
+.create-preview-shell--room {
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-areas: "host meta opponent";
+}
+
+.create-preview-shell--room .participant-slot--room-main:first-child {
+  grid-area: host;
+}
+
+.create-preview-shell--room .create-center-pill--room {
+  grid-area: meta;
+}
+
+.create-preview-shell--room .participant-slot--room-main:last-child {
+  grid-area: opponent;
+}
+
 .participant-slot--create-main,
 .participant-slot--room-main {
   min-height: 104px;
@@ -1140,12 +1157,15 @@ button:focus-visible {
 
 .room-stage__actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
   gap: 10px;
   align-items: center;
 }
 
-.room-stage__leave,
+.room-stage__leave {
+  min-height: 42px;
+}
+
 .room-stage__ready {
   min-height: 50px;
 }
@@ -1171,6 +1191,14 @@ button:focus-visible {
   .create-layout--final,
   .room-stage--final {
     grid-template-columns: 1fr;
+  }
+
+  .create-preview-shell--room {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      "host opponent"
+      "meta meta";
+    align-items: start;
   }
 
   .room-stage__actions {

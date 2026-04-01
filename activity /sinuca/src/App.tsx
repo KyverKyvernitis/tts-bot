@@ -263,6 +263,9 @@ export default function App() {
   const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId);
   const roomHostPlayer = room?.players.find((player) => player.userId === room.hostUserId) ?? room?.players[0] ?? null;
   const roomOpponentPlayer = room?.players.find((player) => player.userId !== room.hostUserId) ?? null;
+  const createPreviewRoom = screen === "create" && room && createDraftRoomId && room.roomId === createDraftRoomId ? room : null;
+  const createPreviewHostPlayer = createPreviewRoom?.players.find((player) => player.userId === createPreviewRoom.hostUserId) ?? createPreviewRoom?.players[0] ?? null;
+  const createPreviewOpponentPlayer = createPreviewRoom?.players.find((player) => player.userId !== createPreviewRoom.hostUserId) ?? null;
   const canStart = room?.players.length === 2 && room.players.every((player) => player.ready);
 
   const waitForOAuthTokenResult = (): Promise<OAuthExchangeResult> => new Promise<OAuthExchangeResult>((resolve, reject) => {
@@ -464,6 +467,9 @@ export default function App() {
           if (parsed?.room) {
             setRoom(parsed.room);
             setCreateDraftRoomId(parsed.room.roomId);
+            if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
+              setScreen("room");
+            }
           }
           return parsed?.room ?? null;
         }
@@ -483,6 +489,9 @@ export default function App() {
           if (parsed?.room) {
             setRoom(parsed.room);
             setCreateDraftRoomId(parsed.room.roomId);
+            if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
+              setScreen("room");
+            }
           }
           return parsed?.room ?? null;
         }
@@ -812,7 +821,7 @@ export default function App() {
         if (payload.type === "room_state") {
           setRoom(payload.payload);
           setCreateDraftRoomId(payload.payload.roomId);
-          if (currentScreenRef.current !== "create") {
+          if (currentScreenRef.current !== "create" || payload.payload.players.length > 1) {
             setScreen("room");
           }
           setErrorMessage(null);
@@ -965,7 +974,7 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, [bootstrapped, createDraftRoomId, room?.roomId, screen]);
 
-  const shouldShowBalanceDebug = isServer && (!balanceLoaded || balance.chips === 0);
+  const shouldShowBalanceDebug = Boolean(import.meta.env.DEV) && isServer && (!balanceLoaded || balance.chips === 0);
 
   const heroTitle = useMemo(() => {
     if (screen === "create") return "Criar mesa";
@@ -1110,25 +1119,39 @@ export default function App() {
               <div className="create-preview-shell create-preview-shell--final">
                 <div className="participant-slot participant-slot--filled participant-slot--compact participant-slot--create-main">
                   <div className="participant-slot__avatar-wrap">
-                    <img className="participant-slot__avatar" src={resolvePlayerAvatar({ userId: state.currentUser.userId, avatarUrl: state.currentUser.avatarUrl ?? null })} alt={state.currentUser.displayName} />
+                    <img
+                      className="participant-slot__avatar"
+                      src={resolvePlayerAvatar(createPreviewHostPlayer ?? { userId: state.currentUser.userId, avatarUrl: state.currentUser.avatarUrl ?? null })}
+                      alt={(createPreviewHostPlayer?.displayName ?? state.currentUser.displayName)}
+                    />
                   </div>
-                  <span className="participant-slot__name">{cleanPlayerName({ displayName: state.currentUser.displayName })}</span>
+                  <span className="participant-slot__name">{cleanPlayerName({ displayName: createPreviewHostPlayer?.displayName ?? state.currentUser.displayName })}</span>
                   <small className="participant-slot__role">você</small>
                 </div>
 
                 <div className="create-center-pill create-center-pill--final">
-                  <strong>1/2 jogadores</strong>
-                  <span>{isFriendlyTable ? "Partida amistosa" : "Valendo fichas"}</span>
-                  {!isFriendlyTable ? <em>{createStake}</em> : null}
+                  <strong>{createPreviewRoom ? `${createPreviewRoom.players.length}/2 jogadores` : "1/2 jogadores"}</strong>
+                  <span>{createPreviewRoom ? (createPreviewRoom.tableType === "stake" ? "Valendo fichas" : "Partida amistosa") : (isFriendlyTable ? "Partida amistosa" : "Valendo fichas")}</span>
+                  {(createPreviewRoom ? createPreviewRoom.tableType === "stake" : !isFriendlyTable) ? <em>{createPreviewRoom?.stakeChips ?? createStake}</em> : null}
                 </div>
 
-                <div className="participant-slot participant-slot--ghost participant-slot--compact participant-slot--create-main">
-                  <div className="participant-slot__avatar-wrap participant-slot__avatar-wrap--ghost">
-                    <div className="participant-slot__unknown">?</div>
+                {createPreviewOpponentPlayer ? (
+                  <div className="participant-slot participant-slot--filled participant-slot--compact participant-slot--create-main">
+                    <div className="participant-slot__avatar-wrap">
+                      <img className="participant-slot__avatar" src={resolvePlayerAvatar(createPreviewOpponentPlayer)} alt={createPreviewOpponentPlayer.displayName} />
+                    </div>
+                    <span className="participant-slot__name">{cleanPlayerName(createPreviewOpponentPlayer)}</span>
+                    <small className="participant-slot__role">jogador</small>
                   </div>
-                  <span className="participant-slot__name">Aguardando adversário</span>
-                  <small className="participant-slot__role">vaga aberta</small>
-                </div>
+                ) : (
+                  <div className="participant-slot participant-slot--ghost participant-slot--compact participant-slot--create-main">
+                    <div className="participant-slot__avatar-wrap participant-slot__avatar-wrap--ghost">
+                      <div className="participant-slot__unknown">?</div>
+                    </div>
+                    <span className="participant-slot__name">Aguardando adversário</span>
+                    <small className="participant-slot__role">vaga aberta</small>
+                  </div>
+                )}
               </div>
             </div>
 
