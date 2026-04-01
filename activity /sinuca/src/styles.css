@@ -867,6 +867,11 @@ button:focus-visible {
   text-transform: uppercase;
 }
 
+.chip-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .chip-button--back {
   padding: 9px 15px;
   border-radius: 18px;
@@ -1216,6 +1221,10 @@ button:focus-visible {
   grid-template-columns: minmax(0, 0.74fr) minmax(0, 1.26fr);
   gap: 8px;
   align-items: center;
+}
+
+.room-stage__actions--single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .room-stage__actions--host {
