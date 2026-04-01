@@ -194,7 +194,9 @@ export default function App() {
   const instanceId = state.context.instanceId ?? `local-${state.currentUser.userId}`;
   const isServer = state.context.mode === "server";
   const resolvedUser = isResolvedDiscordUserId(state.currentUser.userId);
-  const createStakeOptions = (isServer ? [0, 10, 25, 50] : [0]) as const;
+  const serverCreateStakeOptions = [0, 10, 25, 50] as const;
+  const dmCreateStakeOptions = [0] as const;
+  const createStakeOptions = isServer ? serverCreateStakeOptions : dmCreateStakeOptions;
   const isFriendlyTable = !isServer || createStake === 0 || createTableType === "casual";
   const createModeLabel = isFriendlyTable ? "Partida amistosa" : "Valendo fichas";
   const canAffordSelectedStake = !isServer || createStake === 0 ? true : balanceLoaded && balance.chips >= createStake;
