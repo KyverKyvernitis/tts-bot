@@ -189,7 +189,9 @@ export default function App() {
   const [balance, setBalance] = useState<BalanceSnapshot>(initialBalance);
   const [balanceLoaded, setBalanceLoaded] = useState(false);
   const [balanceDebug, setBalanceDebug] = useState<BalanceDebugSnapshot | null>(null);
+  const [roomEntryMenuOpen, setRoomEntryMenuOpen] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
+  const roomEntryMenuRef = useRef<HTMLDivElement | null>(null);
   const lastInitKeyRef = useRef<string | null>(null);
   const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
   const balanceReceiptRef = useRef<number>(0);
@@ -251,10 +253,25 @@ export default function App() {
     createDraftRoomIdRef.current = createDraftRoomId;
   }, [createDraftRoomId]);
 
+  useEffect(() => {
+    if (!roomEntryMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (roomEntryMenuRef.current?.contains(target)) return;
+      setRoomEntryMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [roomEntryMenuOpen]);
+
+  useEffect(() => {
+    if (screen !== "room") setRoomEntryMenuOpen(false);
+  }, [screen, room?.roomId]);
+
   const instanceId = state.context.instanceId ?? `local-${state.currentUser.userId}`;
   const isServer = state.context.mode === "server";
   const resolvedUser = isResolvedDiscordUserId(state.currentUser.userId);
-  const serverCreateStakeOptions = [0, 10, 25, 50] as const;
+  const serverCreateStakeOptions = [0, 10, 25, 30, 50] as const;
   const dmCreateStakeOptions = [0] as const;
   const createStakeOptions: readonly number[] = isServer ? serverCreateStakeOptions : dmCreateStakeOptions;
   const isFriendlyTable = !isServer || createStake === 0 || createTableType === "casual";
@@ -268,7 +285,8 @@ export default function App() {
   const createPreviewOpponentPlayer = createPreviewRoom?.players.find((player) => player.userId !== createPreviewRoom.hostUserId) ?? null;
   const isRoomHost = room ? room.hostUserId === state.currentUser.userId : false;
   const canHostStart = Boolean(room && room.players.length === 2 && roomOpponentPlayer?.ready);
-  const roomMetaLabel = room?.tableType === "stake" ? "Entrada" : "Modo";
+  const roomStakeOptions = [0, 10, 25, 30, 50] as const;
+  const roomMetaLabel = "Entrada";
   const roomStatusText = !roomOpponentPlayer
     ? "aguardando adversário"
     : canHostStart
@@ -296,6 +314,8 @@ export default function App() {
     : currentPlayer?.ready
       ? "Você está pronto. Aguarde o anfitrião iniciar."
       : "Marque pronto quando estiver preparado.";
+  const roomStakeDisplay = room?.tableType === "stake" ? room.stakeLabel : "Amistosa";
+  const formatStakeOptionLabel = (stake: number) => stake === 0 ? "Amistosa" : `${stake} fichas`;
 
   const waitForOAuthTokenResult = (): Promise<OAuthExchangeResult> => new Promise<OAuthExchangeResult>((resolve, reject) => {
     const socket = socketRef.current;
@@ -542,6 +562,7 @@ export default function App() {
       "/rooms/join": "room_join",
       "/rooms/leave": "room_leave",
       "/rooms/ready": "room_ready",
+      "/rooms/stake": "room_stake",
     };
     const attempts: string[] = [];
     const action = actionByPath[path];
@@ -643,6 +664,20 @@ export default function App() {
       roomId,
       userId: state.currentUser.userId,
       ready,
+    }, reason);
+    if (result?.room) {
+      setRoom(result.room);
+      return result.room;
+    }
+    return null;
+  };
+
+  const updateRoomStakeOverHttp = async (roomId: string, stake: number, reason: string) => {
+    const result = await postRoomActionOverHttp("/rooms/stake", {
+      roomId,
+      userId: state.currentUser.userId,
+      stakeChips: stake,
+      tableType: stake === 0 ? "casual" : "stake",
     }, reason);
     if (result?.room) {
       setRoom(result.room);
@@ -1017,17 +1052,17 @@ export default function App() {
   }, [canHostStart, currentPlayer?.ready, isRoomHost, roomOpponentPlayer, screen]);
 
   const heroSubtitle = useMemo(() => {
-    if (screen === "create") return "Configure a mesa e abra para outro jogador entrar.";
+    if (screen === "create") return "Abra a mesa e ajuste a entrada.";
     if (screen === "list") return "Entre em uma mesa aberta.";
     if (screen === "room") {
-      if (!room) return "Acompanhe a mesa e prepare a partida.";
+      if (!room) return "Acompanhe a mesa.";
       if (isRoomHost) {
-        if (!roomOpponentPlayer) return "Esperando adversário.";
-        return canHostStart ? "Pode iniciar." : "Esperando o pronto do adversário.";
+        if (!roomOpponentPlayer) return "Aguardando jogador.";
+        return canHostStart ? "Pronta para iniciar." : "Esperando pronto.";
       }
-      return currentPlayer?.ready ? "Aguardando o anfitrião." : "Marque pronto.";
+      return currentPlayer?.ready ? "Aguardando início." : "Marque pronto.";
     }
-    return "Crie uma mesa ou entre em uma já aberta.";
+    return "Crie ou entre em uma mesa.";
   }, [canHostStart, currentPlayer?.ready, isRoomHost, room, roomOpponentPlayer, screen]);
 
   const heroEyebrow = useMemo(() => {
@@ -1042,7 +1077,7 @@ export default function App() {
       return isFriendlyTable ? { label: "Modo", value: "Amistosa" } : { label: "Entrada", value: `${createStake} fichas` };
     }
     if (screen === "room" && room) {
-      return room.tableType === "stake" ? { label: "Entrada", value: room.stakeLabel } : { label: "Modo", value: "Amistosa" };
+      return { label: "Entrada", value: room.tableType === "stake" ? room.stakeLabel : "Amistosa" };
     }
     return null;
   }, [createStake, isFriendlyTable, room, screen]);
@@ -1213,7 +1248,7 @@ export default function App() {
                         setCreateTableType(stake === 0 ? "casual" : "stake");
                       }}
                     >
-                      {stake}
+                      {stake === 0 ? "Amistosa" : stake}
                     </button>
                   ))}
                 </div>
@@ -1264,26 +1299,26 @@ export default function App() {
                 return (
                   <article key={entry.roomId} className="room-entry-card room-entry-card--soft room-entry-card--showdown">
                     <div className="room-entry-card__showdown">
-                      <div className="participant-slot participant-slot--filled">
+                      <div className="participant-slot participant-slot--filled participant-slot--list-card">
                         <div className="participant-slot__avatar-wrap">
                           <img className="participant-slot__avatar" src={resolvePlayerAvatar(host)} alt={host.displayName} />
                         </div>
                         <span className="participant-slot__name">{cleanPlayerName(host)}</span>
-                        <small className="participant-slot__role">criador</small>
+                        <small className="participant-slot__role">anfitrião</small>
                       </div>
 
-                      <div className="participant-slot__versus">vs.</div>
+                      <div className="participant-slot__versus participant-slot__versus--list">vs.</div>
 
                       {opponent ? (
-                        <div className="participant-slot participant-slot--filled">
+                        <div className="participant-slot participant-slot--filled participant-slot--list-card">
                           <div className="participant-slot__avatar-wrap">
                             <img className="participant-slot__avatar" src={resolvePlayerAvatar(opponent)} alt={opponent.displayName} />
                           </div>
                           <span className="participant-slot__name">{cleanPlayerName(opponent)}</span>
-                          <small className="participant-slot__role">jogador</small>
+                          <small className="participant-slot__role">adversário</small>
                         </div>
                       ) : (
-                        <div className="participant-slot participant-slot--ghost">
+                        <div className="participant-slot participant-slot--ghost participant-slot--list-card">
                           <div className="participant-slot__avatar-wrap participant-slot__avatar-wrap--ghost">
                             <div className="participant-slot__unknown">?</div>
                           </div>
@@ -1293,18 +1328,15 @@ export default function App() {
                       )}
                     </div>
 
-                    <div className="room-entry-card__footer">
-                      <div className="room-entry-card__meta room-entry-card__meta--row">
-                        <span>{entry.players.length}/2 jogadores</span>
-                        <div className="room-entry-card__stake">
-                          <span>{entry.tableType === "stake" ? "Valendo fichas" : "Partida amistosa"}</span>
-                          {entry.tableType === "stake" ? <strong>{entry.stakeChips ?? 0}</strong> : null}
-                        </div>
-                        <span className={`status-badge status-badge--${entry.status}`}>{formatStatus(entry)}</span>
+                    <div className="room-entry-card__footer room-entry-card__footer--compact">
+                      <div className="room-entry-card__meta room-entry-card__meta--chips">
+                        <span className="room-inline-chip">{entry.players.length}/2</span>
+                        <span className="room-inline-chip">{entry.tableType === "stake" ? `${entry.stakeChips ?? 0} fichas` : "Amistosa"}</span>
+                        <span className={`status-badge status-badge--${entry.status} room-inline-chip room-inline-chip--status`}>{formatStatus(entry)}</span>
                       </div>
 
                       <button
-                        className="primary-button"
+                        className="primary-button room-entry-card__join"
                         type="button"
                         disabled={authBusy || entry.players.length >= 2}
                         onClick={() => {
@@ -1346,7 +1378,7 @@ export default function App() {
                   <span className="participant-slot__name">{cleanPlayerName(roomHostPlayer ?? room.players[0])}</span>
                   <small className="participant-slot__role">anfitrião</small>
                   <span className={`room-ready-badge ${canHostStart ? "room-ready-badge--ready" : ""}`}>
-                    {canHostStart ? "pode iniciar" : roomOpponentPlayer ? "aguardando" : "esperando"}
+                    {canHostStart ? "pode iniciar" : roomOpponentPlayer ? "aguardando" : "vaga aberta"}
                   </span>
                 </div>
 
@@ -1373,11 +1405,43 @@ export default function App() {
                 )}
               </div>
 
-              <div className="room-stage__footer">
-                <div className="room-stage__status-inline">
+              <div className="room-stage__footer room-stage__footer--tight">
+                <div className="room-stage__status-inline room-stage__status-inline--compact">
                   <span>{roomMetaLabel}</span>
-                  <strong>{room.tableType === "stake" ? room.stakeLabel : "Amistosa"}</strong>
-                  <small>{roomStatusCopy}</small>
+                  {isRoomHost ? (
+                    <div ref={roomEntryMenuRef} className={`entry-selector ${roomEntryMenuOpen ? "entry-selector--open" : ""}`}>
+                      <button
+                        className="entry-selector__trigger"
+                        type="button"
+                        onClick={() => setRoomEntryMenuOpen((current) => !current)}
+                      >
+                        <strong>{roomStakeDisplay}</strong>
+                        <span className={`entry-selector__chevron ${roomEntryMenuOpen ? "entry-selector__chevron--open" : ""}`}>v</span>
+                      </button>
+                      <div className={`entry-selector__menu ${roomEntryMenuOpen ? "entry-selector__menu--open" : ""}`}>
+                        {roomStakeOptions.map((stake) => {
+                          const active = stake === 0 ? room.tableType !== "stake" : room.tableType === "stake" && room.stakeChips === stake;
+                          return (
+                            <button
+                              key={stake}
+                              type="button"
+                              className={`entry-selector__option ${active ? "entry-selector__option--active" : ""}`}
+                              onClick={() => {
+                                setRoomEntryMenuOpen(false);
+                                if (!room || active) return;
+                                void updateRoomStakeOverHttp(room.roomId, stake, "http_primary_stake");
+                              }}
+                            >
+                              {formatStakeOptionLabel(stake)}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <strong>{roomStakeDisplay}</strong>
+                  )}
+                  <small>{roomStatusText}</small>
                 </div>
 
                 <div className={`room-stage__actions ${isRoomHost ? "room-stage__actions--host" : "room-stage__actions--guest"}`}>

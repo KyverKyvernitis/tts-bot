@@ -1543,3 +1543,332 @@ button:focus-visible {
     justify-content: flex-start;
   }
 }
+
+/* patch: compactação final de lista/sala + dropdown de entrada */
+.hero-card {
+  padding: 8px 12px;
+  gap: 8px;
+}
+
+.hero-card__copy {
+  max-width: 520px;
+}
+
+.hero-card__eyebrow,
+.room-entry-card__eyebrow,
+.menu-button__eyebrow {
+  margin-bottom: 5px;
+}
+
+.hero-card p {
+  margin-top: 4px;
+  font-size: 0.88rem;
+}
+
+.hero-stat {
+  min-width: 92px;
+  padding: 7px 10px;
+  border-radius: 15px;
+}
+
+.hero-stat span {
+  margin-bottom: 2px;
+}
+
+.hero-stat strong {
+  font-size: 0.95rem;
+}
+
+.list-topbar {
+  margin-bottom: 10px;
+}
+
+.chip-button--back {
+  padding: 8px 13px;
+}
+
+.room-entry-card--showdown {
+  padding: 12px 13px;
+  gap: 10px;
+}
+
+.room-entry-card__showdown {
+  gap: 10px;
+}
+
+.participant-slot--list-card {
+  min-height: 96px;
+  padding: 8px 8px 9px;
+  gap: 5px;
+  border-radius: 18px;
+}
+
+.participant-slot--list-card .participant-slot__avatar-wrap {
+  width: 52px;
+  height: 52px;
+}
+
+.participant-slot--list-card .participant-slot__name {
+  font-size: 0.84rem;
+  max-width: 9rem;
+}
+
+.participant-slot--list-card .participant-slot__role {
+  font-size: 0.6rem;
+}
+
+.participant-slot__versus--list {
+  font-size: 0.82rem;
+  letter-spacing: 0.12em;
+}
+
+.room-entry-card__footer--compact {
+  gap: 8px;
+  align-items: center;
+}
+
+.room-entry-card__meta--chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.room-inline-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(236, 246, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(236, 244, 252, 0.86);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.room-inline-chip--status.status-badge {
+  padding: 0 10px;
+  min-height: 28px;
+  font-size: 10px;
+}
+
+.room-entry-card__join {
+  min-height: 38px;
+  min-width: 108px;
+  padding: 10px 14px;
+  border-radius: 16px;
+}
+
+.room-stage__preview--compact {
+  padding: 9px;
+  gap: 8px;
+}
+
+.room-stage__players {
+  gap: 7px;
+}
+
+.room-stage__preview--compact .participant-slot--room-main {
+  min-height: 78px;
+  padding: 7px 8px 8px;
+  gap: 3px;
+  border-radius: 18px;
+}
+
+.room-stage__preview--compact .participant-slot--room-main .participant-slot__avatar-wrap {
+  width: 48px;
+  height: 48px;
+}
+
+.room-stage__preview--compact .participant-slot__name {
+  font-size: 0.84rem;
+  max-width: 8.5rem;
+}
+
+.room-stage__preview--compact .participant-slot__role {
+  font-size: 0.58rem;
+}
+
+.room-ready-badge {
+  min-height: 24px;
+  padding: 4px 8px;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+}
+
+.room-stage__footer--tight {
+  grid-template-columns: minmax(0, 1fr) minmax(290px, auto);
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.room-stage__status-inline--compact {
+  gap: 1px;
+  align-content: start;
+}
+
+.room-stage__status-inline--compact span {
+  font-size: 9px;
+}
+
+.room-stage__status-inline--compact > strong,
+.room-stage__status-inline--compact > .entry-selector .entry-selector__trigger strong {
+  font-size: 0.92rem;
+}
+
+.room-stage__status-inline--compact small {
+  font-size: 0.76rem;
+  line-height: 1.18;
+  color: rgba(229, 238, 248, 0.68);
+}
+
+.room-stage__actions {
+  gap: 7px;
+}
+
+.room-stage__leave,
+.room-stage__ready {
+  min-height: 38px;
+  border-radius: 16px;
+}
+
+.entry-selector {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.entry-selector__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(236, 246, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: #f4fbff;
+  cursor: pointer;
+}
+
+.entry-selector__trigger strong {
+  font-family: var(--font-ui);
+  font-size: 0.94rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.entry-selector__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  font-family: var(--font-ui);
+  font-size: 0.82rem;
+  color: rgba(230, 240, 248, 0.72);
+  transform: rotate(0deg);
+  transition: transform 0.16s ease;
+}
+
+.entry-selector__chevron--open {
+  transform: rotate(180deg);
+}
+
+.entry-selector__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  gap: 4px;
+  min-width: 140px;
+  padding: 6px;
+  border-radius: 16px;
+  border: 1px solid rgba(232, 242, 255, 0.1);
+  background: rgba(7, 21, 31, 0.94);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  z-index: 8;
+}
+
+.entry-selector__menu--open {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.entry-selector__option {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+  color: rgba(240, 246, 252, 0.92);
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.entry-selector__option:hover {
+  border-color: rgba(241, 247, 255, 0.12);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.entry-selector__option--active {
+  background: rgba(31, 119, 84, 0.24);
+  border-color: rgba(98, 199, 158, 0.22);
+  color: #e4fff0;
+}
+
+@media (max-width: 920px) {
+  .room-entry-card__footer--compact {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .room-entry-card__join {
+    width: 100%;
+  }
+
+  .room-stage__footer--tight {
+    grid-template-columns: 1fr;
+  }
+
+  .entry-selector {
+    width: 100%;
+  }
+
+  .entry-selector__trigger {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .entry-selector__menu {
+    width: 100%;
+    min-width: 0;
+  }
+}
+.create-toggle-group--stakes-four {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+@media (max-width: 920px) {
+  .create-toggle-group--stakes-four {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
