@@ -8,10 +8,11 @@ import {
   writeCachedToken,
   writeCachedUser,
 } from "./sdk/discord";
-import type { ActivityBootstrap, ActivityUser, BalanceDebugSnapshot, BalanceSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
+import type { ActivityBootstrap, ActivityUser, BalanceDebugSnapshot, BalanceSnapshot, GameSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.wav";
+import GameStage from "./game/GameStage";
 
 const DISCORD_ID_RE = /^\d{17,20}$/;
 
@@ -44,7 +45,7 @@ const initialBalance: BalanceSnapshot = {
 
 type ConnectionState = "connecting" | "connected" | "offline";
 type AuthState = "checking" | "ready" | "needs_consent";
-type LobbyScreen = "home" | "create" | "list" | "room";
+type LobbyScreen = "home" | "create" | "list" | "room" | "game";
 type TableType = "stake" | "casual";
 
 type OAuthExchangeResult = { ok: boolean; accessToken: string | null; error: string | null; detail: string | null };
@@ -55,6 +56,7 @@ type IncomingMessage =
   | { type: "error"; message: string }
   | { type: "room_state"; payload: RoomSnapshot }
   | { type: "room_list"; payload: RoomSnapshot[] }
+  | { type: "game_state"; payload: GameSnapshot }
   | { type: "balance_state"; payload: BalanceSnapshot }
   | { type: "balance_debug"; payload: BalanceDebugSnapshot }
   | { type: "session_context"; payload: SessionContextPayload }
@@ -213,6 +215,7 @@ export default function App() {
   const [state, setState] = useState<ActivityBootstrap>(initialState);
   const [bootstrapped, setBootstrapped] = useState(false);
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
+  const [game, setGame] = useState<GameSnapshot | null>(null);
   const [rooms, setRooms] = useState<RoomSnapshot[]>([]);
   const [screen, setScreen] = useState<LobbyScreen>("home");
   const [createTableType, setCreateTableType] = useState<TableType>("stake");
@@ -229,6 +232,8 @@ export default function App() {
   const [roomEntryMenuOpen, setRoomEntryMenuOpen] = useState(false);
   const [createEntryMenuOpen, setCreateEntryMenuOpen] = useState(false);
   const [createRoomBusy, setCreateRoomBusy] = useState(false);
+  const [gameStartBusy, setGameStartBusy] = useState(false);
+  const [gameShootBusy, setGameShootBusy] = useState(false);
   const [roomExitBusy, setRoomExitBusy] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const roomEntryMenuRef = useRef<HTMLDivElement | null>(null);
@@ -596,11 +601,14 @@ export default function App() {
           if (parsed?.room) {
             setRoom(parsed.room);
             setCreateDraftRoomId(parsed.room.roomId);
-            if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
+            if (parsed.room.status === "in_game") {
+              setScreen("game");
+            } else if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
               setScreen("room");
             }
-          } else if (currentScreenRef.current === "room") {
+          } else if (currentScreenRef.current === "room" || currentScreenRef.current === "game") {
             setRoom(null);
+            setGame(null);
             setCreateDraftRoomId(null);
             setRoomEntryMenuOpen(false);
             setErrorMessage("a sala foi fechada");
@@ -625,11 +633,14 @@ export default function App() {
           if (parsed?.room) {
             setRoom(parsed.room);
             setCreateDraftRoomId(parsed.room.roomId);
-            if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
+            if (parsed.room.status === "in_game") {
+              setScreen("game");
+            } else if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
               setScreen("room");
             }
-          } else if (currentScreenRef.current === "room") {
+          } else if (currentScreenRef.current === "room" || currentScreenRef.current === "game") {
             setRoom(null);
+            setGame(null);
             setCreateDraftRoomId(null);
             setRoomEntryMenuOpen(false);
             setErrorMessage("a sala foi fechada");
@@ -779,6 +790,138 @@ export default function App() {
     if (result?.room) {
       setRoom(result.room);
       return result.room;
+    }
+    return null;
+  };
+
+
+  const fetchGameStateOverHttp = async (roomId: string, reason: string, sinceSeq = 0) => {
+    const attempts: string[] = [];
+    for (const baseUrl of resolveApiCandidates("/balance")) {
+      try {
+        const url = new URL(baseUrl, window.location.origin);
+        url.searchParams.set("action", "game_get");
+        url.searchParams.set("roomId", roomId);
+        if (sinceSeq > 0) url.searchParams.set("sinceSeq", String(sinceSeq));
+        const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3200);
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
+        if (response.ok) {
+          if (parsed?.game) {
+            setGame((current) => parsed.game ? { ...parsed.game, lastShot: parsed.game.lastShot ?? (current?.roomId === parsed.game.roomId && current?.shotSequence === parsed.game.shotSequence ? current.lastShot : null) } : current);
+            setScreen("game");
+            return parsed.game;
+          }
+          return null;
+        }
+        attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+      } catch (error) {
+        attempts.push(`balance_game:${error instanceof Error ? error.message : "unknown"}`);
+      }
+    }
+
+    for (const baseUrl of resolveApiCandidates(`/games/${roomId}`)) {
+      try {
+        const url = new URL(baseUrl, window.location.origin);
+        if (sinceSeq > 0) url.searchParams.set("sinceSeq", String(sinceSeq));
+        const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3200);
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
+        if (response.ok) {
+          if (parsed?.game) {
+            setGame((current) => parsed.game ? { ...parsed.game, lastShot: parsed.game.lastShot ?? (current?.roomId === parsed.game.roomId && current?.shotSequence === parsed.game.shotSequence ? current.lastShot : null) } : current);
+            setScreen("game");
+            return parsed.game;
+          }
+          return null;
+        }
+        attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+      } catch (error) {
+        attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
+      }
+    }
+
+    if (attempts.length) {
+      setAuthDebug((current) => current ? `${current} • game:http_failed:${reason}:${attempts.join(" | ")}` : `game:http_failed:${reason}:${attempts.join(" | ")}`);
+    }
+    return null;
+  };
+
+  const postGameActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
+    const actionByPath: Record<string, string> = {
+      "/games/start": "game_start",
+      "/games/shoot": "game_shoot",
+    };
+    const attempts: string[] = [];
+    const action = actionByPath[path];
+
+    if (action) {
+      for (const baseUrl of resolveApiCandidates("/balance")) {
+        try {
+          const url = new URL(baseUrl, window.location.origin);
+          url.searchParams.set("action", action);
+          Object.entries(payload).forEach(([key, value]) => {
+            if (value === null || value === undefined) return;
+            url.searchParams.set(key, String(value));
+          });
+          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 4200);
+          const raw = await response.text();
+          const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string } : null;
+          if (response.ok) return parsed;
+          attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        } catch (error) {
+          attempts.push(`balance_action:${error instanceof Error ? error.message : "unknown"}`);
+        }
+      }
+    }
+
+    for (const baseUrl of resolveApiCandidates(path)) {
+      try {
+        const response = await fetchWithTimeout(baseUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(payload),
+        }, 4200);
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string } : null;
+        if (response.ok) return parsed;
+        attempts.push(`${baseUrl}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+      } catch (error) {
+        attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
+      }
+    }
+
+    if (attempts.length) {
+      setAuthDebug((current) => current ? `${current} • game_action:http_failed:${reason}:${attempts.join(" | ")}` : `game_action:http_failed:${reason}:${attempts.join(" | ")}`);
+    }
+    return null;
+  };
+
+  const startGameOverHttp = async (roomId: string, reason: string) => {
+    const result = await postGameActionOverHttp("/games/start", {
+      roomId,
+      userId: state.currentUser.userId,
+    }, reason);
+    if (result?.room) setRoom(result.room);
+    if (result?.game) {
+      setGame(result.game);
+      setScreen("game");
+      return result.game;
+    }
+    return null;
+  };
+
+  const shootGameOverHttp = async (roomId: string, shot: { angle: number; power: number }, reason: string) => {
+    const result = await postGameActionOverHttp("/games/shoot", {
+      roomId,
+      userId: state.currentUser.userId,
+      angle: shot.angle,
+      power: shot.power,
+    }, reason);
+    if (result?.game) {
+      setGame(result.game);
+      return result.game;
     }
     return null;
   };
@@ -982,9 +1125,17 @@ export default function App() {
         if (payload.type === "room_state") {
           setRoom(payload.payload);
           setCreateDraftRoomId(payload.payload.roomId);
-          if (currentScreenRef.current !== "create" || payload.payload.players.length > 1) {
+          if (payload.payload.status === "in_game") {
+            setScreen("game");
+          } else if (currentScreenRef.current !== "create" || payload.payload.players.length > 1) {
             setScreen("room");
           }
+          setErrorMessage(null);
+          return;
+        }
+        if (payload.type === "game_state") {
+          setGame(payload.payload);
+          setScreen("game");
           setErrorMessage(null);
           return;
         }
@@ -1143,7 +1294,7 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped) return;
-    const activeRoomId = screen === "room"
+    const activeRoomId = screen === "room" || screen === "game"
       ? room?.roomId ?? null
       : screen === "create"
         ? createDraftRoomIdRef.current ?? createDraftRoomId
@@ -1155,6 +1306,16 @@ export default function App() {
     }, 2500);
     return () => window.clearInterval(interval);
   }, [bootstrapped, createDraftRoomId, room?.roomId, screen]);
+
+
+  useEffect(() => {
+    if (!bootstrapped || screen !== "game" || !room?.roomId) return;
+    void fetchGameStateOverHttp(room.roomId, "game_initial", game?.shotSequence ?? 0);
+    const interval = window.setInterval(() => {
+      void fetchGameStateOverHttp(room.roomId, "game_poll", game?.shotSequence ?? 0);
+    }, 900);
+    return () => window.clearInterval(interval);
+  }, [bootstrapped, game?.shotSequence, room?.roomId, screen]);
 
   const exitCurrentRoom = async (reason: string) => {
     if (!room || roomExitBusy) return;
@@ -1172,6 +1333,7 @@ export default function App() {
       setRoomEntryMenuOpen(false);
       setCreateEntryMenuOpen(false);
       setCreateDraftRoomId(null);
+      setGame(null);
       setRoom(null);
       setScreen(isRoomHost ? "home" : "list");
       void requestRooms();
@@ -1190,6 +1352,7 @@ export default function App() {
       if (isRoomHost) return canHostStart ? "Mesa pronta" : "Mesa aberta";
       return currentPlayer?.ready ? "Pronto" : "Mesa encontrada";
     }
+    if (screen === "game") return "Mesa em jogo";
     return "Sinuca de Femboy";
   }, [canHostStart, currentPlayer?.ready, isRoomHost, roomOpponentPlayer, screen]);
 
@@ -1204,6 +1367,10 @@ export default function App() {
       }
       return currentPlayer?.ready ? "Aguardando início." : "Marque pronto.";
     }
+    if (screen === "game") {
+      if (!game) return "Carregando a mesa.";
+      return game.turnUserId === state.currentUser.userId ? "Sua vez de bater." : "Aguardando a jogada do adversário.";
+    }
     return "Crie ou entre em uma mesa.";
   }, [canHostStart, currentPlayer?.ready, isRoomHost, room, roomOpponentPlayer, screen]);
 
@@ -1211,6 +1378,7 @@ export default function App() {
     if (screen === "create") return "Mesa nova";
     if (screen === "list") return "Salas";
     if (screen === "room") return "Sala";
+    if (screen === "game") return "Partida";
     return "Lobby";
   }, [screen]);
 
@@ -1220,6 +1388,9 @@ export default function App() {
       return { label: "Entrada", value: formatStakeOptionLabel(createStake) };
     }
     if (screen === "room" && room) {
+      return { label: "Entrada", value: formatStakeOptionLabel(room.tableType === "stake" ? (room.stakeChips ?? 0) : 0) };
+    }
+    if (screen === "game" && room) {
       return { label: "Entrada", value: formatStakeOptionLabel(room.tableType === "stake" ? (room.stakeChips ?? 0) : 0) };
     }
     return null;
@@ -1609,13 +1780,19 @@ export default function App() {
                     <button
                       className={`primary-button room-stage__ready ${!canHostStart ? "primary-button--muted" : ""}`}
                       type="button"
-                      disabled={!canHostStart}
-                      onClick={() => {
-                        if (!canHostStart) return;
-                        setErrorMessage("A mesa jogável entra no próximo patch.");
+                      disabled={!canHostStart || gameStartBusy}
+                      onClick={async () => {
+                        if (!canHostStart || gameStartBusy) return;
+                        setGameStartBusy(true);
+                        setErrorMessage(null);
+                        try {
+                          await startGameOverHttp(room.roomId, "http_primary_game_start");
+                        } finally {
+                          setGameStartBusy(false);
+                        }
                       }}
                     >
-                      Iniciar partida
+                      {gameStartBusy ? "Abrindo mesa..." : "Iniciar partida"}
                     </button>
                   ) : (
                     <button
@@ -1637,6 +1814,36 @@ export default function App() {
             </div>
           </div>
         </section>
+      ) : null}
+
+      {screen === "game" && room ? (
+        game ? (
+          <GameStage
+            room={room}
+            game={game}
+            currentUserId={state.currentUser.userId}
+            shootBusy={gameShootBusy}
+            exitBusy={roomExitBusy}
+            onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room_game" : "http_primary_leave_room_game"); }}
+            onShoot={async (shot) => {
+              if (!room) return;
+              setGameShootBusy(true);
+              setErrorMessage(null);
+              try {
+                await shootGameOverHttp(room.roomId, shot, "http_primary_game_shoot");
+              } finally {
+                setGameShootBusy(false);
+              }
+            }}
+          />
+        ) : (
+          <section className="lobby-panel lobby-panel--compact lobby-panel--room-stage">
+            <div className="empty-card empty-card--soft empty-card--home empty-card--list">
+              <strong>Carregando a mesa...</strong>
+              <span>Sincronizando a partida para os dois lados.</span>
+            </div>
+          </section>
+        )
       ) : null}
 
       {shouldShowBalanceDebug ? (
