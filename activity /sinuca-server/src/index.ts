@@ -257,6 +257,139 @@ function broadcastRoomList(payload: ListRoomsPayload) {
   }
 }
 
+function normalizeRoomMode(value: unknown, fallbackGuildId?: string | null): "server" | "casual" {
+  if (value === "server") return "server";
+  if (value === "casual") return "casual";
+  return fallbackGuildId ? "server" : "casual";
+}
+
+async function handleListRoomsHttp(req: Request, res: Response) {
+  const session = resolveRequestSession(req);
+  const payload = {
+    mode: normalizeRoomMode(firstString(req.body?.mode) ?? firstString(req.query?.mode), session.guildId),
+    guildId: normalizeIntString(firstString(req.body?.guildId) ?? firstString(req.query?.guildId)) ?? session.guildId,
+    channelId: normalizeIntString(firstString(req.body?.channelId) ?? firstString(req.query?.channelId)) ?? session.channelId,
+  } satisfies ListRoomsPayload;
+  const rooms = listRooms(payload).map(toSnapshot);
+  console.log("[sinuca-list-rooms-http]", JSON.stringify({ payload, session, rooms: rooms.map((room) => ({ roomId: room.roomId, guildId: room.guildId, channelId: room.channelId, mode: room.mode, players: room.players.length, status: room.status, tableType: room.tableType, stakeChips: room.stakeChips })) }));
+  res.json({ rooms });
+}
+
+async function handleGetRoomHttp(req: Request, res: Response) {
+  const roomId = normalizeIntString(req.params?.roomId);
+  if (!roomId) {
+    res.status(400).json({ error: "missing_room_id" });
+    return;
+  }
+  const room = getRoom(roomId);
+  console.log("[sinuca-get-room-http]", JSON.stringify({ roomId, found: Boolean(room) }));
+  res.json({ room: room ? toSnapshot(room) : null });
+}
+
+async function handleCreateRoomHttp(req: Request, res: Response) {
+  const session = resolveRequestSession(req);
+  const merged = mergeWithSession(req.body ?? {}, session);
+  const instanceId = normalizeIntString(merged.instanceId);
+  const guildId = normalizeIntString(merged.guildId);
+  const channelId = normalizeIntString(merged.channelId);
+  const userId = normalizeIntString(merged.userId);
+  const displayName = normalizeIntString(merged.displayName);
+  const avatarUrl = firstString(merged.avatarUrl);
+  const requestedTableType = merged.tableType === "casual" ? "casual" : "stake";
+  const stakeChips = typeof merged.stakeChips === "number" ? merged.stakeChips : Number(merged.stakeChips ?? 0);
+  console.log("[sinuca-create-room-http-request]", JSON.stringify({ session, merged: { instanceId, guildId, channelId, userId, displayName, avatarUrl, tableType: requestedTableType, stakeChips } }));
+  if (!instanceId || !userId || !displayName) {
+    res.status(400).json({ error: "incomplete_session" });
+    return;
+  }
+  const room = createRoom(instanceId, guildId, channelId, userId, displayName, avatarUrl ?? null, {
+    tableType: requestedTableType,
+    stakeChips: Number.isFinite(stakeChips) ? stakeChips : null,
+  });
+  broadcastRoom(room.roomId);
+  broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+  res.json({ room: toSnapshot(room) });
+}
+
+async function handleJoinRoomHttp(req: Request, res: Response) {
+  const session = resolveRequestSession(req);
+  const merged = mergeWithSession(req.body ?? {}, session);
+  const roomId = normalizeIntString(merged.roomId);
+  const userId = normalizeIntString(merged.userId);
+  const displayName = normalizeIntString(merged.displayName);
+  const avatarUrl = firstString(merged.avatarUrl);
+  console.log("[sinuca-join-room-http-request]", JSON.stringify({ session, merged: { roomId, userId, displayName, avatarUrl } }));
+  if (!roomId || !userId || !displayName) {
+    res.status(400).json({ error: "missing_join_identifiers" });
+    return;
+  }
+  const room = addPlayer(roomId, userId, displayName, avatarUrl ?? null);
+  if (!room) {
+    res.status(404).json({ error: "room_not_found" });
+    return;
+  }
+  broadcastRoom(room.roomId);
+  broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+  res.json({ room: toSnapshot(room) });
+}
+
+async function handleLeaveRoomHttp(req: Request, res: Response) {
+  const session = resolveRequestSession(req);
+  const merged = mergeWithSession(req.body ?? {}, session);
+  const roomId = normalizeIntString(merged.roomId);
+  const userId = normalizeIntString(merged.userId);
+  console.log("[sinuca-leave-room-http-request]", JSON.stringify({ session, merged: { roomId, userId } }));
+  if (!roomId || !userId) {
+    res.status(400).json({ error: "missing_leave_identifiers" });
+    return;
+  }
+  const previous = getRoom(roomId);
+  const room = removePlayer(roomId, userId);
+  if (room) {
+    broadcastRoom(room.roomId);
+    broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+  } else if (previous) {
+    broadcastRoomList({ guildId: previous.guildId, channelId: previous.channelId, mode: previous.mode });
+  }
+  res.json({ room: room ? toSnapshot(room) : null });
+}
+
+async function handleReadyRoomHttp(req: Request, res: Response) {
+  const session = resolveRequestSession(req);
+  const merged = mergeWithSession(req.body ?? {}, session);
+  const roomId = normalizeIntString(merged.roomId);
+  const userId = normalizeIntString(merged.userId);
+  const ready = Boolean(merged.ready);
+  console.log("[sinuca-ready-room-http-request]", JSON.stringify({ session, merged: { roomId, userId, ready } }));
+  if (!roomId || !userId) {
+    res.status(400).json({ error: "missing_ready_identifiers" });
+    return;
+  }
+  const room = setPlayerReady(roomId, userId, ready);
+  if (!room) {
+    res.status(404).json({ error: "room_not_found" });
+    return;
+  }
+  broadcastRoom(room.roomId);
+  broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+  res.json({ room: toSnapshot(room) });
+}
+
+app.get("/rooms", handleListRoomsHttp);
+app.get("/api/rooms", handleListRoomsHttp);
+app.post("/rooms", handleListRoomsHttp);
+app.post("/api/rooms", handleListRoomsHttp);
+app.get("/rooms/:roomId", handleGetRoomHttp);
+app.get("/api/rooms/:roomId", handleGetRoomHttp);
+app.post("/rooms/create", handleCreateRoomHttp);
+app.post("/api/rooms/create", handleCreateRoomHttp);
+app.post("/rooms/join", handleJoinRoomHttp);
+app.post("/api/rooms/join", handleJoinRoomHttp);
+app.post("/rooms/leave", handleLeaveRoomHttp);
+app.post("/api/rooms/leave", handleLeaveRoomHttp);
+app.post("/rooms/ready", handleReadyRoomHttp);
+app.post("/api/rooms/ready", handleReadyRoomHttp);
+
 async function ensureMongo() {
   if (!mongoUri) return null;
   if (!mongoClient) {
@@ -270,6 +403,13 @@ function normalizeIntString(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   const raw = String(value).trim();
   return raw ? raw : null;
+}
+
+function firstString(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    return firstString(value[0]);
+  }
+  return typeof value === "string" ? value : null;
 }
 
 function parseQuerySession(urlValue: string | undefined | null): Partial<SessionContextPayload> {
