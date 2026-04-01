@@ -1176,21 +1176,8 @@ export default function App() {
             <div className="create-config-card room-stage__details">
               <div className="create-config-block create-config-block--tight">
                 <div className="create-config-block__head">
-                  <strong>Resumo da mesa</strong>
-                  <span>Deixe a mesa aberta e aguarde o outro jogador entrar.</span>
-                </div>
-                <ul className="kv-list kv-list--compact kv-list--summary-tight">
-                  <li><span>Modo</span><strong>{room.tableType === "stake" ? "Valendo fichas" : "Partida amistosa"}</strong></li>
-                  {room.tableType === "stake" ? <li><span>Entrada</span><strong>{room.stakeLabel}</strong></li> : null}
-                  <li><span>Jogadores</span><strong>{room.players.length}/2</strong></li>
-                  <li><span>Canal</span><strong>{state.context.channelId ?? "fora de servidor"}</strong></li>
-                </ul>
-              </div>
-
-              <div className="create-config-block create-config-block--tight">
-                <div className="create-config-block__head">
                   <strong>Estado da sala</strong>
-                  <span>{canStart ? "Os dois jogadores estão prontos." : "A partida começa quando os dois estiverem prontos."}</span>
+                  <span>{room.players.length < 2 ? "A sala já está aberta na lista. Aguarde outro jogador entrar." : canStart ? "Os dois jogadores estão prontos." : "A partida começa quando os dois estiverem prontos."}</span>
                 </div>
 
                 <div className="room-stage__actions">
