@@ -113,9 +113,9 @@ function defaultDiscordAvatarUrl(userId: string) {
   }
 }
 
-function buildPlayerTag(player: Pick<RoomPlayer, "displayName">) {
+function cleanPlayerName(player: Pick<RoomPlayer, "displayName">) {
   const label = player.displayName?.trim() || "jogador";
-  return label.startsWith("@") ? label : `@${label}`;
+  return label.replace(/^@+/, "");
 }
 
 function resolvePlayerAvatar(player: Pick<RoomPlayer, "userId" | "avatarUrl">) {
@@ -785,13 +785,14 @@ export default function App() {
                   <div className="participant-slot__avatar-wrap">
                     <img className="participant-slot__avatar" src={resolvePlayerAvatar({ userId: state.currentUser.userId, avatarUrl: state.currentUser.avatarUrl ?? null })} alt={state.currentUser.displayName} />
                   </div>
-                  <span className="participant-slot__name">{buildPlayerTag({ displayName: state.currentUser.displayName })}</span>
+                  <span className="participant-slot__name">{cleanPlayerName({ displayName: state.currentUser.displayName })}</span>
                   <small className="participant-slot__role">você</small>
                 </div>
 
                 <div className="create-center-pill create-center-pill--final">
                   <strong>1/2 jogadores</strong>
                   <span>{isFriendlyTable ? "Partida amistosa" : "Valendo fichas"}</span>
+                  {!isFriendlyTable ? <em>{createStake}</em> : null}
                 </div>
 
                 <div className="participant-slot participant-slot--ghost participant-slot--compact participant-slot--create-main">
@@ -893,7 +894,7 @@ export default function App() {
                         <div className="participant-slot__avatar-wrap">
                           <img className="participant-slot__avatar" src={resolvePlayerAvatar(host)} alt={host.displayName} />
                         </div>
-                        <span className="participant-slot__name">{buildPlayerTag(host)}</span>
+                        <span className="participant-slot__name">{cleanPlayerName(host)}</span>
                         <small className="participant-slot__role">criador</small>
                       </div>
 
@@ -904,7 +905,7 @@ export default function App() {
                           <div className="participant-slot__avatar-wrap">
                             <img className="participant-slot__avatar" src={resolvePlayerAvatar(opponent)} alt={opponent.displayName} />
                           </div>
-                          <span className="participant-slot__name">{buildPlayerTag(opponent)}</span>
+                          <span className="participant-slot__name">{cleanPlayerName(opponent)}</span>
                           <small className="participant-slot__role">jogador</small>
                         </div>
                       ) : (
@@ -921,7 +922,10 @@ export default function App() {
                     <div className="room-entry-card__footer">
                       <div className="room-entry-card__meta room-entry-card__meta--row">
                         <span>{entry.players.length}/2 jogadores</span>
-                        {entry.tableType === "stake" ? <span>{entry.stakeLabel}</span> : <span>amistosa</span>}
+                        <div className="room-entry-card__stake">
+                          <span>{entry.tableType === "stake" ? "Valendo fichas" : "Partida amistosa"}</span>
+                          {entry.tableType === "stake" ? <strong>{entry.stakeChips ?? 0}</strong> : null}
+                        </div>
                         <span className={`status-badge status-badge--${entry.status}`}>{formatStatus(entry)}</span>
                       </div>
 
@@ -965,7 +969,7 @@ export default function App() {
                   <div className="participant-slot__avatar-wrap">
                     <img className="participant-slot__avatar" src={resolvePlayerAvatar(roomHostPlayer ?? room.players[0])} alt={room.hostDisplayName} />
                   </div>
-                  <span className="participant-slot__name">{buildPlayerTag(roomHostPlayer ?? room.players[0])}</span>
+                  <span className="participant-slot__name">{cleanPlayerName(roomHostPlayer ?? room.players[0])}</span>
                   <small className="participant-slot__role">anfitrião</small>
                   <span className={`room-ready-badge ${roomHostPlayer?.ready ? "room-ready-badge--ready" : ""}`}>
                     {roomHostPlayer?.ready ? "pronto" : "aguardando"}
@@ -975,7 +979,7 @@ export default function App() {
                 <div className="create-center-pill create-center-pill--final create-center-pill--room">
                   <strong>{room.players.length}/2 jogadores</strong>
                   <span>{room.tableType === "stake" ? "Valendo fichas" : "Partida amistosa"}</span>
-                  <em>{room.tableType === "stake" ? room.stakeLabel : "Amistosa"}</em>
+                  {room.tableType === "stake" ? <em>{room.stakeChips ?? 0}</em> : null}
                   <small className={`status-badge status-badge--${room.status}`}>{formatStatus(room)}</small>
                 </div>
 
@@ -984,7 +988,7 @@ export default function App() {
                     <div className="participant-slot__avatar-wrap">
                       <img className="participant-slot__avatar" src={resolvePlayerAvatar(roomOpponentPlayer)} alt={roomOpponentPlayer.displayName} />
                     </div>
-                    <span className="participant-slot__name">{buildPlayerTag(roomOpponentPlayer)}</span>
+                    <span className="participant-slot__name">{cleanPlayerName(roomOpponentPlayer)}</span>
                     <small className="participant-slot__role">jogador</small>
                     <span className={`room-ready-badge ${roomOpponentPlayer?.ready ? "room-ready-badge--ready" : ""}`}>
                       {roomOpponentPlayer?.ready ? "pronto" : "aguardando"}
