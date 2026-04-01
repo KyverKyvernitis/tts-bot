@@ -9,6 +9,7 @@ import {
   createRoom,
   getRoom,
   getSubscribers,
+  closeRoom,
   listRooms,
   removePlayer,
   setPlayerReady,
@@ -339,20 +340,28 @@ async function handleLeaveRoomHttp(req: Request, res: Response) {
   const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
   const roomId = normalizeIntString(merged.roomId);
   const userId = normalizeIntString(merged.userId);
-  console.log("[sinuca-leave-room-http-request]", JSON.stringify({ session, merged: { roomId, userId } }));
+  const shouldCloseRoom = Boolean((merged as Record<string, unknown>).closeRoom);
+  console.log("[sinuca-leave-room-http-request]", JSON.stringify({ session, merged: { roomId, userId, closeRoom: shouldCloseRoom } }));
   if (!roomId || !userId) {
     res.status(400).json({ error: "missing_leave_identifiers" });
     return;
   }
   const previous = getRoom(roomId);
-  const room = removePlayer(roomId, userId);
+  const room = shouldCloseRoom && previous && previous.hostUserId === userId
+    ? null
+    : removePlayer(roomId, userId);
+  const closedRoom = shouldCloseRoom && previous && previous.hostUserId === userId
+    ? closeRoom(roomId)
+    : null;
   if (room) {
     broadcastRoom(room.roomId);
     broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+  } else if (closedRoom) {
+    broadcastRoomList({ guildId: closedRoom.guildId, channelId: closedRoom.channelId, mode: closedRoom.mode });
   } else if (previous) {
     broadcastRoomList({ guildId: previous.guildId, channelId: previous.channelId, mode: previous.mode });
   }
-  res.json({ room: room ? toSnapshot(room) : null });
+  res.json({ room: room ? toSnapshot(room) : null, closed: Boolean(closedRoom) });
 }
 
 async function handleReadyRoomHttp(req: Request, res: Response) {
@@ -931,11 +940,19 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "jogador da activity não identificado" });
         return;
       }
-      const room = removePlayer(merged.roomId, merged.userId);
+      const shouldCloseRoom = Boolean((merged as Record<string, unknown>).closeRoom);
+      const room = shouldCloseRoom && previous && previous.hostUserId === merged.userId
+        ? null
+        : removePlayer(merged.roomId, merged.userId);
+      const closedRoom = shouldCloseRoom && previous && previous.hostUserId === merged.userId
+        ? closeRoom(merged.roomId)
+        : null;
       unsubscribeSocket(ws);
       if (room) {
         broadcastRoom(room.roomId);
         broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+      } else if (closedRoom) {
+        broadcastRoomList({ guildId: closedRoom.guildId, channelId: closedRoom.channelId, mode: closedRoom.mode });
       } else if (previous) {
         broadcastRoomList({ guildId: previous.guildId, channelId: previous.channelId, mode: previous.mode });
       }

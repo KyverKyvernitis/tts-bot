@@ -27,6 +27,7 @@ export interface JoinRoomPayload {
 export interface LeaveRoomPayload {
   roomId: string;
   userId: string;
+  closeRoom?: boolean;
 }
 
 export interface ReadyPayload {

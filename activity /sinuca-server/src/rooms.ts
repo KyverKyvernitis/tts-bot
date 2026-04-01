@@ -127,6 +127,14 @@ export function getRoom(roomId: string): RoomRecord | null {
   return rooms.get(roomId) ?? null;
 }
 
+export function closeRoom(roomId: string): RoomRecord | null {
+  const room = rooms.get(roomId) ?? null;
+  if (!room) return null;
+  rooms.delete(roomId);
+  roomSockets.delete(roomId);
+  return room;
+}
+
 export function addPlayer(roomId: string, userId: string, displayName: string, avatarUrl?: string | null): RoomRecord | null {
   const room = rooms.get(roomId);
   if (!room) return null;
