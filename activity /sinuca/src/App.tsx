@@ -912,12 +912,15 @@ export default function App() {
     return null;
   };
 
-  const shootGameOverHttp = async (roomId: string, shot: { angle: number; power: number }, reason: string) => {
+  const shootGameOverHttp = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null }, reason: string) => {
     const result = await postGameActionOverHttp("/games/shoot", {
       roomId,
       userId: state.currentUser.userId,
       angle: shot.angle,
       power: shot.power,
+      cueX: shot.cueX ?? null,
+      cueY: shot.cueY ?? null,
+      calledPocket: shot.calledPocket ?? null,
     }, reason);
     if (result?.game) {
       setGame(result.game);
@@ -1827,7 +1830,7 @@ export default function App() {
             shootBusy={gameShootBusy}
             exitBusy={roomExitBusy}
             onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room_game" : "http_primary_leave_room_game"); }}
-            onShoot={async (shot: { angle: number; power: number }) => {
+            onShoot={async (shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null }) => {
               if (!room) return;
               setGameShootBusy(true);
               setErrorMessage(null);
