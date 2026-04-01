@@ -42,7 +42,7 @@ function computeStatus(room: RoomRecord): RoomStatus {
 function sameContext(room: RoomRecord, payload: ListRoomsPayload) {
   if (room.mode !== payload.mode) return false;
   if (payload.mode === "casual") return true;
-  return room.guildId === (payload.guildId ?? null) && room.channelId === (payload.channelId ?? null);
+  return room.guildId === (payload.guildId ?? null);
 }
 
 export function createRoom(
