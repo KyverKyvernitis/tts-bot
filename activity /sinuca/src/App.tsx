@@ -190,8 +190,10 @@ export default function App() {
   const [balanceLoaded, setBalanceLoaded] = useState(false);
   const [balanceDebug, setBalanceDebug] = useState<BalanceDebugSnapshot | null>(null);
   const [roomEntryMenuOpen, setRoomEntryMenuOpen] = useState(false);
+  const [createEntryMenuOpen, setCreateEntryMenuOpen] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const roomEntryMenuRef = useRef<HTMLDivElement | null>(null);
+  const createEntryMenuRef = useRef<HTMLDivElement | null>(null);
   const lastInitKeyRef = useRef<string | null>(null);
   const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
   const balanceReceiptRef = useRef<number>(0);
@@ -254,18 +256,21 @@ export default function App() {
   }, [createDraftRoomId]);
 
   useEffect(() => {
-    if (!roomEntryMenuOpen) return;
+    if (!roomEntryMenuOpen && !createEntryMenuOpen) return;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
       if (roomEntryMenuRef.current?.contains(target)) return;
+      if (createEntryMenuRef.current?.contains(target)) return;
       setRoomEntryMenuOpen(false);
+      setCreateEntryMenuOpen(false);
     };
     document.addEventListener("pointerdown", handlePointerDown);
     return () => document.removeEventListener("pointerdown", handlePointerDown);
-  }, [roomEntryMenuOpen]);
+  }, [createEntryMenuOpen, roomEntryMenuOpen]);
 
   useEffect(() => {
     if (screen !== "room") setRoomEntryMenuOpen(false);
+    if (screen !== "create") setCreateEntryMenuOpen(false);
   }, [screen, room?.roomId]);
 
   const instanceId = state.context.instanceId ?? `local-${state.currentUser.userId}`;
@@ -1074,7 +1079,7 @@ export default function App() {
 
   const heroSecondaryLabel = useMemo(() => {
     if (screen === "create") {
-      return isFriendlyTable ? { label: "Modo", value: "Amistosa" } : { label: "Entrada", value: `${createStake} fichas` };
+      return { label: "Entrada", value: isFriendlyTable ? "Amistosa" : `${createStake} fichas` };
     }
     if (screen === "room" && room) {
       return { label: "Entrada", value: room.tableType === "stake" ? room.stakeLabel : "Amistosa" };
@@ -1190,8 +1195,8 @@ export default function App() {
           </div>
 
           <div className="create-layout create-layout--final">
-            <div className="create-preview-card create-preview-card--final">
-              <div className="create-preview-shell create-preview-shell--final">
+            <div className="create-preview-card create-preview-card--final create-preview-card--single">
+              <div className="create-preview-shell create-preview-shell--final create-preview-shell--create-compact">
                 <div className="participant-slot participant-slot--filled participant-slot--compact participant-slot--create-main">
                   <div className="participant-slot__avatar-wrap">
                     <img
@@ -1202,12 +1207,6 @@ export default function App() {
                   </div>
                   <span className="participant-slot__name">{cleanPlayerName({ displayName: createPreviewHostPlayer?.displayName ?? state.currentUser.displayName })}</span>
                   <small className="participant-slot__role">você</small>
-                </div>
-
-                <div className="create-center-pill create-center-pill--final">
-                  <strong>{createPreviewRoom ? `${createPreviewRoom.players.length}/2 jogadores` : "1/2 jogadores"}</strong>
-                  <span>{createPreviewRoom ? (createPreviewRoom.tableType === "stake" ? "Valendo fichas" : "Partida amistosa") : (isFriendlyTable ? "Partida amistosa" : "Valendo fichas")}</span>
-                  {(createPreviewRoom ? createPreviewRoom.tableType === "stake" : !isFriendlyTable) ? <em>{createPreviewRoom?.stakeChips ?? createStake}</em> : null}
                 </div>
 
                 {createPreviewOpponentPlayer ? (
@@ -1228,52 +1227,71 @@ export default function App() {
                   </div>
                 )}
               </div>
-            </div>
 
-            <div className="create-config-card create-config-card--final">
-              <div className="create-config-block create-config-block--tight create-config-block--entry-only">
-                <div className="create-config-block__head create-config-block__head--inline">
-                  <strong>Entrada</strong>
-                  <small className="create-config-block__value">{isFriendlyTable ? "Amistosa" : `${createStake} fichas`}</small>
+              <div className="create-preview-footer">
+                <div className="create-preview-footer__meta">
+                  <strong>{createPreviewRoom ? `${createPreviewRoom.players.length}/2 jogadores` : "1/2 jogadores"}</strong>
+                  <small>{createPreviewOpponentPlayer ? "Mesa aberta" : "Aguardando adversário"}</small>
                 </div>
 
-                <div className={`create-toggle-group create-toggle-group--stakes create-toggle-group--stakes-compact ${!isServer ? "create-toggle-group--single" : "create-toggle-group--stakes-four"}`}>
-                  {createStakeOptions.map((stake) => (
-                    <button
-                      key={stake}
-                      type="button"
-                      className={`chip-button create-toggle create-toggle--stake ${createStake === stake ? "chip-button--active" : ""}`}
-                      onClick={() => {
-                        setCreateStake(stake);
-                        setCreateTableType(stake === 0 ? "casual" : "stake");
-                      }}
-                    >
-                      {stake === 0 ? "Amistosa" : stake}
-                    </button>
-                  ))}
+                <div ref={createEntryMenuRef} className={`entry-selector entry-selector--create ${createEntryMenuOpen ? "entry-selector--open" : ""}`}>
+                  <button
+                    className="entry-selector__trigger entry-selector__trigger--create"
+                    type="button"
+                    onClick={() => setCreateEntryMenuOpen((current) => !current)}
+                  >
+                    <span className="entry-selector__label">Entrada</span>
+                    <strong>{isFriendlyTable ? "Amistosa" : `${createStake} fichas`}</strong>
+                    <span className={`entry-selector__chevron ${createEntryMenuOpen ? "entry-selector__chevron--open" : ""}`}>v</span>
+                  </button>
+                  <div className={`entry-selector__menu ${createEntryMenuOpen ? "entry-selector__menu--open" : ""}`}>
+                    {createStakeOptions.map((stake) => {
+                      const active = createStake === stake;
+                      return (
+                        <button
+                          key={stake}
+                          type="button"
+                          className={`entry-selector__option ${active ? "entry-selector__option--active" : ""}`}
+                          onClick={() => {
+                            setCreateEntryMenuOpen(false);
+                            if (active) return;
+                            setCreateStake(stake);
+                            setCreateTableType(stake === 0 ? "casual" : "stake");
+                          }}
+                        >
+                          {formatStakeOptionLabel(stake)}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-
-                {isServer && createStake > 0 && !balanceLoaded ? (
-                  <p className="plain-copy create-config-block__warning">Carregando fichas...</p>
-                ) : null}
-                {isServer && createStake > 0 && balanceLoaded && !canAffordSelectedStake ? (
-                  <p className="error-copy create-config-block__warning">Você não tem fichas suficientes para essa entrada.</p>
-                ) : null}
 
                 {!resolvedUser ? (
-                  <button className="primary-button create-submit" type="button" disabled={authBusy} onClick={() => { void handleAuthorize(); }}>
+                  <button className="primary-button create-submit create-submit--compact" type="button" disabled={authBusy} onClick={() => { void handleAuthorize(); }}>
                     {authBusy ? "Autorizando..." : "Autorizar conta"}
                   </button>
                 ) : (
                   <button
-                    className="primary-button create-submit"
+                    className="primary-button create-submit create-submit--compact"
                     type="button"
-                    disabled
+                    disabled={!createPreviewRoom || (isServer && createStake > 0 && balanceLoaded && !canAffordSelectedStake)}
+                    onClick={() => {
+                      if (!createPreviewRoom) return;
+                      setRoom(createPreviewRoom);
+                      setScreen("room");
+                    }}
                   >
-                    Iniciar jogo (em breve)
+                    {createPreviewRoom ? "Abrir mesa" : "Abrindo mesa..."}
                   </button>
                 )}
               </div>
+
+              {isServer && createStake > 0 && !balanceLoaded ? (
+                <p className="plain-copy create-preview-note">Carregando fichas...</p>
+              ) : null}
+              {isServer && createStake > 0 && balanceLoaded && !canAffordSelectedStake ? (
+                <p className="error-copy create-preview-note">Você não tem fichas suficientes para essa entrada.</p>
+              ) : null}
             </div>
           </div>
         </section>
