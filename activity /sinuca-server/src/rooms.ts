@@ -45,6 +45,26 @@ function sameContext(room: RoomRecord, payload: ListRoomsPayload) {
   return room.guildId === (payload.guildId ?? null);
 }
 
+function normalizeStake(tableType: TableType, stakeChips: number | null | undefined) {
+  const allowedStake = new Set([10, 25, 50]);
+  const normalized = Number(stakeChips);
+  if (tableType === "stake" && allowedStake.has(normalized)) return normalized;
+  return 25;
+}
+
+function findExistingHostRoom(mode: "server" | "casual", guildId: string | null, channelId: string | null, userId: string) {
+  for (const room of rooms.values()) {
+    if (room.hostUserId !== userId) continue;
+    if (room.mode !== mode) continue;
+    if (mode === "server") {
+      if (room.guildId === guildId) return room;
+      continue;
+    }
+    if (room.channelId === channelId) return room;
+  }
+  return null;
+}
+
 export function createRoom(
   instanceId: string,
   guildId: string | null | undefined,
@@ -55,10 +75,28 @@ export function createRoom(
   options?: { tableType?: TableType | null; stakeChips?: number | null },
 ): RoomRecord {
   const mode = guildId ? "server" : "casual";
-  const allowedStake = new Set([10, 25, 50]);
   const requestedTableType = options?.tableType === "casual" ? "casual" : "stake";
   const tableType: TableType = mode === "server" ? requestedTableType : "casual";
-  const normalizedStake = tableType === "stake" && allowedStake.has(Number(options?.stakeChips)) ? Number(options?.stakeChips) : 25;
+  const normalizedStake = normalizeStake(tableType, options?.stakeChips ?? null);
+  const existing = findExistingHostRoom(mode, guildId ?? null, channelId ?? null, userId);
+
+  if (existing) {
+    existing.instanceId = instanceId;
+    existing.guildId = guildId ?? null;
+    existing.channelId = channelId ?? null;
+    existing.hostDisplayName = displayName;
+    existing.tableType = tableType;
+    existing.stakeChips = tableType === "stake" ? normalizedStake : null;
+    existing.stakeLabel = tableType === "stake" ? `${normalizedStake} fichas` : "casual";
+    const hostPlayer = existing.players.find((player) => player.userId === userId);
+    if (hostPlayer) {
+      hostPlayer.displayName = displayName;
+      hostPlayer.avatarUrl = avatarUrl ?? hostPlayer.avatarUrl ?? null;
+    }
+    existing.status = computeStatus(existing);
+    return existing;
+  }
+
   const room: RoomRecord = {
     roomId: makeRoomId(mode),
     instanceId,

@@ -706,7 +706,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       const room = createRoom(instanceId, guildId ?? null, channelId ?? null, userId, displayName, merged.avatarUrl ?? null, { tableType: merged.tableType ?? null, stakeChips: merged.stakeChips ?? null });
       console.log("[sinuca-create-room-result]", JSON.stringify({ roomId: room.roomId, guildId: room.guildId, channelId: room.channelId, mode: room.mode, tableType: room.tableType, stakeChips: room.stakeChips, players: room.players.length, status: room.status }));
       subscribeSocket(room.roomId, ws);
-      send(ws, { type: "room_state", payload: toSnapshot(room) });
+      broadcastRoom(room.roomId);
       broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
       return;
     }
