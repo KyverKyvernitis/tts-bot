@@ -192,6 +192,7 @@ export default function App() {
   const [roomEntryMenuOpen, setRoomEntryMenuOpen] = useState(false);
   const [createEntryMenuOpen, setCreateEntryMenuOpen] = useState(false);
   const [createRoomBusy, setCreateRoomBusy] = useState(false);
+  const [roomExitBusy, setRoomExitBusy] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const roomEntryMenuRef = useRef<HTMLDivElement | null>(null);
   const createEntryMenuRef = useRef<HTMLDivElement | null>(null);
@@ -319,6 +320,7 @@ export default function App() {
       ? "Você está pronto. Aguarde o anfitrião iniciar."
       : "Marque pronto quando estiver preparado.";
   const formatStakeOptionLabel = (stake: number) => stake === 0 ? "Amistoso" : `${stake}`;
+  const initReadyForServerActions = !isServer || (resolvedUser && authState === "ready" && Boolean(state.context.guildId) && balanceLoaded);
 
   useEffect(() => {
     if (screen === "create" && createPreviewRoom) {
@@ -354,10 +356,10 @@ export default function App() {
     for (const baseUrl of candidates) {
       const requestUrl = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}guildId=${encodeURIComponent(state.context.guildId)}&userId=${encodeURIComponent(state.currentUser.userId)}`;
       try {
-        const response = await fetch(requestUrl, {
+        const response = await fetchWithTimeout(requestUrl, {
           method: "GET",
           credentials: "same-origin",
-        });
+        }, 3500);
         const raw = await response.text();
         let parsed: { balance?: BalanceSnapshot; debug?: BalanceDebugSnapshot; error?: string; detail?: string } | null = null;
         try {
@@ -529,6 +531,13 @@ export default function App() {
             if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
               setScreen("room");
             }
+          } else if (currentScreenRef.current === "room") {
+            setRoom(null);
+            setCreateDraftRoomId(null);
+            setRoomEntryMenuOpen(false);
+            setErrorMessage("a sala foi fechada");
+            setScreen("list");
+            void requestRooms();
           }
           return parsed?.room ?? null;
         }
@@ -551,6 +560,13 @@ export default function App() {
             if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
               setScreen("room");
             }
+          } else if (currentScreenRef.current === "room") {
+            setRoom(null);
+            setCreateDraftRoomId(null);
+            setRoomEntryMenuOpen(false);
+            setErrorMessage("a sala foi fechada");
+            setScreen("list");
+            void requestRooms();
           }
           return parsed?.room ?? null;
         }
@@ -586,7 +602,7 @@ export default function App() {
             if (value === null || value === undefined) return;
             url.searchParams.set(key, String(value));
           });
-          const response = await fetch(url.toString(), { method: "GET", credentials: "same-origin" });
+          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3500);
           const raw = await response.text();
           const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
           if (response.ok) {
@@ -664,10 +680,11 @@ export default function App() {
     return null;
   };
 
-  const leaveRoomOverHttp = async (roomId: string, reason: string) => {
-    await postRoomActionOverHttp("/rooms/leave", {
+  const leaveRoomOverHttp = async (roomId: string, reason: string, options?: { closeRoom?: boolean }) => {
+    return await postRoomActionOverHttp("/rooms/leave", {
       roomId,
       userId: state.currentUser.userId,
+      closeRoom: options?.closeRoom ?? false,
     }, reason);
   };
 
@@ -1016,6 +1033,27 @@ export default function App() {
   }, [authState, bootstrapped, connectionState, resolvedUser, state.context.guildId, state.currentUser.userId]);
 
   useEffect(() => {
+    if (!bootstrapped || !isServer || !resolvedUser || !state.context.guildId || balanceLoaded) return;
+
+    let cancelled = false;
+    const pumpBalance = async () => {
+      if (cancelled) return;
+      requestBalance();
+      await fetchBalanceOverHttp("online_retry");
+    };
+
+    void pumpBalance();
+    const interval = window.setInterval(() => {
+      void pumpBalance();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [balanceLoaded, bootstrapped, isServer, resolvedUser, state.context.guildId, state.currentUser.userId]);
+
+  useEffect(() => {
     if (!bootstrapped || !isServer || !resolvedUser || !state.context.guildId) return;
     if (connectionState === "connected") return;
 
@@ -1049,6 +1087,29 @@ export default function App() {
     }, 2500);
     return () => window.clearInterval(interval);
   }, [bootstrapped, createDraftRoomId, room?.roomId, screen]);
+
+  const exitCurrentRoom = async (reason: string) => {
+    if (!room || roomExitBusy) return;
+    setRoomExitBusy(true);
+    setErrorMessage(null);
+
+    try {
+      const result = await leaveRoomOverHttp(room.roomId, reason, { closeRoom: isRoomHost });
+      if (result === null) {
+        setErrorMessage(isRoomHost ? "não foi possível fechar a sala agora" : "não foi possível sair da sala agora");
+        return;
+      }
+
+      setRoomEntryMenuOpen(false);
+      setCreateEntryMenuOpen(false);
+      setCreateDraftRoomId(null);
+      setRoom(null);
+      setScreen(isRoomHost ? "home" : "list");
+      void requestRooms();
+    } finally {
+      setRoomExitBusy(false);
+    }
+  };
 
   const shouldShowBalanceDebug = Boolean(import.meta.env.DEV) && isServer && (!balanceLoaded || balance.chips === 0);
 
@@ -1211,9 +1272,14 @@ export default function App() {
               <button
                 className="menu-button menu-button--create"
                 type="button"
-                disabled={createRoomBusy}
+                disabled={createRoomBusy || !initReadyForServerActions}
                 onClick={() => {
                   if (createRoomBusy) return;
+                  if (!initReadyForServerActions) {
+                    if (isServer) void fetchBalanceOverHttp("create_gate_retry");
+                    setErrorMessage(isServer ? "aguarde as fichas carregarem para abrir a sala" : "aguarde a activity terminar de carregar");
+                    return;
+                  }
                   const nextStake = isServer ? 25 : 0;
                   const nextTableType: TableType = isServer ? "stake" : "casual";
                   setRoom(null);
@@ -1223,19 +1289,25 @@ export default function App() {
                   setCreateEntryMenuOpen(false);
                   setRoomEntryMenuOpen(false);
                   setCreateRoomBusy(true);
+                  setErrorMessage(null);
                   void (async () => {
-                    const nextRoom = await createRoomOverHttp("home_click_create", { stake: nextStake, tableType: nextTableType });
-                    if (nextRoom) {
-                      setRoom(nextRoom);
-                      setScreen("room");
+                    try {
+                      const nextRoom = await createRoomOverHttp("home_click_create", { stake: nextStake, tableType: nextTableType });
+                      if (nextRoom) {
+                        setRoom(nextRoom);
+                        setScreen("room");
+                      } else {
+                        setErrorMessage("não foi possível abrir a sala agora");
+                      }
+                    } finally {
+                      setCreateRoomBusy(false);
                     }
-                    setCreateRoomBusy(false);
                   })();
                 }}
               >
                 <span className="menu-button__eyebrow">Mesa nova</span>
                 <strong>{createRoomBusy ? "Abrindo mesa..." : "Criar mesa"}</strong>
-                <small>{createRoomBusy ? "Entrando na sala..." : "Abra uma mesa."}</small>
+                <small>{createRoomBusy ? "Entrando na sala..." : (!initReadyForServerActions && isServer ? "Carregando fichas..." : "Abra uma mesa.")}</small>
               </button>
 
               <button
@@ -1261,13 +1333,13 @@ export default function App() {
             <button className="chip-button chip-button--back" type="button" onClick={() => {
               const roomId = createDraftRoomIdRef.current;
               if (roomId) {
-                void leaveRoomOverHttp(roomId, "http_primary_leave_create");
+                void leaveRoomOverHttp(roomId, "http_primary_close_create", { closeRoom: true });
               }
               setCreateDraftRoomId(null);
               setRoom(null);
               setScreen("home");
               void requestRooms();
-            }}>Voltar</button>
+            }}>Fechar sala</button>
           </div>
 
           <div className="create-layout create-layout--final">
@@ -1418,7 +1490,7 @@ export default function App() {
       {screen === "room" && room ? (
         <section className="lobby-panel lobby-panel--compact lobby-panel--room-stage">
           <div className="list-topbar list-topbar--room-stage list-topbar--room-stage-compact">
-            <button className="chip-button chip-button--back" type="button" onClick={() => { setRoom(null); setScreen("list"); void requestRooms(); }}>Voltar</button>
+            <button className="chip-button chip-button--back" type="button" disabled={roomExitBusy} onClick={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room" : "http_primary_leave_room_top"); }}>{roomExitBusy ? (isRoomHost ? "Fechando..." : "Saindo...") : (isRoomHost ? "Fechar sala" : "Sair")}</button>
             <div className="room-stage__top-meta">
               <span className="room-stage__top-chip">{room.players.length}/2</span>
               <span className={`room-ready-badge ${canHostStart ? "room-ready-badge--ready" : ""}`}>{roomTopStatus}</span>
@@ -1467,20 +1539,7 @@ export default function App() {
                   <small>{roomStatusText}</small>
                 </div>
 
-                <div className={`room-stage__actions ${isRoomHost ? "room-stage__actions--host" : "room-stage__actions--guest"}`}>
-                  <button
-                    className="chip-button room-stage__leave"
-                    type="button"
-                    onClick={() => {
-                      void leaveRoomOverHttp(room.roomId, "http_primary_leave_room");
-                      setRoom(null);
-                      setScreen("list");
-                      void requestRooms();
-                    }}
-                  >
-                    {isRoomHost ? "Fechar mesa" : "Sair"}
-                  </button>
-
+                <div className={`room-stage__actions room-stage__actions--single ${isRoomHost ? "room-stage__actions--host" : "room-stage__actions--guest"}`}>
                   {isRoomHost ? (
                     <button
                       className={`primary-button room-stage__ready ${!canHostStart ? "primary-button--muted" : ""}`}
