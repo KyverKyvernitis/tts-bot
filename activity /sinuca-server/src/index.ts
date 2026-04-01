@@ -210,11 +210,15 @@ function send(ws: WebSocket, payload: ServerMessage) {
 }
 
 function contextKey(payload: ListRoomsPayload) {
+  if (payload.mode === "server") {
+    return `${payload.mode}:${payload.guildId ?? ""}`;
+  }
   return `${payload.mode}:${payload.guildId ?? ""}:${payload.channelId ?? ""}`;
 }
 
 function watchContext(ws: WebSocket, payload: ListRoomsPayload) {
   const nextKey = contextKey(payload);
+  console.log("[sinuca-watch-context]", JSON.stringify({ nextKey, payload }));
   const previous = socketContext.get(ws);
   if (previous && previous !== nextKey) {
     contextWatchers.get(previous)?.delete(ws);
@@ -242,9 +246,12 @@ function broadcastRoom(roomId: string) {
 }
 
 function broadcastRoomList(payload: ListRoomsPayload) {
-  const watchers = contextWatchers.get(contextKey(payload));
+  const key = contextKey(payload);
+  const nextRooms = listRooms(payload).map(toSnapshot);
+  const watchers = contextWatchers.get(key);
+  console.log("[sinuca-broadcast-room-list]", JSON.stringify({ key, payload, rooms: nextRooms.map((room) => ({ roomId: room.roomId, guildId: room.guildId, channelId: room.channelId, mode: room.mode, players: room.players.length, status: room.status, tableType: room.tableType, stakeChips: room.stakeChips })), watcherCount: watchers?.size ?? 0 }));
   if (!watchers || watchers.size === 0) return;
-  const message: ServerMessage = { type: "room_list", payload: listRooms(payload).map(toSnapshot) };
+  const message: ServerMessage = { type: "room_list", payload: nextRooms };
   for (const client of watchers) {
     send(client, message);
   }
@@ -651,8 +658,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
     if (data.type === "list_rooms") {
       const merged = mergeWithSession(data.payload, activeSession);
+      const nextRooms = listRooms(merged).map(toSnapshot);
+      console.log("[sinuca-list-rooms]", JSON.stringify({ activeSession, request: data.payload, merged, rooms: nextRooms.map((room) => ({ roomId: room.roomId, guildId: room.guildId, channelId: room.channelId, mode: room.mode, players: room.players.length, status: room.status, tableType: room.tableType, stakeChips: room.stakeChips })) }));
       watchContext(ws, merged);
-      send(ws, { type: "room_list", payload: listRooms(merged).map(toSnapshot) });
+      send(ws, { type: "room_list", payload: nextRooms });
       return;
     }
 
@@ -689,11 +698,13 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     if (data.type === "create_room") {
       const merged = mergeWithSession(data.payload, activeSession);
       const { instanceId, guildId, channelId, userId, displayName } = merged;
+      console.log("[sinuca-create-room-request]", JSON.stringify({ activeSession, request: data.payload, merged }));
       if (!instanceId || !userId || !displayName) {
         send(ws, { type: "error", message: "sessão da activity incompleta" });
         return;
       }
       const room = createRoom(instanceId, guildId ?? null, channelId ?? null, userId, displayName, merged.avatarUrl ?? null, { tableType: merged.tableType ?? null, stakeChips: merged.stakeChips ?? null });
+      console.log("[sinuca-create-room-result]", JSON.stringify({ roomId: room.roomId, guildId: room.guildId, channelId: room.channelId, mode: room.mode, tableType: room.tableType, stakeChips: room.stakeChips, players: room.players.length, status: room.status }));
       subscribeSocket(room.roomId, ws);
       send(ws, { type: "room_state", payload: toSnapshot(room) });
       broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
