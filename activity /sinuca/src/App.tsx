@@ -196,7 +196,7 @@ export default function App() {
   const resolvedUser = isResolvedDiscordUserId(state.currentUser.userId);
   const serverCreateStakeOptions = [0, 10, 25, 50] as const;
   const dmCreateStakeOptions = [0] as const;
-  const createStakeOptions = isServer ? serverCreateStakeOptions : dmCreateStakeOptions;
+  const createStakeOptions: readonly number[] = isServer ? serverCreateStakeOptions : dmCreateStakeOptions;
   const isFriendlyTable = !isServer || createStake === 0 || createTableType === "casual";
   const createModeLabel = isFriendlyTable ? "Partida amistosa" : "Valendo fichas";
   const canAffordSelectedStake = !isServer || createStake === 0 ? true : balanceLoaded && balance.chips >= createStake;
@@ -437,7 +437,7 @@ export default function App() {
       return;
     }
     setCreateTableType((current) => current === "stake" || current === "casual" ? current : "stake");
-    setCreateStake((current) => createStakeOptions.includes(current as typeof createStakeOptions[number]) ? current : 25);
+    setCreateStake((current) => createStakeOptions.includes(current) ? current : 25);
   }, [isServer, screen]);
 
 
