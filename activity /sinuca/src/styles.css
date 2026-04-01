@@ -118,6 +118,7 @@ button:focus-visible {
 }
 
 .hero-card__meta--hud {
+  --hud-pill-width: 114px;
   display: flex;
   gap: 8px;
   align-items: stretch;
@@ -172,7 +173,8 @@ button:focus-visible {
 }
 
 .hero-stat {
-  min-width: 108px;
+  width: var(--hud-pill-width, 114px);
+  min-width: var(--hud-pill-width, 114px);
   padding: 8px 12px;
   border-radius: 17px;
   border: 1px solid rgba(238, 246, 255, 0.12);
@@ -270,7 +272,7 @@ button:focus-visible {
 
 .menu-button {
   min-height: 80px;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
   padding: 15px 19px;
   display: flex;
@@ -708,7 +710,7 @@ button:focus-visible {
 .create-center-pill strong {
   font-family: var(--font-ui);
   color: #f5f9ff;
-  font-size: 0.82rem;
+  font-size: 0.79rem;
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
@@ -1774,15 +1776,17 @@ button:focus-visible {
 }
 
 .entry-selector--hero {
+  width: var(--hud-pill-width, 114px);
   align-items: stretch;
 }
 
 .entry-selector__trigger--hero {
-  min-width: 118px;
+  width: 100%;
+  min-width: 0;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   min-height: 52px;
-  padding: 8px 12px;
+  padding: 8px 10px;
   border-radius: 17px;
   border: 1px solid rgba(238, 246, 255, 0.12);
   background: rgba(255, 255, 255, 0.065);
@@ -1798,12 +1802,16 @@ button:focus-visible {
 .entry-selector__trigger--hero strong {
   font-size: 1rem;
   line-height: 1.05;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .entry-selector__menu--hero {
   left: auto;
   right: 0;
-  min-width: 170px;
+  width: 100%;
+  min-width: 100%;
 }
 
 .entry-selector__trigger strong {
@@ -1817,6 +1825,7 @@ button:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 12px;
   width: 12px;
   height: 12px;
   font-family: var(--font-ui);
@@ -1832,18 +1841,18 @@ button:focus-visible {
 
 .entry-selector__menu {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 5px);
   left: 0;
   display: grid;
-  gap: 4px;
+  gap: 3px;
   min-width: 140px;
-  padding: 6px;
-  border-radius: 16px;
-  border: 1px solid rgba(232, 242, 255, 0.1);
-  background: rgba(7, 21, 31, 0.94);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.22);
+  padding: 4px;
+  border-radius: 14px;
+  border: 1px solid rgba(232, 242, 255, 0.12);
+  background: rgba(10, 25, 37, 0.97);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
   opacity: 0;
   transform: translateY(-4px);
   pointer-events: none;
@@ -1858,8 +1867,8 @@ button:focus-visible {
 }
 
 .entry-selector__option {
-  min-height: 32px;
-  padding: 0 10px;
+  min-height: 28px;
+  padding: 0 8px;
   border: 1px solid transparent;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.035);
@@ -1953,6 +1962,12 @@ button:focus-visible {
   border-top: 1px solid rgba(232, 242, 255, 0.08);
 }
 
+.create-preview-footer--solo {
+  grid-template-columns: minmax(0, 1fr);
+  padding-top: 0;
+  border-top: 0;
+}
+
 .create-preview-footer__meta {
   display: grid;
   gap: 2px;
@@ -1996,6 +2011,7 @@ button:focus-visible {
 }
 
 .create-submit--compact {
+  width: 100%;
   min-height: 34px;
   padding: 0 18px;
   border-radius: 999px;

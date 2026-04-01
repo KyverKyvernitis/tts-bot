@@ -317,8 +317,7 @@ export default function App() {
     : currentPlayer?.ready
       ? "Você está pronto. Aguarde o anfitrião iniciar."
       : "Marque pronto quando estiver preparado.";
-  const roomStakeDisplay = room?.tableType === "stake" ? room.stakeLabel : "Amistosa";
-  const formatStakeOptionLabel = (stake: number) => stake === 0 ? "Amistosa" : `${stake} fichas`;
+  const formatStakeOptionLabel = (stake: number) => stake === 0 ? "Amistoso" : `${stake}`;
 
   const waitForOAuthTokenResult = (): Promise<OAuthExchangeResult> => new Promise<OAuthExchangeResult>((resolve, reject) => {
     const socket = socketRef.current;
@@ -1078,13 +1077,13 @@ export default function App() {
   const heroSecondaryLabel = useMemo(() => {
     if (!isServer) return null;
     if (screen === "create") {
-      return { label: "Entrada", value: isFriendlyTable ? "Amistosa" : `${createStake} fichas` };
+      return { label: "Entrada", value: formatStakeOptionLabel(createStake) };
     }
     if (screen === "room" && room) {
-      return { label: "Entrada", value: room.tableType === "stake" ? room.stakeLabel : "Amistosa" };
+      return { label: "Entrada", value: formatStakeOptionLabel(room.tableType === "stake" ? (room.stakeChips ?? 0) : 0) };
     }
     return null;
-  }, [createStake, isFriendlyTable, isServer, room, screen]);
+  }, [createStake, isServer, room, screen]);
 
   const heroEntryEditable = Boolean(isServer && heroSecondaryLabel && (screen === "create" || (screen === "room" && room && isRoomHost)));
 
@@ -1286,12 +1285,7 @@ export default function App() {
                 )}
               </div>
 
-              <div className="create-preview-footer">
-                <div className="create-preview-footer__meta">
-                  <strong>{createPreviewRoom ? `${createPreviewRoom.players.length}/2 jogadores` : "1/2 jogadores"}</strong>
-                  <small>{createPreviewOpponentPlayer ? "Mesa aberta" : "Aguardando adversário"}</small>
-                </div>
-
+              <div className="create-preview-footer create-preview-footer--solo">
                 {!resolvedUser ? (
                   <button className="primary-button create-submit create-submit--compact" type="button" disabled={authBusy} onClick={() => { void handleAuthorize(); }}>
                     {authBusy ? "Autorizando..." : "Autorizar conta"}
@@ -1375,7 +1369,7 @@ export default function App() {
                     <div className="room-entry-card__footer room-entry-card__footer--compact">
                       <div className="room-entry-card__meta room-entry-card__meta--chips">
                         <span className="room-inline-chip">{entry.players.length}/2</span>
-                        <span className="room-inline-chip">{entry.tableType === "stake" ? `${entry.stakeChips ?? 0} fichas` : "Amistosa"}</span>
+                        <span className="room-inline-chip">{formatStakeOptionLabel(entry.tableType === "stake" ? (entry.stakeChips ?? 0) : 0)}</span>
                         <span className={`status-badge status-badge--${entry.status} room-inline-chip room-inline-chip--status`}>{formatStatus(entry)}</span>
                       </div>
 
