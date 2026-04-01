@@ -940,7 +940,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "jogador da activity não identificado" });
         return;
       }
-      const shouldCloseRoom = Boolean((merged as Record<string, unknown>).closeRoom);
+      const shouldCloseRoom = Boolean(merged.closeRoom);
       const room = shouldCloseRoom && previous && previous.hostUserId === merged.userId
         ? null
         : removePlayer(merged.roomId, merged.userId);
