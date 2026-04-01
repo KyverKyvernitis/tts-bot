@@ -276,7 +276,7 @@ async function handleListRoomsHttp(req: Request, res: Response) {
 }
 
 async function handleGetRoomHttp(req: Request, res: Response) {
-  const roomId = normalizeIntString(req.params?.roomId);
+  const roomId = normalizeIntString(req.params?.roomId ?? firstString(req.body?.roomId) ?? firstString(req.query?.roomId));
   if (!roomId) {
     res.status(400).json({ error: "missing_room_id" });
     return;
@@ -288,7 +288,7 @@ async function handleGetRoomHttp(req: Request, res: Response) {
 
 async function handleCreateRoomHttp(req: Request, res: Response) {
   const session = resolveRequestSession(req);
-  const merged = mergeWithSession(req.body ?? {}, session);
+  const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
   const instanceId = normalizeIntString(merged.instanceId);
   const guildId = normalizeIntString(merged.guildId);
   const channelId = normalizeIntString(merged.channelId);
@@ -313,7 +313,7 @@ async function handleCreateRoomHttp(req: Request, res: Response) {
 
 async function handleJoinRoomHttp(req: Request, res: Response) {
   const session = resolveRequestSession(req);
-  const merged = mergeWithSession(req.body ?? {}, session);
+  const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
   const roomId = normalizeIntString(merged.roomId);
   const userId = normalizeIntString(merged.userId);
   const displayName = firstString(merged.displayName);
@@ -335,7 +335,7 @@ async function handleJoinRoomHttp(req: Request, res: Response) {
 
 async function handleLeaveRoomHttp(req: Request, res: Response) {
   const session = resolveRequestSession(req);
-  const merged = mergeWithSession(req.body ?? {}, session);
+  const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
   const roomId = normalizeIntString(merged.roomId);
   const userId = normalizeIntString(merged.userId);
   console.log("[sinuca-leave-room-http-request]", JSON.stringify({ session, merged: { roomId, userId } }));
@@ -356,7 +356,7 @@ async function handleLeaveRoomHttp(req: Request, res: Response) {
 
 async function handleReadyRoomHttp(req: Request, res: Response) {
   const session = resolveRequestSession(req);
-  const merged = mergeWithSession(req.body ?? {}, session);
+  const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
   const roomId = normalizeIntString(merged.roomId);
   const userId = normalizeIntString(merged.userId);
   const ready = Boolean(merged.ready);
@@ -594,6 +594,25 @@ async function fetchBalance(guildId: string, userId: string, session?: SessionCo
 
 async function handleBalance(req: Request, res: Response) {
   const session = resolveRequestSession(req);
+  const action = firstString(req.body?.action) ?? firstString(req.query?.action);
+  if (action === "rooms_list") {
+    return void handleListRoomsHttp(req, res);
+  }
+  if (action === "room_get") {
+    return void handleGetRoomHttp(req, res);
+  }
+  if (action === "room_create") {
+    return void handleCreateRoomHttp(req, res);
+  }
+  if (action === "room_join") {
+    return void handleJoinRoomHttp(req, res);
+  }
+  if (action === "room_leave") {
+    return void handleLeaveRoomHttp(req, res);
+  }
+  if (action === "room_ready") {
+    return void handleReadyRoomHttp(req, res);
+  }
   const bodyGuildId = typeof req.body?.guildId === "string" ? req.body.guildId : null;
   const bodyUserId = typeof req.body?.userId === "string" ? req.body.userId : null;
   const queryGuildId = typeof req.query?.guildId === "string" ? req.query.guildId : null;
