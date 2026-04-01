@@ -3,20 +3,34 @@ import type { BallGroup, GameBallSnapshot, GameShotFrameBall, GameSnapshot, Room
 
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
-const BALL_SIZE = 24;
+const BALL_SIZE = 20;
 const BALL_RADIUS = BALL_SIZE / 2;
-const TABLE_MIN_X = 54 + BALL_RADIUS;
-const TABLE_MAX_X = TABLE_WIDTH - 54 - BALL_RADIUS;
-const TABLE_MIN_Y = 44 + BALL_RADIUS;
-const TABLE_MAX_Y = TABLE_HEIGHT - 44 - BALL_RADIUS;
-const BREAK_MAX_X = TABLE_WIDTH * 0.27;
+const TABLE_MIN_X = 64 + BALL_RADIUS;
+const TABLE_MAX_X = TABLE_WIDTH - 64 - BALL_RADIUS;
+const TABLE_MIN_Y = 48 + BALL_RADIUS;
+const TABLE_MAX_Y = TABLE_HEIGHT - 48 - BALL_RADIUS;
+const BREAK_MAX_X = TABLE_WIDTH * 0.34;
+const DEFAULT_CUE_X = 300;
+const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
+const RACK_APEX_X = 910;
+const RACK_APEX_Y = TABLE_HEIGHT / 2;
+const RACK_ROW_STEP_X = BALL_SIZE * 0.92;
+const RACK_SPACING = BALL_SIZE * 1.02;
 const POCKETS = [
-  { id: 1, x: 48, y: 38 },
-  { id: 2, x: TABLE_WIDTH / 2, y: 26 },
-  { id: 3, x: TABLE_WIDTH - 48, y: 38 },
-  { id: 4, x: 48, y: TABLE_HEIGHT - 38 },
-  { id: 5, x: TABLE_WIDTH / 2, y: TABLE_HEIGHT - 26 },
-  { id: 6, x: TABLE_WIDTH - 48, y: TABLE_HEIGHT - 38 },
+  { id: 1, x: 66, y: 48 },
+  { id: 2, x: TABLE_WIDTH / 2, y: 34 },
+  { id: 3, x: TABLE_WIDTH - 66, y: 48 },
+  { id: 4, x: 66, y: TABLE_HEIGHT - 48 },
+  { id: 5, x: TABLE_WIDTH / 2, y: TABLE_HEIGHT - 34 },
+  { id: 6, x: TABLE_WIDTH - 66, y: TABLE_HEIGHT - 48 },
+] as const;
+
+const OPENING_RACK = [
+  [1],
+  [10, 2],
+  [12, 8, 14],
+  [3, 6, 7, 11],
+  [15, 5, 13, 4, 9],
 ] as const;
 
 type ShotInput = {
@@ -51,27 +65,27 @@ function playerInitials(player: RoomPlayer | null | undefined) {
 
 function ballColor(number: number) {
   const map: Record<number, string> = {
-    1: "#f4d144",
-    2: "#2a5ce0",
-    3: "#d83a3d",
-    4: "#6c42ca",
-    5: "#e48225",
-    6: "#2b9b53",
-    7: "#8a2f21",
-    8: "#16181c",
-    9: "#f4d144",
-    10: "#2a5ce0",
-    11: "#d83a3d",
-    12: "#6c42ca",
-    13: "#e48225",
-    14: "#2b9b53",
-    15: "#8a2f21",
+    1: "#f3d54d",
+    2: "#315fe0",
+    3: "#d63e3e",
+    4: "#6d45c8",
+    5: "#ef8b2d",
+    6: "#2f9b5a",
+    7: "#7d2c25",
+    8: "#17191d",
+    9: "#f3d54d",
+    10: "#315fe0",
+    11: "#d63e3e",
+    12: "#6d45c8",
+    13: "#ef8b2d",
+    14: "#2f9b5a",
+    15: "#7d2c25",
   };
   return map[number] ?? "#eef4ff";
 }
 
 function resolveBallMeta(number: number) {
-  if (number === 0) return { label: "", className: "cue", color: "#f6fbff" };
+  if (number === 0) return { label: "", className: "cue", color: "#f7fbff" };
   if (number === 8) return { label: "8", className: "eight", color: ballColor(number) };
   return {
     label: String(number),
@@ -101,6 +115,36 @@ function clampCuePosition(x: number, y: number, breakOnly: boolean) {
   };
 }
 
+function buildOpeningBalls(source: GameBallSnapshot[]) {
+  const cueSource = source.find((ball) => ball.number === 0) ?? { id: "ball-0", number: 0, x: DEFAULT_CUE_X, y: DEFAULT_CUE_Y, pocketed: false };
+  const cue = {
+    ...cueSource,
+    ...clampCuePosition(
+      Number.isFinite(cueSource.x) ? cueSource.x : DEFAULT_CUE_X,
+      Number.isFinite(cueSource.y) ? cueSource.y : DEFAULT_CUE_Y,
+      true,
+    ),
+    pocketed: false,
+  };
+
+  const rackBalls: GameBallSnapshot[] = [];
+  OPENING_RACK.forEach((rowBalls, row) => {
+    const rowX = RACK_APEX_X + row * RACK_ROW_STEP_X;
+    const startY = RACK_APEX_Y - ((rowBalls.length - 1) * RACK_SPACING) / 2;
+    rowBalls.forEach((number, index) => {
+      rackBalls.push({
+        id: `ball-${number}`,
+        number,
+        x: rowX,
+        y: startY + index * RACK_SPACING,
+        pocketed: false,
+      });
+    });
+  });
+
+  return [cue, ...rackBalls];
+}
+
 export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, onShoot, onExit }: Props) {
   const [displayBalls, setDisplayBalls] = useState<GameBallSnapshot[]>(game.balls);
   const [power, setPower] = useState(0.58);
@@ -118,24 +162,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const host = room.players.find((player) => player.userId === room.hostUserId) ?? room.players[0] ?? null;
   const guest = room.players.find((player) => player.userId !== room.hostUserId) ?? null;
   const isHost = currentUserId === room.hostUserId;
-  const currentPlayer = isHost ? host : guest;
-  const opponentPlayer = isHost ? guest : host;
-  const myGroup = isHost ? game.hostGroup : game.guestGroup;
-  const opponentGroup = isHost ? game.guestGroup : game.hostGroup;
-  const cueBall = displayBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+  const me = room.players.find((player) => player.userId === currentUserId) ?? (isHost ? host : guest);
+  const opponent = room.players.find((player) => player.userId !== currentUserId) ?? (isHost ? guest : host);
+  const myGroup = currentUserId === room.hostUserId ? game.hostGroup : game.guestGroup;
+  const opponentGroup = currentUserId === room.hostUserId ? game.guestGroup : game.hostGroup;
   const isMyTurn = game.turnUserId === currentUserId;
-  const canInteract = Boolean(cueBall && isMyTurn && !animating && !shootBusy && game.status !== "finished");
-  const isBallInHand = game.ballInHandUserId === currentUserId && canInteract;
-  const cueLabel = game.tableType === "casual" ? "Amistoso" : `${game.stakeChips ?? 0}`;
   const isOpenTable = !game.hostGroup || !game.guestGroup;
-  const myRemaining = displayBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === myGroup).length;
-  const opponentRemaining = displayBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === opponentGroup).length;
-  const needEightCall = !isOpenTable && myGroup !== null && myRemaining === 0;
-  const canShoot = Boolean(canInteract && (!needEightCall || selectedPocket !== null));
 
   useEffect(() => {
-    if (animating) return;
-    setDisplayBalls(game.balls);
+    if (!animating) setDisplayBalls(game.balls);
   }, [animating, game.balls]);
 
   useEffect(() => {
@@ -153,7 +188,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       setDisplayBalls(frameToDisplayBalls(frame.balls, game.balls));
       frameIndex += 1;
       if (frameIndex < frames.length) {
-        animationRef.current = window.setTimeout(tick, 28) as unknown as number;
+        animationRef.current = window.setTimeout(tick, 24) as unknown as number;
         return;
       }
       lastAnimatedSeqRef.current = game.lastShot?.seq ?? 0;
@@ -173,20 +208,40 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [animating, game]);
 
   useEffect(() => () => {
-    if (animationRef.current !== null) {
-      window.clearTimeout(animationRef.current);
-    }
+    if (animationRef.current !== null) window.clearTimeout(animationRef.current);
   }, []);
+
+  const renderBalls = useMemo(() => {
+    const visibleNonCue = displayBalls.filter((ball) => !ball.pocketed && ball.number !== 0);
+    if ((game.phase === "break" || game.shotSequence === 0) && visibleNonCue.length < 10) {
+      return buildOpeningBalls(displayBalls);
+    }
+    return displayBalls;
+  }, [displayBalls, game.phase, game.shotSequence]);
+
+  const cueBall = renderBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+  const canInteract = Boolean(cueBall && isMyTurn && !animating && !shootBusy && game.status !== "finished");
+  const isBallInHand = game.ballInHandUserId === currentUserId && canInteract;
+  const cueLabel = game.tableType === "casual" ? "Amistoso" : `${game.stakeChips ?? 0}`;
+  const myRemaining = renderBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === myGroup).length;
+  const opponentRemaining = renderBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === opponentGroup).length;
+  const needEightCall = !isOpenTable && myGroup !== null && myRemaining === 0;
+  const canShoot = Boolean(canInteract && (!needEightCall || selectedPocket !== null));
 
   useEffect(() => {
     if (!cueBall) return;
-    setAimAngle(0);
-  }, [cueBall?.id, game.gameId]);
+    if (game.phase === "break") {
+      setAimAngle(0);
+      return;
+    }
+    if (game.turnUserId !== currentUserId) {
+      setAimAngle(Math.PI);
+    }
+  }, [cueBall?.id, cueBall?.x, cueBall?.y, game.phase, game.turnUserId, currentUserId]);
 
   useEffect(() => {
     if (!needEightCall) setSelectedPocket(null);
   }, [needEightCall]);
-
 
   const pointToLocal = (clientX: number, clientY: number) => {
     if (!tableRef.current) return null;
@@ -201,7 +256,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!cueBall) return;
     const point = pointToLocal(clientX, clientY);
     if (!point) return;
-    setAimAngle(Math.atan2(point.y - cueBall.y, point.x - cueBall.x));
+    setAimAngle(Math.atan2(cueBall.y - point.y, cueBall.x - point.x));
   };
 
   const updateCuePositionFromPoint = (clientX: number, clientY: number) => {
@@ -216,8 +271,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!powerRailRef.current) return;
     const rect = powerRailRef.current.getBoundingClientRect();
     const ratio = 1 - (clientY - rect.top) / rect.height;
-    const clamped = Math.max(0.12, Math.min(1, ratio));
-    setPower(clamped);
+    setPower(Math.max(0.15, Math.min(1, ratio)));
   };
 
   const handleTablePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -225,7 +279,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const point = pointToLocal(event.clientX, event.clientY);
     if (!point) return;
     const distanceToCue = Math.hypot(point.x - cueBall.x, point.y - cueBall.y);
-    if (isBallInHand && distanceToCue <= 36) {
+    if (isBallInHand && distanceToCue <= 42) {
       setPointerMode("place");
       updateCuePositionFromPoint(event.clientX, event.clientY);
       return;
@@ -268,30 +322,18 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   };
 
   const handlePowerUp = (event?: ReactPointerEvent<HTMLDivElement>) => {
-    if (event) {
-      event.currentTarget.releasePointerCapture?.(event.pointerId);
-    }
-    if (powerMovedRef.current && canShoot && !shootBusy) {
-      void handleShoot();
-    }
+    if (event) event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (powerMovedRef.current && canShoot && !shootBusy) void handleShoot();
     powerMovedRef.current = false;
   };
 
-  const hostPocketed = myGroup && isHost
-    ? 7 - myRemaining
-    : opponentGroup && !isHost
-      ? 7 - opponentRemaining
-      : displayBalls.filter((ball) => ball.pocketed && ball.number !== 0 && ball.number !== 8 && groupOfNumber(ball.number) === game.hostGroup).length;
-  const guestPocketed = myGroup && !isHost
-    ? 7 - myRemaining
-    : opponentGroup && isHost
-      ? 7 - opponentRemaining
-      : displayBalls.filter((ball) => ball.pocketed && ball.number !== 0 && ball.number !== 8 && groupOfNumber(ball.number) === game.guestGroup).length;
+  const leftPlayer = me;
+  const rightPlayer = opponent;
+  const leftPocketed = myGroup ? 7 - myRemaining : 0;
+  const rightPocketed = opponentGroup ? 7 - opponentRemaining : 0;
 
   const statusText = game.status === "finished"
-    ? game.winnerUserId === currentUserId
-      ? "Você venceu"
-      : "Você perdeu"
+    ? game.winnerUserId === currentUserId ? "Você venceu" : "Você perdeu"
     : game.foulReason && !animating
       ? `Falta: ${game.foulReason}`
       : isBallInHand
@@ -299,13 +341,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         : animating
           ? `Tacada ${animatingSeq}`
           : isMyTurn
-            ? needEightCall
-              ? "Chame a caçapa da 8"
-              : "Sua vez"
-            : `Vez de ${cleanName((game.turnUserId === host?.userId ? host : guest)?.displayName ?? "oponente")}`;
+            ? needEightCall ? "Caçapa da 8" : "Sua vez"
+            : `Vez de ${cleanName(opponent?.displayName ?? "oponente")}`;
 
   const phaseText = game.status === "finished"
-    ? "Fim de partida"
+    ? "Fim"
     : game.phase === "break"
       ? "Break"
       : game.phase === "open_table"
@@ -313,28 +353,30 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         : game.phase === "eight_ball"
           ? "Bola 8"
           : myGroup === "solids"
-            ? "Você: lisas"
+            ? "Lisas"
             : myGroup === "stripes"
-              ? "Você: listradas"
-              : "Sem grupo";
+              ? "Listradas"
+              : "";
 
   const aimGuide = useMemo(() => {
     if (!cueBall) return null;
+    const guideLength = 520;
+    const cueOffset = 230 + power * 120;
     return {
       left: cueBall.x,
       top: cueBall.y,
       angle: aimAngle,
-      length: 500,
-      cueOffset: 240 + power * 120,
-      ghostX: cueBall.x + Math.cos(aimAngle) * 240,
-      ghostY: cueBall.y + Math.sin(aimAngle) * 240,
-      ringX: cueBall.x + Math.cos(aimAngle) * 286,
-      ringY: cueBall.y + Math.sin(aimAngle) * 286,
+      length: guideLength,
+      cueOffset,
+      ghostX: cueBall.x + Math.cos(aimAngle) * 320,
+      ghostY: cueBall.y + Math.sin(aimAngle) * 320,
+      ringX: cueBall.x + Math.cos(aimAngle) * 360,
+      ringY: cueBall.y + Math.sin(aimAngle) * 360,
     };
   }, [aimAngle, cueBall, power]);
 
   return (
-    <section className="game-ref">
+    <section className="game-ref game-ref--cover">
       <div className="game-ref__top">
         <button
           className="game-ref__menu"
@@ -347,15 +389,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           {exitBusy ? "…" : "≡"}
         </button>
 
-        <div className={`game-ref__player ${game.turnUserId === host?.userId ? "game-ref__player--active" : ""}`}>
+        <div className={`game-ref__player ${game.turnUserId === leftPlayer?.userId ? "game-ref__player--active" : ""}`}>
           <div className="game-ref__avatar">
-            {host?.avatarUrl ? <img src={host.avatarUrl} alt={cleanName(host.displayName)} /> : <span>{playerInitials(host)}</span>}
+            {leftPlayer?.avatarUrl ? <img src={leftPlayer.avatarUrl} alt={cleanName(leftPlayer.displayName)} /> : <span>{playerInitials(leftPlayer)}</span>}
           </div>
           <div className="game-ref__player-body">
-            <strong>{cleanName(host?.displayName ?? "Anfitrião")}</strong>
+            <strong>{cleanName(leftPlayer?.displayName ?? "Jogador")}</strong>
             <div className="game-ref__pips">
               {Array.from({ length: 7 }).map((_, index) => (
-                <span key={`host-${index}`} className={`game-ref__pip ${index < hostPocketed ? "game-ref__pip--filled" : ""}`} />
+                <span key={`left-${index}`} className={`game-ref__pip ${index < leftPocketed ? "game-ref__pip--filled" : ""}`} />
               ))}
             </div>
           </div>
@@ -364,20 +406,20 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         <div className="game-ref__status">
           <span className="game-ref__stake">{cueLabel}</span>
           <strong>{statusText}</strong>
-          <small>{phaseText}</small>
+          <small>{phaseText || "Pool"}</small>
         </div>
 
-        <div className={`game-ref__player game-ref__player--right ${game.turnUserId === guest?.userId ? "game-ref__player--active" : ""}`}>
+        <div className={`game-ref__player game-ref__player--right ${game.turnUserId === rightPlayer?.userId ? "game-ref__player--active" : ""}`}>
           <div className="game-ref__player-body game-ref__player-body--right">
-            <strong>{cleanName(guest?.displayName ?? "Aguardando")}</strong>
+            <strong>{cleanName(rightPlayer?.displayName ?? "Adversário")}</strong>
             <div className="game-ref__pips game-ref__pips--right">
               {Array.from({ length: 7 }).map((_, index) => (
-                <span key={`guest-${index}`} className={`game-ref__pip ${index < guestPocketed ? "game-ref__pip--filled" : ""}`} />
+                <span key={`right-${index}`} className={`game-ref__pip ${index < rightPocketed ? "game-ref__pip--filled" : ""}`} />
               ))}
             </div>
           </div>
           <div className="game-ref__avatar">
-            {guest?.avatarUrl ? <img src={guest.avatarUrl} alt={cleanName(guest.displayName)} /> : <span>{playerInitials(guest)}</span>}
+            {rightPlayer?.avatarUrl ? <img src={rightPlayer.avatarUrl} alt={cleanName(rightPlayer.displayName)} /> : <span>{playerInitials(rightPlayer)}</span>}
           </div>
         </div>
       </div>
@@ -393,7 +435,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         >
           <div className="game-ref__power-track">
             <div className="game-ref__power-fill" style={{ height: `${Math.round(power * 100)}%` }} />
-            <div className="game-ref__power-knob" style={{ bottom: `calc(${Math.round(power * 100)}% - 11px)` }} />
+            <div className="game-ref__power-knob" style={{ bottom: `calc(${Math.round(power * 100)}% - 10px)` }} />
           </div>
           <div className="game-ref__power-value">{Math.round(power * 100)}</div>
         </div>
@@ -412,8 +454,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
               <div className="pool-ref__head-string" />
               <div className="pool-ref__head-spot" />
 
-              {Array.from({ length: 6 }).map((_, index) => (
-                <span key={`pocket-${index}`} className={`pool-ref__pocket pool-ref__pocket--${index + 1}`} />
+              {POCKETS.map((pocket) => (
+                <span key={`pocket-${pocket.id}`} className={`pool-ref__pocket pool-ref__pocket--${pocket.id}`} />
               ))}
 
               {needEightCall && isMyTurn ? POCKETS.map((pocket) => (
@@ -452,7 +494,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
                 </>
               ) : null}
 
-              {displayBalls.map((ball) => {
+              {renderBalls.map((ball) => {
                 if (ball.pocketed) return null;
                 const meta = resolveBallMeta(ball.number);
                 return (
@@ -462,7 +504,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
                     style={{
                       left: `${ball.x - BALL_RADIUS}px`,
                       top: `${ball.y - BALL_RADIUS}px`,
-                      ['--ball-color' as string]: meta.color,
+                      ["--ball-color" as string]: meta.color,
                     }}
                   >
                     {meta.label ? <span>{meta.label}</span> : null}
