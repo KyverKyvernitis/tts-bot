@@ -102,6 +102,14 @@ function resolveApiCandidates(path: string) {
   return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
 }
 
+function resolveBalanceTransportCandidates(action: string) {
+  return resolveApiCandidates("/balance").map((baseUrl) => {
+    const url = new URL(baseUrl, window.location.origin);
+    url.searchParams.set("action", action);
+    return url;
+  });
+}
+
 function resolveSocketUrl() {
   const configured = (import.meta.env.VITE_SINUCA_WS_URL as string | undefined)?.trim();
   if (configured) {
@@ -396,6 +404,27 @@ export default function App() {
 
   const fetchRoomsOverHttp = async (reason: string) => {
     const attempts: string[] = [];
+
+    for (const url of resolveBalanceTransportCandidates("rooms_list")) {
+      try {
+        url.searchParams.set("mode", state.context.mode);
+        if (state.context.guildId) url.searchParams.set("guildId", state.context.guildId);
+        if (state.context.channelId) url.searchParams.set("channelId", state.context.channelId);
+        const response = await fetch(url.toString(), { method: "GET", credentials: "same-origin" });
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { rooms?: RoomSnapshot[]; error?: string } : null;
+        if (response.ok && Array.isArray(parsed?.rooms)) {
+          setRooms(parsed.rooms);
+          setErrorMessage(null);
+          return true;
+        }
+        attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "unknown";
+        attempts.push(`${url.toString()}:exception:${message}`);
+      }
+    }
+
     for (const baseUrl of resolveApiCandidates("/rooms")) {
       try {
         const url = new URL(baseUrl, window.location.origin);
@@ -424,6 +453,27 @@ export default function App() {
 
   const fetchRoomStateOverHttp = async (roomId: string, reason: string) => {
     const attempts: string[] = [];
+
+    for (const url of resolveBalanceTransportCandidates("room_get")) {
+      try {
+        url.searchParams.set("roomId", roomId);
+        const response = await fetch(url.toString(), { method: "GET", credentials: "same-origin" });
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
+        if (response.ok) {
+          if (parsed?.room) {
+            setRoom(parsed.room);
+            setCreateDraftRoomId(parsed.room.roomId);
+          }
+          return parsed?.room ?? null;
+        }
+        attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "unknown";
+        attempts.push(`${url.toString()}:exception:${message}`);
+      }
+    }
+
     for (const baseUrl of resolveApiCandidates(`/rooms/${encodeURIComponent(roomId)}`)) {
       try {
         const response = await fetchWithTimeout(baseUrl, { method: "GET", credentials: "same-origin" });
@@ -449,7 +499,39 @@ export default function App() {
   };
 
   const postRoomActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
+    const actionByPath: Record<string, string> = {
+      "/rooms/create": "room_create",
+      "/rooms/join": "room_join",
+      "/rooms/leave": "room_leave",
+      "/rooms/ready": "room_ready",
+    };
     const attempts: string[] = [];
+    const action = actionByPath[path];
+
+    if (action) {
+      for (const baseUrl of resolveApiCandidates("/balance")) {
+        try {
+          const url = new URL(baseUrl, window.location.origin);
+          url.searchParams.set("action", action);
+          Object.entries(payload).forEach(([key, value]) => {
+            if (value === null || value === undefined) return;
+            url.searchParams.set(key, String(value));
+          });
+          const response = await fetch(url.toString(), { method: "GET", credentials: "same-origin" });
+          const raw = await response.text();
+          const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
+          if (response.ok) {
+            setErrorMessage(null);
+            return parsed;
+          }
+          attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "unknown";
+          attempts.push(`${baseUrl}:exception:${message}`);
+        }
+      }
+    }
+
     for (const baseUrl of resolveApiCandidates(path)) {
       try {
         const response = await fetchWithTimeout(baseUrl, {
