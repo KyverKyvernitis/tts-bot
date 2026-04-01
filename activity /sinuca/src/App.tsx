@@ -12,7 +12,7 @@ import type { ActivityBootstrap, ActivityUser, BalanceDebugSnapshot, BalanceSnap
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.wav";
-import GameStage from "./game/GameStage";
+import GameStage from "./games/GameStage";
 
 const DISCORD_ID_RE = /^\d{17,20}$/;
 
@@ -1825,7 +1825,7 @@ export default function App() {
             shootBusy={gameShootBusy}
             exitBusy={roomExitBusy}
             onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room_game" : "http_primary_leave_room_game"); }}
-            onShoot={async (shot) => {
+            onShoot={async (shot: { angle: number; power: number }) => {
               if (!room) return;
               setGameShootBusy(true);
               setErrorMessage(null);
