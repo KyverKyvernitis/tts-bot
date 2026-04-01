@@ -1248,3 +1248,43 @@ button:focus-visible {
 .create-config-card--final .create-config-block--summary .create-submit {
   margin-top: 0;
 }
+
+
+.list-topbar--single {
+  justify-content: flex-start;
+}
+
+.create-toggle-group--stakes-four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.create-config-block--entry-only {
+  gap: 8px;
+}
+
+.create-config-block--entry-only .create-config-block__head {
+  margin-bottom: 0;
+}
+
+.create-config-block--entry-only .create-submit {
+  margin-top: 2px;
+}
+
+.create-config-block--entry-only .create-toggle--stake {
+  min-height: 38px;
+}
+
+.create-config-block--entry-only .create-config-block__warning {
+  margin-top: 2px;
+  margin-bottom: 0;
+}
+
+.create-center-pill--final em {
+  display: none;
+}
+
+@media (max-width: 920px) {
+  .create-toggle-group--stakes-four {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
