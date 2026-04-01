@@ -60,20 +60,40 @@ type IncomingMessage =
   | { type: "session_context"; payload: SessionContextPayload }
   | { type: "oauth_token_result"; payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null } };
 
+const DEFAULT_PUBLIC_HOST = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || "osakaagiota.duckdns.org";
+
 function joinBaseAndPath(base: string, path: string) {
   const normalizedBase = base.endsWith("/") ? base.slice(0, -1) : base;
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return `${normalizedBase}${normalizedPath}`;
 }
 
-function resolveApiCandidates(path: string) {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const configured = (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim();
+function resolvePublicBaseCandidates() {
+  const configuredApiBase = (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim();
+  const configuredPublicHost = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim();
   const candidates: string[] = [];
 
-  if (configured) {
-    candidates.push(joinBaseAndPath(configured, `/api${normalizedPath}`));
-    candidates.push(joinBaseAndPath(configured, normalizedPath));
+  if (configuredApiBase) {
+    candidates.push(configuredApiBase);
+  }
+
+  const directHost = configuredPublicHost || DEFAULT_PUBLIC_HOST;
+  if (directHost) {
+    const withScheme = /^https?:\/\//i.test(directHost) ? directHost : `https://${directHost}`;
+    candidates.push(withScheme);
+  }
+
+  candidates.push(window.location.origin);
+  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
+}
+
+function resolveApiCandidates(path: string) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const candidates: string[] = [];
+
+  for (const base of resolvePublicBaseCandidates()) {
+    candidates.push(joinBaseAndPath(base, `/api${normalizedPath}`));
+    candidates.push(joinBaseAndPath(base, normalizedPath));
   }
 
   candidates.push(`/api${normalizedPath}`);
@@ -87,6 +107,12 @@ function resolveSocketUrl() {
     const url = new URL(configured, window.location.origin);
     if (!url.search && window.location.search) url.search = window.location.search;
     return url.toString();
+  }
+
+  const configuredPublicHost = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || DEFAULT_PUBLIC_HOST;
+  if (configuredPublicHost) {
+    const host = configuredPublicHost.replace(/^https?:\/\//i, "").replace(/\/$/, "");
+    return `wss://${host}/ws${window.location.search ?? ""}`;
   }
 
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
