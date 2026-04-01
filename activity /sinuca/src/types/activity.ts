@@ -2,6 +2,8 @@ export type ActivityMode = "server" | "casual";
 export type TableType = "stake" | "casual";
 export type RoomStatus = "waiting" | "ready" | "in_game";
 export type GameStatus = "waiting_shot" | "finished";
+export type BallGroup = "solids" | "stripes";
+export type GamePhase = "break" | "open_table" | "group_play" | "eight_ball" | "finished";
 
 export interface ActivityContext {
   mode: ActivityMode;
@@ -85,8 +87,15 @@ export interface GameSnapshot {
   tableType: TableType;
   stakeChips: number | null;
   status: GameStatus;
+  phase: GamePhase;
   turnUserId: string;
   shotSequence: number;
+  hostGroup: BallGroup | null;
+  guestGroup: BallGroup | null;
+  ballInHandUserId: string | null;
+  winnerUserId: string | null;
+  foulReason: string | null;
+  calledPocket: number | null;
   balls: GameBallSnapshot[];
   createdAt: number;
   updatedAt: number;
