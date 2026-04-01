@@ -1409,7 +1409,6 @@ export default function App() {
           </div>
         </section>
       ) : null}
-      ) : null}
 
       {shouldShowBalanceDebug ? (
         <section className="debug-card">
