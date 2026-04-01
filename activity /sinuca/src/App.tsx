@@ -451,6 +451,12 @@ export default function App() {
   };
 
   const requestRooms = () => {
+    console.log("[sinuca-ui-request-rooms]", {
+      mode: state.context.mode,
+      guildId: state.context.guildId,
+      channelId: state.context.channelId,
+      screen,
+    });
     sendMessage({
       type: "list_rooms",
       payload: {
@@ -645,6 +651,7 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped || screen !== "list" || connectionState !== "connected") return;
+    requestRooms();
     const interval = window.setInterval(() => requestRooms(), 2500);
     return () => window.clearInterval(interval);
   }, [bootstrapped, connectionState, screen, state.context.channelId, state.context.guildId, state.context.mode]);
