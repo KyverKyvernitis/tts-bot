@@ -194,10 +194,11 @@ export default function App() {
   const instanceId = state.context.instanceId ?? `local-${state.currentUser.userId}`;
   const isServer = state.context.mode === "server";
   const resolvedUser = isResolvedDiscordUserId(state.currentUser.userId);
-  const createStakeOptions = (isServer ? [0, 10, 25, 50] : [0]) as const;
-  const isFriendlyTable = !isServer || createStake === 0 || createTableType === "casual";
+  const createStakeOptions = [10, 25, 50] as const;
+  const canChooseStakeMode = isServer;
+  const isFriendlyTable = !isServer || createTableType === "casual";
   const createModeLabel = isFriendlyTable ? "Partida amistosa" : "Valendo fichas";
-  const canAffordSelectedStake = !isServer || createStake === 0 ? true : balanceLoaded && balance.chips >= createStake;
+  const canAffordSelectedStake = !isServer || createTableType !== "stake" ? true : balanceLoaded && balance.chips >= createStake;
   const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId);
   const roomHostPlayer = room?.players.find((player) => player.userId === room.hostUserId) ?? room?.players[0] ?? null;
   const roomOpponentPlayer = room?.players.find((player) => player.userId !== room.hostUserId) ?? null;
@@ -420,7 +421,6 @@ export default function App() {
   useEffect(() => {
     if (!isServer) {
       setCreateTableType("casual");
-      setCreateStake(0);
       return;
     }
     setCreateTableType("stake");
@@ -431,7 +431,6 @@ export default function App() {
     if (screen !== "create") return;
     if (!isServer) {
       setCreateTableType("casual");
-      setCreateStake(0);
       return;
     }
     setCreateTableType((current) => current === "stake" || current === "casual" ? current : "stake");
@@ -677,7 +676,7 @@ export default function App() {
     if (screen === "room" && room) {
       return room.tableType === "stake" ? { label: "Entrada", value: room.stakeLabel } : { label: "Modo", value: "Amistosa" };
     }
-    return null;
+    return { label: "Entrada", value: "25 fichas" };
   }, [createStake, isFriendlyTable, room, screen]);
 
   return (
@@ -704,12 +703,10 @@ export default function App() {
                 <strong>{balance.bonusChips}</strong>
               </div>
             ) : null}
-            {heroSecondaryLabel ? (
-              <div className="hero-stat hero-stat--entry">
-                <span>{heroSecondaryLabel.label}</span>
-                <strong>{heroSecondaryLabel.value}</strong>
-              </div>
-            ) : null}
+            <div className="hero-stat hero-stat--entry">
+              <span>{heroSecondaryLabel.label}</span>
+              <strong>{heroSecondaryLabel.value}</strong>
+            </div>
           </div>
         ) : null}
       </header>
@@ -743,7 +740,6 @@ export default function App() {
                     setCreateStake(25);
                   } else {
                     setCreateTableType("casual");
-                    setCreateStake(0);
                   }
                   setScreen("create");
                 }}
@@ -772,8 +768,9 @@ export default function App() {
 
             {screen === "create" ? (
         <section className="lobby-panel lobby-panel--compact lobby-panel--create">
-          <div className="list-topbar list-topbar--create list-topbar--compact-create list-topbar--single">
+          <div className="list-topbar list-topbar--create list-topbar--compact-create">
             <button className="chip-button chip-button--back" type="button" onClick={() => setScreen("home")}>Voltar</button>
+            <div className="list-topbar__count">{isFriendlyTable ? "Partida amistosa" : `${createStake} fichas`}</div>
           </div>
 
           <div className="create-layout create-layout--final">
@@ -789,7 +786,8 @@ export default function App() {
 
                 <div className="create-center-pill create-center-pill--final">
                   <strong>1/2 jogadores</strong>
-                  <span>{isFriendlyTable ? "Partida amistosa" : "Valendo fichas"}</span>
+                  <span>{createModeLabel}</span>
+                  {!isFriendlyTable ? <em>{createStake} fichas</em> : null}
                 </div>
 
                 <div className="participant-slot participant-slot--ghost participant-slot--compact participant-slot--create-main">
@@ -803,32 +801,72 @@ export default function App() {
             </div>
 
             <div className="create-config-card create-config-card--final">
-              <div className="create-config-block create-config-block--tight create-config-block--entry-only">
+              <div className="create-config-block create-config-block--tight">
                 <div className="create-config-block__head create-config-block__head--inline">
-                  <strong>Entrada</strong>
-                  <small className="create-config-block__value">{isFriendlyTable ? "Amistosa" : `${createStake} fichas`}</small>
+                  <strong>{isServer ? "Tipo da partida" : "Partida amistosa"}</strong>
+                  {isServer ? <small className="create-config-block__value">{createModeLabel}</small> : null}
                 </div>
 
-                <div className={`create-toggle-group create-toggle-group--stakes create-toggle-group--stakes-compact ${!isServer ? "create-toggle-group--single" : "create-toggle-group--stakes-four"}`}>
-                  {createStakeOptions.map((stake) => (
+                {canChooseStakeMode ? (
+                  <div className="create-toggle-group create-toggle-group--dense">
                     <button
-                      key={stake}
                       type="button"
-                      className={`chip-button create-toggle create-toggle--stake ${createStake === stake ? "chip-button--active" : ""}`}
-                      onClick={() => {
-                        setCreateStake(stake);
-                        setCreateTableType(stake === 0 ? "casual" : "stake");
-                      }}
+                      className={`chip-button create-toggle ${createTableType === "stake" ? "chip-button--active" : ""}`}
+                      onClick={() => setCreateTableType("stake")}
                     >
-                      {stake}
+                      Valendo fichas
                     </button>
-                  ))}
+                    <button
+                      type="button"
+                      className={`chip-button create-toggle ${createTableType === "casual" ? "chip-button--active" : ""}`}
+                      onClick={() => setCreateTableType("casual")}
+                    >
+                      Partida amistosa
+                    </button>
+                  </div>
+                ) : (
+                  <div className="create-toggle-group create-toggle-group--single create-toggle-group--dense">
+                    <button type="button" className="chip-button create-toggle chip-button--active" disabled>Partida amistosa</button>
+                  </div>
+                )}
+              </div>
+
+              {isServer && createTableType === "stake" ? (
+                <div className="create-config-block create-config-block--tight">
+                  <div className="create-config-block__head create-config-block__head--inline">
+                    <strong>Entrada</strong>
+                    <small className="create-config-block__value">{createStake} fichas</small>
+                  </div>
+
+                  <div className="create-toggle-group create-toggle-group--stakes create-toggle-group--stakes-compact">
+                    {createStakeOptions.map((stake) => (
+                      <button
+                        key={stake}
+                        type="button"
+                        className={`chip-button create-toggle create-toggle--stake ${createStake === stake ? "chip-button--active" : ""}`}
+                        onClick={() => setCreateStake(stake)}
+                      >
+                        {stake}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="create-config-block create-config-block--summary create-config-block--tight">
+                <div className="create-config-block__head create-config-block__head--compact">
+                  <strong>Resumo</strong>
                 </div>
 
-                {isServer && createStake > 0 && !balanceLoaded ? (
+                <ul className="kv-list kv-list--compact kv-list--summary-tight">
+                  <li><span>Modo</span><strong>{createModeLabel}</strong></li>
+                  {!isFriendlyTable ? <li><span>Entrada</span><strong>{createStake} fichas</strong></li> : null}
+                </ul>
+
+                {isServer && createTableType === "stake" && !balanceLoaded ? (
                   <p className="plain-copy create-config-block__warning">Carregando fichas...</p>
                 ) : null}
-                {isServer && createStake > 0 && balanceLoaded && !canAffordSelectedStake ? (
+                {isServer && createTableType === "stake" && balanceLoaded && !canAffordSelectedStake ? (
                   <p className="error-copy create-config-block__warning">Você não tem fichas suficientes para essa entrada.</p>
                 ) : null}
 
@@ -852,8 +890,8 @@ export default function App() {
                           userId: state.currentUser.userId,
                           displayName: state.currentUser.displayName,
                           avatarUrl: state.currentUser.avatarUrl ?? null,
-                          tableType: isServer ? (createStake === 0 ? "casual" : "stake") : "casual",
-                          stakeChips: isServer && createStake > 0 ? createStake : null,
+                          tableType: isServer ? createTableType : "casual",
+                          stakeChips: isServer && createTableType === "stake" ? createStake : null,
                         },
                       });
                     }}
