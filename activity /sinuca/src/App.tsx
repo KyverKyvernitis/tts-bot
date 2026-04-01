@@ -369,7 +369,7 @@ export default function App() {
           setErrorMessage(null);
           return true;
         }
-        attempts.push(`${baseUrl}:${response.status}:${parsed?.error ?? raw.slice(0, 180) || "empty"}`);
+        attempts.push(`${baseUrl}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown";
         attempts.push(`${baseUrl}:exception:${message}`);
@@ -395,7 +395,7 @@ export default function App() {
           }
           return parsed?.room ?? null;
         }
-        attempts.push(`${baseUrl}:${response.status}:${parsed?.error ?? raw.slice(0, 180) || "empty"}`);
+        attempts.push(`${baseUrl}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown";
         attempts.push(`${baseUrl}:exception:${message}`);
@@ -423,7 +423,7 @@ export default function App() {
           setErrorMessage(null);
           return parsed;
         }
-        attempts.push(`${baseUrl}:${response.status}:${parsed?.error ?? raw.slice(0, 180) || "empty"}`);
+        attempts.push(`${baseUrl}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown";
         attempts.push(`${baseUrl}:exception:${message}`);
