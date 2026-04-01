@@ -353,6 +353,143 @@ export default function App() {
     };
   };
 
+  const fetchRoomsOverHttp = async (reason: string) => {
+    const attempts: string[] = [];
+    for (const baseUrl of resolveApiCandidates("/rooms")) {
+      try {
+        const url = new URL(baseUrl, window.location.origin);
+        url.searchParams.set("mode", state.context.mode);
+        if (state.context.guildId) url.searchParams.set("guildId", state.context.guildId);
+        if (state.context.channelId) url.searchParams.set("channelId", state.context.channelId);
+        const response = await fetch(url.toString(), { method: "GET", credentials: "same-origin" });
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { rooms?: RoomSnapshot[]; error?: string } : null;
+        if (response.ok && Array.isArray(parsed?.rooms)) {
+          setRooms(parsed.rooms);
+          setErrorMessage(null);
+          return true;
+        }
+        attempts.push(`${baseUrl}:${response.status}:${parsed?.error ?? raw.slice(0, 180) || "empty"}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "unknown";
+        attempts.push(`${baseUrl}:exception:${message}`);
+      }
+    }
+    if (attempts.length) {
+      setAuthDebug((current) => current ? `${current} • rooms:http_failed:${reason}:${attempts.join(" | ")}` : `rooms:http_failed:${reason}:${attempts.join(" | ")}`);
+    }
+    return false;
+  };
+
+  const fetchRoomStateOverHttp = async (roomId: string, reason: string) => {
+    const attempts: string[] = [];
+    for (const baseUrl of resolveApiCandidates(`/rooms/${encodeURIComponent(roomId)}`)) {
+      try {
+        const response = await fetch(baseUrl, { method: "GET", credentials: "same-origin" });
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
+        if (response.ok) {
+          if (parsed?.room) {
+            setRoom(parsed.room);
+            setCreateDraftRoomId(parsed.room.roomId);
+          }
+          return parsed?.room ?? null;
+        }
+        attempts.push(`${baseUrl}:${response.status}:${parsed?.error ?? raw.slice(0, 180) || "empty"}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "unknown";
+        attempts.push(`${baseUrl}:exception:${message}`);
+      }
+    }
+    if (attempts.length) {
+      setAuthDebug((current) => current ? `${current} • room:http_failed:${reason}:${attempts.join(" | ")}` : `room:http_failed:${reason}:${attempts.join(" | ")}`);
+    }
+    return null;
+  };
+
+  const postRoomActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
+    const attempts: string[] = [];
+    for (const baseUrl of resolveApiCandidates(path)) {
+      try {
+        const response = await fetch(baseUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(payload),
+        });
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
+        if (response.ok) {
+          setErrorMessage(null);
+          return parsed;
+        }
+        attempts.push(`${baseUrl}:${response.status}:${parsed?.error ?? raw.slice(0, 180) || "empty"}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "unknown";
+        attempts.push(`${baseUrl}:exception:${message}`);
+      }
+    }
+    if (attempts.length) {
+      setAuthDebug((current) => current ? `${current} • room_action:http_failed:${reason}:${attempts.join(" | ")}` : `room_action:http_failed:${reason}:${attempts.join(" | ")}`);
+    }
+    return null;
+  };
+
+  const createRoomOverHttp = async (reason: string) => {
+    const result = await postRoomActionOverHttp("/rooms/create", {
+      instanceId,
+      guildId: state.context.guildId,
+      channelId: state.context.channelId,
+      mode: state.context.mode,
+      userId: state.currentUser.userId,
+      displayName: state.currentUser.displayName,
+      avatarUrl: state.currentUser.avatarUrl ?? null,
+      tableType: isServer ? (createStake === 0 ? "casual" : "stake") : "casual",
+      stakeChips: isServer && createStake > 0 ? createStake : null,
+    }, reason);
+    if (result?.room) {
+      setRoom(result.room);
+      setCreateDraftRoomId(result.room.roomId);
+      return result.room;
+    }
+    return null;
+  };
+
+  const joinRoomOverHttp = async (roomId: string, reason: string) => {
+    const result = await postRoomActionOverHttp("/rooms/join", {
+      roomId,
+      userId: state.currentUser.userId,
+      displayName: state.currentUser.displayName,
+      avatarUrl: state.currentUser.avatarUrl ?? null,
+    }, reason);
+    if (result?.room) {
+      setRoom(result.room);
+      setScreen("room");
+      return result.room;
+    }
+    return null;
+  };
+
+  const leaveRoomOverHttp = async (roomId: string, reason: string) => {
+    await postRoomActionOverHttp("/rooms/leave", {
+      roomId,
+      userId: state.currentUser.userId,
+    }, reason);
+  };
+
+  const setReadyOverHttp = async (roomId: string, ready: boolean, reason: string) => {
+    const result = await postRoomActionOverHttp("/rooms/ready", {
+      roomId,
+      userId: state.currentUser.userId,
+      ready,
+    }, reason);
+    if (result?.room) {
+      setRoom(result.room);
+      return result.room;
+    }
+    return null;
+  };
+
   const runAuthorizeFlow = async (promptMode: "none" | "consent"): Promise<{ user: ActivityUser | null; debug: string }> => {
     const authorizeResult = await authorizeDiscordCode(promptMode);
     if (!authorizeResult.code) {
@@ -453,22 +590,27 @@ export default function App() {
 
   useEffect(() => {
     if (screen !== "create") return;
-    if (!resolvedUser || authState !== "ready" || connectionState !== "connected") return;
-    sendMessage({
-      type: "create_room",
-      payload: {
-        instanceId,
-        guildId: state.context.guildId,
-        channelId: state.context.channelId,
-        mode: state.context.mode,
-        userId: state.currentUser.userId,
-        displayName: state.currentUser.displayName,
-        avatarUrl: state.currentUser.avatarUrl ?? null,
-        tableType: isServer ? (createStake === 0 ? "casual" : "stake") : "casual",
-        stakeChips: isServer && createStake > 0 ? createStake : null,
-      },
-    });
-  }, [authState, connectionState, createStake, instanceId, isServer, resolvedUser, screen, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.avatarUrl, state.currentUser.displayName, state.currentUser.userId]);
+    if (!resolvedUser || authState !== "ready") return;
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      sendMessage({
+        type: "create_room",
+        payload: {
+          instanceId,
+          guildId: state.context.guildId,
+          channelId: state.context.channelId,
+          mode: state.context.mode,
+          userId: state.currentUser.userId,
+          displayName: state.currentUser.displayName,
+          avatarUrl: state.currentUser.avatarUrl ?? null,
+          tableType: isServer ? (createStake === 0 ? "casual" : "stake") : "casual",
+          stakeChips: isServer && createStake > 0 ? createStake : null,
+        },
+      });
+      return;
+    }
+    void createRoomOverHttp("socket_unavailable_create");
+  }, [authState, createStake, instanceId, isServer, resolvedUser, screen, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.avatarUrl, state.currentUser.displayName, state.currentUser.userId]);
 
 
   const sendMessage = (payload: object) => {
@@ -480,21 +622,26 @@ export default function App() {
     socket.send(JSON.stringify(payload));
   };
 
-  const requestRooms = () => {
+  const requestRooms = async () => {
     console.log("[sinuca-ui-request-rooms]", {
       mode: state.context.mode,
       guildId: state.context.guildId,
       channelId: state.context.channelId,
       screen,
     });
-    sendMessage({
-      type: "list_rooms",
-      payload: {
-        mode: state.context.mode,
-        guildId: state.context.guildId,
-        channelId: state.context.channelId,
-      },
-    });
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      sendMessage({
+        type: "list_rooms",
+        payload: {
+          mode: state.context.mode,
+          guildId: state.context.guildId,
+          channelId: state.context.channelId,
+        },
+      });
+      return;
+    }
+    await fetchRoomsOverHttp("socket_unavailable_list");
   };
 
   const requestBalance = () => {
@@ -652,7 +799,7 @@ export default function App() {
       payload: initPayload,
     }));
     lastInitKeyRef.current = nextInitKey;
-    requestRooms();
+    void requestRooms();
   }, [bootstrapped, connectionState, resolvedUser, state.context.channelId, state.context.guildId, state.context.instanceId, state.currentUser.displayName, state.currentUser.userId]);
 
   useEffect(() => {
@@ -683,11 +830,28 @@ export default function App() {
   }, [bootstrapped, connectionState, isServer, resolvedUser, state.context.guildId, state.currentUser.userId]);
 
   useEffect(() => {
-    if (!bootstrapped || screen !== "list" || connectionState !== "connected") return;
-    requestRooms();
-    const interval = window.setInterval(() => requestRooms(), 2500);
+    if (!bootstrapped || screen !== "list") return;
+    void requestRooms();
+    const interval = window.setInterval(() => {
+      void requestRooms();
+    }, 2500);
     return () => window.clearInterval(interval);
   }, [bootstrapped, connectionState, screen, state.context.channelId, state.context.guildId, state.context.mode]);
+
+  useEffect(() => {
+    if (!bootstrapped || connectionState === "connected") return;
+    const activeRoomId = screen === "room"
+      ? room?.roomId ?? null
+      : screen === "create"
+        ? createDraftRoomIdRef.current ?? createDraftRoomId
+        : null;
+    if (!activeRoomId) return;
+    void fetchRoomStateOverHttp(activeRoomId, "offline_initial");
+    const interval = window.setInterval(() => {
+      void fetchRoomStateOverHttp(activeRoomId, "offline_poll");
+    }, 2500);
+    return () => window.clearInterval(interval);
+  }, [bootstrapped, connectionState, createDraftRoomId, room?.roomId, screen]);
 
   const shouldShowBalanceDebug = isServer && (!balanceLoaded || balance.chips === 0);
 
@@ -802,7 +966,7 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   setScreen("list");
-                  requestRooms();
+                  void requestRooms();
                 }}
               >
                 <span className="menu-button__eyebrow">Mesas abertas</span>
@@ -820,12 +984,17 @@ export default function App() {
             <button className="chip-button chip-button--back" type="button" onClick={() => {
               const roomId = createDraftRoomIdRef.current;
               if (roomId) {
-                sendMessage({ type: "leave_room", payload: { roomId, userId: state.currentUser.userId } });
+                const socket = socketRef.current;
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                  sendMessage({ type: "leave_room", payload: { roomId, userId: state.currentUser.userId } });
+                } else {
+                  void leaveRoomOverHttp(roomId, "socket_unavailable_leave_create");
+                }
               }
               setCreateDraftRoomId(null);
               setRoom(null);
               setScreen("home");
-              requestRooms();
+              void requestRooms();
             }}>Voltar</button>
           </div>
 
@@ -973,10 +1142,15 @@ export default function App() {
                             void handleAuthorize();
                             return;
                           }
-                          sendMessage({
-                            type: "join_room",
-                            payload: { roomId: entry.roomId, userId: state.currentUser.userId, displayName: state.currentUser.displayName, avatarUrl: state.currentUser.avatarUrl ?? null },
-                          });
+                          const socket = socketRef.current;
+                          if (socket && socket.readyState === WebSocket.OPEN) {
+                            sendMessage({
+                              type: "join_room",
+                              payload: { roomId: entry.roomId, userId: state.currentUser.userId, displayName: state.currentUser.displayName, avatarUrl: state.currentUser.avatarUrl ?? null },
+                            });
+                            return;
+                          }
+                          void joinRoomOverHttp(entry.roomId, "socket_unavailable_join");
                         }}
                       >
                         {!resolvedUser ? (authBusy ? "Autorizando..." : "Autorizar") : entry.players.length >= 2 ? "Mesa cheia" : "Entrar"}
@@ -993,7 +1167,7 @@ export default function App() {
       {screen === "room" && room ? (
         <section className="lobby-panel lobby-panel--compact lobby-panel--room-stage">
           <div className="list-topbar list-topbar--room-stage">
-            <button className="chip-button chip-button--back" type="button" onClick={() => { setRoom(null); setScreen("list"); requestRooms(); }}>Voltar</button>
+            <button className="chip-button chip-button--back" type="button" onClick={() => { setRoom(null); setScreen("list"); void requestRooms(); }}>Voltar</button>
             <div className="list-topbar__count">{room.players.length}/2 jogadores</div>
           </div>
 
@@ -1067,10 +1241,15 @@ export default function App() {
                     className="chip-button room-stage__leave"
                     type="button"
                     onClick={() => {
-                      sendMessage({ type: "leave_room", payload: { roomId: room.roomId, userId: state.currentUser.userId } });
+                      const socket = socketRef.current;
+                      if (socket && socket.readyState === WebSocket.OPEN) {
+                        sendMessage({ type: "leave_room", payload: { roomId: room.roomId, userId: state.currentUser.userId } });
+                      } else {
+                        void leaveRoomOverHttp(room.roomId, "socket_unavailable_leave_room");
+                      }
                       setRoom(null);
                       setScreen("list");
-                      requestRooms();
+                      void requestRooms();
                     }}
                   >
                     {room.players.length === 1 && currentPlayer?.userId === room.hostUserId ? "Fechar mesa" : "Sair"}
@@ -1078,7 +1257,15 @@ export default function App() {
                   <button
                     className={`primary-button room-stage__ready ${currentPlayer?.ready ? "primary-button--muted" : ""}`}
                     type="button"
-                    onClick={() => sendMessage({ type: "set_ready", payload: { roomId: room.roomId, userId: state.currentUser.userId, ready: !currentPlayer?.ready } })}
+                    onClick={() => {
+                      const nextReady = !currentPlayer?.ready;
+                      const socket = socketRef.current;
+                      if (socket && socket.readyState === WebSocket.OPEN) {
+                        sendMessage({ type: "set_ready", payload: { roomId: room.roomId, userId: state.currentUser.userId, ready: nextReady } });
+                        return;
+                      }
+                      void setReadyOverHttp(room.roomId, nextReady, "socket_unavailable_ready");
+                    }}
                   >
                     {currentPlayer?.ready ? "Cancelar pronto" : "Marcar pronto"}
                   </button>
