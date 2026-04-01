@@ -1115,7 +1115,7 @@ export default function App() {
               heroEntryEditable ? (
                 <div
                   ref={screen === "create" ? createEntryMenuRef : roomEntryMenuRef}
-                  className={`entry-selector entry-selector--hero ${screen === "create" ? (createEntryMenuOpen ? "entry-selector--open" : "") : (roomEntryMenuOpen ? "entry-selector--open" : "")}`}
+                  className={`entry-selector entry-selector--hero entry-selector--hero-compact ${screen === "create" ? (createEntryMenuOpen ? "entry-selector--open" : "") : (roomEntryMenuOpen ? "entry-selector--open" : "")}`}
                 >
                   <button
                     className="entry-selector__trigger entry-selector__trigger--hero"
