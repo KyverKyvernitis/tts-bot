@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { GameBallSnapshot, GameShotFrameBall, GameSnapshot, RoomSnapshot } from "../types/activity";
+import type { GameBallSnapshot, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
 
 const TABLE_WIDTH = 1000;
 const TABLE_HEIGHT = 560;
 const BALL_SIZE = 28;
 const BALL_RADIUS = BALL_SIZE / 2;
+
+type ShotInput = { angle: number; power: number };
 
 type Props = {
   room: RoomSnapshot;
@@ -12,12 +14,18 @@ type Props = {
   currentUserId: string;
   shootBusy: boolean;
   exitBusy: boolean;
-  onShoot: (shot: { angle: number; power: number }) => Promise<void>;
+  onShoot: (shot: ShotInput) => Promise<void>;
   onExit: () => void;
 };
 
 function cleanName(name: string) {
   return (name || "jogador").replace(/^@+/, "").trim() || "jogador";
+}
+
+function playerInitials(player: RoomPlayer | null | undefined) {
+  const source = cleanName(player?.displayName ?? "J");
+  const pieces = source.split(/\s+/).filter(Boolean).slice(0, 2);
+  return pieces.map((piece) => piece[0]?.toUpperCase() ?? "").join("") || source[0]?.toUpperCase() || "J";
 }
 
 function resolveBallMeta(number: number) {
@@ -48,11 +56,12 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const animationRef = useRef<number | null>(null);
   const lastAnimatedSeqRef = useRef<number>(0);
 
-  const host = room.players.find((player) => player.userId === room.hostUserId) ?? room.players[0];
+  const host = room.players.find((player) => player.userId === room.hostUserId) ?? room.players[0] ?? null;
   const guest = room.players.find((player) => player.userId !== room.hostUserId) ?? null;
   const currentTurnName = game.turnUserId === host?.userId ? host?.displayName : guest?.displayName ?? host?.displayName;
   const cueBall = displayBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
   const isMyTurn = game.turnUserId === currentUserId;
+  const isHost = currentUserId === room.hostUserId;
   const canShoot = Boolean(cueBall && isMyTurn && !animating && !shootBusy);
 
   useEffect(() => {
@@ -103,16 +112,17 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   useEffect(() => {
     if (!cueBall) return;
     setAimAngle(0);
-  }, [game.gameId]);
+  }, [cueBall, game.gameId]);
 
   const aimGuide = useMemo(() => {
     if (!cueBall) return null;
-    const length = 350;
     return {
       left: cueBall.x,
       top: cueBall.y,
       angle: aimAngle,
-      length,
+      length: 350,
+      ghostX: cueBall.x + Math.cos(aimAngle) * 215,
+      ghostY: cueBall.y + Math.sin(aimAngle) * 215,
     };
   }, [aimAngle, cueBall]);
 
@@ -146,107 +156,144 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     await onShoot({ angle: aimAngle, power });
   };
 
+  const tableLabel = game.tableType === "casual" ? "Amistoso" : `Entrada ${game.stakeChips ?? 0}`;
+  const statusText = animating
+    ? `Tacada ${animatingSeq} em andamento`
+    : canShoot
+      ? "Sua vez de jogar"
+      : isMyTurn
+        ? "Aguardando a branca voltar"
+        : `Vez de ${cleanName(currentTurnName ?? "jogador")}`;
+
   return (
-    <section className="game-stage-shell">
-      <div className="game-topbar">
-        <button className="chip-button chip-button--back" type="button" disabled={exitBusy} onClick={onExit}>
-          {exitBusy ? "Saindo..." : (room.hostUserId === currentUserId ? "Fechar sala" : "Sair")}
+    <section className="game-stage-shell game-stage-shell--reboot">
+      <div className="game-topbar game-topbar--reboot">
+        <button className="chip-button chip-button--back game-exit-button" type="button" disabled={exitBusy} onClick={onExit}>
+          {exitBusy ? "Saindo..." : (isHost ? "Fechar sala" : "Sair")}
         </button>
-        <div className="game-topbar__status">
-          <span className="room-stage__top-chip">{game.tableType === "casual" ? "Amistoso" : game.stakeChips ?? 0}</span>
-          <span className="room-ready-badge room-ready-badge--ready">Fase 1</span>
+        <div className="game-topbar__status game-topbar__status--reboot">
+          <span className="game-chip">{tableLabel}</span>
+          <span className={`game-chip ${canShoot ? "game-chip--active" : ""}`}>{statusText}</span>
         </div>
       </div>
 
-      <div className="game-hud">
-        <div className={`game-hud__player ${game.turnUserId === host?.userId ? "game-hud__player--active" : ""}`}>
-          <span className="game-hud__label">Anfitrião</span>
-          <strong>{cleanName(host?.displayName ?? "Anfitrião")}</strong>
-        </div>
-        <div className="game-hud__center">
-          <span className="game-hud__turn">{animating ? "Bolas em movimento" : `Vez de ${cleanName(currentTurnName ?? "jogador")}`}</span>
-          <small>{game.shotSequence === 0 ? "Break inicial" : `Tacada ${game.shotSequence}`}</small>
-        </div>
-        <div className={`game-hud__player ${game.turnUserId === guest?.userId ? "game-hud__player--active" : ""}`}>
-          <span className="game-hud__label">Adversário</span>
-          <strong>{cleanName(guest?.displayName ?? "Aguardando")}</strong>
-        </div>
-      </div>
-
-      <div className="game-layout">
-        <div
-          ref={tableRef}
-          className={`pool-table ${canShoot ? "pool-table--interactive" : ""}`}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerUp}
-        >
-          <div className="pool-table__felt" />
-          {Array.from({ length: 6 }).map((_, index) => (
-            <span key={`pocket-${index}`} className={`pool-pocket pool-pocket--${index + 1}`} />
-          ))}
-
-          {aimGuide && !animating && isMyTurn ? (
-            <>
-              <div
-                className="pool-aim-line"
-                style={{
-                  left: `${aimGuide.left}px`,
-                  top: `${aimGuide.top}px`,
-                  width: `${aimGuide.length}px`,
-                  transform: `translateY(-1px) rotate(${aimGuide.angle}rad)`,
-                }}
-              />
-              <div
-                className="pool-cue"
-                style={{
-                  left: `${aimGuide.left}px`,
-                  top: `${aimGuide.top}px`,
-                  transform: `translate(-100%, -50%) rotate(${aimGuide.angle}rad) translateX(${-52 - power * 56}px)`,
-                }}
-              />
-            </>
-          ) : null}
-
-          {displayBalls.map((ball) => {
-            if (ball.pocketed) return null;
-            const meta = resolveBallMeta(ball.number);
-            return (
-              <div
-                key={ball.id}
-                className={`pool-ball pool-ball--${meta.className}`}
-                style={{ left: `${ball.x - BALL_RADIUS}px`, top: `${ball.y - BALL_RADIUS}px` }}
-              >
-                {meta.label ? <span>{meta.label}</span> : null}
-              </div>
-            );
-          })}
-        </div>
-
-        <aside className="game-controls">
-          <div className="game-controls__card">
-            <span className="game-controls__eyebrow">Taco</span>
-            <strong>{canShoot ? "Mire e bata" : (animating ? `Tacada ${animatingSeq}` : (isMyTurn ? "Aguardando branca" : "Espere sua vez"))}</strong>
-            <small>Arraste na mesa para girar a mira. A barra ajusta a força da tacada.</small>
+      <div className="game-scorebar">
+        <div className={`game-scorecard ${game.turnUserId === host?.userId ? "game-scorecard--active" : ""}`}>
+          <div className="game-scorecard__avatar">
+            {host?.avatarUrl ? <img src={host.avatarUrl} alt={cleanName(host.displayName)} /> : <span>{playerInitials(host)}</span>}
           </div>
+          <div className="game-scorecard__meta">
+            <span className="game-scorecard__role">Anfitrião</span>
+            <strong>{cleanName(host?.displayName ?? "Anfitrião")}</strong>
+            <small>{game.turnUserId === host?.userId ? "Jogando agora" : "Aguardando"}</small>
+          </div>
+        </div>
 
-          <label className="power-slider">
+        <div className="game-scorebar__center">
+          <span className="game-scorebar__title">Mesa de sinuca</span>
+          <strong>{game.shotSequence === 0 ? "Break inicial" : `Tacada ${game.shotSequence}`}</strong>
+          <small>{game.tableType === "casual" ? "Partida amistosa" : `Valendo ${game.stakeChips ?? 0}`}</small>
+        </div>
+
+        <div className={`game-scorecard ${game.turnUserId === guest?.userId ? "game-scorecard--active" : ""}`}>
+          <div className="game-scorecard__avatar">
+            {guest?.avatarUrl ? <img src={guest.avatarUrl} alt={cleanName(guest.displayName)} /> : <span>{playerInitials(guest)}</span>}
+          </div>
+          <div className="game-scorecard__meta">
+            <span className="game-scorecard__role">Adversário</span>
+            <strong>{cleanName(guest?.displayName ?? "Aguardando")}</strong>
+            <small>{game.turnUserId === guest?.userId ? "Jogando agora" : (guest ? "Aguardando" : "Entrando na mesa")}</small>
+          </div>
+        </div>
+      </div>
+
+      <div className="game-board-card">
+        <div className="game-board-card__frame">
+          <div
+            ref={tableRef}
+            className={`pool-table pool-table--reboot ${canShoot ? "pool-table--interactive" : ""}`}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerLeave={handlePointerUp}
+          >
+            <div className="pool-table__felt" />
+            <div className="pool-table__marks" />
+            {Array.from({ length: 6 }).map((_, index) => (
+              <span key={`pocket-${index}`} className={`pool-pocket pool-pocket--${index + 1}`} />
+            ))}
+
+            {aimGuide && !animating && isMyTurn ? (
+              <>
+                <div
+                  className="pool-aim-line"
+                  style={{
+                    left: `${aimGuide.left}px`,
+                    top: `${aimGuide.top}px`,
+                    width: `${aimGuide.length}px`,
+                    transform: `translateY(-1px) rotate(${aimGuide.angle}rad)`,
+                  }}
+                />
+                <div
+                  className="pool-ghost-dot"
+                  style={{
+                    left: `${aimGuide.ghostX}px`,
+                    top: `${aimGuide.ghostY}px`,
+                  }}
+                />
+                <div
+                  className="pool-cue"
+                  style={{
+                    left: `${aimGuide.left}px`,
+                    top: `${aimGuide.top}px`,
+                    transform: `translate(-100%, -50%) rotate(${aimGuide.angle}rad) translateX(${-70 - power * 70}px)`,
+                  }}
+                />
+              </>
+            ) : null}
+
+            {displayBalls.map((ball) => {
+              if (ball.pocketed) return null;
+              const meta = resolveBallMeta(ball.number);
+              return (
+                <div
+                  key={ball.id}
+                  className={`pool-ball pool-ball--${meta.className}`}
+                  style={{ left: `${ball.x - BALL_RADIUS}px`, top: `${ball.y - BALL_RADIUS}px` }}
+                >
+                  {meta.label ? <span>{meta.label}</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="game-actionbar">
+        <div className="game-power-card">
+          <div className="game-power-card__labels">
             <span>Força</span>
-            <input type="range" min="18" max="100" value={Math.round(power * 100)} onChange={(event) => setPower(Number(event.target.value) / 100)} disabled={!canShoot} />
             <strong>{Math.round(power * 100)}%</strong>
-          </label>
-
-          <button className="primary-button game-controls__shoot" type="button" disabled={!canShoot || shootBusy} onClick={handleShoot}>
-            {shootBusy ? "Tacando..." : (isMyTurn ? "Tacar" : "Aguardando adversário")}
-          </button>
-
-          <div className="game-controls__legend">
-            <span className="game-controls__legend-ball game-controls__legend-ball--solid">Lisas</span>
-            <span className="game-controls__legend-ball game-controls__legend-ball--stripe">Listradas</span>
-            <span className="game-controls__legend-ball game-controls__legend-ball--eight">8</span>
           </div>
-        </aside>
+          <input
+            className="game-power-card__slider"
+            type="range"
+            min="18"
+            max="100"
+            value={Math.round(power * 100)}
+            onChange={(event) => setPower(Number(event.target.value) / 100)}
+            disabled={!canShoot}
+          />
+        </div>
+
+        <div className="game-shot-hint">
+          <strong>{canShoot ? "Arraste na mesa para mirar" : statusText}</strong>
+          <small>Solte a mira e aperte o botão quando alinhar a tacada.</small>
+        </div>
+
+        <button className="primary-button game-shoot-button" type="button" disabled={!canShoot || shootBusy} onClick={handleShoot}>
+          {shootBusy ? "Tacando..." : "Tacar"}
+        </button>
       </div>
     </section>
   );
