@@ -481,6 +481,9 @@ async function handleShootGameHttp(req: Request, res: Response) {
   const userId = normalizeIntString(merged.userId);
   const angle = Number(merged.angle ?? 0);
   const power = Number(merged.power ?? 0);
+  const cueX = merged.cueX === undefined ? null : Number(merged.cueX);
+  const cueY = merged.cueY === undefined ? null : Number(merged.cueY);
+  const calledPocket = merged.calledPocket === undefined ? null : Number(merged.calledPocket);
   if (!roomId || !userId) {
     res.status(400).json({ error: "missing_shot_identifiers" });
     return;
@@ -499,7 +502,7 @@ async function handleShootGameHttp(req: Request, res: Response) {
     res.status(409).json({ error: "not_your_turn", game: before });
     return;
   }
-  const game = takeShot(roomId, userId, angle, power);
+  const game = takeShot(roomId, userId, angle, power, cueX, cueY, Number.isFinite(calledPocket) ? calledPocket : null);
   if (!game) {
     res.status(404).json({ error: "game_not_found" });
     return;
@@ -1122,7 +1125,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "não é sua vez" });
         return;
       }
-      takeShot(merged.roomId, merged.userId, Number(merged.angle ?? 0), Number(merged.power ?? 0));
+      takeShot(merged.roomId, merged.userId, Number(merged.angle ?? 0), Number(merged.power ?? 0), merged.cueX === undefined ? null : Number(merged.cueX), merged.cueY === undefined ? null : Number(merged.cueY), merged.calledPocket === undefined ? null : Number(merged.calledPocket));
       broadcastGame(merged.roomId);
       return;
     }
