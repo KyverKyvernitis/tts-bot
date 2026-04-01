@@ -589,10 +589,29 @@ export default function App() {
   }, [isServer, screen]);
 
   useEffect(() => {
-    if (screen !== "create") return;
-    if (!resolvedUser || authState !== "ready") return;
-    void createRoomOverHttp("http_primary_create");
-  }, [authState, createStake, instanceId, isServer, resolvedUser, screen, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.avatarUrl, state.currentUser.displayName, state.currentUser.userId]);
+    if (!bootstrapped || screen !== "create") return;
+
+    let cancelled = false;
+    const ensureDraftRoom = async (reason: string) => {
+      if (cancelled) return;
+      const nextRoom = await createRoomOverHttp(reason);
+      if (!cancelled && nextRoom) {
+        setCreateDraftRoomId(nextRoom.roomId);
+      }
+    };
+
+    void ensureDraftRoom("http_primary_create");
+    const interval = window.setInterval(() => {
+      if (!createDraftRoomIdRef.current) {
+        void ensureDraftRoom("http_create_retry");
+      }
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [bootstrapped, createStake, instanceId, screen, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.avatarUrl, state.currentUser.displayName, state.currentUser.userId]);
 
 
   const sendMessage = (payload: object) => {
@@ -916,14 +935,14 @@ export default function App() {
                 onClick={() => {
                   setRoom(null);
                   setCreateDraftRoomId(null);
-                  if (isServer) {
-                    setCreateTableType("stake");
-                    setCreateStake(25);
-                  } else {
-                    setCreateTableType("casual");
-                    setCreateStake(0);
-                  }
+                  const nextStake = isServer ? 25 : 0;
+                  const nextTableType: TableType = isServer ? "stake" : "casual";
+                  setCreateTableType(nextTableType);
+                  setCreateStake(nextStake);
                   setScreen("create");
+                  window.setTimeout(() => {
+                    void createRoomOverHttp("home_click_create");
+                  }, 0);
                 }}
               >
                 <span className="menu-button__eyebrow">Mesa nova</span>
