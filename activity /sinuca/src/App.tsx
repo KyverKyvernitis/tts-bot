@@ -131,6 +131,7 @@ export default function App() {
   const [screen, setScreen] = useState<LobbyScreen>("home");
   const [createTableType, setCreateTableType] = useState<TableType>("stake");
   const [createStake, setCreateStake] = useState<number>(25);
+  const [createDraftRoomId, setCreateDraftRoomId] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [authBusy, setAuthBusy] = useState(false);
@@ -144,6 +145,8 @@ export default function App() {
   const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
   const balanceReceiptRef = useRef<number>(0);
   const uiClickAudioRef = useRef<HTMLAudioElement | null>(null);
+  const currentScreenRef = useRef<LobbyScreen>("home");
+  const createDraftRoomIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -190,6 +193,14 @@ export default function App() {
     if (!button || button.disabled) return;
     playUiClick();
   };
+
+  useEffect(() => {
+    currentScreenRef.current = screen;
+  }, [screen]);
+
+  useEffect(() => {
+    createDraftRoomIdRef.current = createDraftRoomId;
+  }, [createDraftRoomId]);
 
   const instanceId = state.context.instanceId ?? `local-${state.currentUser.userId}`;
   const isServer = state.context.mode === "server";
@@ -440,6 +451,25 @@ export default function App() {
     setCreateStake((current) => createStakeOptions.includes(current) ? current : 25);
   }, [isServer, screen]);
 
+  useEffect(() => {
+    if (screen !== "create") return;
+    if (!resolvedUser || authState !== "ready" || connectionState !== "connected") return;
+    sendMessage({
+      type: "create_room",
+      payload: {
+        instanceId,
+        guildId: state.context.guildId,
+        channelId: state.context.channelId,
+        mode: state.context.mode,
+        userId: state.currentUser.userId,
+        displayName: state.currentUser.displayName,
+        avatarUrl: state.currentUser.avatarUrl ?? null,
+        tableType: isServer ? (createStake === 0 ? "casual" : "stake") : "casual",
+        stakeChips: isServer && createStake > 0 ? createStake : null,
+      },
+    });
+  }, [authState, connectionState, createStake, instanceId, isServer, resolvedUser, screen, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.avatarUrl, state.currentUser.displayName, state.currentUser.userId]);
+
 
   const sendMessage = (payload: object) => {
     const socket = socketRef.current;
@@ -522,7 +552,10 @@ export default function App() {
         }
         if (payload.type === "room_state") {
           setRoom(payload.payload);
-          setScreen("room");
+          setCreateDraftRoomId(payload.payload.roomId);
+          if (currentScreenRef.current !== "create") {
+            setScreen("room");
+          }
           setErrorMessage(null);
           return;
         }
@@ -747,6 +780,8 @@ export default function App() {
                 className="menu-button menu-button--create"
                 type="button"
                 onClick={() => {
+                  setRoom(null);
+                  setCreateDraftRoomId(null);
                   if (isServer) {
                     setCreateTableType("stake");
                     setCreateStake(25);
@@ -782,7 +817,16 @@ export default function App() {
             {screen === "create" ? (
         <section className="lobby-panel lobby-panel--compact lobby-panel--create">
           <div className="list-topbar list-topbar--create list-topbar--compact-create list-topbar--single">
-            <button className="chip-button chip-button--back" type="button" onClick={() => setScreen("home")}>Voltar</button>
+            <button className="chip-button chip-button--back" type="button" onClick={() => {
+              const roomId = createDraftRoomIdRef.current;
+              if (roomId) {
+                sendMessage({ type: "leave_room", payload: { roomId, userId: state.currentUser.userId } });
+              }
+              setCreateDraftRoomId(null);
+              setRoom(null);
+              setScreen("home");
+              requestRooms();
+            }}>Voltar</button>
           </div>
 
           <div className="create-layout create-layout--final">
@@ -850,25 +894,9 @@ export default function App() {
                   <button
                     className="primary-button create-submit"
                     type="button"
-                    disabled={authBusy || !canAffordSelectedStake}
-                    onClick={() => {
-                      sendMessage({
-                        type: "create_room",
-                        payload: {
-                          instanceId,
-                          guildId: state.context.guildId,
-                          channelId: state.context.channelId,
-                          mode: state.context.mode,
-                          userId: state.currentUser.userId,
-                          displayName: state.currentUser.displayName,
-                          avatarUrl: state.currentUser.avatarUrl ?? null,
-                          tableType: isServer ? (createStake === 0 ? "casual" : "stake") : "casual",
-                          stakeChips: isServer && createStake > 0 ? createStake : null,
-                        },
-                      });
-                    }}
+                    disabled
                   >
-                    Criar mesa
+                    Iniciar jogo (em breve)
                   </button>
                 )}
               </div>
