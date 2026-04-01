@@ -591,25 +591,7 @@ export default function App() {
   useEffect(() => {
     if (screen !== "create") return;
     if (!resolvedUser || authState !== "ready") return;
-    const socket = socketRef.current;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      sendMessage({
-        type: "create_room",
-        payload: {
-          instanceId,
-          guildId: state.context.guildId,
-          channelId: state.context.channelId,
-          mode: state.context.mode,
-          userId: state.currentUser.userId,
-          displayName: state.currentUser.displayName,
-          avatarUrl: state.currentUser.avatarUrl ?? null,
-          tableType: isServer ? (createStake === 0 ? "casual" : "stake") : "casual",
-          stakeChips: isServer && createStake > 0 ? createStake : null,
-        },
-      });
-      return;
-    }
-    void createRoomOverHttp("socket_unavailable_create");
+    void createRoomOverHttp("http_primary_create");
   }, [authState, createStake, instanceId, isServer, resolvedUser, screen, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.avatarUrl, state.currentUser.displayName, state.currentUser.userId]);
 
 
@@ -629,19 +611,7 @@ export default function App() {
       channelId: state.context.channelId,
       screen,
     });
-    const socket = socketRef.current;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      sendMessage({
-        type: "list_rooms",
-        payload: {
-          mode: state.context.mode,
-          guildId: state.context.guildId,
-          channelId: state.context.channelId,
-        },
-      });
-      return;
-    }
-    await fetchRoomsOverHttp("socket_unavailable_list");
+    await fetchRoomsOverHttp("http_primary_list");
   };
 
   const requestBalance = () => {
@@ -839,7 +809,7 @@ export default function App() {
   }, [bootstrapped, connectionState, screen, state.context.channelId, state.context.guildId, state.context.mode]);
 
   useEffect(() => {
-    if (!bootstrapped || connectionState === "connected") return;
+    if (!bootstrapped) return;
     const activeRoomId = screen === "room"
       ? room?.roomId ?? null
       : screen === "create"
@@ -851,7 +821,7 @@ export default function App() {
       void fetchRoomStateOverHttp(activeRoomId, "offline_poll");
     }, 2500);
     return () => window.clearInterval(interval);
-  }, [bootstrapped, connectionState, createDraftRoomId, room?.roomId, screen]);
+  }, [bootstrapped, createDraftRoomId, room?.roomId, screen]);
 
   const shouldShowBalanceDebug = isServer && (!balanceLoaded || balance.chips === 0);
 
@@ -984,12 +954,7 @@ export default function App() {
             <button className="chip-button chip-button--back" type="button" onClick={() => {
               const roomId = createDraftRoomIdRef.current;
               if (roomId) {
-                const socket = socketRef.current;
-                if (socket && socket.readyState === WebSocket.OPEN) {
-                  sendMessage({ type: "leave_room", payload: { roomId, userId: state.currentUser.userId } });
-                } else {
-                  void leaveRoomOverHttp(roomId, "socket_unavailable_leave_create");
-                }
+                void leaveRoomOverHttp(roomId, "http_primary_leave_create");
               }
               setCreateDraftRoomId(null);
               setRoom(null);
@@ -1142,15 +1107,7 @@ export default function App() {
                             void handleAuthorize();
                             return;
                           }
-                          const socket = socketRef.current;
-                          if (socket && socket.readyState === WebSocket.OPEN) {
-                            sendMessage({
-                              type: "join_room",
-                              payload: { roomId: entry.roomId, userId: state.currentUser.userId, displayName: state.currentUser.displayName, avatarUrl: state.currentUser.avatarUrl ?? null },
-                            });
-                            return;
-                          }
-                          void joinRoomOverHttp(entry.roomId, "socket_unavailable_join");
+                          void joinRoomOverHttp(entry.roomId, "http_primary_join");
                         }}
                       >
                         {!resolvedUser ? (authBusy ? "Autorizando..." : "Autorizar") : entry.players.length >= 2 ? "Mesa cheia" : "Entrar"}
@@ -1241,12 +1198,7 @@ export default function App() {
                     className="chip-button room-stage__leave"
                     type="button"
                     onClick={() => {
-                      const socket = socketRef.current;
-                      if (socket && socket.readyState === WebSocket.OPEN) {
-                        sendMessage({ type: "leave_room", payload: { roomId: room.roomId, userId: state.currentUser.userId } });
-                      } else {
-                        void leaveRoomOverHttp(room.roomId, "socket_unavailable_leave_room");
-                      }
+                      void leaveRoomOverHttp(room.roomId, "http_primary_leave_room");
                       setRoom(null);
                       setScreen("list");
                       void requestRooms();
@@ -1259,12 +1211,7 @@ export default function App() {
                     type="button"
                     onClick={() => {
                       const nextReady = !currentPlayer?.ready;
-                      const socket = socketRef.current;
-                      if (socket && socket.readyState === WebSocket.OPEN) {
-                        sendMessage({ type: "set_ready", payload: { roomId: room.roomId, userId: state.currentUser.userId, ready: nextReady } });
-                        return;
-                      }
-                      void setReadyOverHttp(room.roomId, nextReady, "socket_unavailable_ready");
+                      void setReadyOverHttp(room.roomId, nextReady, "http_primary_ready");
                     }}
                   >
                     {currentPlayer?.ready ? "Cancelar pronto" : "Marcar pronto"}
