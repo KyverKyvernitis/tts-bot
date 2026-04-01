@@ -172,6 +172,43 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, tim
   }
 }
 
+
+function dispatchLeaveBeacon(roomId: string, userId: string, closeRoom: boolean) {
+  const payload = new URLSearchParams();
+  payload.set('roomId', roomId);
+  payload.set('userId', userId);
+  payload.set('closeRoom', String(closeRoom));
+  payload.set('reason', closeRoom ? 'activity_unload_close' : 'activity_unload_leave');
+
+  for (const baseUrl of resolveApiCandidates('/rooms/leave')) {
+    try {
+      if (typeof navigator.sendBeacon === 'function') {
+        const blob = new Blob([payload.toString()], { type: 'application/x-www-form-urlencoded;charset=UTF-8' });
+        if (navigator.sendBeacon(baseUrl, blob)) return true;
+      }
+    } catch {
+      // ignore and continue with keepalive fallback
+    }
+  }
+
+  for (const baseUrl of resolveApiCandidates('/rooms/leave')) {
+    try {
+      void fetch(baseUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+        body: payload.toString(),
+        credentials: 'same-origin',
+        keepalive: true,
+      });
+      return true;
+    } catch {
+      // ignore and keep trying other candidates
+    }
+  }
+
+  return false;
+}
+
 export default function App() {
   const [state, setState] = useState<ActivityBootstrap>(initialState);
   const [bootstrapped, setBootstrapped] = useState(false);
@@ -202,6 +239,10 @@ export default function App() {
   const uiClickAudioRef = useRef<HTMLAudioElement | null>(null);
   const currentScreenRef = useRef<LobbyScreen>("home");
   const createDraftRoomIdRef = useRef<string | null>(null);
+  const currentRoomRef = useRef<RoomSnapshot | null>(null);
+  const isRoomHostRef = useRef(false);
+  const currentUserIdRef = useRef<string | null>(null);
+  const unloadLeaveSentRef = useRef<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -258,6 +299,51 @@ export default function App() {
   }, [createDraftRoomId]);
 
   useEffect(() => {
+    currentRoomRef.current = room;
+  }, [room]);
+
+  useEffect(() => {
+    isRoomHostRef.current = Boolean(room && room.hostUserId === state.currentUser.userId);
+    currentUserIdRef.current = state.currentUser.userId;
+  }, [room, state.currentUser.userId]);
+
+  useEffect(() => {
+    const flushLeaveOnExit = () => {
+      const activeRoom = currentRoomRef.current;
+      const userId = currentUserIdRef.current;
+      if (!activeRoom || !userId) return;
+      const unloadKey = `${activeRoom.roomId}:${userId}:${isRoomHostRef.current ? 'host' : 'guest'}`;
+      if (unloadLeaveSentRef.current === unloadKey) return;
+      unloadLeaveSentRef.current = unloadKey;
+      dispatchLeaveBeacon(activeRoom.roomId, userId, isRoomHostRef.current);
+    };
+
+    const handlePageHide = () => {
+      flushLeaveOnExit();
+    };
+
+    const handleBeforeUnload = () => {
+      flushLeaveOnExit();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushLeaveOnExit();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!roomEntryMenuOpen && !createEntryMenuOpen) return;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
@@ -292,15 +378,6 @@ export default function App() {
   const isRoomHost = room ? room.hostUserId === state.currentUser.userId : false;
   const canHostStart = Boolean(room && room.players.length === 2 && roomOpponentPlayer?.ready);
   const roomStakeOptions = [0, 10, 25, 30, 50] as const;
-  const roomStatusText = !roomOpponentPlayer
-    ? "aguardando adversário"
-    : canHostStart
-      ? "pronta"
-      : isRoomHost
-        ? "aguardando pronto"
-        : currentPlayer?.ready
-          ? "aguardando início"
-          : "aguardando pronto";
   const roomTopStatus = !roomOpponentPlayer
     ? "vaga aberta"
     : canHostStart
@@ -310,15 +387,6 @@ export default function App() {
         : currentPlayer?.ready
           ? "você pronto"
           : "aguardando";
-  const roomStatusCopy = isRoomHost
-    ? !roomOpponentPlayer
-      ? "Aguardando adversário entrar na mesa."
-      : canHostStart
-        ? "Adversário pronto. Você já pode iniciar a partida."
-        : "Falta o adversário marcar pronto."
-    : currentPlayer?.ready
-      ? "Você está pronto. Aguarde o anfitrião iniciar."
-      : "Marque pronto quando estiver preparado.";
   const formatStakeOptionLabel = (stake: number) => stake === 0 ? "Amistoso" : `${stake}`;
   const initReadyForServerActions = !isServer || (resolvedUser && authState === "ready" && Boolean(state.context.guildId) && balanceLoaded);
 
@@ -1100,6 +1168,7 @@ export default function App() {
         return;
       }
 
+      unloadLeaveSentRef.current = null;
       setRoomEntryMenuOpen(false);
       setCreateEntryMenuOpen(false);
       setCreateDraftRoomId(null);
@@ -1535,10 +1604,6 @@ export default function App() {
               </div>
 
               <div className="room-stage__footer room-stage__footer--tight">
-                <div className="room-stage__status-inline room-stage__status-inline--compact room-stage__status-inline--copy-only">
-                  <small>{roomStatusText}</small>
-                </div>
-
                 <div className={`room-stage__actions room-stage__actions--single ${isRoomHost ? "room-stage__actions--host" : "room-stage__actions--guest"}`}>
                   {isRoomHost ? (
                     <button
