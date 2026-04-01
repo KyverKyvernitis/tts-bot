@@ -12,6 +12,7 @@ import {
   listRooms,
   removePlayer,
   setPlayerReady,
+  setRoomStake,
   subscribeSocket,
   toSnapshot,
   unsubscribeSocket,
@@ -375,6 +376,37 @@ async function handleReadyRoomHttp(req: Request, res: Response) {
   res.json({ room: toSnapshot(room) });
 }
 
+async function handleUpdateStakeRoomHttp(req: Request, res: Response) {
+  const session = resolveRequestSession(req);
+  const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
+  const roomId = normalizeIntString(merged.roomId);
+  const userId = normalizeIntString(merged.userId);
+  const rawStake = typeof merged.stakeChips === "number" ? merged.stakeChips : Number(merged.stakeChips ?? 0);
+  const tableType = merged.tableType === "casual" || rawStake === 0 ? "casual" : "stake";
+  console.log("[sinuca-stake-room-http-request]", JSON.stringify({ session, merged: { roomId, userId, tableType, stakeChips: rawStake } }));
+  if (!roomId || !userId) {
+    res.status(400).json({ error: "missing_stake_identifiers" });
+    return;
+  }
+  const currentRoom = getRoom(roomId);
+  if (!currentRoom) {
+    res.status(404).json({ error: "room_not_found" });
+    return;
+  }
+  if (currentRoom.hostUserId !== userId) {
+    res.status(403).json({ error: "only_host_can_update_stake" });
+    return;
+  }
+  const room = setRoomStake(roomId, userId, { tableType, stakeChips: Number.isFinite(rawStake) ? rawStake : null });
+  if (!room) {
+    res.status(404).json({ error: "room_not_found" });
+    return;
+  }
+  broadcastRoom(room.roomId);
+  broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+  res.json({ room: toSnapshot(room) });
+}
+
 app.get("/rooms", handleListRoomsHttp);
 app.get("/api/rooms", handleListRoomsHttp);
 app.post("/rooms", handleListRoomsHttp);
@@ -389,6 +421,8 @@ app.post("/rooms/leave", handleLeaveRoomHttp);
 app.post("/api/rooms/leave", handleLeaveRoomHttp);
 app.post("/rooms/ready", handleReadyRoomHttp);
 app.post("/api/rooms/ready", handleReadyRoomHttp);
+app.post("/rooms/stake", handleUpdateStakeRoomHttp);
+app.post("/api/rooms/stake", handleUpdateStakeRoomHttp);
 
 async function ensureMongo() {
   if (!mongoUri) return null;
@@ -612,6 +646,9 @@ async function handleBalance(req: Request, res: Response) {
   }
   if (action === "room_ready") {
     return void handleReadyRoomHttp(req, res);
+  }
+  if (action === "room_stake") {
+    return void handleUpdateStakeRoomHttp(req, res);
   }
   const bodyGuildId = typeof req.body?.guildId === "string" ? req.body.guildId : null;
   const bodyUserId = typeof req.body?.userId === "string" ? req.body.userId : null;

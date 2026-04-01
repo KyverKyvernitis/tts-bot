@@ -46,7 +46,7 @@ function sameContext(room: RoomRecord, payload: ListRoomsPayload) {
 }
 
 function normalizeStake(tableType: TableType, stakeChips: number | null | undefined) {
-  const allowedStake = new Set([10, 25, 50]);
+  const allowedStake = new Set([10, 25, 30, 50]);
   const normalized = Number(stakeChips);
   if (tableType === "stake" && allowedStake.has(normalized)) return normalized;
   return 25;
@@ -165,6 +165,27 @@ export function setPlayerReady(roomId: string, userId: string, ready: boolean): 
   const player = room.players.find((entry) => entry.userId === userId);
   if (!player) return room;
   player.ready = ready;
+  room.status = computeStatus(room);
+  return room;
+}
+
+export function setRoomStake(roomId: string, hostUserId: string, options?: { tableType?: TableType | null; stakeChips?: number | null }): RoomRecord | null {
+  const room = rooms.get(roomId);
+  if (!room) return null;
+  if (room.hostUserId !== hostUserId) return room;
+
+  const nextTableType: TableType = options?.tableType === "casual" || Number(options?.stakeChips ?? 0) === 0 ? "casual" : "stake";
+  const nextStake = nextTableType === "stake" ? normalizeStake(nextTableType, options?.stakeChips ?? room.stakeChips) : null;
+
+  room.tableType = nextTableType;
+  room.stakeChips = nextStake;
+  room.stakeLabel = nextTableType === "stake" ? `${nextStake} fichas` : "casual";
+
+  for (const player of room.players) {
+    if (player.userId === room.hostUserId) continue;
+    player.ready = false;
+  }
+
   room.status = computeStatus(room);
   return room;
 }
