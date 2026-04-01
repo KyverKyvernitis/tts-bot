@@ -340,7 +340,7 @@ async function handleLeaveRoomHttp(req: Request, res: Response) {
   const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
   const roomId = normalizeIntString(merged.roomId);
   const userId = normalizeIntString(merged.userId);
-  const shouldCloseRoom = Boolean((merged as Record<string, unknown>).closeRoom);
+  const shouldCloseRoom = booleanish(merged.closeRoom, false);
   console.log("[sinuca-leave-room-http-request]", JSON.stringify({ session, merged: { roomId, userId, closeRoom: shouldCloseRoom } }));
   if (!roomId || !userId) {
     res.status(400).json({ error: "missing_leave_identifiers" });
@@ -369,7 +369,7 @@ async function handleReadyRoomHttp(req: Request, res: Response) {
   const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
   const roomId = normalizeIntString(merged.roomId);
   const userId = normalizeIntString(merged.userId);
-  const ready = Boolean(merged.ready);
+  const ready = booleanish(merged.ready, false);
   console.log("[sinuca-ready-room-http-request]", JSON.stringify({ session, merged: { roomId, userId, ready } }));
   if (!roomId || !userId) {
     res.status(400).json({ error: "missing_ready_identifiers" });
@@ -453,6 +453,19 @@ function firstString(value: unknown): string | null {
     return firstString(value[0]);
   }
   return typeof value === "string" ? value : null;
+}
+
+
+function booleanish(value: unknown, fallback = false): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return fallback;
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  }
+  return fallback;
 }
 
 function parseQuerySession(urlValue: string | undefined | null): Partial<SessionContextPayload> {
@@ -940,7 +953,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "jogador da activity não identificado" });
         return;
       }
-      const shouldCloseRoom = Boolean(merged.closeRoom);
+      const shouldCloseRoom = booleanish(merged.closeRoom, false);
       const room = shouldCloseRoom && previous && previous.hostUserId === merged.userId
         ? null
         : removePlayer(merged.roomId, merged.userId);
@@ -965,7 +978,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "jogador da activity não identificado" });
         return;
       }
-      const room = setPlayerReady(merged.roomId, merged.userId, merged.ready);
+      const room = setPlayerReady(merged.roomId, merged.userId, booleanish(merged.ready, false));
       if (!room) {
         send(ws, { type: "error", message: "mesa não encontrada" });
         return;
