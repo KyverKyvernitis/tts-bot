@@ -1084,15 +1084,15 @@ button:focus-visible {
 
 .participant-slot--create-main,
 .participant-slot--room-main {
-  min-height: 104px;
-  padding: 10px 10px 12px;
-  gap: 6px;
+  min-height: 92px;
+  padding: 8px 9px 10px;
+  gap: 5px;
 }
 
 .participant-slot--create-main .participant-slot__avatar-wrap,
 .participant-slot--room-main .participant-slot__avatar-wrap {
-  width: 62px;
-  height: 62px;
+  width: 56px;
+  height: 56px;
 }
 
 .create-center-pill--final {
@@ -1145,9 +1145,13 @@ button:focus-visible {
 
 .room-stage--final {
   display: grid;
-  grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.92fr);
-  gap: 12px;
+  grid-template-columns: minmax(0, 1.08fr) minmax(300px, 0.92fr);
+  gap: 10px;
   align-items: start;
+}
+
+.room-stage--compact {
+  gap: 10px;
 }
 
 .room-stage__details {
@@ -1155,19 +1159,73 @@ button:focus-visible {
   gap: 8px;
 }
 
+.room-stage__meta-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.room-stage__meta-item {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 16px;
+  background: rgba(6, 12, 28, 0.52);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.room-stage__meta-item span {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: rgba(227, 236, 246, 0.72);
+}
+
+.room-stage__meta-item strong {
+  font-size: 0.95rem;
+  color: #f4fbff;
+}
+
+.room-stage__meta-item--stake strong {
+  font-family: var(--font-ui);
+  font-size: 1.05rem;
+}
+
+.room-stage__details--compact {
+  padding: 10px 12px;
+  gap: 8px;
+}
+
+.room-stage__status-copy {
+  color: rgba(229, 238, 248, 0.82);
+  font-size: 0.94rem;
+  line-height: 1.35;
+}
+
 .room-stage__actions {
   display: grid;
-  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
-  gap: 10px;
+  grid-template-columns: minmax(0, 0.74fr) minmax(0, 1.26fr);
+  gap: 8px;
   align-items: center;
 }
 
+.room-stage__actions--host {
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+}
+
+.room-stage__actions--guest {
+  grid-template-columns: minmax(0, 0.66fr) minmax(0, 1.34fr);
+}
+
 .room-stage__leave {
-  min-height: 42px;
+  min-height: 38px;
+  padding-inline: 12px;
 }
 
 .room-stage__ready {
-  min-height: 50px;
+  min-height: 44px;
 }
 
 .room-ready-badge {
@@ -1199,6 +1257,10 @@ button:focus-visible {
       "host opponent"
       "meta meta";
     align-items: start;
+  }
+
+  .room-stage__meta-strip {
+    grid-template-columns: 1fr;
   }
 
   .room-stage__actions {

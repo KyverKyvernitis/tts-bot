@@ -979,14 +979,18 @@ export default function App() {
   const heroTitle = useMemo(() => {
     if (screen === "create") return "Criar mesa";
     if (screen === "list") return "Mesas abertas";
-    if (screen === "room") return room ? `Sala de ${room.hostDisplayName}` : "Sala da mesa";
+    if (screen === "room") return "Sala";
     return "Sinuca de Femboy";
   }, [room, screen]);
 
   const heroSubtitle = useMemo(() => {
     if (screen === "create") return "Configure a mesa e abra para outro jogador entrar.";
     if (screen === "list") return "Entre em uma mesa aberta.";
-    if (screen === "room") return "Aguarde o outro jogador e marque pronto quando quiser começar.";
+    if (screen === "room") {
+      if (!room) return "Acompanhe a mesa e prepare a partida.";
+      if (isRoomHost) return roomOpponentPlayer ? "Aguarde o adversário ficar pronto para iniciar." : "Aguarde outro jogador entrar na mesa.";
+      return currentPlayer?.ready ? "Você está pronto. Aguarde o anfitrião iniciar." : "Marque pronto quando estiver preparado.";
+    }
     return "Crie uma mesa ou entre em uma já aberta.";
   }, [screen]);
 
@@ -1293,7 +1297,7 @@ export default function App() {
             <div className="list-topbar__count">{room.players.length}/2 jogadores</div>
           </div>
 
-          <div className="room-stage room-stage--final">
+          <div className="room-stage room-stage--final room-stage--compact">
             <div className="create-preview-card room-stage__preview">
               <div className="create-preview-shell create-preview-shell--room">
                 <div className="participant-slot participant-slot--filled participant-slot--room-main">
@@ -1305,13 +1309,6 @@ export default function App() {
                   <span className={`room-ready-badge ${roomHostPlayer?.ready ? "room-ready-badge--ready" : ""}`}>
                     {roomHostPlayer?.ready ? "pronto" : "aguardando"}
                   </span>
-                </div>
-
-                <div className="create-center-pill create-center-pill--final create-center-pill--room">
-                  <strong>{room.players.length}/2 jogadores</strong>
-                  <span>{room.tableType === "stake" ? "Valendo fichas" : "Partida amistosa"}</span>
-                  {room.tableType === "stake" ? <em>{room.stakeChips ?? 0}</em> : null}
-                  <small className={`status-badge status-badge--${room.status}`}>{formatStatus(room)}</small>
                 </div>
 
                 {roomOpponentPlayer ? (
@@ -1336,28 +1333,63 @@ export default function App() {
                   </div>
                 )}
               </div>
+
+              <div className="room-stage__meta-strip">
+                <div className="room-stage__meta-item">
+                  <span>jogadores</span>
+                  <strong>{room.players.length}/2</strong>
+                </div>
+                <div className="room-stage__meta-item room-stage__meta-item--stake">
+                  <span>{roomMetaLabel}</span>
+                  {room.tableType === "stake" ? <strong>{room.stakeChips ?? 0}</strong> : null}
+                </div>
+                <div className="room-stage__meta-item">
+                  <span>estado</span>
+                  <strong>{roomStatusText}</strong>
+                </div>
+              </div>
             </div>
 
-            <div className="create-config-card room-stage__details">
-              <div className="create-config-block create-config-block--tight">
-                <div className="create-config-block__head">
-                  <strong>Estado da sala</strong>
-                  <span>{room.players.length < 2 ? "A sala já está aberta na lista. Aguarde outro jogador entrar." : canStart ? "Os dois jogadores estão prontos." : "A partida começa quando os dois estiverem prontos."}</span>
-                </div>
+            <div className="create-config-card room-stage__details room-stage__details--compact">
+              <div className="room-stage__status-copy">
+                {isRoomHost
+                  ? roomOpponentPlayer
+                    ? canHostStart
+                      ? "Adversário pronto. Você já pode iniciar a partida."
+                      : "Aguarde o adversário ficar pronto para iniciar."
+                    : "A sala já está aberta na lista. Aguarde outro jogador entrar."
+                  : currentPlayer?.ready
+                    ? "Você está pronto. Aguarde o anfitrião iniciar."
+                    : "Marque pronto quando estiver preparado."}
+              </div>
 
-                <div className="room-stage__actions">
+              <div className={`room-stage__actions ${isRoomHost ? "room-stage__actions--host" : "room-stage__actions--guest"}`}>
+                <button
+                  className="chip-button room-stage__leave"
+                  type="button"
+                  onClick={() => {
+                    void leaveRoomOverHttp(room.roomId, "http_primary_leave_room");
+                    setRoom(null);
+                    setScreen("list");
+                    void requestRooms();
+                  }}
+                >
+                  {isRoomHost ? "Fechar mesa" : "Sair"}
+                </button>
+
+                {isRoomHost ? (
                   <button
-                    className="chip-button room-stage__leave"
+                    className={`primary-button room-stage__ready ${!canHostStart ? "primary-button--muted" : ""}`}
                     type="button"
+                    disabled={!canHostStart}
                     onClick={() => {
-                      void leaveRoomOverHttp(room.roomId, "http_primary_leave_room");
-                      setRoom(null);
-                      setScreen("list");
-                      void requestRooms();
+                      if (!canHostStart) return;
+                      setErrorMessage("A mesa jogável entra no próximo patch.");
                     }}
                   >
-                    {room.players.length === 1 && currentPlayer?.userId === room.hostUserId ? "Fechar mesa" : "Sair"}
+                    {canHostStart ? "Iniciar partida" : "Aguardando adversário"}
                   </button>
+                ) : (
                   <button
                     className={`primary-button room-stage__ready ${currentPlayer?.ready ? "primary-button--muted" : ""}`}
                     type="button"
@@ -1368,14 +1400,15 @@ export default function App() {
                   >
                     {currentPlayer?.ready ? "Cancelar pronto" : "Marcar pronto"}
                   </button>
-                </div>
-
-                {authState === "needs_consent" && !resolvedUser ? <p className="plain-copy">Autorize sua conta para usar fichas, criar mesa e entrar em partida.</p> : null}
-                {errorMessage && connectionState !== "offline" ? <p className="error-copy">{errorMessage}</p> : null}
+                )}
               </div>
+
+              {authState === "needs_consent" && !resolvedUser ? <p className="plain-copy">Autorize sua conta para usar fichas, criar mesa e entrar em partida.</p> : null}
+              {errorMessage && connectionState !== "offline" ? <p className="error-copy">{errorMessage}</p> : null}
             </div>
           </div>
         </section>
+      ) : null}
       ) : null}
 
       {shouldShowBalanceDebug ? (
