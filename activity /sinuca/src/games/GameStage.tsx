@@ -1,30 +1,41 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { BallGroup, GameBallSnapshot, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
+import tableAsset from "../assets/game/pool-table-mobile.svg";
+import cueAsset from "../assets/game/pool-cue-mobile.svg";
+import powerFrameAsset from "../assets/game/power-meter-frame.svg";
+
+const BALL_SPRITE_MODULES = import.meta.glob("../assets/game/balls/*.svg", { eager: true, import: "default" }) as Record<string, string>;
 
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
-const BALL_RADIUS = 12;
+const BALL_RADIUS = 13;
 const BALL_DIAMETER = BALL_RADIUS * 2;
-const PLAY_MIN_X = 54 + BALL_RADIUS;
-const PLAY_MAX_X = TABLE_WIDTH - 54 - BALL_RADIUS;
-const PLAY_MIN_Y = 44 + BALL_RADIUS;
-const PLAY_MAX_Y = TABLE_HEIGHT - 44 - BALL_RADIUS;
-const HEAD_STRING_X = TABLE_WIDTH * 0.29;
+const FELT_LEFT = 69;
+const FELT_TOP = 50;
+const FELT_RIGHT = TABLE_WIDTH - FELT_LEFT;
+const FELT_BOTTOM = TABLE_HEIGHT - FELT_TOP;
+const PLAY_MIN_X = FELT_LEFT + BALL_RADIUS;
+const PLAY_MAX_X = FELT_RIGHT - BALL_RADIUS;
+const PLAY_MIN_Y = FELT_TOP + BALL_RADIUS;
+const PLAY_MAX_Y = FELT_BOTTOM - BALL_RADIUS;
+const HEAD_STRING_X = 328;
 const BREAK_MAX_X = HEAD_STRING_X - BALL_RADIUS - 6;
-const DEFAULT_CUE_X = TABLE_WIDTH * 0.23;
+const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const RACK_APEX_X = 874;
+const RACK_APEX_X = 922;
 const RACK_APEX_Y = TABLE_HEIGHT / 2;
 const RACK_ROW_STEP_X = BALL_DIAMETER * 0.88;
 const RACK_SPACING = BALL_DIAMETER * 1.02;
-const MAX_PULL_DISTANCE = 150;
+const MAX_PULL_DISTANCE = 182;
+const CUE_DRAW_LENGTH = 880;
+const CUE_DRAW_HEIGHT = 31;
 const POCKETS = [
-  { id: 1, x: 48, y: 40 },
-  { id: 2, x: TABLE_WIDTH / 2, y: 26 },
-  { id: 3, x: TABLE_WIDTH - 48, y: 40 },
-  { id: 4, x: 48, y: TABLE_HEIGHT - 40 },
-  { id: 5, x: TABLE_WIDTH / 2, y: TABLE_HEIGHT - 26 },
-  { id: 6, x: TABLE_WIDTH - 48, y: TABLE_HEIGHT - 40 },
+  { id: 1, x: 54, y: 42 },
+  { id: 2, x: TABLE_WIDTH / 2, y: 28 },
+  { id: 3, x: TABLE_WIDTH - 54, y: 42 },
+  { id: 4, x: 54, y: TABLE_HEIGHT - 42 },
+  { id: 5, x: TABLE_WIDTH / 2, y: TABLE_HEIGHT - 28 },
+  { id: 6, x: TABLE_WIDTH - 54, y: TABLE_HEIGHT - 42 },
 ] as const;
 const OPENING_RACK = [
   [1],
@@ -64,6 +75,12 @@ type AimPreview = {
   contactY: number | null;
 };
 
+type SpriteBank = {
+  table: HTMLImageElement;
+  cue: HTMLImageElement;
+  balls: Map<number, HTMLImageElement>;
+};
+
 function cleanName(name: string) {
   return (name || "jogador").replace(/^@+/, "").trim() || "jogador";
 }
@@ -76,21 +93,21 @@ function playerInitials(player: RoomPlayer | null | undefined) {
 
 function ballColor(number: number) {
   const map: Record<number, string> = {
-    1: "#f4d347",
-    2: "#3966ea",
-    3: "#d54143",
-    4: "#7a4ad7",
-    5: "#f18f34",
-    6: "#31a15b",
-    7: "#7b3025",
-    8: "#17191d",
-    9: "#f4d347",
-    10: "#3966ea",
-    11: "#d54143",
-    12: "#7a4ad7",
-    13: "#f18f34",
-    14: "#31a15b",
-    15: "#7b3025",
+    1: "#f1d54f",
+    2: "#3761e2",
+    3: "#d34b44",
+    4: "#7948cb",
+    5: "#f09236",
+    6: "#2ca65a",
+    7: "#6c2e21",
+    8: "#14181f",
+    9: "#f1d54f",
+    10: "#3761e2",
+    11: "#d34b44",
+    12: "#7948cb",
+    13: "#f09236",
+    14: "#2ca65a",
+    15: "#6c2e21",
   };
   return map[number] ?? "#f6fbff";
 }
@@ -208,15 +225,15 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
   };
 }
 
-function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot) {
+function drawFallbackBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot) {
   const x = ball.x;
   const y = ball.y;
   const color = ballColor(ball.number);
 
   ctx.save();
   ctx.translate(x, y);
-  ctx.shadowColor = "rgba(0, 0, 0, 0.30)";
-  ctx.shadowBlur = 10;
+  ctx.shadowColor = "rgba(0, 0, 0, 0.26)";
+  ctx.shadowBlur = 8;
   ctx.shadowOffsetY = 4;
 
   const baseGradient = ctx.createRadialGradient(-4, -4, 2, 0, 0, BALL_RADIUS + 6);
@@ -224,7 +241,7 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot) {
     baseGradient.addColorStop(0, "#ffffff");
     baseGradient.addColorStop(1, "#d9e5ef");
   } else {
-    baseGradient.addColorStop(0, ball.number === 8 ? "#4f5560" : "#fff4d0");
+    baseGradient.addColorStop(0, ball.number === 8 ? "#515964" : "#fff4d0");
     baseGradient.addColorStop(0.24, ball.number === 8 ? "#232730" : color);
     baseGradient.addColorStop(1, ball.number === 8 ? "#090b10" : color);
   }
@@ -236,12 +253,12 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot) {
 
   if (ball.number >= 9) {
     ctx.beginPath();
-    ctx.arc(0, 0, BALL_RADIUS - 1.2, 0, Math.PI * 2);
+    ctx.arc(0, 0, BALL_RADIUS - 1.1, 0, Math.PI * 2);
     ctx.fillStyle = "#fbfdff";
     ctx.fill();
 
     ctx.beginPath();
-    ctx.roundRect(-BALL_RADIUS + 1, -5.4, BALL_RADIUS * 2 - 2, 10.8, 5.4);
+    ctx.roundRect(-BALL_RADIUS + 1, -5.2, BALL_RADIUS * 2 - 2, 10.4, 5.2);
     ctx.fillStyle = color;
     ctx.fill();
   }
@@ -262,8 +279,82 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot) {
   ctx.restore();
 }
 
+function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, sprite: HTMLImageElement | undefined) {
+  if (!sprite || !sprite.complete || !sprite.naturalWidth) {
+    drawFallbackBall(ctx, ball);
+    return;
+  }
+  const size = 40;
+  ctx.drawImage(sprite, ball.x - size / 2, ball.y - size / 2, size, size);
+}
+
+function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview, aimAngle: number) {
+  ctx.save();
+  ctx.setLineDash([15, 9]);
+  ctx.strokeStyle = "rgba(255,255,255,0.86)";
+  ctx.lineWidth = 2.6;
+  ctx.beginPath();
+  ctx.moveTo(cueBall.x, cueBall.y);
+  ctx.lineTo(preview.endX, preview.endY);
+  ctx.stroke();
+  ctx.restore();
+
+  if (preview.contactX !== null && preview.contactY !== null) {
+    ctx.beginPath();
+    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.86, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.96)";
+    ctx.lineWidth = 2.2;
+    ctx.stroke();
+  }
+
+  if (preview.hitBall) {
+    const impactDx = Math.cos(aimAngle) * BALL_DIAMETER;
+    const impactDy = Math.sin(aimAngle) * BALL_DIAMETER;
+    ctx.save();
+    ctx.setLineDash([8, 8]);
+    ctx.strokeStyle = "rgba(255,255,255,0.42)";
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.moveTo(preview.hitBall.x, preview.hitBall.y);
+    ctx.lineTo(preview.hitBall.x + impactDx * 0.55, preview.hitBall.y + impactDy * 0.55);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawCue(
+  ctx: CanvasRenderingContext2D,
+  cueBall: GameBallSnapshot,
+  aimAngle: number,
+  pullRatio: number,
+  cueSprite: HTMLImageElement,
+) {
+  const dirX = Math.cos(aimAngle);
+  const dirY = Math.sin(aimAngle);
+  const cueGap = BALL_RADIUS + 18 + pullRatio * 82;
+  const cueLength = 640;
+  const drawHeight = 22;
+
+  ctx.save();
+  ctx.translate(cueBall.x - dirX * cueGap, cueBall.y - dirY * cueGap);
+  ctx.rotate(aimAngle);
+  if (cueSprite.complete && cueSprite.naturalWidth) {
+    ctx.drawImage(cueSprite, -cueLength, -drawHeight / 2, cueLength, drawHeight);
+  } else {
+    ctx.strokeStyle = "#d9ad73";
+    ctx.lineWidth = 8;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-cueLength, 0);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawPoolTable(
   ctx: CanvasRenderingContext2D,
+  sprites: SpriteBank,
   renderBalls: GameBallSnapshot[],
   cueBall: GameBallSnapshot | null,
   aimAngle: number,
@@ -276,182 +367,63 @@ function drawPoolTable(
 ) {
   ctx.clearRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
 
-  const tableGradient = ctx.createLinearGradient(0, 0, 0, TABLE_HEIGHT);
-  tableGradient.addColorStop(0, "#b02f1f");
-  tableGradient.addColorStop(0.5, "#852414");
-  tableGradient.addColorStop(1, "#a92f1d");
-  ctx.fillStyle = tableGradient;
-  ctx.beginPath();
-  ctx.roundRect(8, 8, TABLE_WIDTH - 16, TABLE_HEIGHT - 16, 40);
-  ctx.fill();
+  if (sprites.table.complete && sprites.table.naturalWidth) {
+    ctx.drawImage(sprites.table, 0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+  }
 
-  const woodInner = ctx.createLinearGradient(0, 0, 0, TABLE_HEIGHT);
-  woodInner.addColorStop(0, "rgba(255, 195, 160, 0.18)");
-  woodInner.addColorStop(1, "rgba(0, 0, 0, 0.22)");
-  ctx.fillStyle = woodInner;
-  ctx.beginPath();
-  ctx.roundRect(18, 18, TABLE_WIDTH - 36, TABLE_HEIGHT - 36, 32);
-  ctx.fill();
-
-  const feltInsetX = 54;
-  const feltInsetY = 44;
-  const feltWidth = TABLE_WIDTH - feltInsetX * 2;
-  const feltHeight = TABLE_HEIGHT - feltInsetY * 2;
-
-  const feltGradient = ctx.createLinearGradient(feltInsetX, feltInsetY, feltInsetX, feltInsetY + feltHeight);
-  feltGradient.addColorStop(0, "#8de0ff");
-  feltGradient.addColorStop(0.5, "#67c6eb");
-  feltGradient.addColorStop(1, "#58b7dd");
-  ctx.fillStyle = feltGradient;
-  ctx.beginPath();
-  ctx.roundRect(feltInsetX, feltInsetY, feltWidth, feltHeight, 28);
-  ctx.fill();
-
-  const glow = ctx.createRadialGradient(TABLE_WIDTH / 2, TABLE_HEIGHT / 2, 120, TABLE_WIDTH / 2, TABLE_HEIGHT / 2, TABLE_WIDTH * 0.45);
-  glow.addColorStop(0, "rgba(255,255,255,0.20)");
-  glow.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = glow;
-  ctx.beginPath();
-  ctx.roundRect(feltInsetX, feltInsetY, feltWidth, feltHeight, 28);
-  ctx.fill();
-
-  ctx.strokeStyle = "rgba(255,255,255,0.18)";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(HEAD_STRING_X, feltInsetY + 14);
-  ctx.lineTo(HEAD_STRING_X, TABLE_HEIGHT - feltInsetY - 14);
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.arc(HEAD_STRING_X, TABLE_HEIGHT / 2, 26, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(255,255,255,0.13)";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  const cushionColor = "#a8d8ee";
-  ctx.fillStyle = cushionColor;
-  ctx.beginPath();
-  ctx.moveTo(92, 52);
-  ctx.lineTo(TABLE_WIDTH / 2 - 50, 52);
-  ctx.lineTo(TABLE_WIDTH / 2 - 70, 70);
-  ctx.lineTo(112, 70);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(TABLE_WIDTH / 2 + 50, 52);
-  ctx.lineTo(TABLE_WIDTH - 92, 52);
-  ctx.lineTo(TABLE_WIDTH - 112, 70);
-  ctx.lineTo(TABLE_WIDTH / 2 + 70, 70);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(92, TABLE_HEIGHT - 52);
-  ctx.lineTo(TABLE_WIDTH / 2 - 50, TABLE_HEIGHT - 52);
-  ctx.lineTo(TABLE_WIDTH / 2 - 70, TABLE_HEIGHT - 70);
-  ctx.lineTo(112, TABLE_HEIGHT - 70);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(TABLE_WIDTH / 2 + 50, TABLE_HEIGHT - 52);
-  ctx.lineTo(TABLE_WIDTH - 92, TABLE_HEIGHT - 52);
-  ctx.lineTo(TABLE_WIDTH - 112, TABLE_HEIGHT - 70);
-  ctx.lineTo(TABLE_WIDTH / 2 + 70, TABLE_HEIGHT - 70);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(54, 92);
-  ctx.lineTo(54, TABLE_HEIGHT - 92);
-  ctx.lineTo(72, TABLE_HEIGHT - 112);
-  ctx.lineTo(72, 112);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(TABLE_WIDTH - 54, 92);
-  ctx.lineTo(TABLE_WIDTH - 54, TABLE_HEIGHT - 92);
-  ctx.lineTo(TABLE_WIDTH - 72, TABLE_HEIGHT - 112);
-  ctx.lineTo(TABLE_WIDTH - 72, 112);
-  ctx.closePath();
-  ctx.fill();
-
-  for (const pocket of POCKETS) {
-    const rim = ctx.createRadialGradient(pocket.x - 6, pocket.y - 6, 6, pocket.x, pocket.y, 34);
-    rim.addColorStop(0, "rgba(81, 121, 143, 0.55)");
-    rim.addColorStop(1, "rgba(8, 10, 14, 0.98)");
-    ctx.beginPath();
-    ctx.arc(pocket.x, pocket.y, 31, 0, Math.PI * 2);
-    ctx.fillStyle = rim;
-    ctx.fill();
-
-    if (needEightCall && selectedPocket === pocket.id) {
+  if (needEightCall && selectedPocket !== null) {
+    const selected = POCKETS.find((pocket) => pocket.id === selectedPocket) ?? null;
+    if (selected) {
       ctx.beginPath();
-      ctx.arc(pocket.x, pocket.y, 18, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(255, 246, 175, 0.95)";
-      ctx.lineWidth = 3;
+      ctx.arc(selected.x, selected.y, 21, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255, 244, 163, 0.96)";
+      ctx.lineWidth = 3.4;
       ctx.stroke();
     }
   }
 
   if (cueBall && showGuide && preview) {
-    const dirX = Math.cos(aimAngle);
-    const dirY = Math.sin(aimAngle);
-
-    ctx.save();
-    ctx.strokeStyle = "rgba(255,255,255,0.82)";
-    ctx.lineWidth = 2.2;
-    ctx.setLineDash([10, 8]);
-    ctx.beginPath();
-    ctx.moveTo(cueBall.x, cueBall.y);
-    ctx.lineTo(preview.endX, preview.endY);
-    ctx.stroke();
-    ctx.restore();
-
-    if (preview.contactX !== null && preview.contactY !== null) {
-      ctx.beginPath();
-      ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.82, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(255,255,255,0.92)";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-
-    const cueGap = BALL_RADIUS + 10 + pullRatio * 74;
-    const cueLength = 560;
-    const tipX = cueBall.x - dirX * cueGap;
-    const tipY = cueBall.y - dirY * cueGap;
-    const buttX = cueBall.x - dirX * (cueGap + cueLength);
-    const buttY = cueBall.y - dirY * (cueGap + cueLength);
-
-    ctx.save();
-    ctx.strokeStyle = "#d9ad73";
-    ctx.lineWidth = 8;
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(tipX, tipY);
-    ctx.lineTo(buttX, buttY);
-    ctx.stroke();
-
-    ctx.strokeStyle = "#f5e9d7";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(tipX, tipY);
-    ctx.lineTo(cueBall.x - dirX * (cueGap - 14), cueBall.y - dirY * (cueGap - 14));
-    ctx.stroke();
-    ctx.restore();
+    drawGuide(ctx, cueBall, preview, aimAngle);
+    drawCue(ctx, cueBall, aimAngle, pullRatio, sprites.cue);
   }
 
   for (const ball of renderBalls) {
     if (ball.pocketed) continue;
-    drawBall(ctx, ball);
+    drawBallSprite(ctx, ball, sprites.balls.get(ball.number));
   }
 
   if (cueBall && isBallInHand) {
-    ctx.beginPath();
-    ctx.arc(cueBall.x, cueBall.y, BALL_RADIUS + 10, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(255,255,255,0.38)";
-    ctx.lineWidth = 2;
+    ctx.save();
     ctx.setLineDash([8, 6]);
+    ctx.beginPath();
+    ctx.arc(cueBall.x, cueBall.y, BALL_RADIUS + 11, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.42)";
+    ctx.lineWidth = 2;
     ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.restore();
   }
+}
+
+function createImage(src: string) {
+  const image = new window.Image();
+  image.decoding = "async";
+  image.src = src;
+  return image;
+}
+
+function buildSpriteBank(): SpriteBank {
+  const balls = new Map<number, HTMLImageElement>();
+  Object.entries(BALL_SPRITE_MODULES).forEach(([path, src]) => {
+    const match = path.match(/ball-(\d+)\.svg$/);
+    if (!match) return;
+    balls.set(Number(match[1]), createImage(src));
+  });
+
+  return {
+    table: createImage(tableAsset),
+    cue: createImage(cueAsset),
+    balls,
+  };
 }
 
 export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, onShoot, onExit }: Props) {
@@ -463,6 +435,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const [animating, setAnimating] = useState(false);
   const [animatingSeq, setAnimatingSeq] = useState(0);
   const [selectedPocket, setSelectedPocket] = useState<number | null>(null);
+  const [assetsVersion, setAssetsVersion] = useState(0);
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const powerRailRef = useRef<HTMLDivElement | null>(null);
@@ -472,11 +445,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const pullRatioRef = useRef(0);
   const aimAngleRef = useRef(0);
   const powerRef = useRef(power);
+  const spriteBank = useMemo(() => buildSpriteBank(), []);
 
   const host = room.players.find((player) => player.userId === room.hostUserId) ?? room.players[0] ?? null;
   const guest = room.players.find((player) => player.userId !== room.hostUserId) ?? null;
   const isHost = currentUserId === room.hostUserId;
-  const me = room.players.find((player) => player.userId === currentUserId) ?? (isHost ? host : guest);
   const opponent = room.players.find((player) => player.userId !== currentUserId) ?? (isHost ? guest : host);
   const leftPlayer = host;
   const rightPlayer = guest;
@@ -486,6 +459,25 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const opponentGroup = currentUserId === room.hostUserId ? game.guestGroup : game.hostGroup;
   const isMyTurn = game.turnUserId === currentUserId;
   const isOpenTable = !game.hostGroup || !game.guestGroup;
+
+  useEffect(() => {
+    const notifyLoaded = () => setAssetsVersion((current) => current + 1);
+    const unregister: Array<() => void> = [];
+    const images = [spriteBank.table, spriteBank.cue, ...spriteBank.balls.values()];
+
+    images.forEach((image) => {
+      if (image.complete && image.naturalWidth) return;
+      const handle = () => notifyLoaded();
+      image.addEventListener("load", handle);
+      image.addEventListener("error", handle);
+      unregister.push(() => {
+        image.removeEventListener("load", handle);
+        image.removeEventListener("error", handle);
+      });
+    });
+
+    return () => unregister.forEach((fn) => fn());
+  }, [spriteBank]);
 
   useEffect(() => {
     if (!animating) setDisplayBalls(game.balls);
@@ -540,9 +532,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const cueBall = renderBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
   const canInteract = Boolean(cueBall && isMyTurn && !animating && !shootBusy && game.status !== "finished");
   const isBallInHand = game.ballInHandUserId === currentUserId && canInteract;
-  const cueLabel = game.tableType === "casual" ? "Amistoso" : `${game.stakeChips ?? 0}`;
+  const cueLabel = game.tableType === "casual" ? "amistoso" : `${game.stakeChips ?? 0}`;
   const myRemaining = renderBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === myGroup).length;
-  const opponentRemaining = renderBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === opponentGroup).length;
   const leftRemaining = renderBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === leftGroup).length;
   const rightRemaining = renderBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === rightGroup).length;
   const needEightCall = !isOpenTable && myGroup !== null && myRemaining === 0;
@@ -587,10 +578,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const updatePullFromPoint = (point: LocalPoint) => {
     if (!cueBall) return;
     const distance = Math.hypot(point.x - cueBall.x, point.y - cueBall.y);
-    const ratio = clamp((distance - 8) / MAX_PULL_DISTANCE, 0, 1);
+    const ratio = clamp((distance - 12) / MAX_PULL_DISTANCE, 0, 1);
     pullRatioRef.current = ratio;
     setPullRatio(ratio);
-    pointerMovedRef.current = distance > 12;
+    pointerMovedRef.current = distance > 14;
   };
 
   const updateCuePositionFromPoint = (point: LocalPoint) => {
@@ -635,7 +626,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!point) return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     pointerMovedRef.current = false;
-    if (isBallInHand && pointInCircle(point, cueBall.x, cueBall.y, BALL_RADIUS * 2.25)) {
+    if (isBallInHand && pointInCircle(point, cueBall.x, cueBall.y, BALL_RADIUS * 2.2)) {
       setPointerMode("place");
       updateCuePositionFromPoint(point);
       return;
@@ -701,18 +692,18 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             : `Vez de ${cleanName(opponent?.displayName ?? "oponente")}`;
 
   const phaseText = game.status === "finished"
-    ? "Fim"
+    ? "fim"
     : game.phase === "break"
-      ? "Break"
+      ? "break"
       : game.phase === "open_table"
-        ? "Mesa aberta"
+        ? "mesa aberta"
         : game.phase === "eight_ball"
-          ? "Bola 8"
+          ? "bola 8"
           : isOpenTable
-            ? "Pool"
+            ? "pool"
             : myGroup === "solids"
-              ? "Lisas"
-              : "Listradas";
+              ? "lisas"
+              : "listradas";
 
   const preview = useMemo(() => {
     if (!cueBall || animating) return null;
@@ -730,17 +721,18 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
     drawPoolTable(
       context,
+      spriteBank,
       renderBalls,
       cueBall,
       aimAngle,
-      Boolean(cueBall && isMyTurn && !animating),
+      Boolean(cueBall && canInteract),
       pullRatio,
       preview,
       needEightCall && isMyTurn,
       selectedPocket,
       isBallInHand,
     );
-  }, [aimAngle, animating, cueBall, isBallInHand, isMyTurn, needEightCall, preview, pullRatio, renderBalls, selectedPocket]);
+  }, [aimAngle, animating, assetsVersion, canInteract, cueBall, isBallInHand, isMyTurn, needEightCall, preview, pullRatio, renderBalls, selectedPocket, spriteBank]);
 
   return (
     <section className="pool-stage" aria-label="Mesa de sinuca">
@@ -800,9 +792,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onPointerUp={handlePowerUp}
           onPointerCancel={handlePowerUp}
         >
-          <span className="pool-stage__power-cap" />
           <div className="pool-stage__power-track">
             <div className="pool-stage__power-fill" style={{ height: `${Math.round(power * 100)}%` }} />
+            <img className="pool-stage__power-frame" src={powerFrameAsset} alt="" aria-hidden="true" />
             <div className="pool-stage__power-marker" style={{ bottom: `${Math.round(power * 100)}%` }} />
           </div>
           <small>{Math.round(power * 100)}</small>
