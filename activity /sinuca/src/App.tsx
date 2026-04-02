@@ -855,28 +855,9 @@ export default function App() {
     const attempts: string[] = [];
     const action = actionByPath[path];
 
-    if (action) {
-      for (const baseUrl of resolveApiCandidates("/balance")) {
-        try {
-          const url = new URL(baseUrl, window.location.origin);
-          url.searchParams.set("action", action);
-          Object.entries(payload).forEach(([key, value]) => {
-            if (value === null || value === undefined) return;
-            url.searchParams.set(key, String(value));
-          });
-          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 4200);
-          const raw = await response.text();
-          const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string } : null;
-          if (response.ok) return parsed;
-          attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-        } catch (error) {
-          attempts.push(`balance_action:${error instanceof Error ? error.message : "unknown"}`);
-        }
-      }
-    }
-
     for (const baseUrl of resolveApiCandidates(path)) {
       try {
+        console.log("[sinuca-http-action]", JSON.stringify({ path, baseUrl, reason, payload }));
         const response = await fetchWithTimeout(baseUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -889,6 +870,27 @@ export default function App() {
         attempts.push(`${baseUrl}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
       } catch (error) {
         attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
+      }
+    }
+
+    if (action) {
+      for (const baseUrl of resolveApiCandidates("/balance")) {
+        try {
+          const url = new URL(baseUrl, window.location.origin);
+          url.searchParams.set("action", action);
+          Object.entries(payload).forEach(([key, value]) => {
+            if (value === null || value === undefined) return;
+            url.searchParams.set(key, String(value));
+          });
+          console.log("[sinuca-http-action-fallback]", JSON.stringify({ path, url: url.toString(), reason, payload }));
+          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 4200);
+          const raw = await response.text();
+          const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string } : null;
+          if (response.ok) return parsed;
+          attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        } catch (error) {
+          attempts.push(`balance_action:${error instanceof Error ? error.message : "unknown"}`);
+        }
       }
     }
 

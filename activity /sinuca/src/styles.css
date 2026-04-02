@@ -1140,7 +1140,7 @@ button:focus-visible {
 }
 
 .create-config-card--final .create-config-block__head {
-  gap: 2px;
+  gap: 1px;
 }
 
 .create-config-card--final .create-config-block__head strong {
@@ -2145,7 +2145,7 @@ button:focus-visible {
 
 .game-hud__player,
 .game-hud__center {
-  border-radius: 20px;
+  border-radius: 18px;
   padding: 12px 14px;
 }
 
@@ -2500,8 +2500,8 @@ button:focus-visible {
 }
 
 .game-scorecard__avatar {
-  width: 60px;
-  height: 60px;
+  width: 56px;
+  height: 56px;
   border-radius: 50%;
   overflow: hidden;
   display: grid;
@@ -4723,16 +4723,16 @@ button:focus-visible {
   position: absolute;
   inset: 0;
   display: grid;
-  grid-template-rows: 68px minmax(0, 1fr);
+  grid-template-rows: 62px minmax(0, 1fr);
   gap: 6px;
-  padding: max(10px, env(safe-area-inset-top, 0px)) 12px 10px;
+  padding: max(8px, env(safe-area-inset-top, 0px)) 12px 8px;
   overflow: hidden;
   background: transparent;
 }
 
 .pool-stage__hud {
   display: grid;
-  grid-template-columns: 60px minmax(0, 1fr) 154px minmax(0, 1fr);
+  grid-template-columns: 56px minmax(0, 1fr) 148px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   min-height: 0;
@@ -4855,7 +4855,7 @@ button:focus-visible {
   border-radius: 999px;
   border: 1px solid rgba(255,255,255,0.08);
   background: linear-gradient(180deg, rgba(38, 54, 104, 0.84), rgba(20, 29, 61, 0.94));
-  font: 700 1rem var(--font-ui);
+  font: 700 0.96rem var(--font-ui);
   color: #fbfdff;
 }
 
@@ -4865,7 +4865,7 @@ button:focus-visible {
 }
 
 .pool-stage__status small {
-  font: 600 0.88rem var(--font-ui);
+  font: 600 0.82rem var(--font-ui);
   color: rgba(232, 242, 255, 0.74);
 }
 
@@ -4944,7 +4944,7 @@ button:focus-visible {
   position: relative;
   width: min(100%, calc((100dvh - 106px) * 2));
   max-width: 1400px;
-  filter: drop-shadow(0 20px 24px rgba(0, 0, 0, 0.28));
+  filter: drop-shadow(0 24px 26px rgba(0, 0, 0, 0.34));
   aspect-ratio: 2 / 1;
   touch-action: none;
   user-select: none;
@@ -4985,21 +4985,21 @@ button:focus-visible {
 
 @media (max-width: 1100px) {
   .pool-stage {
-    grid-template-rows: 62px minmax(0, 1fr);
+    grid-template-rows: 58px minmax(0, 1fr);
     gap: 6px;
     padding-inline: 10px;
   }
 
   .pool-stage__hud {
-    grid-template-columns: 54px minmax(0, 1fr) 138px minmax(0, 1fr);
+    grid-template-columns: 50px minmax(0, 1fr) 132px minmax(0, 1fr);
     gap: 8px;
   }
 
   .pool-stage__menu,
   .pool-stage__player,
   .pool-stage__status {
-    height: 54px;
-    border-radius: 17px;
+    height: 50px;
+    border-radius: 16px;
   }
 
   .pool-stage__menu {
@@ -5066,25 +5066,25 @@ button:focus-visible {
 
 @media (max-width: 760px) {
   .pool-stage {
-    grid-template-rows: 60px minmax(0, 1fr);
+    grid-template-rows: 56px minmax(0, 1fr);
     padding: max(8px, env(safe-area-inset-top, 0px)) 8px 8px;
   }
 
   .pool-stage__hud {
-    grid-template-columns: 52px minmax(0, 1fr) 118px minmax(0, 1fr);
+    grid-template-columns: 48px minmax(0, 1fr) 112px minmax(0, 1fr);
     gap: 6px;
   }
 
   .pool-stage__menu,
   .pool-stage__player,
   .pool-stage__status {
-    height: 54px;
-    border-radius: 16px;
+    height: 48px;
+    border-radius: 15px;
   }
 
   .pool-stage__menu {
-    width: 52px;
-    font-size: 1.6rem;
+    width: 48px;
+    font-size: 1.52rem;
   }
 
   .pool-stage__player {
