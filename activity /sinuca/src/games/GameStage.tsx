@@ -281,15 +281,31 @@ function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, s
     drawFallbackBall(ctx, ball);
     return;
   }
-  const size = 40;
+  const size = 36;
+  ctx.save();
+  ctx.fillStyle = "rgba(0, 0, 0, 0.24)";
+  ctx.beginPath();
+  ctx.ellipse(ball.x, ball.y + 12, 11.5, 5.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
   ctx.drawImage(sprite, ball.x - size / 2, ball.y - size / 2, size, size);
 }
 
 function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview, aimAngle: number) {
   ctx.save();
-  ctx.setLineDash([15, 9]);
-  ctx.strokeStyle = "rgba(255,255,255,0.86)";
-  ctx.lineWidth = 2.6;
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.lineWidth = 8;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(cueBall.x, cueBall.y);
+  ctx.lineTo(preview.endX, preview.endY);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.lineWidth = 2.4;
+  ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
   ctx.lineTo(preview.endX, preview.endY);
@@ -297,23 +313,30 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.restore();
 
   if (preview.contactX !== null && preview.contactY !== null) {
+    ctx.save();
     ctx.beginPath();
-    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.86, 0, Math.PI * 2);
+    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.74, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(255,255,255,0.96)";
     ctx.lineWidth = 2.2;
     ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.42, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.68)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
   }
 
   if (preview.hitBall) {
     const impactDx = Math.cos(aimAngle) * BALL_DIAMETER;
     const impactDy = Math.sin(aimAngle) * BALL_DIAMETER;
     ctx.save();
-    ctx.setLineDash([8, 8]);
-    ctx.strokeStyle = "rgba(255,255,255,0.42)";
-    ctx.lineWidth = 1.8;
+    ctx.setLineDash([10, 8]);
+    ctx.strokeStyle = "rgba(255,255,255,0.38)";
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
     ctx.moveTo(preview.hitBall.x, preview.hitBall.y);
-    ctx.lineTo(preview.hitBall.x + impactDx * 0.55, preview.hitBall.y + impactDy * 0.55);
+    ctx.lineTo(preview.hitBall.x + impactDx * 0.58, preview.hitBall.y + impactDy * 0.58);
     ctx.stroke();
     ctx.restore();
   }
@@ -565,7 +588,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const updateAimFromPoint = (point: LocalPoint) => {
     if (!cueBall) return;
-    const angle = Math.atan2(cueBall.y - point.y, cueBall.x - point.x);
+    const angle = Math.atan2(point.y - cueBall.y, point.x - cueBall.x);
     aimAngleRef.current = angle;
     setAimAngle(angle);
   };
@@ -589,13 +612,20 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const releaseShot = async () => {
     if (!cueBall || !canInteract || shootBusy) return;
     if (needEightCall && selectedPocket === null) return;
-    await onShoot({
+    const payload = {
       angle: aimAngleRef.current,
       power: clamp(powerRef.current, 0.22, 1),
       cueX: isBallInHand ? cueBall.x : null,
       cueY: isBallInHand ? cueBall.y : null,
       calledPocket: needEightCall ? selectedPocket : null,
-    });
+    };
+    console.log("[sinuca-frontend-shoot]", JSON.stringify({
+      roomId: room.roomId,
+      userId: currentUserId,
+      isMyTurn,
+      ...payload,
+    }));
+    await onShoot(payload);
   };
 
   const handleTablePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
