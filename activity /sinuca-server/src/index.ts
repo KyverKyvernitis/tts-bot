@@ -484,6 +484,16 @@ async function handleShootGameHttp(req: Request, res: Response) {
   const cueX = merged.cueX === undefined ? null : Number(merged.cueX);
   const cueY = merged.cueY === undefined ? null : Number(merged.cueY);
   const calledPocket = merged.calledPocket === undefined ? null : Number(merged.calledPocket);
+  console.log("[sinuca-shoot-http]", JSON.stringify({
+    method: req.method,
+    roomId,
+    userId,
+    angle,
+    power,
+    cueX,
+    cueY,
+    calledPocket,
+  }));
   if (!roomId || !userId) {
     res.status(400).json({ error: "missing_shot_identifiers" });
     return;
@@ -499,6 +509,7 @@ async function handleShootGameHttp(req: Request, res: Response) {
     return;
   }
   if (before.turnUserId !== userId) {
+    console.log("[sinuca-shoot-http-rejected]", JSON.stringify({ roomId, userId, reason: "not_your_turn", turnUserId: before.turnUserId }));
     res.status(409).json({ error: "not_your_turn", game: before });
     return;
   }
@@ -507,6 +518,15 @@ async function handleShootGameHttp(req: Request, res: Response) {
     res.status(404).json({ error: "game_not_found" });
     return;
   }
+  console.log("[sinuca-shoot-http-applied]", JSON.stringify({
+    roomId,
+    userId,
+    shotSequence: game.shotSequence,
+    turnUserId: game.turnUserId,
+    phase: game.phase,
+    foulReason: game.foulReason,
+    cueBall: game.balls.find((ball) => ball.number === 0) ?? null,
+  }));
   broadcastGame(roomId);
   res.json({ game });
 }
@@ -1112,6 +1132,15 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
     if (data.type === "take_shot") {
       const merged = mergeWithSession(data.payload, activeSession);
+      console.log("[sinuca-shoot-ws]", JSON.stringify({
+        roomId: merged.roomId,
+        userId: merged.userId ?? null,
+        angle: Number(merged.angle ?? 0),
+        power: Number(merged.power ?? 0),
+        cueX: merged.cueX === undefined ? null : Number(merged.cueX),
+        cueY: merged.cueY === undefined ? null : Number(merged.cueY),
+        calledPocket: merged.calledPocket === undefined ? null : Number(merged.calledPocket),
+      }));
       if (!merged.userId) {
         send(ws, { type: "error", message: "jogador da activity não identificado" });
         return;
@@ -1125,7 +1154,13 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "não é sua vez" });
         return;
       }
-      takeShot(merged.roomId, merged.userId, Number(merged.angle ?? 0), Number(merged.power ?? 0), merged.cueX === undefined ? null : Number(merged.cueX), merged.cueY === undefined ? null : Number(merged.cueY), merged.calledPocket === undefined ? null : Number(merged.calledPocket));
+      const applied = takeShot(merged.roomId, merged.userId, Number(merged.angle ?? 0), Number(merged.power ?? 0), merged.cueX === undefined ? null : Number(merged.cueX), merged.cueY === undefined ? null : Number(merged.cueY), merged.calledPocket === undefined ? null : Number(merged.calledPocket));
+      console.log("[sinuca-shoot-ws-applied]", JSON.stringify({
+        roomId: merged.roomId,
+        shotSequence: applied?.shotSequence ?? null,
+        turnUserId: applied?.turnUserId ?? null,
+        phase: applied?.phase ?? null,
+      }));
       broadcastGame(merged.roomId);
       return;
     }
