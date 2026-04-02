@@ -8,7 +8,8 @@ const BALL_DIAMETER = BALL_RADIUS * 2;
 const POCKET_RADIUS = 34;
 const RAIL_MARGIN_X = 54;
 const RAIL_MARGIN_Y = 44;
-const DEFAULT_CUE_X = 300;
+const HEAD_STRING_X = TABLE_WIDTH * 0.29;
+const DEFAULT_CUE_X = TABLE_WIDTH * 0.23;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
 const MAX_SHOT_SPEED = 24;
 const MIN_SPEED = 0.05;
@@ -75,7 +76,7 @@ function createBall(number: number, x: number, y: number): PhysicsBall {
 
 function rackBalls(): PhysicsBall[] {
   const balls: PhysicsBall[] = [createBall(0, DEFAULT_CUE_X, DEFAULT_CUE_Y)];
-  const apexX = 870;
+  const apexX = 874;
   const apexY = TABLE_HEIGHT / 2;
   const rowStepX = BALL_DIAMETER * 0.88;
   const spacing = BALL_DIAMETER * 1.01;
@@ -245,13 +246,42 @@ function inferPhase(game: GameRecord): GamePhase {
 
 function legalCuePosition(x: number, y: number, breakOnly = false) {
   const minX = RAIL_MARGIN_X + BALL_RADIUS;
-  const maxX = breakOnly ? TABLE_WIDTH * 0.27 : TABLE_WIDTH - RAIL_MARGIN_X - BALL_RADIUS;
+  const maxX = breakOnly ? HEAD_STRING_X - BALL_RADIUS - 6 : TABLE_WIDTH - RAIL_MARGIN_X - BALL_RADIUS;
   const minY = RAIL_MARGIN_Y + BALL_RADIUS;
   const maxY = TABLE_HEIGHT - RAIL_MARGIN_Y - BALL_RADIUS;
   return {
     x: clamp(x, minX, maxX),
     y: clamp(y, minY, maxY),
   };
+}
+
+function cuePositionOverlaps(balls: PhysicsBall[], cueX: number, cueY: number) {
+  for (const ball of balls) {
+    if (ball.number === 0 || ball.pocketed) continue;
+    if (Math.hypot(ball.x - cueX, ball.y - cueY) < BALL_DIAMETER + 1) return true;
+  }
+  return false;
+}
+
+function resolveCuePlacement(balls: PhysicsBall[], x: number, y: number, breakOnly = false) {
+  const base = legalCuePosition(x, y, breakOnly);
+  if (!cuePositionOverlaps(balls, base.x, base.y)) return base;
+
+  for (let radius = 6; radius <= 160; radius += 6) {
+    for (let step = 0; step < 24; step += 1) {
+      const angle = (Math.PI * 2 * step) / 24;
+      const candidate = legalCuePosition(
+        base.x + Math.cos(angle) * radius,
+        base.y + Math.sin(angle) * radius,
+        breakOnly,
+      );
+      if (!cuePositionOverlaps(balls, candidate.x, candidate.y)) return candidate;
+    }
+  }
+
+  const fallback = legalCuePosition(DEFAULT_CUE_X, DEFAULT_CUE_Y, breakOnly);
+  if (!cuePositionOverlaps(balls, fallback.x, fallback.y)) return fallback;
+  return base;
 }
 
 function simulateShot(
@@ -270,7 +300,8 @@ function simulateShot(
 
   const breakOnlyPlacement = game.shotSequence === 0;
   if (game.ballInHandUserId === shooterUserId) {
-    const position = legalCuePosition(
+    const position = resolveCuePlacement(
+      balls,
       Number.isFinite(cueX ?? NaN) ? Number(cueX) : cueBall.x,
       Number.isFinite(cueY ?? NaN) ? Number(cueY) : cueBall.y,
       breakOnlyPlacement,
