@@ -6,6 +6,13 @@ import powerFrameAsset from "../assets/game/power-meter-frame.svg";
 
 const BALL_SPRITE_MODULES = import.meta.glob("../assets/game/balls/*.svg", { eager: true, import: "default" }) as Record<string, string>;
 
+const BALL_SPRITES_BY_NUMBER = new Map<number, string>();
+Object.entries(BALL_SPRITE_MODULES).forEach(([path, src]) => {
+  const match = path.match(/ball-(\d+)\.svg$/);
+  if (!match) return;
+  BALL_SPRITES_BY_NUMBER.set(Number(match[1]), src);
+});
+
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
 const BALL_RADIUS = 13;
@@ -119,6 +126,10 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function lerp(from: number, to: number, t: number) {
+  return from + (to - from) * t;
+}
+
 function lerpAngle(current: number, target: number, factor: number) {
   const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
   return current + delta * factor;
@@ -136,6 +147,39 @@ function frameToDisplayBalls(frameBalls: GameShotFrameBall[], previousBalls: Gam
   return previousBalls.map((ball) => {
     const next = map.get(ball.id);
     return next ? { ...ball, x: next.x, y: next.y, pocketed: next.pocketed } : ball;
+  });
+}
+
+function pocketedNumbersForGroup(balls: GameBallSnapshot[], group: BallGroup | null) {
+  if (!group) return [] as number[];
+  return balls
+    .filter((ball) => ball.pocketed && groupOfNumber(ball.number) === group)
+    .map((ball) => ball.number)
+    .sort((a, b) => a - b);
+}
+
+function interpolateFrameBalls(
+  baseBalls: GameBallSnapshot[],
+  fromFrame: GameShotFrameBall[],
+  toFrame: GameShotFrameBall[],
+  t: number,
+) {
+  const fromMap = new Map(fromFrame.map((ball) => [ball.id, ball]));
+  const toMap = new Map(toFrame.map((ball) => [ball.id, ball]));
+  return baseBalls.map((ball) => {
+    const from = fromMap.get(ball.id) ?? toMap.get(ball.id);
+    const to = toMap.get(ball.id) ?? fromMap.get(ball.id);
+    if (!from && !to) return ball;
+    const startX = from?.x ?? to?.x ?? ball.x;
+    const startY = from?.y ?? to?.y ?? ball.y;
+    const endX = to?.x ?? from?.x ?? ball.x;
+    const endY = to?.y ?? from?.y ?? ball.y;
+    return {
+      ...ball,
+      x: lerp(startX, endX, t),
+      y: lerp(startY, endY, t),
+      pocketed: (t < 0.5 ? from?.pocketed : to?.pocketed) ?? to?.pocketed ?? from?.pocketed ?? ball.pocketed,
+    };
   });
 }
 
@@ -298,8 +342,8 @@ function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, s
 
 function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview, aimAngle: number) {
   ctx.save();
-  ctx.strokeStyle = "rgba(164, 228, 255, 0.18)";
-  ctx.lineWidth = 8.6;
+  ctx.strokeStyle = "rgba(126, 216, 255, 0.22)";
+  ctx.lineWidth = 7.8;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -308,8 +352,8 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.restore();
 
   ctx.save();
-  ctx.strokeStyle = "rgba(247, 251, 255, 0.98)";
-  ctx.lineWidth = 1.9;
+  ctx.strokeStyle = "rgba(248, 252, 255, 0.96)";
+  ctx.lineWidth = 1.65;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -317,52 +361,52 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.stroke();
   ctx.restore();
 
-  const ringX = cueBall.x - Math.cos(aimAngle) * (BALL_RADIUS * 0.45);
-  const ringY = cueBall.y - Math.sin(aimAngle) * (BALL_RADIUS * 0.45);
+  const ringX = cueBall.x - Math.cos(aimAngle) * (BALL_RADIUS * 0.52);
+  const ringY = cueBall.y - Math.sin(aimAngle) * (BALL_RADIUS * 0.52);
   ctx.save();
   ctx.beginPath();
-  ctx.arc(ringX, ringY, BALL_RADIUS * 0.92, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(255,255,255,0.38)";
-  ctx.lineWidth = 1.8;
+  ctx.arc(ringX, ringY, BALL_RADIUS * 1.02, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(255,255,255,0.34)";
+  ctx.lineWidth = 1.6;
   ctx.setLineDash([8, 7]);
   ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(cueBall.x, cueBall.y, BALL_RADIUS * 1.68, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(176, 235, 255, 0.18)";
-  ctx.lineWidth = 2;
   ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.arc(cueBall.x, cueBall.y, BALL_RADIUS * 1.62, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(176, 235, 255, 0.16)";
+  ctx.lineWidth = 1.6;
   ctx.stroke();
   ctx.restore();
 
   if (preview.contactX !== null && preview.contactY !== null) {
     ctx.save();
     ctx.beginPath();
-    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.72, 0, Math.PI * 2);
+    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.68, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(252,255,255,0.98)";
-    ctx.lineWidth = 2.2;
+    ctx.lineWidth = 2;
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.34, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(190, 244, 255, 0.7)";
-    ctx.lineWidth = 1.4;
+    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.36, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(190, 244, 255, 0.72)";
+    ctx.lineWidth = 1.2;
     ctx.stroke();
     ctx.restore();
   }
 
   if (preview.hitBall) {
-    const normalX = Math.cos(aimAngle + Math.PI / 2) * BALL_RADIUS * 1.4;
-    const normalY = Math.sin(aimAngle + Math.PI / 2) * BALL_RADIUS * 1.4;
-    const tailX = Math.cos(aimAngle) * BALL_DIAMETER * 0.7;
-    const tailY = Math.sin(aimAngle) * BALL_DIAMETER * 0.7;
+    const tangentX = Math.cos(aimAngle + Math.PI / 2) * BALL_RADIUS * 1.35;
+    const tangentY = Math.sin(aimAngle + Math.PI / 2) * BALL_RADIUS * 1.35;
+    const objectTailX = Math.cos(aimAngle) * BALL_DIAMETER * 0.76;
+    const objectTailY = Math.sin(aimAngle) * BALL_DIAMETER * 0.76;
     ctx.save();
     ctx.strokeStyle = "rgba(255,255,255,0.92)";
-    ctx.lineWidth = 1.8;
+    ctx.lineWidth = 1.7;
     ctx.lineCap = "round";
     ctx.beginPath();
-    ctx.moveTo(preview.hitBall.x - normalX, preview.hitBall.y - normalY);
-    ctx.lineTo(preview.hitBall.x + normalX, preview.hitBall.y + normalY);
+    ctx.moveTo(preview.hitBall.x - tangentX, preview.hitBall.y - tangentY);
+    ctx.lineTo(preview.hitBall.x + tangentX, preview.hitBall.y + tangentY);
     ctx.moveTo(preview.hitBall.x, preview.hitBall.y);
-    ctx.lineTo(preview.hitBall.x + tailX, preview.hitBall.y + tailY);
+    ctx.lineTo(preview.hitBall.x + objectTailX, preview.hitBall.y + objectTailY);
     ctx.stroke();
     ctx.restore();
   }
@@ -377,9 +421,9 @@ function drawCue(
 ) {
   const dirX = Math.cos(aimAngle);
   const dirY = Math.sin(aimAngle);
-  const cueGap = BALL_RADIUS + 8 + pullRatio * 88;
-  const cueLength = 860;
-  const drawHeight = 15;
+  const cueGap = BALL_RADIUS + 7 + pullRatio * 94;
+  const cueLength = 980;
+  const drawHeight = 12;
 
   ctx.save();
   ctx.translate(cueBall.x - dirX * cueGap, cueBall.y - dirY * cueGap);
@@ -487,9 +531,16 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const powerRailRef = useRef<HTMLDivElement | null>(null);
-  const animationRef = useRef<number | null>(null);
   const drawLoopRef = useRef<number | null>(null);
   const lastAnimatedSeqRef = useRef(0);
+  const playbackRef = useRef<{
+    seq: number;
+    frames: { balls: GameShotFrameBall[] }[];
+    startedAt: number;
+    baseBalls: GameBallSnapshot[];
+    finalBalls: GameBallSnapshot[];
+  } | null>(null);
+  const playbackSettlingRef = useRef(false);
   const pointerMovedRef = useRef(false);
   const aimAngleRef = useRef(0);
   const drawAimAngleRef = useRef(0);
@@ -549,40 +600,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!game.lastShot || !game.lastShot.frames.length) return;
     if (game.lastShot.seq <= lastAnimatedSeqRef.current) return;
 
-    const frames = game.lastShot.frames;
-    const frameStepMs = 1000 / 60;
-    let startedAt = 0;
+    playbackSettlingRef.current = false;
+    playbackRef.current = {
+      seq: game.lastShot.seq,
+      frames: game.lastShot.frames,
+      startedAt: performance.now(),
+      baseBalls: game.balls,
+      finalBalls: game.balls,
+    };
     setAnimating(true);
     setAnimatingSeq(game.lastShot.seq);
-
-    const tick = (timestamp: number) => {
-      if (!startedAt) startedAt = timestamp;
-      const elapsed = timestamp - startedAt;
-      const frameIndex = Math.min(frames.length - 1, Math.floor(elapsed / frameStepMs));
-      const frame = frames[frameIndex];
-      setDisplayBalls(frameToDisplayBalls(frame.balls, game.balls));
-      if (frameIndex < frames.length - 1) {
-        animationRef.current = window.requestAnimationFrame(tick);
-        return;
-      }
-      lastAnimatedSeqRef.current = game.lastShot?.seq ?? 0;
-      setDisplayBalls(game.balls);
-      setAnimating(false);
-      setAnimatingSeq(0);
-      animationRef.current = null;
-    };
-
-    animationRef.current = window.requestAnimationFrame(tick);
-    return () => {
-      if (animationRef.current !== null) {
-        window.cancelAnimationFrame(animationRef.current);
-        animationRef.current = null;
-      }
-    };
   }, [animating, game]);
 
   useEffect(() => () => {
-    if (animationRef.current !== null) window.cancelAnimationFrame(animationRef.current);
     if (drawLoopRef.current !== null) window.cancelAnimationFrame(drawLoopRef.current);
   }, []);
 
@@ -599,9 +629,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const isBallInHand = game.ballInHandUserId === currentUserId && canInteract;
   const cueLabel = game.tableType === "casual" ? "amistoso" : `${game.stakeChips ?? 0}`;
   const myRemaining = renderBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === myGroup).length;
-  const leftRemaining = renderBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === leftGroup).length;
-  const rightRemaining = renderBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === rightGroup).length;
   const needEightCall = !isOpenTable && myGroup !== null && myRemaining === 0;
+  const leftPocketed = useMemo(() => pocketedNumbersForGroup(game.balls, leftGroup), [game.balls, leftGroup]);
+  const rightPocketed = useMemo(() => pocketedNumbersForGroup(game.balls, rightGroup), [game.balls, rightGroup]);
 
   useEffect(() => {
     if (!cueBall) return;
@@ -811,19 +841,51 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       drawAimAngleRef.current = lerpAngle(
         drawAimAngleRef.current,
         targetAngle,
-        state.pointerMode === "aim" ? 0.34 : state.pointerMode === "power" ? 0.2 : 0.26,
+        state.pointerMode === "aim" ? 0.42 : state.pointerMode === "power" ? 0.24 : 0.28,
       );
-      const preview = state.cueBall && !animating
-        ? computeAimPreview(state.cueBall, state.renderBalls, drawAimAngleRef.current)
+
+      let drawBalls = state.renderBalls;
+      let drawCueBall = state.cueBall;
+      const playback = playbackRef.current;
+      if (playback && playback.frames.length) {
+        const frameStepMs = 1000 / 60;
+        const elapsed = performance.now() - playback.startedAt;
+        const rawIndex = elapsed / frameStepMs;
+        const frameIndex = Math.min(playback.frames.length - 1, Math.floor(rawIndex));
+        if (frameIndex >= playback.frames.length - 1) {
+          drawBalls = frameToDisplayBalls(playback.frames[playback.frames.length - 1].balls, playback.baseBalls);
+          drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+          if (!playbackSettlingRef.current) {
+            playbackSettlingRef.current = true;
+            window.setTimeout(() => {
+              if (playbackRef.current?.seq !== playback.seq) return;
+              lastAnimatedSeqRef.current = playback.seq;
+              playbackRef.current = null;
+              setDisplayBalls(playback.finalBalls);
+              setAnimating(false);
+              setAnimatingSeq(0);
+            }, 0);
+          }
+        } else {
+          const frameA = playback.frames[frameIndex];
+          const frameB = playback.frames[Math.min(playback.frames.length - 1, frameIndex + 1)];
+          const localT = clamp(rawIndex - frameIndex, 0, 1);
+          drawBalls = interpolateFrameBalls(playback.baseBalls, frameA.balls, frameB.balls, localT);
+          drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+        }
+      }
+
+      const preview = drawCueBall && !animating
+        ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current)
         : null;
 
       drawPoolTable(
         context,
         spriteBank,
-        state.renderBalls,
-        state.cueBall,
+        drawBalls,
+        drawCueBall,
         drawAimAngleRef.current,
-        Boolean(state.cueBall && (state.canInteract || state.shootBusy)),
+        Boolean(drawCueBall && (state.canInteract || state.shootBusy)),
         state.pointerMode === "power"
           ? clamp(0.18 + state.power * 0.82, 0.18, 1)
           : state.pointerMode === "aim"
@@ -868,9 +930,14 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           <div className="pool-stage__player-copy">
             <strong>{cleanName(leftPlayer?.displayName ?? "Jogador")}</strong>
             <div className="pool-stage__pips">
-              {Array.from({ length: 7 }).map((_, index) => (
-                <span key={`left-${index}`} className={`pool-stage__pip ${index < (leftGroup ? 7 - leftRemaining : 0) ? "pool-stage__pip--filled" : ""}`} />
-              ))}
+              {Array.from({ length: 7 }).map((_, index) => {
+                const number = leftPocketed[index] ?? null;
+                return (
+                  <span key={`left-${index}`} className={`pool-stage__pip ${number !== null ? "pool-stage__pip--ball" : ""}`}>
+                    {number !== null ? <img src={BALL_SPRITES_BY_NUMBER.get(number)} alt="" aria-hidden="true" /> : null}
+                  </span>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -885,9 +952,14 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           <div className="pool-stage__player-copy pool-stage__player-copy--right">
             <strong>{cleanName(rightPlayer?.displayName ?? "Adversário")}</strong>
             <div className="pool-stage__pips pool-stage__pips--right">
-              {Array.from({ length: 7 }).map((_, index) => (
-                <span key={`right-${index}`} className={`pool-stage__pip ${index < (rightGroup ? 7 - rightRemaining : 0) ? "pool-stage__pip--filled" : ""}`} />
-              ))}
+              {Array.from({ length: 7 }).map((_, index) => {
+                const number = rightPocketed[index] ?? null;
+                return (
+                  <span key={`right-${index}`} className={`pool-stage__pip ${number !== null ? "pool-stage__pip--ball" : ""}`}>
+                    {number !== null ? <img src={BALL_SPRITES_BY_NUMBER.get(number)} alt="" aria-hidden="true" /> : null}
+                  </span>
+                );
+              })}
             </div>
           </div>
           <div className="pool-stage__avatar">
