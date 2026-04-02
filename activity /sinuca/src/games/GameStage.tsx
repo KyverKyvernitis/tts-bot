@@ -51,6 +51,9 @@ const OPENING_RACK = [
   [15, 6, 13, 4, 5],
 ] as const;
 
+// Duração da animação da bola entrando na caçapa (ms)
+const POCKET_ANIM_DURATION = 320;
+
 type ShotInput = {
   angle: number;
   power: number;
@@ -79,6 +82,17 @@ type AimPreview = {
   hitBall: GameBallSnapshot | null;
   contactX: number | null;
   contactY: number | null;
+  // Deflection: where the cue ball goes after impact
+  cueDeflectX: number | null;
+  cueDeflectY: number | null;
+};
+
+// Animação de bola caindo na caçapa
+type PocketAnimation = {
+  ball: GameBallSnapshot;
+  pocketX: number;
+  pocketY: number;
+  startedAt: number;
 };
 
 type SpriteBank = {
@@ -257,6 +271,8 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
   let hitDistance = boundary.distance;
   let contactX: number | null = null;
   let contactY: number | null = null;
+  let cueDeflectX: number | null = null;
+  let cueDeflectY: number | null = null;
 
   for (const ball of balls) {
     if (ball.pocketed || ball.number === 0) continue;
@@ -276,91 +292,206 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
     }
   }
 
+  // Calcular linha de deflexão da bola branca após impacto
+  // Na física de sinuca (massas iguais, colisão elástica):
+  // - Bola alvo: segue a linha dos centros (normal ao contato)
+  // - Bola branca: deflecte perpendicularmente ao movimento da bola alvo
+  if (hitBall && contactX !== null && contactY !== null) {
+    // Vetor normal do impacto: do contact point até o centro da bola alvo
+    const nx = hitBall.x - contactX;
+    const ny = hitBall.y - contactY;
+    const nlen = Math.hypot(nx, ny) || 1;
+    const nnx = nx / nlen;
+    const nny = ny / nlen;
+
+    // Componente da velocidade ao longo do normal (vai para a bola alvo)
+    const dotN = dx * nnx + dy * nny;
+    // Componente residual (fica na bola branca)
+    const remVx = dx - dotN * nnx;
+    const remVy = dy - dotN * nny;
+    const remLen = Math.hypot(remVx, remVy);
+
+    const DEFLECT_DIST = 120;
+    if (remLen > 0.05) {
+      // A bola branca continua na direção perpendicular
+      cueDeflectX = contactX + (remVx / remLen) * DEFLECT_DIST;
+      cueDeflectY = contactY + (remVy / remLen) * DEFLECT_DIST;
+    } else {
+      // Tiro completamente frontal: bola branca para, mostramos apenas ponto
+      cueDeflectX = contactX;
+      cueDeflectY = contactY;
+    }
+  }
+
   return {
     endX: cueBall.x + dx * hitDistance,
     endY: cueBall.y + dy * hitDistance,
     hitBall,
     contactX,
     contactY,
+    cueDeflectX,
+    cueDeflectY,
   };
 }
 
-function drawFallbackBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot) {
+// ─── Renderização das bolas ────────────────────────────────────────────────
+
+function drawFallbackBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, scale = 1) {
   const x = ball.x;
   const y = ball.y;
+  const r = BALL_RADIUS * scale;
   const color = ballColor(ball.number);
 
   ctx.save();
   ctx.translate(x, y);
-  ctx.shadowColor = "rgba(0, 0, 0, 0.26)";
-  ctx.shadowBlur = 8;
-  ctx.shadowOffsetY = 4;
 
-  const baseGradient = ctx.createRadialGradient(-4, -4, 2, 0, 0, BALL_RADIUS + 6);
+  // Sombra
+  ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
+  ctx.shadowBlur = 10 * scale;
+  ctx.shadowOffsetY = 5 * scale;
+
+  // Gradiente base 3D (iluminação de canto superior-esquerdo)
+  const baseGradient = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r * 1.35);
+
   if (ball.number === 0) {
+    // Bola branca
     baseGradient.addColorStop(0, "#ffffff");
-    baseGradient.addColorStop(1, "#d9e5ef");
+    baseGradient.addColorStop(0.45, "#e8f0f8");
+    baseGradient.addColorStop(1, "#b8cce0");
+  } else if (ball.number === 8) {
+    // Bola 8 preta
+    baseGradient.addColorStop(0, "#4a5260");
+    baseGradient.addColorStop(0.3, "#1e2330");
+    baseGradient.addColorStop(1, "#050709");
   } else {
-    baseGradient.addColorStop(0, ball.number === 8 ? "#515964" : "#fff4d0");
-    baseGradient.addColorStop(0.24, ball.number === 8 ? "#232730" : color);
-    baseGradient.addColorStop(1, ball.number === 8 ? "#090b10" : color);
+    baseGradient.addColorStop(0, "#fff8d8");
+    baseGradient.addColorStop(0.18, color);
+    baseGradient.addColorStop(1, shadeColor(color, -55));
   }
 
   ctx.beginPath();
-  ctx.arc(0, 0, BALL_RADIUS, 0, Math.PI * 2);
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
   ctx.fillStyle = baseGradient;
   ctx.fill();
+  ctx.shadowColor = "transparent";
 
+  // Bolas listradas (9-15): faixa branca + cor
   if (ball.number >= 9) {
+    // Base branca com brilho
     ctx.beginPath();
-    ctx.arc(0, 0, BALL_RADIUS - 1.1, 0, Math.PI * 2);
-    ctx.fillStyle = "#fbfdff";
+    ctx.arc(0, 0, r - 0.8 * scale, 0, Math.PI * 2);
+    ctx.fillStyle = "#f8faff";
     ctx.fill();
 
+    // Faixa colorida larga no centro
+    const stripeH = r * 1.04;
+    ctx.save();
     ctx.beginPath();
-    ctx.roundRect(-BALL_RADIUS + 1, -5.2, BALL_RADIUS * 2 - 2, 10.4, 5.2);
-    ctx.fillStyle = color;
-    ctx.fill();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.clip();
+    const sg = ctx.createLinearGradient(-r, -stripeH, r, stripeH);
+    sg.addColorStop(0, shadeColor(color, -30));
+    sg.addColorStop(0.5, color);
+    sg.addColorStop(1, shadeColor(color, -30));
+    ctx.fillStyle = sg;
+    ctx.fillRect(-r, -stripeH, r * 2, stripeH * 2);
+    ctx.restore();
   }
 
+  // Número da bola (disco branco central)
   if (ball.number > 0) {
+    const diskR = r * 0.42;
+    const diskGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, diskR);
+    diskGrad.addColorStop(0, "#ffffff");
+    diskGrad.addColorStop(1, "#e8eef4");
     ctx.beginPath();
-    ctx.arc(0, 0, 5.4, 0, Math.PI * 2);
-    ctx.fillStyle = ball.number === 8 ? "#f4f6fa" : "#fdfdfd";
+    ctx.arc(0, 0, diskR, 0, Math.PI * 2);
+    ctx.fillStyle = diskGrad;
     ctx.fill();
 
-    ctx.fillStyle = ball.number === 8 ? "#091018" : "#182230";
-    ctx.font = "700 7px Inter, system-ui, sans-serif";
+    const fontSize = clamp(Math.round((ball.number >= 10 ? 5.2 : 6.5) * scale), 4, 14);
+    ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(String(ball.number), 0, 0.5);
+    ctx.fillStyle = ball.number === 8 ? "#0a0c12" : "#1a1e2a";
+    ctx.fillText(String(ball.number), 0, 0.5 * scale);
   }
+
+  // Reflexo especular (brilho de luz no canto superior-esquerdo)
+  const specGrad = ctx.createRadialGradient(-r * 0.34, -r * 0.38, 0, -r * 0.28, -r * 0.3, r * 0.58);
+  specGrad.addColorStop(0, "rgba(255, 255, 255, 0.68)");
+  specGrad.addColorStop(0.35, "rgba(255, 255, 255, 0.22)");
+  specGrad.addColorStop(1, "rgba(255, 255, 255, 0)");
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fillStyle = specGrad;
+  ctx.fill();
 
   ctx.restore();
 }
 
-function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, sprite: HTMLImageElement | undefined) {
+// Escurece/clareia uma cor hex
+function shadeColor(hex: string, amount: number): string {
+  const num = parseInt(hex.replace("#", ""), 16);
+  const r = clamp((num >> 16) + amount, 0, 255);
+  const g = clamp(((num >> 8) & 0xff) + amount, 0, 255);
+  const b = clamp((num & 0xff) + amount, 0, 255);
+  return `rgb(${r},${g},${b})`;
+}
+
+function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, sprite: HTMLImageElement | undefined, scale = 1) {
   if (!sprite || !sprite.complete || !sprite.naturalWidth) {
-    drawFallbackBall(ctx, ball);
+    drawFallbackBall(ctx, ball, scale);
     return;
   }
-  const size = BALL_DRAW_SIZE;
+  const size = BALL_DRAW_SIZE * scale;
+  // Sombra elíptica no chão
   ctx.save();
-  ctx.fillStyle = "rgba(0, 0, 0, 0.26)";
+  ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
   ctx.beginPath();
-  ctx.ellipse(ball.x, ball.y + 9.2, 8.8, 4.0, 0, 0, Math.PI * 2);
+  ctx.ellipse(ball.x, ball.y + 9.2 * scale, 8.8 * scale, 3.8 * scale, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
   ctx.drawImage(sprite, ball.x - size / 2, ball.y - size / 2, size, size);
 }
+
+// ─── Animação de bola entrando na caçapa ──────────────────────────────────
+
+function drawPocketAnimation(
+  ctx: CanvasRenderingContext2D,
+  anim: PocketAnimation,
+  now: number,
+  sprite: HTMLImageElement | undefined,
+) {
+  const elapsed = now - anim.startedAt;
+  const t = clamp(elapsed / POCKET_ANIM_DURATION, 0, 1);
+  // ease-in: acelera ao cair na caçapa
+  const eased = t * t;
+  const scale = lerp(1, 0.08, eased);
+  const alpha = lerp(1, 0, Math.pow(t, 0.7));
+  if (alpha <= 0.02) return;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const ball = {
+    ...anim.ball,
+    x: lerp(anim.ball.x, anim.pocketX, eased),
+    y: lerp(anim.ball.y, anim.pocketY, eased),
+  };
+  drawBallSprite(ctx, ball, sprite, scale);
+  ctx.restore();
+}
+
+// ─── Guia de mira ─────────────────────────────────────────────────────────
 
 function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview, aimAngle: number) {
   const hasHit = preview.contactX !== null && preview.contactY !== null && preview.hitBall;
   const lineEndX = hasHit ? preview.contactX! : preview.endX;
   const lineEndY = hasHit ? preview.contactY! : preview.endY;
 
+  // Linha tracejada principal (trajetória da bola branca até o contato)
   ctx.save();
-  ctx.strokeStyle = "rgba(208, 236, 255, 0.16)";
+  ctx.strokeStyle = "rgba(208, 236, 255, 0.18)";
   ctx.lineWidth = 4.2;
   ctx.lineCap = "round";
   ctx.beginPath();
@@ -373,12 +504,15 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.strokeStyle = "rgba(245, 250, 255, 0.95)";
   ctx.lineWidth = 1.15;
   ctx.lineCap = "round";
+  ctx.setLineDash([6, 5]);
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
   ctx.lineTo(lineEndX, lineEndY);
   ctx.stroke();
+  ctx.setLineDash([]);
   ctx.restore();
 
+  // Anel de mira ao redor da bola branca
   const ringX = cueBall.x - Math.cos(aimAngle) * (BALL_RADIUS * 0.56);
   const ringY = cueBall.y - Math.sin(aimAngle) * (BALL_RADIUS * 0.56);
   ctx.save();
@@ -400,31 +534,100 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
     const ghostX = preview.contactX!;
     const ghostY = preview.contactY!;
     const hitBall = preview.hitBall!;
-    const tangentX = Math.cos(aimAngle + Math.PI / 2) * BALL_RADIUS * 1.22;
-    const tangentY = Math.sin(aimAngle + Math.PI / 2) * BALL_RADIUS * 1.22;
-    const objectPathX = Math.cos(aimAngle) * BALL_DIAMETER * 0.92;
-    const objectPathY = Math.sin(aimAngle) * BALL_DIAMETER * 0.92;
+    const dx = Math.cos(aimAngle);
+    const dy = Math.sin(aimAngle);
 
+    // Linha de trajetória da bola alvo (saindo do impacto)
+    // Direção: linha dos centros (do ghost até o centro da bola alvo)
+    const targetDX = hitBall.x - ghostX;
+    const targetDY = hitBall.y - ghostY;
+    const targetLen = Math.hypot(targetDX, targetDY) || 1;
+    const tnx = targetDX / targetLen;
+    const tny = targetDY / targetLen;
+    const objectPathLen = 100;
+
+    ctx.save();
+    ctx.strokeStyle = "rgba(246, 250, 255, 0.85)";
+    ctx.lineWidth = 1.55;
+    ctx.lineCap = "round";
+    ctx.setLineDash([8, 5]);
+    ctx.beginPath();
+    ctx.moveTo(hitBall.x, hitBall.y);
+    ctx.lineTo(hitBall.x + tnx * objectPathLen, hitBall.y + tny * objectPathLen);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    // Bola fantasma no ponto de contato
     ctx.save();
     ctx.beginPath();
     ctx.arc(ghostX, ghostY, BALL_RADIUS * 0.72, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(250, 254, 255, 0.98)";
+    ctx.strokeStyle = "rgba(250, 254, 255, 0.9)";
     ctx.lineWidth = 1.85;
     ctx.stroke();
     ctx.beginPath();
     ctx.arc(ghostX, ghostY, BALL_RADIUS * 1.02, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(166, 231, 255, 0.42)";
+    ctx.strokeStyle = "rgba(166, 231, 255, 0.35)";
     ctx.lineWidth = 1.1;
     ctx.stroke();
+    ctx.restore();
 
-    ctx.strokeStyle = "rgba(246, 250, 255, 0.94)";
-    ctx.lineWidth = 1.55;
+    // ── NOVO: Linha de deflexão da bola branca após o impacto ──────────────
+    if (preview.cueDeflectX !== null && preview.cueDeflectY !== null) {
+      const cdx = preview.cueDeflectX - ghostX;
+      const cdy = preview.cueDeflectY - ghostY;
+      const cdLen = Math.hypot(cdx, cdy);
+      if (cdLen > 4) {
+        ctx.save();
+        // Linha de deflexão em azul-ciano suave
+        ctx.strokeStyle = "rgba(120, 220, 255, 0.65)";
+        ctx.lineWidth = 1.3;
+        ctx.lineCap = "round";
+        ctx.setLineDash([5, 6]);
+        ctx.beginPath();
+        ctx.moveTo(ghostX, ghostY);
+        ctx.lineTo(preview.cueDeflectX, preview.cueDeflectY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Ponto no final da deflexão
+        ctx.beginPath();
+        ctx.arc(preview.cueDeflectX, preview.cueDeflectY, 3, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(120, 220, 255, 0.55)";
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    // Linha tangente na bola alvo (referência visual)
+    const tangentX = Math.cos(aimAngle + Math.PI / 2) * BALL_RADIUS * 1.18;
+    const tangentY = Math.sin(aimAngle + Math.PI / 2) * BALL_RADIUS * 1.18;
+    ctx.save();
+    ctx.strokeStyle = "rgba(246, 250, 255, 0.55)";
+    ctx.lineWidth = 1.2;
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(hitBall.x - tangentX, hitBall.y - tangentY);
     ctx.lineTo(hitBall.x + tangentX, hitBall.y + tangentY);
-    ctx.moveTo(hitBall.x, hitBall.y);
-    ctx.lineTo(hitBall.x + objectPathX, hitBall.y + objectPathY);
+    ctx.stroke();
+    ctx.restore();
+
+    // Seta de direção na bola alvo
+    const arrowLen = 18;
+    const arrowAx = hitBall.x + tnx * arrowLen;
+    const arrowAy = hitBall.y + tny * arrowLen;
+    const perpX = -tny * 5;
+    const perpY = tnx * 5;
+    ctx.save();
+    ctx.strokeStyle = "rgba(246, 250, 255, 0.7)";
+    ctx.lineWidth = 1.2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(hitBall.x + tnx * 12, hitBall.y + tny * 12);
+    ctx.lineTo(arrowAx, arrowAy);
+    ctx.lineTo(arrowAx - tnx * 6 + perpX, arrowAy - tny * 6 + perpY);
+    ctx.moveTo(arrowAx, arrowAy);
+    ctx.lineTo(arrowAx - tnx * 6 - perpX, arrowAy - tny * 6 - perpY);
     ctx.stroke();
     ctx.restore();
   }
@@ -463,6 +666,8 @@ function drawCue(
   ctx.restore();
 }
 
+// ─── Render da mesa completa ───────────────────────────────────────────────
+
 function drawPoolTable(
   ctx: CanvasRenderingContext2D,
   tableCache: HTMLCanvasElement | null,
@@ -476,6 +681,8 @@ function drawPoolTable(
   needEightCall: boolean,
   selectedPocket: number | null,
   isBallInHand: boolean,
+  pocketAnimations: PocketAnimation[],
+  now: number,
 ) {
   ctx.clearRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
 
@@ -501,11 +708,35 @@ function drawPoolTable(
     drawCue(ctx, cueBall, aimAngle, pullRatio, sprites.cue);
   }
 
+  // Sombras das bolas (desenhadas antes)
   for (const ball of renderBalls) {
     if (ball.pocketed) continue;
-    drawBallSprite(ctx, ball, sprites.balls.get(ball.number));
+    ctx.save();
+    ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+    ctx.beginPath();
+    ctx.ellipse(ball.x + 1, ball.y + 8, 9, 3.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
+  // Bolas normais
+  for (const ball of renderBalls) {
+    if (ball.pocketed) continue;
+    const sprite = sprites.balls.get(ball.number);
+    if (sprite && sprite.complete && sprite.naturalWidth) {
+      const size = BALL_DRAW_SIZE;
+      ctx.drawImage(sprite, ball.x - size / 2, ball.y - size / 2, size, size);
+    } else {
+      drawFallbackBall(ctx, ball, 1);
+    }
+  }
+
+  // Animações de bolas entrando nas caçapas
+  for (const anim of pocketAnimations) {
+    drawPocketAnimation(ctx, anim, now, sprites.balls.get(anim.ball.number));
+  }
+
+  // Indicador de bola na mão
   if (cueBall && isBallInHand) {
     ctx.save();
     ctx.setLineDash([8, 6]);
@@ -540,6 +771,8 @@ function buildSpriteBank(): SpriteBank {
   };
 }
 
+// ─── Componente principal ──────────────────────────────────────────────────
+
 export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, onShoot, onExit }: Props) {
   const [displayBalls, setDisplayBalls] = useState<GameBallSnapshot[]>(game.balls);
   const [power, setPower] = useState(0.82);
@@ -569,6 +802,12 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const powerRef = useRef(power);
   const powerReleaseGuardRef = useRef(false);
   const pointerModeRef = useRef<PointerMode>("idle");
+
+  // Animações de bolas caindo nas caçapas
+  const pocketAnimationsRef = useRef<PocketAnimation[]>([]);
+  // Rastreia quais bolas já foram pocketadas (por id) para detectar novas
+  const prevPocketedIdsRef = useRef<Set<string>>(new Set());
+
   const renderStateRef = useRef({
     renderBalls: [] as GameBallSnapshot[],
     cueBall: null as GameBallSnapshot | null,
@@ -706,7 +945,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const angle = Math.atan2(cueBall.y - point.y, cueBall.x - point.x);
     aimAngleRef.current = angle;
   };
-
 
   const updateCuePositionFromPoint = (point: LocalPoint) => {
     if (!cueBall) return;
@@ -870,6 +1108,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     };
   }, [canInteract, cueBall, isBallInHand, isMyTurn, needEightCall, pointerMode, power, renderBalls, selectedPocket, shootBusy]);
 
+  // ─── Loop de renderização ────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -877,6 +1116,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!context) return;
 
     const draw = () => {
+      const now = performance.now();
       const dpr = Math.min(1.4, Math.max(1, window.devicePixelRatio || 1));
       const targetWidth = Math.round(TABLE_WIDTH * dpr);
       const targetHeight = Math.round(TABLE_HEIGHT * dpr);
@@ -899,7 +1139,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const playback = playbackRef.current;
       if (playback && playback.frames.length) {
         const frameStepMs = 1000 / 60;
-        const elapsed = performance.now() - playback.startedAt;
+        const elapsed = now - playback.startedAt;
         const nominalDuration = Math.max(frameStepMs, playback.frames.length * frameStepMs);
         const playbackDuration = Math.min(MAX_PLAYBACK_DURATION_MS, nominalDuration);
         const progress = clamp(elapsed / playbackDuration, 0, 1);
@@ -928,6 +1168,36 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         }
       }
 
+      // ── Detectar bolas recém-pocketadas e criar animações ──────────────
+      const currentPocketedIds = new Set<string>();
+      for (const ball of drawBalls) {
+        if (ball.pocketed) currentPocketedIds.add(ball.id);
+      }
+      for (const ball of drawBalls) {
+        if (ball.pocketed && !prevPocketedIdsRef.current.has(ball.id)) {
+          // Esta bola acabou de ser pocketada!
+          // Encontra a caçapa mais próxima para a animação
+          let closestPocket = POCKETS[0];
+          let minDist = Infinity;
+          for (const pocket of POCKETS) {
+            const d = Math.hypot(pocket.x - ball.x, pocket.y - ball.y);
+            if (d < minDist) { minDist = d; closestPocket = pocket; }
+          }
+          pocketAnimationsRef.current.push({
+            ball,
+            pocketX: closestPocket.x,
+            pocketY: closestPocket.y,
+            startedAt: now,
+          });
+        }
+      }
+      prevPocketedIdsRef.current = currentPocketedIds;
+
+      // Remover animações concluídas
+      pocketAnimationsRef.current = pocketAnimationsRef.current.filter(
+        (anim) => now - anim.startedAt < POCKET_ANIM_DURATION
+      );
+
       const preview = drawCueBall && !animating
         ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current)
         : null;
@@ -949,6 +1219,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         state.needEightCall,
         state.selectedPocket,
         state.isBallInHand,
+        pocketAnimationsRef.current,
+        now,
       );
 
       drawLoopRef.current = window.requestAnimationFrame(draw);
@@ -962,6 +1234,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       }
     };
   }, [animating, assetsVersion, spriteBank]);
+
+  // ─── JSX ────────────────────────────────────────────────────────────────
 
   return (
     <section className="pool-stage" aria-label="Mesa de sinuca">
