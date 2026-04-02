@@ -537,6 +537,8 @@ app.post("/rooms", handleListRoomsHttp);
 app.post("/api/rooms", handleListRoomsHttp);
 app.get("/rooms/:roomId", handleGetRoomHttp);
 app.get("/api/rooms/:roomId", handleGetRoomHttp);
+app.get("/games/shoot", handleShootGameHttp);
+app.get("/api/games/shoot", handleShootGameHttp);
 app.get("/games/:roomId", handleGetGameHttp);
 app.get("/api/games/:roomId", handleGetGameHttp);
 app.post("/rooms/create", handleCreateRoomHttp);
