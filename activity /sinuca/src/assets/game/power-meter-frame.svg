@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="36" height="424" viewBox="0 0 36 424" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" width="38" height="424" viewBox="0 0 38 424" fill="none">
   <defs>
-    <linearGradient id="meterShell" x1="18" y1="22" x2="18" y2="402" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1e2835"/>
-      <stop offset="1" stop-color="#0d121a"/>
+    <linearGradient id="meterShell" x1="19" y1="16" x2="19" y2="408" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#273342"/>
+      <stop offset="1" stop-color="#0e1218"/>
     </linearGradient>
   </defs>
-  <rect x="14" y="14" width="8" height="396" rx="4" fill="url(#meterShell)" stroke="#f4f6fb" stroke-opacity="0.75" stroke-width="2"/>
-  <rect x="0" y="53" width="36" height="6" rx="3" fill="#f6f7fb" fill-opacity="0.95"/>
-  <rect x="0" y="365" width="36" height="6" rx="3" fill="#f6f7fb" fill-opacity="0.95"/>
-  <rect x="11.5" y="11.5" width="13" height="401" rx="6.5" stroke="#ffffff" stroke-opacity="0.12"/>
+  <rect x="15" y="16" width="8" height="392" rx="4" fill="url(#meterShell)" stroke="#f7f8fb" stroke-opacity="0.84" stroke-width="1.8"/>
+  <rect x="0" y="52" width="38" height="6" rx="3" fill="#f6f7fb" fill-opacity="0.95"/>
+  <rect x="0" y="366" width="38" height="6" rx="3" fill="#f6f7fb" fill-opacity="0.95"/>
+  <rect x="12.5" y="13.5" width="13" height="397" rx="6.5" stroke="#ffffff" stroke-opacity="0.12"/>
 </svg>
