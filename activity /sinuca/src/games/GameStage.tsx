@@ -119,6 +119,11 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function lerpAngle(current: number, target: number, factor: number) {
+  const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
+  return current + delta * factor;
+}
+
 function clampCuePosition(x: number, y: number, breakOnly: boolean) {
   return {
     x: clamp(x, PLAY_MIN_X, breakOnly ? BREAK_MAX_X : PLAY_MAX_X),
@@ -281,11 +286,11 @@ function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, s
     drawFallbackBall(ctx, ball);
     return;
   }
-  const size = 33;
+  const size = 31;
   ctx.save();
   ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
   ctx.beginPath();
-  ctx.ellipse(ball.x, ball.y + 10.5, 10.2, 4.7, 0, 0, Math.PI * 2);
+  ctx.ellipse(ball.x, ball.y + 9.7, 9.2, 4.1, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
   ctx.drawImage(sprite, ball.x - size / 2, ball.y - size / 2, size, size);
@@ -293,8 +298,8 @@ function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, s
 
 function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview, aimAngle: number) {
   ctx.save();
-  ctx.strokeStyle = "rgba(171, 233, 255, 0.24)";
-  ctx.lineWidth = 7.5;
+  ctx.strokeStyle = "rgba(164, 228, 255, 0.18)";
+  ctx.lineWidth = 8.6;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -303,8 +308,8 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.restore();
 
   ctx.save();
-  ctx.strokeStyle = "rgba(242, 249, 255, 0.96)";
-  ctx.lineWidth = 2.15;
+  ctx.strokeStyle = "rgba(247, 251, 255, 0.98)";
+  ctx.lineWidth = 1.9;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -372,9 +377,9 @@ function drawCue(
 ) {
   const dirX = Math.cos(aimAngle);
   const dirY = Math.sin(aimAngle);
-  const cueGap = BALL_RADIUS + 7 + pullRatio * 76;
-  const cueLength = 760;
-  const drawHeight = 18;
+  const cueGap = BALL_RADIUS + 8 + pullRatio * 88;
+  const cueLength = 860;
+  const drawHeight = 15;
 
   ctx.save();
   ctx.translate(cueBall.x - dirX * cueGap, cueBall.y - dirY * cueGap);
@@ -483,10 +488,24 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const powerRailRef = useRef<HTMLDivElement | null>(null);
   const animationRef = useRef<number | null>(null);
+  const drawLoopRef = useRef<number | null>(null);
   const lastAnimatedSeqRef = useRef(0);
   const pointerMovedRef = useRef(false);
   const aimAngleRef = useRef(0);
+  const drawAimAngleRef = useRef(0);
   const powerRef = useRef(power);
+  const powerReleaseGuardRef = useRef(false);
+  const renderStateRef = useRef({
+    renderBalls: [] as GameBallSnapshot[],
+    cueBall: null as GameBallSnapshot | null,
+    canInteract: false,
+    pointerMode: "idle" as PointerMode,
+    power,
+    needEightCall: false,
+    selectedPocket: null as number | null,
+    isBallInHand: false,
+    shootBusy: false,
+  });
   const spriteBank = useMemo(() => buildSpriteBank(), []);
 
   const host = room.players.find((player) => player.userId === room.hostUserId) ?? room.players[0] ?? null;
@@ -531,16 +550,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (game.lastShot.seq <= lastAnimatedSeqRef.current) return;
 
     const frames = game.lastShot.frames;
-    let frameIndex = 0;
+    const frameStepMs = 1000 / 60;
+    let startedAt = 0;
     setAnimating(true);
     setAnimatingSeq(game.lastShot.seq);
 
-    const tick = () => {
-      const frame = frames[Math.min(frameIndex, frames.length - 1)];
+    const tick = (timestamp: number) => {
+      if (!startedAt) startedAt = timestamp;
+      const elapsed = timestamp - startedAt;
+      const frameIndex = Math.min(frames.length - 1, Math.floor(elapsed / frameStepMs));
+      const frame = frames[frameIndex];
       setDisplayBalls(frameToDisplayBalls(frame.balls, game.balls));
-      frameIndex += 1;
-      if (frameIndex < frames.length) {
-        animationRef.current = window.setTimeout(tick, 24) as unknown as number;
+      if (frameIndex < frames.length - 1) {
+        animationRef.current = window.requestAnimationFrame(tick);
         return;
       }
       lastAnimatedSeqRef.current = game.lastShot?.seq ?? 0;
@@ -550,17 +572,18 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       animationRef.current = null;
     };
 
-    tick();
+    animationRef.current = window.requestAnimationFrame(tick);
     return () => {
       if (animationRef.current !== null) {
-        window.clearTimeout(animationRef.current);
+        window.cancelAnimationFrame(animationRef.current);
         animationRef.current = null;
       }
     };
   }, [animating, game]);
 
   useEffect(() => () => {
-    if (animationRef.current !== null) window.clearTimeout(animationRef.current);
+    if (animationRef.current !== null) window.cancelAnimationFrame(animationRef.current);
+    if (drawLoopRef.current !== null) window.cancelAnimationFrame(drawLoopRef.current);
   }, []);
 
   const renderBalls = useMemo(() => {
@@ -585,11 +608,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (game.phase === "break") {
       setAimAngle(0);
       aimAngleRef.current = 0;
+      drawAimAngleRef.current = 0;
       return;
     }
     if (game.turnUserId !== currentUserId) {
       setAimAngle(Math.PI);
       aimAngleRef.current = Math.PI;
+      drawAimAngleRef.current = Math.PI;
     }
   }, [cueBall?.id, cueBall?.x, cueBall?.y, currentUserId, game.phase, game.turnUserId]);
 
@@ -687,8 +712,17 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     setPointerMode("idle");
   };
 
+  const commitPowerShot = () => {
+    if (pointerMode !== "power" || powerReleaseGuardRef.current) return;
+    powerReleaseGuardRef.current = true;
+    setPointerMode("idle");
+    console.log("[sinuca-power-release]", JSON.stringify({ roomId: room.roomId, power: clamp(powerRef.current, 0.22, 1) }));
+    void releaseShot();
+  };
+
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!canInteract) return;
+    powerReleaseGuardRef.current = false;
     setPointerMode("power");
     event.currentTarget.setPointerCapture?.(event.pointerId);
     updatePowerFromClientY(event.clientY);
@@ -701,14 +735,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const handlePowerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
-    if (pointerMode !== "power") return;
-    setPointerMode("idle");
-    void releaseShot();
+    commitPowerShot();
   };
 
   const handlePowerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
-    if (pointerMode === "power") setPointerMode("idle");
+    if (pointerMode === "power" && !powerReleaseGuardRef.current) {
+      powerReleaseGuardRef.current = true;
+      setPointerMode("idle");
+    }
+  };
+
+  const handlePowerLostCapture = () => {
+    if (pointerMode === "power") commitPowerShot();
   };
 
   const statusText = game.status === "finished"
@@ -737,34 +776,76 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
               ? "lisas"
               : "listradas";
 
-  const preview = useMemo(() => {
-    if (!cueBall || animating) return null;
-    return computeAimPreview(cueBall, renderBalls, aimAngle);
-  }, [aimAngle, animating, cueBall, renderBalls]);
+  useEffect(() => {
+    renderStateRef.current = {
+      renderBalls,
+      cueBall,
+      canInteract,
+      pointerMode,
+      power,
+      needEightCall: needEightCall && isMyTurn,
+      selectedPocket,
+      isBallInHand,
+      shootBusy,
+    };
+  }, [canInteract, cueBall, isBallInHand, isMyTurn, needEightCall, pointerMode, power, renderBalls, selectedPocket, shootBusy]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const context = canvas.getContext("2d");
     if (!context) return;
-    const dpr = Math.max(1, window.devicePixelRatio || 1);
-    canvas.width = TABLE_WIDTH * dpr;
-    canvas.height = TABLE_HEIGHT * dpr;
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    drawPoolTable(
-      context,
-      spriteBank,
-      renderBalls,
-      cueBall,
-      aimAngle,
-      Boolean(cueBall && canInteract),
-      pointerMode === "power" ? clamp(0.18 + power * 0.82, 0.18, 1) : pointerMode === "aim" ? 0.12 : 0,
-      preview,
-      needEightCall && isMyTurn,
-      selectedPocket,
-      isBallInHand,
-    );
-  }, [aimAngle, animating, assetsVersion, canInteract, cueBall, isBallInHand, isMyTurn, needEightCall, pointerMode, power, preview, renderBalls, selectedPocket, spriteBank]);
+
+    const draw = () => {
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const targetWidth = Math.round(TABLE_WIDTH * dpr);
+      const targetHeight = Math.round(TABLE_HEIGHT * dpr);
+      if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+      }
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      const state = renderStateRef.current;
+      const targetAngle = aimAngleRef.current;
+      drawAimAngleRef.current = lerpAngle(
+        drawAimAngleRef.current,
+        targetAngle,
+        state.pointerMode === "aim" ? 0.34 : state.pointerMode === "power" ? 0.2 : 0.26,
+      );
+      const preview = state.cueBall && !animating
+        ? computeAimPreview(state.cueBall, state.renderBalls, drawAimAngleRef.current)
+        : null;
+
+      drawPoolTable(
+        context,
+        spriteBank,
+        state.renderBalls,
+        state.cueBall,
+        drawAimAngleRef.current,
+        Boolean(state.cueBall && (state.canInteract || state.shootBusy)),
+        state.pointerMode === "power"
+          ? clamp(0.18 + state.power * 0.82, 0.18, 1)
+          : state.pointerMode === "aim"
+            ? 0.08
+            : 0,
+        preview,
+        state.needEightCall,
+        state.selectedPocket,
+        state.isBallInHand,
+      );
+
+      drawLoopRef.current = window.requestAnimationFrame(draw);
+    };
+
+    drawLoopRef.current = window.requestAnimationFrame(draw);
+    return () => {
+      if (drawLoopRef.current !== null) {
+        window.cancelAnimationFrame(drawLoopRef.current);
+        drawLoopRef.current = null;
+      }
+    };
+  }, [animating, assetsVersion, spriteBank]);
 
   return (
     <section className="pool-stage" aria-label="Mesa de sinuca">
