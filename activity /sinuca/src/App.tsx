@@ -1369,9 +1369,15 @@ export default function App() {
     void fetchGameStateOverHttp(room.roomId, "game_initial", game?.shotSequence ?? 0);
     const interval = window.setInterval(() => {
       void fetchGameStateOverHttp(room.roomId, "game_poll", game?.shotSequence ?? 0);
-    }, 400);
+    }, 180);
     return () => window.clearInterval(interval);
   }, [bootstrapped, game?.shotSequence, room?.roomId, screen]);
+
+  useEffect(() => {
+    if (screen !== "game") return;
+    if (!game) return;
+    setGameShootBusy(false);
+  }, [game?.shotSequence, game?.turnUserId, screen]);
 
   const exitCurrentRoom = async (reason: string) => {
     if (!room || roomExitBusy) return;
