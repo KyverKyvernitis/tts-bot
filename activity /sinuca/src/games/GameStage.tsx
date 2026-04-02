@@ -17,6 +17,8 @@ const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
 const BALL_RADIUS = 13;
 const BALL_DIAMETER = BALL_RADIUS * 2;
+const BALL_DRAW_SIZE = 29;
+const MAX_PLAYBACK_DURATION_MS = 2800;
 const FELT_LEFT = 69;
 const FELT_TOP = 50;
 const FELT_RIGHT = TABLE_WIDTH - FELT_LEFT;
@@ -330,11 +332,11 @@ function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, s
     drawFallbackBall(ctx, ball);
     return;
   }
-  const size = 31;
+  const size = BALL_DRAW_SIZE;
   ctx.save();
-  ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+  ctx.fillStyle = "rgba(0, 0, 0, 0.26)";
   ctx.beginPath();
-  ctx.ellipse(ball.x, ball.y + 9.7, 9.2, 4.1, 0, 0, Math.PI * 2);
+  ctx.ellipse(ball.x, ball.y + 9.2, 8.8, 4.0, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
   ctx.drawImage(sprite, ball.x - size / 2, ball.y - size / 2, size, size);
@@ -342,8 +344,8 @@ function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, s
 
 function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview, aimAngle: number) {
   ctx.save();
-  ctx.strokeStyle = "rgba(126, 216, 255, 0.22)";
-  ctx.lineWidth = 7.8;
+  ctx.strokeStyle = "rgba(126, 216, 255, 0.16)";
+  ctx.lineWidth = 6.2;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -352,8 +354,8 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.restore();
 
   ctx.save();
-  ctx.strokeStyle = "rgba(248, 252, 255, 0.96)";
-  ctx.lineWidth = 1.65;
+  ctx.strokeStyle = "rgba(248, 252, 255, 0.98)";
+  ctx.lineWidth = 1.55;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -421,9 +423,9 @@ function drawCue(
 ) {
   const dirX = Math.cos(aimAngle);
   const dirY = Math.sin(aimAngle);
-  const cueGap = BALL_RADIUS + 7 + pullRatio * 94;
-  const cueLength = 980;
-  const drawHeight = 12;
+  const cueGap = BALL_RADIUS + 6 + pullRatio * 112;
+  const cueLength = 1048;
+  const drawHeight = 10;
 
   ctx.save();
   ctx.translate(cueBall.x - dirX * cueGap, cueBall.y - dirY * cueGap);
@@ -841,7 +843,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       drawAimAngleRef.current = lerpAngle(
         drawAimAngleRef.current,
         targetAngle,
-        state.pointerMode === "aim" ? 0.42 : state.pointerMode === "power" ? 0.24 : 0.28,
+        state.pointerMode === "aim" ? 0.62 : state.pointerMode === "power" ? 0.38 : 0.44,
       );
 
       let drawBalls = state.renderBalls;
@@ -850,9 +852,12 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       if (playback && playback.frames.length) {
         const frameStepMs = 1000 / 60;
         const elapsed = performance.now() - playback.startedAt;
-        const rawIndex = elapsed / frameStepMs;
+        const nominalDuration = Math.max(frameStepMs, playback.frames.length * frameStepMs);
+        const playbackDuration = Math.min(MAX_PLAYBACK_DURATION_MS, nominalDuration);
+        const progress = clamp(elapsed / playbackDuration, 0, 1);
+        const rawIndex = progress * Math.max(0, playback.frames.length - 1);
         const frameIndex = Math.min(playback.frames.length - 1, Math.floor(rawIndex));
-        if (frameIndex >= playback.frames.length - 1) {
+        if (progress >= 1 || frameIndex >= playback.frames.length - 1) {
           drawBalls = frameToDisplayBalls(playback.frames[playback.frames.length - 1].balls, playback.baseBalls);
           drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
           if (!playbackSettlingRef.current) {
