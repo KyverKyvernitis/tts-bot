@@ -1,93 +1,114 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" fill="none">
   <defs>
-    <linearGradient id="woodBase" x1="0" y1="20" x2="0" y2="580" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#a94934"/>
-      <stop offset="0.12" stop-color="#8d2d1a"/>
-      <stop offset="0.42" stop-color="#772113"/>
-      <stop offset="0.74" stop-color="#8f301d"/>
-      <stop offset="1" stop-color="#c1694a"/>
+    <linearGradient id="woodOuter" x1="0" y1="24" x2="0" y2="576" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a33f2c"/>
+      <stop offset="0.16" stop-color="#7e2314"/>
+      <stop offset="0.48" stop-color="#5e150b"/>
+      <stop offset="0.78" stop-color="#852717"/>
+      <stop offset="1" stop-color="#c76c4f"/>
     </linearGradient>
-    <linearGradient id="woodGloss" x1="0" y1="32" x2="0" y2="568" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffd7c3" stop-opacity="0.34"/>
-      <stop offset="0.12" stop-color="#ffffff" stop-opacity="0.08"/>
-      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
-      <stop offset="0.82" stop-color="#0d0301" stop-opacity="0.16"/>
-      <stop offset="1" stop-color="#000000" stop-opacity="0.36"/>
+    <linearGradient id="woodInner" x1="0" y1="42" x2="0" y2="558" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f7b693" stop-opacity="0.58"/>
+      <stop offset="0.15" stop-color="#ffffff" stop-opacity="0.09"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0.78" stop-color="#080201" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.34"/>
     </linearGradient>
-    <radialGradient id="felt" cx="50%" cy="47%" r="78%">
-      <stop offset="0" stop-color="#56c3ee"/>
-      <stop offset="0.44" stop-color="#2e9bd2"/>
-      <stop offset="0.8" stop-color="#12649c"/>
-      <stop offset="1" stop-color="#0a335b"/>
+    <radialGradient id="feltFill" cx="50%" cy="47%" r="78%">
+      <stop offset="0" stop-color="#76d9ff"/>
+      <stop offset="0.38" stop-color="#3bb0e6"/>
+      <stop offset="0.76" stop-color="#1576ad"/>
+      <stop offset="1" stop-color="#063056"/>
     </radialGradient>
-    <radialGradient id="feltShade" cx="50%" cy="50%" r="84%">
-      <stop offset="0.58" stop-color="#ffffff" stop-opacity="0"/>
-      <stop offset="0.82" stop-color="#001728" stop-opacity="0.18"/>
-      <stop offset="1" stop-color="#00111d" stop-opacity="0.52"/>
+    <radialGradient id="feltShade" cx="50%" cy="50%" r="82%">
+      <stop offset="0.48" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0.72" stop-color="#001420" stop-opacity="0.15"/>
+      <stop offset="0.9" stop-color="#000f19" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#000912" stop-opacity="0.66"/>
     </radialGradient>
-    <linearGradient id="cushionTop" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#dbf3ff" stop-opacity="0.98"/>
-      <stop offset="0.34" stop-color="#93c0d9" stop-opacity="0.92"/>
-      <stop offset="1" stop-color="#51738a" stop-opacity="0.98"/>
+    <linearGradient id="railTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e8fbff" stop-opacity="0.96"/>
+      <stop offset="0.28" stop-color="#adcfe3" stop-opacity="0.96"/>
+      <stop offset="1" stop-color="#597d95" stop-opacity="0.98"/>
     </linearGradient>
-    <linearGradient id="cushionSide" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#84acc4" stop-opacity="0.96"/>
-      <stop offset="1" stop-color="#d7f2ff" stop-opacity="0.92"/>
+    <linearGradient id="railSide" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7aa3bc"/>
+      <stop offset="1" stop-color="#e0f7ff"/>
     </linearGradient>
-    <radialGradient id="pocket" cx="50%" cy="42%" r="68%">
-      <stop offset="0" stop-color="#323641"/>
-      <stop offset="0.34" stop-color="#090d14"/>
+    <radialGradient id="pocketCore" cx="50%" cy="42%" r="72%">
+      <stop offset="0" stop-color="#343944"/>
+      <stop offset="0.28" stop-color="#111620"/>
       <stop offset="1" stop-color="#000000"/>
     </radialGradient>
-    <filter id="shadow" x="-10%" y="-14%" width="120%" height="136%">
-      <feDropShadow dx="0" dy="26" stdDeviation="26" flood-color="#000000" flood-opacity="0.34"/>
-      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#000000" flood-opacity="0.22"/>
+    <filter id="tableShadow" x="-10%" y="-14%" width="120%" height="140%">
+      <feDropShadow dx="0" dy="26" stdDeviation="24" flood-color="#000000" flood-opacity="0.4"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000000" flood-opacity="0.18"/>
     </filter>
   </defs>
 
-  <g filter="url(#shadow)">
-    <rect x="18" y="20" width="1164" height="560" rx="56" fill="#200906"/>
-    <rect x="26" y="28" width="1148" height="544" rx="48" fill="url(#woodBase)"/>
-    <rect x="26" y="28" width="1148" height="544" rx="48" fill="url(#woodGloss)"/>
+  <g filter="url(#tableShadow)">
+    <rect x="16" y="20" width="1168" height="560" rx="58" fill="#180504"/>
+    <rect x="26" y="28" width="1148" height="544" rx="50" fill="url(#woodOuter)"/>
+    <rect x="26" y="28" width="1148" height="544" rx="50" fill="url(#woodInner)"/>
+    <rect x="42" y="44" width="1116" height="512" rx="40" stroke="#f2d0bd" stroke-opacity="0.12" stroke-width="3"/>
 
-    <path d="M90 82H1110" stroke="#2f120c" stroke-opacity="0.9" stroke-width="10" stroke-linecap="round"/>
-    <path d="M90 518H1110" stroke="#2f120c" stroke-opacity="0.9" stroke-width="10" stroke-linecap="round"/>
-    <path d="M102 64H1098" stroke="#ffd5bf" stroke-opacity="0.22" stroke-width="3" stroke-linecap="round"/>
-    <path d="M102 536H1098" stroke="#200706" stroke-opacity="0.55" stroke-width="4" stroke-linecap="round"/>
+    <path d="M92 80H1108" stroke="#2b0d08" stroke-opacity="0.95" stroke-width="11" stroke-linecap="round"/>
+    <path d="M92 520H1108" stroke="#2b0d08" stroke-opacity="0.95" stroke-width="11" stroke-linecap="round"/>
+    <path d="M104 62H1096" stroke="#ffd4c0" stroke-opacity="0.24" stroke-width="3" stroke-linecap="round"/>
+    <path d="M104 538H1096" stroke="#180605" stroke-opacity="0.48" stroke-width="4" stroke-linecap="round"/>
 
-    <rect x="69" y="50" width="1062" height="500" rx="28" fill="url(#felt)"/>
+    <rect x="69" y="50" width="1062" height="500" rx="28" fill="url(#feltFill)"/>
     <rect x="69" y="50" width="1062" height="500" rx="28" fill="url(#feltShade)"/>
+    <rect x="76" y="57" width="1048" height="486" rx="24" stroke="#dff6ff" stroke-opacity="0.08" stroke-width="2"/>
 
-    <path d="M105 62H535L504 90H136Z" fill="url(#cushionTop)"/>
-    <path d="M665 62H1095L1064 90H696Z" fill="url(#cushionTop)"/>
-    <path d="M136 510H504L535 538H105Z" fill="url(#cushionTop)" opacity="0.86"/>
-    <path d="M696 510H1064L1095 538H665Z" fill="url(#cushionTop)" opacity="0.86"/>
-    <path d="M80 118V482L100 456V144Z" fill="url(#cushionSide)" opacity="0.86"/>
-    <path d="M1120 118V482L1100 456V144Z" fill="url(#cushionSide)" opacity="0.86"/>
+    <path d="M104 62H536L502 92H138Z" fill="url(#railTop)"/>
+    <path d="M664 62H1096L1062 92H698Z" fill="url(#railTop)"/>
+    <path d="M138 508H502L536 538H104Z" fill="url(#railTop)" opacity="0.9"/>
+    <path d="M698 508H1062L1096 538H664Z" fill="url(#railTop)" opacity="0.9"/>
+    <path d="M80 116V484L102 456V144Z" fill="url(#railSide)" opacity="0.9"/>
+    <path d="M1120 116V484L1098 456V144Z" fill="url(#railSide)" opacity="0.9"/>
+    <path d="M96 102H1104" stroke="#ffffff" stroke-opacity="0.05" stroke-width="1.5"/>
 
-    <path d="M328 82V518" stroke="#d9f7ff" stroke-opacity="0.14" stroke-width="2"/>
+    <path d="M328 84V516" stroke="#dcf8ff" stroke-opacity="0.15" stroke-width="2"/>
     <circle cx="328" cy="300" r="31" stroke="#effbff" stroke-opacity="0.12" stroke-width="2"/>
 
-    <g fill="#f7fcff" opacity="0.72">
-      <circle cx="210" cy="64" r="2.7"/><circle cx="340" cy="64" r="2.7"/><circle cx="470" cy="64" r="2.7"/>
-      <circle cx="730" cy="64" r="2.7"/><circle cx="860" cy="64" r="2.7"/><circle cx="990" cy="64" r="2.7"/>
-      <circle cx="210" cy="536" r="2.7"/><circle cx="340" cy="536" r="2.7"/><circle cx="470" cy="536" r="2.7"/>
-      <circle cx="730" cy="536" r="2.7"/><circle cx="860" cy="536" r="2.7"/><circle cx="990" cy="536" r="2.7"/>
+    <g fill="#f5fbff" opacity="0.8">
+      <circle cx="212" cy="64" r="2.8"/><circle cx="342" cy="64" r="2.8"/><circle cx="472" cy="64" r="2.8"/>
+      <circle cx="728" cy="64" r="2.8"/><circle cx="858" cy="64" r="2.8"/><circle cx="988" cy="64" r="2.8"/>
+      <circle cx="212" cy="536" r="2.8"/><circle cx="342" cy="536" r="2.8"/><circle cx="472" cy="536" r="2.8"/>
+      <circle cx="728" cy="536" r="2.8"/><circle cx="858" cy="536" r="2.8"/><circle cx="988" cy="536" r="2.8"/>
     </g>
 
     <g>
-      <circle cx="54" cy="42" r="33" fill="#36110d"/>
-      <circle cx="54" cy="42" r="28" fill="url(#pocket)"/>
-      <circle cx="600" cy="28" r="31" fill="#36110d"/>
-      <circle cx="600" cy="28" r="26" fill="url(#pocket)"/>
-      <circle cx="1146" cy="42" r="33" fill="#36110d"/>
-      <circle cx="1146" cy="42" r="28" fill="url(#pocket)"/>
-      <circle cx="54" cy="558" r="33" fill="#36110d"/>
-      <circle cx="54" cy="558" r="28" fill="url(#pocket)"/>
-      <circle cx="600" cy="572" r="31" fill="#36110d"/>
-      <circle cx="600" cy="572" r="26" fill="url(#pocket)"/>
-      <circle cx="1146" cy="558" r="33" fill="#36110d"/>
-      <circle cx="1146" cy="558" r="28" fill="url(#pocket)"/>
+      <circle cx="54" cy="42" r="34" fill="#2b0f0b"/>
+      <circle cx="54" cy="42" r="30" fill="#3a1610" opacity="0.72"/>
+      <circle cx="54" cy="42" r="26.8" fill="url(#pocketCore)"/>
+      <ellipse cx="54" cy="38" rx="19" ry="12" fill="#5a616f" opacity="0.16"/>
+
+      <circle cx="600" cy="28" r="32" fill="#2b0f0b"/>
+      <circle cx="600" cy="28" r="28.5" fill="#3a1610" opacity="0.72"/>
+      <circle cx="600" cy="28" r="25.5" fill="url(#pocketCore)"/>
+      <ellipse cx="600" cy="24" rx="18" ry="11.5" fill="#5a616f" opacity="0.16"/>
+
+      <circle cx="1146" cy="42" r="34" fill="#2b0f0b"/>
+      <circle cx="1146" cy="42" r="30" fill="#3a1610" opacity="0.72"/>
+      <circle cx="1146" cy="42" r="26.8" fill="url(#pocketCore)"/>
+      <ellipse cx="1146" cy="38" rx="19" ry="12" fill="#5a616f" opacity="0.16"/>
+
+      <circle cx="54" cy="558" r="34" fill="#2b0f0b"/>
+      <circle cx="54" cy="558" r="30" fill="#3a1610" opacity="0.72"/>
+      <circle cx="54" cy="558" r="26.8" fill="url(#pocketCore)"/>
+      <ellipse cx="54" cy="554" rx="19" ry="12" fill="#5a616f" opacity="0.16"/>
+
+      <circle cx="600" cy="572" r="32" fill="#2b0f0b"/>
+      <circle cx="600" cy="572" r="28.5" fill="#3a1610" opacity="0.72"/>
+      <circle cx="600" cy="572" r="25.5" fill="url(#pocketCore)"/>
+      <ellipse cx="600" cy="568" rx="18" ry="11.5" fill="#5a616f" opacity="0.16"/>
+
+      <circle cx="1146" cy="558" r="34" fill="#2b0f0b"/>
+      <circle cx="1146" cy="558" r="30" fill="#3a1610" opacity="0.72"/>
+      <circle cx="1146" cy="558" r="26.8" fill="url(#pocketCore)"/>
+      <ellipse cx="1146" cy="554" rx="19" ry="12" fill="#5a616f" opacity="0.16"/>
     </g>
   </g>
 </svg>

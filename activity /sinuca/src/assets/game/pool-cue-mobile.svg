@@ -1,28 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="24" viewBox="0 0 1320 24" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" width="1460" height="20" viewBox="0 0 1460 20" fill="none">
   <defs>
-    <linearGradient id="cueWood" x1="0" y1="12" x2="1320" y2="12" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#3c2317"/>
-      <stop offset="0.07" stop-color="#7a4a2f"/>
-      <stop offset="0.18" stop-color="#c49463"/>
-      <stop offset="0.54" stop-color="#efd7a1"/>
-      <stop offset="1" stop-color="#fff5db"/>
+    <linearGradient id="cueMain" x1="0" y1="10" x2="1460" y2="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#44281b"/>
+      <stop offset="0.08" stop-color="#855338"/>
+      <stop offset="0.18" stop-color="#c29464"/>
+      <stop offset="0.52" stop-color="#e7d2a3"/>
+      <stop offset="1" stop-color="#fff7dc"/>
     </linearGradient>
-    <linearGradient id="cueShade" x1="0" y1="2" x2="0" y2="22" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.34"/>
-      <stop offset="0.4" stop-color="#ffffff" stop-opacity="0.04"/>
-      <stop offset="1" stop-color="#000000" stop-opacity="0.22"/>
+    <linearGradient id="cueShade" x1="0" y1="2" x2="0" y2="18" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.3"/>
+      <stop offset="0.4" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.24"/>
     </linearGradient>
   </defs>
-  <g>
-    <rect x="58" y="8.4" width="1184" height="7.2" rx="3.6" fill="url(#cueWood)"/>
-    <rect x="58" y="8.4" width="1184" height="7.2" rx="3.6" fill="url(#cueShade)"/>
-    <rect x="0" y="6.2" width="64" height="11.6" rx="4.4" fill="#d6ba8a"/>
-    <rect x="64" y="7.2" width="22" height="9.6" rx="3" fill="#ead7af"/>
-    <rect x="194" y="7.5" width="18" height="9" rx="2.8" fill="#101720" opacity="0.84"/>
-    <rect x="214" y="7.5" width="26" height="9" rx="3" fill="#cfb68e" opacity="0.98"/>
-    <rect x="1172" y="7.2" width="24" height="9.6" rx="3.2" fill="#11161c" opacity="0.85"/>
-    <rect x="1198" y="7.2" width="22" height="9.6" rx="3.2" fill="#11161c" opacity="0.85"/>
-    <rect x="1224" y="7.6" width="58" height="8.8" rx="3.6" fill="#efe4ce"/>
-    <circle cx="1290" cy="12" r="4.2" fill="#f7fbff"/>
-  </g>
+  <rect x="72" y="7" width="1318" height="6" rx="3" fill="url(#cueMain)"/>
+  <rect x="72" y="7" width="1318" height="6" rx="3" fill="url(#cueShade)"/>
+  <rect x="0" y="5.2" width="74" height="9.6" rx="4.8" fill="#d7bf92"/>
+  <rect x="74" y="6" width="18" height="8" rx="3.6" fill="#f0debc"/>
+  <rect x="198" y="6.2" width="14" height="7.6" rx="3" fill="#11171e" opacity="0.86"/>
+  <rect x="214" y="6.2" width="24" height="7.6" rx="3" fill="#d5bc95"/>
+  <rect x="1188" y="6.2" width="20" height="7.6" rx="3" fill="#11161c" opacity="0.84"/>
+  <rect x="1212" y="6.2" width="20" height="7.6" rx="3" fill="#11161c" opacity="0.84"/>
+  <rect x="1236" y="6.5" width="112" height="7" rx="3.5" fill="#eee3cf"/>
+  <rect x="1348" y="6.5" width="58" height="7" rx="3.5" fill="#fbf8ef"/>
+  <circle cx="1416" cy="10" r="3.6" fill="#ffffff"/>
 </svg>
