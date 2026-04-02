@@ -308,6 +308,11 @@ export default function App() {
   }, [room]);
 
   useEffect(() => {
+    if (!game) return;
+    setGameShootBusy(false);
+  }, [game?.roomId, game?.shotSequence, game?.turnUserId]);
+
+  useEffect(() => {
     isRoomHostRef.current = Boolean(room && room.hostUserId === state.currentUser.userId);
     currentUserIdRef.current = state.currentUser.userId;
   }, [room, state.currentUser.userId]);
