@@ -281,11 +281,11 @@ function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, s
     drawFallbackBall(ctx, ball);
     return;
   }
-  const size = 36;
+  const size = 33;
   ctx.save();
-  ctx.fillStyle = "rgba(0, 0, 0, 0.24)";
+  ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
   ctx.beginPath();
-  ctx.ellipse(ball.x, ball.y + 12, 11.5, 5.2, 0, 0, Math.PI * 2);
+  ctx.ellipse(ball.x, ball.y + 10.5, 10.2, 4.7, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
   ctx.drawImage(sprite, ball.x - size / 2, ball.y - size / 2, size, size);
@@ -293,8 +293,8 @@ function drawBallSprite(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, s
 
 function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview, aimAngle: number) {
   ctx.save();
-  ctx.strokeStyle = "rgba(255,255,255,0.18)";
-  ctx.lineWidth = 8;
+  ctx.strokeStyle = "rgba(171, 233, 255, 0.24)";
+  ctx.lineWidth = 7.5;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -303,8 +303,8 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.restore();
 
   ctx.save();
-  ctx.strokeStyle = "rgba(255,255,255,0.9)";
-  ctx.lineWidth = 2.4;
+  ctx.strokeStyle = "rgba(242, 249, 255, 0.96)";
+  ctx.lineWidth = 2.15;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -312,31 +312,52 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.stroke();
   ctx.restore();
 
+  const ringX = cueBall.x - Math.cos(aimAngle) * (BALL_RADIUS * 0.45);
+  const ringY = cueBall.y - Math.sin(aimAngle) * (BALL_RADIUS * 0.45);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(ringX, ringY, BALL_RADIUS * 0.92, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(255,255,255,0.38)";
+  ctx.lineWidth = 1.8;
+  ctx.setLineDash([8, 7]);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cueBall.x, cueBall.y, BALL_RADIUS * 1.68, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(176, 235, 255, 0.18)";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([]);
+  ctx.stroke();
+  ctx.restore();
+
   if (preview.contactX !== null && preview.contactY !== null) {
     ctx.save();
     ctx.beginPath();
-    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.74, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(255,255,255,0.96)";
+    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.72, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(252,255,255,0.98)";
     ctx.lineWidth = 2.2;
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.42, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(255,255,255,0.68)";
-    ctx.lineWidth = 1.5;
+    ctx.arc(preview.contactX, preview.contactY, BALL_RADIUS * 0.34, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(190, 244, 255, 0.7)";
+    ctx.lineWidth = 1.4;
     ctx.stroke();
     ctx.restore();
   }
 
   if (preview.hitBall) {
-    const impactDx = Math.cos(aimAngle) * BALL_DIAMETER;
-    const impactDy = Math.sin(aimAngle) * BALL_DIAMETER;
+    const normalX = Math.cos(aimAngle + Math.PI / 2) * BALL_RADIUS * 1.4;
+    const normalY = Math.sin(aimAngle + Math.PI / 2) * BALL_RADIUS * 1.4;
+    const tailX = Math.cos(aimAngle) * BALL_DIAMETER * 0.7;
+    const tailY = Math.sin(aimAngle) * BALL_DIAMETER * 0.7;
     ctx.save();
-    ctx.setLineDash([10, 8]);
-    ctx.strokeStyle = "rgba(255,255,255,0.38)";
-    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = "rgba(255,255,255,0.92)";
+    ctx.lineWidth = 1.8;
+    ctx.lineCap = "round";
     ctx.beginPath();
+    ctx.moveTo(preview.hitBall.x - normalX, preview.hitBall.y - normalY);
+    ctx.lineTo(preview.hitBall.x + normalX, preview.hitBall.y + normalY);
     ctx.moveTo(preview.hitBall.x, preview.hitBall.y);
-    ctx.lineTo(preview.hitBall.x + impactDx * 0.58, preview.hitBall.y + impactDy * 0.58);
+    ctx.lineTo(preview.hitBall.x + tailX, preview.hitBall.y + tailY);
     ctx.stroke();
     ctx.restore();
   }
@@ -351,13 +372,16 @@ function drawCue(
 ) {
   const dirX = Math.cos(aimAngle);
   const dirY = Math.sin(aimAngle);
-  const cueGap = BALL_RADIUS + 18 + pullRatio * 82;
-  const cueLength = 640;
-  const drawHeight = 22;
+  const cueGap = BALL_RADIUS + 7 + pullRatio * 76;
+  const cueLength = 760;
+  const drawHeight = 18;
 
   ctx.save();
   ctx.translate(cueBall.x - dirX * cueGap, cueBall.y - dirY * cueGap);
   ctx.rotate(aimAngle);
+  ctx.shadowColor = "rgba(0, 0, 0, 0.28)";
+  ctx.shadowBlur = 10;
+  ctx.shadowOffsetY = 2;
   if (cueSprite.complete && cueSprite.naturalWidth) {
     ctx.drawImage(cueSprite, -cueLength, -drawHeight / 2, cueLength, drawHeight);
   } else {
@@ -588,7 +612,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const updateAimFromPoint = (point: LocalPoint) => {
     if (!cueBall) return;
-    const angle = Math.atan2(point.y - cueBall.y, point.x - cueBall.x);
+    const angle = Math.atan2(cueBall.y - point.y, cueBall.x - point.x);
     aimAngleRef.current = angle;
     setAimAngle(angle);
   };
@@ -734,7 +758,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       cueBall,
       aimAngle,
       Boolean(cueBall && canInteract),
-      pointerMode === "power" ? clamp(0.18 + power * 0.82, 0.18, 1) : 0,
+      pointerMode === "power" ? clamp(0.18 + power * 0.82, 0.18, 1) : pointerMode === "aim" ? 0.12 : 0,
       preview,
       needEightCall && isMyTurn,
       selectedPocket,
