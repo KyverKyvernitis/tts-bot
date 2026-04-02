@@ -1369,7 +1369,7 @@ export default function App() {
     void fetchGameStateOverHttp(room.roomId, "game_initial", game?.shotSequence ?? 0);
     const interval = window.setInterval(() => {
       void fetchGameStateOverHttp(room.roomId, "game_poll", game?.shotSequence ?? 0);
-    }, 180);
+    }, 140);
     return () => window.clearInterval(interval);
   }, [bootstrapped, game?.shotSequence, room?.roomId, screen]);
 
@@ -1377,7 +1377,7 @@ export default function App() {
     if (screen !== "game") return;
     if (!game) return;
     setGameShootBusy(false);
-  }, [game?.shotSequence, game?.turnUserId, screen]);
+  }, [game?.shotSequence, game?.turnUserId, game?.updatedAt, screen]);
 
   const exitCurrentRoom = async (reason: string) => {
     if (!room || roomExitBusy) return;
