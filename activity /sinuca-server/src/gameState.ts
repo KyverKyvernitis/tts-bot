@@ -3,13 +3,13 @@ import type { RoomRecord } from "./rooms.js";
 
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
-const BALL_RADIUS = 12;
+const BALL_RADIUS = 13;
 const BALL_DIAMETER = BALL_RADIUS * 2;
-const POCKET_RADIUS = 34;
-const RAIL_MARGIN_X = 54;
-const RAIL_MARGIN_Y = 44;
-const HEAD_STRING_X = TABLE_WIDTH * 0.29;
-const DEFAULT_CUE_X = TABLE_WIDTH * 0.23;
+const POCKET_RADIUS = 29;
+const RAIL_MARGIN_X = 69;
+const RAIL_MARGIN_Y = 50;
+const HEAD_STRING_X = 328;
+const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
 const MAX_SHOT_SPEED = 24;
 const MIN_SPEED = 0.05;
@@ -18,12 +18,12 @@ const MAX_STEPS = 960;
 const FRAME_SAMPLE_EVERY = 2;
 
 const POCKETS = [
-  { x: RAIL_MARGIN_X - 6, y: RAIL_MARGIN_Y - 6 },
-  { x: TABLE_WIDTH / 2, y: RAIL_MARGIN_Y - 14 },
-  { x: TABLE_WIDTH - RAIL_MARGIN_X + 6, y: RAIL_MARGIN_Y - 6 },
-  { x: RAIL_MARGIN_X - 6, y: TABLE_HEIGHT - RAIL_MARGIN_Y + 6 },
-  { x: TABLE_WIDTH / 2, y: TABLE_HEIGHT - RAIL_MARGIN_Y + 14 },
-  { x: TABLE_WIDTH - RAIL_MARGIN_X + 6, y: TABLE_HEIGHT - RAIL_MARGIN_Y + 6 },
+  { x: 54, y: 42 },
+  { x: TABLE_WIDTH / 2, y: 28 },
+  { x: TABLE_WIDTH - 54, y: 42 },
+  { x: 54, y: TABLE_HEIGHT - 42 },
+  { x: TABLE_WIDTH / 2, y: TABLE_HEIGHT - 28 },
+  { x: TABLE_WIDTH - 54, y: TABLE_HEIGHT - 42 },
 ] as const;
 
 interface PhysicsBall extends GameBallSnapshot {
@@ -76,10 +76,10 @@ function createBall(number: number, x: number, y: number): PhysicsBall {
 
 function rackBalls(): PhysicsBall[] {
   const balls: PhysicsBall[] = [createBall(0, DEFAULT_CUE_X, DEFAULT_CUE_Y)];
-  const apexX = 874;
+  const apexX = 922;
   const apexY = TABLE_HEIGHT / 2;
   const rowStepX = BALL_DIAMETER * 0.88;
-  const spacing = BALL_DIAMETER * 1.01;
+  const spacing = BALL_DIAMETER * 1.02;
   const rackRows = [
     [1],
     [9, 2],
