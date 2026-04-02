@@ -914,8 +914,37 @@ export default function App() {
     return null;
   };
 
+  const forceShootGameOverHttpGet = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null }, reason: string) => {
+    const attempts: string[] = [];
+    for (const baseUrl of resolveApiCandidates("/games/shoot")) {
+      try {
+        const url = new URL(baseUrl, window.location.origin);
+        url.searchParams.set("roomId", roomId);
+        url.searchParams.set("userId", state.currentUser.userId);
+        url.searchParams.set("angle", String(shot.angle));
+        url.searchParams.set("power", String(shot.power));
+        if (shot.cueX !== null && shot.cueX !== undefined) url.searchParams.set("cueX", String(shot.cueX));
+        if (shot.cueY !== null && shot.cueY !== undefined) url.searchParams.set("cueY", String(shot.cueY));
+        if (shot.calledPocket !== null && shot.calledPocket !== undefined) url.searchParams.set("calledPocket", String(shot.calledPocket));
+        console.log("[sinuca-http-shoot-get]", JSON.stringify({ reason, url: url.toString() }));
+        const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 4200);
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
+        if (response.ok) return parsed;
+        attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+      } catch (error) {
+        attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
+      }
+    }
+    if (attempts.length) {
+      setAuthDebug((current) => current ? `${current} • shoot_get:http_failed:${reason}:${attempts.join(" | ")}` : `shoot_get:http_failed:${reason}:${attempts.join(" | ")}`);
+    }
+    return null;
+  };
+
   const shootGameOverHttp = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null }, reason: string) => {
-    const result = await postGameActionOverHttp("/games/shoot", {
+    const previousSeq = game?.roomId === roomId ? game.shotSequence : 0;
+    const payload = {
       roomId,
       userId: state.currentUser.userId,
       angle: shot.angle,
@@ -923,11 +952,33 @@ export default function App() {
       cueX: shot.cueX ?? null,
       cueY: shot.cueY ?? null,
       calledPocket: shot.calledPocket ?? null,
-    }, reason);
+    };
+
+    console.log("[sinuca-shoot-dispatch]", JSON.stringify({ reason, previousSeq, payload }));
+    let result = await postGameActionOverHttp("/games/shoot", payload, reason);
     if (result?.game) {
       setGame(result.game);
       return result.game;
     }
+
+    const refreshedAfterPost = await fetchGameStateOverHttp(roomId, `${reason}:verify_after_post`, previousSeq);
+    if (refreshedAfterPost && refreshedAfterPost.shotSequence > previousSeq) {
+      return refreshedAfterPost;
+    }
+
+    result = await forceShootGameOverHttpGet(roomId, shot, `${reason}:direct_get`);
+    if (result?.game) {
+      setGame(result.game);
+      return result.game;
+    }
+
+    const refreshedAfterGet = await fetchGameStateOverHttp(roomId, `${reason}:verify_after_get`, previousSeq);
+    if (refreshedAfterGet && refreshedAfterGet.shotSequence > previousSeq) {
+      return refreshedAfterGet;
+    }
+
+    console.warn("[sinuca-shoot-missing]", JSON.stringify({ roomId, previousSeq, reason }));
+    setErrorMessage("A tacada não chegou ao servidor.");
     return null;
   };
 
@@ -1837,7 +1888,10 @@ export default function App() {
               setGameShootBusy(true);
               setErrorMessage(null);
               try {
-                await shootGameOverHttp(room.roomId, shot, "http_primary_game_shoot");
+                const applied = await shootGameOverHttp(room.roomId, shot, "http_primary_game_shoot");
+                if (!applied) {
+                  console.warn("[sinuca-shoot-ui]", JSON.stringify({ roomId: room.roomId, reason: "no_game_returned" }));
+                }
               } finally {
                 setGameShootBusy(false);
               }
