@@ -15,7 +15,8 @@ const MAX_SHOT_SPEED = 24;
 const MIN_SPEED = 0.05;
 const FRICTION = 0.992;
 const MAX_STEPS = 960;
-const FRAME_SAMPLE_EVERY = 2;
+const FRAME_SAMPLE_EVERY = 1;
+const MAX_SUBSTEPS = 4;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -332,36 +333,44 @@ function simulateShot(
   let hadAnyCollision = false;
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
-    for (const ball of balls) {
-      if (ball.pocketed) continue;
-      ball.x += ball.vx;
-      ball.y += ball.vy;
-      const bounced = handleWallCollision(ball);
-      if (bounced && firstHitNumber !== null) railAfterContact = true;
-    }
+    const maxVelocity = balls.reduce((max, ball) => ball.pocketed ? max : Math.max(max, Math.abs(ball.vx), Math.abs(ball.vy)), 0);
+    const substeps = clamp(Math.ceil(maxVelocity / 7), 1, MAX_SUBSTEPS);
 
-    for (let index = 0; index < balls.length; index += 1) {
-      for (let otherIndex = index + 1; otherIndex < balls.length; otherIndex += 1) {
-        const a = balls[index];
-        const b = balls[otherIndex];
-        const collided = resolveCollision(a, b);
-        if (!collided) continue;
-        hadAnyCollision = true;
-        if (firstHitNumber === null) {
-          if (a.number === 0 && b.number !== 0) firstHitNumber = b.number;
-          else if (b.number === 0 && a.number !== 0) firstHitNumber = a.number;
+    for (let substep = 0; substep < substeps; substep += 1) {
+      for (const ball of balls) {
+        if (ball.pocketed) continue;
+        ball.x += ball.vx / substeps;
+        ball.y += ball.vy / substeps;
+        const bounced = handleWallCollision(ball);
+        if (bounced && firstHitNumber !== null) railAfterContact = true;
+      }
+
+      for (let index = 0; index < balls.length; index += 1) {
+        for (let otherIndex = index + 1; otherIndex < balls.length; otherIndex += 1) {
+          const a = balls[index];
+          const b = balls[otherIndex];
+          const collided = resolveCollision(a, b);
+          if (!collided) continue;
+          hadAnyCollision = true;
+          if (firstHitNumber === null) {
+            if (a.number === 0 && b.number !== 0) firstHitNumber = b.number;
+            else if (b.number === 0 && a.number !== 0) firstHitNumber = a.number;
+          }
+        }
+      }
+
+      for (const ball of balls) {
+        if (ball.pocketed) continue;
+        const pocketIndex = handlePocket(ball);
+        if (pocketIndex !== null) {
+          if (ball.number === 0) cuePocketed = true;
+          else pocketedEvents.push({ number: ball.number, pocketIndex });
         }
       }
     }
 
     for (const ball of balls) {
       if (ball.pocketed) continue;
-      const pocketIndex = handlePocket(ball);
-      if (pocketIndex !== null) {
-        if (ball.number === 0) cuePocketed = true;
-        else pocketedEvents.push({ number: ball.number, pocketIndex });
-        continue;
-      }
       ball.vx *= FRICTION;
       ball.vy *= FRICTION;
       if (Math.abs(ball.vx) < MIN_SPEED) ball.vx = 0;
