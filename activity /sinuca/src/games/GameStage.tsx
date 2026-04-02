@@ -26,9 +26,6 @@ const RACK_APEX_X = 922;
 const RACK_APEX_Y = TABLE_HEIGHT / 2;
 const RACK_ROW_STEP_X = BALL_DIAMETER * 0.88;
 const RACK_SPACING = BALL_DIAMETER * 1.02;
-const MAX_PULL_DISTANCE = 182;
-const CUE_DRAW_LENGTH = 880;
-const CUE_DRAW_HEIGHT = 31;
 const POCKETS = [
   { id: 1, x: 54, y: 42 },
   { id: 2, x: TABLE_WIDTH / 2, y: 28 },
@@ -431,7 +428,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const [power, setPower] = useState(0.82);
   const [aimAngle, setAimAngle] = useState(0);
   const [pointerMode, setPointerMode] = useState<PointerMode>("idle");
-  const [pullRatio, setPullRatio] = useState(0);
   const [animating, setAnimating] = useState(false);
   const [animatingSeq, setAnimatingSeq] = useState(0);
   const [selectedPocket, setSelectedPocket] = useState<number | null>(null);
@@ -442,7 +438,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const animationRef = useRef<number | null>(null);
   const lastAnimatedSeqRef = useRef(0);
   const pointerMovedRef = useRef(false);
-  const pullRatioRef = useRef(0);
   const aimAngleRef = useRef(0);
   const powerRef = useRef(power);
   const spriteBank = useMemo(() => buildSpriteBank(), []);
@@ -575,14 +570,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     setAimAngle(angle);
   };
 
-  const updatePullFromPoint = (point: LocalPoint) => {
-    if (!cueBall) return;
-    const distance = Math.hypot(point.x - cueBall.x, point.y - cueBall.y);
-    const ratio = clamp((distance - 12) / MAX_PULL_DISTANCE, 0, 1);
-    pullRatioRef.current = ratio;
-    setPullRatio(ratio);
-    pointerMovedRef.current = distance > 14;
-  };
 
   const updateCuePositionFromPoint = (point: LocalPoint) => {
     if (!cueBall) return;
@@ -600,24 +587,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   };
 
   const releaseShot = async () => {
-    if (!cueBall || !canInteract) return;
+    if (!cueBall || !canInteract || shootBusy) return;
     if (needEightCall && selectedPocket === null) return;
-    const dragPower = pullRatioRef.current;
-    if (dragPower < 0.1) {
-      pullRatioRef.current = 0;
-      setPullRatio(0);
-      return;
-    }
-    const resolvedPower = clamp(0.14 + powerRef.current * dragPower * 0.86, 0.14, 1);
     await onShoot({
       angle: aimAngleRef.current,
-      power: resolvedPower,
+      power: clamp(powerRef.current, 0.22, 1),
       cueX: isBallInHand ? cueBall.x : null,
       cueY: isBallInHand ? cueBall.y : null,
       calledPocket: needEightCall ? selectedPocket : null,
     });
-    pullRatioRef.current = 0;
-    setPullRatio(0);
   };
 
   const handleTablePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -633,7 +611,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     }
     setPointerMode("aim");
     updateAimFromPoint(point);
-    updatePullFromPoint(point);
+    pointerMovedRef.current = true;
   };
 
   const handleTablePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -646,20 +624,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     }
     if (pointerMode === "aim") {
       updateAimFromPoint(point);
-      updatePullFromPoint(point);
+      pointerMovedRef.current = true;
     }
   };
 
   const handleTablePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
-    const activeMode = pointerMode;
     setPointerMode("idle");
-    if (activeMode === "aim" && pointerMovedRef.current && !shootBusy) {
-      void releaseShot();
-      return;
-    }
-    pullRatioRef.current = 0;
-    setPullRatio(0);
   };
 
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -675,6 +646,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   };
 
   const handlePowerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (pointerMode !== "power") return;
+    setPointerMode("idle");
+    void releaseShot();
+  };
+
+  const handlePowerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     if (pointerMode === "power") setPointerMode("idle");
   };
@@ -726,13 +704,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       cueBall,
       aimAngle,
       Boolean(cueBall && canInteract),
-      pullRatio,
+      pointerMode === "power" ? clamp(0.18 + power * 0.82, 0.18, 1) : 0,
       preview,
       needEightCall && isMyTurn,
       selectedPocket,
       isBallInHand,
     );
-  }, [aimAngle, animating, assetsVersion, canInteract, cueBall, isBallInHand, isMyTurn, needEightCall, preview, pullRatio, renderBalls, selectedPocket, spriteBank]);
+  }, [aimAngle, animating, assetsVersion, canInteract, cueBall, isBallInHand, isMyTurn, needEightCall, pointerMode, power, preview, renderBalls, selectedPocket, spriteBank]);
 
   return (
     <section className="pool-stage" aria-label="Mesa de sinuca">
@@ -790,7 +768,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onPointerDown={handlePowerDown}
           onPointerMove={handlePowerMove}
           onPointerUp={handlePowerUp}
-          onPointerCancel={handlePowerUp}
+          onPointerCancel={handlePowerCancel}
         >
           <div className="pool-stage__power-track">
             <div className="pool-stage__power-fill" style={{ height: `${Math.round(power * 100)}%` }} />
