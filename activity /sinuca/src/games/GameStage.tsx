@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { BallGroup, GameBallSnapshot, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
-import tableAsset from "../assets/game/pool-table-mobile.svg";
-import cueAsset from "../assets/game/pool-cue-mobile.svg";
-import powerFrameAsset from "../assets/game/power-meter-frame.svg";
+import tableAsset from "../assets/game/pool-table-public.png";
+import cueAsset from "../assets/game/pool-cue-public.png";
+import powerFrameAsset from "../assets/game/power-meter-public.png";
 
-const BALL_SPRITE_MODULES = import.meta.glob("../assets/game/balls/*.svg", { eager: true, import: "default" }) as Record<string, string>;
+const BALL_SPRITE_MODULES = import.meta.glob("../assets/game/balls/*.png", { eager: true, import: "default" }) as Record<string, string>;
 
 const BALL_SPRITES_BY_NUMBER = new Map<number, string>();
 Object.entries(BALL_SPRITE_MODULES).forEach(([path, src]) => {
-  const match = path.match(/ball-(\d+)\.svg$/);
+  const match = path.match(/ball-(\d+)\.png$/);
   if (!match) return;
   BALL_SPRITES_BY_NUMBER.set(Number(match[1]), src);
 });
@@ -17,7 +17,7 @@ const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
 const BALL_RADIUS = 13;
 const BALL_DIAMETER = BALL_RADIUS * 2;
-const BALL_DRAW_SIZE = 28;
+const BALL_DRAW_SIZE = 30;
 const MAX_PLAYBACK_DURATION_MS = 2800;
 const FELT_LEFT = 69;
 const FELT_TOP = 50;
@@ -85,6 +85,18 @@ type SpriteBank = {
   table: HTMLImageElement;
   cue: HTMLImageElement;
   balls: Map<number, HTMLImageElement>;
+};
+
+function makeTableCache(image: HTMLImageElement) {
+  if (!image.complete || !image.naturalWidth) return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = TABLE_WIDTH;
+  canvas.height = TABLE_HEIGHT;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.clearRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+  ctx.drawImage(image, 0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+  return canvas;
 };
 
 function cleanName(name: string) {
@@ -348,8 +360,8 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   const lineEndY = hasHit ? preview.contactY! : preview.endY;
 
   ctx.save();
-  ctx.strokeStyle = "rgba(208, 236, 255, 0.18)";
-  ctx.lineWidth = 5.2;
+  ctx.strokeStyle = "rgba(208, 236, 255, 0.16)";
+  ctx.lineWidth = 4.2;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -359,7 +371,7 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
 
   ctx.save();
   ctx.strokeStyle = "rgba(245, 250, 255, 0.95)";
-  ctx.lineWidth = 1.35;
+  ctx.lineWidth = 1.15;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -428,8 +440,8 @@ function drawCue(
   const dirX = Math.cos(aimAngle);
   const dirY = Math.sin(aimAngle);
   const cueGap = BALL_RADIUS + 4 + pullRatio * 118;
-  const cueLength = 1088;
-  const drawHeight = 8;
+  const cueLength = 1028;
+  const drawHeight = cueSprite.complete && cueSprite.naturalWidth ? Math.max(9, cueLength * (cueSprite.naturalHeight / cueSprite.naturalWidth)) : 10;
 
   ctx.save();
   ctx.translate(cueBall.x - dirX * cueGap, cueBall.y - dirY * cueGap);
@@ -453,6 +465,7 @@ function drawCue(
 
 function drawPoolTable(
   ctx: CanvasRenderingContext2D,
+  tableCache: HTMLCanvasElement | null,
   sprites: SpriteBank,
   renderBalls: GameBallSnapshot[],
   cueBall: GameBallSnapshot | null,
@@ -466,7 +479,9 @@ function drawPoolTable(
 ) {
   ctx.clearRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
 
-  if (sprites.table.complete && sprites.table.naturalWidth) {
+  if (tableCache) {
+    ctx.drawImage(tableCache, 0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+  } else if (sprites.table.complete && sprites.table.naturalWidth) {
     ctx.drawImage(sprites.table, 0, 0, TABLE_WIDTH, TABLE_HEIGHT);
   }
 
@@ -513,7 +528,7 @@ function createImage(src: string) {
 function buildSpriteBank(): SpriteBank {
   const balls = new Map<number, HTMLImageElement>();
   Object.entries(BALL_SPRITE_MODULES).forEach(([path, src]) => {
-    const match = path.match(/ball-(\d+)\.svg$/);
+    const match = path.match(/ball-(\d+)\.png$/);
     if (!match) return;
     balls.set(Number(match[1]), createImage(src));
   });
@@ -538,6 +553,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const powerRailRef = useRef<HTMLDivElement | null>(null);
   const drawLoopRef = useRef<number | null>(null);
+  const tableCacheRef = useRef<HTMLCanvasElement | null>(null);
   const lastAnimatedSeqRef = useRef(0);
   const playbackRef = useRef<{
     seq: number;
@@ -552,6 +568,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const drawAimAngleRef = useRef(0);
   const powerRef = useRef(power);
   const powerReleaseGuardRef = useRef(false);
+  const pointerModeRef = useRef<PointerMode>("idle");
   const renderStateRef = useRef({
     renderBalls: [] as GameBallSnapshot[],
     cueBall: null as GameBallSnapshot | null,
@@ -596,6 +613,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
     return () => unregister.forEach((fn) => fn());
   }, [spriteBank]);
+
+  useEffect(() => {
+    tableCacheRef.current = makeTableCache(spriteBank.table);
+  }, [assetsVersion, spriteBank]);
 
   useEffect(() => {
     if (!animating) setDisplayBalls(game.balls);
@@ -662,6 +683,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     powerRef.current = power;
   }, [power]);
 
+  useEffect(() => {
+    pointerModeRef.current = pointerMode;
+  }, [pointerMode]);
+
+  const setPointerModeSafe = (next: PointerMode) => {
+    pointerModeRef.current = next;
+    setPointerMode(next);
+  };
+
   const pointToLocal = (clientX: number, clientY: number) => {
     if (!tableWrapRef.current) return null;
     const rect = tableWrapRef.current.getBoundingClientRect();
@@ -719,11 +749,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     event.currentTarget.setPointerCapture?.(event.pointerId);
     pointerMovedRef.current = false;
     if (isBallInHand && pointInCircle(point, cueBall.x, cueBall.y, BALL_RADIUS * 2.2)) {
-      setPointerMode("place");
+      setPointerModeSafe("place");
       updateCuePositionFromPoint(point);
       return;
     }
-    setPointerMode("aim");
+    setPointerModeSafe("aim");
     updateAimFromPoint(point);
     pointerMovedRef.current = true;
   };
@@ -744,13 +774,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const handleTablePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
-    setPointerMode("idle");
+    setPointerModeSafe("idle");
   };
 
   const commitPowerShot = () => {
-    if (pointerMode !== "power" || powerReleaseGuardRef.current) return;
+    if (pointerModeRef.current !== "power" || powerReleaseGuardRef.current) return;
     powerReleaseGuardRef.current = true;
-    setPointerMode("idle");
+    setPointerModeSafe("idle");
     console.log("[sinuca-power-release]", JSON.stringify({ roomId: room.roomId, power: clamp(powerRef.current, 0.22, 1) }));
     void releaseShot();
   };
@@ -758,13 +788,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!canInteract) return;
     powerReleaseGuardRef.current = false;
-    setPointerMode("power");
+    setPointerModeSafe("power");
     event.currentTarget.setPointerCapture?.(event.pointerId);
     updatePowerFromClientY(event.clientY);
   };
 
   const handlePowerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (pointerMode !== "power") return;
+    if (pointerModeRef.current !== "power") return;
     updatePowerFromClientY(event.clientY);
   };
 
@@ -775,15 +805,30 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const handlePowerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
-    if (pointerMode === "power" && !powerReleaseGuardRef.current) {
-      powerReleaseGuardRef.current = true;
-      setPointerMode("idle");
+    if (pointerModeRef.current === "power" && !powerReleaseGuardRef.current) {
+      commitPowerShot();
     }
   };
 
   const handlePowerLostCapture = () => {
-    if (pointerMode === "power") commitPowerShot();
+    if (pointerModeRef.current === "power") commitPowerShot();
   };
+
+  useEffect(() => {
+    if (pointerMode !== "power") return;
+    const handleWindowUp = () => {
+      if (pointerModeRef.current === "power") commitPowerShot();
+    };
+    const handleWindowCancel = () => {
+      if (pointerModeRef.current === "power") commitPowerShot();
+    };
+    window.addEventListener("pointerup", handleWindowUp);
+    window.addEventListener("pointercancel", handleWindowCancel);
+    return () => {
+      window.removeEventListener("pointerup", handleWindowUp);
+      window.removeEventListener("pointercancel", handleWindowCancel);
+    };
+  }, [pointerMode, room.roomId, currentUserId, shootBusy, animating, canInteract, isBallInHand, needEightCall, selectedPocket]);
 
   const statusText = game.status === "finished"
     ? game.winnerUserId === currentUserId ? "Você venceu" : "Você perdeu"
@@ -832,7 +877,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!context) return;
 
     const draw = () => {
-      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const dpr = Math.min(1.4, Math.max(1, window.devicePixelRatio || 1));
       const targetWidth = Math.round(TABLE_WIDTH * dpr);
       const targetHeight = Math.round(TABLE_HEIGHT * dpr);
       if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
@@ -889,6 +934,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
       drawPoolTable(
         context,
+        tableCacheRef.current,
         spriteBank,
         drawBalls,
         drawCueBall,
@@ -984,6 +1030,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onPointerMove={handlePowerMove}
           onPointerUp={handlePowerUp}
           onPointerCancel={handlePowerCancel}
+          onLostPointerCapture={handlePowerLostCapture}
         >
           <div className="pool-stage__power-track">
             <div className="pool-stage__power-fill" style={{ height: `${Math.round(power * 100)}%` }} />
