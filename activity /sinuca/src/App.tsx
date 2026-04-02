@@ -1369,7 +1369,7 @@ export default function App() {
     void fetchGameStateOverHttp(room.roomId, "game_initial", game?.shotSequence ?? 0);
     const interval = window.setInterval(() => {
       void fetchGameStateOverHttp(room.roomId, "game_poll", game?.shotSequence ?? 0);
-    }, 900);
+    }, 400);
     return () => window.clearInterval(interval);
   }, [bootstrapped, game?.shotSequence, room?.roomId, screen]);
 
