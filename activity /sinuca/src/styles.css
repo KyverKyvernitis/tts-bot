@@ -406,7 +406,7 @@ button:focus-visible {
 
 .empty-card--home {
   display: grid;
-  gap: 6px;
+  gap: 5px;
   min-height: 94px;
   align-content: center;
 }
@@ -951,7 +951,7 @@ button:focus-visible {
   height: 100%;
   display: grid;
   place-items: center;
-  font-size: 2rem;
+  font-size: 1.8rem;
   color: rgba(240, 246, 252, 0.72);
 }
 
@@ -3325,7 +3325,7 @@ button:focus-visible {
 }
 
 .game-mobile-player--right {
-  grid-template-columns: minmax(0, 1fr) 52px;
+  grid-template-columns: minmax(0, 1fr) 48px;
 }
 
 .game-mobile-player--active {
@@ -4287,7 +4287,7 @@ button:focus-visible {
   border-radius: 20px;
   background: linear-gradient(180deg, #39c43c 0%, #199e27 100%);
   color: #effff0;
-  font-size: 2rem;
+  font-size: 1.8rem;
   line-height: 1;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 12px 20px rgba(0,0,0,0.25);
 }
@@ -4723,40 +4723,40 @@ button:focus-visible {
   position: absolute;
   inset: 0;
   display: grid;
-  grid-template-rows: 62px minmax(0, 1fr);
-  gap: 6px;
-  padding: max(8px, env(safe-area-inset-top, 0px)) 12px 8px;
+  grid-template-rows: 56px minmax(0, 1fr);
+  gap: 4px;
+  padding: max(8px, env(safe-area-inset-top, 0px)) 10px 8px;
   overflow: hidden;
   background: transparent;
 }
 
 .pool-stage__hud {
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr) 148px minmax(0, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr) 138px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-height: 0;
 }
 
 .pool-stage__menu,
 .pool-stage__player,
 .pool-stage__status {
-  height: 60px;
-  border-radius: 20px;
+  height: 54px;
+  border-radius: 18px;
   border: 1px solid rgba(119, 211, 255, 0.18);
   background: linear-gradient(180deg, rgba(2, 12, 24, 0.82), rgba(4, 10, 20, 0.9));
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 10px 22px rgba(0,0,0,0.18);
 }
 
 .pool-stage__menu {
-  width: 60px;
-  border-radius: 18px;
+  width: 52px;
+  border-radius: 16px;
   display: grid;
   place-items: center;
   border-color: rgba(120, 255, 127, 0.26);
   background: linear-gradient(180deg, #3fd04c, #28a93d);
   color: #f7fff9;
-  font-size: 2rem;
+  font-size: 1.8rem;
   font-weight: 700;
 }
 
@@ -4766,14 +4766,14 @@ button:focus-visible {
 
 .pool-stage__player {
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr);
+  grid-template-columns: 48px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
-  padding: 4px 12px;
+  gap: 8px;
+  padding: 4px 10px;
 }
 
 .pool-stage__player--right {
-  grid-template-columns: minmax(0, 1fr) 52px;
+  grid-template-columns: minmax(0, 1fr) 48px;
 }
 
 .pool-stage__player--active {
@@ -4782,15 +4782,15 @@ button:focus-visible {
 }
 
 .pool-stage__avatar {
-  width: 46px;
-  height: 46px;
-  border-radius: 15px;
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
   overflow: hidden;
   display: grid;
   place-items: center;
   background: linear-gradient(180deg, rgba(25, 34, 48, 0.96), rgba(8, 11, 17, 0.98));
   border: 1px solid rgba(255,255,255,0.08);
-  font: 700 0.96rem var(--font-ui);
+  font: 700 0.92rem var(--font-ui);
   color: #eef7ff;
 }
 
@@ -4811,7 +4811,7 @@ button:focus-visible {
 }
 
 .pool-stage__player-copy strong {
-  font: 700 clamp(1rem, 1vw, 1.22rem) var(--font-ui);
+  font: 700 clamp(0.94rem, 0.96vw, 1.12rem) var(--font-ui);
   color: #f6f8ff;
   white-space: nowrap;
   overflow: hidden;
@@ -4828,8 +4828,8 @@ button:focus-visible {
 }
 
 .pool-stage__pip {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   border-radius: 999px;
   border: 1px solid rgba(255,255,255,0.14);
   background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.08), rgba(0,0,0,0.54));
@@ -4844,44 +4844,44 @@ button:focus-visible {
   display: grid;
   align-content: center;
   justify-items: center;
-  gap: 2px;
-  padding: 4px 8px;
+  gap: 1px;
+  padding: 3px 8px;
   text-align: center;
 }
 
 .pool-stage__stake {
-  min-width: 88px;
-  padding: 2px 12px;
+  min-width: 84px;
+  padding: 1px 12px;
   border-radius: 999px;
   border: 1px solid rgba(255,255,255,0.08);
   background: linear-gradient(180deg, rgba(38, 54, 104, 0.84), rgba(20, 29, 61, 0.94));
-  font: 700 0.96rem var(--font-ui);
+  font: 700 0.92rem var(--font-ui);
   color: #fbfdff;
 }
 
 .pool-stage__status strong {
-  font: 700 1rem var(--font-ui);
+  font: 700 0.94rem var(--font-ui);
   color: #ffffff;
 }
 
 .pool-stage__status small {
-  font: 600 0.82rem var(--font-ui);
+  font: 600 0.76rem var(--font-ui);
   color: rgba(232, 242, 255, 0.74);
 }
 
 .pool-stage__table-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: 54px minmax(0, 1fr);
-  gap: 8px;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 6px;
   align-items: center;
 }
 
 .pool-stage__power {
   align-self: center;
   justify-self: center;
-  width: 52px;
-  height: min(76vh, 460px);
+  width: 44px;
+  height: min(74vh, 430px);
   display: grid;
   justify-items: center;
   align-content: center;
@@ -4894,7 +4894,7 @@ button:focus-visible {
 
 .pool-stage__power-track {
   position: relative;
-  width: 52px;
+  width: 44px;
   height: 100%;
   min-height: 220px;
 }
@@ -4910,9 +4910,9 @@ button:focus-visible {
 
 .pool-stage__power-fill {
   position: absolute;
-  left: 18px;
+  left: 15px;
   bottom: 30px;
-  width: 16px;
+  width: 14px;
   border-radius: 10px;
   background: linear-gradient(180deg, #fff5bb, #f8cf6a 38%, #e08d33 74%, #c0571f 100%);
   box-shadow: 0 0 14px rgba(255, 196, 111, 0.32), inset 0 1px 0 rgba(255,255,255,0.4);
@@ -4920,8 +4920,8 @@ button:focus-visible {
 
 .pool-stage__power-marker {
   position: absolute;
-  left: 8px;
-  width: 36px;
+  left: 5px;
+  width: 34px;
   height: 5px;
   border-radius: 999px;
   background: rgba(255,255,255,0.95);
@@ -4930,7 +4930,7 @@ button:focus-visible {
 }
 
 .pool-stage__power small {
-  font: 700 1rem var(--font-ui);
+  font: 700 0.94rem var(--font-ui);
 }
 
 .pool-stage__table-shell {
@@ -4942,9 +4942,9 @@ button:focus-visible {
 
 .pool-stage__table-wrap {
   position: relative;
-  width: min(100%, calc((100dvh - 106px) * 2));
-  max-width: 1400px;
-  filter: drop-shadow(0 24px 26px rgba(0, 0, 0, 0.34));
+  width: min(100%, calc((100dvh - 94px) * 2.04));
+  max-width: 1420px;
+  filter: drop-shadow(0 28px 30px rgba(0, 0, 0, 0.36));
   aspect-ratio: 2 / 1;
   touch-action: none;
   user-select: none;
