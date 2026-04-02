@@ -1,19 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="40" height="456" viewBox="0 0 40 456" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="424" viewBox="0 0 36 424" fill="none">
   <defs>
-    <linearGradient id="frameMetal" x1="20" y1="0" x2="20" y2="456" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#f2f3f6"/>
-      <stop offset="0.16" stop-color="#dadde1"/>
-      <stop offset="1" stop-color="#747b84"/>
-    </linearGradient>
-    <linearGradient id="coreDark" x1="20" y1="34" x2="20" y2="422" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#26303a"/>
-      <stop offset="0.5" stop-color="#0f161f"/>
-      <stop offset="1" stop-color="#070b11"/>
+    <linearGradient id="meterShell" x1="18" y1="22" x2="18" y2="402" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1e2835"/>
+      <stop offset="1" stop-color="#0d121a"/>
     </linearGradient>
   </defs>
-  <rect x="5" y="0" width="30" height="7" rx="3.5" fill="#d9dfe4" opacity="0.82"/>
-  <rect x="9" y="26" width="22" height="404" rx="11" fill="url(#frameMetal)"/>
-  <rect x="12" y="32" width="16" height="392" rx="8" fill="url(#coreDark)"/>
-  <rect x="0" y="220" width="40" height="6" rx="3" fill="#f5f7fa" opacity="0.9"/>
-  <rect x="5" y="449" width="30" height="7" rx="3.5" fill="#7f8690" opacity="0.82"/>
+  <rect x="14" y="14" width="8" height="396" rx="4" fill="url(#meterShell)" stroke="#f4f6fb" stroke-opacity="0.75" stroke-width="2"/>
+  <rect x="0" y="53" width="36" height="6" rx="3" fill="#f6f7fb" fill-opacity="0.95"/>
+  <rect x="0" y="365" width="36" height="6" rx="3" fill="#f6f7fb" fill-opacity="0.95"/>
+  <rect x="11.5" y="11.5" width="13" height="401" rx="6.5" stroke="#ffffff" stroke-opacity="0.12"/>
 </svg>
