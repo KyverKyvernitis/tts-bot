@@ -133,6 +133,8 @@ type AimPreview = {
   contactY: number | null;
   cueDeflectX: number | null;
   cueDeflectY: number | null;
+  targetGuideX: number | null;
+  targetGuideY: number | null;
 };
 
 type PocketAnimation = {
@@ -289,6 +291,8 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
   let contactY: number | null = null;
   let cueDeflectX: number | null = null;
   let cueDeflectY: number | null = null;
+  let targetGuideX: number | null = null;
+  let targetGuideY: number | null = null;
 
   for (const ball of balls) {
     if (ball.pocketed || ball.number === 0) continue;
@@ -314,6 +318,8 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
     const nlen = Math.hypot(nx, ny) || 1;
     const nnx = nx / nlen;
     const nny = ny / nlen;
+    targetGuideX = hitBall.x + nnx * 66;
+    targetGuideY = hitBall.y + nny * 66;
     const dotN = dx * nnx + dy * nny;
     const remVx = dx - dotN * nnx;
     const remVy = dy - dotN * nny;
@@ -328,7 +334,7 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
     }
   }
 
-  return { endX: cueBall.x + dx * hitDistance, endY: cueBall.y + dy * hitDistance, hitBall, contactX, contactY, cueDeflectX, cueDeflectY };
+  return { endX: cueBall.x + dx * hitDistance, endY: cueBall.y + dy * hitDistance, hitBall, contactX, contactY, cueDeflectX, cueDeflectY, targetGuideX, targetGuideY };
 }
 
 // ─── Canvas ball rendering (high quality 3D with numbers/stripes) ──────────
@@ -467,6 +473,27 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
   ctx.lineTo(lineEndX, lineEndY);
   ctx.stroke();
   ctx.restore();
+
+  if (hasHit && preview.hitBall && preview.targetGuideX !== null && preview.targetGuideY !== null) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(240, 246, 255, 0.58)";
+    ctx.lineWidth = 0.95;
+    ctx.lineCap = "round";
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(preview.hitBall.x, preview.hitBall.y);
+    ctx.lineTo(preview.targetGuideX, preview.targetGuideY);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,0.72)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(preview.hitBall.x, preview.hitBall.y, BALL_VISUAL_RADIUS + 1.5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
 // Ghost ball circle — drawn AFTER balls so it's visible on top
@@ -753,8 +780,18 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if ((game.phase === "break" || game.shotSequence === 0) && visibleNonCue.length < 15) {
       return buildOpeningBalls(displayBalls);
     }
+    if (game.ballInHandUserId) {
+      const cue = displayBalls.find((ball) => ball.number === 0) ?? null;
+      if (!cue || cue.pocketed) {
+        const placed = clampCuePosition(DEFAULT_CUE_X, DEFAULT_CUE_Y, game.phase === "break");
+        return [
+          { id: cue?.id ?? "ball-0", number: 0, x: placed.x, y: placed.y, pocketed: false },
+          ...displayBalls.filter((ball) => ball.number !== 0),
+        ];
+      }
+    }
     return displayBalls;
-  }, [displayBalls, game.phase, game.shotSequence]);
+  }, [displayBalls, game.ballInHandUserId, game.phase, game.shotSequence]);
 
   const cueBall = renderBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
   const canInteract = Boolean(cueBall && isMyTurn && !animating && !shootBusy && game.status !== "finished");
@@ -856,10 +893,21 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const commitPowerShot = () => {
     if (pointerModeRef.current !== "power" || powerReleaseGuardRef.current) return;
     powerReleaseGuardRef.current = true;
-    // Start snap-back animation instead of instant fire
-    snapAnimRef.current = { startedAt: performance.now(), power: powerRef.current, fired: false };
+    const state = renderStateRef.current;
+    const liveCueBall = state.cueBall;
+    const shotPower = clamp(powerRef.current, 0.05, 1);
+    snapAnimRef.current = { startedAt: performance.now(), power: shotPower, fired: true };
     setPointerModeSafe("idle");
-    // The actual shot fires after snap animation completes (see render loop)
+    if (!liveCueBall || !canInteractRef.current || shootBusyRef.current) return;
+    const payload = {
+      angle: aimAngleRef.current,
+      power: shotPower,
+      cueX: state.isBallInHand ? liveCueBall.x : null,
+      cueY: state.isBallInHand ? liveCueBall.y : null,
+      calledPocket: state.needEightCall ? state.selectedPocket : null,
+    };
+    SFX.cueHit(payload.power);
+    void onShootRef.current(payload).catch(() => {});
   };
 
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1006,36 +1054,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
       const preview = drawCueBall && !animating ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
 
-      // Snap animation: animate pullback return + fire shot
-      const SNAP_MS = 120;
+      // Quick cue settle after release for responsiveness
+      const SNAP_MS = 46;
       const snap = snapAnimRef.current;
       let pullRatio = 0;
-      if (snap && !snap.fired) {
+      if (snap) {
         const elapsed = now - snap.startedAt;
         if (elapsed >= SNAP_MS) {
           pullRatio = 0;
-          snap.fired = true;
           snapAnimRef.current = null;
-          // Fire the actual shot now
-          const shotPower = snap.power;
-          powerRef.current = shotPower;
-          void (async () => {
-            if (!drawCueBall || !canInteractRef.current || shootBusyRef.current) return;
-            const payload = {
-              angle: aimAngleRef.current,
-              power: clamp(shotPower, 0.05, 1),
-              cueX: state.isBallInHand ? drawCueBall.x : null,
-              cueY: state.isBallInHand ? drawCueBall.y : null,
-              calledPocket: state.needEightCall ? state.selectedPocket : null,
-            };
-            SFX.cueHit(payload.power);
-            await onShootRef.current(payload);
-          })();
         } else {
-          // Animate pullback returning to 0 with easeOut
           const t = elapsed / SNAP_MS;
           const eased = 1 - (1 - t) * (1 - t);
-          pullRatio = clamp(0.18 + snap.power * 0.82, 0.18, 1) * (1 - eased);
+          pullRatio = clamp(0.16 + snap.power * 0.78, 0.16, 1) * (1 - eased);
         }
       } else if (state.pointerMode === "power") {
         pullRatio = clamp(0.18 + state.power * 0.82, 0.18, 1);
@@ -1188,8 +1219,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onLostPointerCapture={handlePowerLostCapture}
         >
           <div className="pool-stage__power-track">
-            <div className="pool-stage__power-fill" style={{ height: `${Math.round(power * 100)}%` }} />
-            <div className="pool-stage__power-marker" style={{ bottom: `${Math.round(power * 100)}%` }} />
+            <div className="pool-stage__power-fill" style={{ height: `${Math.round(power * 100)}%`, top: "2px", bottom: "auto" }} />
+            <div className="pool-stage__power-marker" style={{ top: `${Math.round(power * 100)}%` }} />
           </div>
         </div>
 
