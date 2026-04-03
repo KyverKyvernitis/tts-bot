@@ -67,6 +67,7 @@ const SFX = (() => {
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
 const BALL_RADIUS = 13;
+const BALL_VISUAL_RADIUS = 15; // Draw slightly larger than physics for visibility (#8)
 const BALL_DIAMETER = BALL_RADIUS * 2;
 const MAX_PLAYBACK_DURATION_MS = 3500;
 const FELT_LEFT = 69;
@@ -83,8 +84,8 @@ const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
 const RACK_APEX_X = 922;
 const RACK_APEX_Y = TABLE_HEIGHT / 2;
-const RACK_ROW_STEP_X = BALL_DIAMETER * 0.88;
-const RACK_SPACING = BALL_DIAMETER * 1.02;
+const RACK_ROW_STEP_X = BALL_DIAMETER * 0.866;
+const RACK_SPACING = BALL_DIAMETER * 1.0;
 const POCKETS = [
   { id: 1, x: 54, y: 42 },
   { id: 2, x: TABLE_WIDTH / 2, y: 28 },
@@ -294,7 +295,7 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
     const relX = ball.x - cueBall.x;
     const relY = ball.y - cueBall.y;
     const projection = relX * dx + relY * dy;
-    if (projection <= BALL_DIAMETER) continue;
+    if (projection <= BALL_RADIUS) continue;
     const perpendicularSq = relX * relX + relY * relY - projection * projection;
     const limit = BALL_DIAMETER * BALL_DIAMETER;
     if (perpendicularSq < 0 || perpendicularSq > limit) continue;
@@ -333,16 +334,17 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
 // ─── Canvas ball rendering (high quality 3D with numbers/stripes) ──────────
 
 function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, scale = 1) {
-  const r = BALL_RADIUS * scale;
+  const r = BALL_VISUAL_RADIUS * scale;
   const color = ballColor(ball.number);
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
 
-  // Shadow
-  ctx.shadowColor = "rgba(0, 0, 0, 0.38)";
-  ctx.shadowBlur = 8 * scale;
-  ctx.shadowOffsetY = 4 * scale;
+  // Shadow — stronger and more visible (#10)
+  ctx.shadowColor = "rgba(0, 0, 0, 0.50)";
+  ctx.shadowBlur = 10 * scale;
+  ctx.shadowOffsetX = 1 * scale;
+  ctx.shadowOffsetY = 5 * scale;
 
   // Base 3D gradient
   const baseGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r * 1.3);
@@ -387,9 +389,9 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, scale =
     ctx.restore();
   }
 
-  // Number disk
+  // Number disk — bigger (#9)
   if (ball.number > 0) {
-    const diskR = r * 0.42;
+    const diskR = r * 0.44;
     const diskGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, diskR);
     diskGrad.addColorStop(0, "#ffffff");
     diskGrad.addColorStop(1, "#e8eef4");
@@ -398,7 +400,8 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, scale =
     ctx.fillStyle = diskGrad;
     ctx.fill();
 
-    const fontSize = clamp(Math.round((ball.number >= 10 ? 5.2 : 6.5) * scale), 4, 14);
+    // Bigger font size (#9)
+    const fontSize = clamp(Math.round((ball.number >= 10 ? 7 : 8.5) * scale), 5, 18);
     ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -470,7 +473,7 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
     const ghostY = preview.contactY!;
     ctx.save();
     ctx.beginPath();
-    ctx.arc(ghostX, ghostY, BALL_RADIUS * 0.85, 0, Math.PI * 2);
+    ctx.arc(ghostX, ghostY, BALL_VISUAL_RADIUS, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(250, 254, 255, 0.82)";
     ctx.lineWidth = 1.5;
     ctx.stroke();
@@ -594,7 +597,7 @@ function drawPoolTable(
     ctx.save();
     ctx.setLineDash([8, 6]);
     ctx.beginPath();
-    ctx.arc(cueBall.x, cueBall.y, BALL_RADIUS + 11, 0, Math.PI * 2);
+    ctx.arc(cueBall.x, cueBall.y, BALL_VISUAL_RADIUS + 9, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(255,255,255,0.42)";
     ctx.lineWidth = 2;
     ctx.stroke();
@@ -620,6 +623,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const [animatingSeq, setAnimatingSeq] = useState(0);
   const [selectedPocket, setSelectedPocket] = useState<number | null>(null);
   const [assetsVersion, setAssetsVersion] = useState(0);
+  const [groupBanner, setGroupBanner] = useState<string | null>(null);
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const powerRailRef = useRef<HTMLDivElement | null>(null);
@@ -704,8 +708,18 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     };
     setAnimating(true);
     setAnimatingSeq(game.lastShot.seq);
-    // Play ball collision sound slightly delayed to match visual
-    window.setTimeout(() => SFX.ballHit(), 120);
+    // Schedule realistic collision sounds based on shot frames
+    const frameCount = game.lastShot.frames.length;
+    // Initial ball hit
+    window.setTimeout(() => SFX.ballHit(), 80);
+    // Cushion bounces during longer shots
+    if (frameCount > 60) {
+      window.setTimeout(() => SFX.cushion(), 300);
+    }
+    if (frameCount > 150) {
+      window.setTimeout(() => SFX.cushion(), 600);
+      window.setTimeout(() => SFX.ballHit(), 450);
+    }
   }, [animating, game]);
 
   useEffect(() => () => { if (drawLoopRef.current !== null) window.cancelAnimationFrame(drawLoopRef.current); }, []);
@@ -739,6 +753,18 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [cueBall?.id, cueBall?.x, cueBall?.y, currentUserId, game.phase, game.turnUserId]);
 
   useEffect(() => { if (!needEightCall) setSelectedPocket(null); }, [needEightCall]);
+
+  // #16: Show group assignment banner
+  const prevGroupRef = useRef<BallGroup | null>(null);
+  useEffect(() => {
+    if (myGroup && !prevGroupRef.current) {
+      const label = myGroup === "solids" ? "Suas bolas são lisas!" : "Suas bolas são listradas!";
+      setGroupBanner(label);
+      const timer = window.setTimeout(() => setGroupBanner(null), 2500);
+      return () => window.clearTimeout(timer);
+    }
+    prevGroupRef.current = myGroup;
+  }, [myGroup]);
   useEffect(() => { powerRef.current = power; }, [power]);
   useEffect(() => { pointerModeRef.current = pointerMode; }, [pointerMode]);
 
@@ -905,7 +931,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const state = renderStateRef.current;
       const targetAngle = aimAngleRef.current;
       // Smoother aim interpolation
-      const aimLerp = state.pointerMode === "aim" ? 0.88 : state.pointerMode === "power" ? 0.55 : 0.7;
+      const aimLerp = state.pointerMode === "aim" ? 0.95 : state.pointerMode === "power" ? 0.6 : 0.75;
       drawAimAngleRef.current = lerpAngle(drawAimAngleRef.current, targetAngle, aimLerp);
 
       let drawBalls = state.renderBalls;
@@ -1113,7 +1139,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             <div className="pool-stage__power-fill" style={{ height: `${Math.round(power * 100)}%` }} />
             <div className="pool-stage__power-marker" style={{ bottom: `${Math.round(power * 100)}%` }} />
           </div>
-          <small>{Math.round(power * 100)}</small>
         </div>
 
         <div className="pool-stage__table-shell">
@@ -1127,6 +1152,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             onPointerLeave={(event) => { if (pointerMode === "idle") return; handleTablePointerUp(event); }}
           >
             <canvas ref={canvasRef} className="pool-stage__canvas" aria-hidden="true" />
+            {groupBanner && (
+              <div className="pool-stage__group-banner">{groupBanner}</div>
+            )}
             {needEightCall && isMyTurn ? POCKETS.map((pocket) => (
               <button
                 key={pocket.id}
