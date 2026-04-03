@@ -433,6 +433,15 @@ function simulateShot(
   else if (firstHitNumber === null) foulReason = "miss";
   else if (!pocketedNumbers.length && !railAfterContact) foulReason = "no_rail";
 
+  if (cuePocketed) {
+    const scratchPlacement = resolveCuePlacement(balls, DEFAULT_CUE_X, DEFAULT_CUE_Y, false);
+    cueBall.pocketed = false;
+    cueBall.x = scratchPlacement.x;
+    cueBall.y = scratchPlacement.y;
+    cueBall.vx = 0;
+    cueBall.vy = 0;
+  }
+
   let winnerUserId: string | null = null;
   if (eightPocketEvent) {
     const legalEight = !foulReason && currentTarget === "eight" && calledPocket !== null && eightPocketEvent.pocketIndex === calledPocket;
