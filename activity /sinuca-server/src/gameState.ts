@@ -11,12 +11,14 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 26;
-const MIN_SPEED = 0.05;
-const FRICTION = 0.994;
-const MAX_STEPS = 1200;
-const FRAME_SAMPLE_EVERY = 2;
-const MAX_SUBSTEPS = 6;
+const MAX_SHOT_SPEED = 22;
+const MIN_SPEED = 0.045;
+const FRICTION = 0.991;
+const MAX_STEPS = 1400;
+const FRAME_SAMPLE_EVERY = 1;
+const MAX_SUBSTEPS = 8;
+const CUSHION_RESTITUTION = 0.86;
+const BALL_RESTITUTION = 0.94;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -153,25 +155,25 @@ function handleWallCollision(ball: PhysicsBall) {
 
   if (ball.x < minX) {
     ball.x = minX;
-    ball.vx *= -0.96;
-    ball.vy *= 0.99;
+    ball.vx *= -CUSHION_RESTITUTION;
+    ball.vy *= 0.985;
     collided = true;
   } else if (ball.x > maxX) {
     ball.x = maxX;
-    ball.vx *= -0.96;
-    ball.vy *= 0.99;
+    ball.vx *= -CUSHION_RESTITUTION;
+    ball.vy *= 0.985;
     collided = true;
   }
 
   if (ball.y < minY) {
     ball.y = minY;
-    ball.vy *= -0.96;
-    ball.vx *= 0.99;
+    ball.vy *= -CUSHION_RESTITUTION;
+    ball.vx *= 0.985;
     collided = true;
   } else if (ball.y > maxY) {
     ball.y = maxY;
-    ball.vy *= -0.96;
-    ball.vx *= 0.99;
+    ball.vy *= -CUSHION_RESTITUTION;
+    ball.vx *= 0.985;
     collided = true;
   }
 
@@ -230,11 +232,20 @@ function resolveCollision(a: PhysicsBall, b: PhysicsBall) {
   const relativeVelocity = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
   if (relativeVelocity > 0) return true;
 
-  const impulse = -relativeVelocity;
+  const impulse = -((1 + BALL_RESTITUTION) * relativeVelocity) / 2;
   a.vx -= impulse * nx;
   a.vy -= impulse * ny;
   b.vx += impulse * nx;
   b.vy += impulse * ny;
+
+  const tangentX = -ny;
+  const tangentY = nx;
+  const relTan = (b.vx - a.vx) * tangentX + (b.vy - a.vy) * tangentY;
+  const tanImpulse = relTan * 0.035;
+  a.vx += tanImpulse * tangentX;
+  a.vy += tanImpulse * tangentY;
+  b.vx -= tanImpulse * tangentX;
+  b.vy -= tanImpulse * tangentY;
   return true;
 }
 
