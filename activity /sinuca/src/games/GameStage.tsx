@@ -535,8 +535,8 @@ function drawCue(
 ) {
   const dirX = Math.cos(aimAngle);
   const dirY = Math.sin(aimAngle);
-  const cueGap = BALL_RADIUS + 14 + pullRatio * 120;
-  const cueLength = 1000;
+  const cueGap = BALL_RADIUS + 24 + pullRatio * 118;
+  const cueLength = 1040;
   const drawHeight = cueSprite.complete && cueSprite.naturalWidth
     ? Math.max(10, cueLength * (cueSprite.naturalHeight / cueSprite.naturalWidth))
     : 10;
@@ -879,16 +879,35 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       beginAimDrag(point);
       return;
     }
-    const dx = point.x - last.x;
-    const dy = point.y - last.y;
-    const angle = aimAngleRef.current;
-    const tangentX = -Math.sin(angle);
-    const tangentY = Math.cos(angle);
-    const radialX = Math.cos(angle);
-    const radialY = Math.sin(angle);
-    const tangentDrag = dx * tangentX + dy * tangentY;
-    const radialDrag = dx * radialX + dy * radialY;
-    const delta = tangentDrag * 0.0105 + radialDrag * 0.0012;
+
+    const lastDx = last.x - cueBall.x;
+    const lastDy = last.y - cueBall.y;
+    const nextDx = point.x - cueBall.x;
+    const nextDy = point.y - cueBall.y;
+    const lastDist = Math.hypot(lastDx, lastDy);
+    const nextDist = Math.hypot(nextDx, nextDy);
+
+    // Ignore jitter when the pointer is too close to the cue ball.
+    if (lastDist < BALL_RADIUS * 1.8 || nextDist < BALL_RADIUS * 1.8) {
+      aimDragRef.current = { x: point.x, y: point.y };
+      return;
+    }
+
+    const lastAngle = Math.atan2(lastDy, lastDx);
+    const nextAngle = Math.atan2(nextDy, nextDx);
+    let delta = Math.atan2(Math.sin(nextAngle - lastAngle), Math.cos(nextAngle - lastAngle));
+
+    // Use a damped angular delta so the finger controls the AIM DIRECTION,
+    // not the cue sprite directly. This feels much closer to 8 Ball Pool.
+    const avgDist = (lastDist + nextDist) * 0.5;
+    const distFactor = avgDist < 120 ? 0.42 : avgDist < 220 ? 0.56 : 0.7;
+    delta = clamp(delta * distFactor, -0.085, 0.085);
+
+    if (Math.abs(delta) < 0.0012) {
+      aimDragRef.current = { x: point.x, y: point.y };
+      return;
+    }
+
     aimAngleRef.current += delta;
     aimDragRef.current = { x: point.x, y: point.y };
   };
@@ -1071,7 +1090,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const state = renderStateRef.current;
       const targetAngle = aimAngleRef.current;
       // Smoother aim interpolation
-      const aimLerp = state.pointerMode === "aim" ? 0.34 : state.pointerMode === "power" ? 0.22 : 0.18;
+      const aimLerp = state.pointerMode === "aim" ? 0.56 : state.pointerMode === "power" ? 0.34 : 0.26;
       drawAimAngleRef.current = lerpAngle(drawAimAngleRef.current, targetAngle, aimLerp);
 
       let drawBalls = state.renderBalls;
@@ -1145,9 +1164,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           pullRatio = clamp(0.16 + snap.power * 0.78, 0.16, 1) * (1 - eased);
         }
       } else if (state.pointerMode === "power") {
-        pullRatio = clamp(0.18 + state.power * 0.82, 0.18, 1);
+        pullRatio = clamp(0.15 + state.power * 0.76, 0.15, 0.95);
       } else if (state.pointerMode === "aim") {
-        pullRatio = 0.08;
+        pullRatio = 0.06;
       }
 
       drawPoolTable(
