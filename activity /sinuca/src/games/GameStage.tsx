@@ -7,6 +7,63 @@ import cueAsset from "../assets/game/pool-cue-public.png";
 // The canvas drawFallbackBall() renders much higher quality balls with
 // 3D gradients, numbers, stripes, specular highlights than the old PNG sprites.
 
+// ─── Web Audio API sound engine ────────────────────────────────────────────
+const SFX = (() => {
+  let ctx: AudioContext | null = null;
+  const getCtx = () => {
+    if (!ctx) { try { ctx = new AudioContext(); } catch { return null; } }
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    return ctx;
+  };
+
+  function noise(ac: AudioContext, duration: number, volume: number, freq: number, decay: number) {
+    const len = Math.ceil(ac.sampleRate * duration);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      const t = i / ac.sampleRate;
+      const env = Math.exp(-t * decay);
+      const osc = Math.sin(2 * Math.PI * freq * t);
+      const nz = (Math.random() * 2 - 1) * 0.3;
+      data[i] = (osc * 0.7 + nz) * env * volume;
+    }
+    return buf;
+  }
+
+  function play(buffer: AudioBuffer, ac: AudioContext, vol = 0.5) {
+    const src = ac.createBufferSource();
+    const gain = ac.createGain();
+    gain.gain.value = Math.min(1, Math.max(0, vol));
+    src.buffer = buffer;
+    src.connect(gain).connect(ac.destination);
+    src.start();
+  }
+
+  return {
+    /** Cue hitting the ball — sharp high click */
+    cueHit(power = 0.7) {
+      const ac = getCtx(); if (!ac) return;
+      const vol = 0.25 + power * 0.35;
+      play(noise(ac, 0.08, vol, 1800 + power * 600, 45), ac, vol);
+    },
+    /** Ball falling into pocket — deep satisfying thud */
+    pocket() {
+      const ac = getCtx(); if (!ac) return;
+      play(noise(ac, 0.18, 0.4, 180, 14), ac, 0.5);
+    },
+    /** Cushion bounce — soft bump */
+    cushion() {
+      const ac = getCtx(); if (!ac) return;
+      play(noise(ac, 0.06, 0.15, 400, 55), ac, 0.2);
+    },
+    /** Ball-ball collision — mid click */
+    ballHit() {
+      const ac = getCtx(); if (!ac) return;
+      play(noise(ac, 0.05, 0.2, 1200, 60), ac, 0.25);
+    },
+  };
+})();
+
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
 const BALL_RADIUS = 13;
@@ -385,10 +442,10 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   const lineEndX = hasHit ? preview.contactX! : preview.endX;
   const lineEndY = hasHit ? preview.contactY! : preview.endY;
 
-  // Wide soft glow line
+  // Soft glow under aim line
   ctx.save();
-  ctx.strokeStyle = "rgba(200, 230, 255, 0.12)";
-  ctx.lineWidth = 4.5;
+  ctx.strokeStyle = "rgba(200, 230, 255, 0.10)";
+  ctx.lineWidth = 4;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -396,10 +453,10 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.stroke();
   ctx.restore();
 
-  // Main aim line (thin, bright)
+  // Main aim line — SOLID, thin, bright (reference style)
   ctx.save();
-  ctx.strokeStyle = "rgba(245, 250, 255, 0.92)";
-  ctx.lineWidth = 1.1;
+  ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
+  ctx.lineWidth = 1.2;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -407,65 +464,17 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.stroke();
   ctx.restore();
 
-  // Aim ring on cue ball
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cueBall.x, cueBall.y, BALL_RADIUS * 1.5, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(173, 227, 255, 0.16)";
-  ctx.lineWidth = 1.3;
-  ctx.stroke();
-  ctx.restore();
-
+  // Ghost ball circle at contact point
   if (hasHit) {
     const ghostX = preview.contactX!;
     const ghostY = preview.contactY!;
-    const hitBall = preview.hitBall!;
-
-    // Object ball trajectory line
-    const targetDX = hitBall.x - ghostX;
-    const targetDY = hitBall.y - ghostY;
-    const targetLen = Math.hypot(targetDX, targetDY) || 1;
-    const tnx = targetDX / targetLen;
-    const tny = targetDY / targetLen;
-
-    ctx.save();
-    ctx.strokeStyle = "rgba(246, 250, 255, 0.75)";
-    ctx.lineWidth = 1.2;
-    ctx.lineCap = "round";
-    ctx.setLineDash([6, 5]);
-    ctx.beginPath();
-    ctx.moveTo(hitBall.x, hitBall.y);
-    ctx.lineTo(hitBall.x + tnx * 90, hitBall.y + tny * 90);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.restore();
-
-    // Ghost ball (contact point indicator)
     ctx.save();
     ctx.beginPath();
-    ctx.arc(ghostX, ghostY, BALL_RADIUS * 0.8, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(250, 254, 255, 0.85)";
-    ctx.lineWidth = 1.6;
+    ctx.arc(ghostX, ghostY, BALL_RADIUS * 0.85, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(250, 254, 255, 0.82)";
+    ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.restore();
-
-    // Cue ball deflection line
-    if (preview.cueDeflectX !== null && preview.cueDeflectY !== null) {
-      const cdLen = Math.hypot(preview.cueDeflectX - ghostX, preview.cueDeflectY - ghostY);
-      if (cdLen > 4) {
-        ctx.save();
-        ctx.strokeStyle = "rgba(120, 220, 255, 0.55)";
-        ctx.lineWidth = 1.1;
-        ctx.lineCap = "round";
-        ctx.setLineDash([4, 5]);
-        ctx.beginPath();
-        ctx.moveTo(ghostX, ghostY);
-        ctx.lineTo(preview.cueDeflectX, preview.cueDeflectY);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-      }
-    }
   }
 }
 
@@ -695,6 +704,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     };
     setAnimating(true);
     setAnimatingSeq(game.lastShot.seq);
+    // Play ball collision sound slightly delayed to match visual
+    window.setTimeout(() => SFX.ballHit(), 120);
   }, [animating, game]);
 
   useEffect(() => () => { if (drawLoopRef.current !== null) window.cancelAnimationFrame(drawLoopRef.current); }, []);
@@ -769,6 +780,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       cueY: isBallInHand ? cueBall.y : null,
       calledPocket: needEightCall ? selectedPocket : null,
     };
+    SFX.cueHit(payload.power);
     await onShoot(payload);
   };
 
@@ -937,13 +949,14 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       for (const ball of drawBalls) { if (ball.pocketed) currentPocketedIds.add(ball.id); }
       for (const ball of drawBalls) {
         if (ball.pocketed && !prevPocketedIdsRef.current.has(ball.id)) {
-          let closestPocket = POCKETS[0];
+          let closestPocket: typeof POCKETS[number] = POCKETS[0];
           let minDist = Infinity;
           for (const pocket of POCKETS) {
             const d = Math.hypot(pocket.x - ball.x, pocket.y - ball.y);
             if (d < minDist) { minDist = d; closestPocket = pocket; }
           }
           pocketAnimationsRef.current.push({ ball, pocketX: closestPocket.x, pocketY: closestPocket.y, startedAt: now });
+          SFX.pocket();
         }
       }
       prevPocketedIdsRef.current = currentPocketedIds;
@@ -977,18 +990,55 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [animating, assetsVersion, cueSprite]);
 
   // ─── Pocketed ball mini-icons (for HUD) ─────────────────────────────────
-  function BallDot({ number }: { number: number }) {
-    const color = ballColor(number);
-    const isStripe = number >= 9;
+  // Pre-render mini ball icons as data URLs for HUD pips
+  const ballIconCache = useMemo(() => {
+    const cache = new Map<number, string>();
+    const size = 30; // render at 2x for sharpness
+    for (let n = 1; n <= 15; n++) {
+      const c = document.createElement("canvas");
+      c.width = size; c.height = size;
+      const cx = c.getContext("2d");
+      if (!cx) continue;
+      const r = size / 2 - 1;
+      const color = ballColor(n);
+      const isStripe = n >= 9;
+      cx.translate(size / 2, size / 2);
+      // Base
+      const bg = cx.createRadialGradient(-r * 0.25, -r * 0.25, r * 0.05, 0, 0, r * 1.2);
+      if (n === 8) {
+        bg.addColorStop(0, "#4a5260"); bg.addColorStop(0.3, "#1e2330"); bg.addColorStop(1, "#050709");
+      } else {
+        bg.addColorStop(0, "#fff8d8"); bg.addColorStop(0.18, color); bg.addColorStop(1, shadeColor(color, -50));
+      }
+      cx.beginPath(); cx.arc(0, 0, r, 0, Math.PI * 2); cx.fillStyle = bg; cx.fill();
+      // Stripe
+      if (isStripe) {
+        cx.beginPath(); cx.arc(0, 0, r - 0.5, 0, Math.PI * 2); cx.fillStyle = "#f8faff"; cx.fill();
+        cx.save(); cx.beginPath(); cx.arc(0, 0, r, 0, Math.PI * 2); cx.clip();
+        cx.fillStyle = color; cx.fillRect(-r, -r * 0.55, r * 2, r * 1.1); cx.restore();
+      }
+      // Number disk
+      const dr = r * 0.42;
+      cx.beginPath(); cx.arc(0, 0, dr, 0, Math.PI * 2); cx.fillStyle = "#fff"; cx.fill();
+      cx.font = `700 ${n >= 10 ? 7 : 8}px Inter, system-ui, sans-serif`;
+      cx.textAlign = "center"; cx.textBaseline = "middle";
+      cx.fillStyle = "#1a1e2a"; cx.fillText(String(n), 0, 0.5);
+      // Specular
+      const sg = cx.createRadialGradient(-r * 0.3, -r * 0.35, 0, -r * 0.25, -r * 0.28, r * 0.5);
+      sg.addColorStop(0, "rgba(255,255,255,0.6)"); sg.addColorStop(0.4, "rgba(255,255,255,0.15)"); sg.addColorStop(1, "rgba(255,255,255,0)");
+      cx.beginPath(); cx.arc(0, 0, r, 0, Math.PI * 2); cx.fillStyle = sg; cx.fill();
+      cache.set(n, c.toDataURL());
+    }
+    return cache;
+  }, []);
+
+  function BallPip({ number }: { number: number }) {
+    const src = ballIconCache.get(number);
+    if (!src) return <span className="pool-stage__pip" />;
     return (
-      <span
-        className="pool-stage__pip pool-stage__pip--ball"
-        style={{
-          background: isStripe ? `radial-gradient(circle, #fff 35%, ${color} 36%, ${color} 65%, #fff 66%)` : color,
-          borderColor: isStripe ? "#fff" : "transparent",
-        }}
-        title={String(number)}
-      />
+      <span className="pool-stage__pip pool-stage__pip--ball">
+        <img src={src} alt={String(number)} style={{ width: "100%", height: "100%", borderRadius: "50%" }} />
+      </span>
     );
   }
 
@@ -1018,7 +1068,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
               {Array.from({ length: 7 }).map((_, index) => {
                 const number = leftPocketed[index] ?? null;
                 return number !== null
-                  ? <BallDot key={`left-${index}`} number={number} />
+                  ? <BallPip key={`left-${index}`} number={number} />
                   : <span key={`left-${index}`} className="pool-stage__pip" />;
               })}
             </div>
@@ -1038,7 +1088,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
               {Array.from({ length: 7 }).map((_, index) => {
                 const number = rightPocketed[index] ?? null;
                 return number !== null
-                  ? <BallDot key={`right-${index}`} number={number} />
+                  ? <BallPip key={`right-${index}`} number={number} />
                   : <span key={`right-${index}`} className="pool-stage__pip" />;
               })}
             </div>
