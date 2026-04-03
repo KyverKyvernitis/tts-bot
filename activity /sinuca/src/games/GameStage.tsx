@@ -440,12 +440,13 @@ function drawPocketAnimation(ctx: CanvasRenderingContext2D, anim: PocketAnimatio
 
 // ─── Aim guide (reference-style: clean line + ghost ball) ─────────────────
 
-function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview, aimAngle: number) {
+// Aim line only — drawn BEFORE balls
+function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview) {
   const hasHit = preview.contactX !== null && preview.contactY !== null && preview.hitBall;
   const lineEndX = hasHit ? preview.contactX! : preview.endX;
   const lineEndY = hasHit ? preview.contactY! : preview.endY;
 
-  // Soft glow under aim line
+  // Soft glow
   ctx.save();
   ctx.strokeStyle = "rgba(200, 230, 255, 0.10)";
   ctx.lineWidth = 4;
@@ -456,7 +457,7 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.stroke();
   ctx.restore();
 
-  // Main aim line — SOLID, thin, bright (reference style)
+  // Main aim line — SOLID, bright
   ctx.save();
   ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
   ctx.lineWidth = 1.2;
@@ -466,19 +467,33 @@ function drawGuide(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, pre
   ctx.lineTo(lineEndX, lineEndY);
   ctx.stroke();
   ctx.restore();
+}
 
-  // Ghost ball circle at contact point
-  if (hasHit) {
-    const ghostX = preview.contactX!;
-    const ghostY = preview.contactY!;
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(ghostX, ghostY, BALL_VISUAL_RADIUS, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(250, 254, 255, 0.82)";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    ctx.restore();
-  }
+// Ghost ball circle — drawn AFTER balls so it's visible on top
+function drawGhostBall(ctx: CanvasRenderingContext2D, preview: AimPreview) {
+  const hasHit = preview.contactX !== null && preview.contactY !== null && preview.hitBall;
+  if (!hasHit) return;
+
+  const ghostX = preview.contactX!;
+  const ghostY = preview.contactY!;
+
+  // Outer glow
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(ghostX, ghostY, BALL_VISUAL_RADIUS + 2, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(200, 240, 255, 0.25)";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.restore();
+
+  // Main ghost ball circle — thick and bright
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(ghostX, ghostY, BALL_VISUAL_RADIUS, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+  ctx.lineWidth = 2.2;
+  ctx.stroke();
+  ctx.restore();
 }
 
 // ─── Cue stick rendering ──────────────────────────────────────────────────
@@ -575,16 +590,21 @@ function drawPoolTable(
     }
   }
 
-  // Guide + Cue (drawn before balls so balls render on top)
+  // STEP 1: Aim line + Cue BEFORE balls (so balls render on top of the line)
   if (cueBall && showGuide && preview) {
-    drawGuide(ctx, cueBall, preview, aimAngle);
+    drawAimLine(ctx, cueBall, preview);
     drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
   }
 
-  // All balls (canvas rendered - high quality)
+  // STEP 2: All balls
   for (const ball of renderBalls) {
     if (ball.pocketed) continue;
     drawBall(ctx, ball, 1);
+  }
+
+  // STEP 3: Ghost ball circle AFTER balls (so it's visible on top)
+  if (cueBall && showGuide && preview) {
+    drawGhostBall(ctx, preview);
   }
 
   // Pocket animations
@@ -646,6 +666,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const pointerModeRef = useRef<PointerMode>("idle");
   const pocketAnimationsRef = useRef<PocketAnimation[]>([]);
   const prevPocketedIdsRef = useRef<Set<string>>(new Set());
+  const snapAnimRef = useRef<{ startedAt: number; power: number; fired: boolean } | null>(null);
+  const canInteractRef = useRef(false);
+  const shootBusyRef = useRef(false);
+  const onShootRef = useRef(onShoot);
 
   const renderStateRef = useRef({
     renderBalls: [] as GameBallSnapshot[],
@@ -735,6 +759,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const cueBall = renderBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
   const canInteract = Boolean(cueBall && isMyTurn && !animating && !shootBusy && game.status !== "finished");
   const isBallInHand = game.ballInHandUserId === currentUserId && canInteract;
+  canInteractRef.current = canInteract;
+  shootBusyRef.current = shootBusy;
+  onShootRef.current = onShoot;
   const cueLabel = game.tableType === "casual" ? "amistoso" : `${game.stakeChips ?? 0}`;
   const myRemaining = renderBalls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === myGroup).length;
   const needEightCall = !isOpenTable && myGroup !== null && myRemaining === 0;
@@ -790,24 +817,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const updatePowerFromClientY = (clientY: number) => {
     if (!powerRailRef.current) return;
     const rect = powerRailRef.current.getBoundingClientRect();
-    const ratio = 1 - (clientY - rect.top) / rect.height;
-    const next = clamp(ratio, 0.22, 1);
+    // Drag DOWN = pull cue back = MORE power (slingshot feel)
+    const ratio = (clientY - rect.top) / rect.height;
+    const next = clamp(ratio, 0.05, 1);
     powerRef.current = next;
     setPower(next);
-  };
-
-  const releaseShot = async () => {
-    if (!cueBall || !canInteract || shootBusy) return;
-    if (needEightCall && selectedPocket === null) return;
-    const payload = {
-      angle: aimAngleRef.current,
-      power: clamp(powerRef.current, 0.22, 1),
-      cueX: isBallInHand ? cueBall.x : null,
-      cueY: isBallInHand ? cueBall.y : null,
-      calledPocket: needEightCall ? selectedPocket : null,
-    };
-    SFX.cueHit(payload.power);
-    await onShoot(payload);
   };
 
   const handleTablePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -842,8 +856,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const commitPowerShot = () => {
     if (pointerModeRef.current !== "power" || powerReleaseGuardRef.current) return;
     powerReleaseGuardRef.current = true;
+    // Start snap-back animation instead of instant fire
+    snapAnimRef.current = { startedAt: performance.now(), power: powerRef.current, fired: false };
     setPointerModeSafe("idle");
-    void releaseShot();
+    // The actual shot fires after snap animation completes (see render loop)
   };
 
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -990,6 +1006,43 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
       const preview = drawCueBall && !animating ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
 
+      // Snap animation: animate pullback return + fire shot
+      const SNAP_MS = 120;
+      const snap = snapAnimRef.current;
+      let pullRatio = 0;
+      if (snap && !snap.fired) {
+        const elapsed = now - snap.startedAt;
+        if (elapsed >= SNAP_MS) {
+          pullRatio = 0;
+          snap.fired = true;
+          snapAnimRef.current = null;
+          // Fire the actual shot now
+          const shotPower = snap.power;
+          powerRef.current = shotPower;
+          void (async () => {
+            if (!drawCueBall || !canInteractRef.current || shootBusyRef.current) return;
+            const payload = {
+              angle: aimAngleRef.current,
+              power: clamp(shotPower, 0.05, 1),
+              cueX: state.isBallInHand ? drawCueBall.x : null,
+              cueY: state.isBallInHand ? drawCueBall.y : null,
+              calledPocket: state.needEightCall ? state.selectedPocket : null,
+            };
+            SFX.cueHit(payload.power);
+            await onShootRef.current(payload);
+          })();
+        } else {
+          // Animate pullback returning to 0 with easeOut
+          const t = elapsed / SNAP_MS;
+          const eased = 1 - (1 - t) * (1 - t);
+          pullRatio = clamp(0.18 + snap.power * 0.82, 0.18, 1) * (1 - eased);
+        }
+      } else if (state.pointerMode === "power") {
+        pullRatio = clamp(0.18 + state.power * 0.82, 0.18, 1);
+      } else if (state.pointerMode === "aim") {
+        pullRatio = 0.08;
+      }
+
       drawPoolTable(
         context,
         tableCacheRef.current,
@@ -997,9 +1050,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         drawBalls,
         drawCueBall,
         drawAimAngleRef.current,
-        Boolean(drawCueBall && (state.canInteract || state.shootBusy)),
-        state.pointerMode === "power" ? clamp(0.18 + state.power * 0.82, 0.18, 1)
-          : state.pointerMode === "aim" ? 0.08 : 0,
+        Boolean(drawCueBall && (state.canInteract || state.shootBusy || snapAnimRef.current)),
+        pullRatio,
         preview,
         state.needEightCall,
         state.selectedPocket,
