@@ -4719,6 +4719,11 @@ button:focus-visible {
     radial-gradient(circle at 50% 35%, rgba(105, 208, 255, 0.08), transparent 48%);
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   POOL GAME STAGE — rebuilt for 8 Ball Pool reference visual
+   ═══════════════════════════════════════════════════════════════════════════ */
+
 .pool-stage {
   position: absolute;
   inset: 0;
@@ -4727,7 +4732,8 @@ button:focus-visible {
   gap: 3px;
   padding: max(6px, env(safe-area-inset-top, 0px)) 8px 7px;
   overflow: hidden;
-  background: transparent;
+  /* Solid dark blue background — replaces transparent/galaxy */
+  background: linear-gradient(180deg, #0d1a2e, #111e34 40%, #0a1525);
 }
 
 .pool-stage__hud {
@@ -4834,17 +4840,12 @@ button:focus-visible {
   border: 1px solid rgba(255,255,255,0.14);
   background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.08), rgba(0,0,0,0.56));
   overflow: hidden;
+  flex-shrink: 0;
 }
 
 .pool-stage__pip--ball {
-  border-color: rgba(255,255,255,0.1);
-  background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.14), rgba(0,0,0,0.4));
-}
-
-.pool-stage__pip img {
-  display: block;
-  width: 100%;
-  height: 100%;
+  border-color: rgba(255,255,255,0.2);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
 }
 
 .pool-stage__status {
@@ -4884,6 +4885,8 @@ button:focus-visible {
   align-items: center;
 }
 
+/* ── Power bar — reference-style green→yellow→red gradient ──────────────── */
+
 .pool-stage__power {
   align-self: center;
   justify-self: center;
@@ -4901,44 +4904,57 @@ button:focus-visible {
 
 .pool-stage__power-track {
   position: relative;
-  width: 32px;
+  width: 24px;
   height: 100%;
   min-height: 220px;
-}
-
-.pool-stage__power-frame {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  pointer-events: none;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid rgba(255,255,255,0.1);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,0.5);
+  overflow: hidden;
 }
 
 .pool-stage__power-fill {
   position: absolute;
-  left: 12px;
-  bottom: 30px;
-  width: 8px;
-  border-radius: 10px;
-  background: linear-gradient(180deg, #fff5bb, #f8cf6a 38%, #e08d33 74%, #c0571f 100%);
-  box-shadow: 0 0 14px rgba(255, 196, 111, 0.32), inset 0 1px 0 rgba(255,255,255,0.4);
+  left: 3px;
+  right: 3px;
+  bottom: 3px;
+  border-radius: 9px;
+  /* Reference-style gradient: green bottom → yellow middle → red top */
+  background: linear-gradient(0deg,
+    #22c55e 0%,
+    #4ade80 15%,
+    #eab308 40%,
+    #f59e0b 55%,
+    #ef4444 80%,
+    #dc2626 100%
+  );
+  box-shadow:
+    0 0 12px rgba(234, 179, 8, 0.25),
+    inset 0 1px 0 rgba(255,255,255,0.3);
+  transition: height 0.04s linear;
 }
 
 .pool-stage__power-marker {
   position: absolute;
-  left: -1px;
-  width: 34px;
-  height: 4px;
+  left: -2px;
+  right: -2px;
+  height: 3px;
   border-radius: 999px;
   background: rgba(255,255,255,0.95);
   transform: translateY(50%);
-  box-shadow: 0 0 10px rgba(255,255,255,0.32);
+  box-shadow: 0 0 8px rgba(255,255,255,0.4);
 }
 
 .pool-stage__power small {
   font: 700 0.9rem var(--font-ui);
 }
+
+.pool-stage__power--active .pool-stage__power-track {
+  border-color: rgba(255,255,255,0.22);
+}
+
+/* ── Table area ──────────────────────────────────────────────────────────── */
 
 .pool-stage__table-shell {
   min-width: 0;
@@ -4989,6 +5005,8 @@ button:focus-visible {
   background: linear-gradient(180deg, rgba(70, 53, 13, 0.95), rgba(35, 24, 8, 0.98));
   box-shadow: 0 0 0 1px rgba(255, 233, 159, 0.25), 0 12px 18px rgba(0,0,0,0.24);
 }
+
+/* ── Responsive breakpoints ──────────────────────────────────────────────── */
 
 @media (max-width: 1100px) {
   .pool-stage {
@@ -5051,19 +5069,13 @@ button:focus-visible {
   }
 
   .pool-stage__power-track {
-    width: 34px;
+    width: 26px;
     min-height: 198px;
   }
 
-  .pool-stage__power-fill {
-    left: 11px;
-    width: 11px;
-    bottom: 28px;
-  }
-
   .pool-stage__power-marker {
-    left: 0;
-    width: 36px;
+    left: -3px;
+    right: -3px;
   }
 
   .pool-stage__table-wrap {
@@ -5158,19 +5170,13 @@ button:focus-visible {
   }
 
   .pool-stage__power-track {
-    width: 30px;
+    width: 22px;
     min-height: 156px;
   }
 
-  .pool-stage__power-fill {
-    left: 10px;
-    width: 10px;
-    bottom: 25px;
-  }
-
   .pool-stage__power-marker {
-    left: 0;
-    width: 30px;
+    left: -3px;
+    right: -3px;
   }
 
   .pool-stage__power small {
