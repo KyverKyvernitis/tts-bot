@@ -4921,18 +4921,18 @@ button:focus-visible {
   right: 2px;
   bottom: 2px;
   border-radius: 7px;
-  background: linear-gradient(0deg,
-    #d4a017 0%,
-    #e8a810 18%,
-    #e88d0e 40%,
-    #d96a18 60%,
-    #c43e1a 80%,
-    #a01818 100%
+  background: linear-gradient(180deg,
+    #fff3a2 0%,
+    #ffd84e 16%,
+    #ffbf23 34%,
+    #ff9415 56%,
+    #ef4d17 78%,
+    #a81212 100%
   );
   box-shadow:
     0 0 10px rgba(220, 160, 30, 0.3),
     inset 0 1px 0 rgba(255,255,255,0.25);
-  transition: height 0.03s linear, top 0.03s linear;
+  transition: height 0.02s linear, top 0.02s linear;
 }
 
 .pool-stage__power-marker {
