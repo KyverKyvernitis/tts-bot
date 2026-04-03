@@ -535,7 +535,7 @@ function drawCue(
 ) {
   const dirX = Math.cos(aimAngle);
   const dirY = Math.sin(aimAngle);
-  const cueGap = BALL_RADIUS + 4 + pullRatio * 110;
+  const cueGap = BALL_RADIUS + 14 + pullRatio * 120;
   const cueLength = 1000;
   const drawHeight = cueSprite.complete && cueSprite.naturalWidth
     ? Math.max(10, cueLength * (cueSprite.naturalHeight / cueSprite.naturalWidth))
@@ -687,6 +687,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   } | null>(null);
   const playbackSettlingRef = useRef(false);
   const pointerMovedRef = useRef(false);
+  const aimDragRef = useRef<{ x: number; y: number } | null>(null);
   const aimAngleRef = useRef(0);
   const drawAimAngleRef = useRef(0);
   const powerRef = useRef(power);
@@ -867,9 +868,29 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     return { x: ((clientX - rect.left) / rect.width) * TABLE_WIDTH, y: ((clientY - rect.top) / rect.height) * TABLE_HEIGHT };
   };
 
-  const updateAimFromPoint = (point: LocalPoint) => {
+  const beginAimDrag = (point: LocalPoint) => {
+    aimDragRef.current = { x: point.x, y: point.y };
+  };
+
+  const updateAimFromDrag = (point: LocalPoint) => {
     if (!cueBall) return;
-    aimAngleRef.current = Math.atan2(cueBall.y - point.y, cueBall.x - point.x);
+    const last = aimDragRef.current;
+    if (!last) {
+      beginAimDrag(point);
+      return;
+    }
+    const dx = point.x - last.x;
+    const dy = point.y - last.y;
+    const angle = aimAngleRef.current;
+    const tangentX = -Math.sin(angle);
+    const tangentY = Math.cos(angle);
+    const radialX = Math.cos(angle);
+    const radialY = Math.sin(angle);
+    const tangentDrag = dx * tangentX + dy * tangentY;
+    const radialDrag = dx * radialX + dy * radialY;
+    const delta = tangentDrag * 0.0105 + radialDrag * 0.0012;
+    aimAngleRef.current += delta;
+    aimDragRef.current = { x: point.x, y: point.y };
   };
 
   const updateCuePositionFromPoint = (point: LocalPoint) => {
@@ -901,7 +922,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       return;
     }
     setPointerModeSafe("aim");
-    updateAimFromPoint(point);
+    beginAimDrag(point);
     pointerMovedRef.current = true;
   };
 
@@ -910,11 +931,12 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const point = pointToLocal(event.clientX, event.clientY);
     if (!point) return;
     if (pointerMode === "place") { updateCuePositionFromPoint(point); return; }
-    if (pointerMode === "aim") { updateAimFromPoint(point); pointerMovedRef.current = true; }
+    if (pointerMode === "aim") { updateAimFromDrag(point); pointerMovedRef.current = true; }
   };
 
   const handleTablePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
+    aimDragRef.current = null;
     setPointerModeSafe("idle");
   };
 
@@ -1049,7 +1071,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const state = renderStateRef.current;
       const targetAngle = aimAngleRef.current;
       // Smoother aim interpolation
-      const aimLerp = state.pointerMode === "aim" ? 0.95 : state.pointerMode === "power" ? 0.6 : 0.75;
+      const aimLerp = state.pointerMode === "aim" ? 0.34 : state.pointerMode === "power" ? 0.22 : 0.18;
       drawAimAngleRef.current = lerpAngle(drawAimAngleRef.current, targetAngle, aimLerp);
 
       let drawBalls = state.renderBalls;
