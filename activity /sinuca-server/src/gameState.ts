@@ -11,11 +11,11 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 28;
+const MAX_SHOT_SPEED = 26;
 const MIN_SPEED = 0.05;
-const FRICTION = 0.9912;
+const FRICTION = 0.994;
 const MAX_STEPS = 1200;
-const FRAME_SAMPLE_EVERY = 1;
+const FRAME_SAMPLE_EVERY = 2;
 const MAX_SUBSTEPS = 6;
 
 const POCKETS = [
@@ -79,8 +79,8 @@ function rackBalls(): PhysicsBall[] {
   const balls: PhysicsBall[] = [createBall(0, DEFAULT_CUE_X, DEFAULT_CUE_Y)];
   const apexX = 922;
   const apexY = TABLE_HEIGHT / 2;
-  const rowStepX = BALL_DIAMETER * 0.88;
-  const spacing = BALL_DIAMETER * 1.02;
+  const rowStepX = BALL_DIAMETER * 0.866; // tight triangular packing
+  const spacing = BALL_DIAMETER * 1.0;    // touching, no gaps
   const rackRows = [
     [1],
     [9, 2],
@@ -94,7 +94,10 @@ function rackBalls(): PhysicsBall[] {
     const rowBalls = rackRows[row];
     const startY = apexY - ((rowBalls.length - 1) * spacing) / 2;
     rowBalls.forEach((number, index) => {
-      balls.push(createBall(number, rowX, startY + index * spacing));
+      // Micro-jitter (±0.25px) so break scatters naturally instead of perfectly symmetric
+      const jx = (Math.random() - 0.5) * 0.5;
+      const jy = (Math.random() - 0.5) * 0.5;
+      balls.push(createBall(number, rowX + jx, startY + index * spacing + jy));
     });
   }
 
@@ -131,7 +134,7 @@ function ballIsMoving(ball: PhysicsBall) {
 }
 
 function nearPocket(x: number, y: number) {
-  const pocketSkipRadius = POCKET_RADIUS + 14;
+  const pocketSkipRadius = POCKET_RADIUS + 6;
   for (const pocket of POCKETS) {
     if (Math.hypot(x - pocket.x, y - pocket.y) < pocketSkipRadius) return true;
   }
@@ -150,25 +153,25 @@ function handleWallCollision(ball: PhysicsBall) {
 
   if (ball.x < minX) {
     ball.x = minX;
-    ball.vx *= -0.92;
-    ball.vy *= 0.98;
+    ball.vx *= -0.96;
+    ball.vy *= 0.99;
     collided = true;
   } else if (ball.x > maxX) {
     ball.x = maxX;
-    ball.vx *= -0.92;
-    ball.vy *= 0.98;
+    ball.vx *= -0.96;
+    ball.vy *= 0.99;
     collided = true;
   }
 
   if (ball.y < minY) {
     ball.y = minY;
-    ball.vy *= -0.92;
-    ball.vx *= 0.98;
+    ball.vy *= -0.96;
+    ball.vx *= 0.99;
     collided = true;
   } else if (ball.y > maxY) {
     ball.y = maxY;
-    ball.vy *= -0.92;
-    ball.vx *= 0.98;
+    ball.vy *= -0.96;
+    ball.vx *= 0.99;
     collided = true;
   }
 
@@ -352,7 +355,7 @@ function simulateShot(
   }
 
   const shotPower = clamp(Number.isFinite(power) ? power : 0.6, 0.12, 1);
-  const shotSpeed = 4 + shotPower * MAX_SHOT_SPEED;
+  const shotSpeed = 5 + shotPower * MAX_SHOT_SPEED;
   cueBall.vx = Math.cos(safeAngle) * shotSpeed;
   cueBall.vy = Math.sin(safeAngle) * shotSpeed;
 
