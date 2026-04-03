@@ -5,18 +5,18 @@ const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
 const BALL_RADIUS = 13;
 const BALL_DIAMETER = BALL_RADIUS * 2;
-const POCKET_RADIUS = 29;
+const POCKET_RADIUS = 32;
 const RAIL_MARGIN_X = 69;
 const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 24;
+const MAX_SHOT_SPEED = 28;
 const MIN_SPEED = 0.05;
-const FRICTION = 0.992;
-const MAX_STEPS = 960;
+const FRICTION = 0.9912;
+const MAX_STEPS = 1200;
 const FRAME_SAMPLE_EVERY = 1;
-const MAX_SUBSTEPS = 4;
+const MAX_SUBSTEPS = 6;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -130,6 +130,14 @@ function ballIsMoving(ball: PhysicsBall) {
   return !ball.pocketed && (Math.abs(ball.vx) > MIN_SPEED || Math.abs(ball.vy) > MIN_SPEED);
 }
 
+function nearPocket(x: number, y: number) {
+  const pocketSkipRadius = POCKET_RADIUS + 14;
+  for (const pocket of POCKETS) {
+    if (Math.hypot(x - pocket.x, y - pocket.y) < pocketSkipRadius) return true;
+  }
+  return false;
+}
+
 function handleWallCollision(ball: PhysicsBall) {
   const minX = RAIL_MARGIN_X + BALL_RADIUS;
   const maxX = TABLE_WIDTH - RAIL_MARGIN_X - BALL_RADIUS;
@@ -137,23 +145,30 @@ function handleWallCollision(ball: PhysicsBall) {
   const maxY = TABLE_HEIGHT - RAIL_MARGIN_Y - BALL_RADIUS;
   let collided = false;
 
+  // Skip wall collision near pocket mouths so balls can enter
+  if (nearPocket(ball.x, ball.y)) return false;
+
   if (ball.x < minX) {
     ball.x = minX;
-    ball.vx *= -0.985;
+    ball.vx *= -0.92;
+    ball.vy *= 0.98;
     collided = true;
   } else if (ball.x > maxX) {
     ball.x = maxX;
-    ball.vx *= -0.985;
+    ball.vx *= -0.92;
+    ball.vy *= 0.98;
     collided = true;
   }
 
   if (ball.y < minY) {
     ball.y = minY;
-    ball.vy *= -0.985;
+    ball.vy *= -0.92;
+    ball.vx *= 0.98;
     collided = true;
   } else if (ball.y > maxY) {
     ball.y = maxY;
-    ball.vy *= -0.985;
+    ball.vy *= -0.92;
+    ball.vx *= 0.98;
     collided = true;
   }
 
@@ -166,13 +181,29 @@ function handlePocket(ball: PhysicsBall): number | null {
     const pocket = POCKETS[index];
     const dx = ball.x - pocket.x;
     const dy = ball.y - pocket.y;
-    if (Math.hypot(dx, dy) <= POCKET_RADIUS - 3) {
+    const dist = Math.hypot(dx, dy);
+
+    // Ball falls in pocket
+    if (dist <= POCKET_RADIUS - 2) {
       ball.pocketed = true;
       ball.vx = 0;
       ball.vy = 0;
       ball.x = pocket.x;
       ball.y = pocket.y;
       return index + 1;
+    }
+
+    // Pocket funnel effect — balls near mouth get pulled toward center
+    const funnelRadius = POCKET_RADIUS + 12;
+    if (dist < funnelRadius && dist > POCKET_RADIUS - 4) {
+      const speed = Math.hypot(ball.vx, ball.vy);
+      if (speed > 0.3) {
+        const pullStrength = 0.015 * (1 - (dist - POCKET_RADIUS + 4) / (funnelRadius - POCKET_RADIUS + 4));
+        const nx = dx / (dist || 1);
+        const ny = dy / (dist || 1);
+        ball.vx -= nx * pullStrength * speed;
+        ball.vy -= ny * pullStrength * speed;
+      }
     }
   }
   return null;
