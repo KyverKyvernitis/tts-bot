@@ -11,14 +11,14 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 22;
+const MAX_SHOT_SPEED = 18.8;
 const MIN_SPEED = 0.045;
-const FRICTION = 0.991;
+const FRICTION = 0.994;
 const MAX_STEPS = 1400;
 const FRAME_SAMPLE_EVERY = 1;
-const MAX_SUBSTEPS = 8;
-const CUSHION_RESTITUTION = 0.86;
-const BALL_RESTITUTION = 0.94;
+const MAX_SUBSTEPS = 12;
+const CUSHION_RESTITUTION = 0.74;
+const BALL_RESTITUTION = 0.9;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -156,24 +156,24 @@ function handleWallCollision(ball: PhysicsBall) {
   if (ball.x < minX) {
     ball.x = minX;
     ball.vx *= -CUSHION_RESTITUTION;
-    ball.vy *= 0.985;
+    ball.vy *= 0.95;
     collided = true;
   } else if (ball.x > maxX) {
     ball.x = maxX;
     ball.vx *= -CUSHION_RESTITUTION;
-    ball.vy *= 0.985;
+    ball.vy *= 0.95;
     collided = true;
   }
 
   if (ball.y < minY) {
     ball.y = minY;
     ball.vy *= -CUSHION_RESTITUTION;
-    ball.vx *= 0.985;
+    ball.vx *= 0.95;
     collided = true;
   } else if (ball.y > maxY) {
     ball.y = maxY;
     ball.vy *= -CUSHION_RESTITUTION;
-    ball.vx *= 0.985;
+    ball.vx *= 0.95;
     collided = true;
   }
 
@@ -238,10 +238,15 @@ function resolveCollision(a: PhysicsBall, b: PhysicsBall) {
   b.vx += impulse * nx;
   b.vy += impulse * ny;
 
+  a.vx *= 0.996;
+  a.vy *= 0.996;
+  b.vx *= 0.996;
+  b.vy *= 0.996;
+
   const tangentX = -ny;
   const tangentY = nx;
   const relTan = (b.vx - a.vx) * tangentX + (b.vy - a.vy) * tangentY;
-  const tanImpulse = relTan * 0.035;
+  const tanImpulse = relTan * 0.02;
   a.vx += tanImpulse * tangentX;
   a.vy += tanImpulse * tangentY;
   b.vx -= tanImpulse * tangentX;
@@ -366,7 +371,7 @@ function simulateShot(
   }
 
   const shotPower = clamp(Number.isFinite(power) ? power : 0.6, 0.12, 1);
-  const shotSpeed = 5 + shotPower * MAX_SHOT_SPEED;
+  const shotSpeed = 4.4 + shotPower * MAX_SHOT_SPEED;
   cueBall.vx = Math.cos(safeAngle) * shotSpeed;
   cueBall.vy = Math.sin(safeAngle) * shotSpeed;
 
