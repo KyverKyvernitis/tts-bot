@@ -103,6 +103,8 @@ const OPENING_RACK = [
 ] as const;
 
 const POCKET_ANIM_DURATION = 320;
+const POWER_MIN = 0.06;
+const POWER_RETURN_MS = 180;
 
 type ShotInput = {
   angle: number;
@@ -476,10 +478,9 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
 
   if (hasHit && preview.hitBall && preview.targetGuideX !== null && preview.targetGuideY !== null) {
     ctx.save();
-    ctx.strokeStyle = "rgba(240, 246, 255, 0.58)";
-    ctx.lineWidth = 0.95;
+    ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
+    ctx.lineWidth = 1.2;
     ctx.lineCap = "round";
-    ctx.setLineDash([6, 6]);
     ctx.beginPath();
     ctx.moveTo(preview.hitBall.x, preview.hitBall.y);
     ctx.lineTo(preview.targetGuideX, preview.targetGuideY);
@@ -663,7 +664,7 @@ function createImage(src: string) {
 
 export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, onShoot, onExit }: Props) {
   const [displayBalls, setDisplayBalls] = useState<GameBallSnapshot[]>(game.balls);
-  const [power, setPower] = useState(0.82);
+  const [power, setPower] = useState(POWER_MIN);
   const [, setAimAngle] = useState(0);
   const [pointerMode, setPointerMode] = useState<PointerMode>("idle");
   const [animating, setAnimating] = useState(false);
@@ -690,6 +691,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const drawAimAngleRef = useRef(0);
   const powerRef = useRef(power);
   const powerReleaseGuardRef = useRef(false);
+  const powerReturnAnimRef = useRef<number | null>(null);
+  const localCuePlacementRef = useRef<{ x: number; y: number } | null>(null);
   const pointerModeRef = useRef<PointerMode>("idle");
   const pocketAnimationsRef = useRef<PocketAnimation[]>([]);
   const prevPocketedIdsRef = useRef<Set<string>>(new Set());
@@ -742,7 +745,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   useEffect(() => { tableCacheRef.current = makeTableCache(tableSprite); }, [assetsVersion, tableSprite]);
 
-  useEffect(() => { if (!animating) setDisplayBalls(game.balls); }, [animating, game.balls]);
+  useEffect(() => {
+    if (animating) return;
+    let nextBalls = game.balls;
+    if (game.ballInHandUserId === currentUserId && localCuePlacementRef.current) {
+      const placed = clampCuePosition(
+        localCuePlacementRef.current.x,
+        localCuePlacementRef.current.y,
+        game.shotSequence === 0,
+      );
+      nextBalls = game.balls.map((ball) => (ball.number === 0 ? { ...ball, x: placed.x, y: placed.y, pocketed: false } : ball));
+    }
+    setDisplayBalls(nextBalls);
+  }, [animating, currentUserId, game.ballInHandUserId, game.balls, game.shotSequence]);
 
   // Shot animation trigger
   useEffect(() => {
@@ -773,7 +788,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     }
   }, [animating, game]);
 
-  useEffect(() => () => { if (drawLoopRef.current !== null) window.cancelAnimationFrame(drawLoopRef.current); }, []);
+  useEffect(() => () => {
+    if (drawLoopRef.current !== null) window.cancelAnimationFrame(drawLoopRef.current);
+    if (powerReturnAnimRef.current !== null) window.cancelAnimationFrame(powerReturnAnimRef.current);
+  }, []);
 
   const renderBalls = useMemo(() => {
     const visibleNonCue = displayBalls.filter((ball) => !ball.pocketed && ball.number !== 0);
@@ -830,6 +848,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     prevGroupRef.current = myGroup;
   }, [myGroup]);
   useEffect(() => { powerRef.current = power; }, [power]);
+  useEffect(() => {
+    if (game.ballInHandUserId !== currentUserId) {
+      localCuePlacementRef.current = null;
+    }
+    if (!shootBusy && pointerModeRef.current !== "power" && powerRef.current !== POWER_MIN) {
+      powerRef.current = POWER_MIN;
+      setPower(POWER_MIN);
+    }
+  }, [currentUserId, game.ballInHandUserId, game.shotSequence, shootBusy]);
   useEffect(() => { pointerModeRef.current = pointerMode; }, [pointerMode]);
 
   const setPointerModeSafe = (next: PointerMode) => { pointerModeRef.current = next; setPointerMode(next); };
@@ -848,6 +875,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const updateCuePositionFromPoint = (point: LocalPoint) => {
     if (!cueBall) return;
     const next = clampCuePosition(point.x, point.y, game.shotSequence === 0);
+    localCuePlacementRef.current = next;
     setDisplayBalls((current) => current.map((ball) => (ball.number === 0 ? { ...ball, x: next.x, y: next.y, pocketed: false } : ball)));
   };
 
@@ -856,7 +884,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const rect = powerRailRef.current.getBoundingClientRect();
     // Drag DOWN = pull cue back = MORE power (slingshot feel)
     const ratio = (clientY - rect.top) / rect.height;
-    const next = clamp(ratio, 0.05, 1);
+    const next = clamp(ratio, POWER_MIN, 1);
     powerRef.current = next;
     setPower(next);
   };
@@ -890,13 +918,32 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     setPointerModeSafe("idle");
   };
 
+  const animatePowerReturn = (from: number) => {
+    if (powerReturnAnimRef.current !== null) {
+      window.cancelAnimationFrame(powerReturnAnimRef.current);
+      powerReturnAnimRef.current = null;
+    }
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = clamp((now - start) / POWER_RETURN_MS, 0, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const next = lerp(from, POWER_MIN, eased);
+      powerRef.current = next;
+      setPower(next);
+      if (t < 1) powerReturnAnimRef.current = window.requestAnimationFrame(step);
+      else powerReturnAnimRef.current = null;
+    };
+    powerReturnAnimRef.current = window.requestAnimationFrame(step);
+  };
+
   const commitPowerShot = () => {
     if (pointerModeRef.current !== "power" || powerReleaseGuardRef.current) return;
     powerReleaseGuardRef.current = true;
     const state = renderStateRef.current;
     const liveCueBall = state.cueBall;
-    const shotPower = clamp(powerRef.current, 0.05, 1);
+    const shotPower = clamp(powerRef.current, POWER_MIN, 1);
     snapAnimRef.current = { startedAt: performance.now(), power: shotPower, fired: true };
+    animatePowerReturn(shotPower);
     setPointerModeSafe("idle");
     if (!liveCueBall || !canInteractRef.current || shootBusyRef.current) return;
     const payload = {
@@ -906,12 +953,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       cueY: state.isBallInHand ? liveCueBall.y : null,
       calledPocket: state.needEightCall ? state.selectedPocket : null,
     };
+    if (state.isBallInHand) {
+      localCuePlacementRef.current = { x: liveCueBall.x, y: liveCueBall.y };
+    }
     SFX.cueHit(payload.power);
     void onShootRef.current(payload).catch(() => {});
   };
 
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!canInteract) return;
+    if (powerReturnAnimRef.current !== null) {
+      window.cancelAnimationFrame(powerReturnAnimRef.current);
+      powerReturnAnimRef.current = null;
+    }
     powerReleaseGuardRef.current = false;
     setPointerModeSafe("power");
     event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -1055,7 +1109,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const preview = drawCueBall && !animating ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
 
       // Quick cue settle after release for responsiveness
-      const SNAP_MS = 46;
+      const SNAP_MS = 14;
       const snap = snapAnimRef.current;
       let pullRatio = 0;
       if (snap) {
