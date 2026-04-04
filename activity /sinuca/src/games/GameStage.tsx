@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { BallGroup, GameBallSnapshot, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
+import type { AimPointerMode, AimStateSnapshot, BallGroup, GameBallSnapshot, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
 import tableAsset from "../assets/game/pool-table-public.png";
 import cueAsset from "../assets/game/pool-cue-public.png";
 
@@ -108,6 +108,10 @@ const OPENING_RACK = [
 const POCKET_ANIM_DURATION = 320;
 const POWER_MIN = 0.06;
 const POWER_RETURN_MS = 180;
+const POWER_DEADZONE_PX = 14;
+const POWER_FULL_TRAVEL_RATIO = 0.9;
+const POWER_CURVE_EXPONENT = 1.75;
+const AIM_SYNC_INTERVAL_MS = 44;
 
 type ShotInput = {
   angle: number;
@@ -123,7 +127,9 @@ type Props = {
   currentUserId: string;
   shootBusy: boolean;
   exitBusy: boolean;
+  opponentAim: AimStateSnapshot | null;
   onShoot: (shot: ShotInput) => Promise<void>;
+  onAimStateChange?: (aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; mode: AimPointerMode }) => void;
   onExit: () => void;
 };
 
@@ -650,6 +656,34 @@ function drawCue(
   ctx.restore();
 }
 
+function drawRemoteAimOverlay(
+  ctx: CanvasRenderingContext2D,
+  cueSprite: HTMLImageElement,
+  cueBall: GameBallSnapshot,
+  aimAngle: number,
+  preview: AimPreview | null,
+  pullRatio: number,
+) {
+  const lineEndX = preview && preview.contactX !== null && preview.contactY !== null ? preview.contactX : preview?.endX ?? (cueBall.x + Math.cos(aimAngle) * 420);
+  const lineEndY = preview && preview.contactX !== null && preview.contactY !== null ? preview.contactY : preview?.endY ?? (cueBall.y + Math.sin(aimAngle) * 420);
+
+  ctx.save();
+  ctx.globalAlpha = 0.42;
+  ctx.strokeStyle = "rgba(244, 248, 255, 0.86)";
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(cueBall.x, cueBall.y);
+  ctx.lineTo(lineEndX, lineEndY);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = 0.38;
+  drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
+  ctx.restore();
+}
+
 // ─── Table render cache ───────────────────────────────────────────────────
 
 function makeTableCache(image: HTMLImageElement) {
@@ -682,6 +716,7 @@ function drawPoolTable(
   pocketAnimations: PocketAnimation[],
   now: number,
   ballSpinCache: Map<string, BallSpinState>,
+  remoteOverlay: { cueBall: GameBallSnapshot; aimAngle: number; preview: AimPreview | null; pullRatio: number } | null,
 ) {
   ctx.clearRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
 
@@ -702,7 +737,10 @@ function drawPoolTable(
     }
   }
 
-  // STEP 1: Aim line + Cue BEFORE balls (so balls render on top of the line)
+  // STEP 1: Remote aim overlay first, then local aim line + cue BEFORE balls.
+  if (remoteOverlay) {
+    drawRemoteAimOverlay(ctx, cueSprite, remoteOverlay.cueBall, remoteOverlay.aimAngle, remoteOverlay.preview, remoteOverlay.pullRatio);
+  }
   if (cueBall && showGuide && preview) {
     drawAimLine(ctx, cueBall, preview);
     drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
@@ -746,7 +784,7 @@ function createImage(src: string) {
 
 // ─── Main component ───────────────────────────────────────────────────────
 
-export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, onShoot, onExit }: Props) {
+export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, onShoot, onAimStateChange, onExit }: Props) {
   const [displayBalls, setDisplayBalls] = useState<GameBallSnapshot[]>(game.balls);
   const [power, setPower] = useState(POWER_MIN);
   const [, setAimAngle] = useState(0);
@@ -756,6 +794,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const [selectedPocket, setSelectedPocket] = useState<number | null>(null);
   const [assetsVersion, setAssetsVersion] = useState(0);
   const [groupBanner, setGroupBanner] = useState<string | null>(null);
+  const [displayedGroups, setDisplayedGroups] = useState<{ hostGroup: BallGroup | null; guestGroup: BallGroup | null }>({
+    hostGroup: game.hostGroup,
+    guestGroup: game.guestGroup,
+  });
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const powerRailRef = useRef<HTMLDivElement | null>(null);
@@ -777,6 +819,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const powerRef = useRef(power);
   const powerReleaseGuardRef = useRef(false);
   const powerReturnAnimRef = useRef<number | null>(null);
+  const powerGestureRef = useRef<{ startY: number; fullTravelPx: number } | null>(null);
   const localCuePlacementRef = useRef<{ x: number; y: number } | null>(null);
   const pointerModeRef = useRef<PointerMode>("idle");
   const pocketAnimationsRef = useRef<PocketAnimation[]>([]);
@@ -786,6 +829,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const canInteractRef = useRef(false);
   const shootBusyRef = useRef(false);
   const onShootRef = useRef(onShoot);
+  const onAimStateChangeRef = useRef(onAimStateChange);
+  const displayedGroupsRef = useRef(displayedGroups);
+  const pendingDisplayedGroupsRef = useRef<{ hostGroup: BallGroup | null; guestGroup: BallGroup | null } | null>(null);
+  const lastAimEmitAtRef = useRef(0);
+  const lastAimPayloadKeyRef = useRef<string>("");
 
   const renderStateRef = useRef({
     renderBalls: [] as GameBallSnapshot[],
@@ -809,11 +857,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const opponent = room.players.find((player) => player.userId !== currentUserId) ?? (isHost ? guest : host);
   const leftPlayer = host;
   const rightPlayer = guest;
-  const leftGroup = game.hostGroup;
-  const rightGroup = game.guestGroup;
-  const myGroup = currentUserId === room.hostUserId ? game.hostGroup : game.guestGroup;
+  const leftGroup = displayedGroups.hostGroup;
+  const rightGroup = displayedGroups.guestGroup;
+  const myGroup = currentUserId === room.hostUserId ? displayedGroups.hostGroup : displayedGroups.guestGroup;
   const isMyTurn = game.turnUserId === currentUserId;
-  const isOpenTable = !game.hostGroup || !game.guestGroup;
+  const isOpenTable = !displayedGroups.hostGroup || !displayedGroups.guestGroup;
 
   // Asset loading
   useEffect(() => {
@@ -830,6 +878,34 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [tableSprite, cueSprite]);
 
   useEffect(() => { tableCacheRef.current = makeTableCache(tableSprite); }, [assetsVersion, tableSprite]);
+
+  useEffect(() => { onAimStateChangeRef.current = onAimStateChange; }, [onAimStateChange]);
+  useEffect(() => { displayedGroupsRef.current = displayedGroups; }, [displayedGroups]);
+
+  useEffect(() => {
+    const next = { hostGroup: game.hostGroup, guestGroup: game.guestGroup };
+    const current = displayedGroupsRef.current;
+    const changed = current.hostGroup !== next.hostGroup || current.guestGroup !== next.guestGroup;
+    if (!changed) return;
+
+    const assigningAfterPocket = current.hostGroup === null && current.guestGroup === null && next.hostGroup !== null && next.guestGroup !== null;
+    if (assigningAfterPocket && animating) {
+      pendingDisplayedGroupsRef.current = next;
+      return;
+    }
+
+    pendingDisplayedGroupsRef.current = null;
+    displayedGroupsRef.current = next;
+    setDisplayedGroups(next);
+  }, [animating, game.guestGroup, game.hostGroup]);
+
+  useEffect(() => {
+    if (animating || !pendingDisplayedGroupsRef.current) return;
+    const next = pendingDisplayedGroupsRef.current;
+    pendingDisplayedGroupsRef.current = null;
+    displayedGroupsRef.current = next;
+    setDisplayedGroups(next);
+  }, [animating]);
 
   useEffect(() => {
     if (animating) return;
@@ -877,6 +953,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   useEffect(() => () => {
     if (drawLoopRef.current !== null) window.cancelAnimationFrame(drawLoopRef.current);
     if (powerReturnAnimRef.current !== null) window.cancelAnimationFrame(powerReturnAnimRef.current);
+    onAimStateChangeRef.current?.({ visible: false, angle: aimAngleRef.current, cueX: null, cueY: null, mode: "idle" });
   }, []);
 
   const renderBalls = useMemo(() => {
@@ -922,16 +999,16 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   useEffect(() => { if (!needEightCall) setSelectedPocket(null); }, [needEightCall]);
 
-  // #16: Show group assignment banner
-  const prevGroupRef = useRef<BallGroup | null>(null);
+  // #16: Show group assignment banner only after the scoring shot has visually ended.
+  const prevGroupRef = useRef<BallGroup | null>(myGroup);
   useEffect(() => {
-    if (myGroup && !prevGroupRef.current) {
-      const label = myGroup === "solids" ? "Suas bolas são lisas!" : "Suas bolas são listradas!";
-      setGroupBanner(label);
-      const timer = window.setTimeout(() => setGroupBanner(null), 2500);
-      return () => window.clearTimeout(timer);
-    }
+    const previous = prevGroupRef.current;
     prevGroupRef.current = myGroup;
+    if (!myGroup || previous) return;
+    const label = myGroup === "solids" ? "Suas bolas são lisas!" : "Suas bolas são listradas!";
+    setGroupBanner(label);
+    const timer = window.setTimeout(() => setGroupBanner(null), 2500);
+    return () => window.clearTimeout(timer);
   }, [myGroup]);
   useEffect(() => { powerRef.current = power; }, [power]);
   useEffect(() => {
@@ -951,7 +1028,41 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [currentUserId, game.ballInHandUserId, game.balls, game.shotSequence, shootBusy]);
   useEffect(() => { pointerModeRef.current = pointerMode; }, [pointerMode]);
 
+  const powerBarVisible = canInteract && !isBallInHand && !animating;
+
+  const emitAimState = (next: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; mode: AimPointerMode }, force = false) => {
+    const handler = onAimStateChangeRef.current;
+    if (!handler) return;
+    const payload = {
+      visible: next.visible,
+      angle: Number.isFinite(next.angle) ? next.angle : 0,
+      cueX: next.cueX ?? null,
+      cueY: next.cueY ?? null,
+      mode: next.mode,
+    };
+    const key = `${payload.visible ? 1 : 0}:${payload.mode}:${payload.angle.toFixed(3)}:${payload.cueX === null ? "n" : payload.cueX.toFixed(1)}:${payload.cueY === null ? "n" : payload.cueY.toFixed(1)}`;
+    const now = performance.now();
+    if (!force && key === lastAimPayloadKeyRef.current && now - lastAimEmitAtRef.current < AIM_SYNC_INTERVAL_MS) return;
+    if (!force && payload.visible && now - lastAimEmitAtRef.current < AIM_SYNC_INTERVAL_MS) return;
+    lastAimPayloadKeyRef.current = key;
+    lastAimEmitAtRef.current = now;
+    handler(payload);
+  };
+
+  useEffect(() => {
+    if (!canInteract || animating || shootBusy || game.status === "finished" || pointerMode === "place") {
+      emitAimState({ visible: false, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "idle" }, true);
+    }
+  }, [animating, canInteract, cueBall?.x, cueBall?.y, game.status, pointerMode, shootBusy]);
+
   const setPointerModeSafe = (next: PointerMode) => { pointerModeRef.current = next; setPointerMode(next); };
+
+  const mapPowerFromDrag = (dragPx: number, fullTravelPx: number) => {
+    const effective = Math.max(0, dragPx - POWER_DEADZONE_PX);
+    const normalized = clamp(effective / Math.max(1, fullTravelPx), 0, 1);
+    const curved = Math.pow(normalized, POWER_CURVE_EXPONENT);
+    return clamp(POWER_MIN + curved * (1 - POWER_MIN), POWER_MIN, 1);
+  };
 
   const pointToLocal = (clientX: number, clientY: number) => {
     if (!tableWrapRef.current) return null;
@@ -961,6 +1072,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const beginAimDrag = (point: LocalPoint) => {
     aimDragRef.current = { x: point.x, y: point.y };
+    if (cueBall) {
+      emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall.x, cueY: cueBall.y, mode: "aim" }, true);
+    }
   };
 
   const updateAimFromDrag = (point: LocalPoint) => {
@@ -968,6 +1082,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const previous = aimDragRef.current;
     if (!previous) {
       aimDragRef.current = { x: point.x, y: point.y };
+      emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall.x, cueY: cueBall.y, mode: "aim" });
       return;
     }
 
@@ -999,6 +1114,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (Math.abs(delta) < 0.0009) return;
 
     aimAngleRef.current += delta;
+    emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall.x, cueY: cueBall.y, mode: "aim" });
   };
 
   const updateCuePositionFromPoint = (point: LocalPoint) => {
@@ -1006,16 +1122,17 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const next = clampCuePosition(point.x, point.y, game.shotSequence === 0);
     localCuePlacementRef.current = next;
     setDisplayBalls((current) => current.map((ball) => (ball.number === 0 ? { ...ball, x: next.x, y: next.y, pocketed: false } : ball)));
+    emitAimState({ visible: false, angle: aimAngleRef.current, cueX: next.x, cueY: next.y, mode: "place" });
   };
 
   const updatePowerFromClientY = (clientY: number) => {
-    if (!powerRailRef.current) return;
-    const rect = powerRailRef.current.getBoundingClientRect();
-    // Drag DOWN = pull cue back = MORE power (slingshot feel)
-    const ratio = (clientY - rect.top) / rect.height;
-    const next = clamp(ratio, POWER_MIN, 1);
+    const gesture = powerGestureRef.current;
+    if (!gesture) return;
+    const dragPx = Math.max(0, clientY - gesture.startY);
+    const next = mapPowerFromDrag(dragPx, gesture.fullTravelPx);
     powerRef.current = next;
     setPower(next);
+    emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "power" });
   };
 
   const handleTablePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1046,6 +1163,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const handleTablePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     aimDragRef.current = null;
+    emitAimState({ visible: false, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "idle" }, true);
     setPointerModeSafe("idle");
   };
 
@@ -1070,11 +1188,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const commitPowerShot = () => {
     if (pointerModeRef.current !== "power" || powerReleaseGuardRef.current) return;
     powerReleaseGuardRef.current = true;
+    powerGestureRef.current = null;
     const state = renderStateRef.current;
     const liveCueBall = state.cueBall;
     const shotPower = clamp(powerRef.current, POWER_MIN, 1);
     snapAnimRef.current = { startedAt: performance.now(), power: shotPower, fired: true };
     setPointerModeSafe("idle");
+    emitAimState({ visible: false, angle: aimAngleRef.current, cueX: liveCueBall?.x ?? null, cueY: liveCueBall?.y ?? null, mode: "idle" }, true);
 
     if (!liveCueBall || !canInteractRef.current || shootBusyRef.current) {
       animatePowerReturn(shotPower);
@@ -1100,16 +1220,23 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   };
 
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!canInteract) return;
+    if (!canInteract || !powerRailRef.current) return;
     SFX.prime();
     if (powerReturnAnimRef.current !== null) {
       window.cancelAnimationFrame(powerReturnAnimRef.current);
       powerReturnAnimRef.current = null;
     }
+    const rect = powerRailRef.current.getBoundingClientRect();
+    powerGestureRef.current = {
+      startY: event.clientY,
+      fullTravelPx: Math.max(rect.height * POWER_FULL_TRAVEL_RATIO, 180),
+    };
     powerReleaseGuardRef.current = false;
+    powerRef.current = POWER_MIN;
+    setPower(POWER_MIN);
     setPointerModeSafe("power");
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    updatePowerFromClientY(event.clientY);
+    emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "power" }, true);
   };
 
   const handlePowerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1247,9 +1374,32 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       }
       prevPocketedIdsRef.current = currentPocketedIds;
       pocketAnimationsRef.current = pocketAnimationsRef.current.filter((anim) => now - anim.startedAt < POCKET_ANIM_DURATION);
-      updateBallSpinCache(ballSpinRef.current, drawBalls, now);
 
+      const remoteVisible = Boolean(
+        opponentAim
+        && opponentAim.visible
+        && !animating
+        && !state.canInteract
+        && opponentAim.userId === game.turnUserId
+        && game.status !== "finished"
+      );
+      const remoteCueBall = remoteVisible && opponentAim && opponentAim.cueX !== null && opponentAim.cueY !== null
+        ? {
+            id: drawCueBall?.id ?? "ball-0",
+            number: 0,
+            x: opponentAim.cueX,
+            y: opponentAim.cueY,
+            pocketed: false,
+          }
+        : null;
+      if (remoteCueBall && game.ballInHandUserId === game.turnUserId) {
+        drawBalls = drawBalls.map((ball) => ball.number === 0 ? { ...ball, x: remoteCueBall.x, y: remoteCueBall.y, pocketed: false } : ball);
+        drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? remoteCueBall;
+      }
+
+      updateBallSpinCache(ballSpinRef.current, drawBalls, now);
       const preview = drawCueBall && !animating && !(state.isBallInHand && state.pointerMode === "place") ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
+      const remotePreview = remoteVisible && remoteCueBall && opponentAim ? computeAimPreview(remoteCueBall, drawBalls, opponentAim.angle) : null;
 
       // Quick cue settle after release for responsiveness
       const SNAP_MS = 14;
@@ -1271,6 +1421,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         pullRatio = 0.06;
       }
 
+      const remotePullRatio = opponentAim?.mode === "power" ? 0.32 : opponentAim?.mode === "aim" ? 0.08 : 0.04;
+
       drawPoolTable(
         context,
         tableCacheRef.current,
@@ -1287,6 +1439,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         pocketAnimationsRef.current,
         now,
         ballSpinRef.current,
+        remoteVisible && remoteCueBall && opponentAim ? { cueBall: remoteCueBall, aimAngle: opponentAim.angle, preview: remotePreview, pullRatio: remotePullRatio } : null,
       );
 
       drawLoopRef.current = window.requestAnimationFrame(draw);
@@ -1294,7 +1447,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
     drawLoopRef.current = window.requestAnimationFrame(draw);
     return () => { if (drawLoopRef.current !== null) { window.cancelAnimationFrame(drawLoopRef.current); drawLoopRef.current = null; } };
-  }, [animating, assetsVersion, cueSprite]);
+  }, [animating, assetsVersion, cueSprite, game.ballInHandUserId, game.status, game.turnUserId, opponentAim]);
 
   // ─── Pocketed ball mini-icons (for HUD) ─────────────────────────────────
   // Pre-render mini ball icons as data URLs for HUD pips
@@ -1409,7 +1562,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       <div className="pool-stage__table-layout">
         <div
           ref={powerRailRef}
-          className={`pool-stage__power ${canInteract ? "pool-stage__power--active" : ""} ${pointerMode === "power" ? "pool-stage__power--dragging" : ""}`}
+          className={`pool-stage__power ${canInteract ? "pool-stage__power--active" : ""} ${pointerMode === "power" ? "pool-stage__power--dragging" : ""} ${powerBarVisible ? "" : "pool-stage__power--hidden"}`}
+          aria-hidden={!powerBarVisible}
           onPointerDown={handlePowerDown}
           onPointerMove={handlePowerMove}
           onPointerUp={handlePowerUp}
