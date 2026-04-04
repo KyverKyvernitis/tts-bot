@@ -108,6 +108,7 @@ const OPENING_RACK = [
 const POCKET_ANIM_DURATION = 320;
 const POWER_MIN = 0.06;
 const POWER_RETURN_MS = 180;
+const LOCAL_RELEASE_HOLD_MS = 130;
 
 type ShotInput = {
   angle: number;
@@ -442,8 +443,8 @@ function drawBall(
     ctx.rotate(spinAxis);
 
     if (ball.number >= 9) {
-      const stripeCenterY = Math.sin(spinPhase) * r * 0.2;
-      const stripeHalf = r * (0.24 + 0.06 * Math.abs(Math.cos(spinPhase)));
+      const stripeCenterY = Math.sin(spinPhase) * r * 0.18;
+      const stripeHalf = r * (0.31 + 0.08 * Math.abs(Math.cos(spinPhase)));
       ctx.save();
       ctx.beginPath();
       ctx.arc(0, 0, r - 0.55 * scale, 0, Math.PI * 2);
@@ -457,8 +458,8 @@ function drawBall(
       ctx.restore();
 
       ctx.save();
-      ctx.strokeStyle = "rgba(255,255,255,0.62)";
-      ctx.lineWidth = 0.85 * scale;
+      ctx.strokeStyle = "rgba(18,26,38,0.34)";
+      ctx.lineWidth = 1.1 * scale;
       ctx.beginPath();
       ctx.moveTo(-r * 0.9, stripeCenterY - stripeHalf);
       ctx.lineTo(r * 0.9, stripeCenterY - stripeHalf);
@@ -786,6 +787,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const canInteractRef = useRef(false);
   const shootBusyRef = useRef(false);
   const onShootRef = useRef(onShoot);
+  const pendingReleaseRef = useRef<{ startedAt: number; cueX: number; cueY: number; angle: number; power: number } | null>(null);
 
   const renderStateRef = useRef({
     renderBalls: [] as GameBallSnapshot[],
@@ -858,19 +860,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       baseBalls: game.balls,
       finalBalls: game.balls,
     };
+    pendingReleaseRef.current = null;
     setAnimating(true);
     setAnimatingSeq(game.lastShot.seq);
-    // Schedule realistic collision sounds based on shot frames
+    // Keep playback sounds secondary so the release itself still feels immediate.
     const frameCount = game.lastShot.frames.length;
-    // Initial ball hit
-    window.setTimeout(() => SFX.ballHit(), 80);
-    // Cushion bounces during longer shots
-    if (frameCount > 60) {
-      window.setTimeout(() => SFX.cushion(), 300);
+    if (frameCount > 18) {
+      window.setTimeout(() => SFX.ballHit(), 28);
     }
-    if (frameCount > 150) {
-      window.setTimeout(() => SFX.cushion(), 600);
-      window.setTimeout(() => SFX.ballHit(), 450);
+    if (frameCount > 56) {
+      window.setTimeout(() => SFX.cushion(), 240);
+    }
+    if (frameCount > 84) {
+      window.setTimeout(() => SFX.ballHit(), 410);
     }
   }, [animating, game]);
 
@@ -935,14 +937,20 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [myGroup]);
   useEffect(() => { powerRef.current = power; }, [power]);
   useEffect(() => {
-    if (game.ballInHandUserId !== currentUserId) {
+    if (game.ballInHandUserId === currentUserId) {
+      if (!localCuePlacementRef.current) {
+        const cue = game.balls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+        const placed = clampCuePosition(cue?.x ?? DEFAULT_CUE_X, cue?.y ?? DEFAULT_CUE_Y, game.shotSequence === 0);
+        localCuePlacementRef.current = placed;
+      }
+    } else {
       localCuePlacementRef.current = null;
     }
     if (!shootBusy && pointerModeRef.current !== "power" && powerRef.current !== POWER_MIN) {
       powerRef.current = POWER_MIN;
       setPower(POWER_MIN);
     }
-  }, [currentUserId, game.ballInHandUserId, game.shotSequence, shootBusy]);
+  }, [currentUserId, game.ballInHandUserId, game.balls, game.shotSequence, shootBusy]);
   useEffect(() => { pointerModeRef.current = pointerMode; }, [pointerMode]);
 
   const setPointerModeSafe = (next: PointerMode) => { pointerModeRef.current = next; setPointerMode(next); };
@@ -1087,6 +1095,14 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       localCuePlacementRef.current = { x: liveCueBall.x, y: liveCueBall.y };
     }
 
+    pendingReleaseRef.current = {
+      startedAt: performance.now(),
+      cueX: liveCueBall.x,
+      cueY: liveCueBall.y,
+      angle: aimAngleRef.current,
+      power: shotPower,
+    };
+
     // Fire the real shot immediately, then let visual/audio reactions happen in parallel.
     void onShootRef.current(payload).catch(() => {});
     animatePowerReturn(shotPower);
@@ -1191,6 +1207,24 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       let drawBalls = state.renderBalls;
       let drawCueBall = state.cueBall;
       const playback = playbackRef.current;
+      const pendingRelease = pendingReleaseRef.current;
+
+      if (!playback && pendingRelease) {
+        const elapsed = now - pendingRelease.startedAt;
+        if (elapsed >= LOCAL_RELEASE_HOLD_MS) {
+          pendingReleaseRef.current = null;
+        } else {
+          const cueBallId = state.cueBall?.id ?? "ball-0";
+          const speed = 24 + pendingRelease.power * 54;
+          const distance = (elapsed / LOCAL_RELEASE_HOLD_MS) * speed;
+          const nextCueX = pendingRelease.cueX + Math.cos(pendingRelease.angle) * distance;
+          const nextCueY = pendingRelease.cueY + Math.sin(pendingRelease.angle) * distance;
+          drawBalls = state.renderBalls.map((ball) => ball.id === cueBallId
+            ? { ...ball, x: nextCueX, y: nextCueY, pocketed: false }
+            : ball);
+          drawCueBall = drawBalls.find((ball) => ball.id === cueBallId) ?? null;
+        }
+      }
 
       if (playback && playback.frames.length) {
         const frameStepMs = 1000 / 60;
@@ -1243,7 +1277,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       pocketAnimationsRef.current = pocketAnimationsRef.current.filter((anim) => now - anim.startedAt < POCKET_ANIM_DURATION);
       updateBallSpinCache(ballSpinRef.current, drawBalls, now);
 
-      const preview = drawCueBall && !animating ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
+      const preview = drawCueBall && !animating && !pendingReleaseRef.current ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
 
       // Quick cue settle after release for responsiveness
       const SNAP_MS = 14;
