@@ -56,6 +56,8 @@ ACTIVITY_SERVICE_NAME="sinuca-activity-server"
 ACTIVITY_HEALTH_URL="http://127.0.0.1:8787/health"
 ACTIVITY_START_SCRIPT="/home/ubuntu/bot/start-sinuca-server.sh"
 ACTIVITY_LOG_FILE="/home/ubuntu/bot/activity /sinuca-server/sinuca-server.log"
+REQUIREMENTS_FILE="/home/ubuntu/bot/requirements.txt"
+UPDATE_STARTED_AT="$(date +%s)"
 RETRY_LATEST_CODE=42
 PENDING_REMOTE_HASH=""
 
@@ -77,6 +79,22 @@ NPM_BIN=${NPM_BIN:-ausente}"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+elapsed_human() {
+  local now_ts elapsed minutes seconds
+  now_ts="$(date +%s)"
+  elapsed=$((now_ts - UPDATE_STARTED_AT))
+  if [ "$elapsed" -lt 0 ] 2>/dev/null; then
+    elapsed=0
+  fi
+  minutes=$((elapsed / 60))
+  seconds=$((elapsed % 60))
+  if [ "$minutes" -gt 0 ]; then
+    printf '%dmin %02ds' "$minutes" "$seconds"
+  else
+    printf '%ds' "$seconds"
+  fi
 }
 
 tail_err() {
@@ -119,6 +137,7 @@ run_step() {
     err_text="$(tail_err)"
 
     local body="Etapa: $step_name
+Duração: $(elapsed_human)
 
 Últimas linhas do erro:
 $err_text"
@@ -356,10 +375,10 @@ rollback_update() {
   git reset --hard "$PREV_HASH" >/dev/null 2>&1 || true
 
   if [ -x /home/ubuntu/bot/.venv/bin/python ]; then
-    /home/ubuntu/bot/.venv/bin/python -m pip install -r requirements.txt >/dev/null 2>&1 || true
+    /home/ubuntu/bot/.venv/bin/python -m pip install -r "$REQUIREMENTS_FILE" >/dev/null 2>&1 || true
   elif [ -f /home/ubuntu/bot/.venv/bin/activate ]; then
     . /home/ubuntu/bot/.venv/bin/activate
-    pip install -r requirements.txt >/dev/null 2>&1 || true
+    pip install -r "$REQUIREMENTS_FILE" >/dev/null 2>&1 || true
   fi
 
   (
@@ -382,7 +401,8 @@ rollback_update() {
   BODY="Branch: $BRANCH
 Tentativa de update para: $NEW_SHORT
 Rollback para: $PREV_SHORT
-Motivo: $reason"
+Motivo: $reason
+Duração: $(elapsed_human)"
 
   if [ "$mark_bad_remote" = "1" ]; then
     BODY="$BODY
@@ -407,7 +427,7 @@ deploy_current_target() {
     PIP_CMD=(pip)
   fi
 
-  if ! run_step "pip install -r requirements.txt" "${PIP_CMD[@]}" install -r requirements.txt; then
+  if ! run_step "pip install -r requirements.txt" "${PIP_CMD[@]}" install -r "$REQUIREMENTS_FILE"; then
     rollback_update "Falha ao instalar dependências" 0
     return 1
   fi
@@ -475,8 +495,10 @@ if [ -n "$DIRTY_STATE" ]; then
   LAST_STATE="$(read_file "$DIRTY_STATE_FILE")"
   if [ "$LAST_STATE" != "dirty" ]; then
     log "Repo sujo. Update automático ignorado."
-    BODY="O repositório local está com alterações não commitadas.
-Por segurança, o update automático foi cancelado."
+    BODY="Motivo: repositório local com alterações não commitadas
+Duração: $(elapsed_human)
+
+Por segurança, o update automático foi cancelado para evitar sobrescrever ajustes locais."
     /home/ubuntu/bot/alert.sh warn "Update ignorado" "$BODY"
     write_file "$DIRTY_STATE_FILE" "dirty"
   fi
@@ -488,7 +510,9 @@ fi
 LAST_STATE="$(read_file "$DIRTY_STATE_FILE")"
 if [ "$LAST_STATE" = "dirty" ]; then
   log "Repo voltou a ficar limpo."
-  BODY="O repositório voltou a ficar limpo.
+  BODY="Status: repositório local limpo novamente
+Duração: $(elapsed_human)
+
 O update automático pode funcionar normalmente de novo."
   /home/ubuntu/bot/alert.sh success "Update liberado novamente" "$BODY"
 fi
@@ -499,6 +523,7 @@ REMOTE_HASH="$(git rev-parse origin/$BRANCH 2>/dev/null)"
 
 if [ -z "$LOCAL_HASH" ] || [ -z "$REMOTE_HASH" ]; then
   BODY="Etapa: comparação de hashes
+Duração: $(elapsed_human)
 
 Não foi possível obter LOCAL_HASH ou REMOTE_HASH."
   log "Falha ao obter hashes."
@@ -522,6 +547,7 @@ if [ -n "$FAILED_REMOTE_HASH" ] && [ "$FAILED_REMOTE_HASH" != "$REMOTE_HASH" ]; 
   log "Novo commit remoto detectado após commit ruim anterior. Liberando novas tentativas."
   BODY="Commit remoto ruim anterior: $OLD_FAILED_SHORT
 Novo commit remoto detectado: $NEW_REMOTE_SHORT
+Duração: $(elapsed_human)
 
 O auto-update voltará a tentar atualizar normalmente."
   /home/ubuntu/bot/alert.sh info "Novo commit detectado após rollback" "$BODY"
@@ -562,15 +588,20 @@ while true; do
     fi
 
     if [ -z "$NEXT_HASH" ] || [ "$NEXT_HASH" = "$DEPLOY_TARGET" ]; then
-      BODY="Commit novo foi detectado durante o deploy, mas não foi possível resolver o novo HEAD remoto com segurança."
+      BODY="Motivo: commit mais novo detectado durante o deploy
+Duração: $(elapsed_human)
+
+Não foi possível resolver o novo HEAD remoto com segurança."
       /home/ubuntu/bot/alert.sh warn "Deploy reiniciado" "$BODY"
       exit 1
     fi
 
     NEXT_SHORT="$(git rev-parse --short "$NEXT_HASH" 2>/dev/null || echo "$NEXT_HASH")"
-    BODY="Um commit mais novo chegou durante o deploy do commit $NEW_SHORT.
+    BODY="Commit em deploy: $NEW_SHORT
+Novo commit: $NEXT_SHORT
+Duração: $(elapsed_human)
 
-O processo atual foi descartado e o update será refeito para o commit mais recente: $NEXT_SHORT."
+O processo atual foi descartado e o update será refeito para o commit mais recente."
     /home/ubuntu/bot/alert.sh update "Deploy reiniciado para commit mais novo" "$BODY"
 
     LOCAL_HASH="$DEPLOY_TARGET"
@@ -584,6 +615,8 @@ O processo atual foi descartado e o update será refeito para o commit mais rece
 De: $OLD_SHORT
 Para: $NEW_SHORT
 Commit: $COMMIT_MSG
+Duração: $(elapsed_human)
+Healthcheck: OK
 
 tts-bot reiniciado com sucesso e verificado.
 Activity: frontend publicado em $ACTIVITY_WEB_ROOT e backend validado em $ACTIVITY_HEALTH_URL."
