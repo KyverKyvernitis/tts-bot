@@ -40,6 +40,9 @@ const SFX = (() => {
   }
 
   return {
+    prime() {
+      getCtx();
+    },
     /** Cue hitting the ball — sharp high click */
     cueHit(power = 0.7) {
       const ac = getCtx(); if (!ac) return;
@@ -364,6 +367,10 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, scale =
     baseGrad.addColorStop(0, "#4a5260");
     baseGrad.addColorStop(0.3, "#1e2330");
     baseGrad.addColorStop(1, "#050709");
+  } else if (ball.number >= 9) {
+    baseGrad.addColorStop(0, "#ffffff");
+    baseGrad.addColorStop(0.65, "#f4f7fb");
+    baseGrad.addColorStop(1, "#ccd6e2");
   } else {
     baseGrad.addColorStop(0, "#fff8d8");
     baseGrad.addColorStop(0.18, color);
@@ -376,30 +383,45 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, scale =
   ctx.fill();
   ctx.shadowColor = "transparent";
 
-  // Stripes (9-15): white base + colored band
-  if (ball.number >= 9) {
-    ctx.beginPath();
-    ctx.arc(0, 0, r - 0.8 * scale, 0, Math.PI * 2);
-    ctx.fillStyle = "#f8faff";
-    ctx.fill();
+  // Dark outer rim for better legibility on the felt
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(0, 0, r - 0.45 * scale, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(0,0,0,0.18)";
+  ctx.lineWidth = 0.9 * scale;
+  ctx.stroke();
+  ctx.restore();
 
-    const stripeH = r * 1.04;
+  // Stripes (9-15): stronger white shell + clearer colored band
+  if (ball.number >= 9) {
+    const stripeHalf = r * 0.42;
     ctx.save();
     ctx.beginPath();
-    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.arc(0, 0, r - 0.55 * scale, 0, Math.PI * 2);
     ctx.clip();
-    const sg = ctx.createLinearGradient(-r, -stripeH, r, stripeH);
-    sg.addColorStop(0, shadeColor(color, -30));
+    const sg = ctx.createLinearGradient(-r, 0, r, 0);
+    sg.addColorStop(0, shadeColor(color, -26));
     sg.addColorStop(0.5, color);
-    sg.addColorStop(1, shadeColor(color, -30));
+    sg.addColorStop(1, shadeColor(color, -26));
     ctx.fillStyle = sg;
-    ctx.fillRect(-r, -stripeH, r * 2, stripeH * 2);
+    ctx.fillRect(-r, -stripeHalf, r * 2, stripeHalf * 2);
+    ctx.restore();
+
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,0.78)";
+    ctx.lineWidth = 1.05 * scale;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.92, -stripeHalf);
+    ctx.lineTo(r * 0.92, -stripeHalf);
+    ctx.moveTo(-r * 0.92, stripeHalf);
+    ctx.lineTo(r * 0.92, stripeHalf);
+    ctx.stroke();
     ctx.restore();
   }
 
   // Number disk — bigger (#9)
   if (ball.number > 0) {
-    const diskR = r * 0.44;
+    const diskR = r * (ball.number >= 9 ? 0.40 : 0.44);
     const diskGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, diskR);
     diskGrad.addColorStop(0, "#ffffff");
     diskGrad.addColorStop(1, "#e8eef4");
@@ -457,7 +479,7 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
   // Soft glow
   ctx.save();
   ctx.strokeStyle = "rgba(200, 230, 255, 0.10)";
-  ctx.lineWidth = 5;
+  ctx.lineWidth = 6;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -468,7 +490,7 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
   // Main aim line — SOLID, bright
   ctx.save();
   ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
-  ctx.lineWidth = 1.7;
+  ctx.lineWidth = 2.15;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -479,7 +501,7 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
   if (hasHit && preview.hitBall && preview.targetGuideX !== null && preview.targetGuideY !== null) {
     ctx.save();
     ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
-    ctx.lineWidth = 1.7;
+    ctx.lineWidth = 2.15;
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(preview.hitBall.x, preview.hitBall.y);
@@ -489,7 +511,7 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
 
     ctx.save();
     ctx.strokeStyle = "rgba(255,255,255,0.72)";
-    ctx.lineWidth = 1.7;
+    ctx.lineWidth = 2.15;
     ctx.beginPath();
     ctx.arc(preview.hitBall.x, preview.hitBall.y, BALL_VISUAL_RADIUS + 1.5, 0, Math.PI * 2);
     ctx.stroke();
@@ -519,7 +541,7 @@ function drawGhostBall(ctx: CanvasRenderingContext2D, preview: AimPreview) {
   ctx.beginPath();
   ctx.arc(ghostX, ghostY, BALL_VISUAL_RADIUS, 0, Math.PI * 2);
   ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
-  ctx.lineWidth = 2.7;
+  ctx.lineWidth = 3.05;
   ctx.stroke();
   ctx.restore();
 }
@@ -874,39 +896,23 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const updateAimFromDrag = (point: LocalPoint) => {
     if (!cueBall) return;
-    const last = aimDragRef.current;
-    if (!last) {
-      beginAimDrag(point);
-      return;
-    }
+    const dx = point.x - cueBall.x;
+    const dy = point.y - cueBall.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < BALL_RADIUS * 2.2) return;
 
-    const moveX = point.x - last.x;
-    const moveY = point.y - last.y;
-    const moveLen = Math.hypot(moveX, moveY);
-    if (moveLen < 0.12) {
-      aimDragRef.current = { x: point.x, y: point.y };
-      return;
-    }
+    const targetAngle = Math.atan2(dy, dx);
+    const rawDelta = Math.atan2(
+      Math.sin(targetAngle - aimAngleRef.current),
+      Math.cos(targetAngle - aimAngleRef.current),
+    );
 
-    // Finger movement should control the AIM DIRECTION, not drag the cue directly.
-    // Project the gesture on the tangent of the current aim circle for a more Miniclip-like feel.
-    const tangentX = -Math.sin(aimAngleRef.current);
-    const tangentY = Math.cos(aimAngleRef.current);
-    const tangentialMove = moveX * tangentX + moveY * tangentY;
+    if (Math.abs(rawDelta) < 0.0025) return;
 
-    let delta = tangentialMove * 0.0052;
-
-    // Small radial influence helps natural cornering without making the control jumpy.
-    const radialX = Math.cos(aimAngleRef.current);
-    const radialY = Math.sin(aimAngleRef.current);
-    const radialMove = moveX * radialX + moveY * radialY;
-    delta += radialMove * 0.00055;
-
-    delta = clamp(delta, -0.05, 0.05);
-    if (Math.abs(delta) < 0.0007) {
-      aimDragRef.current = { x: point.x, y: point.y };
-      return;
-    }
+    const gain = distance < 90 ? 0.22 : distance < 220 ? 0.34 : 0.46;
+    const maxStep = distance < 90 ? 0.035 : distance < 220 ? 0.065 : 0.11;
+    const delta = clamp(rawDelta * gain, -maxStep, maxStep);
+    if (Math.abs(delta) < 0.001) return;
 
     aimAngleRef.current += delta;
     aimDragRef.current = { x: point.x, y: point.y };
@@ -935,6 +941,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!point) return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     pointerMovedRef.current = false;
+    SFX.prime();
     if (isBallInHand && pointInCircle(point, cueBall.x, cueBall.y, BALL_RADIUS * 2.2)) {
       setPointerModeSafe("place");
       updateCuePositionFromPoint(point);
@@ -942,6 +949,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     }
     setPointerModeSafe("aim");
     beginAimDrag(point);
+    updateAimFromDrag(point);
     pointerMovedRef.current = true;
   };
 
@@ -1003,14 +1011,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       localCuePlacementRef.current = { x: liveCueBall.x, y: liveCueBall.y };
     }
 
-    // Fire the real shot immediately, then play the bar return animation.
-    SFX.cueHit(payload.power);
+    // Fire the real shot immediately, then let visual/audio reactions happen in parallel.
     void onShootRef.current(payload).catch(() => {});
     animatePowerReturn(shotPower);
+    window.requestAnimationFrame(() => { SFX.cueHit(payload.power); });
   };
 
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!canInteract) return;
+    SFX.prime();
     if (powerReturnAnimRef.current !== null) {
       window.cancelAnimationFrame(powerReturnAnimRef.current);
       powerReturnAnimRef.current = null;
@@ -1048,6 +1057,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     window.addEventListener("pointercancel", handleWindowCancel);
     return () => { window.removeEventListener("pointerup", handleWindowUp); window.removeEventListener("pointercancel", handleWindowCancel); };
   }, [pointerMode, room.roomId, currentUserId, shootBusy, animating, canInteract, isBallInHand, needEightCall, selectedPocket]);
+
+  const powerVisual = clamp((power - POWER_MIN) / (1 - POWER_MIN), 0, 1);
 
   const statusText = game.status === "finished"
     ? game.winnerUserId === currentUserId ? "Você venceu" : "Você perdeu"
@@ -1098,7 +1109,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const state = renderStateRef.current;
       const targetAngle = aimAngleRef.current;
       // Smoother aim interpolation
-      const aimLerp = state.pointerMode === "aim" ? 0.56 : state.pointerMode === "power" ? 0.34 : 0.26;
+      const aimLerp = state.pointerMode === "aim" ? 0.42 : state.pointerMode === "power" ? 0.3 : 0.22;
       drawAimAngleRef.current = lerpAngle(drawAimAngleRef.current, targetAngle, aimLerp);
 
       let drawBalls = state.renderBalls;
@@ -1322,8 +1333,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onLostPointerCapture={handlePowerLostCapture}
         >
           <div className="pool-stage__power-track">
-            <div className="pool-stage__power-fill" style={{ height: `calc(${Math.round(power * 100)}% - 4px)`, top: "2px", bottom: "auto" }} />
-            <div className="pool-stage__power-marker" style={{ top: `calc(${Math.round(power * 100)}% + 1px)` }} />
+            <div className="pool-stage__power-fill" style={{ height: `${Math.round(powerVisual * 100)}%`, top: "2px", bottom: "auto" }} />
+            <div className="pool-stage__power-marker" style={{ top: `calc(${Math.round(powerVisual * 100)}% + 1px)` }} />
           </div>
         </div>
 
