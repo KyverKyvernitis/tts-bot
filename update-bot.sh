@@ -1,7 +1,43 @@
 #!/usr/bin/env bash
 set -u
 
+export HOME="/home/ubuntu"
+export NVM_DIR="$HOME/.nvm"
 export GIT_SSH_COMMAND='ssh -i /home/ubuntu/.ssh/id_ed25519 -o IdentitiesOnly=yes'
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+fi
+
+resolve_runtime_bin() {
+  local name="$1"
+  local candidate=""
+
+  candidate="$(command -v "$name" 2>/dev/null || true)"
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  for candidate in \
+    "$NVM_DIR"/versions/node/*/bin/"$name" \
+    "$HOME/.local/bin/""$name" \
+    "/usr/local/bin/""$name" \
+    "/usr/bin/""$name" \
+    "/bin/""$name"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+NODE_BIN="$(resolve_runtime_bin node || true)"
+NPM_BIN="$(resolve_runtime_bin npm || true)"
 
 cd /home/ubuntu/bot || exit 1
 
@@ -22,6 +58,22 @@ ACTIVITY_START_SCRIPT="/home/ubuntu/bot/start-sinuca-server.sh"
 ACTIVITY_LOG_FILE="/home/ubuntu/bot/activity /sinuca-server/sinuca-server.log"
 RETRY_LATEST_CODE=42
 PENDING_REMOTE_HASH=""
+
+require_runtime_tools() {
+  if [ -n "$NODE_BIN" ] && [ -n "$NPM_BIN" ]; then
+    return 0
+  fi
+
+  local body="Node/NPM não encontrado no ambiente atual.
+HOME=$HOME
+PATH=$PATH
+NODE_BIN=${NODE_BIN:-ausente}
+NPM_BIN=${NPM_BIN:-ausente}"
+
+  log "Falha: runtime Node/NPM não encontrado para o auto update."
+  /home/ubuntu/bot/alert.sh error "Falha no update automático" "$body"
+  return 1
+}
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
@@ -222,7 +274,7 @@ restart_activity_backend() {
 deploy_activity_frontend() {
   cd "$ACTIVITY_FRONTEND_DIR" || return 1
 
-  if ! run_step "activity frontend npm install" npm install; then
+  if ! run_step "activity frontend npm install" "$NPM_BIN" install; then
     return 1
   fi
 
@@ -230,7 +282,7 @@ deploy_activity_frontend() {
     log "Novo commit detectado durante dependências do frontend da Activity. O deploy atual será finalizado e depois reiniciado no commit mais recente."
   fi
 
-  if ! run_step "activity frontend build" npm run build; then
+  if ! run_step "activity frontend build" "$NPM_BIN" run build; then
     return 1
   fi
 
@@ -259,7 +311,7 @@ $err_text"
 deploy_activity_backend() {
   cd "$ACTIVITY_BACKEND_DIR" || return 1
 
-  if ! run_step "activity backend npm install" npm install; then
+  if ! run_step "activity backend npm install" "$NPM_BIN" install; then
     return 1
   fi
 
@@ -267,7 +319,7 @@ deploy_activity_backend() {
     log "Novo commit detectado durante dependências do backend da Activity. O deploy atual será finalizado e depois reiniciado no commit mais recente."
   fi
 
-  if ! run_step "activity backend build" npm run build; then
+  if ! run_step "activity backend build" "$NPM_BIN" run build; then
     return 1
   fi
 
@@ -312,15 +364,15 @@ rollback_update() {
 
   (
     cd "$ACTIVITY_FRONTEND_DIR" &&
-    npm install >/dev/null 2>&1 &&
-    npm run build >/dev/null 2>&1
+    "$NPM_BIN" install >/dev/null 2>&1 &&
+    "$NPM_BIN" run build >/dev/null 2>&1
   ) || true
   publish_activity_frontend >/dev/null 2>&1 || true
 
   (
     cd "$ACTIVITY_BACKEND_DIR" &&
-    npm install >/dev/null 2>&1 &&
-    npm run build >/dev/null 2>&1
+    "$NPM_BIN" install >/dev/null 2>&1 &&
+    "$NPM_BIN" run build >/dev/null 2>&1
   ) || true
   restart_activity_backend >/dev/null 2>&1 || true
 
@@ -407,6 +459,10 @@ exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   log "Outro update já está em execução."
   exit 0
+fi
+
+if ! require_runtime_tools; then
+  exit 1
 fi
 
 if ! run_step "git fetch" git fetch origin "$BRANCH"; then
