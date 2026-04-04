@@ -340,7 +340,7 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
     const relX = ball.x - cueBall.x;
     const relY = ball.y - cueBall.y;
     const projection = relX * dx + relY * dy;
-    if (projection <= BALL_RADIUS) continue;
+    if (projection <= 1) continue;
     const perpendicularSq = relX * relX + relY * relY - projection * projection;
     const limit = BALL_DIAMETER * BALL_DIAMETER;
     if (perpendicularSq < 0 || perpendicularSq > limit) continue;
@@ -1185,7 +1185,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const state = renderStateRef.current;
       const targetAngle = aimAngleRef.current;
       // Keep the cue following the aim direction smoothly without feeling detached.
-      const aimLerp = state.pointerMode === "aim" ? 0.26 : state.pointerMode === "power" ? 0.24 : 0.18;
+      const aimLerp = state.pointerMode === "aim" ? 0.66 : state.pointerMode === "power" ? 0.52 : 0.22;
       drawAimAngleRef.current = lerpAngle(drawAimAngleRef.current, targetAngle, aimLerp);
 
       let drawBalls = state.renderBalls;
