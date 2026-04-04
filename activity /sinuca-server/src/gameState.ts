@@ -11,14 +11,14 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 17.2;
+const MAX_SHOT_SPEED = 15.8;
 const MIN_SPEED = 0.045;
-const FRICTION = 0.9895;
-const MAX_STEPS = 1400;
+const BASE_FRICTION = 0.996;
+const MAX_STEPS = 1800;
 const FRAME_SAMPLE_EVERY = 1;
-const MAX_SUBSTEPS = 18;
-const CUSHION_RESTITUTION = 0.62;
-const BALL_RESTITUTION = 0.84;
+const MAX_SUBSTEPS = 24;
+const CUSHION_RESTITUTION = 0.54;
+const BALL_RESTITUTION = 0.78;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -156,24 +156,24 @@ function handleWallCollision(ball: PhysicsBall) {
   if (ball.x < minX) {
     ball.x = minX;
     ball.vx *= -CUSHION_RESTITUTION;
-    ball.vy *= 0.92;
+    ball.vy *= 0.88;
     collided = true;
   } else if (ball.x > maxX) {
     ball.x = maxX;
     ball.vx *= -CUSHION_RESTITUTION;
-    ball.vy *= 0.92;
+    ball.vy *= 0.88;
     collided = true;
   }
 
   if (ball.y < minY) {
     ball.y = minY;
     ball.vy *= -CUSHION_RESTITUTION;
-    ball.vx *= 0.92;
+    ball.vx *= 0.88;
     collided = true;
   } else if (ball.y > maxY) {
     ball.y = maxY;
     ball.vy *= -CUSHION_RESTITUTION;
-    ball.vx *= 0.92;
+    ball.vx *= 0.88;
     collided = true;
   }
 
@@ -246,7 +246,7 @@ function resolveCollision(a: PhysicsBall, b: PhysicsBall) {
   const tangentX = -ny;
   const tangentY = nx;
   const relTan = (b.vx - a.vx) * tangentX + (b.vy - a.vy) * tangentY;
-  const tanImpulse = relTan * 0.012;
+  const tanImpulse = relTan * 0.008;
   a.vx += tanImpulse * tangentX;
   a.vy += tanImpulse * tangentY;
   b.vx -= tanImpulse * tangentX;
@@ -421,8 +421,10 @@ function simulateShot(
 
     for (const ball of balls) {
       if (ball.pocketed) continue;
-      ball.vx *= FRICTION;
-      ball.vy *= FRICTION;
+      const speed = Math.hypot(ball.vx, ball.vy);
+      const rollingDrag = speed > 7 ? 0.994 : speed > 2.5 ? 0.9915 : 0.983;
+      ball.vx *= BASE_FRICTION * rollingDrag;
+      ball.vy *= BASE_FRICTION * rollingDrag;
       if (Math.abs(ball.vx) < MIN_SPEED) ball.vx = 0;
       if (Math.abs(ball.vy) < MIN_SPEED) ball.vy = 0;
     }
