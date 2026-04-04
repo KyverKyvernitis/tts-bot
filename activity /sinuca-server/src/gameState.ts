@@ -11,14 +11,14 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 18.8;
+const MAX_SHOT_SPEED = 17.2;
 const MIN_SPEED = 0.045;
-const FRICTION = 0.994;
+const FRICTION = 0.9895;
 const MAX_STEPS = 1400;
 const FRAME_SAMPLE_EVERY = 1;
-const MAX_SUBSTEPS = 12;
-const CUSHION_RESTITUTION = 0.74;
-const BALL_RESTITUTION = 0.9;
+const MAX_SUBSTEPS = 18;
+const CUSHION_RESTITUTION = 0.62;
+const BALL_RESTITUTION = 0.84;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -156,24 +156,24 @@ function handleWallCollision(ball: PhysicsBall) {
   if (ball.x < minX) {
     ball.x = minX;
     ball.vx *= -CUSHION_RESTITUTION;
-    ball.vy *= 0.95;
+    ball.vy *= 0.92;
     collided = true;
   } else if (ball.x > maxX) {
     ball.x = maxX;
     ball.vx *= -CUSHION_RESTITUTION;
-    ball.vy *= 0.95;
+    ball.vy *= 0.92;
     collided = true;
   }
 
   if (ball.y < minY) {
     ball.y = minY;
     ball.vy *= -CUSHION_RESTITUTION;
-    ball.vx *= 0.95;
+    ball.vx *= 0.92;
     collided = true;
   } else if (ball.y > maxY) {
     ball.y = maxY;
     ball.vy *= -CUSHION_RESTITUTION;
-    ball.vx *= 0.95;
+    ball.vx *= 0.92;
     collided = true;
   }
 
@@ -246,7 +246,7 @@ function resolveCollision(a: PhysicsBall, b: PhysicsBall) {
   const tangentX = -ny;
   const tangentY = nx;
   const relTan = (b.vx - a.vx) * tangentX + (b.vy - a.vy) * tangentY;
-  const tanImpulse = relTan * 0.02;
+  const tanImpulse = relTan * 0.012;
   a.vx += tanImpulse * tangentX;
   a.vy += tanImpulse * tangentY;
   b.vx -= tanImpulse * tangentX;
