@@ -1045,6 +1045,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const turnControlVisible = Boolean(cueBall && game.status !== "finished" && !animating);
   const powerBarInteractive = canInteract && !isBallInHand;
+  const powerVisual = clamp((power - POWER_MIN) / (1 - POWER_MIN), 0, 1);
   const remotePowerVisual = !isMyTurn
     ? opponentAim?.mode === "power"
       ? 0.62
@@ -1295,8 +1296,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     return () => { window.removeEventListener("pointerup", handleWindowUp); window.removeEventListener("pointercancel", handleWindowCancel); };
   }, [pointerMode, room.roomId, currentUserId, shootBusy, animating, canInteract, isBallInHand, needEightCall, selectedPocket]);
 
-  const powerVisual = clamp((power - POWER_MIN) / (1 - POWER_MIN), 0, 1);
-
   const statusText = game.status === "finished"
     ? game.winnerUserId === currentUserId ? "Você venceu" : "Você perdeu"
     : game.foulReason && !animating
@@ -1410,15 +1409,16 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         && game.turnUserId !== currentUserId
         && game.status !== "finished"
       );
-      const remoteAimAngle = remoteVisible
-        ? (opponentAim && opponentAim.userId === game.turnUserId ? opponentAim.angle : estimateCueAngle(drawCueBall, drawBalls))
+      const remoteCueSource = remoteVisible ? drawCueBall : null;
+      const remoteAimAngle = remoteCueSource
+        ? (opponentAim && opponentAim.userId === game.turnUserId ? opponentAim.angle : estimateCueAngle(remoteCueSource, drawBalls))
         : 0;
-      const remoteCueBall = remoteVisible
+      const remoteCueBall = remoteCueSource
         ? {
-            id: drawCueBall?.id ?? "ball-0",
+            id: remoteCueSource.id,
             number: 0,
-            x: opponentAim && opponentAim.userId === game.turnUserId && opponentAim.cueX !== null ? opponentAim.cueX : drawCueBall.x,
-            y: opponentAim && opponentAim.userId === game.turnUserId && opponentAim.cueY !== null ? opponentAim.cueY : drawCueBall.y,
+            x: opponentAim && opponentAim.userId === game.turnUserId && opponentAim.cueX !== null ? opponentAim.cueX : remoteCueSource.x,
+            y: opponentAim && opponentAim.userId === game.turnUserId && opponentAim.cueY !== null ? opponentAim.cueY : remoteCueSource.y,
             pocketed: false,
           }
         : null;
