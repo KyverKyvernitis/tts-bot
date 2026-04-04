@@ -4,6 +4,7 @@ export type RoomStatus = "waiting" | "ready" | "in_game";
 export type GameStatus = "waiting_shot" | "finished";
 export type BallGroup = "solids" | "stripes";
 export type GamePhase = "break" | "open_table" | "group_play" | "eight_ball" | "finished";
+export type AimPointerMode = "idle" | "aim" | "place" | "power";
 
 export interface ActivityContext {
   mode: ActivityMode;
@@ -77,6 +78,17 @@ export interface GameShotSnapshot {
   cuePocketed: boolean;
   frames: GameShotFrame[];
   createdAt: number;
+}
+
+export interface AimStateSnapshot {
+  roomId: string;
+  userId: string;
+  visible: boolean;
+  angle: number;
+  cueX: number | null;
+  cueY: number | null;
+  mode: AimPointerMode;
+  updatedAt: number;
 }
 
 export interface GameSnapshot {
