@@ -228,25 +228,95 @@ class BotLocal(commands.Bot):
             check=False,
         )
 
-    def _normalize_zip_member(self, raw_name: str) -> PurePosixPath:
+    def _normalize_zip_member_parts(self, raw_name: str) -> tuple[str, ...]:
         posix = PurePosixPath(raw_name.replace("\\", "/"))
-        parts = [part for part in posix.parts if part not in ("", ".")]
-        if parts and parts[0] == self._repo_root.name:
-            parts = parts[1:]
-        return PurePosixPath(*parts)
+        return tuple(part for part in posix.parts if part not in ("", "."))
 
-    def _safe_extract_patch(self, zip_path: Path, extract_dir: Path) -> list[tuple[Path, Path]]:
+    def _guess_repo_name(self, origin_url: str) -> str:
+        cleaned = (origin_url or "").strip().rstrip("/")
+        if cleaned.endswith(".git"):
+            cleaned = cleaned[:-4]
+        if "/" in cleaned:
+            cleaned = cleaned.rsplit("/", 1)[-1]
+        if ":" in cleaned:
+            cleaned = cleaned.rsplit(":", 1)[-1]
+        return cleaned.strip()
+
+    def _pick_zip_strip_count(self, file_members: list[tuple[str, ...]], repo_name_hint: str, branch_name: str) -> int:
+        if not file_members:
+            return 0
+
+        repo_root = self._repo_root.resolve()
+        repo_top_names = {child.name for child in repo_root.iterdir()}
+        max_strip = min(max(len(parts) - 1, 0) for parts in file_members)
+        best_strip = 0
+        best_score = (-1, -1, 0)
+
+        for strip_count in range(max_strip + 1):
+            mapped_members = [parts[strip_count:] for parts in file_members]
+            if any(not parts for parts in mapped_members):
+                continue
+
+            exact_exists = 0
+            top_level_exists = 0
+            for mapped_parts in mapped_members:
+                rel_path = Path(*mapped_parts)
+                if (repo_root / rel_path).exists():
+                    exact_exists += 1
+                if mapped_parts[0] in repo_top_names:
+                    top_level_exists += 1
+
+            score = (exact_exists, top_level_exists, -strip_count)
+            if score > best_score:
+                best_score = score
+                best_strip = strip_count
+
+        if best_score[:2] != (0, 0):
+            return best_strip
+
+        common_first = file_members[0][0] if file_members[0] else ""
+        if common_first and all(parts and parts[0] == common_first for parts in file_members):
+            wrapper_names = {
+                self._repo_root.name,
+                repo_name_hint,
+                f"{repo_name_hint}-main",
+                f"{repo_name_hint}-master",
+                f"{repo_name_hint}-{branch_name}",
+            }
+            if common_first in wrapper_names and common_first not in repo_top_names:
+                return 1
+
+        return best_strip
+
+    def _safe_extract_patch(self, zip_path: Path, extract_dir: Path, repo_name_hint: str, branch_name: str) -> list[tuple[Path, Path]]:
         accepted: list[tuple[Path, Path]] = []
         with zipfile.ZipFile(zip_path) as zf:
+            file_members: list[tuple[str, ...]] = []
+            prepared_infos: list[tuple[zipfile.ZipInfo, tuple[str, ...]]] = []
+
             for info in zf.infolist():
-                normalized = self._normalize_zip_member(info.filename)
-                if not normalized.parts:
+                raw_parts = self._normalize_zip_member_parts(info.filename)
+                if not raw_parts:
+                    continue
+                if raw_parts[0] == "__MACOSX":
+                    continue
+                if raw_parts[-1] == ".DS_Store":
+                    continue
+                if any(part == ".." for part in raw_parts):
+                    raise RuntimeError(f"Caminho inválido no ZIP: {info.filename}")
+
+                prepared_infos.append((info, raw_parts))
+                if not info.is_dir():
+                    file_members.append(raw_parts)
+
+            strip_count = self._pick_zip_strip_count(file_members, repo_name_hint, branch_name)
+
+            for info, raw_parts in prepared_infos:
+                normalized_parts = raw_parts[strip_count:]
+                if not normalized_parts:
                     continue
 
-                if normalized.parts[0] == "__MACOSX":
-                    continue
-                if normalized.name in {".DS_Store"}:
-                    continue
+                normalized = PurePosixPath(*normalized_parts)
                 if normalized.is_absolute() or any(part == ".." for part in normalized.parts):
                     raise RuntimeError(f"Caminho inválido no ZIP: {info.filename}")
 
@@ -308,7 +378,8 @@ class BotLocal(commands.Bot):
         extract_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            extracted_files = self._safe_extract_patch(zip_path, extract_dir)
+            repo_name_hint = self._guess_repo_name(origin_url)
+            extracted_files = self._safe_extract_patch(zip_path, extract_dir, repo_name_hint, branch_name)
 
             clone_result = self._run_cmd(["git", "clone", "--branch", branch_name, "--single-branch", origin_url, str(clone_dir)], work_dir, env=env)
             if clone_result.returncode != 0:
