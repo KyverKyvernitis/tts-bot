@@ -4,6 +4,7 @@ export type RoomStatus = "waiting" | "ready" | "in_game";
 export type GameStatus = "waiting_shot" | "finished";
 export type BallGroup = "solids" | "stripes";
 export type GamePhase = "break" | "open_table" | "group_play" | "eight_ball" | "finished";
+export type AimPointerMode = "idle" | "aim" | "place" | "power";
 
 export interface ContextPayload {
   guildId?: string | null;
@@ -52,6 +53,27 @@ export interface ShootPayload {
   cueX?: number | null;
   cueY?: number | null;
   calledPocket?: number | null;
+}
+
+export interface AimStatePayload {
+  roomId: string;
+  userId: string;
+  visible: boolean;
+  angle?: number | null;
+  cueX?: number | null;
+  cueY?: number | null;
+  mode?: AimPointerMode | null;
+}
+
+export interface AimStateSnapshot {
+  roomId: string;
+  userId: string;
+  visible: boolean;
+  angle: number;
+  cueX: number | null;
+  cueY: number | null;
+  mode: AimPointerMode;
+  updatedAt: number;
 }
 
 export interface GameBallSnapshot {
@@ -136,6 +158,7 @@ export type ClientMessage =
   | { type: "exchange_token"; payload: ExchangeTokenPayload }
   | { type: "start_game"; payload: StartGamePayload }
   | { type: "take_shot"; payload: ShootPayload }
+  | { type: "sync_aim"; payload: AimStatePayload }
   | { type: "ping" };
 
 export interface RoomSnapshot {
@@ -195,4 +218,5 @@ export type ServerMessage =
   | { type: "balance_state"; payload: BalanceSnapshot }
   | { type: "balance_debug"; payload: BalanceDebugSnapshot }
   | { type: "oauth_token_result"; payload: OAuthTokenResultPayload }
+  | { type: "aim_state"; payload: AimStateSnapshot }
   | { type: "error"; message: string };

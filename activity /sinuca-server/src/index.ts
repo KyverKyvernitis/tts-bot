@@ -20,6 +20,8 @@ import {
   unsubscribeSocket,
 } from "./rooms.js";
 import type {
+  AimPointerMode,
+  AimStateSnapshot,
   BalanceDebugSnapshot,
   BalanceSnapshot,
   ClientMessage,
@@ -268,6 +270,18 @@ function broadcastGame(roomId: string) {
   const payload: ServerMessage = { type: "game_state", payload: game };
   for (const client of getSubscribers(roomId)) {
     send(client, payload);
+  }
+}
+
+function normalizeAimMode(value: unknown): AimPointerMode {
+  return value === "aim" || value === "place" || value === "power" || value === "idle" ? value : "idle";
+}
+
+function broadcastAim(roomId: string, payload: AimStateSnapshot, except?: WebSocket | null) {
+  const message: ServerMessage = { type: "aim_state", payload };
+  for (const client of getSubscribers(roomId)) {
+    if (except && client === except) continue;
+    send(client, message);
   }
 }
 
@@ -1129,6 +1143,34 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       broadcastRoom(room.roomId);
       broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
       broadcastGame(room.roomId);
+      return;
+    }
+
+    if (data.type === "sync_aim") {
+      const merged = mergeWithSession(data.payload, activeSession);
+      if (!merged.userId) {
+        send(ws, { type: "error", message: "jogador da activity não identificado" });
+        return;
+      }
+      const room = getRoom(merged.roomId);
+      const game = getGameSnapshot(merged.roomId);
+      if (!room || !game) return;
+
+      const visible = Boolean(merged.visible);
+      if (visible && game.turnUserId !== merged.userId) return;
+
+      const payload: AimStateSnapshot = {
+        roomId: merged.roomId,
+        userId: merged.userId,
+        visible,
+        angle: Number.isFinite(Number(merged.angle)) ? Number(merged.angle) : 0,
+        cueX: merged.cueX === undefined || merged.cueX === null || !Number.isFinite(Number(merged.cueX)) ? null : Number(merged.cueX),
+        cueY: merged.cueY === undefined || merged.cueY === null || !Number.isFinite(Number(merged.cueY)) ? null : Number(merged.cueY),
+        mode: normalizeAimMode(merged.mode),
+        updatedAt: Date.now(),
+      };
+
+      broadcastAim(merged.roomId, payload, ws);
       return;
     }
 
