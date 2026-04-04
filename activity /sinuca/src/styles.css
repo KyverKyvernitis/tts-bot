@@ -2608,6 +2608,7 @@ button:focus-visible {
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
+  transition: top 0.035s linear;
   width: 150px;
   height: 150px;
   border-radius: 50%;
@@ -2642,7 +2643,7 @@ button:focus-visible {
 
 .pool-aim-line {
   z-index: 5;
-  height: 3px;
+  height: 4px;
   background: linear-gradient(90deg, rgba(255,255,255,0.98), rgba(255,255,255,0.45), rgba(255,255,255,0));
 }
 
@@ -4919,30 +4920,31 @@ button:focus-visible {
   position: absolute;
   left: 2px;
   right: 2px;
-  bottom: 2px;
+  bottom: auto;
   border-radius: 7px;
   background: linear-gradient(180deg,
     #fff3a2 0%,
-    #ffd84e 16%,
-    #ffbf23 34%,
-    #ff9415 56%,
-    #ef4d17 78%,
-    #a81212 100%
+    #ffd84e 18%,
+    #ffbf23 38%,
+    #ff8b12 62%,
+    #eb3d12 82%,
+    #981010 100%
   );
   box-shadow:
     0 0 10px rgba(220, 160, 30, 0.3),
     inset 0 1px 0 rgba(255,255,255,0.25);
-  transition: height 0.02s linear, top 0.02s linear;
+  transition: height 0.035s linear, top 0.035s linear;
 }
 
 .pool-stage__power-marker {
   position: absolute;
   left: -3px;
   right: -3px;
-  height: 3px;
+  height: 4px;
   border-radius: 999px;
   background: #fff;
   transform: translateY(-50%);
+  transition: top 0.035s linear;
   box-shadow: 0 0 6px rgba(255,255,255,0.5), 0 0 12px rgba(255,255,255,0.2);
 }
 
