@@ -1,7 +1,13 @@
 import asyncio
 import os
+import shutil
+import stat
+import subprocess
+import tempfile
 import threading
+import zipfile
 from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 
 import discord
 from discord.ext import commands
@@ -22,6 +28,8 @@ def _cfg(*names: str, default=None):
 
 
 class BotLocal(commands.Bot):
+    ZIP_UPDATE_CHANNEL_ID = 1490093068706386131
+
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -54,6 +62,9 @@ class BotLocal(commands.Bot):
             "last_update": None,
         }
         self._health_task: asyncio.Task | None = None
+        self._zip_update_lock = asyncio.Lock()
+        self._repo_root = Path(__file__).resolve().parent
+        self._update_temp_root = Path("/tmp/discord-auto-update")
         set_health_provider(self.get_health_snapshot)
 
     async def setup_hook(self):
@@ -190,6 +201,266 @@ class BotLocal(commands.Bot):
             })
             await asyncio.sleep(15)
 
+    def _make_zip_update_embed(self, title: str, description: str, color: discord.Color) -> discord.Embed:
+        embed = discord.Embed(title=title, description=description, color=color)
+        embed.timestamp = datetime.now(timezone.utc)
+        return embed
+
+    async def _send_zip_update_message(self, message: discord.Message, title: str, description: str, color: discord.Color):
+        embed = self._make_zip_update_embed(title, description, color)
+        await message.reply(embed=embed, mention_author=False)
+
+    def _git_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.setdefault("HOME", "/home/ubuntu")
+        key_path = Path("/home/ubuntu/.ssh/id_ed25519")
+        if key_path.is_file():
+            env.setdefault("GIT_SSH_COMMAND", f"ssh -i {key_path} -o IdentitiesOnly=yes")
+        return env
+
+    def _run_cmd(self, args: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            args,
+            cwd=str(cwd),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def _normalize_zip_member(self, raw_name: str) -> PurePosixPath:
+        posix = PurePosixPath(raw_name.replace("\\", "/"))
+        parts = [part for part in posix.parts if part not in ("", ".")]
+        if parts and parts[0] == self._repo_root.name:
+            parts = parts[1:]
+        return PurePosixPath(*parts)
+
+    def _safe_extract_patch(self, zip_path: Path, extract_dir: Path) -> list[tuple[Path, Path]]:
+        accepted: list[tuple[Path, Path]] = []
+        with zipfile.ZipFile(zip_path) as zf:
+            for info in zf.infolist():
+                normalized = self._normalize_zip_member(info.filename)
+                if not normalized.parts:
+                    continue
+
+                if normalized.parts[0] == "__MACOSX":
+                    continue
+                if normalized.name in {".DS_Store"}:
+                    continue
+                if normalized.is_absolute() or any(part == ".." for part in normalized.parts):
+                    raise RuntimeError(f"Caminho inválido no ZIP: {info.filename}")
+
+                mode = (info.external_attr >> 16) & 0o170000
+                if mode == stat.S_IFLNK:
+                    raise RuntimeError(f"Symlink não é permitido no ZIP: {info.filename}")
+
+                target_rel = Path(*normalized.parts)
+                if info.is_dir():
+                    (extract_dir / target_rel).mkdir(parents=True, exist_ok=True)
+                    continue
+
+                extract_path = extract_dir / target_rel
+                extract_path.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as src, open(extract_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+                accepted.append((extract_path, target_rel))
+
+        if not accepted:
+            raise RuntimeError("O ZIP não trouxe nenhum arquivo aplicável.")
+        return accepted
+
+    def _apply_patch_to_clone(self, extracted_files: list[tuple[Path, Path]], clone_dir: Path) -> list[str]:
+        changed_files: list[str] = []
+        for extracted_path, rel_path in extracted_files:
+            destination = (clone_dir / rel_path).resolve()
+            clone_root = clone_dir.resolve()
+            if clone_root not in destination.parents and destination != clone_root:
+                raise RuntimeError(f"Arquivo fora do repositório: {rel_path.as_posix()}")
+
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            before = destination.read_bytes() if destination.exists() else None
+            data = extracted_path.read_bytes()
+            if before == data:
+                continue
+            destination.write_bytes(data)
+            changed_files.append(rel_path.as_posix())
+        return changed_files
+
+    def _process_zip_update_sync(self, zip_path: Path) -> dict[str, object]:
+        self._update_temp_root.mkdir(parents=True, exist_ok=True)
+        env = self._git_env()
+        origin_result = self._run_cmd(["git", "remote", "get-url", "origin"], self._repo_root, env=env)
+        if origin_result.returncode != 0:
+            raise RuntimeError(f"Não foi possível descobrir o origin do git. {origin_result.stderr.strip() or origin_result.stdout.strip()}")
+        origin_url = (origin_result.stdout or "").strip()
+        if not origin_url:
+            raise RuntimeError("O repositório local não tem origin configurado.")
+
+        branch_result = self._run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], self._repo_root, env=env)
+        branch_name = (branch_result.stdout or "main").strip() or "main"
+        if branch_result.returncode != 0 or branch_name == "HEAD":
+            branch_name = "main"
+
+        work_dir = Path(tempfile.mkdtemp(prefix="discord-auto-update-", dir=str(self._update_temp_root)))
+        extract_dir = work_dir / "extracted"
+        clone_dir = work_dir / "clone"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            extracted_files = self._safe_extract_patch(zip_path, extract_dir)
+
+            clone_result = self._run_cmd(["git", "clone", "--branch", branch_name, "--single-branch", origin_url, str(clone_dir)], work_dir, env=env)
+            if clone_result.returncode != 0:
+                err = (clone_result.stderr or clone_result.stdout or "").strip()
+                raise RuntimeError(f"Falha ao clonar o repositório temporário. {err}")
+
+            changed_files = self._apply_patch_to_clone(extracted_files, clone_dir)
+            if not changed_files:
+                return {
+                    "changed_files": [],
+                    "commit_hash": None,
+                    "triggered_update": False,
+                    "branch": branch_name,
+                }
+
+            self._run_cmd(["git", "config", "user.name", "Discord Auto Update"], clone_dir, env=env)
+            self._run_cmd(["git", "config", "user.email", "discord-auto-update@local"], clone_dir, env=env)
+
+            add_result = self._run_cmd(["git", "add", "--", *changed_files], clone_dir, env=env)
+            if add_result.returncode != 0:
+                err = (add_result.stderr or add_result.stdout or "").strip()
+                raise RuntimeError(f"Falha ao preparar arquivos para commit. {err}")
+
+            status_result = self._run_cmd(["git", "status", "--porcelain"], clone_dir, env=env)
+            if status_result.returncode != 0:
+                err = (status_result.stderr or status_result.stdout or "").strip()
+                raise RuntimeError(f"Falha ao verificar alterações do clone temporário. {err}")
+            if not (status_result.stdout or "").strip():
+                return {
+                    "changed_files": [],
+                    "commit_hash": None,
+                    "triggered_update": False,
+                    "branch": branch_name,
+                }
+
+            commit_message = f"auto update from discord zip ({len(changed_files)} arquivo(s))"
+            commit_result = self._run_cmd(["git", "commit", "-m", commit_message], clone_dir, env=env)
+            if commit_result.returncode != 0:
+                err = (commit_result.stderr or commit_result.stdout or "").strip()
+                raise RuntimeError(f"Falha ao criar commit do update automático. {err}")
+
+            push_result = self._run_cmd(["git", "push", "origin", branch_name], clone_dir, env=env)
+            if push_result.returncode != 0:
+                err = (push_result.stderr or push_result.stdout or "").strip()
+                raise RuntimeError(f"Falha ao enviar update para o GitHub. {err}")
+
+            hash_result = self._run_cmd(["git", "rev-parse", "HEAD"], clone_dir, env=env)
+            commit_hash = (hash_result.stdout or "").strip() if hash_result.returncode == 0 else None
+
+            triggered_update = False
+            update_script = self._repo_root / "update-bot.sh"
+            if update_script.exists():
+                subprocess.Popen(
+                    [str(update_script)],
+                    cwd=str(self._repo_root),
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                triggered_update = True
+
+            return {
+                "changed_files": changed_files,
+                "commit_hash": commit_hash,
+                "triggered_update": triggered_update,
+                "branch": branch_name,
+            }
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    async def _handle_zip_update_message(self, message: discord.Message):
+        zip_attachment = None
+        for attachment in message.attachments:
+            if attachment.filename.lower().endswith(".zip"):
+                zip_attachment = attachment
+                break
+
+        if zip_attachment is None:
+            await self._send_zip_update_message(
+                message,
+                "❌ Arquivo inválido",
+                "Envie um arquivo **.zip** neste canal para iniciar a atualização automática do projeto.",
+                discord.Color.red(),
+            )
+            return
+
+        if self._zip_update_lock.locked():
+            await self._send_zip_update_message(
+                message,
+                "⏳ Atualização em andamento",
+                "Já existe outra atualização automática processando um ZIP neste momento. Aguarde ela terminar e envie novamente.",
+                discord.Color.orange(),
+            )
+            return
+
+        async with self._zip_update_lock:
+            self._update_temp_root.mkdir(parents=True, exist_ok=True)
+            work_dir = Path(tempfile.mkdtemp(prefix="discord-auto-update-msg-", dir=str(self._update_temp_root)))
+            zip_path = work_dir / zip_attachment.filename
+            try:
+                await zip_attachment.save(zip_path)
+                await self._send_zip_update_message(
+                    message,
+                    "📦 ZIP recebido",
+                    "Arquivo baixado fora do repositório. Vou validar, aplicar em clone temporário, enviar para o GitHub e acionar o auto update existente.",
+                    discord.Color.blurple(),
+                )
+
+                result = await asyncio.to_thread(self._process_zip_update_sync, zip_path)
+                changed_files = list(result.get("changed_files") or [])
+                commit_hash = result.get("commit_hash")
+                branch = result.get("branch") or "main"
+                triggered_update = bool(result.get("triggered_update"))
+
+                if not changed_files:
+                    await self._send_zip_update_message(
+                        message,
+                        "ℹ️ Nenhuma alteração aplicada",
+                        "O ZIP foi válido, mas não mudou nenhum arquivo do repositório. Nada foi commitado no GitHub.",
+                        discord.Color.gold(),
+                    )
+                    return
+
+                preview_files = "\n".join(f"• `{path}`" for path in changed_files[:10])
+                if len(changed_files) > 10:
+                    preview_files += f"\n• ... e mais {len(changed_files) - 10} arquivo(s)"
+                short_hash = str(commit_hash)[:7] if commit_hash else "desconhecido"
+                update_line = "O script `update-bot.sh` foi acionado." if triggered_update else "O commit foi enviado, mas o acionamento automático do script não foi encontrado."
+                await self._send_zip_update_message(
+                    message,
+                    "✅ Update enviado para o GitHub",
+                    f"Branch: **{branch}**\nCommit: **{short_hash}**\nArquivos alterados: **{len(changed_files)}**\n\n{preview_files}\n\n{update_line}",
+                    discord.Color.green(),
+                )
+            except zipfile.BadZipFile:
+                await self._send_zip_update_message(
+                    message,
+                    "❌ ZIP inválido",
+                    "O arquivo enviado não pôde ser aberto como ZIP válido. Nenhuma alteração foi aplicada.",
+                    discord.Color.red(),
+                )
+            except Exception as e:
+                print(f"[zip_update] falha: {e!r}")
+                await self._send_zip_update_message(
+                    message,
+                    "❌ Falha no update automático",
+                    f"Nada foi aplicado. Motivo: **{e}**",
+                    discord.Color.red(),
+                )
+            finally:
+                shutil.rmtree(work_dir, ignore_errors=True)
 
     async def on_ready(self):
         print(f"Logado como {self.user} (id: {self.user.id})")
@@ -206,12 +477,13 @@ class BotLocal(commands.Bot):
         if self._health_task is None or self._health_task.done():
             self._health_task = asyncio.create_task(self._health_monitor_loop())
 
-
-
     async def on_message(self, message: discord.Message):
         if getattr(message.author, "bot", False):
             return
         try:
+            if int(getattr(message.channel, "id", 0)) == self.ZIP_UPDATE_CHANNEL_ID:
+                await self._handle_zip_update_message(message)
+                return
             await self.process_commands(message)
         except Exception as e:
             print(f"[bot] falha ao processar comandos: {e!r}")
