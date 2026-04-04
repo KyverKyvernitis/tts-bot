@@ -1403,7 +1403,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       <div className="pool-stage__table-layout">
         <div
           ref={powerRailRef}
-          className={`pool-stage__power ${canInteract ? "pool-stage__power--active" : ""}`}
+          className={`pool-stage__power ${canInteract ? "pool-stage__power--active" : ""} ${pointerMode === "power" ? "pool-stage__power--dragging" : ""}`}
           onPointerDown={handlePowerDown}
           onPointerMove={handlePowerMove}
           onPointerUp={handlePowerUp}
