@@ -149,6 +149,14 @@ type PocketAnimation = {
   startedAt: number;
 };
 
+type BallSpinState = {
+  phase: number;
+  axis: number;
+  lastX: number;
+  lastY: number;
+  lastSeenAt: number;
+};
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function cleanName(name: string) {
@@ -272,6 +280,34 @@ function pointInCircle(point: LocalPoint, circleX: number, circleY: number, radi
   return Math.hypot(point.x - circleX, point.y - circleY) <= radius;
 }
 
+function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallSnapshot[], now: number) {
+  const seen = new Set<string>();
+  for (const ball of balls) {
+    if (ball.pocketed) continue;
+    seen.add(ball.id);
+    const current = cache.get(ball.id);
+    if (!current) {
+      cache.set(ball.id, { phase: 0, axis: 0, lastX: ball.x, lastY: ball.y, lastSeenAt: now });
+      continue;
+    }
+
+    const dx = ball.x - current.lastX;
+    const dy = ball.y - current.lastY;
+    const distance = Math.hypot(dx, dy);
+    if (distance > 0.02) {
+      current.phase = (current.phase + distance / BALL_VISUAL_RADIUS) % (Math.PI * 2);
+      current.axis = Math.atan2(dy, dx) + Math.PI / 2;
+      current.lastX = ball.x;
+      current.lastY = ball.y;
+    }
+    current.lastSeenAt = now;
+  }
+
+  for (const [id, spin] of cache) {
+    if (!seen.has(id) && now - spin.lastSeenAt > 800) cache.delete(id);
+  }
+}
+
 // ─── Aim preview computation ───────────────────────────────────────────────
 
 function findFirstBoundaryHit(cueBall: GameBallSnapshot, angle: number) {
@@ -344,9 +380,16 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
 
 // ─── Canvas ball rendering (high quality 3D with numbers/stripes) ──────────
 
-function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, scale = 1) {
+function drawBall(
+  ctx: CanvasRenderingContext2D,
+  ball: GameBallSnapshot,
+  scale = 1,
+  spin: BallSpinState | undefined = undefined,
+) {
   const r = BALL_VISUAL_RADIUS * scale;
   const color = ballColor(ball.number);
+  const spinPhase = spin?.phase ?? 0;
+  const spinAxis = spin?.axis ?? 0;
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
@@ -383,7 +426,6 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, scale =
   ctx.fill();
   ctx.shadowColor = "transparent";
 
-  // Dark outer rim for better legibility on the felt
   ctx.save();
   ctx.beginPath();
   ctx.arc(0, 0, r - 0.45 * scale, 0, Math.PI * 2);
@@ -392,54 +434,68 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, scale =
   ctx.stroke();
   ctx.restore();
 
-  // Stripes (9-15): stronger white shell + clearer colored band
-  if (ball.number >= 9) {
-    const stripeHalf = r * 0.42;
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(0, 0, r - 0.55 * scale, 0, Math.PI * 2);
-    ctx.clip();
-    const sg = ctx.createLinearGradient(-r, 0, r, 0);
-    sg.addColorStop(0, shadeColor(color, -26));
-    sg.addColorStop(0.5, color);
-    sg.addColorStop(1, shadeColor(color, -26));
-    ctx.fillStyle = sg;
-    ctx.fillRect(-r, -stripeHalf, r * 2, stripeHalf * 2);
-    ctx.restore();
-
-    ctx.save();
-    ctx.strokeStyle = "rgba(255,255,255,0.78)";
-    ctx.lineWidth = 1.05 * scale;
-    ctx.beginPath();
-    ctx.moveTo(-r * 0.92, -stripeHalf);
-    ctx.lineTo(r * 0.92, -stripeHalf);
-    ctx.moveTo(-r * 0.92, stripeHalf);
-    ctx.lineTo(r * 0.92, stripeHalf);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // Number disk — bigger (#9)
   if (ball.number > 0) {
+    const travelY = Math.sin(spinPhase) * r * 0.44;
+    const squashY = 0.52 + 0.48 * Math.abs(Math.cos(spinPhase));
+
+    ctx.save();
+    ctx.rotate(spinAxis);
+
+    if (ball.number >= 9) {
+      const stripeCenterY = Math.sin(spinPhase) * r * 0.5;
+      const stripeHalf = Math.max(r * 0.18, Math.abs(Math.cos(spinPhase)) * r * 0.42);
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(0, 0, r - 0.55 * scale, 0, Math.PI * 2);
+      ctx.clip();
+      const sg = ctx.createLinearGradient(-r, 0, r, 0);
+      sg.addColorStop(0, shadeColor(color, -26));
+      sg.addColorStop(0.5, color);
+      sg.addColorStop(1, shadeColor(color, -26));
+      ctx.fillStyle = sg;
+      ctx.fillRect(-r, stripeCenterY - stripeHalf, r * 2, stripeHalf * 2);
+      ctx.restore();
+
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.78)";
+      ctx.lineWidth = 1.05 * scale;
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.92, stripeCenterY - stripeHalf);
+      ctx.lineTo(r * 0.92, stripeCenterY - stripeHalf);
+      ctx.moveTo(-r * 0.92, stripeCenterY + stripeHalf);
+      ctx.lineTo(r * 0.92, stripeCenterY + stripeHalf);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     const diskR = r * (ball.number >= 9 ? 0.40 : 0.44);
     const diskGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, diskR);
     diskGrad.addColorStop(0, "#ffffff");
     diskGrad.addColorStop(1, "#e8eef4");
+    ctx.save();
+    ctx.translate(0, travelY);
+    ctx.scale(1, squashY);
+    ctx.globalAlpha = 0.72 + 0.28 * squashY;
     ctx.beginPath();
     ctx.arc(0, 0, diskR, 0, Math.PI * 2);
     ctx.fillStyle = diskGrad;
     ctx.fill();
+    ctx.restore();
 
-    // Bigger font size (#9)
     const fontSize = clamp(Math.round((ball.number >= 10 ? 7 : 8.5) * scale), 5, 18);
+    ctx.save();
+    ctx.translate(0, travelY);
+    ctx.scale(1, squashY);
     ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillStyle = ball.number === 8 ? "#0a0c12" : "#1a1e2a";
     ctx.fillText(String(ball.number), 0, 0.5 * scale);
+    ctx.restore();
+
+    ctx.restore();
   }
 
-  // Specular highlight
   const specGrad = ctx.createRadialGradient(-r * 0.34, -r * 0.38, 0, -r * 0.28, -r * 0.3, r * 0.55);
   specGrad.addColorStop(0, "rgba(255, 255, 255, 0.72)");
   specGrad.addColorStop(0.35, "rgba(255, 255, 255, 0.22)");
@@ -454,7 +510,12 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: GameBallSnapshot, scale =
 
 // ─── Pocket animation ─────────────────────────────────────────────────────
 
-function drawPocketAnimation(ctx: CanvasRenderingContext2D, anim: PocketAnimation, now: number) {
+function drawPocketAnimation(
+  ctx: CanvasRenderingContext2D,
+  anim: PocketAnimation,
+  now: number,
+  spin: BallSpinState | undefined = undefined,
+) {
   const elapsed = now - anim.startedAt;
   const t = clamp(elapsed / POCKET_ANIM_DURATION, 0, 1);
   const eased = t * t;
@@ -464,7 +525,7 @@ function drawPocketAnimation(ctx: CanvasRenderingContext2D, anim: PocketAnimatio
   ctx.save();
   ctx.globalAlpha = alpha;
   const ball = { ...anim.ball, x: lerp(anim.ball.x, anim.pocketX, eased), y: lerp(anim.ball.y, anim.pocketY, eased) };
-  drawBall(ctx, ball, scale);
+  drawBall(ctx, ball, scale, spin);
   ctx.restore();
 }
 
@@ -620,6 +681,7 @@ function drawPoolTable(
   isBallInHand: boolean,
   pocketAnimations: PocketAnimation[],
   now: number,
+  ballSpinCache: Map<string, BallSpinState>,
 ) {
   ctx.clearRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
 
@@ -649,7 +711,7 @@ function drawPoolTable(
   // STEP 2: All balls
   for (const ball of renderBalls) {
     if (ball.pocketed) continue;
-    drawBall(ctx, ball, 1);
+    drawBall(ctx, ball, 1, ballSpinCache.get(ball.id));
   }
 
   // STEP 3: Ghost ball circle AFTER balls (so it's visible on top)
@@ -659,7 +721,7 @@ function drawPoolTable(
 
   // Pocket animations
   for (const anim of pocketAnimations) {
-    drawPocketAnimation(ctx, anim, now);
+    drawPocketAnimation(ctx, anim, now, ballSpinCache.get(anim.ball.id));
   }
 
   // Ball-in-hand indicator
@@ -719,6 +781,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const pointerModeRef = useRef<PointerMode>("idle");
   const pocketAnimationsRef = useRef<PocketAnimation[]>([]);
   const prevPocketedIdsRef = useRef<Set<string>>(new Set());
+  const ballSpinRef = useRef<Map<string, BallSpinState>>(new Map());
   const snapAnimRef = useRef<{ startedAt: number; power: number; fired: boolean } | null>(null);
   const canInteractRef = useRef(false);
   const shootBusyRef = useRef(false);
@@ -1165,6 +1228,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       }
       prevPocketedIdsRef.current = currentPocketedIds;
       pocketAnimationsRef.current = pocketAnimationsRef.current.filter((anim) => now - anim.startedAt < POCKET_ANIM_DURATION);
+      updateBallSpinCache(ballSpinRef.current, drawBalls, now);
 
       const preview = drawCueBall && !animating ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
 
@@ -1203,6 +1267,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         state.isBallInHand,
         pocketAnimationsRef.current,
         now,
+        ballSpinRef.current,
       );
 
       drawLoopRef.current = window.requestAnimationFrame(draw);
