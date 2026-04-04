@@ -286,6 +286,21 @@ function pointInCircle(point: LocalPoint, circleX: number, circleY: number, radi
   return Math.hypot(point.x - circleX, point.y - circleY) <= radius;
 }
 
+function estimateCueAngle(cueBall: GameBallSnapshot, balls: GameBallSnapshot[]) {
+  const candidates = balls.filter((ball) => !ball.pocketed && ball.number !== 0);
+  if (!candidates.length) return 0;
+  let best = candidates[0];
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const ball of candidates) {
+    const distance = Math.hypot(ball.x - cueBall.x, ball.y - cueBall.y);
+    if (distance < bestDistance) {
+      best = ball;
+      bestDistance = distance;
+    }
+  }
+  return Math.atan2(best.y - cueBall.y, best.x - cueBall.x);
+}
+
 function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallSnapshot[], now: number) {
   const seen = new Set<string>();
   for (const ball of balls) {
@@ -1028,7 +1043,20 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [currentUserId, game.ballInHandUserId, game.balls, game.shotSequence, shootBusy]);
   useEffect(() => { pointerModeRef.current = pointerMode; }, [pointerMode]);
 
-  const powerBarVisible = canInteract && !isBallInHand && !animating;
+  const turnControlVisible = Boolean(cueBall && game.status !== "finished" && !animating);
+  const powerBarInteractive = canInteract && !isBallInHand;
+  const remotePowerVisual = !isMyTurn
+    ? opponentAim?.mode === "power"
+      ? 0.62
+      : opponentAim?.mode === "aim"
+        ? 0.2
+        : 0.08
+    : 0;
+  const displayedPowerVisual = isMyTurn
+    ? isBallInHand
+      ? 0.08
+      : powerVisual
+    : remotePowerVisual;
 
   const emitAimState = (next: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; mode: AimPointerMode }, force = false) => {
     const handler = onAimStateChangeRef.current;
@@ -1376,19 +1404,21 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       pocketAnimationsRef.current = pocketAnimationsRef.current.filter((anim) => now - anim.startedAt < POCKET_ANIM_DURATION);
 
       const remoteVisible = Boolean(
-        opponentAim
-        && opponentAim.visible
-        && !animating
+        !animating
         && !state.canInteract
-        && opponentAim.userId === game.turnUserId
+        && drawCueBall
+        && game.turnUserId !== currentUserId
         && game.status !== "finished"
       );
-      const remoteCueBall = remoteVisible && opponentAim && opponentAim.cueX !== null && opponentAim.cueY !== null
+      const remoteAimAngle = remoteVisible
+        ? (opponentAim && opponentAim.userId === game.turnUserId ? opponentAim.angle : estimateCueAngle(drawCueBall, drawBalls))
+        : 0;
+      const remoteCueBall = remoteVisible
         ? {
             id: drawCueBall?.id ?? "ball-0",
             number: 0,
-            x: opponentAim.cueX,
-            y: opponentAim.cueY,
+            x: opponentAim && opponentAim.userId === game.turnUserId && opponentAim.cueX !== null ? opponentAim.cueX : drawCueBall.x,
+            y: opponentAim && opponentAim.userId === game.turnUserId && opponentAim.cueY !== null ? opponentAim.cueY : drawCueBall.y,
             pocketed: false,
           }
         : null;
@@ -1399,7 +1429,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
       updateBallSpinCache(ballSpinRef.current, drawBalls, now);
       const preview = drawCueBall && !animating && !(state.isBallInHand && state.pointerMode === "place") ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
-      const remotePreview = remoteVisible && remoteCueBall && opponentAim ? computeAimPreview(remoteCueBall, drawBalls, opponentAim.angle) : null;
+      const remotePreview = remoteVisible && remoteCueBall && !(opponentAim && opponentAim.mode === "place" && game.ballInHandUserId === game.turnUserId)
+        ? computeAimPreview(remoteCueBall, drawBalls, remoteAimAngle)
+        : null;
 
       // Quick cue settle after release for responsiveness
       const SNAP_MS = 14;
@@ -1421,7 +1453,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         pullRatio = 0.06;
       }
 
-      const remotePullRatio = opponentAim?.mode === "power" ? 0.32 : opponentAim?.mode === "aim" ? 0.08 : 0.04;
+      const remotePullRatio = opponentAim?.mode === "power" ? 0.32 : opponentAim?.mode === "aim" ? 0.08 : 0.05;
 
       drawPoolTable(
         context,
@@ -1439,7 +1471,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         pocketAnimationsRef.current,
         now,
         ballSpinRef.current,
-        remoteVisible && remoteCueBall && opponentAim ? { cueBall: remoteCueBall, aimAngle: opponentAim.angle, preview: remotePreview, pullRatio: remotePullRatio } : null,
+        remoteVisible && remoteCueBall ? { cueBall: remoteCueBall, aimAngle: remoteAimAngle, preview: remotePreview, pullRatio: remotePullRatio } : null,
       );
 
       drawLoopRef.current = window.requestAnimationFrame(draw);
@@ -1562,8 +1594,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       <div className="pool-stage__table-layout">
         <div
           ref={powerRailRef}
-          className={`pool-stage__power ${canInteract ? "pool-stage__power--active" : ""} ${pointerMode === "power" ? "pool-stage__power--dragging" : ""} ${powerBarVisible ? "" : "pool-stage__power--hidden"}`}
-          aria-hidden={!powerBarVisible}
+          className={`pool-stage__power ${powerBarInteractive ? "pool-stage__power--active" : ""} ${pointerMode === "power" ? "pool-stage__power--dragging" : ""} ${turnControlVisible ? "" : "pool-stage__power--hidden"} ${!isMyTurn && turnControlVisible ? "pool-stage__power--ghost" : ""} ${isMyTurn && !powerBarInteractive && turnControlVisible ? "pool-stage__power--standby" : ""}`}
+          aria-hidden={!turnControlVisible}
           onPointerDown={handlePowerDown}
           onPointerMove={handlePowerMove}
           onPointerUp={handlePowerUp}
@@ -1571,8 +1603,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onLostPointerCapture={handlePowerLostCapture}
         >
           <div className="pool-stage__power-track">
-            <div className="pool-stage__power-fill" style={{ height: `${Math.round(powerVisual * 100)}%`, top: "2px", bottom: "auto" }} />
-            <div className="pool-stage__power-marker" style={{ top: `calc(${Math.round(powerVisual * 100)}% + 1px)` }} />
+            <div className="pool-stage__power-fill" style={{ height: `${Math.round(displayedPowerVisual * 100)}%`, top: "2px", bottom: "auto" }} />
+            <div className="pool-stage__power-marker" style={{ top: `calc(${Math.round(displayedPowerVisual * 100)}% + 1px)` }} />
           </div>
         </div>
 
