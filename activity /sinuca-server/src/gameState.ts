@@ -11,14 +11,14 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 15.8;
+const MAX_SHOT_SPEED = 24.5;
 const MIN_SPEED = 0.045;
-const BASE_FRICTION = 0.996;
+const BASE_FRICTION = 0.998;
 const MAX_STEPS = 1800;
-const FRAME_SAMPLE_EVERY = 1;
+const FRAME_SAMPLE_EVERY = 2;
 const MAX_SUBSTEPS = 24;
-const CUSHION_RESTITUTION = 0.54;
-const BALL_RESTITUTION = 0.78;
+const CUSHION_RESTITUTION = 0.78;
+const BALL_RESTITUTION = 0.9;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -156,24 +156,24 @@ function handleWallCollision(ball: PhysicsBall) {
   if (ball.x < minX) {
     ball.x = minX;
     ball.vx *= -CUSHION_RESTITUTION;
-    ball.vy *= 0.88;
+    ball.vy *= 0.98;
     collided = true;
   } else if (ball.x > maxX) {
     ball.x = maxX;
     ball.vx *= -CUSHION_RESTITUTION;
-    ball.vy *= 0.88;
+    ball.vy *= 0.98;
     collided = true;
   }
 
   if (ball.y < minY) {
     ball.y = minY;
     ball.vy *= -CUSHION_RESTITUTION;
-    ball.vx *= 0.88;
+    ball.vx *= 0.98;
     collided = true;
   } else if (ball.y > maxY) {
     ball.y = maxY;
     ball.vy *= -CUSHION_RESTITUTION;
-    ball.vx *= 0.88;
+    ball.vx *= 0.98;
     collided = true;
   }
 
@@ -238,10 +238,6 @@ function resolveCollision(a: PhysicsBall, b: PhysicsBall) {
   b.vx += impulse * nx;
   b.vy += impulse * ny;
 
-  a.vx *= 0.996;
-  a.vy *= 0.996;
-  b.vx *= 0.996;
-  b.vy *= 0.996;
 
   const tangentX = -ny;
   const tangentY = nx;
@@ -371,7 +367,7 @@ function simulateShot(
   }
 
   const shotPower = clamp(Number.isFinite(power) ? power : 0.6, 0.12, 1);
-  const shotSpeed = 4.4 + shotPower * MAX_SHOT_SPEED;
+  const shotSpeed = 5.6 + shotPower * MAX_SHOT_SPEED;
   cueBall.vx = Math.cos(safeAngle) * shotSpeed;
   cueBall.vy = Math.sin(safeAngle) * shotSpeed;
 
@@ -421,10 +417,8 @@ function simulateShot(
 
     for (const ball of balls) {
       if (ball.pocketed) continue;
-      const speed = Math.hypot(ball.vx, ball.vy);
-      const rollingDrag = speed > 7 ? 0.994 : speed > 2.5 ? 0.9915 : 0.983;
-      ball.vx *= BASE_FRICTION * rollingDrag;
-      ball.vy *= BASE_FRICTION * rollingDrag;
+      ball.vx *= BASE_FRICTION;
+      ball.vy *= BASE_FRICTION;
       if (Math.abs(ball.vx) < MIN_SPEED) ball.vx = 0;
       if (Math.abs(ball.vy) < MIN_SPEED) ball.vy = 0;
     }
