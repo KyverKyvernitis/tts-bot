@@ -295,7 +295,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     const dy = ball.y - current.lastY;
     const distance = Math.hypot(dx, dy);
     if (distance > 0.02) {
-      current.phase = (current.phase + distance / BALL_VISUAL_RADIUS) % (Math.PI * 2);
+      current.phase = (current.phase + distance / (BALL_VISUAL_RADIUS * 1.45)) % (Math.PI * 2);
       current.axis = Math.atan2(dy, dx) + Math.PI / 2;
       current.lastX = ball.x;
       current.lastY = ball.y;
@@ -435,47 +435,47 @@ function drawBall(
   ctx.restore();
 
   if (ball.number > 0) {
-    const travelY = Math.sin(spinPhase) * r * 0.44;
-    const squashY = 0.52 + 0.48 * Math.abs(Math.cos(spinPhase));
+    const travelY = Math.sin(spinPhase) * r * 0.18;
+    const diskScaleY = 0.86 + 0.14 * Math.abs(Math.cos(spinPhase));
 
     ctx.save();
     ctx.rotate(spinAxis);
 
     if (ball.number >= 9) {
-      const stripeCenterY = Math.sin(spinPhase) * r * 0.5;
-      const stripeHalf = Math.max(r * 0.18, Math.abs(Math.cos(spinPhase)) * r * 0.42);
+      const stripeCenterY = Math.sin(spinPhase) * r * 0.2;
+      const stripeHalf = r * (0.24 + 0.06 * Math.abs(Math.cos(spinPhase)));
       ctx.save();
       ctx.beginPath();
       ctx.arc(0, 0, r - 0.55 * scale, 0, Math.PI * 2);
       ctx.clip();
       const sg = ctx.createLinearGradient(-r, 0, r, 0);
-      sg.addColorStop(0, shadeColor(color, -26));
+      sg.addColorStop(0, shadeColor(color, -18));
       sg.addColorStop(0.5, color);
-      sg.addColorStop(1, shadeColor(color, -26));
+      sg.addColorStop(1, shadeColor(color, -18));
       ctx.fillStyle = sg;
       ctx.fillRect(-r, stripeCenterY - stripeHalf, r * 2, stripeHalf * 2);
       ctx.restore();
 
       ctx.save();
-      ctx.strokeStyle = "rgba(255,255,255,0.78)";
-      ctx.lineWidth = 1.05 * scale;
+      ctx.strokeStyle = "rgba(255,255,255,0.62)";
+      ctx.lineWidth = 0.85 * scale;
       ctx.beginPath();
-      ctx.moveTo(-r * 0.92, stripeCenterY - stripeHalf);
-      ctx.lineTo(r * 0.92, stripeCenterY - stripeHalf);
-      ctx.moveTo(-r * 0.92, stripeCenterY + stripeHalf);
-      ctx.lineTo(r * 0.92, stripeCenterY + stripeHalf);
+      ctx.moveTo(-r * 0.9, stripeCenterY - stripeHalf);
+      ctx.lineTo(r * 0.9, stripeCenterY - stripeHalf);
+      ctx.moveTo(-r * 0.9, stripeCenterY + stripeHalf);
+      ctx.lineTo(r * 0.9, stripeCenterY + stripeHalf);
       ctx.stroke();
       ctx.restore();
     }
 
-    const diskR = r * (ball.number >= 9 ? 0.40 : 0.44);
+    const diskR = r * (ball.number >= 9 ? 0.39 : 0.43);
     const diskGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, diskR);
     diskGrad.addColorStop(0, "#ffffff");
     diskGrad.addColorStop(1, "#e8eef4");
     ctx.save();
     ctx.translate(0, travelY);
-    ctx.scale(1, squashY);
-    ctx.globalAlpha = 0.72 + 0.28 * squashY;
+    ctx.scale(1, diskScaleY);
+    ctx.globalAlpha = 0.8 + 0.2 * diskScaleY;
     ctx.beginPath();
     ctx.arc(0, 0, diskR, 0, Math.PI * 2);
     ctx.fillStyle = diskGrad;
@@ -485,7 +485,7 @@ function drawBall(
     const fontSize = clamp(Math.round((ball.number >= 10 ? 7 : 8.5) * scale), 5, 18);
     ctx.save();
     ctx.translate(0, travelY);
-    ctx.scale(1, squashY);
+    ctx.scale(1, diskScaleY);
     ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -959,26 +959,40 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const updateAimFromDrag = (point: LocalPoint) => {
     if (!cueBall) return;
-    const dx = point.x - cueBall.x;
-    const dy = point.y - cueBall.y;
-    const distance = Math.hypot(dx, dy);
-    if (distance < BALL_RADIUS * 2.2) return;
+    const previous = aimDragRef.current;
+    if (!previous) {
+      aimDragRef.current = { x: point.x, y: point.y };
+      return;
+    }
 
-    const targetAngle = Math.atan2(dy, dx);
+    const prevDx = previous.x - cueBall.x;
+    const prevDy = previous.y - cueBall.y;
+    const currDx = point.x - cueBall.x;
+    const currDy = point.y - cueBall.y;
+    const prevDistance = Math.hypot(prevDx, prevDy);
+    const currDistance = Math.hypot(currDx, currDy);
+    const orbitThreshold = BALL_RADIUS * 2.35;
+
+    aimDragRef.current = { x: point.x, y: point.y };
+    if (prevDistance < orbitThreshold || currDistance < orbitThreshold) return;
+
+    const prevAngle = Math.atan2(prevDy, prevDx);
+    const currAngle = Math.atan2(currDy, currDx);
     const rawDelta = Math.atan2(
-      Math.sin(targetAngle - aimAngleRef.current),
-      Math.cos(targetAngle - aimAngleRef.current),
+      Math.sin(currAngle - prevAngle),
+      Math.cos(currAngle - prevAngle),
     );
 
-    if (Math.abs(rawDelta) < 0.0025) return;
+    const averageRadius = (prevDistance + currDistance) * 0.5;
+    const arcPixels = Math.abs(rawDelta) * averageRadius;
+    if (arcPixels < 1.15) return;
 
-    const gain = distance < 90 ? 0.22 : distance < 220 ? 0.34 : 0.46;
-    const maxStep = distance < 90 ? 0.035 : distance < 220 ? 0.065 : 0.11;
+    const gain = averageRadius < 120 ? 0.9 : averageRadius < 240 ? 0.95 : 1.0;
+    const maxStep = averageRadius < 120 ? 0.04 : averageRadius < 240 ? 0.055 : 0.075;
     const delta = clamp(rawDelta * gain, -maxStep, maxStep);
-    if (Math.abs(delta) < 0.001) return;
+    if (Math.abs(delta) < 0.0009) return;
 
     aimAngleRef.current += delta;
-    aimDragRef.current = { x: point.x, y: point.y };
   };
 
   const updateCuePositionFromPoint = (point: LocalPoint) => {
@@ -1012,8 +1026,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     }
     setPointerModeSafe("aim");
     beginAimDrag(point);
-    updateAimFromDrag(point);
-    pointerMovedRef.current = true;
+    pointerMovedRef.current = false;
   };
 
   const handleTablePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1171,8 +1184,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
       const state = renderStateRef.current;
       const targetAngle = aimAngleRef.current;
-      // Smoother aim interpolation
-      const aimLerp = state.pointerMode === "aim" ? 0.42 : state.pointerMode === "power" ? 0.3 : 0.22;
+      // Keep the cue following the aim direction smoothly without feeling detached.
+      const aimLerp = state.pointerMode === "aim" ? 0.26 : state.pointerMode === "power" ? 0.24 : 0.18;
       drawAimAngleRef.current = lerpAngle(drawAimAngleRef.current, targetAngle, aimLerp);
 
       let drawBalls = state.renderBalls;
