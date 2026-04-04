@@ -81,9 +81,32 @@ def compact(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
-def infer_summary(title: str, body: str) -> str:
+def infer_summary(event_type: str, title: str, body: str) -> str:
     hay = f"{title}\n{body}".lower()
-    checks = [
+
+    success_checks = [
+        (("healthcheck: ok" in hay) and ("activity:" in hay or "backend validado" in hay),
+         "Deploy concluído, frontend publicado e backend validado no healthcheck final."),
+        (("reiniciado com sucesso" in hay) and ("healthcheck: ok" in hay),
+         "Serviço reiniciado e validado com sucesso após o update."),
+        ("update automático aplicado" in hay,
+         "Update aplicado com sucesso e pipeline finalizado sem rollback."),
+        ("update liberado novamente" in hay,
+         "O commit remoto voltou a ser elegível e novas tentativas de update foram liberadas."),
+        ("novo commit detectado após rollback" in hay,
+         "Um commit remoto mais novo foi detectado após o rollback e o auto update foi liberado novamente."),
+    ]
+
+    info_checks = [
+        ("deploy reiniciado para commit mais novo" in hay,
+         "Um commit mais novo chegou durante o deploy e o processo foi reiniciado com segurança."),
+        ("deploy reiniciado" in hay,
+         "O deploy atual foi interrompido para tentar novamente em um estado mais seguro."),
+        ("update ignorado" in hay and "repo sujo" in hay,
+         "O update foi ignorado porque o repositório local tinha alterações pendentes."),
+    ]
+
+    error_checks = [
         ("requirements.txt", "A etapa de dependências Python falhou fora do diretório esperado."),
         ("pip install -r requirements.txt", "A instalação das dependências Python falhou."),
         ("activity frontend build", "O build do frontend da Activity falhou."),
@@ -94,18 +117,32 @@ def infer_summary(title: str, body: str) -> str:
         ("vite build", "O build do frontend falhou durante a etapa do Vite."),
         ("connect() failed", "O serviço de destino não estava respondendo na porta esperada."),
         ("connection refused", "A conexão com o serviço local foi recusada."),
-        ("127.0.0.1:8787", "O backend da Activity não estava acessível em 127.0.0.1:8787."),
         ("sanity check", "O serviço reiniciou, mas não passou no healthcheck."),
         ("repo sujo", "O auto update foi pausado para não sobrescrever alterações locais."),
         ("rollback", "O sistema voltou para a versão anterior para manter o serviço estável."),
         ("npm install", "A instalação de dependências Node falhou."),
         ("systemctl restart", "A reinicialização do serviço falhou."),
+        (("127.0.0.1:8787" in hay) and ("healthcheck: ok" not in hay) and ("backend validado" not in hay),
+         "O backend da Activity não estava acessível em 127.0.0.1:8787."),
     ]
-    for needle, summary in checks:
-        if needle in hay:
+
+    if event_type in {"success", "update"}:
+        for matched, summary in success_checks:
+            if matched:
+                return summary
+        return ""
+
+    if event_type == "info":
+        for matched, summary in info_checks:
+            if matched:
+                return summary
+        return ""
+
+    for matched, summary in error_checks:
+        ok = matched if isinstance(matched, bool) else matched in hay
+        if ok:
             return summary
     return ""
-
 
 lines = BODY.splitlines()
 fields = []
@@ -149,7 +186,7 @@ for raw_line in lines:
 
     extra_notes.append(stripped)
 
-summary = infer_summary(TITLE, BODY)
+summary = infer_summary(TYPE, TITLE, BODY)
 
 if summary:
     fields.insert(0, {"name": "Leitura", "value": trunc(summary, 1024), "inline": False})
