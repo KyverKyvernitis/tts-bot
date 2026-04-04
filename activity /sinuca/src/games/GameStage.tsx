@@ -108,7 +108,6 @@ const OPENING_RACK = [
 const POCKET_ANIM_DURATION = 320;
 const POWER_MIN = 0.06;
 const POWER_RETURN_MS = 180;
-const LOCAL_RELEASE_HOLD_MS = 130;
 
 type ShotInput = {
   angle: number;
@@ -787,7 +786,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const canInteractRef = useRef(false);
   const shootBusyRef = useRef(false);
   const onShootRef = useRef(onShoot);
-  const pendingReleaseRef = useRef<{ startedAt: number; cueX: number; cueY: number; angle: number; power: number } | null>(null);
 
   const renderStateRef = useRef({
     renderBalls: [] as GameBallSnapshot[],
@@ -860,19 +858,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       baseBalls: game.balls,
       finalBalls: game.balls,
     };
-    pendingReleaseRef.current = null;
     setAnimating(true);
     setAnimatingSeq(game.lastShot.seq);
-    // Keep playback sounds secondary so the release itself still feels immediate.
+    // Schedule realistic collision sounds based on shot frames
     const frameCount = game.lastShot.frames.length;
-    if (frameCount > 18) {
-      window.setTimeout(() => SFX.ballHit(), 28);
+    // Initial ball hit
+    window.setTimeout(() => SFX.ballHit(), 80);
+    // Cushion bounces during longer shots
+    if (frameCount > 60) {
+      window.setTimeout(() => SFX.cushion(), 300);
     }
-    if (frameCount > 56) {
-      window.setTimeout(() => SFX.cushion(), 240);
-    }
-    if (frameCount > 84) {
-      window.setTimeout(() => SFX.ballHit(), 410);
+    if (frameCount > 150) {
+      window.setTimeout(() => SFX.cushion(), 600);
+      window.setTimeout(() => SFX.ballHit(), 450);
     }
   }, [animating, game]);
 
@@ -1095,14 +1093,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       localCuePlacementRef.current = { x: liveCueBall.x, y: liveCueBall.y };
     }
 
-    pendingReleaseRef.current = {
-      startedAt: performance.now(),
-      cueX: liveCueBall.x,
-      cueY: liveCueBall.y,
-      angle: aimAngleRef.current,
-      power: shotPower,
-    };
-
     // Fire the real shot immediately, then let visual/audio reactions happen in parallel.
     void onShootRef.current(payload).catch(() => {});
     animatePowerReturn(shotPower);
@@ -1207,24 +1197,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       let drawBalls = state.renderBalls;
       let drawCueBall = state.cueBall;
       const playback = playbackRef.current;
-      const pendingRelease = pendingReleaseRef.current;
-
-      if (!playback && pendingRelease) {
-        const elapsed = now - pendingRelease.startedAt;
-        if (elapsed >= LOCAL_RELEASE_HOLD_MS) {
-          pendingReleaseRef.current = null;
-        } else {
-          const cueBallId = state.cueBall?.id ?? "ball-0";
-          const speed = 24 + pendingRelease.power * 54;
-          const distance = (elapsed / LOCAL_RELEASE_HOLD_MS) * speed;
-          const nextCueX = pendingRelease.cueX + Math.cos(pendingRelease.angle) * distance;
-          const nextCueY = pendingRelease.cueY + Math.sin(pendingRelease.angle) * distance;
-          drawBalls = state.renderBalls.map((ball) => ball.id === cueBallId
-            ? { ...ball, x: nextCueX, y: nextCueY, pocketed: false }
-            : ball);
-          drawCueBall = drawBalls.find((ball) => ball.id === cueBallId) ?? null;
-        }
-      }
 
       if (playback && playback.frames.length) {
         const frameStepMs = 1000 / 60;
@@ -1277,7 +1249,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       pocketAnimationsRef.current = pocketAnimationsRef.current.filter((anim) => now - anim.startedAt < POCKET_ANIM_DURATION);
       updateBallSpinCache(ballSpinRef.current, drawBalls, now);
 
-      const preview = drawCueBall && !animating && !pendingReleaseRef.current ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
+      const preview = drawCueBall && !animating && !(state.isBallInHand && state.pointerMode === "place") ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
 
       // Quick cue settle after release for responsiveness
       const SNAP_MS = 14;
