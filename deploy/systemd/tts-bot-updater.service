@@ -1,0 +1,9 @@
+[Unit]
+Description=Atualiza o tts-bot e reinicia o serviço se houver commit novo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/tts-bot-update.sh
