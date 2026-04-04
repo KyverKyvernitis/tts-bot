@@ -835,6 +835,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const powerReleaseGuardRef = useRef(false);
   const powerReturnAnimRef = useRef<number | null>(null);
   const powerGestureRef = useRef<{ startY: number; fullTravelPx: number } | null>(null);
+  const powerPointerIdRef = useRef<number | null>(null);
   const localCuePlacementRef = useRef<{ x: number; y: number } | null>(null);
   const pointerModeRef = useRef<PointerMode>("idle");
   const pocketAnimationsRef = useRef<PocketAnimation[]>([]);
@@ -1041,7 +1042,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       setPower(POWER_MIN);
     }
   }, [currentUserId, game.ballInHandUserId, game.balls, game.shotSequence, shootBusy]);
-  useEffect(() => { pointerModeRef.current = pointerMode; }, [pointerMode]);
+  useEffect(() => {
+    pointerModeRef.current = pointerMode;
+    if (pointerMode !== "power") powerPointerIdRef.current = null;
+  }, [pointerMode]);
 
   const turnControlVisible = Boolean(cueBall && game.status !== "finished" && !animating);
   const powerBarInteractive = canInteract && !isBallInHand;
@@ -1168,7 +1172,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!cueBall || !canInteract) return;
     const point = pointToLocal(event.clientX, event.clientY);
     if (!point) return;
-    event.currentTarget.setPointerCapture?.(event.pointerId);
+    try { event.currentTarget.setPointerCapture?.(event.pointerId); } catch {}
     pointerMovedRef.current = false;
     SFX.prime();
     if (isBallInHand && pointInCircle(point, cueBall.x, cueBall.y, BALL_RADIUS * 2.2)) {
@@ -1250,6 +1254,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!canInteract || !powerRailRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
     SFX.prime();
     if (powerReturnAnimRef.current !== null) {
       window.cancelAnimationFrame(powerReturnAnimRef.current);
@@ -1261,39 +1267,61 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       fullTravelPx: Math.max(rect.height * POWER_FULL_TRAVEL_RATIO, 180),
     };
     powerReleaseGuardRef.current = false;
+    powerPointerIdRef.current = event.pointerId;
     powerRef.current = POWER_MIN;
     setPower(POWER_MIN);
     setPointerModeSafe("power");
-    event.currentTarget.setPointerCapture?.(event.pointerId);
+    try { event.currentTarget.setPointerCapture?.(event.pointerId); } catch {}
     emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "power" }, true);
   };
 
   const handlePowerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (pointerModeRef.current !== "power") return;
+    if (powerPointerIdRef.current !== null && event.pointerId !== powerPointerIdRef.current) return;
+    event.preventDefault();
     updatePowerFromClientY(event.clientY);
   };
 
   const handlePowerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (powerPointerIdRef.current !== null && event.pointerId !== powerPointerIdRef.current) return;
+    try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch {}
+    powerPointerIdRef.current = null;
     commitPowerShot();
   };
 
   const handlePowerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (powerPointerIdRef.current !== null && event.pointerId !== powerPointerIdRef.current) return;
+    try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch {}
+    powerPointerIdRef.current = null;
     if (pointerModeRef.current === "power" && !powerReleaseGuardRef.current) commitPowerShot();
   };
 
   const handlePowerLostCapture = () => {
-    if (pointerModeRef.current === "power") commitPowerShot();
+    // Discord Activity/webview can drop pointer capture mid-gesture.
+    // Keep the gesture alive and let the global listeners finish the shot.
   };
 
   useEffect(() => {
     if (pointerMode !== "power") return;
-    const handleWindowUp = () => { if (pointerModeRef.current === "power") commitPowerShot(); };
-    const handleWindowCancel = () => { if (pointerModeRef.current === "power") commitPowerShot(); };
-    window.addEventListener("pointerup", handleWindowUp);
-    window.addEventListener("pointercancel", handleWindowCancel);
-    return () => { window.removeEventListener("pointerup", handleWindowUp); window.removeEventListener("pointercancel", handleWindowCancel); };
+    const handleWindowMove = (event: PointerEvent) => {
+      if (pointerModeRef.current !== "power") return;
+      if (powerPointerIdRef.current !== null && event.pointerId !== powerPointerIdRef.current) return;
+      updatePowerFromClientY(event.clientY);
+    };
+    const finishFromWindow = (event: PointerEvent) => {
+      if (pointerModeRef.current !== "power") return;
+      if (powerPointerIdRef.current !== null && event.pointerId !== powerPointerIdRef.current) return;
+      powerPointerIdRef.current = null;
+      commitPowerShot();
+    };
+    window.addEventListener("pointermove", handleWindowMove);
+    window.addEventListener("pointerup", finishFromWindow);
+    window.addEventListener("pointercancel", finishFromWindow);
+    return () => {
+      window.removeEventListener("pointermove", handleWindowMove);
+      window.removeEventListener("pointerup", finishFromWindow);
+      window.removeEventListener("pointercancel", finishFromWindow);
+    };
   }, [pointerMode, room.roomId, currentUserId, shootBusy, animating, canInteract, isBallInHand, needEightCall, selectedPocket]);
 
   const statusText = game.status === "finished"
