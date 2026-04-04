@@ -2271,7 +2271,9 @@ button:focus-visible {
 
 .pool-ball {
   position: absolute;
-  width: 28px;
+  width: 48px;
+  padding-inline: 14px;
+  box-sizing: border-box;
   height: 28px;
   border-radius: 999px;
   display: grid;
@@ -2780,6 +2782,7 @@ button:focus-visible {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
   overflow: hidden;
+  pointer-events: none;
 }
 
 .game-mobile-topbar {
@@ -4881,7 +4884,7 @@ button:focus-visible {
 .pool-stage__table-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: 48px minmax(0, 1fr);
   gap: 4px;
   align-items: center;
 }
@@ -4891,7 +4894,9 @@ button:focus-visible {
 .pool-stage__power {
   align-self: center;
   justify-self: center;
-  width: 28px;
+  width: 48px;
+  padding-inline: 14px;
+  box-sizing: border-box;
   height: min(74vh, 408px);
   display: grid;
   justify-items: center;
@@ -4980,6 +4985,13 @@ button:focus-visible {
 .pool-stage__power--dragging .pool-stage__power-fill,
 .pool-stage__power--dragging .pool-stage__power-marker {
   transition: none !important;
+}
+
+.pool-stage__power-track,
+.pool-stage__power-fill,
+.pool-stage__power-marker {
+  pointer-events: none;
+  touch-action: none;
 }
 
 /* ── Table area ──────────────────────────────────────────────────────────── */
@@ -5119,12 +5131,13 @@ button:focus-visible {
   }
 
   .pool-stage__table-layout {
-    grid-template-columns: 34px minmax(0, 1fr);
+    grid-template-columns: 48px minmax(0, 1fr);
     gap: 8px;
   }
 
   .pool-stage__power {
-    width: 28px;
+    width: 48px;
+    padding-inline: 14px;
     height: min(72vh, 370px);
   }
 
@@ -5167,7 +5180,7 @@ button:focus-visible {
   }
 
   .pool-stage__player {
-    grid-template-columns: 34px minmax(0, 1fr);
+    grid-template-columns: 42px minmax(0, 1fr);
     gap: 4px;
     padding: 4px 8px;
   }
@@ -5218,13 +5231,14 @@ button:focus-visible {
     font-size: 0.66rem;
   }
 
-  .pool-stage__table-layout {
-    grid-template-columns: 34px minmax(0, 1fr);
+ .pool-stage__table-layout {
+    grid-template-columns: 42px minmax(0, 1fr);
     gap: 4px;
   }
 
   .pool-stage__power {
-    width: 24px;
+    width: 42px;
+    padding-inline: 11px;
     height: min(66vh, 296px);
     gap: 0;
   }

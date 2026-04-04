@@ -108,9 +108,7 @@ const OPENING_RACK = [
 const POCKET_ANIM_DURATION = 320;
 const POWER_MIN = 0.06;
 const POWER_RETURN_MS = 180;
-const POWER_DEADZONE_PX = 14;
-const POWER_FULL_TRAVEL_RATIO = 0.9;
-const POWER_CURVE_EXPONENT = 1.75;
+const POWER_CURVE_EXPONENT = 1.18;
 const AIM_SYNC_INTERVAL_MS = 44;
 
 type ShotInput = {
@@ -816,6 +814,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const powerRailRef = useRef<HTMLDivElement | null>(null);
+  const powerTrackRef = useRef<HTMLDivElement | null>(null);
   const drawLoopRef = useRef<number | null>(null);
   const tableCacheRef = useRef<HTMLCanvasElement | null>(null);
   const lastAnimatedSeqRef = useRef(0);
@@ -834,7 +833,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const powerRef = useRef(power);
   const powerReleaseGuardRef = useRef(false);
   const powerReturnAnimRef = useRef<number | null>(null);
-  const powerGestureRef = useRef<{ startY: number; fullTravelPx: number } | null>(null);
+  const powerGestureRef = useRef<{ rectTop: number; rectBottom: number; rectHeight: number } | null>(null);
   const powerPointerIdRef = useRef<number | null>(null);
   const localCuePlacementRef = useRef<{ x: number; y: number } | null>(null);
   const pointerModeRef = useRef<PointerMode>("idle");
@@ -1090,9 +1089,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const setPointerModeSafe = (next: PointerMode) => { pointerModeRef.current = next; setPointerMode(next); };
 
-  const mapPowerFromDrag = (dragPx: number, fullTravelPx: number) => {
-    const effective = Math.max(0, dragPx - POWER_DEADZONE_PX);
-    const normalized = clamp(effective / Math.max(1, fullTravelPx), 0, 1);
+  const mapPowerFromClientY = (clientY: number, rectTop: number, rectBottom: number, rectHeight: number) => {
+    const clampedY = clamp(clientY, rectTop, rectBottom);
+    const normalized = clamp((clampedY - rectTop) / Math.max(1, rectHeight), 0, 1);
     const curved = Math.pow(normalized, POWER_CURVE_EXPONENT);
     return clamp(POWER_MIN + curved * (1 - POWER_MIN), POWER_MIN, 1);
   };
@@ -1161,8 +1160,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const updatePowerFromClientY = (clientY: number) => {
     const gesture = powerGestureRef.current;
     if (!gesture) return;
-    const dragPx = Math.max(0, clientY - gesture.startY);
-    const next = mapPowerFromDrag(dragPx, gesture.fullTravelPx);
+    const next = mapPowerFromClientY(clientY, gesture.rectTop, gesture.rectBottom, gesture.rectHeight);
     powerRef.current = next;
     setPower(next);
     emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "power" });
@@ -1261,16 +1259,16 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       window.cancelAnimationFrame(powerReturnAnimRef.current);
       powerReturnAnimRef.current = null;
     }
-    const rect = powerRailRef.current.getBoundingClientRect();
+    const rect = (powerTrackRef.current ?? powerRailRef.current).getBoundingClientRect();
     powerGestureRef.current = {
-      startY: event.clientY,
-      fullTravelPx: Math.max(rect.height * POWER_FULL_TRAVEL_RATIO, 180),
+      rectTop: rect.top + 2,
+      rectBottom: rect.bottom - 2,
+      rectHeight: Math.max(1, rect.height - 4),
     };
     powerReleaseGuardRef.current = false;
     powerPointerIdRef.current = event.pointerId;
-    powerRef.current = POWER_MIN;
-    setPower(POWER_MIN);
     setPointerModeSafe("power");
+    updatePowerFromClientY(event.clientY);
     try { event.currentTarget.setPointerCapture?.(event.pointerId); } catch {}
     emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "power" }, true);
   };
@@ -1630,7 +1628,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onPointerCancel={handlePowerCancel}
           onLostPointerCapture={handlePowerLostCapture}
         >
-          <div className="pool-stage__power-track">
+          <div ref={powerTrackRef} className="pool-stage__power-track">
             <div className="pool-stage__power-fill" style={{ height: `${Math.round(displayedPowerVisual * 100)}%`, top: "2px", bottom: "auto" }} />
             <div className="pool-stage__power-marker" style={{ top: `calc(${Math.round(displayedPowerVisual * 100)}% + 1px)` }} />
           </div>
