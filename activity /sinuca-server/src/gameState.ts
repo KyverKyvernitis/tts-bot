@@ -11,16 +11,16 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 23.6;
-const MIN_SPEED = 0.03;
-const MAX_STEPS = 1400;
+const MAX_SHOT_SPEED = 22.0;
+const MIN_SPEED = 0.04;
+const BASE_FRICTION = 0.99795;
+const MAX_STEPS = 1500;
 const FRAME_SAMPLE_EVERY = 2;
-const MAX_RECORDED_FRAMES = 96;
 const MAX_SUBSTEPS = 18;
-const CUSHION_RESTITUTION = 0.81;
+const CUSHION_RESTITUTION = 0.78;
 const CUSHION_TANGENT_KEEP = 0.992;
-const BALL_RESTITUTION = 0.92;
-const BALL_TANGENT_TRANSFER = 0.0045;
+const BALL_RESTITUTION = 0.9;
+const BALL_TANGENT_TRANSFER = 0.0055;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -135,25 +135,6 @@ function toSnapshot(game: GameRecord, sinceSeq?: number | null): GameSnapshot {
 
 function ballIsMoving(ball: PhysicsBall) {
   return !ball.pocketed && (Math.abs(ball.vx) > MIN_SPEED || Math.abs(ball.vy) > MIN_SPEED);
-}
-
-function dragForSpeed(speed: number) {
-  if (speed > 18) return 0.99735;
-  if (speed > 10) return 0.99775;
-  if (speed > 4) return 0.9982;
-  if (speed > 1.2) return 0.9987;
-  return 0.99915;
-}
-
-function compressFrames(frames: GameShotFrame[]) {
-  if (frames.length <= MAX_RECORDED_FRAMES) return frames;
-  const reduced: GameShotFrame[] = [];
-  const lastIndex = frames.length - 1;
-  for (let index = 0; index < MAX_RECORDED_FRAMES; index += 1) {
-    const raw = (index / (MAX_RECORDED_FRAMES - 1)) * lastIndex;
-    reduced.push(frames[Math.round(raw)]);
-  }
-  return reduced;
 }
 
 function nearPocket(x: number, y: number) {
@@ -388,7 +369,7 @@ function simulateShot(
   }
 
   const shotPower = clamp(Number.isFinite(power) ? power : 0.6, 0.12, 1);
-  const shotSpeed = 5.4 + shotPower * MAX_SHOT_SPEED;
+  const shotSpeed = 5.2 + shotPower * MAX_SHOT_SPEED;
   cueBall.vx = Math.cos(safeAngle) * shotSpeed;
   cueBall.vy = Math.sin(safeAngle) * shotSpeed;
 
@@ -438,10 +419,8 @@ function simulateShot(
 
     for (const ball of balls) {
       if (ball.pocketed) continue;
-      const speed = Math.hypot(ball.vx, ball.vy);
-      const drag = dragForSpeed(speed);
-      ball.vx *= drag;
-      ball.vy *= drag;
+      ball.vx *= BASE_FRICTION;
+      ball.vy *= BASE_FRICTION;
       if (Math.abs(ball.vx) < MIN_SPEED) ball.vx = 0;
       if (Math.abs(ball.vy) < MIN_SPEED) ball.vy = 0;
     }
@@ -513,20 +492,18 @@ function simulateShot(
     game.phase = inferPhase(game);
   }
 
-  const reducedFrames = compressFrames(frames);
-
   game.lastShot = {
     seq: game.shotSequence,
     shooterUserId,
     nextTurnUserId,
     pocketedNumbers,
     cuePocketed,
-    frames: reducedFrames,
+    frames,
     createdAt: game.updatedAt,
   };
 
   return {
-    frames: reducedFrames,
+    frames,
     pocketedNumbers,
     cuePocketed,
     nextTurnUserId,
