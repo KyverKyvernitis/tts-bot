@@ -4901,6 +4901,9 @@ button:focus-visible {
   cursor: ns-resize;
   user-select: none;
   touch-action: none;
+  opacity: 1;
+  transform: translateX(0) scaleY(1);
+  transition: opacity 140ms ease, transform 140ms ease;
 }
 
 .pool-stage__power-track {
@@ -4947,6 +4950,12 @@ button:focus-visible {
 
 .pool-stage__power small {
   font: 700 0.9rem var(--font-ui);
+}
+
+.pool-stage__power--hidden {
+  opacity: 0;
+  transform: translateX(-8px) scaleY(0.94);
+  pointer-events: none;
 }
 
 .pool-stage__power--active .pool-stage__power-track {

@@ -8,7 +8,7 @@ import {
   writeCachedToken,
   writeCachedUser,
 } from "./sdk/discord";
-import type { ActivityBootstrap, ActivityUser, BalanceDebugSnapshot, BalanceSnapshot, GameSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
+import type { ActivityBootstrap, ActivityUser, AimPointerMode, AimStateSnapshot, BalanceDebugSnapshot, BalanceSnapshot, GameSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.wav";
@@ -60,7 +60,8 @@ type IncomingMessage =
   | { type: "balance_state"; payload: BalanceSnapshot }
   | { type: "balance_debug"; payload: BalanceDebugSnapshot }
   | { type: "session_context"; payload: SessionContextPayload }
-  | { type: "oauth_token_result"; payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null } };
+  | { type: "oauth_token_result"; payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null } }
+  | { type: "aim_state"; payload: AimStateSnapshot };
 
 const DEFAULT_PUBLIC_HOST = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || "osakaagiota.duckdns.org";
 
@@ -216,6 +217,7 @@ export default function App() {
   const [bootstrapped, setBootstrapped] = useState(false);
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
   const [game, setGame] = useState<GameSnapshot | null>(null);
+  const [remoteAim, setRemoteAim] = useState<AimStateSnapshot | null>(null);
   const [rooms, setRooms] = useState<RoomSnapshot[]>([]);
   const [screen, setScreen] = useState<LobbyScreen>("home");
   const [createTableType, setCreateTableType] = useState<TableType>("stake");
@@ -1111,14 +1113,25 @@ export default function App() {
   }, [bootstrapped, createStake, instanceId, screen, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.avatarUrl, state.currentUser.displayName, state.currentUser.userId]);
 
 
-  const sendMessage = (payload: object) => {
+  const sendMessage = (payload: object, options?: { silent?: boolean }) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setErrorMessage("o servidor da activity não está disponível agora");
-      return;
+      if (!options?.silent) setErrorMessage("o servidor da activity não está disponível agora");
+      return false;
     }
     socket.send(JSON.stringify(payload));
+    return true;
   };
+
+  useEffect(() => {
+    if (screen !== "game" || !room || !game) {
+      setRemoteAim(null);
+      return;
+    }
+    if (game.turnUserId === state.currentUser.userId || game.status === "finished") {
+      setRemoteAim(null);
+    }
+  }, [game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
 
   const requestRooms = async () => {
     console.log("[sinuca-ui-request-rooms]", {
@@ -1196,8 +1209,13 @@ export default function App() {
         }
         if (payload.type === "game_state") {
           setGame(payload.payload);
+          setRemoteAim((current) => current?.roomId === payload.payload.roomId && payload.payload.turnUserId !== state.currentUser.userId && payload.payload.status !== "finished" ? current : null);
           setScreen("game");
           setErrorMessage(null);
+          return;
+        }
+        if (payload.type === "aim_state") {
+          setRemoteAim(payload.payload);
           return;
         }
         if (payload.type === "room_list") {
@@ -1893,6 +1911,22 @@ export default function App() {
             currentUserId={state.currentUser.userId}
             shootBusy={gameShootBusy}
             exitBusy={roomExitBusy}
+            opponentAim={remoteAim && remoteAim.roomId === room.roomId ? remoteAim : null}
+            onAimStateChange={(aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; mode: AimPointerMode }) => {
+              if (!room) return;
+              sendMessage({
+                type: "sync_aim",
+                payload: {
+                  roomId: room.roomId,
+                  userId: state.currentUser.userId,
+                  visible: aim.visible,
+                  angle: aim.angle,
+                  cueX: aim.cueX ?? null,
+                  cueY: aim.cueY ?? null,
+                  mode: aim.mode,
+                },
+              }, { silent: true });
+            }}
             onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room_game" : "http_primary_leave_room_game"); }}
             onShoot={async (shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null }) => {
               if (!room) return;
