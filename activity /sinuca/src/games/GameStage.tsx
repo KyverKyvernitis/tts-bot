@@ -457,7 +457,7 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
   // Soft glow
   ctx.save();
   ctx.strokeStyle = "rgba(200, 230, 255, 0.10)";
-  ctx.lineWidth = 4;
+  ctx.lineWidth = 5;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -468,7 +468,7 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
   // Main aim line — SOLID, bright
   ctx.save();
   ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
-  ctx.lineWidth = 1.2;
+  ctx.lineWidth = 1.7;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(cueBall.x, cueBall.y);
@@ -479,7 +479,7 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
   if (hasHit && preview.hitBall && preview.targetGuideX !== null && preview.targetGuideY !== null) {
     ctx.save();
     ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
-    ctx.lineWidth = 1.2;
+    ctx.lineWidth = 1.7;
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(preview.hitBall.x, preview.hitBall.y);
@@ -489,7 +489,7 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
 
     ctx.save();
     ctx.strokeStyle = "rgba(255,255,255,0.72)";
-    ctx.lineWidth = 1.2;
+    ctx.lineWidth = 1.7;
     ctx.beginPath();
     ctx.arc(preview.hitBall.x, preview.hitBall.y, BALL_VISUAL_RADIUS + 1.5, 0, Math.PI * 2);
     ctx.stroke();
@@ -519,7 +519,7 @@ function drawGhostBall(ctx: CanvasRenderingContext2D, preview: AimPreview) {
   ctx.beginPath();
   ctx.arc(ghostX, ghostY, BALL_VISUAL_RADIUS, 0, Math.PI * 2);
   ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
-  ctx.lineWidth = 2.2;
+  ctx.lineWidth = 2.7;
   ctx.stroke();
   ctx.restore();
 }
@@ -880,30 +880,30 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       return;
     }
 
-    const lastDx = last.x - cueBall.x;
-    const lastDy = last.y - cueBall.y;
-    const nextDx = point.x - cueBall.x;
-    const nextDy = point.y - cueBall.y;
-    const lastDist = Math.hypot(lastDx, lastDy);
-    const nextDist = Math.hypot(nextDx, nextDy);
-
-    // Ignore jitter when the pointer is too close to the cue ball.
-    if (lastDist < BALL_RADIUS * 1.8 || nextDist < BALL_RADIUS * 1.8) {
+    const moveX = point.x - last.x;
+    const moveY = point.y - last.y;
+    const moveLen = Math.hypot(moveX, moveY);
+    if (moveLen < 0.12) {
       aimDragRef.current = { x: point.x, y: point.y };
       return;
     }
 
-    const lastAngle = Math.atan2(lastDy, lastDx);
-    const nextAngle = Math.atan2(nextDy, nextDx);
-    let delta = Math.atan2(Math.sin(nextAngle - lastAngle), Math.cos(nextAngle - lastAngle));
+    // Finger movement should control the AIM DIRECTION, not drag the cue directly.
+    // Project the gesture on the tangent of the current aim circle for a more Miniclip-like feel.
+    const tangentX = -Math.sin(aimAngleRef.current);
+    const tangentY = Math.cos(aimAngleRef.current);
+    const tangentialMove = moveX * tangentX + moveY * tangentY;
 
-    // Use a damped angular delta so the finger controls the AIM DIRECTION,
-    // not the cue sprite directly. This feels much closer to 8 Ball Pool.
-    const avgDist = (lastDist + nextDist) * 0.5;
-    const distFactor = avgDist < 120 ? 0.42 : avgDist < 220 ? 0.56 : 0.7;
-    delta = clamp(delta * distFactor, -0.085, 0.085);
+    let delta = tangentialMove * 0.0052;
 
-    if (Math.abs(delta) < 0.0012) {
+    // Small radial influence helps natural cornering without making the control jumpy.
+    const radialX = Math.cos(aimAngleRef.current);
+    const radialY = Math.sin(aimAngleRef.current);
+    const radialMove = moveX * radialX + moveY * radialY;
+    delta += radialMove * 0.00055;
+
+    delta = clamp(delta, -0.05, 0.05);
+    if (Math.abs(delta) < 0.0007) {
       aimDragRef.current = { x: point.x, y: point.y };
       return;
     }
@@ -984,9 +984,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const liveCueBall = state.cueBall;
     const shotPower = clamp(powerRef.current, POWER_MIN, 1);
     snapAnimRef.current = { startedAt: performance.now(), power: shotPower, fired: true };
-    animatePowerReturn(shotPower);
     setPointerModeSafe("idle");
-    if (!liveCueBall || !canInteractRef.current || shootBusyRef.current) return;
+
+    if (!liveCueBall || !canInteractRef.current || shootBusyRef.current) {
+      animatePowerReturn(shotPower);
+      return;
+    }
+
     const payload = {
       angle: aimAngleRef.current,
       power: shotPower,
@@ -994,11 +998,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       cueY: state.isBallInHand ? liveCueBall.y : null,
       calledPocket: state.needEightCall ? state.selectedPocket : null,
     };
+
     if (state.isBallInHand) {
       localCuePlacementRef.current = { x: liveCueBall.x, y: liveCueBall.y };
     }
+
+    // Fire the real shot immediately, then play the bar return animation.
     SFX.cueHit(payload.power);
     void onShootRef.current(payload).catch(() => {});
+    animatePowerReturn(shotPower);
   };
 
   const handlePowerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1176,7 +1184,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         drawBalls,
         drawCueBall,
         drawAimAngleRef.current,
-        Boolean(drawCueBall && (state.canInteract || state.shootBusy || snapAnimRef.current)),
+        Boolean(drawCueBall && (state.canInteract || state.shootBusy || snapAnimRef.current) && !(state.isBallInHand && state.pointerMode === "place")),
         pullRatio,
         preview,
         state.needEightCall,
@@ -1314,8 +1322,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onLostPointerCapture={handlePowerLostCapture}
         >
           <div className="pool-stage__power-track">
-            <div className="pool-stage__power-fill" style={{ height: `${Math.round(power * 100)}%`, top: "2px", bottom: "auto" }} />
-            <div className="pool-stage__power-marker" style={{ top: `${Math.round(power * 100)}%` }} />
+            <div className="pool-stage__power-fill" style={{ height: `calc(${Math.round(power * 100)}% - 4px)`, top: "2px", bottom: "auto" }} />
+            <div className="pool-stage__power-marker" style={{ top: `calc(${Math.round(power * 100)}% + 1px)` }} />
           </div>
         </div>
 
