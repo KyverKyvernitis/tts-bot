@@ -2271,8 +2271,8 @@ button:focus-visible {
 
 .pool-ball {
   position: absolute;
-  width: 48px;
-  padding-inline: 14px;
+  width: 56px;
+  padding-inline: 16px;
   box-sizing: border-box;
   height: 28px;
   border-radius: 999px;
@@ -3459,7 +3459,7 @@ button:focus-visible {
 
 .game-power-rail__track {
   position: relative;
-  width: 18px;
+  width: 24px;
   height: 100%;
   border-radius: 999px;
   border: 1px solid rgba(255, 241, 202, 0.18);
@@ -4884,8 +4884,8 @@ button:focus-visible {
 .pool-stage__table-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  gap: 4px;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 6px;
   align-items: center;
 }
 
@@ -5131,18 +5131,18 @@ button:focus-visible {
   }
 
   .pool-stage__table-layout {
-    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-columns: 54px minmax(0, 1fr);
     gap: 8px;
   }
 
   .pool-stage__power {
-    width: 48px;
-    padding-inline: 14px;
+    width: 54px;
+    padding-inline: 15px;
     height: min(72vh, 370px);
   }
 
   .pool-stage__power-track {
-    width: 18px;
+    width: 22px;
     min-height: 198px;
   }
 
@@ -5180,8 +5180,8 @@ button:focus-visible {
   }
 
   .pool-stage__player {
-    grid-template-columns: 42px minmax(0, 1fr);
-    gap: 4px;
+    grid-template-columns: 54px minmax(0, 1fr);
+    gap: 6px;
     padding: 4px 8px;
   }
 
@@ -5237,14 +5237,14 @@ button:focus-visible {
   }
 
   .pool-stage__power {
-    width: 42px;
-    padding-inline: 11px;
+    width: 54px;
+    padding-inline: 12px;
     height: min(66vh, 296px);
     gap: 0;
   }
 
   .pool-stage__power-track {
-    width: 16px;
+    width: 22px;
     min-height: 156px;
   }
 
