@@ -1,15 +1,20 @@
 [Unit]
 Description=Sinuca Activity Server
 After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/bot
+Environment=ACTIVITY_SERVICE_NAME=sinuca-activity-server
+Environment=ACTIVITY_NOTIFY_COOLDOWN_SECONDS=900
+ExecStartPre=/bin/bash -lc 'fuser -k 8787/tcp >/dev/null 2>&1 || true'
 ExecStart=/home/ubuntu/bot/start-sinuca-server.sh
 ExecStartPost=/home/ubuntu/bot/notify-activity-start.sh
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
