@@ -4958,8 +4958,23 @@ button:focus-visible {
   pointer-events: none;
 }
 
+.pool-stage__power--ghost {
+  opacity: 0.42;
+  pointer-events: none;
+}
+
+.pool-stage__power--standby {
+  opacity: 0.72;
+  pointer-events: none;
+}
+
 .pool-stage__power--active .pool-stage__power-track {
   border-color: rgba(200, 210, 225, 0.6);
+}
+
+.pool-stage__power--ghost .pool-stage__power-track,
+.pool-stage__power--standby .pool-stage__power-track {
+  border-color: rgba(185, 196, 214, 0.42);
 }
 
 .pool-stage__power--dragging .pool-stage__power-fill,
