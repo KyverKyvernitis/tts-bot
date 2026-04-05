@@ -13,6 +13,14 @@ BACK_PORT="8787"
 BACK_HEALTH_URL="http://127.0.0.1:${BACK_PORT}/health"
 BOT_HEALTH_URL="http://127.0.0.1:10000/health"
 
+BOT_HEALTH_ATTEMPTS=15
+BOT_HEALTH_DELAY=2
+BOT_HEALTH_GRACE=5
+ACTIVITY_HEALTH_ATTEMPTS=20
+ACTIVITY_HEALTH_DELAY=2
+ACTIVITY_HEALTH_GRACE=4
+HEALTH_CURL_MAX_TIME=4
+
 send_info() {
   sudo -u ubuntu /home/ubuntu/bot/alert.sh info "$1" "$2" || true
 }
@@ -38,6 +46,31 @@ human_duration() {
 
 run_as_ubuntu() {
   sudo -u ubuntu -H bash -lc "$1"
+}
+
+wait_for_health() {
+  local url="$1"
+  local attempts="${2:-10}"
+  local delay="${3:-2}"
+  local grace="${4:-0}"
+  local max_time="${5:-4}"
+  local try
+
+  if (( grace > 0 )); then
+    sleep "$grace"
+  fi
+
+  for ((try = 1; try <= attempts; try++)); do
+    if curl -fsS --max-time "$max_time" "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+
+    if (( try < attempts )); then
+      sleep "$delay"
+    fi
+  done
+
+  return 1
 }
 
 trap 'send_error "Falha no auto update" "O updater falhou durante a execução."' ERR
@@ -91,24 +124,25 @@ BOT_HEALTHCHECK_STATUS="não verificado"
 if (( BOT_CHANGED == 1 )); then
   systemctl restart "$SERVICE"
   systemctl is-active --quiet "$SERVICE"
-  if curl -fsS "$BOT_HEALTH_URL" >/dev/null 2>&1; then
+  if wait_for_health "$BOT_HEALTH_URL" "$BOT_HEALTH_ATTEMPTS" "$BOT_HEALTH_DELAY" "$BOT_HEALTH_GRACE" "$HEALTH_CURL_MAX_TIME"; then
     BOT_HEALTHCHECK_STATUS="OK"
   else
     BOT_HEALTHCHECK_STATUS="falhou"
   fi
 else
-  if curl -fsS "$BOT_HEALTH_URL" >/dev/null 2>&1; then
+  if wait_for_health "$BOT_HEALTH_URL" 3 1 0 2; then
     BOT_HEALTHCHECK_STATUS="OK"
+  else
+    BOT_HEALTHCHECK_STATUS="falhou"
   fi
 fi
 
 ACTIVITY_LINES="não houve mudanças na Activity."
+ACTIVITY_HEALTHCHECK_STATUS="não verificado"
+FRONT_STATUS="não alterado"
+BACK_STATUS="não alterado"
 
 if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
-  FRONT_STATUS="não alterado"
-  BACK_STATUS="não alterado"
-  ACTIVITY_HEALTHCHECK_STATUS="não verificado"
-
   if (( FRONT_CHANGED == 1 )); then
     if [[ -d "$FRONT_DIR" ]]; then
       run_as_ubuntu "cd \"$FRONT_DIR\" && [ -d node_modules ] || npm install"
@@ -118,6 +152,7 @@ if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
       FRONT_STATUS="frontend publicado em $FRONT_PUBLISH_DIR"
     else
       FRONT_STATUS="frontend não encontrado em $FRONT_DIR"
+      ACTIVITY_HEALTHCHECK_STATUS="falhou"
     fi
   fi
 
@@ -130,9 +165,7 @@ if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
 
       run_as_ubuntu "cd \"$BACK_DIR\" && set -a && [ -f \"$REPO_DIR/.env\" ] && . \"$REPO_DIR/.env\" || true && [ -f .env ] && . ./.env || true && set +a && nohup node dist/index.js >> sinuca-server.log 2>&1 &"
 
-      sleep 3
-
-      if curl -fsS "$BACK_HEALTH_URL" >/dev/null 2>&1; then
+      if wait_for_health "$BACK_HEALTH_URL" "$ACTIVITY_HEALTH_ATTEMPTS" "$ACTIVITY_HEALTH_DELAY" "$ACTIVITY_HEALTH_GRACE" "$HEALTH_CURL_MAX_TIME"; then
         ACTIVITY_HEALTHCHECK_STATUS="OK"
         BACK_STATUS="backend publicado e validado em $BACK_HEALTH_URL"
       else
@@ -141,9 +174,12 @@ if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
       fi
     else
       BACK_STATUS="backend não encontrado em $BACK_DIR"
+      ACTIVITY_HEALTHCHECK_STATUS="falhou"
     fi
-  elif curl -fsS "$BACK_HEALTH_URL" >/dev/null 2>&1; then
+  elif wait_for_health "$BACK_HEALTH_URL" 3 1 0 2; then
     ACTIVITY_HEALTHCHECK_STATUS="OK"
+  else
+    ACTIVITY_HEALTHCHECK_STATUS="falhou"
   fi
 
   ACTIVITY_LINES="frontend
@@ -170,27 +206,36 @@ compact_multiline() {
 CHANGED_FILES_BLOCK="$(compact_multiline "${CHANGED_FILES:-}")"
 ACTIVITY_BLOCK="$(compact_multiline "${ACTIVITY_LINES:-Sem mudanças na Activity}")"
 
-if [[ "${BOT_HEALTHCHECK_STATUS,,}" == *"ok"* ]]; then
+HAS_ALERT=0
+if [[ "${BOT_HEALTHCHECK_STATUS,,}" == *"falhou"* ]]; then
+  HAS_ALERT=1
+fi
+if [[ "${ACTIVITY_HEALTHCHECK_STATUS,,}" == *"falhou"* ]]; then
+  HAS_ALERT=1
+fi
+
+if (( HAS_ALERT == 0 )); then
   ALERT_TYPE="success"
   ALERT_TITLE="Update aplicado com sucesso"
-  ALERT_SUMMARY="O update foi aplicado e o healthcheck passou."
+  ALERT_SUMMARY="O update foi aplicado e os healthchecks passaram após as tentativas de validação."
 else
   ALERT_TYPE="warn"
   ALERT_TITLE="Update aplicado com alerta"
-  ALERT_SUMMARY="O update foi aplicado, mas o healthcheck falhou logo depois."
+  ALERT_SUMMARY="O update foi aplicado, mas ao menos um healthcheck falhou após as tentativas de validação."
 fi
 
-BODY="$(cat <<EOF
+BODY="$(cat <<MSG
 Resumo: $ALERT_SUMMARY
 Host: $HOSTNAME
 Branch: $BRANCH
 Commit: ${SHORT_FROM} → ${SHORT_TO}
 Mudança: $COMMIT_SUBJECT
 Arquivos: $CHANGED_FILES_BLOCK
+Bot health: $BOT_HEALTHCHECK_STATUS
 Activity: $ACTIVITY_BLOCK
 Duração: $DURATION
 Hora: $(date '+%d/%m/%Y %H:%M:%S')
-EOF
+MSG
 )"
 /home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY"
 logger -t "$LOG_TAG" "$ALERT_TITLE"
