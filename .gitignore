@@ -139,3 +139,10 @@ update-bot.sh.disabled
 .env.*
 node_modules/
 dist/
+
+*.bak
+*.log
+.env
+.env.*
+node_modules/
+dist/
