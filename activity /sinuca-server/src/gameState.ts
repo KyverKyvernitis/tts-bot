@@ -16,8 +16,8 @@ const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
 const MIN_SHOT_SPEED = 0.16;
 const MAX_SHOT_SPEED = 12.45;
-const SOFT_STOP_SPEED = 0.02;
-const HARD_STOP_SPEED = 0.0075;
+const SOFT_STOP_SPEED = 0.014;
+const HARD_STOP_SPEED = 0.0045;
 const MIN_SPEED = SOFT_STOP_SPEED;
 const MAX_STEPS = 1500;
 const FRAME_SAMPLE_EVERY = 2;
@@ -151,6 +151,27 @@ function toFrameBalls(balls: PhysicsBall[]) {
 
 function currentFrame(balls: PhysicsBall[]): GameShotFrame {
   return { balls: toFrameBalls(balls) };
+}
+
+function framesNearlyEqual(a: GameShotFrame, b: GameShotFrame, tolerance = 0.08) {
+  const bMap = new Map(b.balls.map((ball) => [ball.id, ball]));
+  for (const ball of a.balls) {
+    const other = bMap.get(ball.id);
+    if (!other) continue;
+    if (ball.pocketed !== other.pocketed) return false;
+    if (Math.abs(ball.x - other.x) > tolerance || Math.abs(ball.y - other.y) > tolerance) return false;
+  }
+  return true;
+}
+
+function trimTrailingSettledFrames(frames: GameShotFrame[]) {
+  if (frames.length <= 2) return frames;
+  let keepUntil = frames.length - 1;
+  const finalFrame = frames[frames.length - 1];
+  while (keepUntil > 1 && framesNearlyEqual(frames[keepUntil - 1], finalFrame)) {
+    keepUntil -= 1;
+  }
+  return frames.slice(0, keepUntil + 1);
 }
 
 function toSnapshot(game: GameRecord, sinceSeq?: number | null): GameSnapshot {
@@ -324,11 +345,11 @@ function updateBallMotion(ball: PhysicsBall) {
   const settledSpeed = Math.hypot(ball.vx, ball.vy);
   if (settledSpeed < SOFT_STOP_SPEED) {
     const settleFactor = clamp(settledSpeed / Math.max(SOFT_STOP_SPEED, 0.0001), 0, 1);
-    const keep = 0.72 + settleFactor * 0.2;
+    const keep = 0.86 + settleFactor * 0.1;
     ball.vx *= keep;
     ball.vy *= keep;
-    ball.sideSpin *= 0.95;
-    ball.roll *= 0.94;
+    ball.sideSpin *= 0.97;
+    ball.roll *= 0.965;
   }
 
   if (settledSpeed < HARD_STOP_SPEED && Math.abs(ball.sideSpin) < SPIN_STOP_SPEED && Math.abs(ball.roll) < ROLL_STOP_SPEED) {
@@ -571,6 +592,8 @@ function simulateShot(
     }
   }
 
+  const trimmedFrames = trimTrailingSettledFrames(frames);
+
   const shooterGroup = currentGroup(game, shooterUserId);
   const openTable = !game.hostGroup || !game.guestGroup;
   const currentTarget = openTable ? null : remainingForGroup(balls, shooterGroup) === 0 ? "eight" : shooterGroup;
@@ -642,12 +665,12 @@ function simulateShot(
     nextTurnUserId,
     pocketedNumbers,
     cuePocketed,
-    frames,
+    frames: trimmedFrames,
     createdAt: game.updatedAt,
   };
 
   return {
-    frames,
+    frames: trimmedFrames,
     pocketedNumbers,
     cuePocketed,
     nextTurnUserId,

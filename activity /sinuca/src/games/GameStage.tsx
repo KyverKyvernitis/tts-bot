@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from "react";
-import type { AimPointerMode, AimStateSnapshot, BallGroup, GameBallSnapshot, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
+import type { AimPointerMode, AimStateSnapshot, BallGroup, GameBallSnapshot, GameShotFrame, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
 import tableAsset from "../assets/game/pool-table-public.png";
 import cueAsset from "../assets/game/pool-cue-public.png";
 
@@ -260,6 +260,40 @@ function interpolateFrameBalls(
       pocketed: (t < 0.5 ? from?.pocketed : to?.pocketed) ?? to?.pocketed ?? from?.pocketed ?? ball.pocketed,
     };
   });
+}
+
+function ballsNearlyMatchFrame(displayBalls: GameBallSnapshot[], frameBalls: GameShotFrameBall[], tolerance = 0.18) {
+  const frameMap = new Map(frameBalls.map((ball) => [ball.id, ball]));
+  for (const ball of displayBalls) {
+    const frameBall = frameMap.get(ball.id);
+    if (!frameBall) continue;
+    if (ball.pocketed !== frameBall.pocketed) return false;
+    if (Math.abs(ball.x - frameBall.x) > tolerance || Math.abs(ball.y - frameBall.y) > tolerance) return false;
+  }
+  return true;
+}
+
+function framesNearlyMatch(a: GameShotFrame, b: GameShotFrame, tolerance = 0.12) {
+  const bMap = new Map(b.balls.map((ball) => [ball.id, ball]));
+  for (const ball of a.balls) {
+    const other = bMap.get(ball.id);
+    if (!other) continue;
+    if (ball.pocketed !== other.pocketed) return false;
+    if (Math.abs(ball.x - other.x) > tolerance || Math.abs(ball.y - other.y) > tolerance) return false;
+  }
+  return true;
+}
+
+function trimPlaybackFrames(frames: GameShotFrame[]) {
+  if (frames.length <= 2) return frames;
+  let keepUntil = frames.length - 1;
+  const finalFrame = frames[frames.length - 1];
+  while (keepUntil > 1) {
+    const candidate = frames[keepUntil - 1];
+    if (!framesNearlyMatch(candidate, finalFrame, 0.12)) break;
+    keepUntil -= 1;
+  }
+  return frames.slice(0, keepUntil + 1);
 }
 
 function buildOpeningBalls(source: GameBallSnapshot[]) {
@@ -1000,9 +1034,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!game.lastShot || !game.lastShot.frames.length) return;
     if (game.lastShot.seq <= lastAnimatedSeqRef.current) return;
     playbackSettlingRef.current = false;
+    const trimmedFrames = trimPlaybackFrames(game.lastShot.frames);
     playbackRef.current = {
       seq: game.lastShot.seq,
-      frames: game.lastShot.frames,
+      frames: trimmedFrames,
       startedAt: performance.now(),
       baseBalls: game.balls,
       finalBalls: game.balls,
@@ -1010,7 +1045,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     setAnimating(true);
     setAnimatingSeq(game.lastShot.seq);
     // Schedule realistic collision sounds based on shot frames
-    const frameCount = game.lastShot.frames.length;
+    const frameCount = trimmedFrames.length;
     // Initial ball hit
     window.setTimeout(() => SFX.ballHit(), 80);
     // Cushion bounces during longer shots
@@ -1534,32 +1569,38 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       if (playback && playback.frames.length) {
         const frameStepMs = 1000 / 60;
         const elapsed = now - playback.startedAt;
-        const nominalDuration = Math.max(frameStepMs, playback.frames.length * frameStepMs);
+        const nominalDuration = Math.max(frameStepMs, (playback.frames.length - 1) * frameStepMs * 0.94);
         const playbackDuration = Math.min(MAX_PLAYBACK_DURATION_MS, nominalDuration);
         const progress = clamp(elapsed / playbackDuration, 0, 1);
         const rawIndex = progress * Math.max(0, playback.frames.length - 1);
         const frameIndex = Math.min(playback.frames.length - 1, Math.floor(rawIndex));
+        const settlePlayback = () => {
+          if (playbackSettlingRef.current) return;
+          playbackSettlingRef.current = true;
+          window.setTimeout(() => {
+            if (playbackRef.current?.seq !== playback.seq) return;
+            lastAnimatedSeqRef.current = playback.seq;
+            playbackRef.current = null;
+            setDisplayBalls(playback.finalBalls);
+            setAnimating(false);
+            setAnimatingSeq(0);
+          }, 0);
+        };
 
         if (progress >= 1 || frameIndex >= playback.frames.length - 1) {
           drawBalls = frameToDisplayBalls(playback.frames[playback.frames.length - 1].balls, playback.baseBalls);
           drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
-          if (!playbackSettlingRef.current) {
-            playbackSettlingRef.current = true;
-            window.setTimeout(() => {
-              if (playbackRef.current?.seq !== playback.seq) return;
-              lastAnimatedSeqRef.current = playback.seq;
-              playbackRef.current = null;
-              setDisplayBalls(playback.finalBalls);
-              setAnimating(false);
-              setAnimatingSeq(0);
-            }, 0);
-          }
+          settlePlayback();
         } else {
           const frameA = playback.frames[frameIndex];
           const frameB = playback.frames[Math.min(playback.frames.length - 1, frameIndex + 1)];
           const localT = clamp(rawIndex - frameIndex, 0, 1);
           drawBalls = interpolateFrameBalls(playback.baseBalls, frameA.balls, frameB.balls, localT);
           drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+          const nearFinalFrame = frameIndex >= Math.max(0, playback.frames.length - 3);
+          if (nearFinalFrame && ballsNearlyMatchFrame(drawBalls, playback.frames[playback.frames.length - 1].balls, 0.16)) {
+            settlePlayback();
+          }
         }
       }
 
@@ -1589,19 +1630,18 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         && remoteAimState
         && remoteAimState.visible
         && remoteMode !== "idle"
-        && !animating
         && game.status !== "finished"
       );
       const fallbackRemoteCueX = remoteAimState?.cueX ?? drawCueBall?.x ?? cueBall?.x ?? DEFAULT_CUE_X;
       const fallbackRemoteCueY = remoteAimState?.cueY ?? drawCueBall?.y ?? cueBall?.y ?? DEFAULT_CUE_Y;
       const remoteCueSource = remoteCanRender
-        ? (drawCueBall ?? cueBall ?? {
+        ? {
             id: "ball-0-remote-overlay",
             number: 0,
             x: fallbackRemoteCueX,
             y: fallbackRemoteCueY,
             pocketed: false,
-          })
+          }
         : null;
       const remoteVisual = remoteAimVisualRef.current;
       let remoteCueBall: GameBallSnapshot | null = null;
@@ -1676,7 +1716,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         remoteCanRender
         && remoteAimState
         && remoteCueBall
-        && (remoteMode === "aim" || remoteMode === "power" || (remoteMode === "place" && game.ballInHandUserId === remoteAimState.userId))
+        && (remoteMode === "aim" || remoteMode === "power" || remoteMode === "place")
       );
 
       updateBallSpinCache(ballSpinRef.current, drawBalls, now);

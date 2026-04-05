@@ -250,6 +250,9 @@ export default function App() {
   const isRoomHostRef = useRef(false);
   const currentUserIdRef = useRef<string | null>(null);
   const unloadLeaveSentRef = useRef<string | null>(null);
+  const pendingAimHttpRef = useRef<{ roomId: string; aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode } } | null>(null);
+  const aimHttpTimerRef = useRef<number | null>(null);
+  const lastAimHttpSentAtRef = useRef(0);
 
   useEffect(() => {
     let mounted = true;
@@ -854,6 +857,107 @@ export default function App() {
     return null;
   };
 
+  const pushAimToState = (payload: AimStateSnapshot | null) => {
+    if (!payload) return;
+    setRemoteAim((current) => {
+      if (payload.userId === state.currentUser.userId) return current;
+      if (current && current.roomId === payload.roomId && current.userId === payload.userId && payload.seq < current.seq) {
+        return current;
+      }
+      return payload;
+    });
+  };
+
+  const syncAimOverHttp = async (roomId: string, aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }, reason: string) => {
+    const payload = {
+      roomId,
+      userId: state.currentUser.userId,
+      visible: aim.visible,
+      angle: aim.angle,
+      cueX: aim.cueX ?? null,
+      cueY: aim.cueY ?? null,
+      power: aim.power ?? 0,
+      seq: aim.seq ?? 0,
+      mode: aim.mode,
+    };
+    const body = JSON.stringify(payload);
+    for (const baseUrl of resolveApiCandidates('/balance')) {
+      try {
+        const url = new URL(baseUrl, window.location.origin);
+        url.searchParams.set('action', 'game_aim_sync');
+        const response = await fetchWithTimeout(url.toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body,
+          keepalive: true,
+        }, 1200);
+        if (response.ok) return true;
+      } catch {}
+    }
+    for (const baseUrl of resolveApiCandidates('/games/aim')) {
+      try {
+        const response = await fetchWithTimeout(baseUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body,
+          keepalive: true,
+        }, 1200);
+        if (response.ok) return true;
+      } catch {}
+    }
+    setAuthDebug((current) => current ? `${current} • aim_sync_http_failed:${reason}:${roomId}` : `aim_sync_http_failed:${reason}:${roomId}`);
+    return false;
+  };
+
+  const scheduleAimHttpSync = (roomId: string, aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => {
+    pendingAimHttpRef.current = { roomId, aim };
+    const flush = () => {
+      const pending = pendingAimHttpRef.current;
+      if (!pending) return;
+      pendingAimHttpRef.current = null;
+      lastAimHttpSentAtRef.current = Date.now();
+      void syncAimOverHttp(pending.roomId, pending.aim, 'scheduled').catch(() => {});
+    };
+    const now = Date.now();
+    const minGap = aim.mode === 'place' ? 55 : 75;
+    const wait = Math.max(0, minGap - (now - lastAimHttpSentAtRef.current));
+    if (aimHttpTimerRef.current !== null) window.clearTimeout(aimHttpTimerRef.current);
+    if (wait === 0 || !aim.visible || aim.mode === 'idle') {
+      flush();
+      return;
+    }
+    aimHttpTimerRef.current = window.setTimeout(() => {
+      aimHttpTimerRef.current = null;
+      flush();
+    }, wait);
+  };
+
+  const fetchAimStateOverHttp = async (roomId: string, reason: string) => {
+    for (const baseUrl of resolveApiCandidates('/balance')) {
+      try {
+        const url = new URL(baseUrl, window.location.origin);
+        url.searchParams.set('action', 'game_aim_get');
+        url.searchParams.set('roomId', roomId);
+        const response = await fetchWithTimeout(url.toString(), { method: 'GET', credentials: 'same-origin' }, 1200);
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { aim?: AimStateSnapshot | null } : null;
+        if (response.ok) return parsed?.aim ?? null;
+      } catch {}
+    }
+    for (const baseUrl of resolveApiCandidates(`/games/${roomId}/aim`)) {
+      try {
+        const response = await fetchWithTimeout(baseUrl, { method: 'GET', credentials: 'same-origin' }, 1200);
+        const raw = await response.text();
+        const parsed = raw ? JSON.parse(raw) as { aim?: AimStateSnapshot | null } : null;
+        if (response.ok) return parsed?.aim ?? null;
+      } catch {}
+    }
+    setAuthDebug((current) => current ? `${current} • aim_get_http_failed:${reason}:${roomId}` : `aim_get_http_failed:${reason}:${roomId}`);
+    return null;
+  };
+
   const postGameActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
     const actionByPath: Record<string, string> = {
       "/games/start": "game_start",
@@ -1137,6 +1241,33 @@ export default function App() {
     }
   }, [game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
 
+  useEffect(() => {
+    if (screen !== 'game' || !room || !game || game.status === 'finished' || game.turnUserId === state.currentUser.userId) return;
+    let cancelled = false;
+    const tick = async () => {
+      const aim = await fetchAimStateOverHttp(room.roomId, 'poll');
+      if (cancelled) return;
+      if (aim && aim.roomId === room.roomId && aim.userId !== state.currentUser.userId && aim.visible && aim.mode !== 'idle') {
+        pushAimToState(aim);
+      } else if (aim && aim.roomId === room.roomId && aim.userId !== state.currentUser.userId && !aim.visible) {
+        setRemoteAim((current) => current?.roomId === room.roomId ? null : current);
+      }
+    };
+    void tick();
+    const interval = window.setInterval(() => { void tick(); }, 90);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
+
+  useEffect(() => () => {
+    if (aimHttpTimerRef.current !== null) {
+      window.clearTimeout(aimHttpTimerRef.current);
+      aimHttpTimerRef.current = null;
+    }
+  }, []);
+
   const requestRooms = async () => {
     console.log("[sinuca-ui-request-rooms]", {
       mode: state.context.mode,
@@ -1219,12 +1350,7 @@ export default function App() {
           return;
         }
         if (payload.type === "aim_state") {
-          setRemoteAim((current) => {
-            if (current && current.roomId === payload.payload.roomId && current.userId === payload.payload.userId && payload.payload.seq < current.seq) {
-              return current;
-            }
-            return payload.payload;
-          });
+          pushAimToState(payload.payload);
           return;
         }
         if (payload.type === "room_list") {
@@ -1923,7 +2049,7 @@ export default function App() {
             opponentAim={remoteAim && remoteAim.roomId === room.roomId ? remoteAim : null}
             onAimStateChange={(aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => {
               if (!room) return;
-              sendMessage({
+              const deliveredOverSocket = sendMessage({
                 type: "sync_aim",
                 payload: {
                   roomId: room.roomId,
@@ -1937,6 +2063,9 @@ export default function App() {
                   mode: aim.mode,
                 },
               }, { silent: true });
+              if (!deliveredOverSocket || aim.mode === 'place' || aim.mode === 'power' || !aim.visible) {
+                scheduleAimHttpSync(room.roomId, aim);
+              }
             }}
             onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room_game" : "http_primary_leave_room_game"); }}
             onShoot={async (shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }) => {

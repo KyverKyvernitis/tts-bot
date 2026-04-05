@@ -205,6 +205,7 @@ const contextWatchers = new Map<string, Set<WebSocket>>();
 const socketContext = new Map<WebSocket, string>();
 const socketSession = new Map<WebSocket, SessionContextPayload>();
 const balanceWatchers = new Map<WebSocket, { guildId: string; userId: string; lastSent: string }>();
+const latestAimByRoom = new Map<string, AimStateSnapshot>();
 
 const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI || "";
 const mongoDbName = process.env.MONGODB_DB || process.env.MONGO_DB_NAME || process.env.MONGODB_DB_NAME || "chat_revive";
@@ -213,6 +214,49 @@ let mongoClient: MongoClient | null = null;
 
 function send(ws: WebSocket, payload: ServerMessage) {
   ws.send(JSON.stringify(payload));
+}
+
+function storeAimState(roomId: string, payload: AimStateSnapshot) {
+  latestAimByRoom.set(roomId, payload);
+}
+
+function clearAimState(roomId: string, userId?: string | null) {
+  const current = latestAimByRoom.get(roomId);
+  if (!current) return;
+  if (userId && current.userId !== userId) return;
+  latestAimByRoom.set(roomId, {
+    ...current,
+    visible: false,
+    power: 0,
+    mode: "idle",
+    updatedAt: Date.now(),
+    seq: current.seq + 1,
+  });
+}
+
+function buildAimPayload(input: {
+  roomId: string;
+  userId: string;
+  visible: boolean;
+  angle?: unknown;
+  cueX?: unknown;
+  cueY?: unknown;
+  power?: unknown;
+  seq?: unknown;
+  mode?: unknown;
+}) {
+  return {
+    roomId: input.roomId,
+    userId: input.userId,
+    visible: Boolean(input.visible),
+    angle: Number.isFinite(Number(input.angle)) ? Number(input.angle) : 0,
+    cueX: input.cueX === undefined || input.cueX === null || !Number.isFinite(Number(input.cueX)) ? null : Number(input.cueX),
+    cueY: input.cueY === undefined || input.cueY === null || !Number.isFinite(Number(input.cueY)) ? null : Number(input.cueY),
+    power: input.power === undefined || input.power === null || !Number.isFinite(Number(input.power)) ? 0 : Number(input.power),
+    seq: input.seq === undefined || input.seq === null || !Number.isFinite(Number(input.seq)) ? 0 : Number(input.seq),
+    mode: normalizeAimMode(input.mode),
+    updatedAt: Date.now(),
+  } satisfies AimStateSnapshot;
 }
 
 function contextKey(payload: ListRoomsPayload) {
@@ -446,6 +490,50 @@ async function handleUpdateStakeRoomHttp(req: Request, res: Response) {
   res.json({ room: toSnapshot(room) });
 }
 
+async function handleGetAimHttp(req: Request, res: Response) {
+  const roomId = normalizeIntString(req.params?.roomId ?? firstString(req.body?.roomId) ?? firstString(req.query?.roomId));
+  if (!roomId) {
+    res.status(400).json({ error: "missing_room_id" });
+    return;
+  }
+  res.json({ aim: latestAimByRoom.get(roomId) ?? null });
+}
+
+async function handleSyncAimHttp(req: Request, res: Response) {
+  const session = resolveRequestSession(req);
+  const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
+  const roomId = normalizeIntString(merged.roomId);
+  const userId = normalizeIntString(merged.userId);
+  if (!roomId || !userId) {
+    res.status(400).json({ error: "missing_aim_identifiers" });
+    return;
+  }
+  const room = getRoom(roomId);
+  const game = getGameSnapshot(roomId);
+  if (!room || !game) {
+    res.status(404).json({ error: "game_not_found" });
+    return;
+  }
+  const payload = buildAimPayload({
+    roomId,
+    userId,
+    visible: Boolean(merged.visible),
+    angle: merged.angle,
+    cueX: merged.cueX,
+    cueY: merged.cueY,
+    power: merged.power,
+    seq: merged.seq,
+    mode: merged.mode,
+  });
+  if (payload.visible && game.turnUserId !== userId) {
+    res.status(409).json({ error: "not_your_turn", aim: latestAimByRoom.get(roomId) ?? null });
+    return;
+  }
+  storeAimState(roomId, payload);
+  broadcastAim(roomId, payload);
+  res.json({ aim: payload });
+}
+
 async function handleGetGameHttp(req: Request, res: Response) {
   const roomId = normalizeIntString(req.params?.roomId ?? firstString(req.body?.roomId) ?? firstString(req.query?.roomId));
   const sinceSeq = Number(firstString(req.body?.sinceSeq) ?? firstString(req.query?.sinceSeq) ?? 0);
@@ -482,6 +570,7 @@ async function handleStartGameHttp(req: Request, res: Response) {
   }
   setRoomInGame(roomId, true);
   const game = startGameForRoom(room);
+  latestAimByRoom.delete(roomId);
   broadcastRoom(roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
   broadcastGame(roomId);
@@ -546,6 +635,7 @@ async function handleShootGameHttp(req: Request, res: Response) {
     res.status(404).json({ error: "game_not_found" });
     return;
   }
+  clearAimState(roomId, userId);
   console.log("[sinuca-shoot-http-applied]", JSON.stringify({
     roomId,
     userId,
@@ -567,12 +657,18 @@ app.get("/rooms/:roomId", handleGetRoomHttp);
 app.get("/api/rooms/:roomId", handleGetRoomHttp);
 app.get("/games/shoot", handleShootGameHttp);
 app.get("/api/games/shoot", handleShootGameHttp);
+app.get("/games/aim", handleGetAimHttp);
+app.get("/api/games/aim", handleGetAimHttp);
+app.get("/games/:roomId/aim", handleGetAimHttp);
+app.get("/api/games/:roomId/aim", handleGetAimHttp);
 app.get("/games/:roomId", handleGetGameHttp);
 app.get("/api/games/:roomId", handleGetGameHttp);
 app.post("/rooms/create", handleCreateRoomHttp);
 app.post("/api/rooms/create", handleCreateRoomHttp);
 app.post("/games/start", handleStartGameHttp);
 app.post("/api/games/start", handleStartGameHttp);
+app.post("/games/aim", handleSyncAimHttp);
+app.post("/api/games/aim", handleSyncAimHttp);
 app.post("/games/shoot", handleShootGameHttp);
 app.post("/api/games/shoot", handleShootGameHttp);
 app.post("/rooms/join", handleJoinRoomHttp);
@@ -826,8 +922,14 @@ async function handleBalance(req: Request, res: Response) {
   if (action === "game_get") {
     return void handleGetGameHttp(req, res);
   }
+  if (action === "game_aim_get") {
+    return void handleGetAimHttp(req, res);
+  }
   if (action === "game_start") {
     return void handleStartGameHttp(req, res);
+  }
+  if (action === "game_aim_sync") {
+    return void handleSyncAimHttp(req, res);
   }
   if (action === "game_shoot") {
     return void handleShootGameHttp(req, res);
@@ -1154,6 +1256,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       }
       setRoomInGame(room.roomId, true);
       startGameForRoom(room);
+      latestAimByRoom.delete(room.roomId);
       broadcastRoom(room.roomId);
       broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
       broadcastGame(room.roomId);
@@ -1173,19 +1276,19 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       const visible = Boolean(merged.visible);
       if (visible && game.turnUserId !== merged.userId) return;
 
-      const payload: AimStateSnapshot = {
+      const payload = buildAimPayload({
         roomId: merged.roomId,
         userId: merged.userId,
         visible,
-        angle: Number.isFinite(Number(merged.angle)) ? Number(merged.angle) : 0,
-        cueX: merged.cueX === undefined || merged.cueX === null || !Number.isFinite(Number(merged.cueX)) ? null : Number(merged.cueX),
-        cueY: merged.cueY === undefined || merged.cueY === null || !Number.isFinite(Number(merged.cueY)) ? null : Number(merged.cueY),
-        power: merged.power === undefined || merged.power === null || !Number.isFinite(Number(merged.power)) ? 0 : Number(merged.power),
-        seq: merged.seq === undefined || merged.seq === null || !Number.isFinite(Number(merged.seq)) ? 0 : Number(merged.seq),
-        mode: normalizeAimMode(merged.mode),
-        updatedAt: Date.now(),
-      };
+        angle: merged.angle,
+        cueX: merged.cueX,
+        cueY: merged.cueY,
+        power: merged.power,
+        seq: merged.seq,
+        mode: merged.mode,
+      });
 
+      storeAimState(merged.roomId, payload);
       broadcastAim(merged.roomId, payload, ws);
       return;
     }
@@ -1227,6 +1330,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         merged.spinX === undefined ? 0 : Number(merged.spinX),
         merged.spinY === undefined ? 0 : Number(merged.spinY),
       );
+      clearAimState(merged.roomId, merged.userId);
       console.log("[sinuca-shoot-ws-applied]", JSON.stringify({
         roomId: merged.roomId,
         shotSequence: applied?.shotSequence ?? null,
