@@ -106,9 +106,9 @@ const OPENING_RACK = [
 ] as const;
 
 const POCKET_ANIM_DURATION = 320;
-const POWER_MIN = 0.025;
+const POWER_MIN = 0.006;
 const POWER_RETURN_MS = 180;
-const POWER_CURVE_EXPONENT = 2.18;
+const POWER_CURVE_EXPONENT = 2.85;
 const AIM_SYNC_INTERVAL_MS = 22;
 const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
@@ -1129,7 +1129,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   useEffect(() => {
     if (pointerMode === "place") {
-      emitAimState({ visible: false, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "place" }, true);
+      emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "place" }, true);
       return;
     }
     if (!canInteract || animating || shootBusy || game.status === "finished") {
@@ -1142,11 +1142,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const mapPowerFromClientY = (clientY: number, rectTop: number, rectBottom: number, rectHeight: number) => {
     const clampedY = clamp(clientY, rectTop, rectBottom);
     const normalized = clamp((clampedY - rectTop) / Math.max(1, rectHeight), 0, 1);
-    const lowBand = Math.pow(Math.min(normalized, 0.82) / 0.82, POWER_CURVE_EXPONENT) * 0.84;
-    const highBand = normalized <= 0.82
-      ? lowBand
-      : 0.84 + Math.pow((normalized - 0.82) / 0.18, 1.35) * 0.16;
-    return clamp(POWER_MIN + highBand * (1 - POWER_MIN), POWER_MIN, 1);
+    const shaped = normalized <= 0.72
+      ? Math.pow(normalized / 0.72, POWER_CURVE_EXPONENT) * 0.62
+      : 0.62 + Math.pow((normalized - 0.72) / 0.28, 1.16) * 0.38;
+    return clamp(POWER_MIN + shaped * (1 - POWER_MIN), POWER_MIN, 1);
   };
 
   const pointToLocal = (clientX: number, clientY: number) => {
@@ -1207,7 +1206,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const next = clampCuePosition(point.x, point.y, game.shotSequence === 0);
     localCuePlacementRef.current = next;
     setDisplayBalls((current) => current.map((ball) => (ball.number === 0 ? { ...ball, x: next.x, y: next.y, pocketed: false } : ball)));
-    emitAimState({ visible: false, angle: aimAngleRef.current, cueX: next.x, cueY: next.y, mode: "place" }, true);
+    emitAimState({ visible: true, angle: aimAngleRef.current, cueX: next.x, cueY: next.y, mode: "place" }, true);
   };
 
   const updatePowerFromClientY = (clientY: number) => {
@@ -1575,7 +1574,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       prevPocketedIdsRef.current = currentPocketedIds;
       pocketAnimationsRef.current = pocketAnimationsRef.current.filter((anim) => now - anim.startedAt < POCKET_ANIM_DURATION);
 
-      const remoteAimState = opponentAim && opponentAim.userId === game.turnUserId ? opponentAim : null;
+      const remoteAimState = opponentAim && opponentAim.userId !== currentUserId ? opponentAim : null;
       const remoteAimFresh = Boolean(remoteAimState && now - remoteAimState.updatedAt < REMOTE_AIM_STALE_MS);
       const remoteMode: AimPointerMode = remoteAimState?.mode ?? "idle";
       const remoteCanRender = Boolean(
@@ -1583,7 +1582,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         && remoteAimState
         && !animating
         && drawCueBall
-        && game.turnUserId !== currentUserId
         && game.status !== "finished"
       );
       const remoteCueSource = remoteCanRender ? drawCueBall : null;
@@ -1630,7 +1628,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         };
         remoteAimAngle = remoteVisual.angle;
         remotePullRatio = remoteMode === "power"
-          ? clamp(0.15 + remoteVisual.pull * 0.76, 0.15, 0.94)
+          ? clamp(0.18 + remoteVisual.pull * 0.8, 0.18, 0.98)
           : remoteMode === "aim"
             ? 0.08
             : remoteMode === "place"
@@ -1645,7 +1643,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         && drawCueBall
         && (Math.abs(remoteCueBall.x - drawCueBall.x) > 0.15 || Math.abs(remoteCueBall.y - drawCueBall.y) > 0.15)
       );
-      if (remoteCueBall && (game.ballInHandUserId === game.turnUserId || remoteMode === "place" || remoteCueMoved)) {
+      if (remoteCueBall && (game.ballInHandUserId === remoteAimState?.userId || remoteMode === "place" || remoteCueMoved)) {
         drawBalls = drawBalls.map((ball) => ball.number === 0 ? { ...ball, x: remoteCueBall.x, y: remoteCueBall.y, pocketed: false } : ball);
         drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? remoteCueBall;
       }
@@ -1654,7 +1652,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         remoteCanRender
         && remoteAimState
         && remoteCueBall
-        && (remoteMode === "aim" || remoteMode === "power" || (remoteMode === "place" && game.ballInHandUserId === game.turnUserId))
+        && (remoteMode === "aim" || remoteMode === "power" || (remoteMode === "place" && game.ballInHandUserId === remoteAimState.userId))
       );
 
       updateBallSpinCache(ballSpinRef.current, drawBalls, now);

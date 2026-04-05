@@ -6,13 +6,16 @@ const TABLE_HEIGHT = 600;
 const BALL_RADIUS = 13;
 const BALL_DIAMETER = BALL_RADIUS * 2;
 const POCKET_RADIUS = 32;
+const POCKET_CAPTURE_RADIUS = POCKET_RADIUS + 4;
+const POCKET_FUNNEL_RADIUS = POCKET_RADIUS + 20;
+const POCKET_WALL_SKIP_RADIUS = POCKET_RADIUS + 18;
 const RAIL_MARGIN_X = 69;
 const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MIN_SHOT_SPEED = 1.15;
-const MAX_SHOT_SPEED = 13.05;
+const MIN_SHOT_SPEED = 0.16;
+const MAX_SHOT_SPEED = 12.45;
 const MIN_SPEED = 0.028;
 const MAX_STEPS = 1500;
 const FRAME_SAMPLE_EVERY = 2;
@@ -163,7 +166,7 @@ function ballIsMoving(ball: PhysicsBall) {
 }
 
 function nearPocket(x: number, y: number) {
-  const pocketSkipRadius = POCKET_RADIUS + 6;
+  const pocketSkipRadius = POCKET_WALL_SKIP_RADIUS;
   for (const pocket of POCKETS) {
     if (Math.hypot(x - pocket.x, y - pocket.y) < pocketSkipRadius) return true;
   }
@@ -178,6 +181,17 @@ function rotateVelocity(ball: PhysicsBall, radians: number) {
   const nextVy = ball.vx * sin + ball.vy * cos;
   ball.vx = nextVx;
   ball.vy = nextVy;
+}
+
+function distancePointToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const lengthSq = abx * abx + aby * aby;
+  if (lengthSq <= 0.000001) return Math.hypot(px - ax, py - ay);
+  const t = clamp(((px - ax) * abx + (py - ay) * aby) / lengthSq, 0, 1);
+  const closestX = ax + abx * t;
+  const closestY = ay + aby * t;
+  return Math.hypot(px - closestX, py - closestY);
 }
 
 function applyRailResponse(ball: PhysicsBall, normalX: number, normalY: number) {
@@ -225,15 +239,22 @@ function handleWallCollision(ball: PhysicsBall) {
   return collided;
 }
 
-function handlePocket(ball: PhysicsBall): number | null {
+function handlePocket(ball: PhysicsBall, stepScale = 1): number | null {
   if (ball.pocketed) return null;
+  const speed = Math.hypot(ball.vx, ball.vy);
+  const prevX = ball.x - ball.vx * stepScale;
+  const prevY = ball.y - ball.vy * stepScale;
+
   for (let index = 0; index < POCKETS.length; index += 1) {
     const pocket = POCKETS[index];
     const dx = ball.x - pocket.x;
     const dy = ball.y - pocket.y;
     const dist = Math.hypot(dx, dy);
+    const segmentDist = distancePointToSegment(pocket.x, pocket.y, prevX, prevY, ball.x, ball.y);
+    const dynamicCaptureRadius = POCKET_CAPTURE_RADIUS + clamp(speed * 0.38, 0, 7);
+    const dynamicFunnelRadius = POCKET_FUNNEL_RADIUS + clamp(speed * 0.48, 0, 10);
 
-    if (dist <= POCKET_RADIUS - 2) {
+    if (dist <= dynamicCaptureRadius || segmentDist <= dynamicCaptureRadius - 1.25) {
       ball.pocketed = true;
       ball.vx = 0;
       ball.vy = 0;
@@ -244,16 +265,13 @@ function handlePocket(ball: PhysicsBall): number | null {
       return index + 1;
     }
 
-    const funnelRadius = POCKET_RADIUS + 12;
-    if (dist < funnelRadius && dist > POCKET_RADIUS - 4) {
-      const speed = Math.hypot(ball.vx, ball.vy);
-      if (speed > 0.3) {
-        const pullStrength = 0.015 * (1 - (dist - POCKET_RADIUS + 4) / (funnelRadius - POCKET_RADIUS + 4));
-        const nx = dx / (dist || 1);
-        const ny = dy / (dist || 1);
-        ball.vx -= nx * pullStrength * speed;
-        ball.vy -= ny * pullStrength * speed;
-      }
+    if (dist < dynamicFunnelRadius || segmentDist < dynamicFunnelRadius - 1) {
+      const nx = dx / (dist || 1);
+      const ny = dy / (dist || 1);
+      const proximity = clamp(1 - ((Math.min(dist, segmentDist) - dynamicCaptureRadius) / Math.max(1, dynamicFunnelRadius - dynamicCaptureRadius)), 0, 1);
+      const pullStrength = (0.018 + clamp(speed * 0.0018, 0, 0.02)) * proximity;
+      ball.vx -= nx * pullStrength * Math.max(speed, 0.45);
+      ball.vy -= ny * pullStrength * Math.max(speed, 0.45);
     }
   }
   return null;
@@ -472,7 +490,7 @@ function simulateShot(
     cueBall.sideSpin = 0;
   }
 
-  const shotPower = clamp(Number.isFinite(power) ? power : 0.58, 0.018, 1);
+  const shotPower = clamp(Number.isFinite(power) ? power : 0.52, 0.006, 1);
   const safeSpinX = clampUnit(Number.isFinite(spinX) ? spinX : 0);
   const safeSpinY = clampUnit(Number.isFinite(spinY) ? spinY : 0);
   const shotSpeed = MIN_SHOT_SPEED + shotPower * MAX_SHOT_SPEED;
@@ -517,7 +535,7 @@ function simulateShot(
 
       for (const ball of balls) {
         if (ball.pocketed) continue;
-        const pocketIndex = handlePocket(ball);
+        const pocketIndex = handlePocket(ball, 1 / substeps);
         if (pocketIndex !== null) {
           if (ball.number === 0) cuePocketed = true;
           else pocketedEvents.push({ number: ball.number, pocketIndex });
