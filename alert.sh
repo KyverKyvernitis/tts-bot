@@ -66,6 +66,7 @@ EMOJI_MAP = {
 
 LABEL_MAP = {
     "resumo": "Resumo",
+    "resultado": "Resultado",
     "host": "Host",
     "branch": "Branch",
     "commit": "Commit",
@@ -73,7 +74,16 @@ LABEL_MAP = {
     "mudanca": "Mudança",
     "arquivos": "Arquivos",
     "arquivos alterados": "Arquivos",
+    "arquivos locais": "Arquivos locais",
     "activity": "Activity",
+    "bot": "Bot",
+    "bot health": "Bot",
+    "repo": "Repositório",
+    "repositório": "Repositório",
+    "repositorio": "Repositório",
+    "repositório sujo": "Repositório",
+    "repositorio sujo": "Repositório",
+    "rollback": "Rollback",
     "duração": "Duração",
     "duracao": "Duração",
     "hora": "Hora",
@@ -81,9 +91,10 @@ LABEL_MAP = {
     "motivo": "Motivo",
     "url": "URL",
     "etapa": "Etapa",
+    "detalhes": "Detalhes",
 }
 
-INLINE_FIELDS = {"Host", "Branch", "Commit", "Duração"}
+INLINE_FIELDS = {"Host", "Branch", "Commit", "Duração", "Resultado", "Repositório"}
 
 def trunc(value: str, limit: int) -> str:
     value = (value or "").strip()
