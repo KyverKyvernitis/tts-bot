@@ -14,34 +14,35 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MIN_SHOT_SPEED = 0.16;
-const MAX_SHOT_SPEED = 12.45;
-const SOFT_STOP_SPEED = 0.014;
-const HARD_STOP_SPEED = 0.0045;
+const MIN_SHOT_SPEED = 0.045;
+const MAX_SHOT_SPEED = 13.2;
+const POWER_FLOOR = 0.0018;
+const SOFT_STOP_SPEED = 0.0105;
+const HARD_STOP_SPEED = 0.0026;
 const MIN_SPEED = SOFT_STOP_SPEED;
-const MAX_STEPS = 1500;
+const MAX_STEPS = 1800;
 const FRAME_SAMPLE_EVERY = 2;
 const MAX_SUBSTEPS = 20;
-const BALL_BALL_RESTITUTION = 0.89;
-const BALL_TANGENT_FRICTION = 0.048;
-const BALL_SPIN_TRANSFER = 0.22;
-const RAIL_RESTITUTION = 0.74;
-const RAIL_TANGENT_FRICTION = 0.93;
-const RAIL_SPIN_TO_TANGENT = 0.14;
-const RAIL_SPIN_KEEP = 0.68;
-const SLIDING_DRAG = 0.9936;
-const ROLLING_DRAG = 0.99775;
-const HIGH_SPEED_DRAG = 0.9969;
-const ROLL_SYNC_RATE = 0.24;
-const ROLL_KEEP = 0.999;
-const SPIN_DECAY = 0.9885;
-const SPIN_CURVE_FACTOR = 0.00135;
-const SPIN_STOP_SPEED = 0.02;
-const ROLL_STOP_SPEED = 0.028;
+const BALL_BALL_RESTITUTION = 0.905;
+const BALL_TANGENT_FRICTION = 0.058;
+const BALL_SPIN_TRANSFER = 0.26;
+const RAIL_RESTITUTION = 0.765;
+const RAIL_TANGENT_FRICTION = 0.915;
+const RAIL_SPIN_TO_TANGENT = 0.165;
+const RAIL_SPIN_KEEP = 0.72;
+const SLIDING_DRAG = 0.99435;
+const ROLLING_DRAG = 0.99812;
+const HIGH_SPEED_DRAG = 0.99725;
+const ROLL_SYNC_RATE = 0.28;
+const ROLL_KEEP = 0.9992;
+const SPIN_DECAY = 0.9898;
+const SPIN_CURVE_FACTOR = 0.00115;
+const SPIN_STOP_SPEED = 0.016;
+const ROLL_STOP_SPEED = 0.02;
 const BACKSPIN_DRAG_FACTOR = 0.013;
 const OVERSPIN_PUSH_FACTOR = 0.009;
-const SHOT_SIDE_SPIN_GAIN = 0.36;
-const SHOT_ROLL_SPIN_GAIN = 0.55;
+const SHOT_SIDE_SPIN_GAIN = 0.38;
+const SHOT_ROLL_SPIN_GAIN = 0.6;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -92,6 +93,12 @@ function clamp(value: number, min: number, max: number) {
 
 function clampUnit(value: number) {
   return clamp(value, -1, 1);
+}
+
+function clothBias(ball: PhysicsBall) {
+  if (ball.number === 0) return 1;
+  const pattern = ((ball.number * 17) % 9) - 4;
+  return 1 + pattern * 0.004;
 }
 
 function createBall(number: number, x: number, y: number): PhysicsBall {
@@ -223,11 +230,11 @@ function applyRailResponse(ball: PhysicsBall, normalX: number, normalY: number) 
   const normalVelocity = ball.vx * normalX + ball.vy * normalY;
   const tangentVelocity = ball.vx * tangentX + ball.vy * tangentY;
   const nextNormal = -normalVelocity * RAIL_RESTITUTION;
-  const nextTangent = tangentVelocity * RAIL_TANGENT_FRICTION + ball.sideSpin * RAIL_SPIN_TO_TANGENT;
+  const nextTangent = tangentVelocity * RAIL_TANGENT_FRICTION + ball.sideSpin * RAIL_SPIN_TO_TANGENT + ball.roll * 0.012;
   ball.vx = normalX * nextNormal + tangentX * nextTangent;
   ball.vy = normalY * nextNormal + tangentY * nextTangent;
-  ball.sideSpin = ball.sideSpin * RAIL_SPIN_KEEP - tangentVelocity * 0.015;
-  ball.roll *= 0.992;
+  ball.sideSpin = ball.sideSpin * RAIL_SPIN_KEEP - tangentVelocity * 0.013;
+  ball.roll *= 0.994;
 }
 
 function handleWallCollision(ball: PhysicsBall) {
@@ -303,20 +310,23 @@ function handlePocket(ball: PhysicsBall, stepScale = 1): number | null {
 function updateBallMotion(ball: PhysicsBall) {
   if (ball.pocketed) return;
   const speed = Math.hypot(ball.vx, ball.vy);
+  const bias = clothBias(ball);
   if (speed <= 0.000001) {
     ball.vx = 0;
     ball.vy = 0;
-    ball.sideSpin *= 0.94;
-    ball.roll *= 0.94;
-    if (Math.abs(ball.sideSpin) < 0.025) ball.sideSpin = 0;
-    if (Math.abs(ball.roll) < 0.025) ball.roll = 0;
+    ball.sideSpin *= 0.945;
+    ball.roll *= 0.95;
+    if (Math.abs(ball.sideSpin) < 0.02) ball.sideSpin = 0;
+    if (Math.abs(ball.roll) < 0.018) ball.roll = 0;
     return;
   }
 
   const slidingFactor = clamp(Math.abs(speed - ball.roll) / Math.max(speed, 0.001), 0, 1);
+  const lowSpeedBlend = clamp(1 - speed / 1.2, 0, 1);
   let drag = ROLLING_DRAG + (SLIDING_DRAG - ROLLING_DRAG) * slidingFactor;
-  if (speed > 9) drag = Math.min(drag, HIGH_SPEED_DRAG);
-  if (speed < 0.7) drag = Math.max(drag, ROLLING_DRAG + 0.0002);
+  if (speed > 8.5) drag = Math.min(drag, HIGH_SPEED_DRAG);
+  drag = 1 - (1 - drag) * bias;
+  if (lowSpeedBlend > 0) drag = Math.min(0.99945, drag + lowSpeedBlend * 0.0002);
   ball.vx *= drag;
   ball.vy *= drag;
 
@@ -324,18 +334,18 @@ function updateBallMotion(ball: PhysicsBall) {
   const dirX = postSpeed > 0.0001 ? ball.vx / postSpeed : 0;
   const dirY = postSpeed > 0.0001 ? ball.vy / postSpeed : 0;
 
-  ball.roll += (postSpeed - ball.roll) * ROLL_SYNC_RATE;
-  if (ball.roll < -0.04 && postSpeed > 0.12) {
-    const slow = Math.max(-0.065, ball.roll * BACKSPIN_DRAG_FACTOR);
+  ball.roll += (postSpeed - ball.roll) * (ROLL_SYNC_RATE + lowSpeedBlend * 0.05);
+  if (ball.roll < -0.035 && postSpeed > 0.11) {
+    const slow = Math.max(-0.055, ball.roll * BACKSPIN_DRAG_FACTOR);
     ball.vx += dirX * slow;
     ball.vy += dirY * slow;
-  } else if (ball.roll > postSpeed + 0.05 && postSpeed > 0.08) {
-    const push = Math.min(0.08, (ball.roll - postSpeed) * OVERSPIN_PUSH_FACTOR);
+  } else if (ball.roll > postSpeed + 0.04 && postSpeed > 0.07) {
+    const push = Math.min(0.065, (ball.roll - postSpeed) * OVERSPIN_PUSH_FACTOR);
     ball.vx += dirX * push;
     ball.vy += dirY * push;
   }
 
-  if (Math.abs(ball.sideSpin) > 0.001 && postSpeed > 0.18) {
+  if (Math.abs(ball.sideSpin) > 0.001 && postSpeed > 0.16) {
     rotateVelocity(ball, ball.sideSpin * SPIN_CURVE_FACTOR);
   }
 
@@ -343,16 +353,18 @@ function updateBallMotion(ball: PhysicsBall) {
   ball.roll *= ROLL_KEEP;
 
   const settledSpeed = Math.hypot(ball.vx, ball.vy);
-  if (settledSpeed < SOFT_STOP_SPEED) {
-    const settleFactor = clamp(settledSpeed / Math.max(SOFT_STOP_SPEED, 0.0001), 0, 1);
-    const keep = 0.86 + settleFactor * 0.1;
+  const softThreshold = SOFT_STOP_SPEED * (0.965 + (bias - 1) * 4.5);
+  const hardThreshold = HARD_STOP_SPEED * (0.95 + (bias - 1) * 5.5);
+  if (settledSpeed < softThreshold) {
+    const settleFactor = clamp(settledSpeed / Math.max(softThreshold, 0.0001), 0, 1);
+    const keep = 0.948 + settleFactor * 0.038;
     ball.vx *= keep;
     ball.vy *= keep;
-    ball.sideSpin *= 0.97;
-    ball.roll *= 0.965;
+    ball.sideSpin *= 0.982;
+    ball.roll *= 0.978;
   }
 
-  if (settledSpeed < HARD_STOP_SPEED && Math.abs(ball.sideSpin) < SPIN_STOP_SPEED && Math.abs(ball.roll) < ROLL_STOP_SPEED) {
+  if (settledSpeed < hardThreshold && Math.abs(ball.sideSpin) < SPIN_STOP_SPEED && Math.abs(ball.roll) < ROLL_STOP_SPEED) {
     ball.vx = 0;
     ball.vy = 0;
     ball.sideSpin = 0;
@@ -522,10 +534,11 @@ function simulateShot(
     cueBall.sideSpin = 0;
   }
 
-  const shotPower = clamp(Number.isFinite(power) ? power : 0.52, 0.006, 1);
+  const shotPower = clamp(Number.isFinite(power) ? power : 0.52, POWER_FLOOR, 1);
   const safeSpinX = clampUnit(Number.isFinite(spinX) ? spinX : 0);
   const safeSpinY = clampUnit(Number.isFinite(spinY) ? spinY : 0);
-  const shotSpeed = MIN_SHOT_SPEED + shotPower * MAX_SHOT_SPEED;
+  const shapedShotPower = shotPower * 0.18 + Math.pow(shotPower, 1.55) * 0.82;
+  const shotSpeed = MIN_SHOT_SPEED + shapedShotPower * MAX_SHOT_SPEED;
   cueBall.vx = Math.cos(safeAngle) * shotSpeed;
   cueBall.vy = Math.sin(safeAngle) * shotSpeed;
   cueBall.roll = shotSpeed * (0.5 + safeSpinY * SHOT_ROLL_SPIN_GAIN);
@@ -580,7 +593,7 @@ function simulateShot(
       updateBallMotion(ball);
     }
 
-    const sampleEvery = maxVelocity < 0.7 ? 1 : FRAME_SAMPLE_EVERY;
+    const sampleEvery = maxVelocity < 1.15 ? 1 : maxVelocity < 3.4 ? FRAME_SAMPLE_EVERY : FRAME_SAMPLE_EVERY + 1;
     if (step % sampleEvery === 0) frames.push(currentFrame(balls));
     if (balls.every((ball) => !ballIsMoving(ball))) {
       const lastFrame = frames[frames.length - 1];

@@ -106,9 +106,9 @@ const OPENING_RACK = [
 ] as const;
 
 const POCKET_ANIM_DURATION = 320;
-const POWER_MIN = 0.006;
+const POWER_MIN = 0.0018;
 const POWER_RETURN_MS = 180;
-const POWER_CURVE_EXPONENT = 2.85;
+const POWER_CURVE_EXPONENT = 3.6;
 const AIM_SYNC_INTERVAL_MS = 22;
 const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
@@ -163,6 +163,8 @@ type BallSpinState = {
   lastX: number;
   lastY: number;
   lastSeenAt: number;
+  phaseVelocity: number;
+  visualSpeed: number;
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -364,19 +366,38 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     seen.add(ball.id);
     const current = cache.get(ball.id);
     if (!current) {
-      cache.set(ball.id, { phase: 0, axis: 0, lastX: ball.x, lastY: ball.y, lastSeenAt: now });
+      cache.set(ball.id, {
+        phase: 0,
+        axis: 0,
+        lastX: ball.x,
+        lastY: ball.y,
+        lastSeenAt: now,
+        phaseVelocity: 0,
+        visualSpeed: 0,
+      });
       continue;
     }
 
+    const elapsedMs = Math.max(1, now - current.lastSeenAt);
+    const elapsedFrames = Math.max(1, elapsedMs / (1000 / 60));
     const dx = ball.x - current.lastX;
     const dy = ball.y - current.lastY;
     const distance = Math.hypot(dx, dy);
-    if (distance > 0.02) {
-      current.phase = (current.phase + distance / (BALL_VISUAL_RADIUS * 1.45)) % (Math.PI * 2);
-      current.axis = Math.atan2(dy, dx) + Math.PI / 2;
+    const targetAxis = distance > 0.01 ? Math.atan2(dy, dx) + Math.PI / 2 : current.axis;
+    current.axis = lerpAngle(current.axis, targetAxis, distance > 0.08 ? 0.5 : 0.18);
+
+    if (distance > 0.01) {
+      const measuredPhaseVelocity = distance / (BALL_VISUAL_RADIUS * 1.04 * elapsedFrames);
+      current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, 0.62);
+      current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.56);
       current.lastX = ball.x;
       current.lastY = ball.y;
+    } else {
+      current.phaseVelocity *= 0.92;
+      current.visualSpeed *= 0.9;
     }
+
+    current.phase = (current.phase + current.phaseVelocity * elapsedFrames) % (Math.PI * 2);
     current.lastSeenAt = now;
   }
 
@@ -467,6 +488,7 @@ function drawBall(
   const color = ballColor(ball.number);
   const spinPhase = spin?.phase ?? 0;
   const spinAxis = spin?.axis ?? 0;
+  const visualSpinSpeed = spin?.visualSpeed ?? 0;
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
@@ -512,15 +534,16 @@ function drawBall(
   ctx.restore();
 
   if (ball.number > 0) {
-    const travelY = Math.sin(spinPhase) * r * 0.18;
-    const diskScaleY = 0.86 + 0.14 * Math.abs(Math.cos(spinPhase));
+    const rollTravel = 0.2 + clamp(visualSpinSpeed * 0.045, 0, 0.1);
+    const travelY = Math.sin(spinPhase) * r * rollTravel;
+    const diskScaleY = 0.8 + 0.2 * Math.abs(Math.cos(spinPhase));
 
     ctx.save();
     ctx.rotate(spinAxis);
 
     if (ball.number >= 9) {
-      const stripeCenterY = Math.sin(spinPhase) * r * 0.18;
-      const stripeHalf = r * (0.31 + 0.08 * Math.abs(Math.cos(spinPhase)));
+      const stripeCenterY = Math.sin(spinPhase) * r * rollTravel;
+      const stripeHalf = r * (0.29 + 0.11 * Math.abs(Math.cos(spinPhase)));
       ctx.save();
       ctx.beginPath();
       ctx.arc(0, 0, r - 0.55 * scale, 0, Math.PI * 2);
@@ -1184,9 +1207,12 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const mapPowerFromClientY = (clientY: number, rectTop: number, rectBottom: number, rectHeight: number) => {
     const clampedY = clamp(clientY, rectTop, rectBottom);
     const normalized = clamp((clampedY - rectTop) / Math.max(1, rectHeight), 0, 1);
-    const shaped = normalized <= 0.72
-      ? Math.pow(normalized / 0.72, POWER_CURVE_EXPONENT) * 0.62
-      : 0.62 + Math.pow((normalized - 0.72) / 0.28, 1.16) * 0.38;
+    let shaped = 0;
+    if (normalized <= 0.8) {
+      shaped = Math.pow(normalized / 0.8, POWER_CURVE_EXPONENT) * 0.56;
+    } else {
+      shaped = 0.56 + Math.pow((normalized - 0.8) / 0.2, 1.34) * 0.44;
+    }
     return clamp(POWER_MIN + shaped * (1 - POWER_MIN), POWER_MIN, 1);
   };
 
