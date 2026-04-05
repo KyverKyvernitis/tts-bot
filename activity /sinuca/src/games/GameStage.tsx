@@ -1082,6 +1082,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       ? 0.08
       : powerVisual
     : remotePowerVisual;
+  const browserSupportsPointerEvents = typeof window !== "undefined" && "PointerEvent" in window;
 
   const emitAimState = (next: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; mode: AimPointerMode }, force = false) => {
     const handler = onAimStateChangeRef.current;
@@ -1304,6 +1305,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   };
 
   const handlePowerTouchStart = (event: ReactTouchEvent<HTMLDivElement>) => {
+    if (browserSupportsPointerEvents) return;
     const touch = event.changedTouches[0];
     if (!touch) return;
     event.preventDefault();
@@ -1323,7 +1325,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   };
 
   const handlePowerTouchMove = (event: ReactTouchEvent<HTMLDivElement>) => {
-    if (pointerModeRef.current !== "power") return;
+    if (browserSupportsPointerEvents || pointerModeRef.current !== "power") return;
     const identifier = powerTouchIdRef.current;
     const touch = findTouchById(event.changedTouches, identifier);
     if (!touch) return;
@@ -1340,7 +1342,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   };
 
   const handlePowerTouchEnd = (event: ReactTouchEvent<HTMLDivElement>) => {
-    if (pointerModeRef.current !== "power") return;
+    if (browserSupportsPointerEvents || pointerModeRef.current !== "power") return;
     const identifier = powerTouchIdRef.current;
     const touch = findTouchById(event.changedTouches, identifier);
     if (!touch && identifier !== null) return;
@@ -1359,7 +1361,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   };
 
   const handlePowerTouchCancel = (event: ReactTouchEvent<HTMLDivElement>) => {
-    if (pointerModeRef.current !== "power") return;
+    if (browserSupportsPointerEvents || pointerModeRef.current !== "power") return;
     event.preventDefault();
     powerTouchIdRef.current = null;
     powerPointerIdRef.current = null;
@@ -1408,18 +1410,22 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     window.addEventListener("pointermove", handleWindowMove);
     window.addEventListener("pointerup", finishFromWindow);
     window.addEventListener("pointercancel", finishFromWindow);
-    window.addEventListener("touchmove", handleTouchMove, { passive: false });
-    window.addEventListener("touchend", finishFromTouch, { passive: false });
-    window.addEventListener("touchcancel", finishFromTouch, { passive: false });
+    if (!browserSupportsPointerEvents) {
+      window.addEventListener("touchmove", handleTouchMove, { passive: false });
+      window.addEventListener("touchend", finishFromTouch, { passive: false });
+      window.addEventListener("touchcancel", finishFromTouch, { passive: false });
+    }
     return () => {
       window.removeEventListener("pointermove", handleWindowMove);
       window.removeEventListener("pointerup", finishFromWindow);
       window.removeEventListener("pointercancel", finishFromWindow);
-      window.removeEventListener("touchmove", handleTouchMove);
-      window.removeEventListener("touchend", finishFromTouch);
-      window.removeEventListener("touchcancel", finishFromTouch);
+      if (!browserSupportsPointerEvents) {
+        window.removeEventListener("touchmove", handleTouchMove);
+        window.removeEventListener("touchend", finishFromTouch);
+        window.removeEventListener("touchcancel", finishFromTouch);
+      }
     };
-  }, [pointerMode, room.roomId, currentUserId, shootBusy, animating, canInteract, isBallInHand, needEightCall, selectedPocket]);
+  }, [pointerMode, room.roomId, currentUserId, shootBusy, animating, canInteract, isBallInHand, needEightCall, selectedPocket, browserSupportsPointerEvents]);
 
   const statusText = game.status === "finished"
     ? game.winnerUserId === currentUserId ? "Você venceu" : "Você perdeu"
@@ -1732,8 +1738,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onLostPointerCapture={handlePowerLostCapture}
         >
           <div ref={powerTrackRef} className="pool-stage__power-track">
-            <div className="pool-stage__power-fill" style={{ height: `${Math.round(displayedPowerVisual * 100)}%`, bottom: "2px", top: "auto" }} />
-            <div className="pool-stage__power-marker" style={{ bottom: `calc(${Math.round(displayedPowerVisual * 100)}% + 1px)` }} />
+            <div className="pool-stage__power-fill" style={{ height: `${Math.round(displayedPowerVisual * 100)}%`, top: "2px", bottom: "auto" }} />
+            <div className="pool-stage__power-marker" style={{ top: `calc(${Math.round(displayedPowerVisual * 100)}% + 1px)` }} />
           </div>
         </div>
 
