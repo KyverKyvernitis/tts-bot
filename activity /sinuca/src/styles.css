@@ -4884,8 +4884,8 @@ button:focus-visible {
 .pool-stage__table-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr);
-  gap: 6px;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
   align-items: center;
 }
 
@@ -4894,9 +4894,10 @@ button:focus-visible {
 .pool-stage__power {
   align-self: center;
   justify-self: center;
-  width: 48px;
-  padding-inline: 14px;
+  width: 72px;
+  padding-inline: 22px 14px;
   box-sizing: border-box;
+  min-width: 72px;
   height: min(74vh, 408px);
   display: grid;
   justify-items: center;
@@ -4905,7 +4906,9 @@ button:focus-visible {
   color: rgba(242, 247, 255, 0.82);
   cursor: ns-resize;
   user-select: none;
+  -webkit-user-select: none;
   touch-action: none;
+  -webkit-touch-callout: none;
   opacity: 1;
   transform: translateX(0) scaleY(1);
   transition: opacity 140ms ease, transform 140ms ease;
@@ -4913,7 +4916,7 @@ button:focus-visible {
 
 .pool-stage__power-track {
   position: relative;
-  width: 18px;
+  width: 20px;
   height: 100%;
   min-height: 220px;
   border-radius: 9px;
@@ -5131,13 +5134,14 @@ button:focus-visible {
   }
 
   .pool-stage__table-layout {
-    grid-template-columns: 54px minmax(0, 1fr);
-    gap: 8px;
+    grid-template-columns: 74px minmax(0, 1fr);
+    gap: 10px;
   }
 
   .pool-stage__power {
-    width: 54px;
-    padding-inline: 15px;
+    width: 74px;
+    min-width: 74px;
+    padding-inline: 22px 14px;
     height: min(72vh, 370px);
   }
 
@@ -5232,19 +5236,20 @@ button:focus-visible {
   }
 
  .pool-stage__table-layout {
-    grid-template-columns: 42px minmax(0, 1fr);
-    gap: 4px;
+    grid-template-columns: 68px minmax(0, 1fr);
+    gap: 6px;
   }
 
   .pool-stage__power {
-    width: 54px;
-    padding-inline: 12px;
+    width: 68px;
+    min-width: 68px;
+    padding-inline: 20px 12px;
     height: min(66vh, 296px);
     gap: 0;
   }
 
   .pool-stage__power-track {
-    width: 22px;
+    width: 24px;
     min-height: 156px;
   }
 
