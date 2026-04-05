@@ -1,0 +1,32 @@
+# secrets
+.env
+.env.*
+google-credentials.json
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# logs
+*.log
+*.log.*
+backup-configs.log
+healthcheck.log
+resource-check.log
+update.log
+
+# temp/runtime
+tmp_audio/
+.healthcheck_last_alert
+.update_last_failed_remote_hash
+
+# activity envs
+activity /sinuca/.env
+activity /sinuca/.env.save
+activity /sinuca-server/.env
