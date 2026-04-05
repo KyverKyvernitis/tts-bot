@@ -429,18 +429,9 @@ class BotLocal(commands.Bot):
             hash_result = self._run_cmd(["git", "rev-parse", "HEAD"], clone_dir, env=env)
             commit_hash = (hash_result.stdout or "").strip() if hash_result.returncode == 0 else None
 
-            triggered_update = False
-            update_script = self._repo_root / "update-bot.sh"
-            if update_script.exists():
-                subprocess.Popen(
-                    [str(update_script)],
-                    cwd=str(self._repo_root),
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-                triggered_update = True
+            updater_service = Path("/etc/systemd/system/tts-bot-updater.service")
+            updater_timer = Path("/etc/systemd/system/tts-bot-updater.timer")
+            triggered_update = updater_service.exists() and updater_timer.exists()
 
             return {
                 "changed_files": changed_files,
@@ -485,7 +476,7 @@ class BotLocal(commands.Bot):
                 await self._send_zip_update_message(
                     message,
                     "📦 ZIP recebido",
-                    "Arquivo baixado fora do repositório. Vou validar, aplicar em clone temporário, enviar para o GitHub e acionar o auto update existente.",
+                    "Arquivo baixado fora do repositório. Vou validar, aplicar em clone temporário, enviar para o GitHub e deixar o updater via systemd aplicar automaticamente.",
                     discord.Color.blurple(),
                 )
 
@@ -508,7 +499,7 @@ class BotLocal(commands.Bot):
                 if len(changed_files) > 10:
                     preview_files += f"\n• ... e mais {len(changed_files) - 10} arquivo(s)"
                 short_hash = str(commit_hash)[:7] if commit_hash else "desconhecido"
-                update_line = "O script `update-bot.sh` foi acionado." if triggered_update else "O commit foi enviado, mas o acionamento automático do script não foi encontrado."
+                update_line = "O commit foi enviado ao GitHub. O updater via systemd verificará e aplicará automaticamente em até 1 minuto." if triggered_update else "O commit foi enviado ao GitHub, mas o updater via systemd não foi encontrado nesta VPS."
                 await self._send_zip_update_message(
                     message,
                     "✅ Update enviado para o GitHub",
