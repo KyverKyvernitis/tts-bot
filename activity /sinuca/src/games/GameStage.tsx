@@ -1067,21 +1067,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (pointerMode !== "power") powerPointerIdRef.current = null;
   }, [pointerMode]);
 
-  const turnControlVisible = Boolean(cueBall && game.status !== "finished" && !animating);
-  const powerBarInteractive = canInteract && !isBallInHand;
+  const isCueBallPlacementActive = isBallInHand && pointerMode === "place";
+  const turnControlVisible = Boolean(cueBall && game.status !== "finished" && !animating && isMyTurn && !isCueBallPlacementActive);
+  const powerBarInteractive = canInteract && !isCueBallPlacementActive;
   const powerVisual = clamp((power - POWER_MIN) / (1 - POWER_MIN), 0, 1);
-  const remotePowerVisual = !isMyTurn
-    ? opponentAim?.mode === "power"
-      ? 0.62
-      : opponentAim?.mode === "aim"
-        ? 0.2
-        : 0.08
-    : 0;
-  const displayedPowerVisual = isMyTurn
-    ? isBallInHand
-      ? 0.08
-      : powerVisual
-    : remotePowerVisual;
+  const displayedPowerVisual = isCueBallPlacementActive ? 0.08 : powerVisual;
   const browserSupportsPointerEvents = typeof window !== "undefined" && "PointerEvent" in window;
 
   const emitAimState = (next: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; mode: AimPointerMode }, force = false) => {
@@ -1725,7 +1715,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       <div className="pool-stage__table-layout">
         <div
           ref={powerRailRef}
-          className={`pool-stage__power ${powerBarInteractive ? "pool-stage__power--active" : ""} ${pointerMode === "power" ? "pool-stage__power--dragging" : ""} ${turnControlVisible ? "" : "pool-stage__power--hidden"} ${!isMyTurn && turnControlVisible ? "pool-stage__power--ghost" : ""} ${isMyTurn && !powerBarInteractive && turnControlVisible ? "pool-stage__power--standby" : ""}`}
+          className={`pool-stage__power ${powerBarInteractive ? "pool-stage__power--active" : ""} ${pointerMode === "power" ? "pool-stage__power--dragging" : ""} ${turnControlVisible ? "" : "pool-stage__power--hidden"} ${isCueBallPlacementActive && turnControlVisible ? "pool-stage__power--standby" : ""}`}
           aria-hidden={!turnControlVisible}
           onPointerDown={handlePowerDown}
           onPointerMove={handlePowerMove}
