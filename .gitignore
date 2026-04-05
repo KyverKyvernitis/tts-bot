@@ -132,3 +132,10 @@ update-bot.sh.disabled
 *.tgz
 *.7z
 *.rar
+
+*.bak
+*.log
+.env
+.env.*
+node_modules/
+dist/
