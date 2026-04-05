@@ -11,16 +11,16 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 17.2;
-const MIN_SPEED = 0.04;
-const BASE_FRICTION = 0.99785;
+const MAX_SHOT_SPEED = 14.6;
+const MIN_SPEED = 0.035;
+const BASE_FRICTION = 0.9977;
 const MAX_STEPS = 1500;
 const FRAME_SAMPLE_EVERY = 2;
 const MAX_SUBSTEPS = 18;
-const CUSHION_RESTITUTION = 0.72;
-const CUSHION_TANGENT_KEEP = 0.992;
-const BALL_RESTITUTION = 0.86;
-const BALL_TANGENT_TRANSFER = 0.0055;
+const CUSHION_RESTITUTION = 0.67;
+const CUSHION_TANGENT_KEEP = 0.986;
+const BALL_RESTITUTION = 0.82;
+const BALL_TANGENT_TRANSFER = 0.0032;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -135,6 +135,14 @@ function toSnapshot(game: GameRecord, sinceSeq?: number | null): GameSnapshot {
 
 function ballIsMoving(ball: PhysicsBall) {
   return !ball.pocketed && (Math.abs(ball.vx) > MIN_SPEED || Math.abs(ball.vy) > MIN_SPEED);
+}
+
+function frictionForSpeed(speed: number) {
+  if (speed > 12) return BASE_FRICTION - 0.00035;
+  if (speed > 7) return BASE_FRICTION - 0.00015;
+  if (speed > 3) return BASE_FRICTION;
+  if (speed > 1.2) return BASE_FRICTION + 0.00035;
+  return BASE_FRICTION + 0.0007;
 }
 
 function nearPocket(x: number, y: number) {
@@ -368,8 +376,9 @@ function simulateShot(
     cueBall.vy = 0;
   }
 
-  const shotPower = clamp(Number.isFinite(power) ? power : 0.6, 0.04, 1);
-  const shotSpeed = 3.5 + shotPower * MAX_SHOT_SPEED;
+  const shotPower = clamp(Number.isFinite(power) ? power : 0.58, 0.02, 1);
+  const shapedPower = Math.pow(shotPower, 1.18);
+  const shotSpeed = 2.15 + shapedPower * MAX_SHOT_SPEED;
   cueBall.vx = Math.cos(safeAngle) * shotSpeed;
   cueBall.vy = Math.sin(safeAngle) * shotSpeed;
 
@@ -419,8 +428,10 @@ function simulateShot(
 
     for (const ball of balls) {
       if (ball.pocketed) continue;
-      ball.vx *= BASE_FRICTION;
-      ball.vy *= BASE_FRICTION;
+      const speed = Math.hypot(ball.vx, ball.vy);
+      const drag = frictionForSpeed(speed);
+      ball.vx *= drag;
+      ball.vy *= drag;
       if (Math.abs(ball.vx) < MIN_SPEED) ball.vx = 0;
       if (Math.abs(ball.vy) < MIN_SPEED) ball.vy = 0;
     }
