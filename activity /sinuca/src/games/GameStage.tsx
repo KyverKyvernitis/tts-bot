@@ -280,7 +280,18 @@ function buildOpeningBalls(source: GameBallSnapshot[]) {
   return [cue, ...rackBalls];
 }
 
-function findTouchById(touches: TouchList, identifier: number | null) {
+type TouchLike = {
+  identifier: number;
+  clientY: number;
+};
+
+type TouchListLike = {
+  readonly length: number;
+  item(index: number): TouchLike | null;
+  [index: number]: TouchLike;
+};
+
+function findTouchById(touches: TouchListLike, identifier: number | null): TouchLike | null {
   if (identifier === null) return touches[0] ?? null;
   for (let index = 0; index < touches.length; index += 1) {
     const touch = touches.item(index);
@@ -845,7 +856,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const powerGestureRef = useRef<{ rectTop: number; rectBottom: number; rectHeight: number } | null>(null);
   const powerPointerIdRef = useRef<number | null>(null);
   const powerTouchIdRef = useRef<number | null>(null);
-  const powerInputSourceRef = useRef<"none" | "pointer" | "touch">("none");
   const localCuePlacementRef = useRef<{ x: number; y: number } | null>(null);
   const pointerModeRef = useRef<PointerMode>("idle");
   const pocketAnimationsRef = useRef<PocketAnimation[]>([]);
@@ -1054,11 +1064,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [currentUserId, game.ballInHandUserId, game.balls, game.shotSequence, shootBusy]);
   useEffect(() => {
     pointerModeRef.current = pointerMode;
-    if (pointerMode !== "power") {
-      powerPointerIdRef.current = null;
-      powerTouchIdRef.current = null;
-      powerInputSourceRef.current = "none";
-    }
+    if (pointerMode !== "power") powerPointerIdRef.current = null;
   }, [pointerMode]);
 
   const turnControlVisible = Boolean(cueBall && game.status !== "finished" && !animating);
@@ -1235,7 +1241,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (pointerModeRef.current !== "power" || powerReleaseGuardRef.current) return;
     powerReleaseGuardRef.current = true;
     powerGestureRef.current = null;
-    powerInputSourceRef.current = "none";
     const state = renderStateRef.current;
     const liveCueBall = state.cueBall;
     const shotPower = clamp(powerRef.current, POWER_MIN, 1);
@@ -1266,7 +1271,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     window.requestAnimationFrame(() => { SFX.cueHit(payload.power); });
   };
 
-  const startPowerGesture = (clientY: number, source: "pointer" | "touch") => {
+  const startPowerGesture = (clientY: number) => {
     if (!canInteractRef.current || !powerRailRef.current) return false;
     SFX.prime();
     if (powerReturnAnimRef.current !== null) {
@@ -1280,7 +1285,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       rectHeight: Math.max(1, rect.height - 4),
     };
     powerReleaseGuardRef.current = false;
-    powerInputSourceRef.current = source;
     setPointerModeSafe("power");
     updatePowerFromClientY(clientY);
     emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "power" }, true);
@@ -1291,9 +1295,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     event.preventDefault();
     event.stopPropagation();
     powerTouchIdRef.current = null;
-    powerInputSourceRef.current = "pointer";
     powerPointerIdRef.current = event.pointerId;
-    if (!startPowerGesture(event.clientY, "pointer")) {
+    if (!startPowerGesture(event.clientY)) {
       powerPointerIdRef.current = null;
       return;
     }
@@ -1306,22 +1309,21 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     event.preventDefault();
     event.stopPropagation();
     powerPointerIdRef.current = null;
-    powerInputSourceRef.current = "touch";
     powerTouchIdRef.current = touch.identifier;
-    if (!startPowerGesture(touch.clientY, "touch")) {
+    if (!startPowerGesture(touch.clientY)) {
       powerTouchIdRef.current = null;
     }
   };
 
   const handlePowerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (pointerModeRef.current !== "power" || powerInputSourceRef.current !== "pointer") return;
+    if (pointerModeRef.current !== "power") return;
     if (powerPointerIdRef.current !== null && event.pointerId !== powerPointerIdRef.current) return;
     event.preventDefault();
     updatePowerFromClientY(event.clientY);
   };
 
   const handlePowerTouchMove = (event: ReactTouchEvent<HTMLDivElement>) => {
-    if (pointerModeRef.current !== "power" || powerInputSourceRef.current !== "touch") return;
+    if (pointerModeRef.current !== "power") return;
     const identifier = powerTouchIdRef.current;
     const touch = findTouchById(event.changedTouches, identifier);
     if (!touch) return;
@@ -1330,43 +1332,37 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   };
 
   const handlePowerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (powerInputSourceRef.current !== "pointer") return;
     if (powerPointerIdRef.current !== null && event.pointerId !== powerPointerIdRef.current) return;
     try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch {}
     powerPointerIdRef.current = null;
     powerTouchIdRef.current = null;
-    powerInputSourceRef.current = "none";
     commitPowerShot();
   };
 
   const handlePowerTouchEnd = (event: ReactTouchEvent<HTMLDivElement>) => {
-    if (pointerModeRef.current !== "power" || powerInputSourceRef.current !== "touch") return;
+    if (pointerModeRef.current !== "power") return;
     const identifier = powerTouchIdRef.current;
     const touch = findTouchById(event.changedTouches, identifier);
     if (!touch && identifier !== null) return;
     event.preventDefault();
     powerTouchIdRef.current = null;
     powerPointerIdRef.current = null;
-    powerInputSourceRef.current = "none";
     commitPowerShot();
   };
 
   const handlePowerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (powerInputSourceRef.current !== "pointer") return;
     if (powerPointerIdRef.current !== null && event.pointerId !== powerPointerIdRef.current) return;
     try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch {}
     powerPointerIdRef.current = null;
     powerTouchIdRef.current = null;
-    powerInputSourceRef.current = "none";
     if (pointerModeRef.current === "power" && !powerReleaseGuardRef.current) commitPowerShot();
   };
 
   const handlePowerTouchCancel = (event: ReactTouchEvent<HTMLDivElement>) => {
-    if (pointerModeRef.current !== "power" || powerInputSourceRef.current !== "touch") return;
+    if (pointerModeRef.current !== "power") return;
     event.preventDefault();
     powerTouchIdRef.current = null;
     powerPointerIdRef.current = null;
-    powerInputSourceRef.current = "none";
     if (!powerReleaseGuardRef.current) commitPowerShot();
   };
 
@@ -1378,20 +1374,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   useEffect(() => {
     if (pointerMode !== "power") return;
     const handleWindowMove = (event: PointerEvent) => {
-      if (pointerModeRef.current !== "power" || powerInputSourceRef.current !== "pointer") return;
+      if (pointerModeRef.current !== "power") return;
       if (powerPointerIdRef.current !== null && event.pointerId !== powerPointerIdRef.current) return;
       updatePowerFromClientY(event.clientY);
     };
     const finishFromWindow = (event: PointerEvent) => {
-      if (pointerModeRef.current !== "power" || powerInputSourceRef.current !== "pointer") return;
+      if (pointerModeRef.current !== "power") return;
       if (powerPointerIdRef.current !== null && event.pointerId !== powerPointerIdRef.current) return;
       powerPointerIdRef.current = null;
       powerTouchIdRef.current = null;
-      powerInputSourceRef.current = "none";
       commitPowerShot();
     };
     const handleTouchMove = (event: TouchEvent) => {
-      if (pointerModeRef.current !== "power" || powerInputSourceRef.current !== "touch") return;
+      if (pointerModeRef.current !== "power") return;
       const identifier = powerTouchIdRef.current;
       const touch = findTouchById(event.changedTouches, identifier)
         ?? findTouchById(event.touches, identifier)
@@ -1401,14 +1396,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       updatePowerFromClientY(touch.clientY);
     };
     const finishFromTouch = (event: TouchEvent) => {
-      if (pointerModeRef.current !== "power" || powerInputSourceRef.current !== "touch") return;
+      if (pointerModeRef.current !== "power") return;
       const identifier = powerTouchIdRef.current;
       const touch = findTouchById(event.changedTouches, identifier);
       if (!touch && identifier !== null) return;
       event.preventDefault();
       powerPointerIdRef.current = null;
       powerTouchIdRef.current = null;
-      powerInputSourceRef.current = "none";
       commitPowerShot();
     };
     window.addEventListener("pointermove", handleWindowMove);
@@ -1736,7 +1730,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onTouchEnd={handlePowerTouchEnd}
           onTouchCancel={handlePowerTouchCancel}
           onLostPointerCapture={handlePowerLostCapture}
-          onContextMenu={(event) => event.preventDefault()}
         >
           <div ref={powerTrackRef} className="pool-stage__power-track">
             <div className="pool-stage__power-fill" style={{ height: `${Math.round(displayedPowerVisual * 100)}%`, bottom: "2px", top: "auto" }} />
