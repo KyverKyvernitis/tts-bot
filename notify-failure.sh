@@ -16,7 +16,15 @@ RESULT_STATE="$(get_prop Result)"
 EXEC_MAIN_CODE="$(get_prop ExecMainCode)"
 EXEC_MAIN_STATUS="$(get_prop ExecMainStatus)"
 
-if [[ "$FORCE_ALERT" != "1" ]]; then
+ALERT_TYPE="error"
+ALERT_TITLE="Falha fatal no serviço"
+EXTRA_PREFIX=""
+
+if [[ "$FORCE_ALERT" == "1" ]]; then
+  ALERT_TYPE="warn"
+  ALERT_TITLE="Teste de alerta do serviço"
+  EXTRA_PREFIX="Modo: teste manual\n\n"
+else
   should_alert=0
 
   if [[ "$ACTIVE_STATE" == "failed" || "$RESULT_STATE" == "failed" ]]; then
@@ -34,7 +42,7 @@ fi
 
 LOGS="$(journalctl -u "$UNIT_NAME" -n 25 --no-pager 2>/dev/null | tail -n 20)"
 
-BODY="Serviço: $DISPLAY_NAME
+BODY="${EXTRA_PREFIX}Serviço: $DISPLAY_NAME
 Host: $(hostname)
 ActiveState: ${ACTIVE_STATE:-desconhecido}
 SubState: ${SUB_STATE:-desconhecido}
@@ -45,4 +53,4 @@ ExecMainStatus: ${EXEC_MAIN_STATUS:-desconhecido}
 Últimas linhas do erro:
 $LOGS"
 
-/home/ubuntu/bot/alert.sh error "Falha fatal no serviço" "$BODY"
+/home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY"
