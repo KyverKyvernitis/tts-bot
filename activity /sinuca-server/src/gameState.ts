@@ -11,16 +11,30 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 14.6;
-const MIN_SPEED = 0.035;
-const BASE_FRICTION = 0.9977;
+const MIN_SHOT_SPEED = 1.15;
+const MAX_SHOT_SPEED = 13.05;
+const MIN_SPEED = 0.028;
 const MAX_STEPS = 1500;
 const FRAME_SAMPLE_EVERY = 2;
-const MAX_SUBSTEPS = 18;
-const CUSHION_RESTITUTION = 0.67;
-const CUSHION_TANGENT_KEEP = 0.986;
-const BALL_RESTITUTION = 0.82;
-const BALL_TANGENT_TRANSFER = 0.0032;
+const MAX_SUBSTEPS = 20;
+const BALL_BALL_RESTITUTION = 0.89;
+const BALL_TANGENT_FRICTION = 0.048;
+const BALL_SPIN_TRANSFER = 0.22;
+const RAIL_RESTITUTION = 0.74;
+const RAIL_TANGENT_FRICTION = 0.93;
+const RAIL_SPIN_TO_TANGENT = 0.14;
+const RAIL_SPIN_KEEP = 0.68;
+const SLIDING_DRAG = 0.9936;
+const ROLLING_DRAG = 0.99775;
+const HIGH_SPEED_DRAG = 0.9969;
+const ROLL_SYNC_RATE = 0.24;
+const ROLL_KEEP = 0.999;
+const SPIN_DECAY = 0.9885;
+const SPIN_CURVE_FACTOR = 0.00135;
+const BACKSPIN_DRAG_FACTOR = 0.013;
+const OVERSPIN_PUSH_FACTOR = 0.009;
+const SHOT_SIDE_SPIN_GAIN = 0.36;
+const SHOT_ROLL_SPIN_GAIN = 0.55;
 
 const POCKETS = [
   { x: 54, y: 42 },
@@ -34,6 +48,8 @@ const POCKETS = [
 interface PhysicsBall extends GameBallSnapshot {
   vx: number;
   vy: number;
+  roll: number;
+  sideSpin: number;
 }
 
 interface ShotOutcome {
@@ -67,6 +83,10 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function clampUnit(value: number) {
+  return clamp(value, -1, 1);
+}
+
 function createBall(number: number, x: number, y: number): PhysicsBall {
   return {
     id: `ball-${number}`,
@@ -76,6 +96,8 @@ function createBall(number: number, x: number, y: number): PhysicsBall {
     pocketed: false,
     vx: 0,
     vy: 0,
+    roll: 0,
+    sideSpin: 0,
   };
 }
 
@@ -84,7 +106,7 @@ function rackBalls(): PhysicsBall[] {
   const apexX = 922;
   const apexY = TABLE_HEIGHT / 2;
   const rowStepX = BALL_DIAMETER * 0.866; // tight triangular packing
-  const spacing = BALL_DIAMETER * 1.0;    // touching, no gaps
+  const spacing = BALL_DIAMETER * 1.0; // touching, no gaps
   const rackRows = [
     [1],
     [9, 2],
@@ -98,7 +120,6 @@ function rackBalls(): PhysicsBall[] {
     const rowBalls = rackRows[row];
     const startY = apexY - ((rowBalls.length - 1) * spacing) / 2;
     rowBalls.forEach((number, index) => {
-      // Micro-jitter (±0.25px) so break scatters naturally instead of perfectly symmetric
       const jx = (Math.random() - 0.5) * 0.5;
       const jy = (Math.random() - 0.5) * 0.5;
       balls.push(createBall(number, rowX + jx, startY + index * spacing + jy));
@@ -128,21 +149,17 @@ function currentFrame(balls: PhysicsBall[]): GameShotFrame {
 function toSnapshot(game: GameRecord, sinceSeq?: number | null): GameSnapshot {
   return {
     ...game,
-    balls: game.balls.map(({ vx: _vx, vy: _vy, ...ball }) => ball),
+    balls: game.balls.map(({ vx: _vx, vy: _vy, roll: _roll, sideSpin: _sideSpin, ...ball }) => ball),
     lastShot: game.lastShot && (!sinceSeq || game.lastShot.seq > sinceSeq) ? game.lastShot : null,
   };
 }
 
 function ballIsMoving(ball: PhysicsBall) {
-  return !ball.pocketed && (Math.abs(ball.vx) > MIN_SPEED || Math.abs(ball.vy) > MIN_SPEED);
-}
-
-function frictionForSpeed(speed: number) {
-  if (speed > 12) return BASE_FRICTION - 0.00035;
-  if (speed > 7) return BASE_FRICTION - 0.00015;
-  if (speed > 3) return BASE_FRICTION;
-  if (speed > 1.2) return BASE_FRICTION + 0.00035;
-  return BASE_FRICTION + 0.0007;
+  return !ball.pocketed && (
+    Math.abs(ball.vx) > MIN_SPEED
+    || Math.abs(ball.vy) > MIN_SPEED
+    || Math.abs(ball.sideSpin) > 0.045
+  );
 }
 
 function nearPocket(x: number, y: number) {
@@ -153,6 +170,29 @@ function nearPocket(x: number, y: number) {
   return false;
 }
 
+function rotateVelocity(ball: PhysicsBall, radians: number) {
+  if (!Number.isFinite(radians) || Math.abs(radians) < 0.000001) return;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const nextVx = ball.vx * cos - ball.vy * sin;
+  const nextVy = ball.vx * sin + ball.vy * cos;
+  ball.vx = nextVx;
+  ball.vy = nextVy;
+}
+
+function applyRailResponse(ball: PhysicsBall, normalX: number, normalY: number) {
+  const tangentX = -normalY;
+  const tangentY = normalX;
+  const normalVelocity = ball.vx * normalX + ball.vy * normalY;
+  const tangentVelocity = ball.vx * tangentX + ball.vy * tangentY;
+  const nextNormal = -normalVelocity * RAIL_RESTITUTION;
+  const nextTangent = tangentVelocity * RAIL_TANGENT_FRICTION + ball.sideSpin * RAIL_SPIN_TO_TANGENT;
+  ball.vx = normalX * nextNormal + tangentX * nextTangent;
+  ball.vy = normalY * nextNormal + tangentY * nextTangent;
+  ball.sideSpin = ball.sideSpin * RAIL_SPIN_KEEP - tangentVelocity * 0.015;
+  ball.roll *= 0.992;
+}
+
 function handleWallCollision(ball: PhysicsBall) {
   const minX = RAIL_MARGIN_X + BALL_RADIUS;
   const maxX = TABLE_WIDTH - RAIL_MARGIN_X - BALL_RADIUS;
@@ -160,30 +200,25 @@ function handleWallCollision(ball: PhysicsBall) {
   const maxY = TABLE_HEIGHT - RAIL_MARGIN_Y - BALL_RADIUS;
   let collided = false;
 
-  // Skip wall collision near pocket mouths so balls can enter
   if (nearPocket(ball.x, ball.y)) return false;
 
   if (ball.x < minX) {
     ball.x = minX;
-    ball.vx *= -CUSHION_RESTITUTION;
-    ball.vy *= CUSHION_TANGENT_KEEP;
+    applyRailResponse(ball, 1, 0);
     collided = true;
   } else if (ball.x > maxX) {
     ball.x = maxX;
-    ball.vx *= -CUSHION_RESTITUTION;
-    ball.vy *= CUSHION_TANGENT_KEEP;
+    applyRailResponse(ball, -1, 0);
     collided = true;
   }
 
   if (ball.y < minY) {
     ball.y = minY;
-    ball.vy *= -CUSHION_RESTITUTION;
-    ball.vx *= CUSHION_TANGENT_KEEP;
+    applyRailResponse(ball, 0, 1);
     collided = true;
   } else if (ball.y > maxY) {
     ball.y = maxY;
-    ball.vy *= -CUSHION_RESTITUTION;
-    ball.vx *= CUSHION_TANGENT_KEEP;
+    applyRailResponse(ball, 0, -1);
     collided = true;
   }
 
@@ -198,17 +233,17 @@ function handlePocket(ball: PhysicsBall): number | null {
     const dy = ball.y - pocket.y;
     const dist = Math.hypot(dx, dy);
 
-    // Ball falls in pocket
     if (dist <= POCKET_RADIUS - 2) {
       ball.pocketed = true;
       ball.vx = 0;
       ball.vy = 0;
+      ball.roll = 0;
+      ball.sideSpin = 0;
       ball.x = pocket.x;
       ball.y = pocket.y;
       return index + 1;
     }
 
-    // Pocket funnel effect — balls near mouth get pulled toward center
     const funnelRadius = POCKET_RADIUS + 12;
     if (dist < funnelRadius && dist > POCKET_RADIUS - 4) {
       const speed = Math.hypot(ball.vx, ball.vy);
@@ -222,6 +257,57 @@ function handlePocket(ball: PhysicsBall): number | null {
     }
   }
   return null;
+}
+
+function updateBallMotion(ball: PhysicsBall) {
+  if (ball.pocketed) return;
+  const speed = Math.hypot(ball.vx, ball.vy);
+  if (speed <= 0.000001) {
+    ball.vx = 0;
+    ball.vy = 0;
+    ball.sideSpin *= 0.94;
+    ball.roll *= 0.94;
+    if (Math.abs(ball.sideSpin) < 0.025) ball.sideSpin = 0;
+    if (Math.abs(ball.roll) < 0.025) ball.roll = 0;
+    return;
+  }
+
+  const slidingFactor = clamp(Math.abs(speed - ball.roll) / Math.max(speed, 0.001), 0, 1);
+  let drag = ROLLING_DRAG + (SLIDING_DRAG - ROLLING_DRAG) * slidingFactor;
+  if (speed > 9) drag = Math.min(drag, HIGH_SPEED_DRAG);
+  if (speed < 0.7) drag = Math.max(drag, ROLLING_DRAG + 0.0002);
+  ball.vx *= drag;
+  ball.vy *= drag;
+
+  const postSpeed = Math.hypot(ball.vx, ball.vy);
+  const dirX = postSpeed > 0.0001 ? ball.vx / postSpeed : 0;
+  const dirY = postSpeed > 0.0001 ? ball.vy / postSpeed : 0;
+
+  ball.roll += (postSpeed - ball.roll) * ROLL_SYNC_RATE;
+  if (ball.roll < -0.04 && postSpeed > 0.12) {
+    const slow = Math.max(-0.065, ball.roll * BACKSPIN_DRAG_FACTOR);
+    ball.vx += dirX * slow;
+    ball.vy += dirY * slow;
+  } else if (ball.roll > postSpeed + 0.05 && postSpeed > 0.08) {
+    const push = Math.min(0.08, (ball.roll - postSpeed) * OVERSPIN_PUSH_FACTOR);
+    ball.vx += dirX * push;
+    ball.vy += dirY * push;
+  }
+
+  if (Math.abs(ball.sideSpin) > 0.001 && postSpeed > 0.18) {
+    rotateVelocity(ball, ball.sideSpin * SPIN_CURVE_FACTOR);
+  }
+
+  ball.sideSpin *= SPIN_DECAY;
+  ball.roll *= ROLL_KEEP;
+
+  if (Math.hypot(ball.vx, ball.vy) < MIN_SPEED) {
+    ball.vx = 0;
+    ball.vy = 0;
+    ball.roll *= 0.9;
+    if (Math.abs(ball.sideSpin) < 0.035) ball.sideSpin = 0;
+    if (Math.abs(ball.roll) < 0.035) ball.roll = 0;
+  }
 }
 
 function resolveCollision(a: PhysicsBall, b: PhysicsBall) {
@@ -239,24 +325,28 @@ function resolveCollision(a: PhysicsBall, b: PhysicsBall) {
   b.x += nx * overlap * 0.5;
   b.y += ny * overlap * 0.5;
 
-  const relativeVelocity = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
-  if (relativeVelocity > 0) return true;
+  const relativeNormal = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+  if (relativeNormal > 0) return true;
 
-  const impulse = -((1 + BALL_RESTITUTION) * relativeVelocity) / 2;
-  a.vx -= impulse * nx;
-  a.vy -= impulse * ny;
-  b.vx += impulse * nx;
-  b.vy += impulse * ny;
-
+  const normalImpulse = -((1 + BALL_BALL_RESTITUTION) * relativeNormal) / 2;
+  a.vx -= normalImpulse * nx;
+  a.vy -= normalImpulse * ny;
+  b.vx += normalImpulse * nx;
+  b.vy += normalImpulse * ny;
 
   const tangentX = -ny;
   const tangentY = nx;
-  const relTan = (b.vx - a.vx) * tangentX + (b.vy - a.vy) * tangentY;
-  const tanImpulse = relTan * BALL_TANGENT_TRANSFER;
-  a.vx += tanImpulse * tangentX;
-  a.vy += tanImpulse * tangentY;
-  b.vx -= tanImpulse * tangentX;
-  b.vy -= tanImpulse * tangentY;
+  const relativeTangent = (b.vx - a.vx) * tangentX + (b.vy - a.vy) * tangentY + (b.sideSpin - a.sideSpin) * 0.18;
+  const maxTangentImpulse = Math.abs(normalImpulse) * BALL_TANGENT_FRICTION;
+  const tangentImpulse = clamp(-relativeTangent * 0.5, -maxTangentImpulse, maxTangentImpulse);
+  a.vx -= tangentImpulse * tangentX;
+  a.vy -= tangentImpulse * tangentY;
+  b.vx += tangentImpulse * tangentX;
+  b.vy += tangentImpulse * tangentY;
+  a.sideSpin -= tangentImpulse * BALL_SPIN_TRANSFER;
+  b.sideSpin += tangentImpulse * BALL_SPIN_TRANSFER;
+  a.roll += (Math.hypot(a.vx, a.vy) - a.roll) * 0.28;
+  b.roll += (Math.hypot(b.vx, b.vy) - b.roll) * 0.28;
   return true;
 }
 
@@ -349,6 +439,8 @@ function simulateShot(
   cueX?: number | null,
   cueY?: number | null,
   calledPocket?: number | null,
+  spinX = 0,
+  spinY = 0,
 ): ShotOutcome {
   const safeAngle = Number.isFinite(angle) ? angle : 0;
   const balls = cloneBalls(game.balls);
@@ -368,19 +460,26 @@ function simulateShot(
     cueBall.y = position.y;
     cueBall.vx = 0;
     cueBall.vy = 0;
+    cueBall.roll = 0;
+    cueBall.sideSpin = 0;
   } else if (cueBall.pocketed) {
     cueBall.pocketed = false;
     cueBall.x = DEFAULT_CUE_X;
     cueBall.y = DEFAULT_CUE_Y;
     cueBall.vx = 0;
     cueBall.vy = 0;
+    cueBall.roll = 0;
+    cueBall.sideSpin = 0;
   }
 
-  const shotPower = clamp(Number.isFinite(power) ? power : 0.58, 0.02, 1);
-  const shapedPower = Math.pow(shotPower, 1.18);
-  const shotSpeed = 2.15 + shapedPower * MAX_SHOT_SPEED;
+  const shotPower = clamp(Number.isFinite(power) ? power : 0.58, 0.018, 1);
+  const safeSpinX = clampUnit(Number.isFinite(spinX) ? spinX : 0);
+  const safeSpinY = clampUnit(Number.isFinite(spinY) ? spinY : 0);
+  const shotSpeed = MIN_SHOT_SPEED + shotPower * MAX_SHOT_SPEED;
   cueBall.vx = Math.cos(safeAngle) * shotSpeed;
   cueBall.vy = Math.sin(safeAngle) * shotSpeed;
+  cueBall.roll = shotSpeed * (0.5 + safeSpinY * SHOT_ROLL_SPIN_GAIN);
+  cueBall.sideSpin = shotSpeed * safeSpinX * SHOT_SIDE_SPIN_GAIN;
 
   const frames: GameShotFrame[] = [currentFrame(balls)];
   const pocketedEvents: PocketEvent[] = [];
@@ -428,12 +527,7 @@ function simulateShot(
 
     for (const ball of balls) {
       if (ball.pocketed) continue;
-      const speed = Math.hypot(ball.vx, ball.vy);
-      const drag = frictionForSpeed(speed);
-      ball.vx *= drag;
-      ball.vy *= drag;
-      if (Math.abs(ball.vx) < MIN_SPEED) ball.vx = 0;
-      if (Math.abs(ball.vy) < MIN_SPEED) ball.vy = 0;
+      updateBallMotion(ball);
     }
 
     if (step % FRAME_SAMPLE_EVERY === 0) frames.push(currentFrame(balls));
@@ -465,6 +559,8 @@ function simulateShot(
     cueBall.y = scratchPlacement.y;
     cueBall.vx = 0;
     cueBall.vy = 0;
+    cueBall.roll = 0;
+    cueBall.sideSpin = 0;
   }
 
   let winnerUserId: string | null = null;
@@ -584,10 +680,12 @@ export function takeShot(
   cueX?: number | null,
   cueY?: number | null,
   calledPocket?: number | null,
+  spinX = 0,
+  spinY = 0,
 ): GameSnapshot | null {
   const game = games.get(roomId);
   if (!game) return null;
   if (game.turnUserId !== userId || game.status === "finished") return toSnapshot(game);
-  simulateShot(game, userId, angle, power, cueX, cueY, calledPocket);
+  simulateShot(game, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY);
   return toSnapshot(game);
 }

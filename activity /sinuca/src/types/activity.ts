@@ -87,6 +87,8 @@ export interface AimStateSnapshot {
   angle: number;
   cueX: number | null;
   cueY: number | null;
+  power: number;
+  seq: number;
   mode: AimPointerMode;
   updatedAt: number;
 }

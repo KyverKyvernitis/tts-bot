@@ -921,7 +921,7 @@ export default function App() {
     return null;
   };
 
-  const forceShootGameOverHttpGet = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null }, reason: string) => {
+  const forceShootGameOverHttpGet = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }, reason: string) => {
     const attempts: string[] = [];
     for (const baseUrl of resolveApiCandidates("/games/shoot")) {
       try {
@@ -933,6 +933,8 @@ export default function App() {
         if (shot.cueX !== null && shot.cueX !== undefined) url.searchParams.set("cueX", String(shot.cueX));
         if (shot.cueY !== null && shot.cueY !== undefined) url.searchParams.set("cueY", String(shot.cueY));
         if (shot.calledPocket !== null && shot.calledPocket !== undefined) url.searchParams.set("calledPocket", String(shot.calledPocket));
+        if (shot.spinX !== null && shot.spinX !== undefined) url.searchParams.set("spinX", String(shot.spinX));
+        if (shot.spinY !== null && shot.spinY !== undefined) url.searchParams.set("spinY", String(shot.spinY));
         console.log("[sinuca-http-shoot-get]", JSON.stringify({ reason, url: url.toString() }));
         const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 4200);
         const raw = await response.text();
@@ -949,7 +951,7 @@ export default function App() {
     return null;
   };
 
-  const shootGameOverHttp = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null }, reason: string) => {
+  const shootGameOverHttp = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }, reason: string) => {
     const previousSeq = game?.roomId === roomId ? game.shotSequence : 0;
     const payload = {
       roomId,
@@ -959,6 +961,8 @@ export default function App() {
       cueX: shot.cueX ?? null,
       cueY: shot.cueY ?? null,
       calledPocket: shot.calledPocket ?? null,
+      spinX: shot.spinX ?? 0,
+      spinY: shot.spinY ?? 0,
     };
 
     console.log("[sinuca-shoot-dispatch]", JSON.stringify({ reason, previousSeq, payload }));
@@ -1215,7 +1219,12 @@ export default function App() {
           return;
         }
         if (payload.type === "aim_state") {
-          setRemoteAim(payload.payload);
+          setRemoteAim((current) => {
+            if (current && current.roomId === payload.payload.roomId && current.userId === payload.payload.userId && payload.payload.seq < current.seq) {
+              return current;
+            }
+            return payload.payload;
+          });
           return;
         }
         if (payload.type === "room_list") {
@@ -1912,7 +1921,7 @@ export default function App() {
             shootBusy={gameShootBusy}
             exitBusy={roomExitBusy}
             opponentAim={remoteAim && remoteAim.roomId === room.roomId ? remoteAim : null}
-            onAimStateChange={(aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; mode: AimPointerMode }) => {
+            onAimStateChange={(aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => {
               if (!room) return;
               sendMessage({
                 type: "sync_aim",
@@ -1923,12 +1932,14 @@ export default function App() {
                   angle: aim.angle,
                   cueX: aim.cueX ?? null,
                   cueY: aim.cueY ?? null,
+                  power: aim.power ?? 0,
+                  seq: aim.seq ?? 0,
                   mode: aim.mode,
                 },
               }, { silent: true });
             }}
             onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room_game" : "http_primary_leave_room_game"); }}
-            onShoot={async (shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null }) => {
+            onShoot={async (shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }) => {
               if (!room) return;
               setGameShootBusy(true);
               setErrorMessage(null);

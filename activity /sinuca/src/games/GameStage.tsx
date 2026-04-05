@@ -108,7 +108,7 @@ const OPENING_RACK = [
 const POCKET_ANIM_DURATION = 320;
 const POWER_MIN = 0.025;
 const POWER_RETURN_MS = 180;
-const POWER_CURVE_EXPONENT = 1.72;
+const POWER_CURVE_EXPONENT = 2.18;
 const AIM_SYNC_INTERVAL_MS = 22;
 const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
@@ -119,6 +119,8 @@ type ShotInput = {
   cueX?: number | null;
   cueY?: number | null;
   calledPocket?: number | null;
+  spinX?: number | null;
+  spinY?: number | null;
 };
 
 type Props = {
@@ -129,7 +131,7 @@ type Props = {
   exitBusy: boolean;
   opponentAim: AimStateSnapshot | null;
   onShoot: (shot: ShotInput) => Promise<void>;
-  onAimStateChange?: (aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; mode: AimPointerMode }) => void;
+  onAimStateChange?: (aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => void;
   onExit: () => void;
 };
 
@@ -889,6 +891,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const pendingDisplayedGroupsRef = useRef<{ hostGroup: BallGroup | null; guestGroup: BallGroup | null } | null>(null);
   const lastAimEmitAtRef = useRef(0);
   const lastAimPayloadKeyRef = useRef<string>("");
+  const aimSeqRef = useRef(0);
+  const remoteAimVisualRef = useRef<{ x: number; y: number; angle: number; pull: number; seq: number; initialized: boolean }>({
+    x: 0,
+    y: 0,
+    angle: 0,
+    pull: 0,
+    seq: 0,
+    initialized: false,
+  });
 
   const renderStateRef = useRef({
     renderBalls: [] as GameBallSnapshot[],
@@ -1093,7 +1104,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const displayedPowerVisual = isCueBallPlacementActive ? 0.08 : powerVisual;
   const browserSupportsPointerEvents = typeof window !== "undefined" && "PointerEvent" in window;
 
-  const emitAimState = (next: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; mode: AimPointerMode }, force = false) => {
+  const emitAimState = (next: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; mode: AimPointerMode }, force = false) => {
     const handler = onAimStateChangeRef.current;
     if (!handler) return;
     const payload = {
@@ -1101,13 +1112,16 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       angle: Number.isFinite(next.angle) ? next.angle : 0,
       cueX: next.cueX ?? null,
       cueY: next.cueY ?? null,
+      power: clamp(next.power ?? powerRef.current ?? POWER_MIN, 0, 1),
+      seq: force ? aimSeqRef.current + 1 : aimSeqRef.current + 1,
       mode: next.mode,
     };
-    const key = `${payload.visible ? 1 : 0}:${payload.mode}:${payload.angle.toFixed(3)}:${payload.cueX === null ? "n" : payload.cueX.toFixed(1)}:${payload.cueY === null ? "n" : payload.cueY.toFixed(1)}`;
+    const key = `${payload.visible ? 1 : 0}:${payload.mode}:${payload.angle.toFixed(3)}:${payload.cueX === null ? "n" : payload.cueX.toFixed(1)}:${payload.cueY === null ? "n" : payload.cueY.toFixed(1)}:${payload.power.toFixed(3)}`;
     const now = performance.now();
     const minInterval = payload.mode === "place" ? PLACE_SYNC_INTERVAL_MS : AIM_SYNC_INTERVAL_MS;
     if (!force && key === lastAimPayloadKeyRef.current && now - lastAimEmitAtRef.current < minInterval) return;
     if (!force && payload.visible && now - lastAimEmitAtRef.current < minInterval) return;
+    aimSeqRef.current = payload.seq;
     lastAimPayloadKeyRef.current = key;
     lastAimEmitAtRef.current = now;
     handler(payload);
@@ -1128,8 +1142,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const mapPowerFromClientY = (clientY: number, rectTop: number, rectBottom: number, rectHeight: number) => {
     const clampedY = clamp(clientY, rectTop, rectBottom);
     const normalized = clamp((clampedY - rectTop) / Math.max(1, rectHeight), 0, 1);
-    const curved = Math.pow(normalized, POWER_CURVE_EXPONENT);
-    return clamp(POWER_MIN + curved * (1 - POWER_MIN), POWER_MIN, 1);
+    const lowBand = Math.pow(Math.min(normalized, 0.82) / 0.82, POWER_CURVE_EXPONENT) * 0.84;
+    const highBand = normalized <= 0.82
+      ? lowBand
+      : 0.84 + Math.pow((normalized - 0.82) / 0.18, 1.35) * 0.16;
+    return clamp(POWER_MIN + highBand * (1 - POWER_MIN), POWER_MIN, 1);
   };
 
   const pointToLocal = (clientX: number, clientY: number) => {
@@ -1199,7 +1216,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const next = mapPowerFromClientY(clientY, gesture.rectTop, gesture.rectBottom, gesture.rectHeight);
     powerRef.current = next;
     setPower(next);
-    emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "power" });
+    emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, power: next, mode: "power" });
   };
 
   const handleTablePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1283,6 +1300,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       cueX: state.isBallInHand ? liveCueBall.x : null,
       cueY: state.isBallInHand ? liveCueBall.y : null,
       calledPocket: state.needEightCall ? state.selectedPocket : null,
+      spinX: 0,
+      spinY: 0,
     };
 
     if (state.isBallInHand) {
@@ -1311,7 +1330,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     powerReleaseGuardRef.current = false;
     setPointerModeSafe("power");
     updatePowerFromClientY(clientY);
-    emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "power" }, true);
+    emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, power: powerRef.current, mode: "power" }, true);
     return true;
   };
 
@@ -1568,15 +1587,59 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         && game.status !== "finished"
       );
       const remoteCueSource = remoteCanRender ? drawCueBall : null;
-      const remoteCueBall = remoteCueSource && remoteAimState
-        ? {
-            id: remoteCueSource.id,
-            number: 0,
-            x: remoteAimState.cueX !== null ? remoteAimState.cueX : remoteCueSource.x,
-            y: remoteAimState.cueY !== null ? remoteAimState.cueY : remoteCueSource.y,
-            pocketed: false,
-          }
-        : null;
+      const remoteVisual = remoteAimVisualRef.current;
+      let remoteCueBall: GameBallSnapshot | null = null;
+      let remoteAimAngle = 0;
+      let remotePullRatio = 0.05;
+
+      if (remoteCanRender && remoteAimState && remoteCueSource) {
+        const targetX = remoteAimState.cueX ?? remoteCueSource.x;
+        const targetY = remoteAimState.cueY ?? remoteCueSource.y;
+        const targetAngle = remoteAimState.angle;
+        const targetPull = clamp(remoteAimState.power ?? 0, 0, 1);
+        const hardSnap = !remoteVisual.initialized
+          || remoteAimState.seq < remoteVisual.seq
+          || Math.abs(targetX - remoteVisual.x) > 180
+          || Math.abs(targetY - remoteVisual.y) > 180;
+
+        if (hardSnap) {
+          remoteVisual.x = targetX;
+          remoteVisual.y = targetY;
+          remoteVisual.angle = targetAngle;
+          remoteVisual.pull = targetPull;
+          remoteVisual.seq = remoteAimState.seq;
+          remoteVisual.initialized = true;
+        } else {
+          const posLerp = remoteMode === "place" ? 0.62 : 0.38;
+          const angleLerp = remoteMode === "aim" ? 0.34 : remoteMode === "power" ? 0.28 : 0.18;
+          const pullLerp = remoteMode === "power" ? 0.46 : 0.24;
+          remoteVisual.x = lerp(remoteVisual.x, targetX, posLerp);
+          remoteVisual.y = lerp(remoteVisual.y, targetY, posLerp);
+          remoteVisual.angle = lerpAngle(remoteVisual.angle, targetAngle, angleLerp);
+          remoteVisual.pull = lerp(remoteVisual.pull, targetPull, pullLerp);
+          remoteVisual.seq = Math.max(remoteVisual.seq, remoteAimState.seq);
+          remoteVisual.initialized = true;
+        }
+
+        remoteCueBall = {
+          id: remoteCueSource.id,
+          number: 0,
+          x: remoteVisual.x,
+          y: remoteVisual.y,
+          pocketed: false,
+        };
+        remoteAimAngle = remoteVisual.angle;
+        remotePullRatio = remoteMode === "power"
+          ? clamp(0.15 + remoteVisual.pull * 0.76, 0.15, 0.94)
+          : remoteMode === "aim"
+            ? 0.08
+            : remoteMode === "place"
+              ? 0.07
+              : 0.05;
+      } else {
+        remoteVisual.initialized = false;
+      }
+
       const remoteCueMoved = Boolean(
         remoteCueBall
         && drawCueBall
@@ -1593,7 +1656,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         && remoteCueBall
         && (remoteMode === "aim" || remoteMode === "power" || (remoteMode === "place" && game.ballInHandUserId === game.turnUserId))
       );
-      const remoteAimAngle = remoteCueBall && remoteAimState ? remoteAimState.angle : 0;
 
       updateBallSpinCache(ballSpinRef.current, drawBalls, now);
       const preview = drawCueBall && !animating && !(state.isBallInHand && state.pointerMode === "place") ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
@@ -1620,8 +1682,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       } else if (state.pointerMode === "aim") {
         pullRatio = 0.06;
       }
-
-      const remotePullRatio = remoteMode === "power" ? 0.42 : remoteMode === "aim" ? 0.11 : remoteMode === "place" ? 0.07 : 0.05;
 
       drawPoolTable(
         context,

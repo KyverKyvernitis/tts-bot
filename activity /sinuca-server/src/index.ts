@@ -498,6 +498,8 @@ async function handleShootGameHttp(req: Request, res: Response) {
   const cueX = merged.cueX === undefined ? null : Number(merged.cueX);
   const cueY = merged.cueY === undefined ? null : Number(merged.cueY);
   const calledPocket = merged.calledPocket === undefined ? null : Number(merged.calledPocket);
+  const spinX = merged.spinX === undefined ? 0 : Number(merged.spinX);
+  const spinY = merged.spinY === undefined ? 0 : Number(merged.spinY);
   console.log("[sinuca-shoot-http]", JSON.stringify({
     method: req.method,
     roomId,
@@ -507,6 +509,8 @@ async function handleShootGameHttp(req: Request, res: Response) {
     cueX,
     cueY,
     calledPocket,
+    spinX,
+    spinY,
   }));
   if (!roomId || !userId) {
     res.status(400).json({ error: "missing_shot_identifiers" });
@@ -527,7 +531,17 @@ async function handleShootGameHttp(req: Request, res: Response) {
     res.status(409).json({ error: "not_your_turn", game: before });
     return;
   }
-  const game = takeShot(roomId, userId, angle, power, cueX, cueY, Number.isFinite(calledPocket) ? calledPocket : null);
+  const game = takeShot(
+    roomId,
+    userId,
+    angle,
+    power,
+    cueX,
+    cueY,
+    Number.isFinite(calledPocket) ? calledPocket : null,
+    Number.isFinite(spinX) ? spinX : 0,
+    Number.isFinite(spinY) ? spinY : 0,
+  );
   if (!game) {
     res.status(404).json({ error: "game_not_found" });
     return;
@@ -1166,6 +1180,8 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         angle: Number.isFinite(Number(merged.angle)) ? Number(merged.angle) : 0,
         cueX: merged.cueX === undefined || merged.cueX === null || !Number.isFinite(Number(merged.cueX)) ? null : Number(merged.cueX),
         cueY: merged.cueY === undefined || merged.cueY === null || !Number.isFinite(Number(merged.cueY)) ? null : Number(merged.cueY),
+        power: merged.power === undefined || merged.power === null || !Number.isFinite(Number(merged.power)) ? 0 : Number(merged.power),
+        seq: merged.seq === undefined || merged.seq === null || !Number.isFinite(Number(merged.seq)) ? 0 : Number(merged.seq),
         mode: normalizeAimMode(merged.mode),
         updatedAt: Date.now(),
       };
@@ -1184,6 +1200,8 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         cueX: merged.cueX === undefined ? null : Number(merged.cueX),
         cueY: merged.cueY === undefined ? null : Number(merged.cueY),
         calledPocket: merged.calledPocket === undefined ? null : Number(merged.calledPocket),
+        spinX: merged.spinX === undefined ? 0 : Number(merged.spinX),
+        spinY: merged.spinY === undefined ? 0 : Number(merged.spinY),
       }));
       if (!merged.userId) {
         send(ws, { type: "error", message: "jogador da activity não identificado" });
@@ -1198,7 +1216,17 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "não é sua vez" });
         return;
       }
-      const applied = takeShot(merged.roomId, merged.userId, Number(merged.angle ?? 0), Number(merged.power ?? 0), merged.cueX === undefined ? null : Number(merged.cueX), merged.cueY === undefined ? null : Number(merged.cueY), merged.calledPocket === undefined ? null : Number(merged.calledPocket));
+      const applied = takeShot(
+        merged.roomId,
+        merged.userId,
+        Number(merged.angle ?? 0),
+        Number(merged.power ?? 0),
+        merged.cueX === undefined ? null : Number(merged.cueX),
+        merged.cueY === undefined ? null : Number(merged.cueY),
+        merged.calledPocket === undefined ? null : Number(merged.calledPocket),
+        merged.spinX === undefined ? 0 : Number(merged.spinX),
+        merged.spinY === undefined ? 0 : Number(merged.spinY),
+      );
       console.log("[sinuca-shoot-ws-applied]", JSON.stringify({
         roomId: merged.roomId,
         shotSequence: applied?.shotSequence ?? null,

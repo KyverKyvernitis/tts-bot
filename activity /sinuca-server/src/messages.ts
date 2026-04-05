@@ -53,6 +53,8 @@ export interface ShootPayload {
   cueX?: number | null;
   cueY?: number | null;
   calledPocket?: number | null;
+  spinX?: number | null;
+  spinY?: number | null;
 }
 
 export interface AimStatePayload {
@@ -62,6 +64,8 @@ export interface AimStatePayload {
   angle?: number | null;
   cueX?: number | null;
   cueY?: number | null;
+  power?: number | null;
+  seq?: number | null;
   mode?: AimPointerMode | null;
 }
 
@@ -72,6 +76,8 @@ export interface AimStateSnapshot {
   angle: number;
   cueX: number | null;
   cueY: number | null;
+  power: number;
+  seq: number;
   mode: AimPointerMode;
   updatedAt: number;
 }
