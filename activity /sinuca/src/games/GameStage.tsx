@@ -707,11 +707,16 @@ function drawRemoteAimOverlay(
   const showPlacementRing = mode === "place";
   const showGuide = mode !== "place";
 
+  ctx.save();
+  ctx.globalAlpha = mode === "place" ? 0.78 : 0.5;
+  drawBall(ctx, cueBall, 1);
+  ctx.restore();
+
   if (showGuide) {
     ctx.save();
-    ctx.globalAlpha = mode === "power" ? 0.62 : 0.56;
-    ctx.strokeStyle = "rgba(244, 248, 255, 0.92)";
-    ctx.lineWidth = mode === "power" ? 2.6 : 2.25;
+    ctx.globalAlpha = mode === "power" ? 0.68 : 0.62;
+    ctx.strokeStyle = "rgba(244, 248, 255, 0.96)";
+    ctx.lineWidth = mode === "power" ? 2.8 : 2.35;
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(cueBall.x, cueBall.y);
@@ -722,18 +727,18 @@ function drawRemoteAimOverlay(
 
   if (showPlacementRing) {
     ctx.save();
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = 0.82;
     ctx.setLineDash([7, 5]);
     ctx.beginPath();
     ctx.arc(cueBall.x, cueBall.y, BALL_VISUAL_RADIUS + 8, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.82)";
-    ctx.lineWidth = 2.1;
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+    ctx.lineWidth = 2.2;
     ctx.stroke();
     ctx.restore();
   }
 
   ctx.save();
-  ctx.globalAlpha = mode === "power" ? 0.58 : mode === "aim" ? 0.5 : 0.42;
+  ctx.globalAlpha = mode === "power" ? 0.64 : mode === "aim" ? 0.56 : 0.48;
   drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
   ctx.restore();
 }
@@ -791,10 +796,7 @@ function drawPoolTable(
     }
   }
 
-  // STEP 1: Remote aim overlay first, then local aim line + cue BEFORE balls.
-  if (remoteOverlay) {
-    drawRemoteAimOverlay(ctx, cueSprite, remoteOverlay.cueBall, remoteOverlay.aimAngle, remoteOverlay.preview, remoteOverlay.pullRatio, remoteOverlay.mode);
-  }
+  // STEP 1: Local aim line + cue BEFORE balls.
   if (cueBall && showGuide && preview) {
     drawAimLine(ctx, cueBall, preview);
     drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
@@ -806,7 +808,12 @@ function drawPoolTable(
     drawBall(ctx, ball, 1, ballSpinCache.get(ball.id));
   }
 
-  // STEP 3: Ghost ball circle AFTER balls (so it's visible on top)
+  // STEP 3: Remote overlay AFTER balls so the transparent cue/mira stay visible.
+  if (remoteOverlay) {
+    drawRemoteAimOverlay(ctx, cueSprite, remoteOverlay.cueBall, remoteOverlay.aimAngle, remoteOverlay.preview, remoteOverlay.pullRatio, remoteOverlay.mode);
+  }
+
+  // STEP 4: Ghost ball circle AFTER balls (so it's visible on top)
   if (cueBall && showGuide && preview) {
     drawGhostBall(ctx, preview);
   }
@@ -1575,16 +1582,27 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       pocketAnimationsRef.current = pocketAnimationsRef.current.filter((anim) => now - anim.startedAt < POCKET_ANIM_DURATION);
 
       const remoteAimState = opponentAim && opponentAim.userId !== currentUserId ? opponentAim : null;
-      const remoteAimFresh = Boolean(remoteAimState && now - remoteAimState.updatedAt < REMOTE_AIM_STALE_MS);
+      const remoteAimFresh = Boolean(remoteAimState && Date.now() - remoteAimState.updatedAt < REMOTE_AIM_STALE_MS);
       const remoteMode: AimPointerMode = remoteAimState?.mode ?? "idle";
       const remoteCanRender = Boolean(
         remoteAimFresh
         && remoteAimState
+        && remoteAimState.visible
+        && remoteMode !== "idle"
         && !animating
-        && drawCueBall
         && game.status !== "finished"
       );
-      const remoteCueSource = remoteCanRender ? drawCueBall : null;
+      const fallbackRemoteCueX = remoteAimState?.cueX ?? drawCueBall?.x ?? cueBall?.x ?? DEFAULT_CUE_X;
+      const fallbackRemoteCueY = remoteAimState?.cueY ?? drawCueBall?.y ?? cueBall?.y ?? DEFAULT_CUE_Y;
+      const remoteCueSource = remoteCanRender
+        ? (drawCueBall ?? cueBall ?? {
+            id: "ball-0-remote-overlay",
+            number: 0,
+            x: fallbackRemoteCueX,
+            y: fallbackRemoteCueY,
+            pocketed: false,
+          })
+        : null;
       const remoteVisual = remoteAimVisualRef.current;
       let remoteCueBall: GameBallSnapshot | null = null;
       let remoteAimAngle = 0;
@@ -1608,9 +1626,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           remoteVisual.seq = remoteAimState.seq;
           remoteVisual.initialized = true;
         } else {
-          const posLerp = remoteMode === "place" ? 0.62 : 0.38;
-          const angleLerp = remoteMode === "aim" ? 0.34 : remoteMode === "power" ? 0.28 : 0.18;
-          const pullLerp = remoteMode === "power" ? 0.46 : 0.24;
+          const posLerp = remoteMode === "place" ? 0.72 : 0.42;
+          const angleLerp = remoteMode === "aim" ? 0.36 : remoteMode === "power" ? 0.3 : 0.2;
+          const pullLerp = remoteMode === "power" ? 0.5 : 0.26;
           remoteVisual.x = lerp(remoteVisual.x, targetX, posLerp);
           remoteVisual.y = lerp(remoteVisual.y, targetY, posLerp);
           remoteVisual.angle = lerpAngle(remoteVisual.angle, targetAngle, angleLerp);
@@ -1628,13 +1646,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         };
         remoteAimAngle = remoteVisual.angle;
         remotePullRatio = remoteMode === "power"
-          ? clamp(0.18 + remoteVisual.pull * 0.8, 0.18, 0.98)
+          ? clamp(0.2 + remoteVisual.pull * 0.8, 0.2, 0.98)
           : remoteMode === "aim"
-            ? 0.08
+            ? 0.1
             : remoteMode === "place"
-              ? 0.07
+              ? 0.08
               : 0.05;
-      } else {
+      } else if (!remoteAimFresh || remoteMode === "idle") {
         remoteVisual.initialized = false;
       }
 
@@ -1644,7 +1662,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         && (Math.abs(remoteCueBall.x - drawCueBall.x) > 0.15 || Math.abs(remoteCueBall.y - drawCueBall.y) > 0.15)
       );
       if (remoteCueBall && (game.ballInHandUserId === remoteAimState?.userId || remoteMode === "place" || remoteCueMoved)) {
-        drawBalls = drawBalls.map((ball) => ball.number === 0 ? { ...ball, x: remoteCueBall.x, y: remoteCueBall.y, pocketed: false } : ball);
+        let replacedCue = false;
+        drawBalls = drawBalls.map((ball) => {
+          if (ball.number !== 0) return ball;
+          replacedCue = true;
+          return { ...ball, x: remoteCueBall!.x, y: remoteCueBall!.y, pocketed: false };
+        });
+        if (!replacedCue) drawBalls = [remoteCueBall, ...drawBalls];
         drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? remoteCueBall;
       }
 

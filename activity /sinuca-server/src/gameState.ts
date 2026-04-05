@@ -16,7 +16,9 @@ const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
 const MIN_SHOT_SPEED = 0.16;
 const MAX_SHOT_SPEED = 12.45;
-const MIN_SPEED = 0.028;
+const SOFT_STOP_SPEED = 0.02;
+const HARD_STOP_SPEED = 0.0075;
+const MIN_SPEED = SOFT_STOP_SPEED;
 const MAX_STEPS = 1500;
 const FRAME_SAMPLE_EVERY = 2;
 const MAX_SUBSTEPS = 20;
@@ -34,6 +36,8 @@ const ROLL_SYNC_RATE = 0.24;
 const ROLL_KEEP = 0.999;
 const SPIN_DECAY = 0.9885;
 const SPIN_CURVE_FACTOR = 0.00135;
+const SPIN_STOP_SPEED = 0.02;
+const ROLL_STOP_SPEED = 0.028;
 const BACKSPIN_DRAG_FACTOR = 0.013;
 const OVERSPIN_PUSH_FACTOR = 0.009;
 const SHOT_SIDE_SPIN_GAIN = 0.36;
@@ -158,11 +162,9 @@ function toSnapshot(game: GameRecord, sinceSeq?: number | null): GameSnapshot {
 }
 
 function ballIsMoving(ball: PhysicsBall) {
-  return !ball.pocketed && (
-    Math.abs(ball.vx) > MIN_SPEED
-    || Math.abs(ball.vy) > MIN_SPEED
-    || Math.abs(ball.sideSpin) > 0.045
-  );
+  if (ball.pocketed) return false;
+  const speed = Math.hypot(ball.vx, ball.vy);
+  return speed > SOFT_STOP_SPEED || Math.abs(ball.sideSpin) > SPIN_STOP_SPEED || Math.abs(ball.roll) > ROLL_STOP_SPEED;
 }
 
 function nearPocket(x: number, y: number) {
@@ -319,12 +321,21 @@ function updateBallMotion(ball: PhysicsBall) {
   ball.sideSpin *= SPIN_DECAY;
   ball.roll *= ROLL_KEEP;
 
-  if (Math.hypot(ball.vx, ball.vy) < MIN_SPEED) {
+  const settledSpeed = Math.hypot(ball.vx, ball.vy);
+  if (settledSpeed < SOFT_STOP_SPEED) {
+    const settleFactor = clamp(settledSpeed / Math.max(SOFT_STOP_SPEED, 0.0001), 0, 1);
+    const keep = 0.72 + settleFactor * 0.2;
+    ball.vx *= keep;
+    ball.vy *= keep;
+    ball.sideSpin *= 0.95;
+    ball.roll *= 0.94;
+  }
+
+  if (settledSpeed < HARD_STOP_SPEED && Math.abs(ball.sideSpin) < SPIN_STOP_SPEED && Math.abs(ball.roll) < ROLL_STOP_SPEED) {
     ball.vx = 0;
     ball.vy = 0;
-    ball.roll *= 0.9;
-    if (Math.abs(ball.sideSpin) < 0.035) ball.sideSpin = 0;
-    if (Math.abs(ball.roll) < 0.035) ball.roll = 0;
+    ball.sideSpin = 0;
+    ball.roll = 0;
   }
 }
 
@@ -548,8 +559,16 @@ function simulateShot(
       updateBallMotion(ball);
     }
 
-    if (step % FRAME_SAMPLE_EVERY === 0) frames.push(currentFrame(balls));
-    if (balls.every((ball) => !ballIsMoving(ball))) break;
+    const sampleEvery = maxVelocity < 0.7 ? 1 : FRAME_SAMPLE_EVERY;
+    if (step % sampleEvery === 0) frames.push(currentFrame(balls));
+    if (balls.every((ball) => !ballIsMoving(ball))) {
+      const lastFrame = frames[frames.length - 1];
+      const settledFrame = currentFrame(balls);
+      if (!lastFrame || JSON.stringify(lastFrame.balls) !== JSON.stringify(settledFrame.balls)) {
+        frames.push(settledFrame);
+      }
+      break;
+    }
   }
 
   const shooterGroup = currentGroup(game, shooterUserId);
