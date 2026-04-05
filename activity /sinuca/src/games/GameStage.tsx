@@ -109,7 +109,7 @@ const POCKET_ANIM_DURATION = 320;
 const POWER_MIN = 0.06;
 const POWER_RETURN_MS = 180;
 const POWER_CURVE_EXPONENT = 1.18;
-const AIM_SYNC_INTERVAL_MS = 44;
+const AIM_SYNC_INTERVAL_MS = 28;
 
 type ShotInput = {
   angle: number;
@@ -1227,7 +1227,16 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const handleTablePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     aimDragRef.current = null;
-    emitAimState({ visible: false, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "idle" }, true);
+    const previousMode = pointerModeRef.current;
+    const latestCueBall = renderStateRef.current.cueBall;
+    const placedCue = previousMode === "place" ? localCuePlacementRef.current : null;
+    emitAimState({
+      visible: false,
+      angle: aimAngleRef.current,
+      cueX: placedCue?.x ?? latestCueBall?.x ?? cueBall?.x ?? null,
+      cueY: placedCue?.y ?? latestCueBall?.y ?? cueBall?.y ?? null,
+      mode: "idle",
+    }, true);
     setPointerModeSafe("idle");
   };
 
@@ -1546,24 +1555,22 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
       const remoteAimState = opponentAim && opponentAim.userId === game.turnUserId ? opponentAim : null;
       const remoteAimFresh = Boolean(remoteAimState && now - remoteAimState.updatedAt < 1600);
-      const remoteVisible = Boolean(
-        !animating
+      const remoteMode: AimPointerMode = remoteAimState?.mode ?? "idle";
+      const remoteCanRender = Boolean(
+        remoteAimFresh
+        && remoteAimState
+        && !animating
         && drawCueBall
         && game.turnUserId !== currentUserId
         && game.status !== "finished"
-        && (!state.canInteract || remoteAimFresh)
       );
-      const remoteCueSource = remoteVisible ? drawCueBall : null;
-      const remoteMode: AimPointerMode = remoteAimState?.mode ?? "idle";
-      const remoteAimAngle = remoteCueSource
-        ? (remoteAimState ? remoteAimState.angle : estimateCueAngle(remoteCueSource, drawBalls))
-        : 0;
-      const remoteCueBall = remoteCueSource
+      const remoteCueSource = remoteCanRender ? drawCueBall : null;
+      const remoteCueBall = remoteCueSource && remoteAimState
         ? {
             id: remoteCueSource.id,
             number: 0,
-            x: remoteAimState && remoteAimState.cueX !== null ? remoteAimState.cueX : remoteCueSource.x,
-            y: remoteAimState && remoteAimState.cueY !== null ? remoteAimState.cueY : remoteCueSource.y,
+            x: remoteAimState.cueX !== null ? remoteAimState.cueX : remoteCueSource.x,
+            y: remoteAimState.cueY !== null ? remoteAimState.cueY : remoteCueSource.y,
             pocketed: false,
           }
         : null;
@@ -1572,9 +1579,12 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? remoteCueBall;
       }
 
+      const remoteOverlayVisible = Boolean(remoteCanRender && remoteAimState && remoteMode !== "idle" && remoteCueBall);
+      const remoteAimAngle = remoteCueBall && remoteAimState ? remoteAimState.angle : 0;
+
       updateBallSpinCache(ballSpinRef.current, drawBalls, now);
       const preview = drawCueBall && !animating && !(state.isBallInHand && state.pointerMode === "place") ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
-      const remotePreview = remoteVisible && remoteCueBall && !(remoteMode === "place" && game.ballInHandUserId === game.turnUserId)
+      const remotePreview = remoteOverlayVisible && remoteCueBall && !(remoteMode === "place" && game.ballInHandUserId === game.turnUserId)
         ? computeAimPreview(remoteCueBall, drawBalls, remoteAimAngle)
         : null;
 
@@ -1616,7 +1626,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         pocketAnimationsRef.current,
         now,
         ballSpinRef.current,
-        remoteVisible && remoteCueBall ? { cueBall: remoteCueBall, aimAngle: remoteAimAngle, preview: remotePreview, pullRatio: remotePullRatio, mode: remoteMode } : null,
+        remoteOverlayVisible && remoteCueBall ? { cueBall: remoteCueBall, aimAngle: remoteAimAngle, preview: remotePreview, pullRatio: remotePullRatio, mode: remoteMode } : null,
       );
 
       drawLoopRef.current = window.requestAnimationFrame(draw);

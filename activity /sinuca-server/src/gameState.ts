@@ -11,15 +11,15 @@ const RAIL_MARGIN_Y = 50;
 const HEAD_STRING_X = 328;
 const DEFAULT_CUE_X = 248;
 const DEFAULT_CUE_Y = TABLE_HEIGHT / 2;
-const MAX_SHOT_SPEED = 18.5;
+const MAX_SHOT_SPEED = 17.2;
 const MIN_SPEED = 0.04;
-const BASE_FRICTION = 0.99795;
+const BASE_FRICTION = 0.99785;
 const MAX_STEPS = 1500;
 const FRAME_SAMPLE_EVERY = 2;
 const MAX_SUBSTEPS = 18;
-const CUSHION_RESTITUTION = 0.78;
+const CUSHION_RESTITUTION = 0.72;
 const CUSHION_TANGENT_KEEP = 0.992;
-const BALL_RESTITUTION = 0.9;
+const BALL_RESTITUTION = 0.86;
 const BALL_TANGENT_TRANSFER = 0.0055;
 
 const POCKETS = [
@@ -368,8 +368,8 @@ function simulateShot(
     cueBall.vy = 0;
   }
 
-  const shotPower = clamp(Number.isFinite(power) ? power : 0.6, 0.06, 1);
-  const shotSpeed = 3.9 + shotPower * MAX_SHOT_SPEED;
+  const shotPower = clamp(Number.isFinite(power) ? power : 0.6, 0.04, 1);
+  const shotSpeed = 3.5 + shotPower * MAX_SHOT_SPEED;
   cueBall.vx = Math.cos(safeAngle) * shotSpeed;
   cueBall.vy = Math.sin(safeAngle) * shotSpeed;
 
