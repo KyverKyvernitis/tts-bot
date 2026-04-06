@@ -876,6 +876,17 @@ export default function App() {
   };
 
 
+  const mergeIncomingGame = (current: GameSnapshot | null, incoming: GameSnapshot | null | undefined) => {
+    if (!incoming) return current;
+    if (current && current.roomId === incoming.roomId && current.updatedAt > incoming.updatedAt) {
+      return current;
+    }
+    return {
+      ...incoming,
+      lastShot: incoming.lastShot ?? (current?.roomId === incoming.roomId && current?.shotSequence === incoming.shotSequence ? current.lastShot : null),
+    };
+  };
+
   const fetchGameStateOverHttp = async (roomId: string, reason: string, sinceSeq = 0) => {
     const attempts: string[] = [];
     for (const baseUrl of resolveApiCandidates("/balance")) {
@@ -889,7 +900,7 @@ export default function App() {
         const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
         if (response.ok) {
           if (parsed?.game) {
-            setGame((current) => parsed.game ? { ...parsed.game, lastShot: parsed.game.lastShot ?? (current?.roomId === parsed.game.roomId && current?.shotSequence === parsed.game.shotSequence ? current.lastShot : null) } : current);
+            setGame((current) => mergeIncomingGame(current, parsed.game));
             setScreen("game");
             return parsed.game;
           }
@@ -910,7 +921,7 @@ export default function App() {
         const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
         if (response.ok) {
           if (parsed?.game) {
-            setGame((current) => parsed.game ? { ...parsed.game, lastShot: parsed.game.lastShot ?? (current?.roomId === parsed.game.roomId && current?.shotSequence === parsed.game.shotSequence ? current.lastShot : null) } : current);
+            setGame((current) => mergeIncomingGame(current, parsed.game));
             setScreen("game");
             return parsed.game;
           }
@@ -1414,7 +1425,7 @@ export default function App() {
           return;
         }
         if (payload.type === "game_state") {
-          setGame(payload.payload);
+          setGame((current) => mergeIncomingGame(current, payload.payload));
           setRemoteAim((current) => current?.roomId === payload.payload.roomId && payload.payload.turnUserId !== state.currentUser.userId && payload.payload.status !== "finished" ? current : null);
           setScreen("game");
           setErrorMessage(null);

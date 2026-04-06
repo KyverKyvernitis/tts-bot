@@ -112,6 +112,9 @@ const POWER_CURVE_EXPONENT = 5.1;
 const AIM_SYNC_INTERVAL_MS = 22;
 const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
+const REALTIME_VISUAL_SNAP_DISTANCE = 42;
+const REALTIME_VISUAL_BASE_BLEND = 0.34;
+const REALTIME_VISUAL_MAX_BLEND = 0.68;
 
 type ShotInput = {
   angle: number;
@@ -310,6 +313,29 @@ function interpolateFrameBalls(
       x: lerp(startX, endX, t),
       y: lerp(startY, endY, t),
       pocketed: (t < 0.5 ? from?.pocketed : to?.pocketed) ?? to?.pocketed ?? from?.pocketed ?? ball.pocketed,
+    };
+  });
+}
+
+function interpolateLiveSnapshotBalls(
+  previousBalls: GameBallSnapshot[],
+  targetBalls: GameBallSnapshot[],
+  alpha: number,
+) {
+  if (!previousBalls.length) return targetBalls.map((ball) => ({ ...ball }));
+  const previousMap = new Map(previousBalls.map((ball) => [ball.id, ball]));
+  return targetBalls.map((ball) => {
+    const prev = previousMap.get(ball.id);
+    if (!prev) return { ...ball };
+    if (ball.pocketed || prev.pocketed) return { ...ball };
+    const dx = ball.x - prev.x;
+    const dy = ball.y - prev.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist >= REALTIME_VISUAL_SNAP_DISTANCE) return { ...ball };
+    return {
+      ...ball,
+      x: lerp(prev.x, ball.x, alpha),
+      y: lerp(prev.y, ball.y, alpha),
     };
   });
 }
@@ -1159,6 +1185,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const lastAimEmitAtRef = useRef(0);
   const lastAimPayloadKeyRef = useRef<string>("");
   const aimSeqRef = useRef(0);
+  const realtimeVisualBallsRef = useRef<GameBallSnapshot[]>(game.balls.map((ball) => ({ ...ball })));
+  const realtimeVisualLastAtRef = useRef<number>(performance.now());
   const remoteAimVisualRef = useRef<{ x: number; y: number; angle: number; pull: number; seq: number; initialized: boolean }>({
     x: 0,
     y: 0,
@@ -1253,6 +1281,12 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     }
     setDisplayBalls(nextBalls);
   }, [animating, currentUserId, game.ballInHandUserId, game.balls, game.shotSequence]);
+
+  useEffect(() => {
+    if (animating || game.status === "simulating") return;
+    realtimeVisualBallsRef.current = displayBalls.map((ball) => ({ ...ball }));
+    realtimeVisualLastAtRef.current = performance.now();
+  }, [animating, displayBalls, game.status]);
 
   // Shot animation trigger
   useEffect(() => {
@@ -1858,6 +1892,20 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             settlePlayback();
           }
         }
+      }
+
+      if ((!playback || !playback.frames.length) && game.status === "simulating" && drawBalls.length) {
+        const previousVisualBalls = realtimeVisualBallsRef.current;
+        const deltaMs = Math.max(1, now - realtimeVisualLastAtRef.current);
+        const dynamicBlend = clamp(REALTIME_VISUAL_BASE_BLEND + deltaMs / 45, REALTIME_VISUAL_BASE_BLEND, REALTIME_VISUAL_MAX_BLEND);
+        const smoothedBalls = interpolateLiveSnapshotBalls(previousVisualBalls, drawBalls, dynamicBlend);
+        realtimeVisualBallsRef.current = smoothedBalls;
+        realtimeVisualLastAtRef.current = now;
+        drawBalls = smoothedBalls;
+        drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+      } else if (!playback || !playback.frames.length) {
+        realtimeVisualBallsRef.current = drawBalls.map((ball) => ({ ...ball }));
+        realtimeVisualLastAtRef.current = now;
       }
 
       // Detect newly pocketed balls → trigger animations
