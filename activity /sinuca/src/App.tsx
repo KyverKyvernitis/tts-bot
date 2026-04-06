@@ -267,7 +267,8 @@ export default function App() {
   const aimHttpTimerRef = useRef<number | null>(null);
   const lastAimHttpSentAtRef = useRef(0);
   const snapshotDebugRef = useRef<{ roomId: string | null; lastReceivedAt: number; lastLoggedAt: number; lastRevision: number; lastSource: string | null }>({ roomId: null, lastReceivedAt: 0, lastLoggedAt: 0, lastRevision: -1, lastSource: null });
-  const simRecoveryRef = useRef<{ roomId: string | null; shotSequence: number; revision: number; lastProgressAt: number; lastRecoveryAt: number; recoveryCount: number }>({ roomId: null, shotSequence: 0, revision: 0, lastProgressAt: 0, lastRecoveryAt: 0, recoveryCount: 0 });
+  const wsGameStateRef = useRef<{ roomId: string | null; lastReceivedAt: number; shotSequence: number; revision: number }>({ roomId: null, lastReceivedAt: 0, shotSequence: 0, revision: 0 });
+  const simRecoveryRef = useRef<{ roomId: string | null; shotSequence: number; revision: number; lastProgressAt: number; lastRecoveryAt: number; recoveryCount: number; inFlight: boolean; lastRequestedShotSequence: number; lastRequestedRevision: number }>({ roomId: null, shotSequence: 0, revision: 0, lastProgressAt: 0, lastRecoveryAt: 0, recoveryCount: 0, inFlight: false, lastRequestedShotSequence: 0, lastRequestedRevision: 0 });
 
   useEffect(() => {
     let mounted = true;
@@ -973,6 +974,9 @@ export default function App() {
           recovery.lastProgressAt = now;
           recovery.lastRecoveryAt = 0;
           recovery.recoveryCount = 0;
+          recovery.inFlight = false;
+          recovery.lastRequestedShotSequence = 0;
+          recovery.lastRequestedRevision = 0;
         } else if (advanced || source === 'local') {
           recovery.revision = mergedRevision;
           recovery.lastProgressAt = now;
@@ -984,6 +988,9 @@ export default function App() {
         recovery.lastProgressAt = now;
         recovery.lastRecoveryAt = 0;
         recovery.recoveryCount = 0;
+        recovery.inFlight = false;
+        recovery.lastRequestedShotSequence = 0;
+        recovery.lastRequestedRevision = 0;
       }
 
       logSnapshotDebug('apply', {
@@ -1014,7 +1021,31 @@ export default function App() {
       return null;
     }
 
+    const isRecoveryRequest = reason.startsWith('force_recover_');
+    const recovery = simRecoveryRef.current;
+    const activeGame = currentGameRef.current;
+    if (isRecoveryRequest) {
+      if (recovery.inFlight) {
+        logSnapshotDebug('skip', {
+          source: 'http',
+          roomId,
+          reason,
+          sinceSeq,
+          status: activeGame?.status ?? null,
+          shotSequence: activeGame?.shotSequence ?? null,
+          revision: Number.isFinite(activeGame?.snapshotRevision) ? activeGame!.snapshotRevision : null,
+          why: 'recovery_inflight',
+        });
+        return null;
+      }
+      recovery.inFlight = true;
+      recovery.lastRecoveryAt = performance.now();
+      recovery.lastRequestedShotSequence = activeGame?.roomId === roomId ? activeGame.shotSequence : 0;
+      recovery.lastRequestedRevision = activeGame?.roomId === roomId && Number.isFinite(activeGame.snapshotRevision) ? activeGame.snapshotRevision : 0;
+    }
+
     const attempts: string[] = [];
+    try {
     for (const baseUrl of resolveApiCandidates("/balance")) {
       try {
         const url = new URL(baseUrl, window.location.origin);
@@ -1074,6 +1105,11 @@ export default function App() {
       setAuthDebug((current) => current ? `${current} • game:http_failed:${reason}:${attempts.join(" | ")}` : `game:http_failed:${reason}:${attempts.join(" | ")}`);
     }
     return null;
+    } finally {
+      if (isRecoveryRequest) {
+        recovery.inFlight = false;
+      }
+    }
   };
 
   const pushAimToState = (payload: AimStateSnapshot | null) => {
@@ -1572,6 +1608,16 @@ export default function App() {
           debugState.lastReceivedAt = debugNow;
           debugState.lastRevision = incomingRevision;
           debugState.lastSource = 'ws';
+          const wsState = wsGameStateRef.current;
+          wsState.roomId = payload.payload.roomId;
+          wsState.lastReceivedAt = debugNow;
+          wsState.shotSequence = payload.payload.shotSequence;
+          wsState.revision = incomingRevision;
+          const recovery = simRecoveryRef.current;
+          if (recovery.roomId === payload.payload.roomId && (payload.payload.shotSequence > recovery.lastRequestedShotSequence || (payload.payload.shotSequence === recovery.lastRequestedShotSequence && incomingRevision > recovery.lastRequestedRevision))) {
+            recovery.inFlight = false;
+            recovery.lastProgressAt = debugNow;
+          }
           applyIncomingGame('ws', payload.payload, 'ws_game_state');
           setRemoteAim((current) => current?.roomId === payload.payload.roomId && payload.payload.turnUserId !== state.currentUser.userId && payload.payload.status !== "finished" ? current : null);
           setScreen("game");
@@ -1764,13 +1810,16 @@ export default function App() {
 
       const now = performance.now();
       const recovery = simRecoveryRef.current;
-      const stalledForMs = now - recovery.lastProgressAt;
-      if (stalledForMs < 420) return;
+      const wsState = wsGameStateRef.current;
+      const lastAuthoritativeAt = wsState.roomId === activeGame.roomId ? wsState.lastReceivedAt : 0;
+      const lastProgressAt = Math.max(recovery.lastProgressAt, lastAuthoritativeAt);
+      const stalledForMs = lastProgressAt > 0 ? now - lastProgressAt : Number.POSITIVE_INFINITY;
+      if (stalledForMs < 900) return;
+      if (recovery.inFlight) return;
 
-      const cooldownMs = recovery.recoveryCount > 0 ? 700 : 450;
+      const cooldownMs = recovery.recoveryCount > 0 ? 1400 : 1000;
       if (now - recovery.lastRecoveryAt < cooldownMs) return;
 
-      recovery.lastRecoveryAt = now;
       recovery.recoveryCount += 1;
       logSnapshotDebug('recover', {
         source: 'http',
@@ -1783,8 +1832,8 @@ export default function App() {
         wsOpen: isSocketOpen(),
         recoveryCount: recovery.recoveryCount,
       });
-      void fetchGameStateOverHttp(activeGame.roomId, `force_recover_watchdog_${activeGame.shotSequence}`, 0);
-    }, 140);
+      void fetchGameStateOverHttp(activeGame.roomId, `force_recover_watchdog_${activeGame.shotSequence}`, activeGame.shotSequence);
+    }, 220);
 
     return () => window.clearInterval(interval);
   }, [bootstrapped, room?.roomId, screen]);
@@ -2373,15 +2422,22 @@ export default function App() {
                 if (sentOverSocket) {
                   window.setTimeout(() => {
                     const latestGame = currentGameRef.current;
+                    const wsState = wsGameStateRef.current;
                     const waitingForNewShot = !latestGame
                       || latestGame.roomId !== room.roomId
                       || latestGame.shotSequence <= previousSeq;
+                    const lastAuthoritativeAt = wsState.roomId === room.roomId ? wsState.lastReceivedAt : 0;
                     const stalledSimulating = latestGame?.roomId === room.roomId
                       && latestGame.status === 'simulating'
-                      && performance.now() - simRecoveryRef.current.lastProgressAt > 420;
+                      && performance.now() - Math.max(simRecoveryRef.current.lastProgressAt, lastAuthoritativeAt) > 950;
                     if (!waitingForNewShot && !stalledSimulating) return;
-                    void fetchGameStateOverHttp(room.roomId, stalledSimulating ? `force_recover_after_shot_${previousSeq}` : 'ws_verify_after_shot', stalledSimulating ? 0 : previousSeq);
-                  }, 650);
+                    const recovery = simRecoveryRef.current;
+                    if (stalledSimulating && !recovery.inFlight) {
+                      void fetchGameStateOverHttp(room.roomId, `force_recover_after_shot_${previousSeq}`, latestGame?.shotSequence ?? previousSeq);
+                    } else if (waitingForNewShot && !isSocketOpen()) {
+                      void fetchGameStateOverHttp(room.roomId, 'ws_verify_after_shot', previousSeq);
+                    }
+                  }, 900);
                   return;
                 }
 
