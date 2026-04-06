@@ -318,6 +318,7 @@ function broadcastRoomList(payload: ListRoomsPayload) {
 function broadcastGame(roomId: string) {
   const game = getGameSnapshot(roomId);
   if (!game) return;
+  noteRealtimeBroadcast(roomId, game.snapshotRevision ?? 0, game.status);
   const payload: ServerMessage = { type: "game_state", payload: game };
   for (const client of getSubscribers(roomId)) {
     send(client, payload);
@@ -329,10 +330,40 @@ function normalizeAimMode(value: unknown): AimPointerMode {
 }
 
 const pendingRealtimeBroadcastRooms = new Set<string>();
+const realtimeDebugByRoom = new Map<string, { lastLogAt: number; lastStepAt: number; lastBroadcastAt: number; stepCount: number; broadcastCount: number; maxStepGapMs: number; maxBroadcastGapMs: number; }>();
+
+function noteRealtimeStep(roomId: string) {
+  const now = Date.now();
+  const current = realtimeDebugByRoom.get(roomId) ?? { lastLogAt: now, lastStepAt: now, lastBroadcastAt: now, stepCount: 0, broadcastCount: 0, maxStepGapMs: 0, maxBroadcastGapMs: 0 };
+  const stepGap = current.lastStepAt ? now - current.lastStepAt : 0;
+  current.maxStepGapMs = Math.max(current.maxStepGapMs, stepGap);
+  current.lastStepAt = now;
+  current.stepCount += 1;
+  realtimeDebugByRoom.set(roomId, current);
+}
+
+function noteRealtimeBroadcast(roomId: string, revision: number, status: string) {
+  const now = Date.now();
+  const current = realtimeDebugByRoom.get(roomId) ?? { lastLogAt: now, lastStepAt: now, lastBroadcastAt: now, stepCount: 0, broadcastCount: 0, maxStepGapMs: 0, maxBroadcastGapMs: 0 };
+  const broadcastGap = current.lastBroadcastAt ? now - current.lastBroadcastAt : 0;
+  current.maxBroadcastGapMs = Math.max(current.maxBroadcastGapMs, broadcastGap);
+  current.lastBroadcastAt = now;
+  current.broadcastCount += 1;
+  if (now - current.lastLogAt >= 1000) {
+    console.log('[sinuca-realtime-debug]', JSON.stringify({ roomId, status, revision, stepsPerWindow: current.stepCount, broadcastsPerWindow: current.broadcastCount, maxStepGapMs: current.maxStepGapMs, maxBroadcastGapMs: current.maxBroadcastGapMs, pendingRooms: pendingRealtimeBroadcastRooms.size }));
+    current.lastLogAt = now;
+    current.stepCount = 0;
+    current.broadcastCount = 0;
+    current.maxStepGapMs = 0;
+    current.maxBroadcastGapMs = 0;
+  }
+  realtimeDebugByRoom.set(roomId, current);
+}
 
 const realtimeStepInterval = setInterval(() => {
   const changedRooms = stepRealtimeGames();
   for (const roomId of changedRooms) {
+    noteRealtimeStep(roomId);
     pendingRealtimeBroadcastRooms.add(roomId);
   }
 }, 1000 / 60);

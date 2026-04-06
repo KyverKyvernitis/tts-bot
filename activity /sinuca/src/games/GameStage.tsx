@@ -116,6 +116,13 @@ const REALTIME_VISUAL_SNAP_DISTANCE = 42;
 const REALTIME_SNAPSHOT_QUEUE_LIMIT = 24;
 const REALTIME_RENDER_DELAY_MS = 42;
 const REALTIME_MAX_EXTRAPOLATION_MS = 90;
+const SNAPSHOT_RENDER_DEBUG_ENABLED = true;
+const SNAPSHOT_RENDER_DEBUG_LOG_EVERY_MS = 450;
+
+function logRenderSnapshotDebug(payload: Record<string, unknown>) {
+  if (!SNAPSHOT_RENDER_DEBUG_ENABLED) return;
+  console.log('[sinuca-snapshot-render]', JSON.stringify(payload));
+}
 
 type ShotInput = {
   angle: number;
@@ -1243,6 +1250,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     receivedAt: performance.now(),
     velocities: {},
   }]);
+  const snapshotRenderDebugRef = useRef<{ lastLoggedAt: number; lastQueueSize: number; lastMode: string }>({ lastLoggedAt: 0, lastQueueSize: 0, lastMode: 'init' });
   const remoteAimVisualRef = useRef<{ x: number; y: number; angle: number; pull: number; seq: number; initialized: boolean }>({
     x: 0,
     y: 0,
@@ -1395,6 +1403,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     };
 
     queue.push(nextEntry);
+
+    const debugNow = now;
+    const debugState = snapshotRenderDebugRef.current;
+    if (debugNow - debugState.lastLoggedAt >= SNAPSHOT_RENDER_DEBUG_LOG_EVERY_MS || debugState.lastQueueSize !== queue.length) {
+      logRenderSnapshotDebug({ event: 'queue_push', roomId: room.roomId, revision: nextRevision, queueSize: queue.length, status: game.status, dtFromPrevMs: previousEntry ? Math.round(debugNow - previousEntry.receivedAt) : null });
+      debugState.lastLoggedAt = debugNow;
+      debugState.lastQueueSize = queue.length;
+      debugState.lastMode = 'queue_push';
+    }
 
     if (queue.length > REALTIME_SNAPSHOT_QUEUE_LIMIT) {
       queue.splice(0, queue.length - REALTIME_SNAPSHOT_QUEUE_LIMIT);
@@ -2033,6 +2050,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           realtimeVisualLastAtRef.current = now;
           drawBalls = smoothedBalls;
           drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+          const debugState = snapshotRenderDebugRef.current;
+          if (now - debugState.lastLoggedAt >= SNAPSHOT_RENDER_DEBUG_LOG_EVERY_MS || debugState.lastMode !== 'interpolate') {
+            logRenderSnapshotDebug({ event: 'interpolate', roomId: room.roomId, queueSize: queue.length, fromRevision: fromSnapshot.revision, toRevision: toSnapshot.revision, rawT: Math.round(rawT * 1000) / 1000, renderLagMs: Math.round(now - toSnapshot.receivedAt) });
+            debugState.lastLoggedAt = now;
+            debugState.lastQueueSize = queue.length;
+            debugState.lastMode = 'interpolate';
+          }
         } else if (queue.length === 1) {
           const holdSnapshot = queue[0];
           const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, now - holdSnapshot.receivedAt);
@@ -2042,6 +2066,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           realtimeVisualLastAtRef.current = now;
           drawBalls = smoothedBalls;
           drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+          const debugState = snapshotRenderDebugRef.current;
+          if (now - debugState.lastLoggedAt >= SNAPSHOT_RENDER_DEBUG_LOG_EVERY_MS || debugState.lastMode !== 'single_hold') {
+            logRenderSnapshotDebug({ event: 'single_hold', roomId: room.roomId, queueSize: queue.length, revision: holdSnapshot.revision, extrapolationMs: Math.round(now - holdSnapshot.receivedAt) });
+            debugState.lastLoggedAt = now;
+            debugState.lastQueueSize = queue.length;
+            debugState.lastMode = 'single_hold';
+          }
         }
       } else if (!playback || !playback.frames.length) {
         const copied = drawBalls.map((ball) => ({ ...ball }));

@@ -165,6 +165,14 @@ function resolvePlayerAvatar(player: Pick<RoomPlayer, "userId" | "avatarUrl">) {
   return defaultDiscordAvatarUrl(player.userId);
 }
 
+const SNAPSHOT_DEBUG_ENABLED = true;
+const SNAPSHOT_DEBUG_LOG_EVERY_MS = 450;
+
+function logSnapshotDebug(scope: string, payload: Record<string, unknown>) {
+  if (!SNAPSHOT_DEBUG_ENABLED) return;
+  console.log(`[sinuca-snapshot-${scope}]`, JSON.stringify(payload));
+}
+
 
 async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs = 2500) {
   const controller = new AbortController();
@@ -258,6 +266,7 @@ export default function App() {
   const pendingAimHttpRef = useRef<{ roomId: string; aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode } } | null>(null);
   const aimHttpTimerRef = useRef<number | null>(null);
   const lastAimHttpSentAtRef = useRef(0);
+  const snapshotDebugRef = useRef<{ roomId: string | null; lastReceivedAt: number; lastLoggedAt: number; lastRevision: number; lastSource: string | null }>({ roomId: null, lastReceivedAt: 0, lastLoggedAt: 0, lastRevision: -1, lastSource: null });
 
   useEffect(() => {
     let mounted = true;
@@ -907,6 +916,17 @@ export default function App() {
         const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
         if (response.ok) {
           if (parsed?.game) {
+            const debugNow = performance.now();
+            const debugState = snapshotDebugRef.current;
+            const incomingRevision = Number.isFinite(parsed.game.snapshotRevision) ? parsed.game.snapshotRevision : 0;
+            if (debugNow - debugState.lastLoggedAt >= SNAPSHOT_DEBUG_LOG_EVERY_MS || debugState.lastRevision !== incomingRevision || debugState.lastSource !== 'http') {
+              logSnapshotDebug('recv', { source: 'http', roomId, status: parsed.game.status, shotSequence: parsed.game.shotSequence, revision: incomingRevision, dtMs: debugState.lastReceivedAt ? Math.round(debugNow - debugState.lastReceivedAt) : null });
+              debugState.lastLoggedAt = debugNow;
+            }
+            debugState.roomId = roomId;
+            debugState.lastReceivedAt = debugNow;
+            debugState.lastRevision = incomingRevision;
+            debugState.lastSource = 'http';
             setGame((current) => mergeIncomingGame(current, parsed.game));
             setScreen("game");
             return parsed.game;
@@ -1332,6 +1352,7 @@ export default function App() {
 
   useEffect(() => {
     if (screen !== 'game' || !room || !game || game.status === 'finished' || game.turnUserId === state.currentUser.userId) return;
+    if (connectionState === 'connected') return;
     let cancelled = false;
     const tick = async () => {
       const aim = await fetchAimStateOverHttp(room.roomId, 'poll');
@@ -1348,7 +1369,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
+  }, [connectionState, game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
 
   useEffect(() => () => {
     if (aimHttpTimerRef.current !== null) {
@@ -1432,6 +1453,17 @@ export default function App() {
           return;
         }
         if (payload.type === "game_state") {
+          const debugNow = performance.now();
+          const debugState = snapshotDebugRef.current;
+          const incomingRevision = Number.isFinite(payload.payload.snapshotRevision) ? payload.payload.snapshotRevision : 0;
+          if (debugNow - debugState.lastLoggedAt >= SNAPSHOT_DEBUG_LOG_EVERY_MS || debugState.lastRevision !== incomingRevision || debugState.lastSource !== 'ws') {
+            logSnapshotDebug('recv', { source: 'ws', roomId: payload.payload.roomId, status: payload.payload.status, shotSequence: payload.payload.shotSequence, revision: incomingRevision, dtMs: debugState.lastReceivedAt ? Math.round(debugNow - debugState.lastReceivedAt) : null });
+            debugState.lastLoggedAt = debugNow;
+          }
+          debugState.roomId = payload.payload.roomId;
+          debugState.lastReceivedAt = debugNow;
+          debugState.lastRevision = incomingRevision;
+          debugState.lastSource = 'ws';
           setGame((current) => mergeIncomingGame(current, payload.payload));
           setRemoteAim((current) => current?.roomId === payload.payload.roomId && payload.payload.turnUserId !== state.currentUser.userId && payload.payload.status !== "finished" ? current : null);
           setScreen("game");
