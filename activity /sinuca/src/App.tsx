@@ -1746,13 +1746,14 @@ export default function App() {
         ? createDraftRoomIdRef.current ?? createDraftRoomId
         : null;
     if (!activeRoomId) return;
-    if (connectionState !== "connected") {
-      void fetchRoomStateOverHttp(activeRoomId, "offline_initial");
-    }
-    if (connectionState === "connected") return;
+
+    const isConnected = connectionState === "connected";
+    void fetchRoomStateOverHttp(activeRoomId, isConnected ? "connected_room_sync_initial" : "offline_initial");
+
     const interval = window.setInterval(() => {
-      void fetchRoomStateOverHttp(activeRoomId, "offline_poll");
-    }, 2500);
+      void fetchRoomStateOverHttp(activeRoomId, isConnected ? "connected_room_sync" : "offline_poll");
+    }, isConnected ? 1200 : 2500);
+
     return () => window.clearInterval(interval);
   }, [bootstrapped, connectionState, createDraftRoomId, room?.roomId, screen]);
 
