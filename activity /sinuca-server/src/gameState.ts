@@ -22,6 +22,7 @@ const HARD_STOP_SPEED = 0.0026;
 const MIN_SPEED = SOFT_STOP_SPEED;
 const MAX_STEPS = 1800;
 const FRAME_SAMPLE_EVERY = 2;
+const REALTIME_SIM_STEPS_PER_TICK = 4;
 const MAX_SUBSTEPS = 20;
 const BALL_BALL_RESTITUTION = 0.905;
 const BALL_TANGENT_FRICTION = 0.058;
@@ -726,7 +727,13 @@ export function stepRealtimeGames() {
       activeShots.delete(roomId);
       continue;
     }
-    const settled = advanceShotSimulation(game, shot);
+
+    let settled = false;
+    for (let i = 0; i < REALTIME_SIM_STEPS_PER_TICK; i += 1) {
+      settled = advanceShotSimulation(game, shot);
+      if (settled) break;
+    }
+
     changedRoomIds.add(roomId);
     if (settled) {
       finalizeShotSimulation(game, shot);
