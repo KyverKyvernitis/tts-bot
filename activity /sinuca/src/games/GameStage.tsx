@@ -755,7 +755,7 @@ function drawPocketAnimation(
 // ─── Aim guide (reference-style: clean line + ghost ball) ─────────────────
 
 // Aim line only — drawn BEFORE balls
-function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview) {
+function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview, illegalTarget: boolean) {
   const hasHit = preview.contactX !== null && preview.contactY !== null && preview.hitBall;
   const lineEndX = hasHit ? preview.contactX! : preview.endX;
   const lineEndY = hasHit ? preview.contactY! : preview.endY;
@@ -782,7 +782,7 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
   ctx.stroke();
   ctx.restore();
 
-  if (hasHit && preview.hitBall && preview.targetGuideX !== null && preview.targetGuideY !== null) {
+  if (!illegalTarget && hasHit && preview.hitBall && preview.targetGuideX !== null && preview.targetGuideY !== null) {
     ctx.save();
     ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
     ctx.lineWidth = 2.15;
@@ -832,13 +832,19 @@ function drawGhostBall(
   if (hasHit) {
     const ghostX = preview.contactX!;
     const ghostY = preview.contactY!;
-    const ghostScale = clamp(0.54 + preview.hitFullness * 0.46, 0.5, 1);
+
+    if (illegalTarget) {
+      drawIllegalAimMarker(ctx, ghostX, ghostY);
+      return;
+    }
+
+    const ghostScale = clamp(0.32 + preview.hitFullness * 0.68, 0.32, 1);
     const ghostRadius = BALL_VISUAL_RADIUS * ghostScale;
 
     ctx.save();
     ctx.beginPath();
     ctx.arc(ghostX, ghostY, ghostRadius + 2, 0, Math.PI * 2);
-    ctx.strokeStyle = illegalTarget ? "rgba(255, 92, 92, 0.26)" : "rgba(200, 240, 255, 0.25)";
+    ctx.strokeStyle = "rgba(200, 240, 255, 0.25)";
     ctx.lineWidth = 3;
     ctx.stroke();
     ctx.restore();
@@ -846,57 +852,35 @@ function drawGhostBall(
     ctx.save();
     ctx.beginPath();
     ctx.arc(ghostX, ghostY, ghostRadius, 0, Math.PI * 2);
-    ctx.strokeStyle = illegalTarget ? "rgba(255, 114, 114, 0.92)" : "rgba(255, 255, 255, 0.9)";
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.92)";
     ctx.lineWidth = 3.05;
     ctx.stroke();
     ctx.restore();
 
     const tangentX = preview.cueTangentX ?? dx;
     const tangentY = preview.cueTangentY ?? dy;
-    const cueStopTravel = lerp(56, 208, powerRatio) * lerp(0.44, 1.05, 1 - preview.hitFullness);
-    const cueGhostX = ghostX + tangentX * cueStopTravel;
-    const cueGhostY = ghostY + tangentY * cueStopTravel;
+    const cueGuideTravel = lerp(86, 220, powerRatio) * lerp(0.34, 1.08, 1 - preview.hitFullness);
+    const cueGuideStartX = ghostX + tangentX * 10;
+    const cueGuideStartY = ghostY + tangentY * 10;
+    const cueGuideEndX = ghostX + tangentX * cueGuideTravel;
+    const cueGuideEndY = ghostY + tangentY * cueGuideTravel;
 
     ctx.save();
-    ctx.globalAlpha = 0.36;
+    ctx.strokeStyle = "rgba(248, 252, 255, 0.82)";
+    ctx.lineWidth = clamp(1.2 + preview.hitFullness * 1.4, 1.2, 2.6);
+    ctx.lineCap = "round";
+    ctx.setLineDash([10, 9]);
     ctx.beginPath();
-    ctx.arc(cueGhostX, cueGhostY, BALL_VISUAL_RADIUS * 0.7, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(255,255,255,0.78)";
-    ctx.fill();
-    ctx.restore();
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(cueGhostX, cueGhostY, BALL_VISUAL_RADIUS * 0.7, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(255,255,255,0.52)";
-    ctx.lineWidth = 1.6;
+    ctx.moveTo(cueGuideStartX, cueGuideStartY);
+    ctx.lineTo(cueGuideEndX, cueGuideEndY);
     ctx.stroke();
     ctx.restore();
-
-    if (illegalTarget) {
-      drawIllegalAimMarker(ctx, ghostX, ghostY);
-    }
     return;
   }
 
-  const cueStopDistance = lerp(84, 260, powerRatio);
-  const cueGhostX = cueBall.x + dx * cueStopDistance;
-  const cueGhostY = cueBall.y + dy * cueStopDistance;
-  ctx.save();
-  ctx.globalAlpha = 0.26;
-  ctx.beginPath();
-  ctx.arc(cueGhostX, cueGhostY, BALL_VISUAL_RADIUS * 0.76, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(255,255,255,0.78)";
-  ctx.fill();
-  ctx.restore();
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cueGhostX, cueGhostY, BALL_VISUAL_RADIUS * 0.76, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(255,255,255,0.42)";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.restore();
+  if (illegalTarget) {
+    drawIllegalAimMarker(ctx, preview.endX, preview.endY);
+  }
 }
 
 // ─── Cue stick rendering ──────────────────────────────────────────────────
@@ -1049,7 +1033,7 @@ function drawPoolTable(
 
   // STEP 1: Local aim line + cue BEFORE balls.
   if (cueBall && showGuide && preview) {
-    drawAimLine(ctx, cueBall, preview);
+    drawAimLine(ctx, cueBall, preview, illegalTarget);
     drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
   }
 
@@ -1141,6 +1125,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const prevPocketedIdsRef = useRef<Set<string>>(new Set());
   const ballSpinRef = useRef<Map<string, BallSpinState>>(new Map());
   const snapAnimRef = useRef<{ startedAt: number; power: number; fired: boolean } | null>(null);
+  const pendingShotVisualRef = useRef<{ startedAt: number; angle: number; power: number; cueX: number; cueY: number } | null>(null);
   const canInteractRef = useRef(false);
   const shootBusyRef = useRef(false);
   const onShootRef = useRef(onShoot);
@@ -1547,7 +1532,17 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const state = renderStateRef.current;
     const liveCueBall = state.cueBall;
     const shotPower = clamp(powerRef.current, POWER_MIN, 1);
-    snapAnimRef.current = { startedAt: performance.now(), power: shotPower, fired: true };
+    const shotStartedAt = performance.now();
+    snapAnimRef.current = { startedAt: shotStartedAt, power: shotPower, fired: true };
+    if (liveCueBall) {
+      pendingShotVisualRef.current = {
+        startedAt: shotStartedAt,
+        angle: aimAngleRef.current,
+        power: shotPower,
+        cueX: liveCueBall.x,
+        cueY: liveCueBall.y,
+      };
+    }
     setPointerModeSafe("idle");
     emitAimState({ visible: false, angle: aimAngleRef.current, cueX: liveCueBall?.x ?? null, cueY: liveCueBall?.y ?? null, mode: "idle" }, true);
 
@@ -1941,7 +1936,33 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       );
 
       updateBallSpinCache(ballSpinRef.current, drawBalls, now);
-      const preview = drawCueBall && !animating && !(state.isBallInHand && state.pointerMode === "place") ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
+      const shotKick = !animating ? pendingShotVisualRef.current : null;
+      if (shotKick && drawCueBall) {
+        const kickElapsed = now - shotKick.startedAt;
+        const KICK_MS = 88;
+        if (kickElapsed >= KICK_MS) {
+          pendingShotVisualRef.current = null;
+        } else {
+          const kickT = clamp(kickElapsed / KICK_MS, 0, 1);
+          const kickDistance = lerp(8, 30, Math.pow(shotKick.power, 0.72));
+          const easedKick = 1 - Math.pow(1 - kickT, 2.4);
+          const kickX = shotKick.cueX + Math.cos(shotKick.angle) * kickDistance * easedKick;
+          const kickY = shotKick.cueY + Math.sin(shotKick.angle) * kickDistance * easedKick;
+          let cueReplaced = false;
+          drawBalls = drawBalls.map((ball) => {
+            if (ball.number !== 0 || ball.pocketed) return ball;
+            cueReplaced = true;
+            return { ...ball, x: kickX, y: kickY, pocketed: false };
+          });
+          drawCueBall = cueReplaced
+            ? drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? drawCueBall
+            : { ...drawCueBall, x: kickX, y: kickY, pocketed: false };
+        }
+      } else if (animating) {
+        pendingShotVisualRef.current = null;
+      }
+
+      const preview = drawCueBall && !animating && !pendingShotVisualRef.current && !(state.isBallInHand && state.pointerMode === "place") ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
       const illegalTarget = preview ? isAimTargetIllegal(preview, drawBalls, displayedGroupsRef.current.hostGroup, displayedGroupsRef.current.guestGroup, currentUserId, room.hostUserId) : false;
       const previewPowerRatio = state.pointerMode === "power"
         ? clamp((state.power - POWER_MIN) / (1 - POWER_MIN), 0, 1)
@@ -1977,7 +1998,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         drawBalls,
         drawCueBall,
         drawAimAngleRef.current,
-        Boolean(drawCueBall && (state.canInteract || state.shootBusy || snapAnimRef.current) && !(state.isBallInHand && state.pointerMode === "place")),
+        Boolean(drawCueBall && (state.canInteract || snapAnimRef.current) && !pendingShotVisualRef.current && !(state.isBallInHand && state.pointerMode === "place")),
         pullRatio,
         preview,
         previewPowerRatio,
