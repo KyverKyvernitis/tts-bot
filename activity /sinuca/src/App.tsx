@@ -270,6 +270,8 @@ export default function App() {
   const wsGameStateRef = useRef<{ roomId: string | null; lastReceivedAt: number; shotSequence: number; revision: number }>({ roomId: null, lastReceivedAt: 0, shotSequence: 0, revision: 0 });
   const simRecoveryRef = useRef<{ roomId: string | null; shotSequence: number; revision: number; lastProgressAt: number; lastRecoveryAt: number; recoveryCount: number; inFlight: boolean; lastRequestedShotSequence: number; lastRequestedRevision: number }>({ roomId: null, shotSequence: 0, revision: 0, lastProgressAt: 0, lastRecoveryAt: 0, recoveryCount: 0, inFlight: false, lastRequestedShotSequence: 0, lastRequestedRevision: 0 });
   const realtimeHttpLockRef = useRef<{ roomId: string | null; shotSequence: number; armedAt: number; source: string | null }>({ roomId: null, shotSequence: 0, armedAt: 0, source: null });
+  const shotDispatchRef = useRef<{ roomId: string | null; expectedShotSequence: number; transport: "ws" | "http" | null; startedAt: number; reason: string | null }>({ roomId: null, expectedShotSequence: 0, transport: null, startedAt: 0, reason: null });
+  const gameShootBusyRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
@@ -692,39 +694,6 @@ export default function App() {
     }
     const attempts: string[] = [];
 
-    for (const url of resolveBalanceTransportCandidates("room_get")) {
-      try {
-        url.searchParams.set("roomId", roomId);
-        const response = await fetch(url.toString(), { method: "GET", credentials: "same-origin" });
-        const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
-        if (response.ok) {
-          if (parsed?.room) {
-            setRoom(parsed.room);
-            setCreateDraftRoomId(parsed.room.roomId);
-            if (parsed.room.status === "in_game") {
-              setScreen("game");
-            } else if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
-              setScreen("room");
-            }
-          } else if (currentScreenRef.current === "room" || currentScreenRef.current === "game") {
-            setRoom(null);
-            setGame(null);
-            setCreateDraftRoomId(null);
-            setRoomEntryMenuOpen(false);
-            setErrorMessage("a sala foi fechada");
-            setScreen("list");
-            void requestRooms();
-          }
-          return parsed?.room ?? null;
-        }
-        attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "unknown";
-        attempts.push(`${url.toString()}:exception:${message}`);
-      }
-    }
-
     for (const baseUrl of resolveApiCandidates(`/rooms/${encodeURIComponent(roomId)}`)) {
       try {
         const response = await fetchWithTimeout(baseUrl, { method: "GET", credentials: "same-origin" });
@@ -901,6 +870,36 @@ export default function App() {
     return Boolean(socket && socket.readyState === WebSocket.OPEN);
   };
 
+  const isRealtimeSocketHealthy = (roomId?: string | null) => {
+    if (!isSocketOpen()) return false;
+    if (!roomId) return true;
+    const wsState = wsGameStateRef.current;
+    const activeRoom = currentRoomRef.current;
+    return wsState.roomId === roomId || activeRoom?.roomId === roomId;
+  };
+
+  const markShotDispatch = (roomId: string, expectedShotSequence: number, transport: "ws" | "http", reason: string) => {
+    shotDispatchRef.current = {
+      roomId,
+      expectedShotSequence,
+      transport,
+      startedAt: performance.now(),
+      reason,
+    };
+  };
+
+  const clearShotDispatch = (roomId?: string | null, reason?: string) => {
+    const current = shotDispatchRef.current;
+    if (roomId && current.roomId && current.roomId !== roomId) return;
+    shotDispatchRef.current = {
+      roomId: null,
+      expectedShotSequence: 0,
+      transport: null,
+      startedAt: 0,
+      reason: reason ?? null,
+    };
+  };
+
   const armRealtimeHttpLock = (roomId: string, shotSequence: number, source: string) => {
     realtimeHttpLockRef.current = { roomId, shotSequence, armedAt: performance.now(), source };
   };
@@ -939,14 +938,18 @@ export default function App() {
   const shouldRunHttpGamePolling = (roomId: string) => {
     const guard = getRealtimeHttpGuardState(roomId);
     if (guard.isRealtimeLocked) return false;
-    if (isSocketOpen()) return false;
+    if (isRealtimeSocketHealthy(roomId)) return false;
     return true;
   };
 
   const shouldBlockHttpAuxDuringRealtime = (roomId: string, kind: "room" | "aim", reason: string) => {
     const guard = getRealtimeHttpGuardState(roomId);
-    if (!guard.sameRoom || !guard.isRealtimeLocked) return false;
     const activeGame = guard.activeGame;
+    const inActiveGameScreen = currentScreenRef.current === 'game' && currentRoomRef.current?.roomId === roomId;
+    const shouldBlock = (guard.sameRoom && guard.isRealtimeLocked)
+      || (inActiveGameScreen && activeGame?.status !== 'finished')
+      || (kind === 'aim' && isRealtimeSocketHealthy(roomId));
+    if (!shouldBlock) return false;
     logSnapshotDebug('skip', {
       source: 'http',
       roomId,
@@ -993,7 +996,7 @@ export default function App() {
         status: incoming.status,
         shotSequence: incoming.shotSequence,
         revision: Number.isFinite(incoming.snapshotRevision) ? incoming.snapshotRevision : 0,
-        why: 'blocked_balance_action_game_get',
+        why: 'blocked_http_game_fetch_during_realtime',
       });
       return null;
     }
@@ -1012,6 +1015,11 @@ export default function App() {
         || previousGame.roomId !== merged.roomId
         || merged.shotSequence > previousGame.shotSequence
         || (merged.shotSequence === previousGame.shotSequence && (mergedRevision > previousRevision || merged.updatedAt > previousGame.updatedAt));
+
+      const shotDispatch = shotDispatchRef.current;
+      if (shotDispatch.roomId === merged.roomId && merged.shotSequence >= shotDispatch.expectedShotSequence) {
+        clearShotDispatch(merged.roomId, `authoritative_${source}`);
+      }
 
       if (merged.status === 'simulating') {
         armRealtimeHttpLock(merged.roomId, merged.shotSequence, source);
@@ -1032,6 +1040,7 @@ export default function App() {
         }
       } else {
         clearRealtimeHttpLock(merged.roomId);
+        clearShotDispatch(merged.roomId, `status_${merged.status}`);
         recovery.roomId = merged.roomId;
         recovery.shotSequence = merged.shotSequence;
         recovery.revision = mergedRevision;
@@ -1066,7 +1075,7 @@ export default function App() {
         status: activeGame?.status ?? null,
         shotSequence: activeGame?.shotSequence ?? null,
         revision: Number.isFinite(activeGame?.snapshotRevision) ? activeGame!.snapshotRevision : null,
-        why: 'blocked_balance_action_game_get',
+        why: 'blocked_http_game_fetch_during_realtime',
       });
       return null;
     }
@@ -1096,65 +1105,42 @@ export default function App() {
 
     const attempts: string[] = [];
     try {
-    for (const baseUrl of resolveApiCandidates("/balance")) {
-      try {
-        const url = new URL(baseUrl, window.location.origin);
-        url.searchParams.set("action", "game_get");
-        url.searchParams.set("roomId", roomId);
-        if (sinceSeq > 0) url.searchParams.set("sinceSeq", String(sinceSeq));
-        const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3200);
-        const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
-        if (response.ok) {
-          if (parsed?.game) {
-            const debugNow = performance.now();
-            const debugState = snapshotDebugRef.current;
-            const incomingRevision = Number.isFinite(parsed.game.snapshotRevision) ? parsed.game.snapshotRevision : 0;
-            if (debugNow - debugState.lastLoggedAt >= SNAPSHOT_DEBUG_LOG_EVERY_MS || debugState.lastRevision !== incomingRevision || debugState.lastSource !== 'http') {
-              logSnapshotDebug('recv', { source: 'http', roomId, status: parsed.game.status, shotSequence: parsed.game.shotSequence, revision: incomingRevision, dtMs: debugState.lastReceivedAt ? Math.round(debugNow - debugState.lastReceivedAt) : null });
-              debugState.lastLoggedAt = debugNow;
+      for (const baseUrl of resolveApiCandidates(`/games/${roomId}`)) {
+        try {
+          const url = new URL(baseUrl, window.location.origin);
+          if (sinceSeq > 0) url.searchParams.set("sinceSeq", String(sinceSeq));
+          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3200);
+          const raw = await response.text();
+          const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
+          if (response.ok) {
+            if (parsed?.game) {
+              const debugNow = performance.now();
+              const debugState = snapshotDebugRef.current;
+              const incomingRevision = Number.isFinite(parsed.game.snapshotRevision) ? parsed.game.snapshotRevision : 0;
+              if (debugNow - debugState.lastLoggedAt >= SNAPSHOT_DEBUG_LOG_EVERY_MS || debugState.lastRevision !== incomingRevision || debugState.lastSource !== 'http') {
+                logSnapshotDebug('recv', { source: 'http', roomId, status: parsed.game.status, shotSequence: parsed.game.shotSequence, revision: incomingRevision, dtMs: debugState.lastReceivedAt ? Math.round(debugNow - debugState.lastReceivedAt) : null });
+                debugState.lastLoggedAt = debugNow;
+              }
+              debugState.roomId = roomId;
+              debugState.lastReceivedAt = debugNow;
+              debugState.lastRevision = incomingRevision;
+              debugState.lastSource = 'http';
+              const applied = applyIncomingGame('http', parsed.game, reason);
+              if (applied) setScreen("game");
+              return applied;
             }
-            debugState.roomId = roomId;
-            debugState.lastReceivedAt = debugNow;
-            debugState.lastRevision = incomingRevision;
-            debugState.lastSource = 'http';
-            const applied = applyIncomingGame('http', parsed.game, reason);
-            if (applied) setScreen("game");
-            return applied;
+            return null;
           }
-          return null;
+          attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        } catch (error) {
+          attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
         }
-        attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-      } catch (error) {
-        attempts.push(`balance_game:${error instanceof Error ? error.message : "unknown"}`);
       }
-    }
 
-    for (const baseUrl of resolveApiCandidates(`/games/${roomId}`)) {
-      try {
-        const url = new URL(baseUrl, window.location.origin);
-        if (sinceSeq > 0) url.searchParams.set("sinceSeq", String(sinceSeq));
-        const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3200);
-        const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
-        if (response.ok) {
-          if (parsed?.game) {
-            const applied = applyIncomingGame('http', parsed.game, reason);
-            if (applied) setScreen("game");
-            return applied;
-          }
-          return null;
-        }
-        attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-      } catch (error) {
-        attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
+      if (attempts.length) {
+        setAuthDebug((current) => current ? `${current} • game:http_failed:${reason}:${attempts.join(" | ")}` : `game:http_failed:${reason}:${attempts.join(" | ")}`);
       }
-    }
-
-    if (attempts.length) {
-      setAuthDebug((current) => current ? `${current} • game:http_failed:${reason}:${attempts.join(" | ")}` : `game:http_failed:${reason}:${attempts.join(" | ")}`);
-    }
-    return null;
+      return null;
     } finally {
       if (isRecoveryRequest) {
         recovery.inFlight = false;
@@ -1186,20 +1172,6 @@ export default function App() {
       mode: aim.mode,
     };
     const body = JSON.stringify(payload);
-    for (const baseUrl of resolveApiCandidates('/balance')) {
-      try {
-        const url = new URL(baseUrl, window.location.origin);
-        url.searchParams.set('action', 'game_aim_sync');
-        const response = await fetchWithTimeout(url.toString(), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body,
-          keepalive: true,
-        }, 1200);
-        if (response.ok) return true;
-      } catch {}
-    }
     for (const baseUrl of resolveApiCandidates('/games/aim')) {
       try {
         const response = await fetchWithTimeout(baseUrl, {
@@ -1217,6 +1189,7 @@ export default function App() {
   };
 
   const scheduleAimHttpSync = (roomId: string, aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => {
+    if (isRealtimeSocketHealthy(roomId)) return;
     if (shouldBlockHttpAuxDuringRealtime(roomId, 'aim', 'room_aim_sync')) return;
     pendingAimHttpRef.current = { roomId, aim };
     const flush = () => {
@@ -1244,17 +1217,6 @@ export default function App() {
     if (shouldBlockHttpAuxDuringRealtime(roomId, "aim", reason)) {
       return null;
     }
-    for (const baseUrl of resolveApiCandidates('/balance')) {
-      try {
-        const url = new URL(baseUrl, window.location.origin);
-        url.searchParams.set('action', 'room_aim_get');
-        url.searchParams.set('roomId', roomId);
-        const response = await fetchWithTimeout(url.toString(), { method: 'GET', credentials: 'same-origin' }, 1200);
-        const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { aim?: AimStateSnapshot | null } : null;
-        if (response.ok) return parsed?.aim ?? null;
-      } catch {}
-    }
     for (const baseUrl of resolveApiCandidates(`/games/${roomId}/aim`)) {
       try {
         const response = await fetchWithTimeout(baseUrl, { method: 'GET', credentials: 'same-origin' }, 1200);
@@ -1268,12 +1230,7 @@ export default function App() {
   };
 
   const postGameActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
-    const actionByPath: Record<string, string> = {
-      "/games/start": "game_start",
-      "/games/shoot": "game_shoot",
-    };
     const attempts: string[] = [];
-    const action = actionByPath[path];
 
     for (const baseUrl of resolveApiCandidates(path)) {
       try {
@@ -1290,27 +1247,6 @@ export default function App() {
         attempts.push(`${baseUrl}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
       } catch (error) {
         attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
-      }
-    }
-
-    if (action) {
-      for (const baseUrl of resolveApiCandidates("/balance")) {
-        try {
-          const url = new URL(baseUrl, window.location.origin);
-          url.searchParams.set("action", action);
-          Object.entries(payload).forEach(([key, value]) => {
-            if (value === null || value === undefined) return;
-            url.searchParams.set(key, String(value));
-          });
-          console.log("[sinuca-http-action-fallback]", JSON.stringify({ path, url: url.toString(), reason, payload }));
-          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 4200);
-          const raw = await response.text();
-          const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string } : null;
-          if (response.ok) return parsed;
-          attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-        } catch (error) {
-          attempts.push(`balance_action:${error instanceof Error ? error.message : "unknown"}`);
-        }
       }
     }
 
@@ -1334,38 +1270,9 @@ export default function App() {
     return null;
   };
 
-  const forceShootGameOverHttpGet = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }, reason: string) => {
-    const attempts: string[] = [];
-    for (const baseUrl of resolveApiCandidates("/games/shoot")) {
-      try {
-        const url = new URL(baseUrl, window.location.origin);
-        url.searchParams.set("roomId", roomId);
-        url.searchParams.set("userId", state.currentUser.userId);
-        url.searchParams.set("angle", String(shot.angle));
-        url.searchParams.set("power", String(shot.power));
-        if (shot.cueX !== null && shot.cueX !== undefined) url.searchParams.set("cueX", String(shot.cueX));
-        if (shot.cueY !== null && shot.cueY !== undefined) url.searchParams.set("cueY", String(shot.cueY));
-        if (shot.calledPocket !== null && shot.calledPocket !== undefined) url.searchParams.set("calledPocket", String(shot.calledPocket));
-        if (shot.spinX !== null && shot.spinX !== undefined) url.searchParams.set("spinX", String(shot.spinX));
-        if (shot.spinY !== null && shot.spinY !== undefined) url.searchParams.set("spinY", String(shot.spinY));
-        console.log("[sinuca-http-shoot-get]", JSON.stringify({ reason, url: url.toString() }));
-        const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 4200);
-        const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
-        if (response.ok) return parsed;
-        attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-      } catch (error) {
-        attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
-      }
-    }
-    if (attempts.length) {
-      setAuthDebug((current) => current ? `${current} • shoot_get:http_failed:${reason}:${attempts.join(" | ")}` : `shoot_get:http_failed:${reason}:${attempts.join(" | ")}`);
-    }
-    return null;
-  };
-
   const shootGameOverHttp = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }, reason: string) => {
     const previousSeq = game?.roomId === roomId ? game.shotSequence : 0;
+    markShotDispatch(roomId, previousSeq + 1, 'http', reason);
     const payload = {
       roomId,
       userId: state.currentUser.userId,
@@ -1389,17 +1296,8 @@ export default function App() {
       return refreshedAfterPost;
     }
 
-    result = await forceShootGameOverHttpGet(roomId, shot, `${reason}:direct_get`);
-    if (result?.game) {
-      return applyIncomingGame('http', result.game, `${reason}:direct_get_result`);
-    }
-
-    const refreshedAfterGet = await fetchGameStateOverHttp(roomId, `${reason}:verify_after_get`, previousSeq);
-    if (refreshedAfterGet && refreshedAfterGet.shotSequence > previousSeq) {
-      return refreshedAfterGet;
-    }
-
     console.warn("[sinuca-shoot-missing]", JSON.stringify({ roomId, previousSeq, reason }));
+    clearShotDispatch(roomId, 'http_missing');
     setErrorMessage("A tacada não chegou ao servidor.");
     return null;
   };
@@ -1537,6 +1435,10 @@ export default function App() {
     socket.send(JSON.stringify(payload));
     return true;
   };
+
+  useEffect(() => {
+    gameShootBusyRef.current = gameShootBusy;
+  }, [gameShootBusy]);
 
   useEffect(() => {
     if (screen !== "game" || !room || !game) {
@@ -1837,7 +1739,8 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped) return;
-    const activeRoomId = screen === "room" || screen === "game"
+    if (screen === "game") return;
+    const activeRoomId = screen === "room"
       ? room?.roomId ?? null
       : screen === "create"
         ? createDraftRoomIdRef.current ?? createDraftRoomId
@@ -1918,6 +1821,9 @@ export default function App() {
   useEffect(() => {
     if (screen !== "game") return;
     if (!game) return;
+    if (shotDispatchRef.current.roomId === game.roomId && game.shotSequence >= shotDispatchRef.current.expectedShotSequence) {
+      clearShotDispatch(game.roomId, 'game_effect_advanced');
+    }
     setGameShootBusy(false);
   }, [game?.shotSequence, game?.turnUserId, game?.updatedAt, screen]);
 
@@ -2447,13 +2353,18 @@ export default function App() {
                   mode: aim.mode,
                 },
               }, { silent: true });
-              if (!deliveredOverSocket || aim.mode === 'place' || aim.mode === 'power' || !aim.visible) {
+              if (!deliveredOverSocket) {
                 scheduleAimHttpSync(room.roomId, aim);
               }
             }}
             onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room_game" : "http_primary_leave_room_game"); }}
             onShoot={async (shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }) => {
               if (!room) return;
+              const existingDispatch = shotDispatchRef.current;
+              if (gameShootBusyRef.current || (existingDispatch.roomId === room.roomId && performance.now() - existingDispatch.startedAt < 1500)) {
+                console.warn("[sinuca-shoot-ui]", JSON.stringify({ roomId: room.roomId, reason: "shot_dispatch_locked", transport: existingDispatch.transport }));
+                return;
+              }
               setGameShootBusy(true);
               setErrorMessage(null);
               try {
@@ -2475,6 +2386,7 @@ export default function App() {
                 }, { silent: true });
 
                 if (sentOverSocket) {
+                  markShotDispatch(room.roomId, previousSeq + 1, 'ws', 'ws_primary_shoot');
                   window.setTimeout(() => {
                     const latestGame = currentGameRef.current;
                     const wsState = wsGameStateRef.current;
@@ -2496,7 +2408,7 @@ export default function App() {
                   return;
                 }
 
-                const applied = await shootGameOverHttp(room.roomId, shot, "http_primary_game_shoot");
+                const applied = await shootGameOverHttp(room.roomId, shot, "http_primary_shot_post");
                 if (!applied) {
                   console.warn("[sinuca-shoot-ui]", JSON.stringify({ roomId: room.roomId, reason: "no_game_returned" }));
                 }

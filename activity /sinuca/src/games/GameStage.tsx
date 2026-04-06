@@ -388,12 +388,17 @@ function interpolateSnapshotBalls(
     const dx = ball.x - prev.x;
     const dy = ball.y - prev.y;
     const dist = Math.hypot(dx, dy);
-    if (dist >= REALTIME_VISUAL_SNAP_DISTANCE) return { ...ball };
+    const isCueBall = ball.number === 0;
+    const snapDistance = isCueBall ? REALTIME_VISUAL_SNAP_DISTANCE * 2.15 : REALTIME_VISUAL_SNAP_DISTANCE;
+    if (dist >= snapDistance) return { ...ball };
+    const appliedAlpha = isCueBall && dist >= REALTIME_VISUAL_SNAP_DISTANCE
+      ? clamp(Math.max(alpha, 0.42), 0.42, 0.82)
+      : alpha;
     return {
       ...ball,
-      x: lerp(prev.x, ball.x, alpha),
-      y: lerp(prev.y, ball.y, alpha),
-      pocketed: (alpha < 0.5 ? prev.pocketed : ball.pocketed),
+      x: lerp(prev.x, ball.x, appliedAlpha),
+      y: lerp(prev.y, ball.y, appliedAlpha),
+      pocketed: (appliedAlpha < 0.5 ? prev.pocketed : ball.pocketed),
     };
   });
 }
@@ -1242,7 +1247,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const prevPocketedIdsRef = useRef<Set<string>>(new Set());
   const ballSpinRef = useRef<Map<string, BallSpinState>>(new Map());
   const snapAnimRef = useRef<{ startedAt: number; power: number; fired: boolean } | null>(null);
-  const pendingShotVisualRef = useRef<{ startedAt: number; angle: number; power: number; cueX: number; cueY: number; travelLimit: number; estimatedSpeedPxPerMs: number; impactType: "ball" | "cushion" | null; impactAtMs: number | null; firstImpactPlayed: boolean } | null>(null);
+  const pendingShotVisualRef = useRef<{ startedAt: number; shotSequenceAtDispatch: number; revisionAtDispatch: number; angle: number; power: number; cueX: number; cueY: number; travelLimit: number; estimatedSpeedPxPerMs: number; impactType: "ball" | "cushion" | null; impactAtMs: number | null; firstImpactPlayed: boolean } | null>(null);
   const queuedSfxRef = useRef<number[]>([]);
   const playbackSoundStateRef = useRef<{ seq: number; frameIndex: number; lastBallAt: number; lastCushionAt: number }>({ seq: 0, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0 });
   const canInteractRef = useRef(false);
@@ -1458,6 +1463,23 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     setAnimatingSeq(game.lastShot.seq);
     playbackSoundStateRef.current = { seq: game.lastShot.seq, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0 };
   }, [animating, game]);
+
+  useEffect(() => {
+    const pending = pendingShotVisualRef.current;
+    if (!pending) return;
+    if (animating || game.status !== "simulating") {
+      pendingShotVisualRef.current = null;
+      return;
+    }
+    const authoritativeCueBall = game.balls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+    if (!authoritativeCueBall) return;
+    const revision = game.snapshotRevision ?? 0;
+    const revisionAdvanced = revision > pending.revisionAtDispatch + 1 || game.shotSequence > pending.shotSequenceAtDispatch;
+    const authoritativeMoved = Math.hypot(authoritativeCueBall.x - pending.cueX, authoritativeCueBall.y - pending.cueY) > 0.75;
+    if (revisionAdvanced || authoritativeMoved) {
+      pendingShotVisualRef.current = null;
+    }
+  }, [animating, game.balls, game.snapshotRevision, game.shotSequence, game.status]);
 
   useEffect(() => () => {
     if (drawLoopRef.current !== null) window.cancelAnimationFrame(drawLoopRef.current);
@@ -1747,6 +1769,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const impactAtMs = travelLimit > 1 ? clamp(travelLimit / estimatedSpeedPxPerMs, 18, 210) : null;
       pendingShotVisualRef.current = {
         startedAt: shotStartedAt,
+        shotSequenceAtDispatch: game.shotSequence,
+        revisionAtDispatch: game.snapshotRevision ?? 0,
         angle: aimAngleRef.current,
         power: shotPower,
         cueX: liveCueBall.x,
@@ -2276,9 +2300,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const shotKick = !animating ? pendingShotVisualRef.current : null;
       if (shotKick && drawCueBall) {
         const kickElapsed = now - shotKick.startedAt;
-        const KICK_MS = 240;
+        const KICK_MS = 140;
         const eventTime = shotKick.impactAtMs ?? KICK_MS;
-        const activeMs = Math.min(KICK_MS, Math.max(eventTime + 36, 96));
+        const activeMs = Math.min(KICK_MS, Math.max(eventTime + 18, 72));
         if (kickElapsed >= activeMs) {
           pendingShotVisualRef.current = null;
         } else {
@@ -2298,8 +2322,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           drawCueBall = cueReplaced
             ? drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? drawCueBall
             : { ...drawCueBall, x: kickX, y: kickY, pocketed: false };
-          realtimeVisualBallsRef.current = drawBalls.map((ball) => ({ ...ball }));
-          realtimeVisualLastAtRef.current = now;
         }
       } else if (animating) {
         pendingShotVisualRef.current = null;
