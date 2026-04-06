@@ -22,7 +22,8 @@ const HARD_STOP_SPEED = 0.0044;
 const MIN_SPEED = SOFT_STOP_SPEED;
 const MAX_STEPS = 1800;
 const FRAME_SAMPLE_EVERY = 2;
-const REALTIME_SIM_STEPS_PER_TICK = 8;
+const REALTIME_SIM_STEPS_PER_TICK = 2;
+const REALTIME_SIM_TIME_SCALE = 4;
 const MAX_SUBSTEPS = 20;
 const BALL_BALL_RESTITUTION = 0.905;
 const BALL_TANGENT_FRICTION = 0.058;
@@ -318,15 +319,16 @@ function handlePocket(ball: PhysicsBall, stepScale = 1): number | null {
   return null;
 }
 
-function updateBallMotion(ball: PhysicsBall) {
+function updateBallMotion(ball: PhysicsBall, timeScale = 1) {
   if (ball.pocketed) return;
   const speed = Math.hypot(ball.vx, ball.vy);
   const bias = clothBias(ball);
+  const scaledTime = Math.max(0.5, timeScale);
   if (speed <= 0.000001) {
     ball.vx = 0;
     ball.vy = 0;
-    ball.sideSpin *= 0.945;
-    ball.roll *= 0.95;
+    ball.sideSpin *= Math.pow(0.945, scaledTime);
+    ball.roll *= Math.pow(0.95, scaledTime);
     if (Math.abs(ball.sideSpin) < 0.02) ball.sideSpin = 0;
     if (Math.abs(ball.roll) < 0.018) ball.roll = 0;
     return;
@@ -338,41 +340,43 @@ function updateBallMotion(ball: PhysicsBall) {
   if (speed > 8.5) drag = Math.min(drag, HIGH_SPEED_DRAG);
   drag = 1 - (1 - drag) * bias;
   if (lowSpeedBlend > 0) drag = Math.min(0.99945, drag + lowSpeedBlend * 0.0002);
-  ball.vx *= drag;
-  ball.vy *= drag;
+  const dragPow = Math.pow(drag, scaledTime);
+  ball.vx *= dragPow;
+  ball.vy *= dragPow;
 
   const postSpeed = Math.hypot(ball.vx, ball.vy);
   const dirX = postSpeed > 0.0001 ? ball.vx / postSpeed : 0;
   const dirY = postSpeed > 0.0001 ? ball.vy / postSpeed : 0;
 
-  ball.roll += (postSpeed - ball.roll) * (ROLL_SYNC_RATE + lowSpeedBlend * 0.05);
+  const rollSync = 1 - Math.pow(1 - clamp(ROLL_SYNC_RATE + lowSpeedBlend * 0.05, 0, 0.95), scaledTime);
+  ball.roll += (postSpeed - ball.roll) * rollSync;
   if (ball.roll < -0.035 && postSpeed > 0.11) {
-    const slow = Math.max(-0.055, ball.roll * BACKSPIN_DRAG_FACTOR);
+    const slow = Math.max(-0.055, ball.roll * BACKSPIN_DRAG_FACTOR) * scaledTime;
     ball.vx += dirX * slow;
     ball.vy += dirY * slow;
   } else if (ball.roll > postSpeed + 0.04 && postSpeed > 0.07) {
-    const push = Math.min(0.065, (ball.roll - postSpeed) * OVERSPIN_PUSH_FACTOR);
+    const push = Math.min(0.065, (ball.roll - postSpeed) * OVERSPIN_PUSH_FACTOR * scaledTime);
     ball.vx += dirX * push;
     ball.vy += dirY * push;
   }
 
   if (Math.abs(ball.sideSpin) > 0.001 && postSpeed > 0.16) {
-    rotateVelocity(ball, ball.sideSpin * SPIN_CURVE_FACTOR);
+    rotateVelocity(ball, ball.sideSpin * SPIN_CURVE_FACTOR * scaledTime);
   }
 
-  ball.sideSpin *= SPIN_DECAY;
-  ball.roll *= ROLL_KEEP;
+  ball.sideSpin *= Math.pow(SPIN_DECAY, scaledTime);
+  ball.roll *= Math.pow(ROLL_KEEP, scaledTime);
 
   const settledSpeed = Math.hypot(ball.vx, ball.vy);
   const softThreshold = SOFT_STOP_SPEED * (0.965 + (bias - 1) * 4.5);
   const hardThreshold = HARD_STOP_SPEED * (0.95 + (bias - 1) * 5.5);
   if (settledSpeed < softThreshold) {
     const settleFactor = clamp(settledSpeed / Math.max(softThreshold, 0.0001), 0, 1);
-    const keep = 0.948 + settleFactor * 0.038;
+    const keep = Math.pow(0.948 + settleFactor * 0.038, scaledTime);
     ball.vx *= keep;
     ball.vy *= keep;
-    ball.sideSpin *= 0.982;
-    ball.roll *= 0.978;
+    ball.sideSpin *= Math.pow(0.982, scaledTime);
+    ball.roll *= Math.pow(0.978, scaledTime);
   }
 
   if (settledSpeed < hardThreshold && Math.abs(ball.sideSpin) < SPIN_STOP_SPEED && Math.abs(ball.roll) < ROLL_STOP_SPEED) {
@@ -602,16 +606,18 @@ function beginShotSimulation(
   activeShots.set(game.roomId, shot);
 }
 
-function advanceShotSimulation(game: GameRecord, shot: LiveShotState) {
+function advanceShotSimulation(game: GameRecord, shot: LiveShotState, timeScale = 1) {
   const balls = game.balls;
+  const scaledTime = Math.max(0.5, timeScale);
   const maxVelocity = balls.reduce((max, ball) => ball.pocketed ? max : Math.max(max, Math.hypot(ball.vx, ball.vy)), 0);
-  const substeps = clamp(Math.ceil(maxVelocity / 7), 1, MAX_SUBSTEPS);
+  const substeps = clamp(Math.ceil((maxVelocity * scaledTime) / 7), 1, MAX_SUBSTEPS);
+  const stepFactor = scaledTime / substeps;
 
   for (let substep = 0; substep < substeps; substep += 1) {
     for (const ball of balls) {
       if (ball.pocketed) continue;
-      ball.x += ball.vx / substeps;
-      ball.y += ball.vy / substeps;
+      ball.x += ball.vx * stepFactor;
+      ball.y += ball.vy * stepFactor;
       const bounced = handleWallCollision(ball);
       if (bounced && shot.firstHitNumber !== null) shot.railAfterContact = true;
     }
@@ -632,7 +638,7 @@ function advanceShotSimulation(game: GameRecord, shot: LiveShotState) {
 
     for (const ball of balls) {
       if (ball.pocketed) continue;
-      const pocketIndex = handlePocket(ball, 1 / substeps);
+      const pocketIndex = handlePocket(ball, stepFactor);
       if (pocketIndex !== null) {
         if (ball.number === 0) shot.cuePocketed = true;
         else shot.pocketedEvents.push({ number: ball.number, pocketIndex });
@@ -642,7 +648,7 @@ function advanceShotSimulation(game: GameRecord, shot: LiveShotState) {
 
   for (const ball of balls) {
     if (ball.pocketed) continue;
-    updateBallMotion(ball);
+    updateBallMotion(ball, scaledTime);
   }
 
   return balls.every((ball) => !ballIsMoving(ball));
@@ -734,7 +740,7 @@ export function stepRealtimeGames() {
 
     let settled = false;
     for (let i = 0; i < REALTIME_SIM_STEPS_PER_TICK; i += 1) {
-      settled = advanceShotSimulation(game, shot);
+      settled = advanceShotSimulation(game, shot, REALTIME_SIM_TIME_SCALE);
       if (settled) break;
     }
 

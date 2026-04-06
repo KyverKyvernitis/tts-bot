@@ -206,6 +206,7 @@ const socketContext = new Map<WebSocket, string>();
 const socketSession = new Map<WebSocket, SessionContextPayload>();
 const balanceWatchers = new Map<WebSocket, { guildId: string; userId: string; lastSent: string }>();
 const latestAimByRoom = new Map<string, AimStateSnapshot>();
+const aimRevisionByRoom = new Map<string, number>();
 
 const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI || "";
 const mongoDbName = process.env.MONGODB_DB || process.env.MONGO_DB_NAME || process.env.MONGODB_DB_NAME || "chat_revive";
@@ -217,6 +218,7 @@ function send(ws: WebSocket, payload: ServerMessage) {
 }
 
 function storeAimState(roomId: string, payload: AimStateSnapshot) {
+  aimRevisionByRoom.set(roomId, payload.snapshotRevision);
   latestAimByRoom.set(roomId, payload);
 }
 
@@ -224,6 +226,7 @@ function clearAimState(roomId: string, userId?: string | null) {
   const current = latestAimByRoom.get(roomId);
   if (!current) return;
   if (userId && current.userId !== userId) return;
+  const nextRevision = (aimRevisionByRoom.get(roomId) ?? current.snapshotRevision ?? 0) + 1;
   latestAimByRoom.set(roomId, {
     ...current,
     visible: false,
@@ -231,7 +234,9 @@ function clearAimState(roomId: string, userId?: string | null) {
     mode: "idle",
     updatedAt: Date.now(),
     seq: current.seq + 1,
+    snapshotRevision: nextRevision,
   });
+  aimRevisionByRoom.set(roomId, nextRevision);
 }
 
 function buildAimPayload(input: {
@@ -245,6 +250,7 @@ function buildAimPayload(input: {
   seq?: unknown;
   mode?: unknown;
 }) {
+  const nextRevision = (aimRevisionByRoom.get(input.roomId) ?? latestAimByRoom.get(input.roomId)?.snapshotRevision ?? 0) + 1;
   return {
     roomId: input.roomId,
     userId: input.userId,
@@ -256,6 +262,7 @@ function buildAimPayload(input: {
     seq: input.seq === undefined || input.seq === null || !Number.isFinite(Number(input.seq)) ? 0 : Number(input.seq),
     mode: normalizeAimMode(input.mode),
     updatedAt: Date.now(),
+    snapshotRevision: nextRevision,
   } satisfies AimStateSnapshot;
 }
 
