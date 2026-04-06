@@ -927,7 +927,7 @@ export default function App() {
     source: "http" | "ws" | "local",
     incoming: GameSnapshot | null | undefined,
     reason: string,
-  ) => {
+  ): GameSnapshot | null => {
     if (!incoming) return null;
     if (source === "http" && shouldBlockHttpGameDuringRealtime(incoming.roomId, reason)) {
       logSnapshotDebug('ignore', {
@@ -942,11 +942,8 @@ export default function App() {
       return null;
     }
 
-    let merged: GameSnapshot | null = null;
-    setGame((current) => {
-      merged = mergeIncomingGame(current, incoming);
-      return merged;
-    });
+    const merged = mergeIncomingGame(currentGameRef.current, incoming);
+    setGame(merged);
 
     if (merged) {
       currentGameRef.current = merged;
@@ -962,7 +959,7 @@ export default function App() {
     return merged;
   };
 
-  const fetchGameStateOverHttp = async (roomId: string, reason: string, sinceSeq = 0) => {
+  const fetchGameStateOverHttp = async (roomId: string, reason: string, sinceSeq = 0): Promise<GameSnapshot | null> => {
     if (shouldBlockHttpGameDuringRealtime(roomId, reason)) {
       const activeGame = currentGameRef.current;
       logSnapshotDebug('skip', {
