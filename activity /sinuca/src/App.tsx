@@ -269,6 +269,7 @@ export default function App() {
   const snapshotDebugRef = useRef<{ roomId: string | null; lastReceivedAt: number; lastLoggedAt: number; lastRevision: number; lastSource: string | null }>({ roomId: null, lastReceivedAt: 0, lastLoggedAt: 0, lastRevision: -1, lastSource: null });
   const wsGameStateRef = useRef<{ roomId: string | null; lastReceivedAt: number; shotSequence: number; revision: number }>({ roomId: null, lastReceivedAt: 0, shotSequence: 0, revision: 0 });
   const simRecoveryRef = useRef<{ roomId: string | null; shotSequence: number; revision: number; lastProgressAt: number; lastRecoveryAt: number; recoveryCount: number; inFlight: boolean; lastRequestedShotSequence: number; lastRequestedRevision: number }>({ roomId: null, shotSequence: 0, revision: 0, lastProgressAt: 0, lastRecoveryAt: 0, recoveryCount: 0, inFlight: false, lastRequestedShotSequence: 0, lastRequestedRevision: 0 });
+  const realtimeHttpLockRef = useRef<{ roomId: string | null; shotSequence: number; armedAt: number; source: string | null }>({ roomId: null, shotSequence: 0, armedAt: 0, source: null });
 
   useEffect(() => {
     let mounted = true;
@@ -900,35 +901,62 @@ export default function App() {
     return Boolean(socket && socket.readyState === WebSocket.OPEN);
   };
 
-  const shouldBlockHttpGameDuringRealtime = (roomId: string, reason: string) => {
+  const armRealtimeHttpLock = (roomId: string, shotSequence: number, source: string) => {
+    realtimeHttpLockRef.current = { roomId, shotSequence, armedAt: performance.now(), source };
+  };
+
+  const clearRealtimeHttpLock = (roomId?: string | null) => {
+    const current = realtimeHttpLockRef.current;
+    if (roomId && current.roomId && current.roomId !== roomId) return;
+    realtimeHttpLockRef.current = { roomId: null, shotSequence: 0, armedAt: 0, source: null };
+  };
+
+  const getRealtimeHttpGuardState = (roomId: string) => {
     const activeGame = currentGameRef.current;
-    const sameRoom = activeGame?.roomId === roomId || currentRoomRef.current?.roomId === roomId;
-    if (!sameRoom) return false;
-    if (activeGame?.status !== "simulating") return false;
+    const activeRoom = currentRoomRef.current;
+    const lock = realtimeHttpLockRef.current;
+    const sameRoom = activeGame?.roomId === roomId || activeRoom?.roomId === roomId || lock.roomId === roomId;
+    if (!sameRoom) return { sameRoom: false, isRealtimeLocked: false, activeGame, lock };
+    const activeGameSimulating = activeGame?.roomId === roomId && activeGame.status === 'simulating';
+    const localLockActive = lock.roomId === roomId;
+    return {
+      sameRoom: true,
+      isRealtimeLocked: activeGameSimulating || localLockActive,
+      activeGame,
+      lock,
+      activeGameSimulating,
+      localLockActive,
+    };
+  };
+
+  const shouldBlockHttpGameDuringRealtime = (roomId: string, reason: string) => {
+    const guard = getRealtimeHttpGuardState(roomId);
+    if (!guard.sameRoom || !guard.isRealtimeLocked) return false;
     if (reason.startsWith("force_recover_")) return false;
     return true;
   };
 
   const shouldRunHttpGamePolling = (roomId: string) => {
+    const guard = getRealtimeHttpGuardState(roomId);
+    if (guard.isRealtimeLocked) return false;
     if (isSocketOpen()) return false;
-    const activeGame = currentGameRef.current;
-    if (activeGame?.roomId === roomId && activeGame.status === "simulating") return false;
     return true;
   };
 
   const shouldBlockHttpAuxDuringRealtime = (roomId: string, kind: "room" | "aim", reason: string) => {
-    const activeGame = currentGameRef.current;
-    const sameRoom = activeGame?.roomId === roomId || currentRoomRef.current?.roomId === roomId;
-    if (!sameRoom) return false;
-    if (activeGame?.status !== "simulating") return false;
+    const guard = getRealtimeHttpGuardState(roomId);
+    if (!guard.sameRoom || !guard.isRealtimeLocked) return false;
+    const activeGame = guard.activeGame;
     logSnapshotDebug('skip', {
       source: 'http',
       roomId,
       reason,
-      status: activeGame.status,
-      shotSequence: activeGame.shotSequence,
-      revision: Number.isFinite(activeGame.snapshotRevision) ? activeGame.snapshotRevision : null,
+      status: activeGame?.status ?? null,
+      shotSequence: activeGame?.shotSequence ?? guard.lock.shotSequence ?? null,
+      revision: activeGame && Number.isFinite(activeGame.snapshotRevision) ? activeGame.snapshotRevision : null,
       why: `${kind}_http_realtime_guard`,
+      wsConnected: isSocketOpen(),
+      lockSource: guard.lock.source,
     });
     return true;
   };
@@ -965,7 +993,7 @@ export default function App() {
         status: incoming.status,
         shotSequence: incoming.shotSequence,
         revision: Number.isFinite(incoming.snapshotRevision) ? incoming.snapshotRevision : 0,
-        why: 'ws_realtime_guard',
+        why: 'blocked_balance_action_game_get',
       });
       return null;
     }
@@ -986,6 +1014,7 @@ export default function App() {
         || (merged.shotSequence === previousGame.shotSequence && (mergedRevision > previousRevision || merged.updatedAt > previousGame.updatedAt));
 
       if (merged.status === 'simulating') {
+        armRealtimeHttpLock(merged.roomId, merged.shotSequence, source);
         const sequenceChanged = recovery.roomId !== merged.roomId || recovery.shotSequence !== merged.shotSequence;
         if (sequenceChanged) {
           recovery.roomId = merged.roomId;
@@ -1002,6 +1031,7 @@ export default function App() {
           recovery.lastProgressAt = now;
         }
       } else {
+        clearRealtimeHttpLock(merged.roomId);
         recovery.roomId = merged.roomId;
         recovery.shotSequence = merged.shotSequence;
         recovery.revision = mergedRevision;
@@ -1036,7 +1066,7 @@ export default function App() {
         status: activeGame?.status ?? null,
         shotSequence: activeGame?.shotSequence ?? null,
         revision: Number.isFinite(activeGame?.snapshotRevision) ? activeGame!.snapshotRevision : null,
-        why: 'ws_realtime_guard',
+        why: 'blocked_balance_action_game_get',
       });
       return null;
     }
@@ -1187,6 +1217,7 @@ export default function App() {
   };
 
   const scheduleAimHttpSync = (roomId: string, aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => {
+    if (shouldBlockHttpAuxDuringRealtime(roomId, 'aim', 'room_aim_sync')) return;
     pendingAimHttpRef.current = { roomId, aim };
     const flush = () => {
       const pending = pendingAimHttpRef.current;
@@ -1216,7 +1247,7 @@ export default function App() {
     for (const baseUrl of resolveApiCandidates('/balance')) {
       try {
         const url = new URL(baseUrl, window.location.origin);
-        url.searchParams.set('action', 'game_aim_get');
+        url.searchParams.set('action', 'room_aim_get');
         url.searchParams.set('roomId', roomId);
         const response = await fetchWithTimeout(url.toString(), { method: 'GET', credentials: 'same-origin' }, 1200);
         const raw = await response.text();
@@ -2427,6 +2458,7 @@ export default function App() {
               setErrorMessage(null);
               try {
                 const previousSeq = game?.roomId === room.roomId ? game.shotSequence : 0;
+                armRealtimeHttpLock(room.roomId, previousSeq + 1, 'local_shot');
                 const sentOverSocket = sendMessage({
                   type: "take_shot",
                   payload: {
