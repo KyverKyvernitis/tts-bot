@@ -1299,7 +1299,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [displayBalls, game.ballInHandUserId, game.phase, game.shotSequence]);
 
   const cueBall = renderBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
-  const canInteract = Boolean(cueBall && isMyTurn && !animating && !shootBusy && game.status !== "finished");
+  const canInteract = Boolean(cueBall && isMyTurn && !animating && !shootBusy && game.status === "waiting_shot");
   const isBallInHand = game.ballInHandUserId === currentUserId && canInteract;
   canInteractRef.current = canInteract;
   shootBusyRef.current = shootBusy;
@@ -1391,7 +1391,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       emitAimState({ visible: true, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "place" }, true);
       return;
     }
-    if (!canInteract || animating || shootBusy || game.status === "finished") {
+    if (!canInteract || animating || shootBusy || game.status !== "waiting_shot") {
       emitAimState({ visible: false, angle: aimAngleRef.current, cueX: cueBall?.x ?? null, cueY: cueBall?.y ?? null, mode: "idle" }, true);
     }
   }, [animating, canInteract, cueBall?.x, cueBall?.y, game.status, pointerMode, shootBusy]);
@@ -1402,10 +1402,12 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const clampedY = clamp(clientY, rectTop, rectBottom);
     const normalized = clamp((clampedY - rectTop) / Math.max(1, rectHeight), 0, 1);
     let shaped = 0;
-    if (normalized <= 0.9) {
-      shaped = Math.pow(normalized / 0.9, POWER_CURVE_EXPONENT) * 0.36;
+    if (normalized <= 0.36) {
+      shaped = Math.pow(normalized / 0.36, POWER_CURVE_EXPONENT) * 0.16;
+    } else if (normalized <= 0.82) {
+      shaped = 0.16 + Math.pow((normalized - 0.36) / 0.46, 1.62) * 0.36;
     } else {
-      shaped = 0.36 + Math.pow((normalized - 0.9) / 0.1, 1.42) * 0.64;
+      shaped = 0.52 + Math.pow((normalized - 0.82) / 0.18, 1.95) * 0.48;
     }
     return clamp(POWER_MIN + shaped * (1 - POWER_MIN), POWER_MIN, 1);
   };
@@ -1764,15 +1766,17 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   const statusText = game.status === "finished"
     ? game.winnerUserId === currentUserId ? "Você venceu" : "Você perdeu"
-    : game.foulReason && !animating
-      ? `Falta: ${game.foulReason}`
-      : isBallInHand
-        ? "Bola na mão"
-        : animating
-          ? `Tacada ${animatingSeq}`
-          : isMyTurn
-            ? needEightCall ? "Escolha a caçapa" : "Sua vez"
-            : `Vez de ${cleanName(opponent?.displayName ?? "oponente")}`;
+    : game.status === "simulating"
+      ? "Tacada em andamento"
+      : game.foulReason && !animating
+        ? `Falta: ${game.foulReason}`
+        : isBallInHand
+          ? "Bola na mão"
+          : animating
+            ? `Tacada ${animatingSeq}`
+            : isMyTurn
+              ? needEightCall ? "Escolha a caçapa" : "Sua vez"
+              : `Vez de ${cleanName(opponent?.displayName ?? "oponente")}`;
 
   const phaseText = game.status === "finished"
     ? "fim"

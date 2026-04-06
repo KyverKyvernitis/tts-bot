@@ -30,7 +30,7 @@ import type {
   SessionContextPayload,
 } from "./messages.js";
 import { getInitialRuleSet } from "./gameRules.js";
-import { getGameSnapshot, removeGame, startGameForRoom, takeShot } from "./gameState.js";
+import { getGameSnapshot, removeGame, startGameForRoom, stepRealtimeGames, takeShot } from "./gameState.js";
 
 const app = express();
 
@@ -320,6 +320,14 @@ function broadcastGame(roomId: string) {
 function normalizeAimMode(value: unknown): AimPointerMode {
   return value === "aim" || value === "place" || value === "power" || value === "idle" ? value : "idle";
 }
+
+const realtimeStepInterval = setInterval(() => {
+  const changedRooms = stepRealtimeGames();
+  for (const roomId of changedRooms) {
+    broadcastGame(roomId);
+  }
+}, 1000 / 60);
+realtimeStepInterval.unref?.();
 
 function broadcastAim(roomId: string, payload: AimStateSnapshot, except?: WebSocket | null) {
   const message: ServerMessage = { type: "aim_state", payload };

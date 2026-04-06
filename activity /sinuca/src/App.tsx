@@ -12,6 +12,7 @@ import type { ActivityBootstrap, ActivityUser, AimPointerMode, AimStateSnapshot,
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.wav";
+import lobbyBgmAsset from "./assets/lobby-bgm-cat-cafe.mp3";
 import GameStage from "./games/GameStage";
 
 const DISCORD_ID_RE = /^\d{17,20}$/;
@@ -244,6 +245,9 @@ export default function App() {
   const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
   const balanceReceiptRef = useRef<number>(0);
   const uiClickAudioRef = useRef<HTMLAudioElement | null>(null);
+  const lobbyBgmAudioRef = useRef<HTMLAudioElement | null>(null);
+  const lobbyBgmFadeTimerRef = useRef<number | null>(null);
+  const previousScreenRef = useRef<LobbyScreen>("home");
   const currentScreenRef = useRef<LobbyScreen>("home");
   const createDraftRoomIdRef = useRef<string | null>(null);
   const currentRoomRef = useRef<RoomSnapshot | null>(null);
@@ -284,6 +288,53 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const audio = new Audio(lobbyBgmAsset);
+    audio.loop = true;
+    audio.preload = "auto";
+    audio.volume = 0;
+    lobbyBgmAudioRef.current = audio;
+    return () => {
+      if (lobbyBgmFadeTimerRef.current !== null) {
+        window.clearInterval(lobbyBgmFadeTimerRef.current);
+        lobbyBgmFadeTimerRef.current = null;
+      }
+      lobbyBgmAudioRef.current = null;
+      audio.pause();
+      audio.src = "";
+    };
+  }, []);
+
+  const fadeLobbyBgmTo = (targetVolume: number, durationMs: number, options?: { pauseWhenDone?: boolean }) => {
+    const audio = lobbyBgmAudioRef.current;
+    if (!audio) return;
+    if (lobbyBgmFadeTimerRef.current !== null) {
+      window.clearInterval(lobbyBgmFadeTimerRef.current);
+      lobbyBgmFadeTimerRef.current = null;
+    }
+    const startVolume = audio.volume;
+    const delta = targetVolume - startVolume;
+    if (Math.abs(delta) < 0.001 || durationMs <= 0) {
+      audio.volume = targetVolume;
+      if (options?.pauseWhenDone && targetVolume <= 0.001) audio.pause();
+      return;
+    }
+    const startedAt = performance.now();
+    lobbyBgmFadeTimerRef.current = window.setInterval(() => {
+      const t = Math.min(1, (performance.now() - startedAt) / durationMs);
+      const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      audio.volume = Math.max(0, Math.min(0.12, startVolume + delta * eased));
+      if (t >= 1) {
+        if (lobbyBgmFadeTimerRef.current !== null) {
+          window.clearInterval(lobbyBgmFadeTimerRef.current);
+          lobbyBgmFadeTimerRef.current = null;
+        }
+        audio.volume = targetVolume;
+        if (options?.pauseWhenDone && targetVolume <= 0.001) audio.pause();
+      }
+    }, 16);
+  };
+
   const playUiClick = () => {
     const audio = uiClickAudioRef.current;
     if (!audio) return;
@@ -301,8 +352,28 @@ export default function App() {
   };
 
   useEffect(() => {
+    const previousScreen = previousScreenRef.current;
+    previousScreenRef.current = screen;
     currentScreenRef.current = screen;
-  }, [screen]);
+
+    const audio = lobbyBgmAudioRef.current;
+    if (!audio) return;
+
+    const inMenuFlow = screen === "home" || screen === "create" || screen === "list" || screen === "room";
+    const shouldPlayLobbyBgm = bootstrapped && inMenuFlow && room?.status !== "in_game";
+
+    if (shouldPlayLobbyBgm) {
+      if (previousScreen === "game") {
+        try { audio.currentTime = 0; } catch {}
+      }
+      if (audio.paused) {
+        void audio.play().catch(() => undefined);
+      }
+      fadeLobbyBgmTo(0.085, previousScreen === "game" ? 260 : 180);
+    } else {
+      fadeLobbyBgmTo(0, 180, { pauseWhenDone: true });
+    }
+  }, [bootstrapped, room?.status, screen]);
 
   useEffect(() => {
     createDraftRoomIdRef.current = createDraftRoomId;

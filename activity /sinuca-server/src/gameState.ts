@@ -60,20 +60,24 @@ interface PhysicsBall extends GameBallSnapshot {
   sideSpin: number;
 }
 
-interface ShotOutcome {
-  frames: GameShotFrame[];
-  pocketedNumbers: number[];
-  cuePocketed: boolean;
-  nextTurnUserId: string;
-  firstHitNumber: number | null;
-  foulReason: string | null;
-  winnerUserId: string | null;
-  eightPocket: boolean;
-}
-
 interface PocketEvent {
   number: number;
   pocketIndex: number;
+}
+
+interface LiveShotState {
+  roomId: string;
+  shooterUserId: string;
+  calledPocket: number | null;
+  shooterGroupBefore: BallGroup | null;
+  openTableBefore: boolean;
+  currentTargetBefore: BallGroup | "eight" | null;
+  pocketedEvents: PocketEvent[];
+  cuePocketed: boolean;
+  firstHitNumber: number | null;
+  railAfterContact: boolean;
+  hadAnyCollision: boolean;
+  startedAt: number;
 }
 
 interface GameRecord extends Omit<GameSnapshot, "balls" | "lastShot"> {
@@ -82,6 +86,7 @@ interface GameRecord extends Omit<GameSnapshot, "balls" | "lastShot"> {
 }
 
 const games = new Map<string, GameRecord>();
+const activeShots = new Map<string, LiveShotState>();
 
 function makeGameId() {
   return `game-${Math.random().toString(36).slice(2, 10)}`;
@@ -493,7 +498,7 @@ function resolveCuePlacement(balls: PhysicsBall[], x: number, y: number, breakOn
   return base;
 }
 
-function simulateShot(
+function beginShotSimulation(
   game: GameRecord,
   shooterUserId: string,
   angle: number,
@@ -503,7 +508,7 @@ function simulateShot(
   calledPocket?: number | null,
   spinX = 0,
   spinY = 0,
-): ShotOutcome {
+) {
   const safeAngle = Number.isFinite(angle) ? angle : 0;
   const balls = cloneBalls(game.balls);
   const cueBall = balls.find((ball) => ball.number === 0) ?? createBall(0, DEFAULT_CUE_X, DEFAULT_CUE_Y);
@@ -537,7 +542,11 @@ function simulateShot(
   const shotPower = clamp(Number.isFinite(power) ? power : 0.52, POWER_FLOOR, 1);
   const safeSpinX = clampUnit(Number.isFinite(spinX) ? spinX : 0);
   const safeSpinY = clampUnit(Number.isFinite(spinY) ? spinY : 0);
-  const shapedShotPower = shotPower * 0.025 + Math.pow(shotPower, 2.18) * 0.975;
+  const shapedShotPower = shotPower <= 0.36
+    ? shotPower * 0.92
+    : shotPower <= 0.82
+      ? 0.3312 + Math.pow((shotPower - 0.36) / 0.46, 1.42) * 0.3788
+      : 0.71 + Math.pow((shotPower - 0.82) / 0.18, 1.88) * 0.29;
   const shotSpeed = MIN_SHOT_SPEED + shapedShotPower * MAX_SHOT_SPEED;
   cueBall.vx = Math.cos(safeAngle) * shotSpeed;
   cueBall.vy = Math.sin(safeAngle) * shotSpeed;
@@ -552,85 +561,107 @@ function simulateShot(
       ? "eight"
       : shooterGroupBefore;
 
-  const frames: GameShotFrame[] = [currentFrame(balls)];
-  const pocketedEvents: PocketEvent[] = [];
-  let cuePocketed = false;
-  let firstHitNumber: number | null = null;
-  let railAfterContact = false;
-  let hadAnyCollision = false;
+  game.balls = balls;
+  game.shotSequence += 1;
+  game.updatedAt = Date.now();
+  game.status = "simulating";
+  game.foulReason = null;
+  game.ballInHandUserId = null;
+  game.calledPocket = currentTargetBefore === "eight" ? calledPocket ?? null : null;
+  game.lastShot = {
+    seq: game.shotSequence,
+    shooterUserId,
+    nextTurnUserId: shooterUserId,
+    pocketedNumbers: [],
+    cuePocketed: false,
+    frames: [],
+    createdAt: game.updatedAt,
+  };
 
-  for (let step = 0; step < MAX_STEPS; step += 1) {
-    const maxVelocity = balls.reduce((max, ball) => ball.pocketed ? max : Math.max(max, Math.abs(ball.vx), Math.abs(ball.vy)), 0);
-    const substeps = clamp(Math.ceil(maxVelocity / 7), 1, MAX_SUBSTEPS);
+  const shot: LiveShotState = {
+    roomId: game.roomId,
+    shooterUserId,
+    calledPocket: game.calledPocket,
+    shooterGroupBefore,
+    openTableBefore,
+    currentTargetBefore,
+    pocketedEvents: [],
+    cuePocketed: false,
+    firstHitNumber: null,
+    railAfterContact: false,
+    hadAnyCollision: false,
+    startedAt: game.updatedAt,
+  };
 
-    for (let substep = 0; substep < substeps; substep += 1) {
-      for (const ball of balls) {
-        if (ball.pocketed) continue;
-        ball.x += ball.vx / substeps;
-        ball.y += ball.vy / substeps;
-        const bounced = handleWallCollision(ball);
-        if (bounced && firstHitNumber !== null) railAfterContact = true;
-      }
+  activeShots.set(game.roomId, shot);
+}
 
-      for (let index = 0; index < balls.length; index += 1) {
-        for (let otherIndex = index + 1; otherIndex < balls.length; otherIndex += 1) {
-          const a = balls[index];
-          const b = balls[otherIndex];
-          const collided = resolveCollision(a, b);
-          if (!collided) continue;
-          hadAnyCollision = true;
-          if (firstHitNumber === null) {
-            if (a.number === 0 && b.number !== 0) firstHitNumber = b.number;
-            else if (b.number === 0 && a.number !== 0) firstHitNumber = a.number;
-          }
-        }
-      }
+function advanceShotSimulation(game: GameRecord, shot: LiveShotState) {
+  const balls = game.balls;
+  const maxVelocity = balls.reduce((max, ball) => ball.pocketed ? max : Math.max(max, Math.hypot(ball.vx, ball.vy)), 0);
+  const substeps = clamp(Math.ceil(maxVelocity / 7), 1, MAX_SUBSTEPS);
 
-      for (const ball of balls) {
-        if (ball.pocketed) continue;
-        const pocketIndex = handlePocket(ball, 1 / substeps);
-        if (pocketIndex !== null) {
-          if (ball.number === 0) cuePocketed = true;
-          else pocketedEvents.push({ number: ball.number, pocketIndex });
+  for (let substep = 0; substep < substeps; substep += 1) {
+    for (const ball of balls) {
+      if (ball.pocketed) continue;
+      ball.x += ball.vx / substeps;
+      ball.y += ball.vy / substeps;
+      const bounced = handleWallCollision(ball);
+      if (bounced && shot.firstHitNumber !== null) shot.railAfterContact = true;
+    }
+
+    for (let index = 0; index < balls.length; index += 1) {
+      for (let otherIndex = index + 1; otherIndex < balls.length; otherIndex += 1) {
+        const a = balls[index];
+        const b = balls[otherIndex];
+        const collided = resolveCollision(a, b);
+        if (!collided) continue;
+        shot.hadAnyCollision = true;
+        if (shot.firstHitNumber === null) {
+          if (a.number === 0 && b.number !== 0) shot.firstHitNumber = b.number;
+          else if (b.number === 0 && a.number !== 0) shot.firstHitNumber = a.number;
         }
       }
     }
 
     for (const ball of balls) {
       if (ball.pocketed) continue;
-      updateBallMotion(ball);
-    }
-
-    const sampleEvery = maxVelocity < 1.15 ? 1 : maxVelocity < 3.4 ? FRAME_SAMPLE_EVERY : FRAME_SAMPLE_EVERY + 1;
-    if (step % sampleEvery === 0) frames.push(currentFrame(balls));
-    if (balls.every((ball) => !ballIsMoving(ball))) {
-      const lastFrame = frames[frames.length - 1];
-      const settledFrame = currentFrame(balls);
-      if (!lastFrame || JSON.stringify(lastFrame.balls) !== JSON.stringify(settledFrame.balls)) {
-        frames.push(settledFrame);
+      const pocketIndex = handlePocket(ball, 1 / substeps);
+      if (pocketIndex !== null) {
+        if (ball.number === 0) shot.cuePocketed = true;
+        else shot.pocketedEvents.push({ number: ball.number, pocketIndex });
       }
-      break;
     }
   }
 
-  const trimmedFrames = trimTrailingSettledFrames(frames);
+  for (const ball of balls) {
+    if (ball.pocketed) continue;
+    updateBallMotion(ball);
+  }
 
-  const firstHitGroup = groupOfNumber(firstHitNumber ?? 0);
-  const pocketedNumbers = pocketedEvents.map((event) => event.number);
-  const eightPocketEvent = pocketedEvents.find((event) => event.number === 8) ?? null;
-  const pocketedOwnGroup = pocketedNumbers.some((number) => shooterGroupBefore && groupOfNumber(number) === shooterGroupBefore);
+  game.updatedAt = Date.now();
+  return balls.every((ball) => !ballIsMoving(ball));
+}
+
+function finalizeShotSimulation(game: GameRecord, shot: LiveShotState) {
+  const balls = game.balls;
+  const cueBall = balls.find((ball) => ball.number === 0) ?? createBall(0, DEFAULT_CUE_X, DEFAULT_CUE_Y);
+  const firstHitGroup = groupOfNumber(shot.firstHitNumber ?? 0);
+  const pocketedNumbers = shot.pocketedEvents.map((event) => event.number);
+  const eightPocketEvent = shot.pocketedEvents.find((event) => event.number === 8) ?? null;
+  const pocketedOwnGroup = pocketedNumbers.some((number) => shot.shooterGroupBefore && groupOfNumber(number) === shot.shooterGroupBefore);
   const pocketedOnOpen = pocketedNumbers.find((number) => groupOfNumber(number) !== null) ?? null;
 
   let foulReason: string | null = null;
-  if (cuePocketed) foulReason = "scratch";
-  else if (firstHitNumber === null && !hadAnyCollision) foulReason = "miss";
-  else if (openTableBefore && firstHitNumber === 8) foulReason = "eight_first";
-  else if (!openTableBefore && currentTargetBefore === "eight" && firstHitNumber !== 8) foulReason = "wrong_ball";
-  else if (!openTableBefore && currentTargetBefore !== "eight" && firstHitGroup !== currentTargetBefore) foulReason = "wrong_ball";
-  else if (firstHitNumber === null) foulReason = "miss";
-  else if (!pocketedNumbers.length && !railAfterContact) foulReason = "no_rail";
+  if (shot.cuePocketed) foulReason = "scratch";
+  else if (shot.firstHitNumber === null && !shot.hadAnyCollision) foulReason = "miss";
+  else if (shot.openTableBefore && shot.firstHitNumber === 8) foulReason = "eight_first";
+  else if (!shot.openTableBefore && shot.currentTargetBefore === "eight" && shot.firstHitNumber !== 8) foulReason = "wrong_ball";
+  else if (!shot.openTableBefore && shot.currentTargetBefore !== "eight" && firstHitGroup !== shot.currentTargetBefore) foulReason = "wrong_ball";
+  else if (shot.firstHitNumber === null) foulReason = "miss";
+  else if (!pocketedNumbers.length && !shot.railAfterContact) foulReason = "no_rail";
 
-  if (cuePocketed) {
+  if (shot.cuePocketed) {
     const scratchPlacement = resolveCuePlacement(balls, DEFAULT_CUE_X, DEFAULT_CUE_Y, false);
     cueBall.pocketed = false;
     cueBall.x = scratchPlacement.x;
@@ -643,28 +674,26 @@ function simulateShot(
 
   let winnerUserId: string | null = null;
   if (eightPocketEvent) {
-    const legalEight = !foulReason && currentTargetBefore === "eight" && calledPocket !== null && eightPocketEvent.pocketIndex === calledPocket;
-    winnerUserId = legalEight ? shooterUserId : opponentUserId(game, shooterUserId);
+    const legalEight = !foulReason && shot.currentTargetBefore === "eight" && shot.calledPocket !== null && eightPocketEvent.pocketIndex === shot.calledPocket;
+    winnerUserId = legalEight ? shot.shooterUserId : opponentUserId(game, shot.shooterUserId);
   }
 
-  if (!winnerUserId && openTableBefore && !foulReason && pocketedOnOpen) {
-    assignGroups(game, shooterUserId, groupOfNumber(pocketedOnOpen)!);
+  if (!winnerUserId && shot.openTableBefore && !foulReason && pocketedOnOpen) {
+    assignGroups(game, shot.shooterUserId, groupOfNumber(pocketedOnOpen)!);
   }
 
   const nextTurnUserId = winnerUserId
-    ? shooterUserId
+    ? shot.shooterUserId
     : foulReason
-      ? opponentUserId(game, shooterUserId)
-      : pocketedOwnGroup || (openTableBefore && pocketedOnOpen !== null)
-        ? shooterUserId
-        : opponentUserId(game, shooterUserId);
+      ? opponentUserId(game, shot.shooterUserId)
+      : pocketedOwnGroup || (shot.openTableBefore && pocketedOnOpen !== null)
+        ? shot.shooterUserId
+        : opponentUserId(game, shot.shooterUserId);
 
-  game.balls = balls;
   game.turnUserId = nextTurnUserId;
-  game.shotSequence += 1;
   game.updatedAt = Date.now();
   game.foulReason = foulReason;
-  game.calledPocket = currentTargetBefore === "eight" ? calledPocket ?? null : null;
+  game.calledPocket = shot.currentTargetBefore === "eight" ? shot.calledPocket ?? null : null;
 
   if (winnerUserId) {
     game.status = "finished";
@@ -673,30 +702,39 @@ function simulateShot(
     game.ballInHandUserId = null;
   } else {
     game.status = "waiting_shot";
-    game.ballInHandUserId = foulReason ? opponentUserId(game, shooterUserId) : null;
+    game.winnerUserId = null;
+    game.ballInHandUserId = foulReason ? opponentUserId(game, shot.shooterUserId) : null;
     game.phase = inferPhase(game);
   }
 
   game.lastShot = {
     seq: game.shotSequence,
-    shooterUserId,
+    shooterUserId: shot.shooterUserId,
     nextTurnUserId,
     pocketedNumbers,
-    cuePocketed,
-    frames: trimmedFrames,
+    cuePocketed: shot.cuePocketed,
+    frames: [],
     createdAt: game.updatedAt,
   };
+}
 
-  return {
-    frames: trimmedFrames,
-    pocketedNumbers,
-    cuePocketed,
-    nextTurnUserId,
-    firstHitNumber,
-    foulReason,
-    winnerUserId,
-    eightPocket: Boolean(eightPocketEvent),
-  };
+export function stepRealtimeGames() {
+  const changedRoomIds = new Set<string>();
+  for (const [roomId, shot] of activeShots) {
+    const game = games.get(roomId);
+    if (!game) {
+      activeShots.delete(roomId);
+      continue;
+    }
+    const settled = advanceShotSimulation(game, shot);
+    changedRoomIds.add(roomId);
+    if (settled) {
+      finalizeShotSimulation(game, shot);
+      activeShots.delete(roomId);
+      changedRoomIds.add(roomId);
+    }
+  }
+  return [...changedRoomIds];
 }
 
 export function startGameForRoom(room: RoomRecord): GameSnapshot {
@@ -730,6 +768,7 @@ export function startGameForRoom(room: RoomRecord): GameSnapshot {
     lastShot: null,
   };
 
+  activeShots.delete(room.roomId);
   games.set(room.roomId, game);
   return toSnapshot(game);
 }
@@ -746,6 +785,7 @@ export function hasGame(roomId: string) {
 
 export function removeGame(roomId: string) {
   const existing = games.get(roomId) ?? null;
+  activeShots.delete(roomId);
   games.delete(roomId);
   return existing ? toSnapshot(existing) : null;
 }
@@ -763,7 +803,7 @@ export function takeShot(
 ): GameSnapshot | null {
   const game = games.get(roomId);
   if (!game) return null;
-  if (game.turnUserId !== userId || game.status === "finished") return toSnapshot(game);
-  simulateShot(game, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY);
+  if (game.turnUserId !== userId || game.status !== "waiting_shot") return toSnapshot(game);
+  beginShotSimulation(game, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY);
   return toSnapshot(game);
 }

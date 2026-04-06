@@ -1,7 +1,7 @@
 export type RoomMode = "server" | "casual";
 export type TableType = "stake" | "casual";
 export type RoomStatus = "waiting" | "ready" | "in_game";
-export type GameStatus = "waiting_shot" | "finished";
+export type GameStatus = "waiting_shot" | "simulating" | "finished";
 export type BallGroup = "solids" | "stripes";
 export type GamePhase = "break" | "open_table" | "group_play" | "eight_ball" | "finished";
 export type AimPointerMode = "idle" | "aim" | "place" | "power";
