@@ -4916,44 +4916,107 @@ button:focus-visible {
 
 .pool-stage__power-track {
   position: relative;
-  width: 20px;
+  width: 28px;
   height: 100%;
   min-height: 220px;
-  border-radius: 9px;
-  background: rgba(0, 0, 0, 0.72);
-  border: 2px solid rgba(160, 165, 180, 0.45);
-  box-shadow: inset 0 2px 6px rgba(0,0,0,0.6), 0 1px 0 rgba(255,255,255,0.08);
+  border-radius: 13px;
+  background: linear-gradient(180deg, rgba(132, 138, 160, 0.96) 0%, rgba(74, 80, 99, 0.96) 100%);
+  border: 2px solid rgba(208, 214, 228, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.18),
+    inset 0 -2px 5px rgba(0,0,0,0.35),
+    0 2px 10px rgba(0,0,0,0.28);
   overflow: hidden;
 }
 
-.pool-stage__power-fill {
+.pool-stage__power-gradient,
+.pool-stage__power-guides {
   position: absolute;
-  left: 2px;
-  right: 2px;
-  bottom: auto;
-  border-radius: 7px;
-  background: linear-gradient(180deg,
-    #fff3a2 0%,
-    #ffd84e 18%,
-    #ffbf23 38%,
-    #ff8b12 62%,
-    #eb3d12 82%,
-    #981010 100%
-  );
-  box-shadow:
-    0 0 10px rgba(220, 160, 30, 0.3),
-    inset 0 1px 0 rgba(255,255,255,0.25);
+  inset: 4px;
+  border-radius: 9px;
+  pointer-events: none;
 }
 
-.pool-stage__power-marker {
+.pool-stage__power-gradient {
+  background:
+    linear-gradient(180deg,
+      #efe54f 0%,
+      #f3d63b 16%,
+      #f1b427 40%,
+      #ef7716 64%,
+      #e64812 82%,
+      #ba170d 100%
+    );
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.2),
+    inset 0 -10px 18px rgba(35, 10, 6, 0.22);
+}
+
+.pool-stage__power-guides {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0)),
+    repeating-linear-gradient(
+      180deg,
+      rgba(0,0,0,0) 0 calc(25% - 1.5px),
+      rgba(86, 39, 13, 0.34) calc(25% - 1.5px) calc(25% + 1.5px)
+    );
+  mix-blend-mode: multiply;
+}
+
+.pool-stage__power-cue {
   position: absolute;
-  left: -3px;
-  right: -3px;
-  height: 4px;
+  left: 50%;
+  right: auto;
+  bottom: 8px;
+  width: 13px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.pool-stage__power-cue-tip,
+.pool-stage__power-cue-ferrule,
+.pool-stage__power-cue-shaft,
+.pool-stage__power-cue-butt {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.pool-stage__power-cue-tip {
+  top: 0;
+  width: 10px;
+  height: 9px;
+  border-radius: 7px 7px 2px 2px;
+  background: linear-gradient(180deg, #f7fbff 0%, #edf3fb 100%);
+  box-shadow: 0 0 4px rgba(255,255,255,0.2);
+}
+
+.pool-stage__power-cue-ferrule {
+  top: 7px;
+  width: 8px;
+  height: 11px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #0f141f 0%, #283342 100%);
+}
+
+.pool-stage__power-cue-shaft {
+  top: 16px;
+  bottom: 10px;
+  width: 8px;
   border-radius: 999px;
-  background: #fff;
-  transform: translateY(-50%);
-  box-shadow: 0 0 6px rgba(255,255,255,0.5), 0 0 12px rgba(255,255,255,0.2);
+  background: linear-gradient(180deg, #ffe6b6 0%, #f6c88c 22%, #efb16f 50%, #f4c789 76%, #ffe4b5 100%);
+  box-shadow:
+    inset 1px 0 0 rgba(255,255,255,0.24),
+    inset -1px 0 0 rgba(106, 51, 16, 0.28);
+}
+
+.pool-stage__power-cue-butt {
+  bottom: 0;
+  width: 10px;
+  height: 12px;
+  border-radius: 0 0 8px 8px;
+  background: linear-gradient(180deg, #6d1b10 0%, #3d0806 100%);
 }
 
 .pool-stage__power small {
@@ -4985,14 +5048,14 @@ button:focus-visible {
   border-color: rgba(185, 196, 214, 0.42);
 }
 
-.pool-stage__power--dragging .pool-stage__power-fill,
-.pool-stage__power--dragging .pool-stage__power-marker {
+.pool-stage__power--dragging .pool-stage__power-cue {
   transition: none !important;
 }
 
 .pool-stage__power-track,
-.pool-stage__power-fill,
-.pool-stage__power-marker {
+.pool-stage__power-gradient,
+.pool-stage__power-guides,
+.pool-stage__power-cue {
   pointer-events: none;
   touch-action: none;
 }
@@ -5146,13 +5209,12 @@ button:focus-visible {
   }
 
   .pool-stage__power-track {
-    width: 22px;
+    width: 30px;
     min-height: 198px;
   }
 
-  .pool-stage__power-marker {
-    left: -4px;
-    right: -4px;
+  .pool-stage__power-cue {
+    width: 14px;
   }
 
   .pool-stage__table-wrap {
@@ -5249,13 +5311,12 @@ button:focus-visible {
   }
 
   .pool-stage__power-track {
-    width: 24px;
+    width: 28px;
     min-height: 156px;
   }
 
-  .pool-stage__power-marker {
-    left: -4px;
-    right: -4px;
+  .pool-stage__power-cue {
+    width: 13px;
   }
 
   .pool-stage__power small {

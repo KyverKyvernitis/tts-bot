@@ -106,9 +106,9 @@ const OPENING_RACK = [
 ] as const;
 
 const POCKET_ANIM_DURATION = 320;
-const POWER_MIN = 0.0018;
+const POWER_MIN = 0.0009;
 const POWER_RETURN_MS = 180;
-const POWER_CURVE_EXPONENT = 3.6;
+const POWER_CURVE_EXPONENT = 4.25;
 const AIM_SYNC_INTERVAL_MS = 22;
 const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
@@ -165,6 +165,7 @@ type BallSpinState = {
   lastSeenAt: number;
   phaseVelocity: number;
   visualSpeed: number;
+  labelDepth: number;
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -374,6 +375,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
         lastSeenAt: now,
         phaseVelocity: 0,
         visualSpeed: 0,
+        labelDepth: 1,
       });
       continue;
     }
@@ -398,12 +400,122 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     }
 
     current.phase = (current.phase + current.phaseVelocity * elapsedFrames) % (Math.PI * 2);
+    current.labelDepth = Math.cos(current.phase);
     current.lastSeenAt = now;
   }
 
   for (const [id, spin] of cache) {
     if (!seen.has(id) && now - spin.lastSeenAt > 800) cache.delete(id);
   }
+}
+
+function drawStripedWrapBand(
+  ctx: CanvasRenderingContext2D,
+  r: number,
+  color: string,
+  phase: number,
+  scale: number,
+) {
+  const innerR = Math.max(1, r - 0.55 * scale);
+  const rowStep = Math.max(0.8, 0.9 * scale);
+  const sampleStep = Math.max(0.7, 0.9 * scale);
+  const bandHalf = 0.34;
+  const cosP = Math.cos(phase);
+  const sinP = Math.sin(phase);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(0, 0, innerR, 0, Math.PI * 2);
+  ctx.clip();
+
+  const stripeGrad = ctx.createLinearGradient(-innerR, 0, innerR, 0);
+  stripeGrad.addColorStop(0, shadeColor(color, -18));
+  stripeGrad.addColorStop(0.22, color);
+  stripeGrad.addColorStop(0.5, shadeColor(color, 10));
+  stripeGrad.addColorStop(0.78, color);
+  stripeGrad.addColorStop(1, shadeColor(color, -20));
+  ctx.fillStyle = stripeGrad;
+
+  for (let py = -innerR; py <= innerR; py += rowStep) {
+    const xSpan = Math.sqrt(Math.max(0, innerR * innerR - py * py));
+    let segmentStart: number | null = null;
+    let lastInsideX = -xSpan;
+    for (let px = -xSpan; px <= xSpan + sampleStep * 0.5; px += sampleStep) {
+      const nx = clamp(px / innerR, -1, 1);
+      const ny = clamp(py / innerR, -1, 1);
+      const nzSq = 1 - nx * nx - ny * ny;
+      const nz = nzSq > 0 ? Math.sqrt(nzSq) : 0;
+      const localY = ny * cosP - nz * sinP;
+      const insideStripe = Math.abs(localY) <= bandHalf;
+      if (insideStripe && segmentStart === null) segmentStart = px;
+      if (insideStripe) lastInsideX = px;
+      const shouldFlush = (!insideStripe && segmentStart !== null) || (segmentStart !== null && px >= xSpan);
+      if (shouldFlush && segmentStart !== null) {
+        const endX = insideStripe ? px : lastInsideX + sampleStep;
+        ctx.fillRect(segmentStart, py - rowStep * 0.54, Math.max(sampleStep, endX - segmentStart), rowStep * 1.08);
+        segmentStart = null;
+      }
+    }
+  }
+
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(0, 0, innerR, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.globalAlpha = 0.28;
+  ctx.strokeStyle = "rgba(18, 24, 36, 0.34)";
+  ctx.lineWidth = Math.max(0.8, 1.05 * scale);
+  const stripeEdge = innerR * (0.34 + 0.08 * Math.abs(Math.cos(phase)));
+  const stripeCenter = -Math.sin(phase) * innerR * 0.36;
+  ctx.beginPath();
+  ctx.ellipse(0, stripeCenter - stripeEdge, innerR * 0.9, innerR * 0.12, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, stripeCenter + stripeEdge, innerR * 0.9, innerR * 0.12, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawBallLabel(
+  ctx: CanvasRenderingContext2D,
+  ball: GameBallSnapshot,
+  r: number,
+  phase: number,
+  scale: number,
+  color: string,
+  isStripe: boolean,
+) {
+  const labelDepth = Math.cos(phase);
+  if (labelDepth < -0.14) return;
+  const labelY = -Math.sin(phase) * r * 0.74;
+  const diskScaleY = 0.64 + Math.max(0, labelDepth) * 0.34;
+  const diskAlpha = clamp(0.22 + (labelDepth + 0.14) * 0.86, 0.22, 1);
+  const diskR = r * (isStripe ? 0.4 : 0.43);
+  const diskGrad = ctx.createRadialGradient(0, labelY - diskR * 0.2, 0, 0, labelY, diskR);
+  diskGrad.addColorStop(0, "#ffffff");
+  diskGrad.addColorStop(1, "#e7eef5");
+
+  ctx.save();
+  ctx.globalAlpha = diskAlpha;
+  ctx.translate(0, labelY);
+  ctx.scale(1, diskScaleY);
+  ctx.beginPath();
+  ctx.arc(0, 0, diskR, 0, Math.PI * 2);
+  ctx.fillStyle = diskGrad;
+  ctx.fill();
+  ctx.restore();
+
+  const fontSize = clamp(Math.round((ball.number >= 10 ? 7 : 8.5) * scale), 5, 18);
+  ctx.save();
+  ctx.globalAlpha = clamp(diskAlpha + 0.06, 0.28, 1);
+  ctx.translate(0, labelY);
+  ctx.scale(1, diskScaleY);
+  ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = ball.number === 8 ? "#0a0c12" : "#1a1e2a";
+  ctx.fillText(String(ball.number), 0, 0.5 * scale);
+  ctx.restore();
 }
 
 // ─── Aim preview computation ───────────────────────────────────────────────
@@ -488,18 +600,15 @@ function drawBall(
   const color = ballColor(ball.number);
   const spinPhase = spin?.phase ?? 0;
   const spinAxis = spin?.axis ?? 0;
-  const visualSpinSpeed = spin?.visualSpeed ?? 0;
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
 
-  // Shadow — stronger and more visible (#10)
   ctx.shadowColor = "rgba(0, 0, 0, 0.50)";
   ctx.shadowBlur = 10 * scale;
   ctx.shadowOffsetX = 1 * scale;
   ctx.shadowOffsetY = 5 * scale;
 
-  // Base 3D gradient
   const baseGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r * 1.3);
   if (ball.number === 0) {
     baseGrad.addColorStop(0, "#ffffff");
@@ -534,67 +643,25 @@ function drawBall(
   ctx.restore();
 
   if (ball.number > 0) {
-    const rollTravel = 0.2 + clamp(visualSpinSpeed * 0.045, 0, 0.1);
-    const travelY = Math.sin(spinPhase) * r * rollTravel;
-    const diskScaleY = 0.8 + 0.2 * Math.abs(Math.cos(spinPhase));
-
+    const isStripe = ball.number >= 9;
     ctx.save();
     ctx.rotate(spinAxis);
 
-    if (ball.number >= 9) {
-      const stripeCenterY = Math.sin(spinPhase) * r * rollTravel;
-      const stripeHalf = r * (0.29 + 0.11 * Math.abs(Math.cos(spinPhase)));
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(0, 0, r - 0.55 * scale, 0, Math.PI * 2);
-      ctx.clip();
-      const sg = ctx.createLinearGradient(-r, 0, r, 0);
-      sg.addColorStop(0, shadeColor(color, -18));
-      sg.addColorStop(0.5, color);
-      sg.addColorStop(1, shadeColor(color, -18));
-      ctx.fillStyle = sg;
-      ctx.fillRect(-r, stripeCenterY - stripeHalf, r * 2, stripeHalf * 2);
-      ctx.restore();
-
-      ctx.save();
-      ctx.strokeStyle = "rgba(18,26,38,0.34)";
-      ctx.lineWidth = 1.1 * scale;
-      ctx.beginPath();
-      ctx.moveTo(-r * 0.9, stripeCenterY - stripeHalf);
-      ctx.lineTo(r * 0.9, stripeCenterY - stripeHalf);
-      ctx.moveTo(-r * 0.9, stripeCenterY + stripeHalf);
-      ctx.lineTo(r * 0.9, stripeCenterY + stripeHalf);
-      ctx.stroke();
-      ctx.restore();
+    if (isStripe) {
+      drawStripedWrapBand(ctx, r, color, spinPhase, scale);
     }
 
-    const diskR = r * (ball.number >= 9 ? 0.39 : 0.43);
-    const diskGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, diskR);
-    diskGrad.addColorStop(0, "#ffffff");
-    diskGrad.addColorStop(1, "#e8eef4");
-    ctx.save();
-    ctx.translate(0, travelY);
-    ctx.scale(1, diskScaleY);
-    ctx.globalAlpha = 0.8 + 0.2 * diskScaleY;
-    ctx.beginPath();
-    ctx.arc(0, 0, diskR, 0, Math.PI * 2);
-    ctx.fillStyle = diskGrad;
-    ctx.fill();
-    ctx.restore();
-
-    const fontSize = clamp(Math.round((ball.number >= 10 ? 7 : 8.5) * scale), 5, 18);
-    ctx.save();
-    ctx.translate(0, travelY);
-    ctx.scale(1, diskScaleY);
-    ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillStyle = ball.number === 8 ? "#0a0c12" : "#1a1e2a";
-    ctx.fillText(String(ball.number), 0, 0.5 * scale);
-    ctx.restore();
-
+    drawBallLabel(ctx, ball, r, spinPhase, scale, color, isStripe);
     ctx.restore();
   }
+
+  const shadowGrad = ctx.createRadialGradient(r * 0.14, r * 0.28, r * 0.1, 0, r * 0.26, r * 1.04);
+  shadowGrad.addColorStop(0, "rgba(10, 12, 18, 0)");
+  shadowGrad.addColorStop(1, "rgba(10, 12, 18, 0.16)");
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fillStyle = shadowGrad;
+  ctx.fill();
 
   const specGrad = ctx.createRadialGradient(-r * 0.34, -r * 0.38, 0, -r * 0.28, -r * 0.3, r * 0.55);
   specGrad.addColorStop(0, "rgba(255, 255, 255, 0.72)");
@@ -1167,6 +1234,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const powerBarInteractive = canInteract && !isCueBallPlacementActive;
   const powerVisual = clamp((power - POWER_MIN) / (1 - POWER_MIN), 0, 1);
   const displayedPowerVisual = isCueBallPlacementActive ? 0.08 : powerVisual;
+  const displayedPowerCueTop = clamp(displayedPowerVisual, 0, 0.935);
   const browserSupportsPointerEvents = typeof window !== "undefined" && "PointerEvent" in window;
 
   const emitAimState = (next: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; mode: AimPointerMode }, force = false) => {
@@ -1208,10 +1276,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const clampedY = clamp(clientY, rectTop, rectBottom);
     const normalized = clamp((clampedY - rectTop) / Math.max(1, rectHeight), 0, 1);
     let shaped = 0;
-    if (normalized <= 0.8) {
-      shaped = Math.pow(normalized / 0.8, POWER_CURVE_EXPONENT) * 0.56;
+    if (normalized <= 0.84) {
+      shaped = Math.pow(normalized / 0.84, POWER_CURVE_EXPONENT) * 0.48;
     } else {
-      shaped = 0.56 + Math.pow((normalized - 0.8) / 0.2, 1.34) * 0.44;
+      shaped = 0.48 + Math.pow((normalized - 0.84) / 0.16, 1.55) * 0.52;
     }
     return clamp(POWER_MIN + shaped * (1 - POWER_MIN), POWER_MIN, 1);
   };
@@ -1923,8 +1991,14 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onLostPointerCapture={handlePowerLostCapture}
         >
           <div ref={powerTrackRef} className="pool-stage__power-track">
-            <div className="pool-stage__power-fill" style={{ height: `${Math.round(displayedPowerVisual * 100)}%`, top: "2px", bottom: "auto" }} />
-            <div className="pool-stage__power-marker" style={{ top: `calc(${Math.round(displayedPowerVisual * 100)}% + 1px)` }} />
+            <div className="pool-stage__power-gradient" />
+            <div className="pool-stage__power-guides" />
+            <div className="pool-stage__power-cue" style={{ top: `calc(${(displayedPowerCueTop * 100).toFixed(1)}% + 4px)` }}>
+              <span className="pool-stage__power-cue-tip" />
+              <span className="pool-stage__power-cue-ferrule" />
+              <span className="pool-stage__power-cue-shaft" />
+              <span className="pool-stage__power-cue-butt" />
+            </div>
           </div>
         </div>
 
