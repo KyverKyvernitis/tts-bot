@@ -755,6 +755,9 @@ export default function App() {
 
     const applyRoomResult = (parsed: { room?: RoomSnapshot | null } | null) => {
       if (parsed?.room) {
+        if (parsed.room.status !== "in_game" && (currentScreenRef.current === "game" || currentGameRef.current?.roomId === parsed.room.roomId)) {
+          resetGameRuntimeState(parsed.room.roomId, { clearGame: true, reason: `${reason}:room_status_not_in_game` });
+        }
         setRoom(parsed.room);
         setCreateDraftRoomId(parsed.room.roomId);
         subscribeRoomRealtime(parsed.room.roomId, `${reason}:http_room_state`);
@@ -767,8 +770,8 @@ export default function App() {
           setScreen("room");
         }
       } else if (currentScreenRef.current === "room" || currentScreenRef.current === "game") {
+        resetGameRuntimeState(roomId, { clearGame: true, reason: `${reason}:room_missing` });
         setRoom(null);
-        setGame(null);
         setCreateDraftRoomId(null);
         setLocallyOwnedRoomId(null);
         setRoomEntryMenuOpen(false);
@@ -1059,6 +1062,42 @@ export default function App() {
     realtimeHttpLockRef.current = { roomId: null, shotSequence: 0, armedAt: 0, source: null };
   };
 
+  const resetGameRuntimeState = (roomId?: string | null, options?: { clearGame?: boolean; reason?: string }) => {
+    const targetRoomId = roomId ?? currentRoomRef.current?.roomId ?? currentGameRef.current?.roomId ?? null;
+    clearShotDispatch(targetRoomId, options?.reason ?? 'runtime_reset');
+    clearRealtimeHttpLock(targetRoomId);
+    wsGameStateRef.current = { roomId: null, lastReceivedAt: 0, shotSequence: 0, revision: 0 };
+    simRecoveryRef.current = {
+      roomId: null,
+      shotSequence: 0,
+      revision: 0,
+      lastProgressAt: 0,
+      lastRecoveryAt: 0,
+      recoveryCount: 0,
+      inFlight: false,
+      lastRequestedShotSequence: 0,
+      lastRequestedRevision: 0,
+    };
+    snapshotDebugRef.current = {
+      roomId: null,
+      lastReceivedAt: 0,
+      lastLoggedAt: 0,
+      lastRevision: -1,
+      lastSource: null,
+    };
+    if (aimHttpTimerRef.current !== null) {
+      window.clearTimeout(aimHttpTimerRef.current);
+      aimHttpTimerRef.current = null;
+    }
+    pendingAimHttpRef.current = null;
+    lastAimHttpSentAtRef.current = 0;
+    setRemoteAim(null);
+    setGameShootBusy(false);
+    if (options?.clearGame ?? true) {
+      setGame(null);
+    }
+  };
+
   const getRealtimeHttpGuardState = (roomId: string) => {
     const activeGame = currentGameRef.current;
     const activeRoom = currentRoomRef.current;
@@ -1087,6 +1126,8 @@ export default function App() {
   const shouldRunHttpGamePolling = (roomId: string) => {
     const guard = getRealtimeHttpGuardState(roomId);
     if (guard.isRealtimeLocked) return false;
+    const activeGame = currentGameRef.current;
+    if (!activeGame || activeGame.roomId !== roomId) return true;
     if (isRealtimeSocketHealthy(roomId)) return false;
     return true;
   };
@@ -1781,6 +1822,9 @@ export default function App() {
           return;
         }
         if (payload.type === "room_state") {
+          if (payload.payload.status !== "in_game" && (currentScreenRef.current === "game" || currentGameRef.current?.roomId === payload.payload.roomId)) {
+            resetGameRuntimeState(payload.payload.roomId, { clearGame: true, reason: 'ws_room_state_not_in_game' });
+          }
           setRoom(payload.payload);
           setCreateDraftRoomId(payload.payload.roomId);
           if (locallyOwnedRoomIdRef.current === payload.payload.roomId || payload.payload.hostUserId === currentUserIdRef.current) {
@@ -1832,6 +1876,9 @@ export default function App() {
           if (activeRoomId && currentScreenRef.current !== "game") {
             const matchingRoom = payload.payload.find((entry) => entry.roomId === activeRoomId) ?? null;
             if (matchingRoom) {
+              if (matchingRoom.status !== "in_game" && currentGameRef.current?.roomId === matchingRoom.roomId) {
+                resetGameRuntimeState(matchingRoom.roomId, { clearGame: true, reason: 'ws_room_list_not_in_game' });
+              }
               setRoom(matchingRoom);
               setCreateDraftRoomId(matchingRoom.roomId);
               if (locallyOwnedRoomIdRef.current === matchingRoom.roomId || matchingRoom.hostUserId === currentUserIdRef.current) {
@@ -2073,28 +2120,25 @@ export default function App() {
 
     const needsBootstrap = () => {
       const activeGame = currentGameRef.current;
-      if (activeGame?.roomId === roomId) return false;
-      const wsState = wsGameStateRef.current;
-      if (wsState.roomId !== roomId || !wsState.lastReceivedAt) return true;
-      return performance.now() - wsState.lastReceivedAt > 700;
+      return activeGame?.roomId !== roomId;
     };
 
-    if (!needsBootstrap()) return;
+    if (needsBootstrap()) {
+      logSnapshotDebug('recover', {
+        source: 'http',
+        roomId,
+        reason: 'game_bootstrap_missing',
+        status: currentGameRef.current?.status ?? null,
+        shotSequence: currentGameRef.current?.shotSequence ?? null,
+        revision: Number.isFinite(currentGameRef.current?.snapshotRevision) ? currentGameRef.current!.snapshotRevision : null,
+        why: 'screen_game_without_snapshot',
+        wsOpen: isSocketOpen(),
+        wsRoomId: wsGameStateRef.current.roomId,
+        wsAgeMs: wsGameStateRef.current.lastReceivedAt ? Math.round(performance.now() - wsGameStateRef.current.lastReceivedAt) : null,
+      });
+      void fetchGameStateOverHttp(roomId, 'game_bootstrap_missing', 0);
+    }
 
-    logSnapshotDebug('recover', {
-      source: 'http',
-      roomId,
-      reason: 'game_bootstrap_missing',
-      status: currentGameRef.current?.status ?? null,
-      shotSequence: currentGameRef.current?.shotSequence ?? null,
-      revision: Number.isFinite(currentGameRef.current?.snapshotRevision) ? currentGameRef.current!.snapshotRevision : null,
-      why: 'screen_game_without_snapshot',
-      wsOpen: isSocketOpen(),
-      wsRoomId: wsGameStateRef.current.roomId,
-      wsAgeMs: wsGameStateRef.current.lastReceivedAt ? Math.round(performance.now() - wsGameStateRef.current.lastReceivedAt) : null,
-    });
-
-    void fetchGameStateOverHttp(roomId, 'game_bootstrap_missing', 0);
     const interval = window.setInterval(() => {
       if (!needsBootstrap()) return;
       void fetchGameStateOverHttp(roomId, 'game_bootstrap_retry', 0);
@@ -2149,7 +2193,7 @@ export default function App() {
       setRoomEntryMenuOpen(false);
       setCreateEntryMenuOpen(false);
       setCreateDraftRoomId(null);
-      setGame(null);
+      resetGameRuntimeState(room.roomId, { clearGame: true, reason });
       setRoom(null);
       setScreen(isRoomHost ? "home" : "list");
       void requestRooms();
@@ -2340,6 +2384,7 @@ export default function App() {
                   }
                   const nextStake = isServer ? 25 : 0;
                   const nextTableType: TableType = isServer ? "stake" : "casual";
+                  resetGameRuntimeState(currentRoomRef.current?.roomId, { clearGame: true, reason: 'home_click_create_reset' });
                   setRoom(null);
                   setCreateDraftRoomId(null);
                   setLocallyOwnedRoomId(null);
@@ -2394,6 +2439,7 @@ export default function App() {
               if (roomId) {
                 void leaveRoomOverHttp(roomId, "http_primary_close_create", { closeRoom: true });
               }
+              resetGameRuntimeState(roomId, { clearGame: true, reason: 'close_create_room' });
               setCreateDraftRoomId(null);
               setLocallyOwnedRoomId(null);
               setRoom(null);
