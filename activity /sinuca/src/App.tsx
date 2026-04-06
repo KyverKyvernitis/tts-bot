@@ -267,6 +267,7 @@ export default function App() {
   const aimHttpTimerRef = useRef<number | null>(null);
   const lastAimHttpSentAtRef = useRef(0);
   const snapshotDebugRef = useRef<{ roomId: string | null; lastReceivedAt: number; lastLoggedAt: number; lastRevision: number; lastSource: string | null }>({ roomId: null, lastReceivedAt: 0, lastLoggedAt: 0, lastRevision: -1, lastSource: null });
+  const simRecoveryRef = useRef<{ roomId: string | null; shotSequence: number; revision: number; lastProgressAt: number; lastRecoveryAt: number; recoveryCount: number }>({ roomId: null, shotSequence: 0, revision: 0, lastProgressAt: 0, lastRecoveryAt: 0, recoveryCount: 0 });
 
   useEffect(() => {
     let mounted = true;
@@ -948,18 +949,50 @@ export default function App() {
       return null;
     }
 
-    const merged = mergeIncomingGame(currentGameRef.current, incoming);
+    const previousGame = currentGameRef.current;
+    const merged = mergeIncomingGame(previousGame, incoming);
     setGame(merged);
 
     if (merged) {
       currentGameRef.current = merged;
+      const now = performance.now();
+      const recovery = simRecoveryRef.current;
+      const mergedRevision = Number.isFinite(merged.snapshotRevision) ? merged.snapshotRevision : 0;
+      const previousRevision = Number.isFinite(previousGame?.snapshotRevision) ? previousGame!.snapshotRevision : -1;
+      const advanced = !previousGame
+        || previousGame.roomId !== merged.roomId
+        || merged.shotSequence > previousGame.shotSequence
+        || (merged.shotSequence === previousGame.shotSequence && (mergedRevision > previousRevision || merged.updatedAt > previousGame.updatedAt));
+
+      if (merged.status === 'simulating') {
+        const sequenceChanged = recovery.roomId !== merged.roomId || recovery.shotSequence !== merged.shotSequence;
+        if (sequenceChanged) {
+          recovery.roomId = merged.roomId;
+          recovery.shotSequence = merged.shotSequence;
+          recovery.revision = mergedRevision;
+          recovery.lastProgressAt = now;
+          recovery.lastRecoveryAt = 0;
+          recovery.recoveryCount = 0;
+        } else if (advanced || source === 'local') {
+          recovery.revision = mergedRevision;
+          recovery.lastProgressAt = now;
+        }
+      } else {
+        recovery.roomId = merged.roomId;
+        recovery.shotSequence = merged.shotSequence;
+        recovery.revision = mergedRevision;
+        recovery.lastProgressAt = now;
+        recovery.lastRecoveryAt = 0;
+        recovery.recoveryCount = 0;
+      }
+
       logSnapshotDebug('apply', {
         source,
         roomId: merged.roomId,
         reason,
         status: merged.status,
         shotSequence: merged.shotSequence,
-        revision: Number.isFinite(merged.snapshotRevision) ? merged.snapshotRevision : 0,
+        revision: mergedRevision,
       });
     }
     return merged;
@@ -1722,6 +1755,42 @@ export default function App() {
 
 
   useEffect(() => {
+    if (!bootstrapped || screen !== 'game' || !room?.roomId) return;
+
+    const interval = window.setInterval(() => {
+      const activeGame = currentGameRef.current;
+      if (!activeGame || activeGame.roomId !== room.roomId) return;
+      if (activeGame.status !== 'simulating') return;
+
+      const now = performance.now();
+      const recovery = simRecoveryRef.current;
+      const stalledForMs = now - recovery.lastProgressAt;
+      if (stalledForMs < 420) return;
+
+      const cooldownMs = recovery.recoveryCount > 0 ? 700 : 450;
+      if (now - recovery.lastRecoveryAt < cooldownMs) return;
+
+      recovery.lastRecoveryAt = now;
+      recovery.recoveryCount += 1;
+      logSnapshotDebug('recover', {
+        source: 'http',
+        roomId: activeGame.roomId,
+        reason: 'force_recover_watchdog',
+        status: activeGame.status,
+        shotSequence: activeGame.shotSequence,
+        revision: Number.isFinite(activeGame.snapshotRevision) ? activeGame.snapshotRevision : 0,
+        stalledForMs: Math.round(stalledForMs),
+        wsOpen: isSocketOpen(),
+        recoveryCount: recovery.recoveryCount,
+      });
+      void fetchGameStateOverHttp(activeGame.roomId, `force_recover_watchdog_${activeGame.shotSequence}`, 0);
+    }, 140);
+
+    return () => window.clearInterval(interval);
+  }, [bootstrapped, room?.roomId, screen]);
+
+
+  useEffect(() => {
     if (!bootstrapped || screen !== "game" || !room?.roomId) return;
     if (!shouldRunHttpGamePolling(room.roomId)) {
       logSnapshotDebug('skip', {
@@ -2303,15 +2372,16 @@ export default function App() {
 
                 if (sentOverSocket) {
                   window.setTimeout(() => {
-                    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) return;
                     const latestGame = currentGameRef.current;
-                    const stillWaitingForAdvance = !latestGame
+                    const waitingForNewShot = !latestGame
                       || latestGame.roomId !== room.roomId
                       || latestGame.shotSequence <= previousSeq;
-                    if (!stillWaitingForAdvance) return;
-                    if (latestGame?.status === 'simulating') return;
-                    void fetchGameStateOverHttp(room.roomId, "ws_verify_after_shot", previousSeq);
-                  }, 1600);
+                    const stalledSimulating = latestGame?.roomId === room.roomId
+                      && latestGame.status === 'simulating'
+                      && performance.now() - simRecoveryRef.current.lastProgressAt > 420;
+                    if (!waitingForNewShot && !stalledSimulating) return;
+                    void fetchGameStateOverHttp(room.roomId, stalledSimulating ? `force_recover_after_shot_${previousSeq}` : 'ws_verify_after_shot', stalledSimulating ? 0 : previousSeq);
+                  }, 650);
                   return;
                 }
 

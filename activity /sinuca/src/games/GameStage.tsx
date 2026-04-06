@@ -409,6 +409,17 @@ function ballsNearlyMatchFrame(displayBalls: GameBallSnapshot[], frameBalls: Gam
   return true;
 }
 
+function ballsNearlyMatchSnapshot(left: GameBallSnapshot[], right: GameBallSnapshot[], tolerance = 0.18) {
+  const rightMap = new Map(right.map((ball) => [ball.id, ball]));
+  for (const ball of left) {
+    const other = rightMap.get(ball.id);
+    if (!other) continue;
+    if (ball.pocketed !== other.pocketed) return false;
+    if (Math.abs(ball.x - other.x) > tolerance || Math.abs(ball.y - other.y) > tolerance) return false;
+  }
+  return true;
+}
+
 function framesNearlyMatch(a: GameShotFrame, b: GameShotFrame, tolerance = 0.12) {
   const bMap = new Map(b.balls.map((ball) => [ball.id, ball]));
   for (const ball of a.balls) {
@@ -1385,7 +1396,20 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     }
 
     if (nextRevision < latestRevision) return;
-    if (nextRevision === latestRevision) return;
+    if (nextRevision === latestRevision) {
+      if (queue.length === 1 && realtimeVisualBallsRef.current.length) {
+        const liveBase = realtimeVisualBallsRef.current.map((ball) => ({ ...ball }));
+        if (!ballsNearlyMatchSnapshot(queue[0].balls, liveBase, 0.12)) {
+          queue[0] = {
+            ...queue[0],
+            balls: liveBase,
+            receivedAt: now,
+            serverAt: game.updatedAt || Date.now(),
+          };
+        }
+      }
+      return;
+    }
 
     const previousEntry = queue[queue.length - 1];
     const nextServerAt = game.updatedAt || Date.now();
@@ -2274,6 +2298,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           drawCueBall = cueReplaced
             ? drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? drawCueBall
             : { ...drawCueBall, x: kickX, y: kickY, pocketed: false };
+          realtimeVisualBallsRef.current = drawBalls.map((ball) => ({ ...ball }));
+          realtimeVisualLastAtRef.current = now;
         }
       } else if (animating) {
         pendingShotVisualRef.current = null;
