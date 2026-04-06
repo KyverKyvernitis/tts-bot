@@ -390,6 +390,10 @@ export default function App() {
   }, [createDraftRoomId]);
 
   useEffect(() => {
+    currentGameRef.current = game;
+  }, [game]);
+
+  useEffect(() => {
     currentRoomRef.current = room;
   }, [room]);
 
@@ -886,6 +890,21 @@ export default function App() {
   };
 
 
+  const isSocketOpen = () => {
+    const socket = socketRef.current;
+    return Boolean(socket && socket.readyState === WebSocket.OPEN);
+  };
+
+  const shouldBlockHttpGameDuringRealtime = (roomId: string, reason: string) => {
+    if (!isSocketOpen()) return false;
+    const activeGame = currentGameRef.current;
+    const sameRoom = activeGame?.roomId === roomId || currentRoomRef.current?.roomId === roomId;
+    if (!sameRoom) return false;
+    if (activeGame?.status !== "simulating") return false;
+    if (reason.startsWith("offline_")) return false;
+    return true;
+  };
+
   const mergeIncomingGame = (current: GameSnapshot | null, incoming: GameSnapshot | null | undefined) => {
     if (!incoming) return current;
     if (current && current.roomId === incoming.roomId) {
@@ -903,7 +922,62 @@ export default function App() {
     };
   };
 
+
+  const applyIncomingGame = (
+    source: "http" | "ws" | "local",
+    incoming: GameSnapshot | null | undefined,
+    reason: string,
+  ) => {
+    if (!incoming) return null;
+    if (source === "http" && shouldBlockHttpGameDuringRealtime(incoming.roomId, reason)) {
+      logSnapshotDebug('ignore', {
+        source,
+        roomId: incoming.roomId,
+        reason,
+        status: incoming.status,
+        shotSequence: incoming.shotSequence,
+        revision: Number.isFinite(incoming.snapshotRevision) ? incoming.snapshotRevision : 0,
+        why: 'ws_realtime_guard',
+      });
+      return null;
+    }
+
+    let merged: GameSnapshot | null = null;
+    setGame((current) => {
+      merged = mergeIncomingGame(current, incoming);
+      return merged;
+    });
+
+    if (merged) {
+      currentGameRef.current = merged;
+      logSnapshotDebug('apply', {
+        source,
+        roomId: merged.roomId,
+        reason,
+        status: merged.status,
+        shotSequence: merged.shotSequence,
+        revision: Number.isFinite(merged.snapshotRevision) ? merged.snapshotRevision : 0,
+      });
+    }
+    return merged;
+  };
+
   const fetchGameStateOverHttp = async (roomId: string, reason: string, sinceSeq = 0) => {
+    if (shouldBlockHttpGameDuringRealtime(roomId, reason)) {
+      const activeGame = currentGameRef.current;
+      logSnapshotDebug('skip', {
+        source: 'http',
+        roomId,
+        reason,
+        sinceSeq,
+        status: activeGame?.status ?? null,
+        shotSequence: activeGame?.shotSequence ?? null,
+        revision: Number.isFinite(activeGame?.snapshotRevision) ? activeGame!.snapshotRevision : null,
+        why: 'ws_realtime_guard',
+      });
+      return null;
+    }
+
     const attempts: string[] = [];
     for (const baseUrl of resolveApiCandidates("/balance")) {
       try {
@@ -927,9 +1001,9 @@ export default function App() {
             debugState.lastReceivedAt = debugNow;
             debugState.lastRevision = incomingRevision;
             debugState.lastSource = 'http';
-            setGame((current) => mergeIncomingGame(current, parsed.game));
-            setScreen("game");
-            return parsed.game;
+            const applied = applyIncomingGame('http', parsed.game, reason);
+            if (applied) setScreen("game");
+            return applied;
           }
           return null;
         }
@@ -948,9 +1022,9 @@ export default function App() {
         const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
         if (response.ok) {
           if (parsed?.game) {
-            setGame((current) => mergeIncomingGame(current, parsed.game));
-            setScreen("game");
-            return parsed.game;
+            const applied = applyIncomingGame('http', parsed.game, reason);
+            if (applied) setScreen("game");
+            return applied;
           }
           return null;
         }
@@ -1181,8 +1255,7 @@ export default function App() {
     console.log("[sinuca-shoot-dispatch]", JSON.stringify({ reason, previousSeq, payload }));
     let result = await postGameActionOverHttp("/games/shoot", payload, reason);
     if (result?.game) {
-      setGame(result.game);
-      return result.game;
+      return applyIncomingGame('http', result.game, `${reason}:post_result`);
     }
 
     const refreshedAfterPost = await fetchGameStateOverHttp(roomId, `${reason}:verify_after_post`, previousSeq);
@@ -1192,8 +1265,7 @@ export default function App() {
 
     result = await forceShootGameOverHttpGet(roomId, shot, `${reason}:direct_get`);
     if (result?.game) {
-      setGame(result.game);
-      return result.game;
+      return applyIncomingGame('http', result.game, `${reason}:direct_get_result`);
     }
 
     const refreshedAfterGet = await fetchGameStateOverHttp(roomId, `${reason}:verify_after_get`, previousSeq);
@@ -1464,7 +1536,7 @@ export default function App() {
           debugState.lastReceivedAt = debugNow;
           debugState.lastRevision = incomingRevision;
           debugState.lastSource = 'ws';
-          setGame((current) => mergeIncomingGame(current, payload.payload));
+          applyIncomingGame('ws', payload.payload, 'ws_game_state');
           setRemoteAim((current) => current?.roomId === payload.payload.roomId && payload.payload.turnUserId !== state.currentUser.userId && payload.payload.status !== "finished" ? current : null);
           setScreen("game");
           setErrorMessage(null);
@@ -2222,6 +2294,7 @@ export default function App() {
                       || latestGame.roomId !== room.roomId
                       || latestGame.shotSequence <= previousSeq;
                     if (!stillWaitingForAdvance) return;
+                    if (latestGame?.status === 'simulating') return;
                     void fetchGameStateOverHttp(room.roomId, "ws_verify_after_shot", previousSeq);
                   }, 1600);
                   return;
