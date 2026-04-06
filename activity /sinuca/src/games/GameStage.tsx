@@ -113,9 +113,9 @@ const AIM_SYNC_INTERVAL_MS = 22;
 const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
 const REALTIME_VISUAL_SNAP_DISTANCE = 42;
-const REALTIME_SNAPSHOT_QUEUE_LIMIT = 12;
-const REALTIME_RENDER_DELAY_MS = 42;
-const REALTIME_MAX_EXTRAPOLATION_MS = 80;
+const REALTIME_SNAPSHOT_QUEUE_LIMIT = 16;
+const REALTIME_RENDER_DELAY_MS = 34;
+const REALTIME_MAX_EXTRAPOLATION_MS = 70;
 
 type ShotInput = {
   angle: number;
@@ -1326,6 +1326,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   useEffect(() => {
     if (animating) return;
+    if (game.status === "simulating") return;
     let nextBalls = game.balls;
     if (game.ballInHandUserId === currentUserId && localCuePlacementRef.current) {
       const placed = clampCuePosition(
@@ -1336,7 +1337,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       nextBalls = game.balls.map((ball) => (ball.number === 0 ? { ...ball, x: placed.x, y: placed.y, pocketed: false } : ball));
     }
     setDisplayBalls(nextBalls);
-  }, [animating, currentUserId, game.ballInHandUserId, game.balls, game.shotSequence]);
+  }, [animating, currentUserId, game.ballInHandUserId, game.balls, game.shotSequence, game.status]);
 
   useEffect(() => {
     const now = performance.now();
@@ -1356,26 +1357,40 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
     const nextRevision = game.snapshotRevision ?? 0;
     const queue = snapshotQueueRef.current;
-    const lastRevision = queue.length ? queue[queue.length - 1].revision : -1;
-    if (nextRevision <= lastRevision) return;
+    const incomingBalls = game.balls.map((ball) => ({ ...ball }));
+    const latestEntry = queue[queue.length - 1] ?? null;
+    const latestRevision = latestEntry?.revision ?? -1;
 
     if (!queue.length) {
+      const baseBalls = (realtimeVisualBallsRef.current.length ? realtimeVisualBallsRef.current : displayBalls).map((ball) => ({ ...ball }));
       queue.push({
-        balls: (realtimeVisualBallsRef.current.length ? realtimeVisualBallsRef.current : displayBalls).map((ball) => ({ ...ball })),
+        balls: baseBalls,
         revision: Math.max(0, nextRevision - 1),
         receivedAt: now - REALTIME_RENDER_DELAY_MS,
         velocities: {},
       });
     }
 
-    const nextBalls = displayBalls.map((ball) => ({ ...ball }));
+    if (nextRevision < latestRevision) return;
+    if (nextRevision === latestRevision) {
+      const same = latestEntry?.balls.length === incomingBalls.length && latestEntry.balls.every((ball, index) => {
+        const nextBall = incomingBalls[index];
+        return nextBall
+          && ball.id === nextBall.id
+          && ball.pocketed === nextBall.pocketed
+          && Math.abs(ball.x - nextBall.x) < 0.0001
+          && Math.abs(ball.y - nextBall.y) < 0.0001;
+      });
+      if (same) return;
+    }
+
     const previousEntry = queue[queue.length - 1];
     const nextEntry: RealtimeSnapshotEntry = {
-      balls: nextBalls,
+      balls: incomingBalls,
       revision: nextRevision,
       receivedAt: now,
       velocities: previousEntry
-        ? buildSnapshotVelocities(previousEntry.balls, nextBalls, now - previousEntry.receivedAt)
+        ? buildSnapshotVelocities(previousEntry.balls, incomingBalls, now - previousEntry.receivedAt)
         : {},
     };
 
@@ -1384,7 +1399,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (queue.length > REALTIME_SNAPSHOT_QUEUE_LIMIT) {
       queue.splice(0, queue.length - REALTIME_SNAPSHOT_QUEUE_LIMIT);
     }
-  }, [animating, displayBalls, game.snapshotRevision, game.status]);
+  }, [animating, displayBalls, game.balls, game.snapshotRevision, game.status]);
 
   // Shot animation trigger
   useEffect(() => {
@@ -1994,8 +2009,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
       if ((!playback || !playback.frames.length) && game.status === "simulating" && drawBalls.length) {
         const queue = snapshotQueueRef.current;
+        const renderTime = now - REALTIME_RENDER_DELAY_MS;
         if (queue.length >= 2) {
-          const renderTime = now - REALTIME_RENDER_DELAY_MS;
           while (queue.length >= 3 && queue[1].receivedAt <= renderTime) {
             queue.shift();
           }
@@ -2009,17 +2024,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             const smoothStep = eased * eased * (3 - 2 * eased);
             smoothedBalls = interpolateSnapshotBalls(fromSnapshot.balls, toSnapshot.balls, smoothStep);
           } else {
-            const extrapolated = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, (renderTime - toSnapshot.receivedAt));
-            const catchup = clamp((rawT - 1) * 0.6, 0, 1);
-            smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, catchup);
+            const extrapolated = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, renderTime - toSnapshot.receivedAt);
+            const carry = clamp(Math.min(0.9, (renderTime - toSnapshot.receivedAt) / Math.max(REALTIME_MAX_EXTRAPOLATION_MS, 1)), 0.16, 0.78);
+            smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
           }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
           drawBalls = smoothedBalls;
           drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
         } else if (queue.length === 1) {
-          const extrapolated = extrapolateSnapshotBalls(queue[0].balls, queue[0].velocities, now - queue[0].receivedAt);
-          const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, 0.6);
+          const holdSnapshot = queue[0];
+          const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, now - holdSnapshot.receivedAt);
+          const carry = clamp((now - realtimeVisualLastAtRef.current) / 24, 0.22, 0.7);
+          const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
           drawBalls = smoothedBalls;

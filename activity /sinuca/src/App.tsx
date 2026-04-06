@@ -1616,8 +1616,8 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped || screen !== "game" || !room?.roomId) return;
-    void fetchGameStateOverHttp(room.roomId, "game_initial", game?.shotSequence ?? 0);
     if (connectionState === "connected") return;
+    void fetchGameStateOverHttp(room.roomId, "game_initial", game?.shotSequence ?? 0);
     const interval = window.setInterval(() => {
       void fetchGameStateOverHttp(room.roomId, "game_poll", game?.shotSequence ?? 0);
     }, 220);

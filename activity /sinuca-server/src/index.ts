@@ -328,13 +328,25 @@ function normalizeAimMode(value: unknown): AimPointerMode {
   return value === "aim" || value === "place" || value === "power" || value === "idle" ? value : "idle";
 }
 
+const pendingRealtimeBroadcastRooms = new Set<string>();
+
 const realtimeStepInterval = setInterval(() => {
   const changedRooms = stepRealtimeGames();
   for (const roomId of changedRooms) {
-    broadcastGame(roomId);
+    pendingRealtimeBroadcastRooms.add(roomId);
   }
 }, 1000 / 60);
 realtimeStepInterval.unref?.();
+
+const realtimeBroadcastInterval = setInterval(() => {
+  if (!pendingRealtimeBroadcastRooms.size) return;
+  const roomIds = [...pendingRealtimeBroadcastRooms];
+  pendingRealtimeBroadcastRooms.clear();
+  for (const roomId of roomIds) {
+    broadcastGame(roomId);
+  }
+}, 1000 / 30);
+realtimeBroadcastInterval.unref?.();
 
 function broadcastAim(roomId: string, payload: AimStateSnapshot, except?: WebSocket | null) {
   const message: ServerMessage = { type: "aim_state", payload };
