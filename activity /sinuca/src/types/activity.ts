@@ -114,6 +114,7 @@ export interface GameSnapshot {
   balls: GameBallSnapshot[];
   createdAt: number;
   updatedAt: number;
+  snapshotRevision: number;
   lastShot: GameShotSnapshot | null;
 }
 
