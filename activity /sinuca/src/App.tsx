@@ -686,6 +686,9 @@ export default function App() {
   };
 
   const fetchRoomStateOverHttp = async (roomId: string, reason: string) => {
+    if (shouldBlockHttpAuxDuringRealtime(roomId, "room", reason)) {
+      return currentRoomRef.current?.roomId === roomId ? currentRoomRef.current : null;
+    }
     const attempts: string[] = [];
 
     for (const url of resolveBalanceTransportCandidates("room_get")) {
@@ -910,6 +913,23 @@ export default function App() {
     if (isSocketOpen()) return false;
     const activeGame = currentGameRef.current;
     if (activeGame?.roomId === roomId && activeGame.status === "simulating") return false;
+    return true;
+  };
+
+  const shouldBlockHttpAuxDuringRealtime = (roomId: string, kind: "room" | "aim", reason: string) => {
+    const activeGame = currentGameRef.current;
+    const sameRoom = activeGame?.roomId === roomId || currentRoomRef.current?.roomId === roomId;
+    if (!sameRoom) return false;
+    if (activeGame?.status !== "simulating") return false;
+    logSnapshotDebug('skip', {
+      source: 'http',
+      roomId,
+      reason,
+      status: activeGame.status,
+      shotSequence: activeGame.shotSequence,
+      revision: Number.isFinite(activeGame.snapshotRevision) ? activeGame.snapshotRevision : null,
+      why: `${kind}_http_realtime_guard`,
+    });
     return true;
   };
 
@@ -1190,6 +1210,9 @@ export default function App() {
   };
 
   const fetchAimStateOverHttp = async (roomId: string, reason: string) => {
+    if (shouldBlockHttpAuxDuringRealtime(roomId, "aim", reason)) {
+      return null;
+    }
     for (const baseUrl of resolveApiCandidates('/balance')) {
       try {
         const url = new URL(baseUrl, window.location.origin);
@@ -1495,7 +1518,7 @@ export default function App() {
   }, [game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
 
   useEffect(() => {
-    if (screen !== 'game' || !room || !game || game.status === 'finished' || game.turnUserId === state.currentUser.userId) return;
+    if (screen !== 'game' || !room || !game || game.status === 'finished' || game.status === 'simulating' || game.turnUserId === state.currentUser.userId) return;
     if (connectionState === 'connected') return;
     let cancelled = false;
     const tick = async () => {
