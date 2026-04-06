@@ -4113,7 +4113,7 @@ button:focus-visible {
 
 .pool-ref__ghost-dot {
   position: absolute;
-  width: 13px;
+  width: 10px;
   height: 13px;
   transform: translate(-50%, -50%);
   border-radius: 50%;
@@ -4223,7 +4223,7 @@ button:focus-visible {
   }
 
   .game-ref__pip {
-    width: 13px;
+    width: 10px;
     height: 13px;
   }
 
@@ -4894,11 +4894,11 @@ button:focus-visible {
 .pool-stage__power {
   align-self: center;
   justify-self: center;
-  width: 72px;
-  padding-inline: 22px 14px;
+  width: 58px;
+  padding-inline: 15px 9px;
   box-sizing: border-box;
-  min-width: 72px;
-  height: min(74vh, 408px);
+  min-width: 58px;
+  height: min(82vh, 500px);
   display: grid;
   justify-items: center;
   align-content: center;
@@ -4916,10 +4916,10 @@ button:focus-visible {
 
 .pool-stage__power-track {
   position: relative;
-  width: 28px;
+  width: 22px;
   height: 100%;
-  min-height: 220px;
-  border-radius: 13px;
+  min-height: 250px;
+  border-radius: 12px;
   background: linear-gradient(180deg, rgba(132, 138, 160, 0.96) 0%, rgba(74, 80, 99, 0.96) 100%);
   border: 2px solid rgba(208, 214, 228, 0.28);
   box-shadow:
@@ -4932,8 +4932,8 @@ button:focus-visible {
 .pool-stage__power-gradient,
 .pool-stage__power-guides {
   position: absolute;
-  inset: 4px;
-  border-radius: 9px;
+  inset: 3px;
+  border-radius: 8px;
   pointer-events: none;
 }
 
@@ -4968,7 +4968,7 @@ button:focus-visible {
   left: 50%;
   right: auto;
   bottom: 8px;
-  width: 13px;
+  width: 10px;
   transform: translateX(-50%);
   pointer-events: none;
 }
@@ -4985,25 +4985,25 @@ button:focus-visible {
 
 .pool-stage__power-cue-tip {
   top: 0;
-  width: 10px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 7px 7px 2px 2px;
   background: linear-gradient(180deg, #f7fbff 0%, #edf3fb 100%);
   box-shadow: 0 0 4px rgba(255,255,255,0.2);
 }
 
 .pool-stage__power-cue-ferrule {
-  top: 7px;
-  width: 8px;
-  height: 11px;
+  top: 6px;
+  width: 6px;
+  height: 10px;
   border-radius: 2px;
   background: linear-gradient(180deg, #0f141f 0%, #283342 100%);
 }
 
 .pool-stage__power-cue-shaft {
-  top: 16px;
-  bottom: 10px;
-  width: 8px;
+  top: 14px;
+  bottom: 9px;
+  width: 6px;
   border-radius: 999px;
   background: linear-gradient(180deg, #ffe6b6 0%, #f6c88c 22%, #efb16f 50%, #f4c789 76%, #ffe4b5 100%);
   box-shadow:
@@ -5013,8 +5013,8 @@ button:focus-visible {
 
 .pool-stage__power-cue-butt {
   bottom: 0;
-  width: 10px;
-  height: 12px;
+  width: 8px;
+  height: 11px;
   border-radius: 0 0 8px 8px;
   background: linear-gradient(180deg, #6d1b10 0%, #3d0806 100%);
 }
@@ -5197,24 +5197,24 @@ button:focus-visible {
   }
 
   .pool-stage__table-layout {
-    grid-template-columns: 74px minmax(0, 1fr);
+    grid-template-columns: 60px minmax(0, 1fr);
     gap: 10px;
   }
 
   .pool-stage__power {
-    width: 74px;
-    min-width: 74px;
-    padding-inline: 22px 14px;
-    height: min(72vh, 370px);
+    width: 60px;
+    min-width: 60px;
+    padding-inline: 15px 9px;
+    height: min(78vh, 430px);
   }
 
   .pool-stage__power-track {
-    width: 30px;
-    min-height: 198px;
+    width: 22px;
+    min-height: 228px;
   }
 
   .pool-stage__power-cue {
-    width: 14px;
+    width: 10px;
   }
 
   .pool-stage__table-wrap {
@@ -5298,25 +5298,25 @@ button:focus-visible {
   }
 
  .pool-stage__table-layout {
-    grid-template-columns: 68px minmax(0, 1fr);
+    grid-template-columns: 54px minmax(0, 1fr);
     gap: 6px;
   }
 
   .pool-stage__power {
-    width: 68px;
-    min-width: 68px;
-    padding-inline: 20px 12px;
-    height: min(66vh, 296px);
+    width: 54px;
+    min-width: 54px;
+    padding-inline: 14px 8px;
+    height: min(72vh, 360px);
     gap: 0;
   }
 
   .pool-stage__power-track {
-    width: 28px;
-    min-height: 156px;
+    width: 20px;
+    min-height: 184px;
   }
 
   .pool-stage__power-cue {
-    width: 13px;
+    width: 9px;
   }
 
   .pool-stage__power small {

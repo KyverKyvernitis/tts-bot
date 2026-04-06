@@ -108,7 +108,7 @@ const OPENING_RACK = [
 const POCKET_ANIM_DURATION = 320;
 const POWER_MIN = 0.0009;
 const POWER_RETURN_MS = 180;
-const POWER_CURVE_EXPONENT = 4.25;
+const POWER_CURVE_EXPONENT = 5.1;
 const AIM_SYNC_INTERVAL_MS = 22;
 const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
@@ -148,6 +148,7 @@ type AimPreview = {
   cueDeflectY: number | null;
   targetGuideX: number | null;
   targetGuideY: number | null;
+  targetGuideScale: number;
   hitFullness: number;
   cueTangentX: number | null;
   cueTangentY: number | null;
@@ -242,6 +243,19 @@ function lerp(from: number, to: number, t: number) {
 function lerpAngle(current: number, target: number, factor: number) {
   const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
   return current + delta * factor;
+}
+
+function clearQueuedSfx(queue: { current: number[] }) {
+  for (const id of queue.current) window.clearTimeout(id);
+  queue.current = [];
+}
+
+function queueSfx(queue: { current: number[] }, delayMs: number, run: () => void) {
+  const id = window.setTimeout(() => {
+    queue.current = queue.current.filter((value) => value !== id);
+    run();
+  }, Math.max(0, delayMs));
+  queue.current.push(id);
 }
 
 function clampCuePosition(x: number, y: number, breakOnly: boolean) {
@@ -579,6 +593,7 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
   let cueDeflectY: number | null = null;
   let targetGuideX: number | null = null;
   let targetGuideY: number | null = null;
+  let targetGuideScale = 1;
   let hitFullness = 1;
   let cueTangentX: number | null = null;
   let cueTangentY: number | null = null;
@@ -607,10 +622,12 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
     const nlen = Math.hypot(nx, ny) || 1;
     const nnx = nx / nlen;
     const nny = ny / nlen;
-    targetGuideX = hitBall.x + nnx * 66;
-    targetGuideY = hitBall.y + nny * 66;
     const dotN = clamp(dx * nnx + dy * nny, 0, 1);
-    hitFullness = clamp(dotN, 0.24, 1);
+    hitFullness = clamp(dotN, 0.16, 1);
+    targetGuideScale = clamp(Math.pow(hitFullness, 0.92), 0.14, 1);
+    const targetGuideLength = lerp(16, 72, targetGuideScale);
+    targetGuideX = hitBall.x + nnx * targetGuideLength;
+    targetGuideY = hitBall.y + nny * targetGuideLength;
     const remVx = dx - dotN * nnx;
     const remVy = dy - dotN * nny;
     const remLen = Math.hypot(remVx, remVy);
@@ -638,6 +655,7 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
     cueDeflectY,
     targetGuideX,
     targetGuideY,
+    targetGuideScale,
     hitFullness,
     cueTangentX,
     cueTangentY,
@@ -783,9 +801,10 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
   ctx.restore();
 
   if (!illegalTarget && hasHit && preview.hitBall && preview.targetGuideX !== null && preview.targetGuideY !== null) {
+    const guideScale = clamp(preview.targetGuideScale, 0.14, 1);
     ctx.save();
     ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
-    ctx.lineWidth = 2.15;
+    ctx.lineWidth = lerp(1.05, 2.15, guideScale);
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(preview.hitBall.x, preview.hitBall.y);
@@ -795,9 +814,9 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
 
     ctx.save();
     ctx.strokeStyle = "rgba(255,255,255,0.72)";
-    ctx.lineWidth = 2.15;
+    ctx.lineWidth = lerp(1.0, 2.15, guideScale);
     ctx.beginPath();
-    ctx.arc(preview.hitBall.x, preview.hitBall.y, BALL_VISUAL_RADIUS + 1.5, 0, Math.PI * 2);
+    ctx.arc(preview.hitBall.x, preview.hitBall.y, lerp(BALL_VISUAL_RADIUS * 0.42, BALL_VISUAL_RADIUS + 1.5, guideScale), 0, Math.PI * 2);
     ctx.stroke();
     ctx.restore();
   }
@@ -806,14 +825,17 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
 // Ghost ball circle — drawn AFTER balls so it's visible on top
 function drawIllegalAimMarker(ctx: CanvasRenderingContext2D, x: number, y: number) {
   ctx.save();
-  ctx.strokeStyle = "rgba(255, 82, 82, 0.96)";
-  ctx.lineWidth = 2.6;
-  ctx.lineCap = "round";
   ctx.beginPath();
-  ctx.moveTo(x - 7, y - 7);
-  ctx.lineTo(x + 7, y + 7);
-  ctx.moveTo(x + 7, y - 7);
-  ctx.lineTo(x - 7, y + 7);
+  ctx.arc(x, y, 8.5, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(255, 88, 88, 0.98)";
+  ctx.lineWidth = 2.6;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 5.8, y + 5.8);
+  ctx.lineTo(x + 5.8, y - 5.8);
+  ctx.strokeStyle = "rgba(255, 88, 88, 0.98)";
+  ctx.lineCap = "round";
+  ctx.lineWidth = 2.8;
   ctx.stroke();
   ctx.restore();
 }
@@ -838,7 +860,7 @@ function drawGhostBall(
       return;
     }
 
-    const ghostScale = clamp(0.32 + preview.hitFullness * 0.68, 0.32, 1);
+    const ghostScale = clamp(0.18 + preview.hitFullness * 0.82, 0.18, 1);
     const ghostRadius = BALL_VISUAL_RADIUS * ghostScale;
 
     ctx.save();
@@ -859,7 +881,7 @@ function drawGhostBall(
 
     const tangentX = preview.cueTangentX ?? dx;
     const tangentY = preview.cueTangentY ?? dy;
-    const cueGuideTravel = lerp(86, 220, powerRatio) * lerp(0.34, 1.08, 1 - preview.hitFullness);
+    const cueGuideTravel = lerp(62, 176, powerRatio) * lerp(0.28, 1.0, preview.hitFullness);
     const cueGuideStartX = ghostX + tangentX * 10;
     const cueGuideStartY = ghostY + tangentY * 10;
     const cueGuideEndX = ghostX + tangentX * cueGuideTravel;
@@ -867,7 +889,7 @@ function drawGhostBall(
 
     ctx.save();
     ctx.strokeStyle = "rgba(248, 252, 255, 0.82)";
-    ctx.lineWidth = clamp(1.2 + preview.hitFullness * 1.4, 1.2, 2.6);
+    ctx.lineWidth = clamp(0.95 + preview.hitFullness * 1.25, 0.95, 2.35);
     ctx.lineCap = "round";
     ctx.setLineDash([10, 9]);
     ctx.beginPath();
@@ -1125,7 +1147,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const prevPocketedIdsRef = useRef<Set<string>>(new Set());
   const ballSpinRef = useRef<Map<string, BallSpinState>>(new Map());
   const snapAnimRef = useRef<{ startedAt: number; power: number; fired: boolean } | null>(null);
-  const pendingShotVisualRef = useRef<{ startedAt: number; angle: number; power: number; cueX: number; cueY: number } | null>(null);
+  const pendingShotVisualRef = useRef<{ startedAt: number; angle: number; power: number; cueX: number; cueY: number; travelLimit: number; estimatedSpeedPxPerMs: number; impactType: "ball" | "cushion" | null; impactAtMs: number | null; firstImpactPlayed: boolean } | null>(null);
+  const queuedSfxRef = useRef<number[]>([]);
+  const playbackSoundStateRef = useRef<{ seq: number; frameIndex: number; lastBallAt: number; lastCushionAt: number }>({ seq: 0, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0 });
   const canInteractRef = useRef(false);
   const shootBusyRef = useRef(false);
   const onShootRef = useRef(onShoot);
@@ -1246,23 +1270,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     };
     setAnimating(true);
     setAnimatingSeq(game.lastShot.seq);
-    // Schedule realistic collision sounds based on shot frames
-    const frameCount = trimmedFrames.length;
-    // Initial ball hit
-    window.setTimeout(() => SFX.ballHit(), 80);
-    // Cushion bounces during longer shots
-    if (frameCount > 60) {
-      window.setTimeout(() => SFX.cushion(), 300);
-    }
-    if (frameCount > 150) {
-      window.setTimeout(() => SFX.cushion(), 600);
-      window.setTimeout(() => SFX.ballHit(), 450);
-    }
+    playbackSoundStateRef.current = { seq: game.lastShot.seq, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0 };
   }, [animating, game]);
 
   useEffect(() => () => {
     if (drawLoopRef.current !== null) window.cancelAnimationFrame(drawLoopRef.current);
     if (powerReturnAnimRef.current !== null) window.cancelAnimationFrame(powerReturnAnimRef.current);
+    clearQueuedSfx(queuedSfxRef);
     onAimStateChangeRef.current?.({ visible: false, angle: aimAngleRef.current, cueX: null, cueY: null, mode: "idle" });
   }, []);
 
@@ -1388,10 +1402,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const clampedY = clamp(clientY, rectTop, rectBottom);
     const normalized = clamp((clampedY - rectTop) / Math.max(1, rectHeight), 0, 1);
     let shaped = 0;
-    if (normalized <= 0.84) {
-      shaped = Math.pow(normalized / 0.84, POWER_CURVE_EXPONENT) * 0.48;
+    if (normalized <= 0.9) {
+      shaped = Math.pow(normalized / 0.9, POWER_CURVE_EXPONENT) * 0.36;
     } else {
-      shaped = 0.48 + Math.pow((normalized - 0.84) / 0.16, 1.55) * 0.52;
+      shaped = 0.36 + Math.pow((normalized - 0.9) / 0.1, 1.42) * 0.64;
     }
     return clamp(POWER_MIN + shaped * (1 - POWER_MIN), POWER_MIN, 1);
   };
@@ -1534,14 +1548,37 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const shotPower = clamp(powerRef.current, POWER_MIN, 1);
     const shotStartedAt = performance.now();
     snapAnimRef.current = { startedAt: shotStartedAt, power: shotPower, fired: true };
+    clearQueuedSfx(queuedSfxRef);
+    SFX.prime();
     if (liveCueBall) {
+      const livePreview = computeAimPreview(liveCueBall, state.renderBalls, aimAngleRef.current);
+      const travelLimit = livePreview.contactX !== null && livePreview.contactY !== null
+        ? Math.max(20, Math.hypot(livePreview.contactX - liveCueBall.x, livePreview.contactY - liveCueBall.y))
+        : Math.max(24, Math.hypot(livePreview.endX - liveCueBall.x, livePreview.endY - liveCueBall.y));
+      const estimatedSpeedPxPerMs = lerp(0.95, 4.85, Math.pow(shotPower, 0.58));
+      const impactAtMs = travelLimit > 1 ? clamp(travelLimit / estimatedSpeedPxPerMs, 18, 210) : null;
       pendingShotVisualRef.current = {
         startedAt: shotStartedAt,
         angle: aimAngleRef.current,
         power: shotPower,
         cueX: liveCueBall.x,
         cueY: liveCueBall.y,
+        travelLimit,
+        estimatedSpeedPxPerMs,
+        impactType: livePreview.hitBall ? "ball" : "cushion",
+        impactAtMs,
+        firstImpactPlayed: false,
       };
+      SFX.cueHit(shotPower);
+      if (impactAtMs !== null) {
+        queueSfx(queuedSfxRef, impactAtMs, () => {
+          const pending = pendingShotVisualRef.current;
+          if (!pending || pending.startedAt !== shotStartedAt || pending.firstImpactPlayed) return;
+          pending.firstImpactPlayed = true;
+          if (pending.impactType === "ball") SFX.ballHit();
+          else if (pending.impactType === "cushion") SFX.cushion();
+        });
+      }
     }
     setPointerModeSafe("idle");
     emitAimState({ visible: false, angle: aimAngleRef.current, cueX: liveCueBall?.x ?? null, cueY: liveCueBall?.y ?? null, mode: "idle" }, true);
@@ -1568,8 +1605,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     // Fire the real shot immediately, then let visual/audio reactions happen in parallel.
     void onShootRef.current(payload).catch(() => {});
     animatePowerReturn(shotPower);
-    window.requestAnimationFrame(() => { SFX.cueHit(payload.power); });
-  };
+      };
 
   const startPowerGesture = (clientY: number) => {
     if (!canInteractRef.current || !powerRailRef.current) return false;
@@ -1838,6 +1874,49 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       prevPocketedIdsRef.current = currentPocketedIds;
       pocketAnimationsRef.current = pocketAnimationsRef.current.filter((anim) => now - anim.startedAt < POCKET_ANIM_DURATION);
 
+      if (playback && playback.frames.length) {
+        const frameStepMs = 1000 / 60;
+        const elapsed = now - playback.startedAt;
+        const nominalDuration = Math.max(frameStepMs, (playback.frames.length - 1) * frameStepMs * 0.94);
+        const playbackDuration = Math.min(MAX_PLAYBACK_DURATION_MS, nominalDuration);
+        const progress = clamp(elapsed / playbackDuration, 0, 1);
+        const rawIndex = progress * Math.max(0, playback.frames.length - 1);
+        const soundFrameIndex = Math.min(playback.frames.length - 1, Math.floor(rawIndex));
+        const soundState = playbackSoundStateRef.current;
+        if (soundState.seq !== playback.seq) {
+          playbackSoundStateRef.current = { seq: playback.seq, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0 };
+        }
+        if (soundFrameIndex > playbackSoundStateRef.current.frameIndex) {
+          const prevFrame = playback.frames[Math.max(0, soundFrameIndex - 1)]?.balls ?? [];
+          const currFrame = playback.frames[soundFrameIndex]?.balls ?? [];
+          const prevMap = new Map(prevFrame.map((ball) => [ball.id, ball]));
+          let newlyPocketed = false;
+          let movingNonCue = 0;
+          let wallTouch = false;
+          for (const ball of currFrame) {
+            const prevBall = prevMap.get(ball.id);
+            if (!prevBall) continue;
+            if (ball.pocketed && !prevBall.pocketed) newlyPocketed = true;
+            const moved = Math.hypot(ball.x - prevBall.x, ball.y - prevBall.y);
+            if (!ball.pocketed && ball.id !== "ball-0" && moved > 0.8) movingNonCue += 1;
+            if (!ball.pocketed && moved > 0.55) {
+              if (ball.x <= PLAY_MIN_X + 2.4 || ball.x >= PLAY_MAX_X - 2.4 || ball.y <= PLAY_MIN_Y + 2.4 || ball.y >= PLAY_MAX_Y - 2.4) {
+                wallTouch = true;
+              }
+            }
+          }
+          const stateNow = playbackSoundStateRef.current;
+          if (movingNonCue > 0 && now - stateNow.lastBallAt > 72) {
+            SFX.ballHit();
+            stateNow.lastBallAt = now;
+          } else if (wallTouch && now - stateNow.lastCushionAt > 84 && !newlyPocketed) {
+            SFX.cushion();
+            stateNow.lastCushionAt = now;
+          }
+          stateNow.frameIndex = soundFrameIndex;
+        }
+      }
+
       const remoteAimState = opponentAim && opponentAim.userId !== currentUserId ? opponentAim : null;
       const remoteAimFresh = Boolean(remoteAimState && Date.now() - remoteAimState.updatedAt < REMOTE_AIM_STALE_MS);
       const remoteMode: AimPointerMode = remoteAimState?.mode ?? "idle";
@@ -1939,15 +2018,19 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const shotKick = !animating ? pendingShotVisualRef.current : null;
       if (shotKick && drawCueBall) {
         const kickElapsed = now - shotKick.startedAt;
-        const KICK_MS = 88;
-        if (kickElapsed >= KICK_MS) {
+        const KICK_MS = 240;
+        const eventTime = shotKick.impactAtMs ?? KICK_MS;
+        const activeMs = Math.min(KICK_MS, Math.max(eventTime + 36, 96));
+        if (kickElapsed >= activeMs) {
           pendingShotVisualRef.current = null;
         } else {
-          const kickT = clamp(kickElapsed / KICK_MS, 0, 1);
-          const kickDistance = lerp(8, 30, Math.pow(shotKick.power, 0.72));
-          const easedKick = 1 - Math.pow(1 - kickT, 2.4);
-          const kickX = shotKick.cueX + Math.cos(shotKick.angle) * kickDistance * easedKick;
-          const kickY = shotKick.cueY + Math.sin(shotKick.angle) * kickDistance * easedKick;
+          const kickDistanceRaw = kickElapsed * shotKick.estimatedSpeedPxPerMs;
+          const kickDistance = Math.min(shotKick.travelLimit, kickDistanceRaw);
+          const easedRatio = shotKick.travelLimit > 0 ? clamp(kickDistance / shotKick.travelLimit, 0, 1) : 0;
+          const easedKick = 1 - Math.pow(1 - easedRatio, 2.2);
+          const finalDistance = shotKick.travelLimit * easedKick;
+          const kickX = shotKick.cueX + Math.cos(shotKick.angle) * finalDistance;
+          const kickY = shotKick.cueY + Math.sin(shotKick.angle) * finalDistance;
           let cueReplaced = false;
           drawBalls = drawBalls.map((ball) => {
             if (ball.number !== 0 || ball.pocketed) return ball;
