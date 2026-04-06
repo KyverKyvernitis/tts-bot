@@ -106,6 +106,38 @@ function resolveApiCandidates(path: string) {
   return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
 }
 
+function resolveStrictApiCandidates(path: string) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const apiPath = normalizedPath.startsWith("/api/") || normalizedPath === "/api"
+    ? normalizedPath
+    : `/api${normalizedPath}`;
+  const candidates: string[] = [apiPath];
+
+  for (const base of resolvePublicBaseCandidates()) {
+    candidates.push(joinBaseAndPath(base, apiPath));
+  }
+
+  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
+}
+
+function buildQueryStringFromPayload(payload: Record<string, unknown>) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(payload)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "boolean") {
+      params.set(key, value ? "true" : "false");
+      continue;
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) continue;
+      params.set(key, `${value}`);
+      continue;
+    }
+    params.set(key, String(value));
+  }
+  return params.toString();
+}
+
 function resolveSocketUrl() {
   const configured = (import.meta.env.VITE_SINUCA_WS_URL as string | undefined)?.trim();
   if (configured) {
@@ -190,7 +222,7 @@ function dispatchLeaveBeacon(roomId: string, userId: string, closeRoom: boolean)
   payload.set('closeRoom', String(closeRoom));
   payload.set('reason', closeRoom ? 'activity_unload_close' : 'activity_unload_leave');
 
-  for (const baseUrl of resolveApiCandidates('/rooms/leave')) {
+  for (const baseUrl of resolveStrictApiCandidates('/rooms/leave')) {
     try {
       if (typeof navigator.sendBeacon === 'function') {
         const blob = new Blob([payload.toString()], { type: 'application/x-www-form-urlencoded;charset=UTF-8' });
@@ -201,7 +233,7 @@ function dispatchLeaveBeacon(roomId: string, userId: string, closeRoom: boolean)
     }
   }
 
-  for (const baseUrl of resolveApiCandidates('/rooms/leave')) {
+  for (const baseUrl of resolveStrictApiCandidates('/rooms/leave')) {
     try {
       void fetch(baseUrl, {
         method: 'POST',
@@ -648,7 +680,7 @@ export default function App() {
   const fetchRoomsOverHttp = async (reason: string) => {
     const attempts: string[] = [];
 
-    for (const baseUrl of resolveApiCandidates("/rooms")) {
+    for (const baseUrl of resolveStrictApiCandidates("/rooms")) {
       try {
         const url = appendNoStoreNonce(baseUrl, `${Date.now()}`);
         url.searchParams.set("mode", state.context.mode);
@@ -680,7 +712,7 @@ export default function App() {
     }
     const attempts: string[] = [];
 
-    for (const baseUrl of resolveApiCandidates(`/rooms/${encodeURIComponent(roomId)}`)) {
+    for (const baseUrl of resolveStrictApiCandidates(`/rooms/${encodeURIComponent(roomId)}`)) {
       try {
         const requestUrl = appendNoStoreNonce(baseUrl, `${Date.now()}`);
         const response = await fetchWithTimeout(requestUrl.toString(), { method: "GET", credentials: "same-origin", cache: "no-store" });
@@ -725,25 +757,61 @@ export default function App() {
 
   const postRoomActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
     const attempts: string[] = [];
+    const query = buildQueryStringFromPayload(payload);
 
-    for (const baseUrl of resolveApiCandidates(path)) {
-      try {
-        const response = await fetchWithTimeout(baseUrl, {
+    const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
+    for (const baseUrl of resolveStrictApiCandidates(path)) {
+      requestVariants.push({
+        label: `POST_JSON:${baseUrl}`,
+        url: baseUrl,
+        init: {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "same-origin",
           body: JSON.stringify(payload),
+        },
+      });
+      requestVariants.push({
+        label: `POST_FORM:${baseUrl}`,
+        url: baseUrl,
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+          credentials: "same-origin",
+          body: query,
+        },
+      });
+      const getUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+      if (query) {
+        const queryUrl = new URL(getUrl.toString(), window.location.origin);
+        const params = new URLSearchParams(query);
+        params.forEach((value, key) => queryUrl.searchParams.set(key, value));
+        requestVariants.push({
+          label: `GET_QUERY:${baseUrl}`,
+          url: queryUrl.toString(),
+          init: {
+            method: "GET",
+            credentials: "same-origin",
+            cache: "no-store",
+          },
         });
+      }
+    }
+
+    for (const variant of requestVariants) {
+      try {
+        const response = await fetchWithTimeout(variant.url, variant.init, 3500);
         const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
+        const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; closed?: boolean; error?: string; detail?: string } : null;
         if (response.ok) {
           setErrorMessage(null);
           return parsed;
         }
-        attempts.push(`${baseUrl}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
+        attempts.push(`${variant.label}:${response.status}:${detail}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown";
-        attempts.push(`${baseUrl}:exception:${message}`);
+        attempts.push(`${variant.label}:exception:${message}`);
       }
     }
     if (attempts.length) {

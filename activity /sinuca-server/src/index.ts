@@ -445,7 +445,7 @@ async function handleCreateRoomHttp(req: Request, res: Response) {
   });
   broadcastRoom(room.roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
-  res.json({ room: toSnapshot(room) });
+  sendNoStoreJson(res, { room: toSnapshot(room) });
 }
 
 async function handleJoinRoomHttp(req: Request, res: Response) {
@@ -467,7 +467,7 @@ async function handleJoinRoomHttp(req: Request, res: Response) {
   }
   broadcastRoom(room.roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
-  res.json({ room: toSnapshot(room) });
+  sendNoStoreJson(res, { room: toSnapshot(room) });
 }
 
 async function handleLeaveRoomHttp(req: Request, res: Response) {
@@ -500,7 +500,7 @@ async function handleLeaveRoomHttp(req: Request, res: Response) {
   } else if (previous) {
     broadcastRoomList({ guildId: previous.guildId, channelId: previous.channelId, mode: previous.mode });
   }
-  res.json({ room: room ? toSnapshot(room) : null, closed: Boolean(closedRoom) });
+  sendNoStoreJson(res, { room: room ? toSnapshot(room) : null, closed: Boolean(closedRoom) });
 }
 
 async function handleReadyRoomHttp(req: Request, res: Response) {
@@ -521,7 +521,7 @@ async function handleReadyRoomHttp(req: Request, res: Response) {
   }
   broadcastRoom(room.roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
-  res.json({ room: toSnapshot(room) });
+  sendNoStoreJson(res, { room: toSnapshot(room) });
 }
 
 async function handleUpdateStakeRoomHttp(req: Request, res: Response) {
@@ -552,7 +552,7 @@ async function handleUpdateStakeRoomHttp(req: Request, res: Response) {
   }
   broadcastRoom(room.roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
-  res.json({ room: toSnapshot(room) });
+  sendNoStoreJson(res, { room: toSnapshot(room) });
 }
 
 async function handleGetAimHttp(req: Request, res: Response) {
@@ -728,7 +728,9 @@ app.get("/games/:roomId/aim", handleGetAimHttp);
 app.get("/api/games/:roomId/aim", handleGetAimHttp);
 app.get("/games/:roomId", handleGetGameHttp);
 app.get("/api/games/:roomId", handleGetGameHttp);
+app.get("/rooms/create", handleCreateRoomHttp);
 app.post("/rooms/create", handleCreateRoomHttp);
+app.get("/api/rooms/create", handleCreateRoomHttp);
 app.post("/api/rooms/create", handleCreateRoomHttp);
 app.post("/games/start", handleStartGameHttp);
 app.post("/api/games/start", handleStartGameHttp);
@@ -736,13 +738,21 @@ app.post("/games/aim", handleSyncAimHttp);
 app.post("/api/games/aim", handleSyncAimHttp);
 app.post("/games/shoot", handleShootGameHttp);
 app.post("/api/games/shoot", handleShootGameHttp);
+app.get("/rooms/join", handleJoinRoomHttp);
 app.post("/rooms/join", handleJoinRoomHttp);
+app.get("/api/rooms/join", handleJoinRoomHttp);
 app.post("/api/rooms/join", handleJoinRoomHttp);
+app.get("/rooms/leave", handleLeaveRoomHttp);
 app.post("/rooms/leave", handleLeaveRoomHttp);
+app.get("/api/rooms/leave", handleLeaveRoomHttp);
 app.post("/api/rooms/leave", handleLeaveRoomHttp);
+app.get("/rooms/ready", handleReadyRoomHttp);
 app.post("/rooms/ready", handleReadyRoomHttp);
+app.get("/api/rooms/ready", handleReadyRoomHttp);
 app.post("/api/rooms/ready", handleReadyRoomHttp);
+app.get("/rooms/stake", handleUpdateStakeRoomHttp);
 app.post("/rooms/stake", handleUpdateStakeRoomHttp);
+app.get("/api/rooms/stake", handleUpdateStakeRoomHttp);
 app.post("/api/rooms/stake", handleUpdateStakeRoomHttp);
 
 async function ensureMongo() {
