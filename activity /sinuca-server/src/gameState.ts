@@ -544,6 +544,14 @@ function simulateShot(
   cueBall.roll = shotSpeed * (0.5 + safeSpinY * SHOT_ROLL_SPIN_GAIN);
   cueBall.sideSpin = shotSpeed * safeSpinX * SHOT_SIDE_SPIN_GAIN;
 
+  const shooterGroupBefore = currentGroup(game, shooterUserId);
+  const openTableBefore = !game.hostGroup || !game.guestGroup;
+  const currentTargetBefore = openTableBefore
+    ? null
+    : remainingForGroup(balls, shooterGroupBefore) === 0
+      ? "eight"
+      : shooterGroupBefore;
+
   const frames: GameShotFrame[] = [currentFrame(balls)];
   const pocketedEvents: PocketEvent[] = [];
   let cuePocketed = false;
@@ -607,21 +615,18 @@ function simulateShot(
 
   const trimmedFrames = trimTrailingSettledFrames(frames);
 
-  const shooterGroup = currentGroup(game, shooterUserId);
-  const openTable = !game.hostGroup || !game.guestGroup;
-  const currentTarget = openTable ? null : remainingForGroup(balls, shooterGroup) === 0 ? "eight" : shooterGroup;
   const firstHitGroup = groupOfNumber(firstHitNumber ?? 0);
   const pocketedNumbers = pocketedEvents.map((event) => event.number);
   const eightPocketEvent = pocketedEvents.find((event) => event.number === 8) ?? null;
-  const pocketedOwnGroup = pocketedNumbers.some((number) => shooterGroup && groupOfNumber(number) === shooterGroup);
+  const pocketedOwnGroup = pocketedNumbers.some((number) => shooterGroupBefore && groupOfNumber(number) === shooterGroupBefore);
   const pocketedOnOpen = pocketedNumbers.find((number) => groupOfNumber(number) !== null) ?? null;
 
   let foulReason: string | null = null;
   if (cuePocketed) foulReason = "scratch";
   else if (firstHitNumber === null && !hadAnyCollision) foulReason = "miss";
-  else if (openTable && firstHitNumber === 8) foulReason = "eight_first";
-  else if (!openTable && currentTarget === "eight" && firstHitNumber !== 8) foulReason = "wrong_ball";
-  else if (!openTable && currentTarget !== "eight" && firstHitGroup !== currentTarget) foulReason = "wrong_ball";
+  else if (openTableBefore && firstHitNumber === 8) foulReason = "eight_first";
+  else if (!openTableBefore && currentTargetBefore === "eight" && firstHitNumber !== 8) foulReason = "wrong_ball";
+  else if (!openTableBefore && currentTargetBefore !== "eight" && firstHitGroup !== currentTargetBefore) foulReason = "wrong_ball";
   else if (firstHitNumber === null) foulReason = "miss";
   else if (!pocketedNumbers.length && !railAfterContact) foulReason = "no_rail";
 
@@ -638,11 +643,11 @@ function simulateShot(
 
   let winnerUserId: string | null = null;
   if (eightPocketEvent) {
-    const legalEight = !foulReason && currentTarget === "eight" && calledPocket !== null && eightPocketEvent.pocketIndex === calledPocket;
+    const legalEight = !foulReason && currentTargetBefore === "eight" && calledPocket !== null && eightPocketEvent.pocketIndex === calledPocket;
     winnerUserId = legalEight ? shooterUserId : opponentUserId(game, shooterUserId);
   }
 
-  if (!winnerUserId && openTable && !foulReason && pocketedOnOpen) {
+  if (!winnerUserId && openTableBefore && !foulReason && pocketedOnOpen) {
     assignGroups(game, shooterUserId, groupOfNumber(pocketedOnOpen)!);
   }
 
@@ -650,7 +655,7 @@ function simulateShot(
     ? shooterUserId
     : foulReason
       ? opponentUserId(game, shooterUserId)
-      : pocketedOwnGroup || (openTable && pocketedOnOpen !== null)
+      : pocketedOwnGroup || (openTableBefore && pocketedOnOpen !== null)
         ? shooterUserId
         : opponentUserId(game, shooterUserId);
 
@@ -659,7 +664,7 @@ function simulateShot(
   game.shotSequence += 1;
   game.updatedAt = Date.now();
   game.foulReason = foulReason;
-  game.calledPocket = currentTarget === "eight" ? calledPocket ?? null : null;
+  game.calledPocket = currentTargetBefore === "eight" ? calledPocket ?? null : null;
 
   if (winnerUserId) {
     game.status = "finished";

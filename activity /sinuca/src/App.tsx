@@ -2073,12 +2073,35 @@ export default function App() {
               setGameShootBusy(true);
               setErrorMessage(null);
               try {
+                const previousSeq = game?.roomId === room.roomId ? game.shotSequence : 0;
+                const sentOverSocket = sendMessage({
+                  type: "take_shot",
+                  payload: {
+                    roomId: room.roomId,
+                    userId: state.currentUser.userId,
+                    angle: shot.angle,
+                    power: shot.power,
+                    cueX: shot.cueX ?? null,
+                    cueY: shot.cueY ?? null,
+                    calledPocket: shot.calledPocket ?? null,
+                    spinX: shot.spinX ?? 0,
+                    spinY: shot.spinY ?? 0,
+                  },
+                }, { silent: true });
+
+                if (sentOverSocket) {
+                  window.setTimeout(() => {
+                    void fetchGameStateOverHttp(room.roomId, "ws_verify_after_shot", previousSeq);
+                  }, 320);
+                  return;
+                }
+
                 const applied = await shootGameOverHttp(room.roomId, shot, "http_primary_game_shoot");
                 if (!applied) {
                   console.warn("[sinuca-shoot-ui]", JSON.stringify({ roomId: room.roomId, reason: "no_game_returned" }));
                 }
               } finally {
-                setGameShootBusy(false);
+                window.setTimeout(() => setGameShootBusy(false), 120);
               }
             }}
           />

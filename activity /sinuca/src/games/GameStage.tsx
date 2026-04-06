@@ -148,6 +148,9 @@ type AimPreview = {
   cueDeflectY: number | null;
   targetGuideX: number | null;
   targetGuideY: number | null;
+  hitFullness: number;
+  cueTangentX: number | null;
+  cueTangentY: number | null;
 };
 
 type PocketAnimation = {
@@ -194,6 +197,38 @@ function groupOfNumber(number: number): BallGroup | null {
   if (number >= 1 && number <= 7) return "solids";
   if (number >= 9 && number <= 15) return "stripes";
   return null;
+}
+
+function remainingForGroupPreview(balls: GameBallSnapshot[], group: BallGroup | null) {
+  if (!group) return 7;
+  return balls.filter((ball) => !ball.pocketed && groupOfNumber(ball.number) === group).length;
+}
+
+function resolveTargetForPreview(
+  balls: GameBallSnapshot[],
+  hostGroup: BallGroup | null,
+  guestGroup: BallGroup | null,
+  currentUserId: string,
+  hostUserId: string,
+) {
+  if (!hostGroup || !guestGroup) return null as BallGroup | "eight" | null;
+  const myGroup = currentUserId === hostUserId ? hostGroup : guestGroup;
+  return remainingForGroupPreview(balls, myGroup) === 0 ? "eight" : myGroup;
+}
+
+function isAimTargetIllegal(
+  preview: AimPreview | null,
+  balls: GameBallSnapshot[],
+  hostGroup: BallGroup | null,
+  guestGroup: BallGroup | null,
+  currentUserId: string,
+  hostUserId: string,
+) {
+  if (!preview?.hitBall) return false;
+  const target = resolveTargetForPreview(balls, hostGroup, guestGroup, currentUserId, hostUserId);
+  if (!target) return preview.hitBall.number === 8;
+  if (target === "eight") return preview.hitBall.number !== 8;
+  return groupOfNumber(preview.hitBall.number) !== target;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -544,6 +579,9 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
   let cueDeflectY: number | null = null;
   let targetGuideX: number | null = null;
   let targetGuideY: number | null = null;
+  let hitFullness = 1;
+  let cueTangentX: number | null = null;
+  let cueTangentY: number | null = null;
 
   for (const ball of balls) {
     if (ball.pocketed || ball.number === 0) continue;
@@ -571,21 +609,39 @@ function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[],
     const nny = ny / nlen;
     targetGuideX = hitBall.x + nnx * 66;
     targetGuideY = hitBall.y + nny * 66;
-    const dotN = dx * nnx + dy * nny;
+    const dotN = clamp(dx * nnx + dy * nny, 0, 1);
+    hitFullness = clamp(dotN, 0.24, 1);
     const remVx = dx - dotN * nnx;
     const remVy = dy - dotN * nny;
     const remLen = Math.hypot(remVx, remVy);
     const DEFLECT_DIST = 100;
     if (remLen > 0.05) {
-      cueDeflectX = contactX + (remVx / remLen) * DEFLECT_DIST;
-      cueDeflectY = contactY + (remVy / remLen) * DEFLECT_DIST;
+      cueTangentX = remVx / remLen;
+      cueTangentY = remVy / remLen;
+      cueDeflectX = contactX + cueTangentX * DEFLECT_DIST;
+      cueDeflectY = contactY + cueTangentY * DEFLECT_DIST;
     } else {
+      cueTangentX = 0;
+      cueTangentY = 0;
       cueDeflectX = contactX;
       cueDeflectY = contactY;
     }
   }
 
-  return { endX: cueBall.x + dx * hitDistance, endY: cueBall.y + dy * hitDistance, hitBall, contactX, contactY, cueDeflectX, cueDeflectY, targetGuideX, targetGuideY };
+  return {
+    endX: cueBall.x + dx * hitDistance,
+    endY: cueBall.y + dy * hitDistance,
+    hitBall,
+    contactX,
+    contactY,
+    cueDeflectX,
+    cueDeflectY,
+    targetGuideX,
+    targetGuideY,
+    hitFullness,
+    cueTangentX,
+    cueTangentY,
+  };
 }
 
 // ─── Canvas ball rendering (high quality 3D with numbers/stripes) ──────────
@@ -748,28 +804,97 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
 }
 
 // Ghost ball circle — drawn AFTER balls so it's visible on top
-function drawGhostBall(ctx: CanvasRenderingContext2D, preview: AimPreview) {
-  const hasHit = preview.contactX !== null && preview.contactY !== null && preview.hitBall;
-  if (!hasHit) return;
-
-  const ghostX = preview.contactX!;
-  const ghostY = preview.contactY!;
-
-  // Outer glow
+function drawIllegalAimMarker(ctx: CanvasRenderingContext2D, x: number, y: number) {
   ctx.save();
+  ctx.strokeStyle = "rgba(255, 82, 82, 0.96)";
+  ctx.lineWidth = 2.6;
+  ctx.lineCap = "round";
   ctx.beginPath();
-  ctx.arc(ghostX, ghostY, BALL_VISUAL_RADIUS + 2, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(200, 240, 255, 0.25)";
-  ctx.lineWidth = 3;
+  ctx.moveTo(x - 7, y - 7);
+  ctx.lineTo(x + 7, y + 7);
+  ctx.moveTo(x + 7, y - 7);
+  ctx.lineTo(x - 7, y + 7);
   ctx.stroke();
   ctx.restore();
+}
 
-  // Main ghost ball circle — thick and bright
+function drawGhostBall(
+  ctx: CanvasRenderingContext2D,
+  cueBall: GameBallSnapshot,
+  preview: AimPreview,
+  powerRatio: number,
+  illegalTarget: boolean,
+) {
+  const hasHit = preview.contactX !== null && preview.contactY !== null && preview.hitBall;
+  const dx = Math.cos(Math.atan2(preview.endY - cueBall.y, preview.endX - cueBall.x));
+  const dy = Math.sin(Math.atan2(preview.endY - cueBall.y, preview.endX - cueBall.x));
+
+  if (hasHit) {
+    const ghostX = preview.contactX!;
+    const ghostY = preview.contactY!;
+    const ghostScale = clamp(0.54 + preview.hitFullness * 0.46, 0.5, 1);
+    const ghostRadius = BALL_VISUAL_RADIUS * ghostScale;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(ghostX, ghostY, ghostRadius + 2, 0, Math.PI * 2);
+    ctx.strokeStyle = illegalTarget ? "rgba(255, 92, 92, 0.26)" : "rgba(200, 240, 255, 0.25)";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(ghostX, ghostY, ghostRadius, 0, Math.PI * 2);
+    ctx.strokeStyle = illegalTarget ? "rgba(255, 114, 114, 0.92)" : "rgba(255, 255, 255, 0.9)";
+    ctx.lineWidth = 3.05;
+    ctx.stroke();
+    ctx.restore();
+
+    const tangentX = preview.cueTangentX ?? dx;
+    const tangentY = preview.cueTangentY ?? dy;
+    const cueStopTravel = lerp(56, 208, powerRatio) * lerp(0.44, 1.05, 1 - preview.hitFullness);
+    const cueGhostX = ghostX + tangentX * cueStopTravel;
+    const cueGhostY = ghostY + tangentY * cueStopTravel;
+
+    ctx.save();
+    ctx.globalAlpha = 0.36;
+    ctx.beginPath();
+    ctx.arc(cueGhostX, cueGhostY, BALL_VISUAL_RADIUS * 0.7, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.78)";
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cueGhostX, cueGhostY, BALL_VISUAL_RADIUS * 0.7, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.52)";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    ctx.restore();
+
+    if (illegalTarget) {
+      drawIllegalAimMarker(ctx, ghostX, ghostY);
+    }
+    return;
+  }
+
+  const cueStopDistance = lerp(84, 260, powerRatio);
+  const cueGhostX = cueBall.x + dx * cueStopDistance;
+  const cueGhostY = cueBall.y + dy * cueStopDistance;
+  ctx.save();
+  ctx.globalAlpha = 0.26;
+  ctx.beginPath();
+  ctx.arc(cueGhostX, cueGhostY, BALL_VISUAL_RADIUS * 0.76, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,0.78)";
+  ctx.fill();
+  ctx.restore();
+
   ctx.save();
   ctx.beginPath();
-  ctx.arc(ghostX, ghostY, BALL_VISUAL_RADIUS, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
-  ctx.lineWidth = 3.05;
+  ctx.arc(cueGhostX, cueGhostY, BALL_VISUAL_RADIUS * 0.76, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(255,255,255,0.42)";
+  ctx.lineWidth = 1.5;
   ctx.stroke();
   ctx.restore();
 }
@@ -893,6 +1018,8 @@ function drawPoolTable(
   showGuide: boolean,
   pullRatio: number,
   preview: AimPreview | null,
+  previewPowerRatio: number,
+  illegalTarget: boolean,
   needEightCall: boolean,
   selectedPocket: number | null,
   isBallInHand: boolean,
@@ -939,7 +1066,7 @@ function drawPoolTable(
 
   // STEP 4: Ghost ball circle AFTER balls (so it's visible on top)
   if (cueBall && showGuide && preview) {
-    drawGhostBall(ctx, preview);
+    drawGhostBall(ctx, cueBall, preview, previewPowerRatio, illegalTarget);
   }
 
   // Pocket animations
@@ -1815,6 +1942,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
       updateBallSpinCache(ballSpinRef.current, drawBalls, now);
       const preview = drawCueBall && !animating && !(state.isBallInHand && state.pointerMode === "place") ? computeAimPreview(drawCueBall, drawBalls, drawAimAngleRef.current) : null;
+      const illegalTarget = preview ? isAimTargetIllegal(preview, drawBalls, displayedGroupsRef.current.hostGroup, displayedGroupsRef.current.guestGroup, currentUserId, room.hostUserId) : false;
+      const previewPowerRatio = state.pointerMode === "power"
+        ? clamp((state.power - POWER_MIN) / (1 - POWER_MIN), 0, 1)
+        : 0.56;
       const remotePreview = remoteOverlayVisible && remoteCueBall && remoteMode !== "place"
         ? computeAimPreview(remoteCueBall, drawBalls, remoteAimAngle)
         : null;
@@ -1849,6 +1980,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         Boolean(drawCueBall && (state.canInteract || state.shootBusy || snapAnimRef.current) && !(state.isBallInHand && state.pointerMode === "place")),
         pullRatio,
         preview,
+        previewPowerRatio,
+        illegalTarget,
         state.needEightCall,
         state.selectedPocket,
         state.isBallInHand,
@@ -1863,7 +1996,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
     drawLoopRef.current = window.requestAnimationFrame(draw);
     return () => { if (drawLoopRef.current !== null) { window.cancelAnimationFrame(drawLoopRef.current); drawLoopRef.current = null; } };
-  }, [animating, assetsVersion, cueSprite, game.ballInHandUserId, game.status, game.turnUserId, opponentAim]);
+  }, [animating, assetsVersion, cueSprite, currentUserId, game.ballInHandUserId, game.status, game.turnUserId, opponentAim, room.hostUserId]);
 
   // ─── Pocketed ball mini-icons (for HUD) ─────────────────────────────────
   // Pre-render mini ball icons as data URLs for HUD pips
