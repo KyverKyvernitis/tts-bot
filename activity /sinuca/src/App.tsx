@@ -1022,8 +1022,9 @@ export default function App() {
     if (!isSocketOpen()) return false;
     if (!roomId) return true;
     const wsState = wsGameStateRef.current;
-    const activeRoom = currentRoomRef.current;
-    return wsState.roomId === roomId || activeRoom?.roomId === roomId;
+    if (wsState.roomId !== roomId) return false;
+    if (!wsState.lastReceivedAt) return false;
+    return performance.now() - wsState.lastReceivedAt <= 1800;
   };
 
   const markShotDispatch = (roomId: string, expectedShotSequence: number, transport: "ws" | "http", reason: string) => {
@@ -2065,6 +2066,41 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, [bootstrapped, room?.roomId, screen]);
 
+
+  useEffect(() => {
+    if (!bootstrapped || screen !== "game" || !room?.roomId) return;
+    const roomId = room.roomId;
+
+    const needsBootstrap = () => {
+      const activeGame = currentGameRef.current;
+      if (activeGame?.roomId === roomId) return false;
+      const wsState = wsGameStateRef.current;
+      if (wsState.roomId !== roomId || !wsState.lastReceivedAt) return true;
+      return performance.now() - wsState.lastReceivedAt > 700;
+    };
+
+    if (!needsBootstrap()) return;
+
+    logSnapshotDebug('recover', {
+      source: 'http',
+      roomId,
+      reason: 'game_bootstrap_missing',
+      status: currentGameRef.current?.status ?? null,
+      shotSequence: currentGameRef.current?.shotSequence ?? null,
+      revision: Number.isFinite(currentGameRef.current?.snapshotRevision) ? currentGameRef.current!.snapshotRevision : null,
+      why: 'screen_game_without_snapshot',
+      wsOpen: isSocketOpen(),
+      wsRoomId: wsGameStateRef.current.roomId,
+      wsAgeMs: wsGameStateRef.current.lastReceivedAt ? Math.round(performance.now() - wsGameStateRef.current.lastReceivedAt) : null,
+    });
+
+    void fetchGameStateOverHttp(roomId, 'game_bootstrap_missing', 0);
+    const interval = window.setInterval(() => {
+      if (!needsBootstrap()) return;
+      void fetchGameStateOverHttp(roomId, 'game_bootstrap_retry', 0);
+    }, 350);
+    return () => window.clearInterval(interval);
+  }, [bootstrapped, connectionState, room?.roomId, screen, game?.roomId, game?.updatedAt]);
 
   useEffect(() => {
     if (!bootstrapped || screen !== "game" || !room?.roomId) return;
