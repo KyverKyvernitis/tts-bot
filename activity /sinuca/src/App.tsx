@@ -249,6 +249,7 @@ export default function App() {
   const lobbyBgmFadeTimerRef = useRef<number | null>(null);
   const previousScreenRef = useRef<LobbyScreen>("home");
   const currentScreenRef = useRef<LobbyScreen>("home");
+  const currentGameRef = useRef<GameSnapshot | null>(null);
   const createDraftRoomIdRef = useRef<string | null>(null);
   const currentRoomRef = useRef<RoomSnapshot | null>(null);
   const isRoomHostRef = useRef(false);
@@ -2183,8 +2184,13 @@ export default function App() {
 
                 if (sentOverSocket) {
                   window.setTimeout(() => {
+                    const latestGame = currentGameRef.current;
+                    const stillWaitingForAdvance = !latestGame
+                      || latestGame.roomId !== room.roomId
+                      || latestGame.shotSequence <= previousSeq;
+                    if (!stillWaitingForAdvance) return;
                     void fetchGameStateOverHttp(room.roomId, "ws_verify_after_shot", previousSeq);
-                  }, 320);
+                  }, 1200);
                   return;
                 }
 
