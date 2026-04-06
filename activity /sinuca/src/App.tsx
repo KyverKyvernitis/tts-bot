@@ -896,12 +896,18 @@ export default function App() {
   };
 
   const shouldBlockHttpGameDuringRealtime = (roomId: string, reason: string) => {
-    if (!isSocketOpen()) return false;
     const activeGame = currentGameRef.current;
     const sameRoom = activeGame?.roomId === roomId || currentRoomRef.current?.roomId === roomId;
     if (!sameRoom) return false;
     if (activeGame?.status !== "simulating") return false;
-    if (reason.startsWith("offline_")) return false;
+    if (reason.startsWith("force_recover_")) return false;
+    return true;
+  };
+
+  const shouldRunHttpGamePolling = (roomId: string) => {
+    if (isSocketOpen()) return false;
+    const activeGame = currentGameRef.current;
+    if (activeGame?.roomId === roomId && activeGame.status === "simulating") return false;
     return true;
   };
 
@@ -1717,13 +1723,25 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped || screen !== "game" || !room?.roomId) return;
-    if (connectionState === "connected") return;
+    if (!shouldRunHttpGamePolling(room.roomId)) {
+      logSnapshotDebug('skip', {
+        source: 'http',
+        roomId: room.roomId,
+        reason: 'game_poll_effect_guard',
+        status: currentGameRef.current?.status ?? null,
+        shotSequence: currentGameRef.current?.shotSequence ?? null,
+        revision: Number.isFinite(currentGameRef.current?.snapshotRevision) ? currentGameRef.current!.snapshotRevision : null,
+        why: isSocketOpen() ? 'ws_open' : 'simulating_guard',
+      });
+      return;
+    }
     void fetchGameStateOverHttp(room.roomId, "game_initial", game?.shotSequence ?? 0);
     const interval = window.setInterval(() => {
+      if (!shouldRunHttpGamePolling(room.roomId)) return;
       void fetchGameStateOverHttp(room.roomId, "game_poll", game?.shotSequence ?? 0);
     }, 220);
     return () => window.clearInterval(interval);
-  }, [bootstrapped, connectionState, game?.shotSequence, room?.roomId, screen]);
+  }, [bootstrapped, connectionState, game?.shotSequence, game?.status, room?.roomId, screen]);
 
   useEffect(() => {
     if (screen !== "game") return;
