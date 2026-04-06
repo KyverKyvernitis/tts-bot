@@ -232,6 +232,7 @@ export default function App() {
   const [createTableType, setCreateTableType] = useState<TableType>("stake");
   const [createStake, setCreateStake] = useState<number>(25);
   const [createDraftRoomId, setCreateDraftRoomId] = useState<string | null>(null);
+  const [locallyOwnedRoomId, setLocallyOwnedRoomId] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [authBusy, setAuthBusy] = useState(false);
@@ -259,6 +260,7 @@ export default function App() {
   const currentScreenRef = useRef<LobbyScreen>("home");
   const currentGameRef = useRef<GameSnapshot | null>(null);
   const createDraftRoomIdRef = useRef<string | null>(null);
+  const locallyOwnedRoomIdRef = useRef<string | null>(null);
   const currentRoomRef = useRef<RoomSnapshot | null>(null);
   const isRoomHostRef = useRef(false);
   const currentUserIdRef = useRef<string | null>(null);
@@ -395,6 +397,10 @@ export default function App() {
   }, [createDraftRoomId]);
 
   useEffect(() => {
+    locallyOwnedRoomIdRef.current = locallyOwnedRoomId;
+  }, [locallyOwnedRoomId]);
+
+  useEffect(() => {
     currentGameRef.current = game;
   }, [game]);
 
@@ -474,13 +480,14 @@ export default function App() {
   const createStakeOptions: readonly number[] = isServer ? serverCreateStakeOptions : dmCreateStakeOptions;
   const isFriendlyTable = !isServer || createStake === 0 || createTableType === "casual";
   const canAffordSelectedStake = !isServer || createStake === 0 ? true : balanceLoaded && balance.chips >= createStake;
-  const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId);
   const roomHostPlayer = room?.players.find((player) => player.userId === room.hostUserId) ?? room?.players[0] ?? null;
   const roomOpponentPlayer = room?.players.find((player) => player.userId !== room.hostUserId) ?? null;
+  const isLocallyOwnedRoom = Boolean(room && locallyOwnedRoomId && room.roomId === locallyOwnedRoomId);
+  const isRoomHost = room ? room.hostUserId === state.currentUser.userId || isLocallyOwnedRoom : false;
+  const currentPlayer = room?.players.find((player) => player.userId === state.currentUser.userId) ?? (isRoomHost ? roomHostPlayer : null);
   const createPreviewRoom = screen === "create" && room && createDraftRoomId && room.roomId === createDraftRoomId ? room : null;
   const createPreviewHostPlayer = createPreviewRoom?.players.find((player) => player.userId === createPreviewRoom.hostUserId) ?? createPreviewRoom?.players[0] ?? null;
   const createPreviewOpponentPlayer = createPreviewRoom?.players.find((player) => player.userId !== createPreviewRoom.hostUserId) ?? null;
-  const isRoomHost = room ? room.hostUserId === state.currentUser.userId : false;
   const canHostStart = Boolean(room && room.players.length === 2 && roomOpponentPlayer?.ready);
   const roomStakeOptions = [0, 10, 25, 30, 50] as const;
   const roomTopStatus = !roomOpponentPlayer
@@ -498,6 +505,7 @@ export default function App() {
   useEffect(() => {
     if (screen === "create" && createPreviewRoom) {
       setRoom(createPreviewRoom);
+      setLocallyOwnedRoomId(createPreviewRoom.roomId);
       setScreen("room");
     }
   }, [createPreviewRoom, screen]);
@@ -703,6 +711,9 @@ export default function App() {
           if (parsed?.room) {
             setRoom(parsed.room);
             setCreateDraftRoomId(parsed.room.roomId);
+            if (locallyOwnedRoomIdRef.current === parsed.room.roomId || parsed.room.hostUserId === state.currentUser.userId) {
+              setLocallyOwnedRoomId(parsed.room.roomId);
+            }
             if (parsed.room.status === "in_game") {
               setScreen("game");
             } else if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
@@ -712,6 +723,7 @@ export default function App() {
             setRoom(null);
             setGame(null);
             setCreateDraftRoomId(null);
+            setLocallyOwnedRoomId(null);
             setRoomEntryMenuOpen(false);
             setErrorMessage("a sala foi fechada");
             setScreen("list");
@@ -809,6 +821,7 @@ export default function App() {
     if (result?.room) {
       setRoom(result.room);
       setCreateDraftRoomId(result.room.roomId);
+      setLocallyOwnedRoomId(result.room.roomId);
       return result.room;
     }
     return null;
@@ -824,6 +837,9 @@ export default function App() {
     if (result?.room) {
       setRoom(result.room);
       setScreen("room");
+      if (result.room.hostUserId !== state.currentUser.userId) {
+        setLocallyOwnedRoomId(null);
+      }
       return result.room;
     }
     return null;
@@ -1256,10 +1272,10 @@ export default function App() {
     return null;
   };
 
-  const startGameOverHttp = async (roomId: string, reason: string) => {
+  const startGameOverHttp = async (roomId: string, reason: string, overrideUserId?: string | null) => {
     const result = await postGameActionOverHttp("/games/start", {
       roomId,
-      userId: state.currentUser.userId,
+      userId: overrideUserId ?? state.currentUser.userId,
     }, reason);
     if (result?.room) setRoom(result.room);
     if (result?.game) {
@@ -1544,6 +1560,9 @@ export default function App() {
         if (payload.type === "room_state") {
           setRoom(payload.payload);
           setCreateDraftRoomId(payload.payload.roomId);
+          if (locallyOwnedRoomIdRef.current === payload.payload.roomId || payload.payload.hostUserId === currentUserIdRef.current) {
+            setLocallyOwnedRoomId(payload.payload.roomId);
+          }
           if (payload.payload.status === "in_game") {
             setScreen("game");
           } else if (currentScreenRef.current !== "create" || payload.payload.players.length > 1) {
@@ -1586,6 +1605,22 @@ export default function App() {
         }
         if (payload.type === "room_list") {
           setRooms(payload.payload);
+          const activeRoomId = currentRoomRef.current?.roomId ?? createDraftRoomIdRef.current;
+          if (activeRoomId && currentScreenRef.current !== "game") {
+            const matchingRoom = payload.payload.find((entry) => entry.roomId === activeRoomId) ?? null;
+            if (matchingRoom) {
+              setRoom(matchingRoom);
+              setCreateDraftRoomId(matchingRoom.roomId);
+              if (locallyOwnedRoomIdRef.current === matchingRoom.roomId || matchingRoom.hostUserId === currentUserIdRef.current) {
+                setLocallyOwnedRoomId(matchingRoom.roomId);
+              }
+              if (matchingRoom.status === "in_game") {
+                setScreen("game");
+              } else if (currentScreenRef.current !== "create" || matchingRoom.players.length > 1) {
+                setScreen("room");
+              }
+            }
+          }
           setErrorMessage(null);
           return;
         }
@@ -1752,7 +1787,7 @@ export default function App() {
 
     const interval = window.setInterval(() => {
       void fetchRoomStateOverHttp(activeRoomId, isConnected ? "connected_room_sync" : "offline_poll");
-    }, isConnected ? 1200 : 2500);
+    }, isConnected ? 650 : 2500);
 
     return () => window.clearInterval(interval);
   }, [bootstrapped, connectionState, createDraftRoomId, room?.roomId, screen]);
@@ -2037,6 +2072,7 @@ export default function App() {
                   const nextTableType: TableType = isServer ? "stake" : "casual";
                   setRoom(null);
                   setCreateDraftRoomId(null);
+                  setLocallyOwnedRoomId(null);
                   setCreateTableType(nextTableType);
                   setCreateStake(nextStake);
                   setCreateEntryMenuOpen(false);
@@ -2089,6 +2125,7 @@ export default function App() {
                 void leaveRoomOverHttp(roomId, "http_primary_close_create", { closeRoom: true });
               }
               setCreateDraftRoomId(null);
+              setLocallyOwnedRoomId(null);
               setRoom(null);
               setScreen("home");
               void requestRooms();
@@ -2299,7 +2336,7 @@ export default function App() {
                         setGameStartBusy(true);
                         setErrorMessage(null);
                         try {
-                          await startGameOverHttp(room.roomId, "http_primary_game_start");
+                          await startGameOverHttp(room.roomId, "http_primary_game_start", isRoomHost ? room.hostUserId : null);
                         } finally {
                           setGameStartBusy(false);
                         }
