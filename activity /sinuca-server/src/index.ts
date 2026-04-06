@@ -62,9 +62,16 @@ app.use((req, _res, next) => {
   next();
 });
 
+function sendNoStoreJson(res: Response, payload: unknown) {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.json(payload);
+}
+
 function handleHealth(req: Request, res: Response) {
   console.log("[sinuca-health]", JSON.stringify({ origin: req.headers.origin ?? null, ua: req.headers["user-agent"] ?? null, url: req.url ?? null }));
-  res.json({ ok: true, rules: getInitialRuleSet() });
+  sendNoStoreJson(res, { ok: true, rules: getInitialRuleSet() });
 }
 
 app.get("/health", handleHealth);
@@ -402,7 +409,7 @@ async function handleListRoomsHttp(req: Request, res: Response) {
   } satisfies ListRoomsPayload;
   const rooms = listRooms(payload).map(toSnapshot);
   console.log("[sinuca-list-rooms-http]", JSON.stringify({ payload, session, rooms: rooms.map((room) => ({ roomId: room.roomId, guildId: room.guildId, channelId: room.channelId, mode: room.mode, players: room.players.length, status: room.status, tableType: room.tableType, stakeChips: room.stakeChips })) }));
-  res.json({ rooms });
+  sendNoStoreJson(res, { rooms });
 }
 
 async function handleGetRoomHttp(req: Request, res: Response) {
@@ -413,7 +420,7 @@ async function handleGetRoomHttp(req: Request, res: Response) {
   }
   const room = getRoom(roomId);
   console.log("[sinuca-get-room-http]", JSON.stringify({ roomId, found: Boolean(room) }));
-  res.json({ room: room ? toSnapshot(room) : null });
+  sendNoStoreJson(res, { room: room ? toSnapshot(room) : null });
 }
 
 async function handleCreateRoomHttp(req: Request, res: Response) {
@@ -554,7 +561,7 @@ async function handleGetAimHttp(req: Request, res: Response) {
     res.status(400).json({ error: "missing_room_id" });
     return;
   }
-  res.json({ aim: latestAimByRoom.get(roomId) ?? null });
+  sendNoStoreJson(res, { aim: latestAimByRoom.get(roomId) ?? null });
 }
 
 async function handleSyncAimHttp(req: Request, res: Response) {
@@ -600,7 +607,7 @@ async function handleGetGameHttp(req: Request, res: Response) {
     return;
   }
   const game = getGameSnapshot(roomId, Number.isFinite(sinceSeq) ? sinceSeq : 0);
-  res.json({ game });
+  sendNoStoreJson(res, { game });
 }
 
 async function handleStartGameHttp(req: Request, res: Response) {
@@ -1263,6 +1270,19 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       subscribeSocket(room.roomId, ws);
       broadcastRoom(room.roomId);
       broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+      return;
+    }
+
+    if (data.type === "subscribe_room") {
+      const merged = mergeWithSession(data.payload, activeSession);
+      const room = getRoom(merged.roomId);
+      console.log("[sinuca-subscribe-room]", JSON.stringify({ activeSession, request: data.payload, merged, roomFound: Boolean(room) }));
+      if (!room) {
+        send(ws, { type: "error", message: "mesa não encontrada" });
+        return;
+      }
+      subscribeSocket(room.roomId, ws);
+      send(ws, { type: "room_state", payload: toSnapshot(room) });
       return;
     }
 

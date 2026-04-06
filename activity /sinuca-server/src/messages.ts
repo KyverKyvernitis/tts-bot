@@ -28,6 +28,11 @@ export interface JoinRoomPayload {
   avatarUrl?: string | null;
 }
 
+export interface SubscribeRoomPayload {
+  roomId: string;
+  userId?: string | null;
+}
+
 export interface LeaveRoomPayload {
   roomId: string;
   userId: string;
@@ -158,6 +163,7 @@ export interface SessionContextPayload {
 export type ClientMessage =
   | { type: "create_room"; payload: CreateRoomPayload }
   | { type: "join_room"; payload: JoinRoomPayload }
+  | { type: "subscribe_room"; payload: SubscribeRoomPayload }
   | { type: "leave_room"; payload: LeaveRoomPayload }
   | { type: "set_ready"; payload: ReadyPayload }
   | { type: "list_rooms"; payload: ListRoomsPayload }

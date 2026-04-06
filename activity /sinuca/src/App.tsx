@@ -106,14 +106,6 @@ function resolveApiCandidates(path: string) {
   return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
 }
 
-function resolveBalanceTransportCandidates(action: string) {
-  return resolveApiCandidates("/balance").map((baseUrl) => {
-    const url = new URL(baseUrl, window.location.origin);
-    url.searchParams.set("action", action);
-    return url;
-  });
-}
-
 function resolveSocketUrl() {
   const configured = (import.meta.env.VITE_SINUCA_WS_URL as string | undefined)?.trim();
   if (configured) {
@@ -182,6 +174,12 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, tim
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+function appendNoStoreNonce(urlLike: string | URL, nonce?: string) {
+  const url = new URL(urlLike.toString(), window.location.origin);
+  url.searchParams.set("_rt", nonce ?? `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  return url;
 }
 
 
@@ -650,12 +648,13 @@ export default function App() {
   const fetchRoomsOverHttp = async (reason: string) => {
     const attempts: string[] = [];
 
-    for (const url of resolveBalanceTransportCandidates("rooms_list")) {
+    for (const baseUrl of resolveApiCandidates("/rooms")) {
       try {
+        const url = appendNoStoreNonce(baseUrl, `${Date.now()}`);
         url.searchParams.set("mode", state.context.mode);
         if (state.context.guildId) url.searchParams.set("guildId", state.context.guildId);
         if (state.context.channelId) url.searchParams.set("channelId", state.context.channelId);
-        const response = await fetch(url.toString(), { method: "GET", credentials: "same-origin" });
+        const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin", cache: "no-store" });
         const raw = await response.text();
         const parsed = raw ? JSON.parse(raw) as { rooms?: RoomSnapshot[]; error?: string } : null;
         if (response.ok && Array.isArray(parsed?.rooms)) {
@@ -664,27 +663,6 @@ export default function App() {
           return true;
         }
         attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "unknown";
-        attempts.push(`${url.toString()}:exception:${message}`);
-      }
-    }
-
-    for (const baseUrl of resolveApiCandidates("/rooms")) {
-      try {
-        const url = new URL(baseUrl, window.location.origin);
-        url.searchParams.set("mode", state.context.mode);
-        if (state.context.guildId) url.searchParams.set("guildId", state.context.guildId);
-        if (state.context.channelId) url.searchParams.set("channelId", state.context.channelId);
-        const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" });
-        const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { rooms?: RoomSnapshot[]; error?: string } : null;
-        if (response.ok && Array.isArray(parsed?.rooms)) {
-          setRooms(parsed.rooms);
-          setErrorMessage(null);
-          return true;
-        }
-        attempts.push(`${baseUrl}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown";
         attempts.push(`${baseUrl}:exception:${message}`);
@@ -704,13 +682,15 @@ export default function App() {
 
     for (const baseUrl of resolveApiCandidates(`/rooms/${encodeURIComponent(roomId)}`)) {
       try {
-        const response = await fetchWithTimeout(baseUrl, { method: "GET", credentials: "same-origin" });
+        const requestUrl = appendNoStoreNonce(baseUrl, `${Date.now()}`);
+        const response = await fetchWithTimeout(requestUrl.toString(), { method: "GET", credentials: "same-origin", cache: "no-store" });
         const raw = await response.text();
         const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
         if (response.ok) {
           if (parsed?.room) {
             setRoom(parsed.room);
             setCreateDraftRoomId(parsed.room.roomId);
+            subscribeRoomRealtime(parsed.room.roomId, `${reason}:http_room_state`);
             if (locallyOwnedRoomIdRef.current === parsed.room.roomId || parsed.room.hostUserId === state.currentUser.userId) {
               setLocallyOwnedRoomId(parsed.room.roomId);
             }
@@ -731,7 +711,7 @@ export default function App() {
           }
           return parsed?.room ?? null;
         }
-        attempts.push(`${baseUrl}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        attempts.push(`${requestUrl.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown";
         attempts.push(`${baseUrl}:exception:${message}`);
@@ -744,39 +724,7 @@ export default function App() {
   };
 
   const postRoomActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
-    const actionByPath: Record<string, string> = {
-      "/rooms/create": "room_create",
-      "/rooms/join": "room_join",
-      "/rooms/leave": "room_leave",
-      "/rooms/ready": "room_ready",
-      "/rooms/stake": "room_stake",
-    };
     const attempts: string[] = [];
-    const action = actionByPath[path];
-
-    if (action) {
-      for (const baseUrl of resolveApiCandidates("/balance")) {
-        try {
-          const url = new URL(baseUrl, window.location.origin);
-          url.searchParams.set("action", action);
-          Object.entries(payload).forEach(([key, value]) => {
-            if (value === null || value === undefined) return;
-            url.searchParams.set(key, String(value));
-          });
-          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3500);
-          const raw = await response.text();
-          const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
-          if (response.ok) {
-            setErrorMessage(null);
-            return parsed;
-          }
-          attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "unknown";
-          attempts.push(`${baseUrl}:exception:${message}`);
-        }
-      }
-    }
 
     for (const baseUrl of resolveApiCandidates(path)) {
       try {
@@ -804,6 +752,21 @@ export default function App() {
     return null;
   };
 
+  const subscribeRoomRealtime = (roomId: string, reason: string) => {
+    if (!roomId) return false;
+    const delivered = sendMessage({
+      type: "subscribe_room",
+      payload: {
+        roomId,
+        userId: state.currentUser.userId,
+      },
+    }, { silent: true });
+    if (delivered) {
+      setAuthDebug((current) => current ? `${current} • room:ws_subscribe:${reason}:${roomId}` : `room:ws_subscribe:${reason}:${roomId}`);
+    }
+    return delivered;
+  };
+
   const createRoomOverHttp = async (reason: string, override?: { stake: number; tableType: TableType }) => {
     const nextStake = override?.stake ?? createStake;
     const nextTableType = override?.tableType ?? createTableType;
@@ -822,6 +785,7 @@ export default function App() {
       setRoom(result.room);
       setCreateDraftRoomId(result.room.roomId);
       setLocallyOwnedRoomId(result.room.roomId);
+      subscribeRoomRealtime(result.room.roomId, `${reason}:http_created`);
       return result.room;
     }
     return null;
@@ -840,6 +804,7 @@ export default function App() {
       if (result.room.hostUserId !== state.currentUser.userId) {
         setLocallyOwnedRoomId(null);
       }
+      subscribeRoomRealtime(result.room.roomId, `${reason}:http_joined`);
       return result.room;
     }
     return null;
@@ -1501,6 +1466,15 @@ export default function App() {
       channelId: state.context.channelId,
       screen,
     });
+    const deliveredOverSocket = sendMessage({
+      type: "list_rooms",
+      payload: {
+        mode: state.context.mode,
+        guildId: state.context.guildId,
+        channelId: state.context.channelId,
+      },
+    }, { silent: true });
+    if (deliveredOverSocket) return;
     await fetchRoomsOverHttp("http_primary_list");
   };
 
@@ -1716,6 +1690,18 @@ export default function App() {
   }, [bootstrapped, connectionState, resolvedUser, state.context.channelId, state.context.guildId, state.context.instanceId, state.currentUser.displayName, state.currentUser.userId]);
 
   useEffect(() => {
+    if (!bootstrapped || connectionState !== "connected") return;
+    if (screen === "game") return;
+    const activeRoomId = screen === "room"
+      ? room?.roomId ?? null
+      : screen === "create"
+        ? createDraftRoomIdRef.current ?? createDraftRoomId
+        : null;
+    if (!activeRoomId) return;
+    subscribeRoomRealtime(activeRoomId, `effect_${screen}`);
+  }, [bootstrapped, connectionState, createDraftRoomId, room?.roomId, screen, state.currentUser.userId]);
+
+  useEffect(() => {
     if (!bootstrapped) return;
     if (resolvedUser) {
       setAuthState("ready");
@@ -1786,8 +1772,8 @@ export default function App() {
     void fetchRoomStateOverHttp(activeRoomId, isConnected ? "connected_room_sync_initial" : "offline_initial");
 
     const interval = window.setInterval(() => {
-      void fetchRoomStateOverHttp(activeRoomId, isConnected ? "connected_room_sync" : "offline_poll");
-    }, isConnected ? 650 : 2500);
+      void fetchRoomStateOverHttp(activeRoomId, isConnected ? "connected_room_sync_fallback" : "offline_poll");
+    }, isConnected ? 2000 : 2500);
 
     return () => window.clearInterval(interval);
   }, [bootstrapped, connectionState, createDraftRoomId, room?.roomId, screen]);
