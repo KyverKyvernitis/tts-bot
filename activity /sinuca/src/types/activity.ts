@@ -91,6 +91,7 @@ export interface AimStateSnapshot {
   seq: number;
   mode: AimPointerMode;
   updatedAt: number;
+  snapshotRevision: number;
 }
 
 export interface GameSnapshot {

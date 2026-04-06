@@ -187,6 +187,11 @@ function trimTrailingSettledFrames(frames: GameShotFrame[]) {
   return frames.slice(0, keepUntil + 1);
 }
 
+function bumpSnapshotRevision(game: GameRecord) {
+  game.snapshotRevision += 1;
+  game.updatedAt = Date.now();
+}
+
 function toSnapshot(game: GameRecord, sinceSeq?: number | null): GameSnapshot {
   return {
     ...game,
@@ -564,7 +569,7 @@ function beginShotSimulation(
 
   game.balls = balls;
   game.shotSequence += 1;
-  game.updatedAt = Date.now();
+  bumpSnapshotRevision(game);
   game.status = "simulating";
   game.foulReason = null;
   game.ballInHandUserId = null;
@@ -640,7 +645,6 @@ function advanceShotSimulation(game: GameRecord, shot: LiveShotState) {
     updateBallMotion(ball);
   }
 
-  game.updatedAt = Date.now();
   return balls.every((ball) => !ballIsMoving(ball));
 }
 
@@ -692,7 +696,7 @@ function finalizeShotSimulation(game: GameRecord, shot: LiveShotState) {
         : opponentUserId(game, shot.shooterUserId);
 
   game.turnUserId = nextTurnUserId;
-  game.updatedAt = Date.now();
+  bumpSnapshotRevision(game);
   game.foulReason = foulReason;
   game.calledPocket = shot.currentTargetBefore === "eight" ? shot.calledPocket ?? null : null;
 
@@ -734,6 +738,7 @@ export function stepRealtimeGames() {
       if (settled) break;
     }
 
+    bumpSnapshotRevision(game);
     changedRoomIds.add(roomId);
     if (settled) {
       finalizeShotSimulation(game, shot);
@@ -772,6 +777,7 @@ export function startGameForRoom(room: RoomRecord): GameSnapshot {
     balls: rackBalls(),
     createdAt: now,
     updatedAt: now,
+    snapshotRevision: 0,
     lastShot: null,
   };
 

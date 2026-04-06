@@ -878,8 +878,14 @@ export default function App() {
 
   const mergeIncomingGame = (current: GameSnapshot | null, incoming: GameSnapshot | null | undefined) => {
     if (!incoming) return current;
-    if (current && current.roomId === incoming.roomId && current.updatedAt > incoming.updatedAt) {
-      return current;
+    if (current && current.roomId === incoming.roomId) {
+      const currentRevision = Number.isFinite(current.snapshotRevision) ? current.snapshotRevision : 0;
+      const incomingRevision = Number.isFinite(incoming.snapshotRevision) ? incoming.snapshotRevision : 0;
+      if (current.shotSequence > incoming.shotSequence) return current;
+      if (current.shotSequence === incoming.shotSequence) {
+        if (currentRevision > incomingRevision) return current;
+        if (currentRevision === incomingRevision && current.updatedAt > incoming.updatedAt) return current;
+      }
     }
     return {
       ...incoming,
@@ -1596,22 +1602,26 @@ export default function App() {
         ? createDraftRoomIdRef.current ?? createDraftRoomId
         : null;
     if (!activeRoomId) return;
-    void fetchRoomStateOverHttp(activeRoomId, "offline_initial");
+    if (connectionState !== "connected") {
+      void fetchRoomStateOverHttp(activeRoomId, "offline_initial");
+    }
+    if (connectionState === "connected") return;
     const interval = window.setInterval(() => {
       void fetchRoomStateOverHttp(activeRoomId, "offline_poll");
     }, 2500);
     return () => window.clearInterval(interval);
-  }, [bootstrapped, createDraftRoomId, room?.roomId, screen]);
+  }, [bootstrapped, connectionState, createDraftRoomId, room?.roomId, screen]);
 
 
   useEffect(() => {
     if (!bootstrapped || screen !== "game" || !room?.roomId) return;
     void fetchGameStateOverHttp(room.roomId, "game_initial", game?.shotSequence ?? 0);
+    if (connectionState === "connected") return;
     const interval = window.setInterval(() => {
       void fetchGameStateOverHttp(room.roomId, "game_poll", game?.shotSequence ?? 0);
-    }, 140);
+    }, 220);
     return () => window.clearInterval(interval);
-  }, [bootstrapped, game?.shotSequence, room?.roomId, screen]);
+  }, [bootstrapped, connectionState, game?.shotSequence, room?.roomId, screen]);
 
   useEffect(() => {
     if (screen !== "game") return;
