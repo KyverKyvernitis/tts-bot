@@ -615,21 +615,33 @@ async function handleStartGameHttp(req: Request, res: Response) {
   const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
   const roomId = normalizeIntString(merged.roomId);
   const userId = normalizeIntString(merged.userId);
+  console.log("[sinuca-start-http]", JSON.stringify({
+    method: req.method,
+    url: req.url ?? null,
+    roomId,
+    userId,
+    sessionUserId: session.userId,
+    sessionGuildId: session.guildId,
+  }));
   if (!roomId || !userId) {
+    console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: "missing_start_identifiers" }));
     res.status(400).json({ error: "missing_start_identifiers" });
     return;
   }
   const room = getRoom(roomId);
   if (!room) {
+    console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: "room_not_found" }));
     res.status(404).json({ error: "room_not_found" });
     return;
   }
   if (room.hostUserId !== userId) {
+    console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: "only_host_can_start", hostUserId: room.hostUserId }));
     res.status(403).json({ error: "only_host_can_start" });
     return;
   }
   const opponent = room.players.find((player) => player.userId !== room.hostUserId);
   if (!opponent || !opponent.ready) {
+    console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: "room_not_ready", opponentUserId: opponent?.userId ?? null, opponentReady: opponent?.ready ?? null }));
     res.status(409).json({ error: "room_not_ready" });
     return;
   }
@@ -639,6 +651,7 @@ async function handleStartGameHttp(req: Request, res: Response) {
   broadcastRoom(roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
   broadcastGame(roomId);
+  console.log("[sinuca-start-http-applied]", JSON.stringify({ roomId, userId, turnUserId: game.turnUserId, phase: game.phase, shotSequence: game.shotSequence }));
   res.json({ game, room: toSnapshot(getRoom(roomId) ?? room) });
 }
 
@@ -1008,6 +1021,7 @@ async function handleBalance(req: Request, res: Response) {
     return void handleGetAimHttp(req, res);
   }
   if (action === "game_start") {
+    console.log("[sinuca-balance-action]", JSON.stringify({ action, method: req.method, url: req.url ?? null }));
     return void handleStartGameHttp(req, res);
   }
   if (action === "game_aim_sync") {

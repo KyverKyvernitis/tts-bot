@@ -146,6 +146,7 @@ function resolveLegacyBalanceAction(path: string) {
   if (normalizedPath === "/rooms/leave") return "room_leave";
   if (normalizedPath === "/rooms/ready") return "room_ready";
   if (normalizedPath === "/rooms/stake") return "room_stake";
+  if (normalizedPath === "/games/start") return "game_start";
   if (/^\/rooms\/[^/]+$/.test(normalizedPath)) return "room_get";
   return null;
 }
@@ -1378,22 +1379,91 @@ export default function App() {
 
   const postGameActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
     const attempts: string[] = [];
+    const query = buildQueryStringFromPayload(payload);
+    const legacyAction = resolveLegacyBalanceAction(path);
+    const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
 
     for (const baseUrl of resolveApiCandidates(path)) {
-      try {
-        console.log("[sinuca-http-action]", JSON.stringify({ path, baseUrl, reason, payload }));
-        const response = await fetchWithTimeout(baseUrl, {
+      requestVariants.push({
+        label: `API_POST_JSON:${baseUrl}`,
+        url: baseUrl,
+        init: {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "same-origin",
           body: JSON.stringify(payload),
-        }, 4200);
+        },
+      });
+      requestVariants.push({
+        label: `API_POST_FORM:${baseUrl}`,
+        url: baseUrl,
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+          credentials: "same-origin",
+          body: query,
+        },
+      });
+      if (query) {
+        const getUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+        const queryUrl = new URL(getUrl.toString(), window.location.origin);
+        const params = new URLSearchParams(query);
+        params.forEach((value, key) => queryUrl.searchParams.set(key, value));
+        requestVariants.push({
+          label: `API_GET_QUERY:${baseUrl}`,
+          url: queryUrl.toString(),
+          init: {
+            method: "GET",
+            credentials: "same-origin",
+            cache: "no-store",
+          },
+        });
+      }
+    }
+
+    if (legacyAction) {
+      for (const baseUrl of resolveApiCandidates("/balance")) {
+        const queryUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+        queryUrl.searchParams.set("action", legacyAction);
+        const params = new URLSearchParams(query);
+        params.forEach((value, key) => queryUrl.searchParams.set(key, value));
+        requestVariants.push({
+          label: `BALANCE_GET_QUERY:${baseUrl}`,
+          url: queryUrl.toString(),
+          init: {
+            method: "GET",
+            credentials: "same-origin",
+            cache: "no-store",
+          },
+        });
+        requestVariants.push({
+          label: `BALANCE_POST_FORM:${baseUrl}`,
+          url: baseUrl,
+          init: {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+            credentials: "same-origin",
+            body: buildQueryStringFromPayload({ action: legacyAction, ...payload }),
+          },
+        });
+      }
+    }
+
+    for (const variant of requestVariants) {
+      try {
+        console.log("[sinuca-http-action]", JSON.stringify({ path, label: variant.label, url: variant.url, reason, payload }));
+        const response = await fetchWithTimeout(variant.url, variant.init, variant.label.startsWith("BALANCE_") ? 3200 : 4200);
         const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string } : null;
-        if (response.ok) return parsed;
-        attempts.push(`${baseUrl}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string; detail?: string } : null;
+        if (response.ok) {
+          setAuthDebug((current) => current ? `${current} • game_action:http_ok:${reason}:${variant.label}` : `game_action:http_ok:${reason}:${variant.label}`);
+          return parsed;
+        }
+        const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
+        attempts.push(`${variant.label}:${response.status}:${detail}`);
       } catch (error) {
-        attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
+        const message = error instanceof Error ? error.message : "unknown";
+        attempts.push(`${variant.label}:exception:${message}`);
       }
     }
 
@@ -1413,6 +1483,18 @@ export default function App() {
       setGame(result.game);
       setScreen("game");
       return result.game;
+    }
+
+    const refreshedRoom = await fetchRoomStateOverHttp(roomId, `${reason}:verify_room_after_start`);
+    if (refreshedRoom) {
+      setRoom(refreshedRoom);
+    }
+
+    const recoveredGame = await fetchGameStateOverHttp(roomId, `${reason}:verify_game_after_start`, 0);
+    if (recoveredGame) {
+      const applied = applyIncomingGame('http', recoveredGame, `${reason}:verify_game_after_start`);
+      setScreen("game");
+      return applied;
     }
     return null;
   };
