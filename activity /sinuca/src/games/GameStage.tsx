@@ -113,9 +113,9 @@ const AIM_SYNC_INTERVAL_MS = 22;
 const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
 const REALTIME_VISUAL_SNAP_DISTANCE = 42;
-const REALTIME_SNAPSHOT_QUEUE_LIMIT = 16;
-const REALTIME_RENDER_DELAY_MS = 34;
-const REALTIME_MAX_EXTRAPOLATION_MS = 70;
+const REALTIME_SNAPSHOT_QUEUE_LIMIT = 24;
+const REALTIME_RENDER_DELAY_MS = 42;
+const REALTIME_MAX_EXTRAPOLATION_MS = 90;
 
 type ShotInput = {
   angle: number;
@@ -1366,7 +1366,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       queue.push({
         balls: baseBalls,
         revision: Math.max(0, nextRevision - 1),
-        receivedAt: now - REALTIME_RENDER_DELAY_MS,
+        receivedAt: now - (REALTIME_RENDER_DELAY_MS + 8),
         velocities: {},
       });
     }
@@ -2011,7 +2011,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         const queue = snapshotQueueRef.current;
         const renderTime = now - REALTIME_RENDER_DELAY_MS;
         if (queue.length >= 2) {
-          while (queue.length >= 3 && queue[1].receivedAt <= renderTime) {
+          while (queue.length >= 3 && queue[1].receivedAt <= renderTime - 6) {
             queue.shift();
           }
           const fromSnapshot = queue[0];
@@ -2025,7 +2025,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             smoothedBalls = interpolateSnapshotBalls(fromSnapshot.balls, toSnapshot.balls, smoothStep);
           } else {
             const extrapolated = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, renderTime - toSnapshot.receivedAt);
-            const carry = clamp(Math.min(0.9, (renderTime - toSnapshot.receivedAt) / Math.max(REALTIME_MAX_EXTRAPOLATION_MS, 1)), 0.16, 0.78);
+            const overshoot = Math.max(0, renderTime - toSnapshot.receivedAt);
+            const carry = clamp(0.28 + Math.min(0.34, overshoot / Math.max(REALTIME_MAX_EXTRAPOLATION_MS, 1)), 0.28, 0.62);
             smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
           }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
@@ -2035,7 +2036,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         } else if (queue.length === 1) {
           const holdSnapshot = queue[0];
           const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, now - holdSnapshot.receivedAt);
-          const carry = clamp((now - realtimeVisualLastAtRef.current) / 24, 0.22, 0.7);
+          const carry = clamp((now - realtimeVisualLastAtRef.current) / 32, 0.18, 0.52);
           const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;

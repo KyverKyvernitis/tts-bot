@@ -2184,13 +2184,14 @@ export default function App() {
 
                 if (sentOverSocket) {
                   window.setTimeout(() => {
+                    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) return;
                     const latestGame = currentGameRef.current;
                     const stillWaitingForAdvance = !latestGame
                       || latestGame.roomId !== room.roomId
                       || latestGame.shotSequence <= previousSeq;
                     if (!stillWaitingForAdvance) return;
                     void fetchGameStateOverHttp(room.roomId, "ws_verify_after_shot", previousSeq);
-                  }, 1200);
+                  }, 1600);
                   return;
                 }
 

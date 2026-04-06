@@ -345,7 +345,7 @@ const realtimeBroadcastInterval = setInterval(() => {
   for (const roomId of roomIds) {
     broadcastGame(roomId);
   }
-}, 1000 / 30);
+}, 1000 / 60);
 realtimeBroadcastInterval.unref?.();
 
 function broadcastAim(roomId: string, payload: AimStateSnapshot, except?: WebSocket | null) {
