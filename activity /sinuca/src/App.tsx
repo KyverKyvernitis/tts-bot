@@ -138,6 +138,18 @@ function buildQueryStringFromPayload(payload: Record<string, unknown>) {
   return params.toString();
 }
 
+function resolveLegacyBalanceAction(path: string) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  if (normalizedPath === "/rooms") return "rooms_list";
+  if (normalizedPath === "/rooms/create") return "room_create";
+  if (normalizedPath === "/rooms/join") return "room_join";
+  if (normalizedPath === "/rooms/leave") return "room_leave";
+  if (normalizedPath === "/rooms/ready") return "room_ready";
+  if (normalizedPath === "/rooms/stake") return "room_stake";
+  if (/^\/rooms\/[^/]+$/.test(normalizedPath)) return "room_get";
+  return null;
+}
+
 function resolveSocketUrl() {
   const configured = (import.meta.env.VITE_SINUCA_WS_URL as string | undefined)?.trim();
   if (configured) {
@@ -692,14 +704,42 @@ export default function App() {
         if (response.ok && Array.isArray(parsed?.rooms)) {
           setRooms(parsed.rooms);
           setErrorMessage(null);
+          setAuthDebug((current) => current ? `${current} • rooms:http_ok:${reason}:api:${baseUrl}` : `rooms:http_ok:${reason}:api:${baseUrl}`);
           return true;
         }
-        attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        attempts.push(`API:${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown";
-        attempts.push(`${baseUrl}:exception:${message}`);
+        attempts.push(`API:${baseUrl}:exception:${message}`);
       }
     }
+
+    const legacyAction = resolveLegacyBalanceAction("/rooms");
+    if (legacyAction) {
+      for (const baseUrl of resolveApiCandidates("/balance")) {
+        try {
+          const url = appendNoStoreNonce(baseUrl, `${Date.now()}`);
+          url.searchParams.set("action", legacyAction);
+          url.searchParams.set("mode", state.context.mode);
+          if (state.context.guildId) url.searchParams.set("guildId", state.context.guildId);
+          if (state.context.channelId) url.searchParams.set("channelId", state.context.channelId);
+          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin", cache: "no-store" });
+          const raw = await response.text();
+          const parsed = raw ? JSON.parse(raw) as { rooms?: RoomSnapshot[]; error?: string } : null;
+          if (response.ok && Array.isArray(parsed?.rooms)) {
+            setRooms(parsed.rooms);
+            setErrorMessage(null);
+            setAuthDebug((current) => current ? `${current} • rooms:http_ok:${reason}:balance:${baseUrl}` : `rooms:http_ok:${reason}:balance:${baseUrl}`);
+            return true;
+          }
+          attempts.push(`BALANCE:${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "unknown";
+          attempts.push(`BALANCE:${baseUrl}:exception:${message}`);
+        }
+      }
+    }
+
     if (attempts.length) {
       setAuthDebug((current) => current ? `${current} • rooms:http_failed:${reason}:${attempts.join(" | ")}` : `rooms:http_failed:${reason}:${attempts.join(" | ")}`);
     }
@@ -712,6 +752,32 @@ export default function App() {
     }
     const attempts: string[] = [];
 
+    const applyRoomResult = (parsed: { room?: RoomSnapshot | null } | null) => {
+      if (parsed?.room) {
+        setRoom(parsed.room);
+        setCreateDraftRoomId(parsed.room.roomId);
+        subscribeRoomRealtime(parsed.room.roomId, `${reason}:http_room_state`);
+        if (locallyOwnedRoomIdRef.current === parsed.room.roomId || parsed.room.hostUserId === state.currentUser.userId) {
+          setLocallyOwnedRoomId(parsed.room.roomId);
+        }
+        if (parsed.room.status === "in_game") {
+          setScreen("game");
+        } else if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
+          setScreen("room");
+        }
+      } else if (currentScreenRef.current === "room" || currentScreenRef.current === "game") {
+        setRoom(null);
+        setGame(null);
+        setCreateDraftRoomId(null);
+        setLocallyOwnedRoomId(null);
+        setRoomEntryMenuOpen(false);
+        setErrorMessage("a sala foi fechada");
+        setScreen("list");
+        void requestRooms();
+      }
+      return parsed?.room ?? null;
+    };
+
     for (const baseUrl of resolveStrictApiCandidates(`/rooms/${encodeURIComponent(roomId)}`)) {
       try {
         const requestUrl = appendNoStoreNonce(baseUrl, `${Date.now()}`);
@@ -719,36 +785,38 @@ export default function App() {
         const raw = await response.text();
         const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
         if (response.ok) {
-          if (parsed?.room) {
-            setRoom(parsed.room);
-            setCreateDraftRoomId(parsed.room.roomId);
-            subscribeRoomRealtime(parsed.room.roomId, `${reason}:http_room_state`);
-            if (locallyOwnedRoomIdRef.current === parsed.room.roomId || parsed.room.hostUserId === state.currentUser.userId) {
-              setLocallyOwnedRoomId(parsed.room.roomId);
-            }
-            if (parsed.room.status === "in_game") {
-              setScreen("game");
-            } else if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
-              setScreen("room");
-            }
-          } else if (currentScreenRef.current === "room" || currentScreenRef.current === "game") {
-            setRoom(null);
-            setGame(null);
-            setCreateDraftRoomId(null);
-            setLocallyOwnedRoomId(null);
-            setRoomEntryMenuOpen(false);
-            setErrorMessage("a sala foi fechada");
-            setScreen("list");
-            void requestRooms();
-          }
-          return parsed?.room ?? null;
+          setAuthDebug((current) => current ? `${current} • room:http_ok:${reason}:api:${baseUrl}` : `room:http_ok:${reason}:api:${baseUrl}`);
+          return applyRoomResult(parsed);
         }
-        attempts.push(`${requestUrl.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        attempts.push(`API:${requestUrl.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown";
-        attempts.push(`${baseUrl}:exception:${message}`);
+        attempts.push(`API:${baseUrl}:exception:${message}`);
       }
     }
+
+    const legacyAction = resolveLegacyBalanceAction(`/rooms/${encodeURIComponent(roomId)}`);
+    if (legacyAction) {
+      for (const baseUrl of resolveApiCandidates("/balance")) {
+        try {
+          const requestUrl = appendNoStoreNonce(baseUrl, `${Date.now()}`);
+          requestUrl.searchParams.set("action", legacyAction);
+          requestUrl.searchParams.set("roomId", roomId);
+          const response = await fetchWithTimeout(requestUrl.toString(), { method: "GET", credentials: "same-origin", cache: "no-store" });
+          const raw = await response.text();
+          const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
+          if (response.ok) {
+            setAuthDebug((current) => current ? `${current} • room:http_ok:${reason}:balance:${baseUrl}` : `room:http_ok:${reason}:balance:${baseUrl}`);
+            return applyRoomResult(parsed);
+          }
+          attempts.push(`BALANCE:${requestUrl.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "unknown";
+          attempts.push(`BALANCE:${baseUrl}:exception:${message}`);
+        }
+      }
+    }
+
     if (attempts.length) {
       setAuthDebug((current) => current ? `${current} • room:http_failed:${reason}:${attempts.join(" | ")}` : `room:http_failed:${reason}:${attempts.join(" | ")}`);
     }
@@ -758,11 +826,12 @@ export default function App() {
   const postRoomActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
     const attempts: string[] = [];
     const query = buildQueryStringFromPayload(payload);
+    const legacyAction = resolveLegacyBalanceAction(path);
 
     const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
     for (const baseUrl of resolveStrictApiCandidates(path)) {
       requestVariants.push({
-        label: `POST_JSON:${baseUrl}`,
+        label: `API_POST_JSON:${baseUrl}`,
         url: baseUrl,
         init: {
           method: "POST",
@@ -772,7 +841,7 @@ export default function App() {
         },
       });
       requestVariants.push({
-        label: `POST_FORM:${baseUrl}`,
+        label: `API_POST_FORM:${baseUrl}`,
         url: baseUrl,
         init: {
           method: "POST",
@@ -787,7 +856,7 @@ export default function App() {
         const params = new URLSearchParams(query);
         params.forEach((value, key) => queryUrl.searchParams.set(key, value));
         requestVariants.push({
-          label: `GET_QUERY:${baseUrl}`,
+          label: `API_GET_QUERY:${baseUrl}`,
           url: queryUrl.toString(),
           init: {
             method: "GET",
@@ -798,13 +867,42 @@ export default function App() {
       }
     }
 
+    if (legacyAction) {
+      for (const baseUrl of resolveApiCandidates("/balance")) {
+        const queryUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+        queryUrl.searchParams.set("action", legacyAction);
+        const params = new URLSearchParams(query);
+        params.forEach((value, key) => queryUrl.searchParams.set(key, value));
+        requestVariants.push({
+          label: `BALANCE_GET_QUERY:${baseUrl}`,
+          url: queryUrl.toString(),
+          init: {
+            method: "GET",
+            credentials: "same-origin",
+            cache: "no-store",
+          },
+        });
+        requestVariants.push({
+          label: `BALANCE_POST_FORM:${baseUrl}`,
+          url: baseUrl,
+          init: {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+            credentials: "same-origin",
+            body: buildQueryStringFromPayload({ action: legacyAction, ...payload }),
+          },
+        });
+      }
+    }
+
     for (const variant of requestVariants) {
       try {
-        const response = await fetchWithTimeout(variant.url, variant.init, 3500);
+        const response = await fetchWithTimeout(variant.url, variant.init, variant.label.startsWith("BALANCE_") ? 3200 : 3500);
         const raw = await response.text();
         const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; closed?: boolean; error?: string; detail?: string } : null;
         if (response.ok) {
           setErrorMessage(null);
+          setAuthDebug((current) => current ? `${current} • room_action:http_ok:${reason}:${variant.label}` : `room_action:http_ok:${reason}:${variant.label}`);
           return parsed;
         }
         const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");

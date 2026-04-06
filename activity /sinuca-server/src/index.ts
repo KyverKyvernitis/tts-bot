@@ -974,24 +974,31 @@ async function handleBalance(req: Request, res: Response) {
   const session = resolveRequestSession(req);
   const action = firstString(req.body?.action) ?? firstString(req.query?.action);
   if (action === "rooms_list") {
+    console.log("[sinuca-balance-action]", JSON.stringify({ action, method: req.method, url: req.url ?? null }));
     return void handleListRoomsHttp(req, res);
   }
   if (action === "room_get") {
+    console.log("[sinuca-balance-action]", JSON.stringify({ action, method: req.method, url: req.url ?? null }));
     return void handleGetRoomHttp(req, res);
   }
   if (action === "room_create") {
+    console.log("[sinuca-balance-action]", JSON.stringify({ action, method: req.method, url: req.url ?? null }));
     return void handleCreateRoomHttp(req, res);
   }
   if (action === "room_join") {
+    console.log("[sinuca-balance-action]", JSON.stringify({ action, method: req.method, url: req.url ?? null }));
     return void handleJoinRoomHttp(req, res);
   }
   if (action === "room_leave") {
+    console.log("[sinuca-balance-action]", JSON.stringify({ action, method: req.method, url: req.url ?? null }));
     return void handleLeaveRoomHttp(req, res);
   }
   if (action === "room_ready") {
+    console.log("[sinuca-balance-action]", JSON.stringify({ action, method: req.method, url: req.url ?? null }));
     return void handleReadyRoomHttp(req, res);
   }
   if (action === "room_stake") {
+    console.log("[sinuca-balance-action]", JSON.stringify({ action, method: req.method, url: req.url ?? null }));
     return void handleUpdateStakeRoomHttp(req, res);
   }
   if (action === "game_get") {
