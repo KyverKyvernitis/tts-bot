@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useGameController } from "./controllers/useGameController";
 import {
   authorizeDiscordCode,
   authenticateDiscordAccessToken,
@@ -15,14 +16,8 @@ import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.w
 import lobbyBgmAsset from "./assets/lobby-bgm-cat-cafe.mp3";
 import GameStage from "./games/GameStage";
 import {
-  GAME_BOOTSTRAP_RETRY_INTERVAL_MS,
-  GAME_LOADING_TIMEOUT_MS,
-  GAME_POLL_INTERVAL_MS,
-  GAME_SIM_STALL_RECOVERY_MS,
-  GAME_SIM_WATCHDOG_INTERVAL_MS,
   getRealtimeHttpGuardState as getRealtimeHttpGuardStateFromModule,
   isRealtimeSocketHealthy as isRealtimeSocketHealthyFromModule,
-  needsGameBootstrap,
   shouldBlockHttpGameDuringRealtime as shouldBlockHttpGameDuringRealtimeFromModule,
   shouldRunHttpGamePolling as shouldRunHttpGamePollingFromModule,
   type RealtimeHttpLockState,
@@ -312,7 +307,6 @@ export default function App() {
   const [gameStartBusy, setGameStartBusy] = useState(false);
   const [gameShootBusy, setGameShootBusy] = useState(false);
   const [roomExitBusy, setRoomExitBusy] = useState(false);
-  const [gameLoadingTimedOut, setGameLoadingTimedOut] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const roomEntryMenuRef = useRef<HTMLDivElement | null>(null);
   const createEntryMenuRef = useRef<HTMLDivElement | null>(null);
@@ -2081,95 +2075,8 @@ export default function App() {
   }, [bootstrapped, connectionState, createDraftRoomId, room?.roomId, screen]);
 
 
-  useEffect(() => {
-    if (!bootstrapped || screen !== 'game' || !room?.roomId) return;
-
-    const interval = window.setInterval(() => {
-      const activeGame = currentGameRef.current;
-      if (!activeGame || activeGame.roomId !== room.roomId) return;
-      if (activeGame.status !== 'simulating') return;
-
-      const now = performance.now();
-      const recovery = simRecoveryRef.current;
-      const wsState = wsGameStateRef.current;
-      const lastAuthoritativeAt = wsState.roomId === activeGame.roomId ? wsState.lastReceivedAt : 0;
-      const lastProgressAt = Math.max(recovery.lastProgressAt, lastAuthoritativeAt);
-      const stalledForMs = lastProgressAt > 0 ? now - lastProgressAt : Number.POSITIVE_INFINITY;
-      if (stalledForMs < GAME_SIM_STALL_RECOVERY_MS) return;
-      if (recovery.inFlight) return;
-
-      const cooldownMs = recovery.recoveryCount > 0 ? 1400 : 1000;
-      if (now - recovery.lastRecoveryAt < cooldownMs) return;
-
-      recovery.recoveryCount += 1;
-      logSnapshotDebug('recover', {
-        source: 'http',
-        roomId: activeGame.roomId,
-        reason: 'force_recover_watchdog',
-        status: activeGame.status,
-        shotSequence: activeGame.shotSequence,
-        revision: Number.isFinite(activeGame.snapshotRevision) ? activeGame.snapshotRevision : 0,
-        stalledForMs: Math.round(stalledForMs),
-        wsOpen: isSocketOpen(),
-        recoveryCount: recovery.recoveryCount,
-      });
-      void fetchGameStateOverHttp(activeGame.roomId, `force_recover_watchdog_${activeGame.shotSequence}`, activeGame.shotSequence);
-    }, GAME_SIM_WATCHDOG_INTERVAL_MS);
-
-    return () => window.clearInterval(interval);
-  }, [bootstrapped, room?.roomId, screen]);
 
 
-  useEffect(() => {
-    if (!bootstrapped || screen !== "game" || !room?.roomId) return;
-    const roomId = room.roomId;
-
-    const needsBootstrapForRoom = () => needsGameBootstrap(roomId, currentGameRef.current);
-
-    if (needsBootstrapForRoom()) {
-      logSnapshotDebug('recover', {
-        source: 'http',
-        roomId,
-        reason: 'game_bootstrap_missing',
-        status: currentGameRef.current?.status ?? null,
-        shotSequence: currentGameRef.current?.shotSequence ?? null,
-        revision: Number.isFinite(currentGameRef.current?.snapshotRevision) ? currentGameRef.current!.snapshotRevision : null,
-        why: 'screen_game_without_snapshot',
-        wsOpen: isSocketOpen(),
-        wsRoomId: wsGameStateRef.current.roomId,
-        wsAgeMs: wsGameStateRef.current.lastReceivedAt ? Math.round(performance.now() - wsGameStateRef.current.lastReceivedAt) : null,
-      });
-      void fetchGameStateOverHttp(roomId, 'game_bootstrap_missing', 0);
-    }
-
-    const interval = window.setInterval(() => {
-      if (!needsBootstrapForRoom()) return;
-      void fetchGameStateOverHttp(roomId, 'game_bootstrap_retry', 0);
-    }, GAME_BOOTSTRAP_RETRY_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-  }, [bootstrapped, connectionState, room?.roomId, screen, game?.roomId, game?.updatedAt]);
-
-  useEffect(() => {
-    if (!bootstrapped || screen !== "game" || !room?.roomId) return;
-    if (!shouldRunHttpGamePolling(room.roomId)) {
-      logSnapshotDebug('skip', {
-        source: 'http',
-        roomId: room.roomId,
-        reason: 'game_poll_effect_guard',
-        status: currentGameRef.current?.status ?? null,
-        shotSequence: currentGameRef.current?.shotSequence ?? null,
-        revision: Number.isFinite(currentGameRef.current?.snapshotRevision) ? currentGameRef.current!.snapshotRevision : null,
-        why: isSocketOpen() ? 'ws_open' : 'simulating_guard',
-      });
-      return;
-    }
-    void fetchGameStateOverHttp(room.roomId, "game_initial", game?.shotSequence ?? 0);
-    const interval = window.setInterval(() => {
-      if (!shouldRunHttpGamePolling(room.roomId)) return;
-      void fetchGameStateOverHttp(room.roomId, "game_poll", game?.shotSequence ?? 0);
-    }, GAME_POLL_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-  }, [bootstrapped, connectionState, game?.shotSequence, game?.status, room?.roomId, screen]);
 
   useEffect(() => {
     if (screen !== "game") return;
@@ -2180,49 +2087,7 @@ export default function App() {
     setGameShootBusy(false);
   }, [game?.shotSequence, game?.turnUserId, game?.updatedAt, screen]);
 
-  useEffect(() => {
-    if (screen !== "game" || !room?.roomId || game) {
-      setGameLoadingTimedOut(false);
-      return;
-    }
-    setGameLoadingTimedOut(false);
-    const timeout = window.setTimeout(() => {
-      setGameLoadingTimedOut(true);
-    }, GAME_LOADING_TIMEOUT_MS);
-    return () => window.clearTimeout(timeout);
-  }, [game?.gameId, room?.roomId, screen]);
 
-  const forceReturnToLobbyFromLoading = async (reason: string) => {
-    if (!room || game || roomExitBusy) return;
-    const roomId = room.roomId;
-    const closeRoom = room.hostUserId === state.currentUser.userId || locallyOwnedRoomIdRef.current === roomId;
-    const nextScreen: LobbyScreen = closeRoom ? "home" : "list";
-
-    setRoomExitBusy(true);
-    setErrorMessage(null);
-
-    try {
-      const result = await leaveRoomOverHttp(roomId, reason, { closeRoom });
-      if (result === null) {
-        dispatchLeaveBeacon(roomId, state.currentUser.userId, closeRoom);
-        setErrorMessage(closeRoom
-          ? "A mesa travou no carregamento. Voltando ao lobby e tentando fechar a sala."
-          : "A mesa travou no carregamento. Voltando ao lobby e tentando sair da sala.");
-      }
-    } finally {
-      unloadLeaveSentRef.current = null;
-      setRoomEntryMenuOpen(false);
-      setCreateEntryMenuOpen(false);
-      setCreateDraftRoomId(null);
-      setLocallyOwnedRoomId((current) => current === roomId ? null : current);
-      resetGameRuntimeState(roomId, { clearGame: true, reason });
-      setRoom(null);
-      setGameStartBusy(false);
-      setScreen(nextScreen);
-      setRoomExitBusy(false);
-      void requestRooms();
-    }
-  };
 
   const exitCurrentRoom = async (reason: string) => {
     if (!room || roomExitBusy) return;
@@ -2304,6 +2169,40 @@ export default function App() {
   }, [createStake, isServer, room, screen]);
 
   const heroEntryEditable = Boolean(isServer && heroSecondaryLabel && (screen === "create" || (screen === "room" && room && isRoomHost)));
+
+  const { gameLoadingTimedOut, forceReturnToLobbyFromLoading } = useGameController({
+    bootstrapped,
+    screen,
+    room,
+    game,
+    roomExitBusy,
+    isRoomHost,
+    currentUserId: state.currentUser.userId,
+    currentGameRef,
+    currentRoomRef,
+    currentScreenRef,
+    locallyOwnedRoomIdRef,
+    unloadLeaveSentRef,
+    simRecoveryRef,
+    wsGameStateRef,
+    setRoomExitBusy,
+    setErrorMessage,
+    setRoomEntryMenuOpen,
+    setCreateEntryMenuOpen,
+    setCreateDraftRoomId,
+    setLocallyOwnedRoomId,
+    setRoom,
+    setGameStartBusy,
+    setScreen,
+    requestRooms,
+    leaveRoomOverHttp,
+    dispatchLeaveBeacon,
+    resetGameRuntimeState,
+    logSnapshotDebug,
+    isSocketOpen,
+    shouldRunHttpGamePolling,
+    fetchGameStateOverHttp,
+  });
 
   return (
     <main
