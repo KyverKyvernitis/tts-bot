@@ -269,8 +269,7 @@ export function useGameController(params: UseGameControllerParams) {
         `lastRealtimeGameId=${debug.lastRealtimeGameId ?? 'null'}`,
         `lastRealtimeAccepted=${debug.lastRealtimeAccepted ?? 'null'}`,
         `lastRealtimeReason=${debug.lastRealtimeReason ?? 'null'}`,
-      ].join('
-'));
+      ].join('\n'));
     };
 
     updateDebugOverlay();
