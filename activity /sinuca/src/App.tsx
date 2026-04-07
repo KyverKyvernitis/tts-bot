@@ -343,13 +343,17 @@ export default function App() {
     lastHttpStatus: null as string | null,
     lastHttpOutcome: null as string | null,
     lastHttpUrl: null as string | null,
+    lastHttpRouteMode: null as string | null,
     wsSubscribeSent: false,
     wsSubscribeRoomId: null as string | null,
+    wsSubscribeReason: null as string | null,
     lastRealtimeEventType: null as string | null,
     lastRealtimeRoomId: null as string | null,
     lastRealtimeGameId: null as string | null,
     lastRealtimeAccepted: null as string | null,
     lastRealtimeReason: null as string | null,
+    recentHttpHistory: [] as string[],
+    recentWsHistory: [] as string[],
   });
   const gameShootBusyRef = useRef(false);
 
@@ -958,21 +962,45 @@ export default function App() {
   };
 
   const subscribeRoomRealtime = (roomId: string, reason: string) => {
-    if (!roomId) return false;
-    const delivered = sendMessage({
+    const socket = socketRef.current;
+    if (!roomId) {
+      gameBootstrapDebugRef.current.wsSubscribeSent = false;
+      gameBootstrapDebugRef.current.wsSubscribeRoomId = null;
+      gameBootstrapDebugRef.current.wsSubscribeReason = 'missing_room_id';
+      gameBootstrapDebugRef.current.lastRealtimeEventType = 'subscribe_room';
+      gameBootstrapDebugRef.current.lastRealtimeAccepted = 'no';
+      gameBootstrapDebugRef.current.lastRealtimeReason = `subscribe_blocked:missing_room_id:${reason}`;
+      pushGameBootstrapHistory('ws', `subscribe_room:blocked:missing_room_id:${reason}`);
+      return false;
+    }
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      gameBootstrapDebugRef.current.wsSubscribeSent = false;
+      gameBootstrapDebugRef.current.wsSubscribeRoomId = roomId;
+      gameBootstrapDebugRef.current.wsSubscribeReason = 'socket_not_open';
+      gameBootstrapDebugRef.current.lastRealtimeEventType = 'subscribe_room';
+      gameBootstrapDebugRef.current.lastRealtimeRoomId = roomId;
+      gameBootstrapDebugRef.current.lastRealtimeAccepted = 'no';
+      gameBootstrapDebugRef.current.lastRealtimeReason = `subscribe_blocked:socket_not_open:${reason}`;
+      pushGameBootstrapHistory('ws', `subscribe_room:blocked:socket_not_open:${roomId}:${reason}`);
+      return false;
+    }
+    socket.send(JSON.stringify({
       type: "subscribe_room",
       payload: {
         roomId,
         userId: state.currentUser.userId,
       },
-    }, { silent: true });
-    gameBootstrapDebugRef.current.wsSubscribeSent = delivered;
+    }));
+    gameBootstrapDebugRef.current.wsSubscribeSent = true;
     gameBootstrapDebugRef.current.wsSubscribeRoomId = roomId;
+    gameBootstrapDebugRef.current.wsSubscribeReason = reason;
+    gameBootstrapDebugRef.current.lastRealtimeEventType = 'subscribe_room';
+    gameBootstrapDebugRef.current.lastRealtimeRoomId = roomId;
+    gameBootstrapDebugRef.current.lastRealtimeAccepted = 'sent';
     gameBootstrapDebugRef.current.lastRealtimeReason = reason;
-    if (delivered) {
-      setAuthDebug((current) => current ? `${current} • room:ws_subscribe:${reason}:${roomId}` : `room:ws_subscribe:${reason}:${roomId}`);
-    }
-    return delivered;
+    pushGameBootstrapHistory('ws', `subscribe_room:sent:${roomId}:${reason}`);
+    setAuthDebug((current) => current ? `${current} • room:ws_subscribe:${reason}:${roomId}` : `room:ws_subscribe:${reason}:${roomId}`);
+    return true;
   };
 
   const createRoomOverHttp = async (reason: string, override?: { stake: number; tableType: TableType }) => {
@@ -1103,14 +1131,26 @@ export default function App() {
       lastHttpStatus: null,
       lastHttpOutcome: null,
       lastHttpUrl: null,
+      lastHttpRouteMode: null,
       wsSubscribeSent: false,
       wsSubscribeRoomId: null,
+      wsSubscribeReason: null,
       lastRealtimeEventType: null,
       lastRealtimeRoomId: null,
       lastRealtimeGameId: null,
       lastRealtimeAccepted: null,
       lastRealtimeReason: null,
+      recentHttpHistory: [],
+      recentWsHistory: [],
     };
+  };
+
+  const pushGameBootstrapHistory = (kind: 'http' | 'ws', entry: string) => {
+    const bucket = kind === 'http'
+      ? gameBootstrapDebugRef.current.recentHttpHistory
+      : gameBootstrapDebugRef.current.recentWsHistory;
+    bucket.push(entry);
+    if (bucket.length > 4) bucket.splice(0, bucket.length - 4);
   };
 
   const resetGameRuntimeState = (roomId?: string | null, options?: { clearGame?: boolean; reason?: string }) => {
@@ -1320,9 +1360,12 @@ export default function App() {
     gameBootstrapDebugRef.current.lastHttpStatus = 'started';
     gameBootstrapDebugRef.current.lastHttpOutcome = reason;
     gameBootstrapDebugRef.current.lastHttpUrl = null;
+    gameBootstrapDebugRef.current.lastHttpRouteMode = 'strict_api';
+    pushGameBootstrapHistory('http', `start:${roomId}:${reason}`);
     if (shouldBlockHttpGameDuringRealtime(roomId, reason)) {
       gameBootstrapDebugRef.current.lastHttpStatus = 'blocked';
       gameBootstrapDebugRef.current.lastHttpOutcome = 'blocked_http_game_fetch_during_realtime';
+      pushGameBootstrapHistory('http', `blocked:${roomId}:${reason}:realtime_guard`);
       const activeGame = currentGameRef.current;
       logSnapshotDebug('skip', {
         source: 'http',
@@ -1362,7 +1405,7 @@ export default function App() {
 
     const attempts: string[] = [];
     try {
-      for (const baseUrl of resolveApiCandidates(`/games/${roomId}`)) {
+      for (const baseUrl of resolveStrictApiCandidates(`/games/${roomId}`)) {
         try {
           const url = new URL(baseUrl, window.location.origin);
           if (sinceSeq > 0) url.searchParams.set("sinceSeq", String(sinceSeq));
@@ -1374,6 +1417,7 @@ export default function App() {
             if (parsed?.game) {
               gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
               gameBootstrapDebugRef.current.lastHttpOutcome = `game:${parsed.game.gameId}`;
+              pushGameBootstrapHistory('http', `ok:${response.status}:${url.toString()}:game:${parsed.game.gameId}`);
               const debugNow = performance.now();
               const debugState = snapshotDebugRef.current;
               const incomingRevision = Number.isFinite(parsed.game.snapshotRevision) ? parsed.game.snapshotRevision : 0;
@@ -1409,14 +1453,17 @@ export default function App() {
             }
             gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
             gameBootstrapDebugRef.current.lastHttpOutcome = parsed?.error ? `empty:${parsed.error}` : 'empty:no_game';
+            pushGameBootstrapHistory('http', `empty:${response.status}:${url.toString()}:${parsed?.error ?? 'no_game'}`);
             return null;
           }
           gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
           gameBootstrapDebugRef.current.lastHttpOutcome = (parsed?.error ?? raw.slice(0, 180)) || "empty";
+          pushGameBootstrapHistory('http', `http:${response.status}:${url.toString()}:${(parsed?.error ?? raw.slice(0, 80)) || 'empty'}`);
           attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
         } catch (error) {
           gameBootstrapDebugRef.current.lastHttpStatus = 'exception';
           gameBootstrapDebugRef.current.lastHttpOutcome = error instanceof Error ? error.message : 'unknown';
+          pushGameBootstrapHistory('http', `exception:${baseUrl}:${error instanceof Error ? error.message : 'unknown'}`);
           attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
         }
       }
@@ -1424,6 +1471,7 @@ export default function App() {
       if (attempts.length) {
         gameBootstrapDebugRef.current.lastHttpStatus = gameBootstrapDebugRef.current.lastHttpStatus ?? 'failed';
         gameBootstrapDebugRef.current.lastHttpOutcome = gameBootstrapDebugRef.current.lastHttpOutcome ?? attempts.join(" | ");
+        pushGameBootstrapHistory('http', `failed:${roomId}:${reason}:${attempts[attempts.length - 1]}`);
         setAuthDebug((current) => current ? `${current} • game:http_failed:${reason}:${attempts.join(" | ")}` : `game:http_failed:${reason}:${attempts.join(" | ")}`);
       }
       return null;

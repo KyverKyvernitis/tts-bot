@@ -55,13 +55,17 @@ export type UseGameControllerParams = {
     lastHttpStatus: string | null;
     lastHttpOutcome: string | null;
     lastHttpUrl: string | null;
+    lastHttpRouteMode: string | null;
     wsSubscribeSent: boolean;
     wsSubscribeRoomId: string | null;
+    wsSubscribeReason: string | null;
     lastRealtimeEventType: string | null;
     lastRealtimeRoomId: string | null;
     lastRealtimeGameId: string | null;
     lastRealtimeAccepted: string | null;
     lastRealtimeReason: string | null;
+    recentHttpHistory: string[];
+    recentWsHistory: string[];
   } };
 };
 
@@ -262,13 +266,21 @@ export function useGameController(params: UseGameControllerParams) {
         `lastHttpStatus=${debug.lastHttpStatus ?? 'null'}`,
         `lastHttpOutcome=${debug.lastHttpOutcome ?? 'null'}`,
         `lastHttpUrl=${debug.lastHttpUrl ?? 'null'}`,
+        `lastHttpRouteMode=${debug.lastHttpRouteMode ?? 'null'}`,
         `wsSubscribeSent=${debug.wsSubscribeSent ? 'yes' : 'no'}`,
         `wsSubscribeRoomId=${debug.wsSubscribeRoomId ?? 'null'}`,
+        `wsSubscribeReason=${debug.wsSubscribeReason ?? 'null'}`,
         `lastRealtimeEvent=${debug.lastRealtimeEventType ?? 'null'}`,
         `lastRealtimeRoomId=${debug.lastRealtimeRoomId ?? 'null'}`,
         `lastRealtimeGameId=${debug.lastRealtimeGameId ?? 'null'}`,
         `lastRealtimeAccepted=${debug.lastRealtimeAccepted ?? 'null'}`,
         `lastRealtimeReason=${debug.lastRealtimeReason ?? 'null'}`,
+        `recentHttp0=${debug.recentHttpHistory[0] ?? 'null'}`,
+        `recentHttp1=${debug.recentHttpHistory[1] ?? 'null'}`,
+        `recentHttp2=${debug.recentHttpHistory[2] ?? 'null'}`,
+        `recentWs0=${debug.recentWsHistory[0] ?? 'null'}`,
+        `recentWs1=${debug.recentWsHistory[1] ?? 'null'}`,
+        `recentWs2=${debug.recentWsHistory[2] ?? 'null'}`,
       ].join('\n'));
     };
 
