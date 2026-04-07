@@ -16,10 +16,14 @@ import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.w
 import lobbyBgmAsset from "./assets/lobby-bgm-cat-cafe.mp3";
 import GameStage from "./games/GameStage";
 import {
+  completeGameBootstrapSession,
+  ensureGameBootstrapSession,
   getRealtimeHttpGuardState as getRealtimeHttpGuardStateFromModule,
+  isIncomingGameValidForBootstrap,
   isRealtimeSocketHealthy as isRealtimeSocketHealthyFromModule,
   shouldBlockHttpGameDuringRealtime as shouldBlockHttpGameDuringRealtimeFromModule,
   shouldRunHttpGamePolling as shouldRunHttpGamePollingFromModule,
+  type GameBootstrapSessionState,
   type RealtimeHttpLockState,
   type SimRecoveryState,
   type SnapshotDebugState,
@@ -333,6 +337,7 @@ export default function App() {
   const simRecoveryRef = useRef<SimRecoveryState>({ roomId: null, shotSequence: 0, revision: 0, lastProgressAt: 0, lastRecoveryAt: 0, recoveryCount: 0, inFlight: false, lastRequestedShotSequence: 0, lastRequestedRevision: 0 });
   const realtimeHttpLockRef = useRef<RealtimeHttpLockState>({ roomId: null, shotSequence: 0, armedAt: 0, source: null });
   const shotDispatchRef = useRef<ShotDispatchState>({ roomId: null, expectedShotSequence: 0, transport: null, startedAt: 0, reason: null });
+  const gameBootstrapSessionRef = useRef<GameBootstrapSessionState>({ token: 0, roomId: null, expectedGameId: null, startedAt: 0, completedAt: 0 });
   const gameShootBusyRef = useRef(false);
 
   useEffect(() => {
@@ -1083,6 +1088,7 @@ export default function App() {
     clearRealtimeHttpLock,
     wsGameStateRef,
     simRecoveryRef,
+    gameBootstrapSessionRef,
     snapshotDebugRef,
     aimHttpTimerRef,
     pendingAimHttpRef,
@@ -1115,6 +1121,7 @@ export default function App() {
     activeRoomId: currentRoomRef.current?.roomId ?? null,
     lock: realtimeHttpLockRef.current,
     isRealtimeHealthy: isRealtimeSocketHealthy(roomId),
+    session: gameBootstrapSessionRef.current,
   });
 
   const shouldBlockHttpAuxDuringRealtime = (roomId: string, kind: "room" | "aim", reason: string) => {
@@ -1141,7 +1148,7 @@ export default function App() {
 
   const mergeIncomingGame = (current: GameSnapshot | null, incoming: GameSnapshot | null | undefined) => {
     if (!incoming) return current;
-    if (current && current.roomId === incoming.roomId) {
+    if (current && current.roomId === incoming.roomId && current.gameId === incoming.gameId) {
       const currentRevision = Number.isFinite(current.snapshotRevision) ? current.snapshotRevision : 0;
       const incomingRevision = Number.isFinite(incoming.snapshotRevision) ? incoming.snapshotRevision : 0;
       if (current.shotSequence > incoming.shotSequence) return current;
@@ -1163,6 +1170,22 @@ export default function App() {
     reason: string,
   ): GameSnapshot | null => {
     if (!incoming) return null;
+    if (!isIncomingGameValidForBootstrap(gameBootstrapSessionRef.current, incoming)) {
+      logSnapshotDebug("ignore", {
+        source,
+        roomId: incoming.roomId,
+        gameId: incoming.gameId,
+        reason,
+        status: incoming.status,
+        shotSequence: incoming.shotSequence,
+        revision: Number.isFinite(incoming.snapshotRevision) ? incoming.snapshotRevision : 0,
+        why: "bootstrap_session_mismatch",
+        bootstrapRoomId: gameBootstrapSessionRef.current.roomId,
+        bootstrapGameId: gameBootstrapSessionRef.current.expectedGameId,
+        bootstrapToken: gameBootstrapSessionRef.current.token,
+      });
+      return null;
+    }
     if (source === "http" && shouldBlockHttpGameDuringRealtime(incoming.roomId, reason)) {
       logSnapshotDebug('ignore', {
         source,
@@ -1227,19 +1250,22 @@ export default function App() {
         recovery.lastRequestedRevision = 0;
       }
 
+      completeGameBootstrapSession(gameBootstrapSessionRef.current, merged.roomId, merged.gameId);
       logSnapshotDebug('apply', {
         source,
         roomId: merged.roomId,
+        gameId: merged.gameId,
         reason,
         status: merged.status,
         shotSequence: merged.shotSequence,
         revision: mergedRevision,
+        bootstrapToken: gameBootstrapSessionRef.current.token,
       });
     }
     return merged;
   };
 
-  const fetchGameStateOverHttp = async (roomId: string, reason: string, sinceSeq = 0): Promise<GameSnapshot | null> => {
+  const fetchGameStateOverHttp = async (roomId: string, reason: string, sinceSeq = 0, bootstrapToken?: number): Promise<GameSnapshot | null> => {
     if (shouldBlockHttpGameDuringRealtime(roomId, reason)) {
       const activeGame = currentGameRef.current;
       logSnapshotDebug('skip', {
@@ -1300,6 +1326,24 @@ export default function App() {
               debugState.lastReceivedAt = debugNow;
               debugState.lastRevision = incomingRevision;
               debugState.lastSource = 'http';
+              if (bootstrapToken != null) {
+                const bootstrapSession = gameBootstrapSessionRef.current;
+                if (bootstrapSession.roomId !== roomId || bootstrapSession.token !== bootstrapToken) {
+                  logSnapshotDebug('ignore', {
+                    source: 'http',
+                    roomId,
+                    gameId: parsed.game.gameId,
+                    reason,
+                    status: parsed.game.status,
+                    shotSequence: parsed.game.shotSequence,
+                    revision: incomingRevision,
+                    why: 'stale_bootstrap_http_result',
+                    bootstrapToken,
+                    activeBootstrapToken: bootstrapSession.token,
+                  });
+                  return null;
+                }
+              }
               const applied = applyIncomingGame('http', parsed.game, reason);
               if (applied) setScreen("game");
               return applied;
@@ -1507,8 +1551,10 @@ export default function App() {
     }, reason);
     if (result?.room) setRoom(result.room);
     if (result?.game) {
+      ensureGameBootstrapSession(gameBootstrapSessionRef.current, roomId, result.game.gameId);
       currentGameRef.current = result.game;
       setGame(result.game);
+      completeGameBootstrapSession(gameBootstrapSessionRef.current, roomId, result.game.gameId);
       setScreen("game");
       return result.game;
     }
@@ -1518,7 +1564,8 @@ export default function App() {
       setRoom(refreshedRoom);
     }
 
-    const recoveredGame = await fetchGameStateOverHttp(roomId, `${reason}:verify_game_after_start`, 0);
+    const bootstrapToken = ensureGameBootstrapSession(gameBootstrapSessionRef.current, roomId, null);
+    const recoveredGame = await fetchGameStateOverHttp(roomId, `${reason}:verify_game_after_start`, 0, bootstrapToken);
     if (recoveredGame) {
       const applied = applyIncomingGame('http', recoveredGame, `${reason}:verify_game_after_start`);
       setScreen("game");
@@ -2187,6 +2234,7 @@ export default function App() {
     unloadLeaveSentRef,
     simRecoveryRef,
     wsGameStateRef,
+    gameBootstrapSessionRef,
     setRoomExitBusy,
     setErrorMessage,
     setRoomEntryMenuOpen,

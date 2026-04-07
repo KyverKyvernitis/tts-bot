@@ -1,5 +1,5 @@
 import type { AimPointerMode, AimStateSnapshot, GameSnapshot } from "../types/activity";
-import type { RealtimeHttpLockState, SimRecoveryState, SnapshotDebugState, WsGameStateRefState } from "./bootstrap";
+import type { GameBootstrapSessionState, RealtimeHttpLockState, SimRecoveryState, SnapshotDebugState, WsGameStateRefState } from "./bootstrap";
 
 export type ShotDispatchState = {
   roomId: string | null;
@@ -42,6 +42,7 @@ export type ResetGameRuntimeDeps = {
   setGameShootBusy: (value: boolean) => void;
   setGame: (value: GameSnapshot | null) => void;
   currentGameRef?: { current: GameSnapshot | null };
+  gameBootstrapSessionRef?: { current: GameBootstrapSessionState };
   clearTimeoutFn?: (timeoutId: number) => void;
 };
 
@@ -78,6 +79,13 @@ export function resetGameRuntimeState(
   }
   deps.pendingAimHttpRef.current = null;
   deps.lastAimHttpSentAtRef.current = 0;
+  if (deps.gameBootstrapSessionRef) {
+    deps.gameBootstrapSessionRef.current.token += 1;
+    deps.gameBootstrapSessionRef.current.roomId = null;
+    deps.gameBootstrapSessionRef.current.expectedGameId = null;
+    deps.gameBootstrapSessionRef.current.startedAt = 0;
+    deps.gameBootstrapSessionRef.current.completedAt = 0;
+  }
   deps.setRemoteAim(null);
   deps.setGameShootBusy(false);
   if (options?.clearGame ?? true) {

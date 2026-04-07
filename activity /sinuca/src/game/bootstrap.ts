@@ -34,6 +34,14 @@ export type SnapshotDebugState = {
   lastSource: string | null;
 };
 
+export type GameBootstrapSessionState = {
+  token: number;
+  roomId: string | null;
+  expectedGameId: string | null;
+  startedAt: number;
+  completedAt: number;
+};
+
 export const GAME_SIM_WATCHDOG_INTERVAL_MS = 220;
 export const GAME_SIM_STALL_RECOVERY_MS = 900;
 export const GAME_BOOTSTRAP_RETRY_INTERVAL_MS = 350;
@@ -106,15 +114,75 @@ export function shouldRunHttpGamePolling(params: {
   activeRoomId: string | null;
   lock: RealtimeHttpLockState;
   isRealtimeHealthy: boolean;
+  session?: GameBootstrapSessionState | null;
 }) {
-  const { roomId, activeGame, activeRoomId, lock, isRealtimeHealthy } = params;
+  const { roomId, activeGame, activeRoomId, lock, isRealtimeHealthy, session } = params;
   const guard = getRealtimeHttpGuardState({ roomId, activeGame, activeRoomId, lock });
   if (guard.isRealtimeLocked) return false;
   if (!activeGame || activeGame.roomId !== roomId) return true;
+  if (session?.roomId === roomId && !session.completedAt) return true;
+  if (session?.roomId === roomId && session.expectedGameId && activeGame.gameId !== session.expectedGameId) return true;
   if (isRealtimeHealthy) return false;
   return true;
 }
 
-export function needsGameBootstrap(roomId: string, activeGame: GameSnapshot | null) {
-  return activeGame?.roomId !== roomId;
+export function needsGameBootstrap(
+  roomId: string,
+  activeGame: GameSnapshot | null,
+  session?: GameBootstrapSessionState | null,
+) {
+  if (session?.roomId === roomId && !session.completedAt) return true;
+  if (activeGame?.roomId !== roomId) return true;
+  if (session?.roomId === roomId && session.expectedGameId && activeGame.gameId !== session.expectedGameId) {
+    return true;
+  }
+  return false;
+}
+
+
+export function ensureGameBootstrapSession(
+  session: GameBootstrapSessionState,
+  roomId: string,
+  expectedGameId?: string | null,
+) {
+  const normalizedExpectedGameId = expectedGameId ?? null;
+  const roomChanged = session.roomId !== roomId;
+  const gameChanged = Boolean(
+    normalizedExpectedGameId
+    && session.expectedGameId
+    && session.expectedGameId !== normalizedExpectedGameId,
+  );
+  if (roomChanged || gameChanged) {
+    session.token += 1;
+    session.roomId = roomId;
+    session.expectedGameId = normalizedExpectedGameId;
+    session.startedAt = performance.now();
+    session.completedAt = 0;
+    return session.token;
+  }
+  if (normalizedExpectedGameId && !session.expectedGameId) {
+    session.expectedGameId = normalizedExpectedGameId;
+  }
+  return session.token;
+}
+
+export function completeGameBootstrapSession(
+  session: GameBootstrapSessionState,
+  roomId: string,
+  gameId: string,
+) {
+  if (session.roomId !== roomId) return;
+  if (!session.expectedGameId) session.expectedGameId = gameId;
+  if (session.expectedGameId !== gameId) return;
+  session.completedAt = performance.now();
+}
+
+export function isIncomingGameValidForBootstrap(
+  session: GameBootstrapSessionState,
+  incoming: Pick<GameSnapshot, "roomId" | "gameId">,
+) {
+  if (!session.roomId) return true;
+  if (session.roomId !== incoming.roomId) return false;
+  if (session.expectedGameId && session.expectedGameId !== incoming.gameId) return false;
+  return true;
 }

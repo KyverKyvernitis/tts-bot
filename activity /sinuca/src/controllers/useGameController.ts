@@ -5,7 +5,9 @@ import {
   GAME_POLL_INTERVAL_MS,
   GAME_SIM_STALL_RECOVERY_MS,
   GAME_SIM_WATCHDOG_INTERVAL_MS,
+  ensureGameBootstrapSession,
   needsGameBootstrap,
+  type GameBootstrapSessionState,
   type SimRecoveryState,
   type WsGameStateRefState,
 } from "../game/bootstrap";
@@ -28,6 +30,7 @@ export type UseGameControllerParams = {
   unloadLeaveSentRef: { current: string | null };
   simRecoveryRef: { current: SimRecoveryState };
   wsGameStateRef: { current: WsGameStateRefState };
+  gameBootstrapSessionRef: { current: GameBootstrapSessionState };
   setRoomExitBusy: Dispatch<SetStateAction<boolean>>;
   setErrorMessage: Dispatch<SetStateAction<string | null>>;
   setRoomEntryMenuOpen: Dispatch<SetStateAction<boolean>>;
@@ -44,7 +47,7 @@ export type UseGameControllerParams = {
   logSnapshotDebug: (scope: string, payload: Record<string, unknown>) => void;
   isSocketOpen: () => boolean;
   shouldRunHttpGamePolling: (roomId: string) => boolean;
-  fetchGameStateOverHttp: (roomId: string, reason: string, sinceSeq?: number) => Promise<GameSnapshot | null>;
+  fetchGameStateOverHttp: (roomId: string, reason: string, sinceSeq?: number, bootstrapToken?: number) => Promise<GameSnapshot | null>;
 };
 
 export function useGameController(params: UseGameControllerParams) {
@@ -63,6 +66,7 @@ export function useGameController(params: UseGameControllerParams) {
     unloadLeaveSentRef,
     simRecoveryRef,
     wsGameStateRef,
+    gameBootstrapSessionRef,
     setRoomExitBusy,
     setErrorMessage,
     setRoomEntryMenuOpen,
@@ -126,7 +130,8 @@ export function useGameController(params: UseGameControllerParams) {
     if (!bootstrapped || screen !== 'game' || !room?.roomId) return;
     const roomId = room.roomId;
 
-    const needsBootstrapForRoom = () => needsGameBootstrap(roomId, currentGameRef.current);
+    const bootstrapToken = ensureGameBootstrapSession(gameBootstrapSessionRef.current, roomId, null);
+    const needsBootstrapForRoom = () => needsGameBootstrap(roomId, currentGameRef.current, gameBootstrapSessionRef.current);
 
     if (needsBootstrapForRoom()) {
       logSnapshotDebug('recover', {
@@ -141,15 +146,16 @@ export function useGameController(params: UseGameControllerParams) {
         wsRoomId: wsGameStateRef.current.roomId,
         wsAgeMs: wsGameStateRef.current.lastReceivedAt ? Math.round(performance.now() - wsGameStateRef.current.lastReceivedAt) : null,
       });
-      void fetchGameStateOverHttp(roomId, 'force_bootstrap_missing', 0);
+      void fetchGameStateOverHttp(roomId, 'force_bootstrap_missing', 0, bootstrapToken);
     }
 
     const interval = window.setInterval(() => {
       if (!needsBootstrapForRoom()) return;
-      void fetchGameStateOverHttp(roomId, 'force_bootstrap_retry', 0);
+      const retryToken = ensureGameBootstrapSession(gameBootstrapSessionRef.current, roomId, null);
+      void fetchGameStateOverHttp(roomId, 'force_bootstrap_retry', 0, retryToken);
     }, GAME_BOOTSTRAP_RETRY_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [bootstrapped, currentGameRef, fetchGameStateOverHttp, isSocketOpen, logSnapshotDebug, room?.roomId, screen, wsGameStateRef]);
+  }, [bootstrapped, currentGameRef, fetchGameStateOverHttp, gameBootstrapSessionRef, isSocketOpen, logSnapshotDebug, room?.roomId, screen, wsGameStateRef]);
 
   useEffect(() => {
     if (!bootstrapped || screen !== 'game' || !room?.roomId) return;
