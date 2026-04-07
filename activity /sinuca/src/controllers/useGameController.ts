@@ -37,7 +37,7 @@ export type UseGameControllerParams = {
   setRoom: Dispatch<SetStateAction<RoomSnapshot | null>>;
   setGameStartBusy: Dispatch<SetStateAction<boolean>>;
   setScreen: Dispatch<SetStateAction<LobbyScreen>>;
-  requestRooms: () => Promise<boolean>;
+  requestRooms: () => Promise<void>;
   leaveRoomOverHttp: (roomId: string, reason: string, options?: { closeRoom?: boolean }) => Promise<{ room?: RoomSnapshot | null; closed?: boolean; error?: string; detail?: string } | null>;
   dispatchLeaveBeacon: (roomId: string, userId: string, closeRoom: boolean) => boolean;
   resetGameRuntimeState: (roomId?: string | null, options?: { clearGame?: boolean; reason?: string }) => void;
