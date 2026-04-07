@@ -2342,14 +2342,22 @@ export default function App() {
                   const stalledSimulating = latestGame?.roomId === room.roomId
                     && latestGame.status === 'simulating'
                     && performance.now() - Math.max(simRecoveryRef.current.lastProgressAt, lastAuthoritativeAt) > 950;
-                  if (!waitingForNewShot && !stalledSimulating) return;
+                  const ambiguousAuthoritativeState = latestGame?.roomId === room.roomId
+                    && latestGame.shotSequence > previousSeq
+                    && latestGame.status !== 'simulating'
+                    && latestGame.lastShot?.seq !== latestGame.shotSequence;
+                  if (!waitingForNewShot && !stalledSimulating && !ambiguousAuthoritativeState) return;
                   const recovery = simRecoveryRef.current;
-                  if (stalledSimulating && !recovery.inFlight) {
-                    void fetchGameStateOverHttp(room.roomId, `force_recover_after_shot_${previousSeq}`, latestGame?.shotSequence ?? previousSeq);
-                  } else if (waitingForNewShot && !isSocketOpen()) {
-                    void fetchGameStateOverHttp(room.roomId, 'ws_verify_after_shot', previousSeq);
+                  if (!recovery.inFlight) {
+                    const sinceSeq = latestGame?.roomId === room.roomId ? Math.max(previousSeq, latestGame.shotSequence) : previousSeq;
+                    const reason = stalledSimulating
+                      ? `force_recover_after_shot_${previousSeq}`
+                      : ambiguousAuthoritativeState
+                        ? `verify_after_shot_ambiguous_${previousSeq}`
+                        : 'ws_verify_after_shot';
+                    void fetchGameStateOverHttp(room.roomId, reason, sinceSeq);
                   }
-                }, 900);
+                }, 420);
                 return;
               }
 

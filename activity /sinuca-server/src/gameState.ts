@@ -80,11 +80,26 @@ interface LiveShotState {
   railAfterContact: boolean;
   hadAnyCollision: boolean;
   startedAt: number;
+  startedSequence: number;
+  startedRevision: number;
+  startCueX: number;
+  startCueY: number;
+  startCueVx: number;
+  startCueVy: number;
+  firstTickLogged: boolean;
+  tickCount: number;
 }
 
 interface GameRecord extends Omit<GameSnapshot, "balls" | "lastShot"> {
   balls: PhysicsBall[];
   lastShot: GameShotSnapshot | null;
+}
+
+export interface TakeShotResult {
+  ok: boolean;
+  game: GameSnapshot | null;
+  error: "game_not_found" | "not_your_turn" | "shot_not_ready" | "shot_not_applied" | null;
+  detail?: Record<string, unknown>;
 }
 
 const games = new Map<string, GameRecord>();
@@ -601,7 +616,34 @@ function beginShotSimulation(
     railAfterContact: false,
     hadAnyCollision: false,
     startedAt: game.updatedAt,
+    startedSequence: game.shotSequence,
+    startedRevision: game.snapshotRevision,
+    startCueX: cueBall.x,
+    startCueY: cueBall.y,
+    startCueVx: cueBall.vx,
+    startCueVy: cueBall.vy,
+    firstTickLogged: false,
+    tickCount: 0,
   };
+
+  console.log("[sinuca-shot-begin]", JSON.stringify({
+    roomId: game.roomId,
+    shooterUserId,
+    shotSequence: game.shotSequence,
+    snapshotRevision: game.snapshotRevision,
+    status: game.status,
+    phase: game.phase,
+    ballInHandUserId: game.ballInHandUserId,
+    cueX: Number(cueBall.x.toFixed(2)),
+    cueY: Number(cueBall.y.toFixed(2)),
+    cueVx: Number(cueBall.vx.toFixed(4)),
+    cueVy: Number(cueBall.vy.toFixed(4)),
+    angle: Number(safeAngle.toFixed(4)),
+    power: Number(shotPower.toFixed(4)),
+    spinX: Number(safeSpinX.toFixed(4)),
+    spinY: Number(safeSpinY.toFixed(4)),
+    calledPocket: game.calledPocket,
+  }));
 
   activeShots.set(game.roomId, shot);
 }
@@ -656,6 +698,16 @@ function advanceShotSimulation(game: GameRecord, shot: LiveShotState, timeScale 
 
 function finalizeShotSimulation(game: GameRecord, shot: LiveShotState) {
   const balls = game.balls;
+  console.log("[sinuca-shot-finalize]", JSON.stringify({
+    roomId: game.roomId,
+    shooterUserId: shot.shooterUserId,
+    shotSequence: game.shotSequence,
+    tickCount: shot.tickCount,
+    cuePocketed: shot.cuePocketed,
+    firstHitNumber: shot.firstHitNumber,
+    hadAnyCollision: shot.hadAnyCollision,
+    pocketedNumbers: shot.pocketedEvents.map((event) => event.number),
+  }));
   const cueBall = balls.find((ball) => ball.number === 0) ?? createBall(0, DEFAULT_CUE_X, DEFAULT_CUE_Y);
   const firstHitGroup = groupOfNumber(shot.firstHitNumber ?? 0);
   const pocketedNumbers = shot.pocketedEvents.map((event) => event.number);
@@ -741,6 +793,27 @@ export function stepRealtimeGames() {
     let settled = false;
     for (let i = 0; i < REALTIME_SIM_STEPS_PER_TICK; i += 1) {
       settled = advanceShotSimulation(game, shot, REALTIME_SIM_TIME_SCALE);
+      shot.tickCount += 1;
+      if (!shot.firstTickLogged) {
+        const cueBall = game.balls.find((ball) => ball.number === 0) ?? null;
+        console.log("[sinuca-shot-first-tick]", JSON.stringify({
+          roomId,
+          shooterUserId: shot.shooterUserId,
+          tickCount: shot.tickCount,
+          settled,
+          shotSequence: game.shotSequence,
+          snapshotRevision: game.snapshotRevision,
+          cueX: cueBall ? Number(cueBall.x.toFixed(2)) : null,
+          cueY: cueBall ? Number(cueBall.y.toFixed(2)) : null,
+          cueVx: cueBall ? Number(cueBall.vx.toFixed(4)) : null,
+          cueVy: cueBall ? Number(cueBall.vy.toFixed(4)) : null,
+          startCueX: Number(shot.startCueX.toFixed(2)),
+          startCueY: Number(shot.startCueY.toFixed(2)),
+          startCueVx: Number(shot.startCueVx.toFixed(4)),
+          startCueVy: Number(shot.startCueVy.toFixed(4)),
+        }));
+        shot.firstTickLogged = true;
+      }
       if (settled) break;
     }
 
@@ -809,6 +882,85 @@ export function removeGame(roomId: string) {
   return existing ? toSnapshot(existing) : null;
 }
 
+export function takeShotChecked(
+  roomId: string,
+  userId: string,
+  angle: number,
+  power: number,
+  cueX?: number | null,
+  cueY?: number | null,
+  calledPocket?: number | null,
+  spinX = 0,
+  spinY = 0,
+): TakeShotResult {
+  const game = games.get(roomId);
+  if (!game) return { ok: false, game: null, error: "game_not_found" };
+
+  if (game.turnUserId !== userId) {
+    const snapshot = toSnapshot(game);
+    console.log("[sinuca-shot-rejected]", JSON.stringify({ roomId, userId, error: "not_your_turn", turnUserId: game.turnUserId, status: game.status, shotSequence: game.shotSequence, snapshotRevision: game.snapshotRevision }));
+    return {
+      ok: false,
+      game: snapshot,
+      error: "not_your_turn",
+      detail: {
+        turnUserId: game.turnUserId,
+        status: game.status,
+        shotSequence: game.shotSequence,
+        snapshotRevision: game.snapshotRevision,
+      },
+    };
+  }
+
+  if (game.status !== "waiting_shot") {
+    const snapshot = toSnapshot(game);
+    console.log("[sinuca-shot-rejected]", JSON.stringify({ roomId, userId, error: "shot_not_ready", turnUserId: game.turnUserId, status: game.status, shotSequence: game.shotSequence, snapshotRevision: game.snapshotRevision }));
+    return {
+      ok: false,
+      game: snapshot,
+      error: "shot_not_ready",
+      detail: {
+        turnUserId: game.turnUserId,
+        status: game.status,
+        shotSequence: game.shotSequence,
+        snapshotRevision: game.snapshotRevision,
+      },
+    };
+  }
+
+  const before = {
+    shotSequence: game.shotSequence,
+    snapshotRevision: game.snapshotRevision,
+    status: game.status,
+    ballInHandUserId: game.ballInHandUserId,
+  };
+
+  beginShotSimulation(game, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY);
+  const snapshot = toSnapshot(game);
+  if (snapshot.shotSequence <= before.shotSequence || snapshot.status !== "simulating") {
+    console.log("[sinuca-shot-rejected]", JSON.stringify({
+      roomId,
+      userId,
+      error: "shot_not_applied",
+      before,
+      after: {
+        shotSequence: snapshot.shotSequence,
+        snapshotRevision: snapshot.snapshotRevision,
+        status: snapshot.status,
+        ballInHandUserId: snapshot.ballInHandUserId,
+      },
+    }));
+    return {
+      ok: false,
+      game: snapshot,
+      error: "shot_not_applied",
+      detail: { before },
+    };
+  }
+
+  return { ok: true, game: snapshot, error: null, detail: { before } };
+}
+
 export function takeShot(
   roomId: string,
   userId: string,
@@ -820,9 +972,5 @@ export function takeShot(
   spinX = 0,
   spinY = 0,
 ): GameSnapshot | null {
-  const game = games.get(roomId);
-  if (!game) return null;
-  if (game.turnUserId !== userId || game.status !== "waiting_shot") return toSnapshot(game);
-  beginShotSimulation(game, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY);
-  return toSnapshot(game);
+  return takeShotChecked(roomId, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY).game;
 }

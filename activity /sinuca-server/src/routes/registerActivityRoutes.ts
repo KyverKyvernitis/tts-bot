@@ -18,7 +18,7 @@ import {
   getGameSnapshot,
   removeGame,
   startGameForRoom,
-  takeShot,
+  takeShotChecked,
 } from "../gameState.js";
 import type {
   BalanceDebugSnapshot,
@@ -427,7 +427,13 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
       res.status(409).json({ error: "not_your_turn", game });
       return;
     }
-    const nextGame = takeShot(roomId, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY);
+    const nextGame = takeShotChecked(roomId, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY);
+    if (!nextGame.ok || !nextGame.game) {
+      const statusCode = nextGame.error === "game_not_found" ? 404 : 409;
+      console.log("[sinuca-shoot-http-rejected]", JSON.stringify({ roomId, userId, error: nextGame.error, detail: nextGame.detail ?? null }));
+      res.status(statusCode).json({ error: nextGame.error ?? "shot_rejected", detail: nextGame.detail ?? null, game: nextGame.game });
+      return;
+    }
     const clearedAim = runtime.clearAimState(roomId, userId);
     if (clearedAim) {
       runtime.broadcastAim(roomId, clearedAim);
@@ -435,15 +441,17 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     runtime.touchRoomActivity(roomId, "http_take_shot");
     console.log("[sinuca-shoot-http-applied]", JSON.stringify({
       roomId,
-      shotSequence: nextGame?.shotSequence ?? null,
-      turnUserId: nextGame?.turnUserId ?? null,
-      phase: nextGame?.phase ?? null,
-      winnerUserId: nextGame?.winnerUserId ?? null,
-      cuePocketed: nextGame?.lastShot?.cuePocketed ?? null,
-      pocketedNumbers: nextGame?.lastShot?.pocketedNumbers ?? null,
+      shotSequence: nextGame.game.shotSequence,
+      turnUserId: nextGame.game.turnUserId,
+      phase: nextGame.game.phase,
+      status: nextGame.game.status,
+      snapshotRevision: nextGame.game.snapshotRevision,
+      winnerUserId: nextGame.game.winnerUserId,
+      cuePocketed: nextGame.game.lastShot?.cuePocketed ?? null,
+      pocketedNumbers: nextGame.game.lastShot?.pocketedNumbers ?? null,
     }));
     runtime.broadcastGame(roomId);
-    res.json({ game: nextGame });
+    res.json({ game: nextGame.game });
   }
 
   async function handleBalance(req: Request, res: Response) {

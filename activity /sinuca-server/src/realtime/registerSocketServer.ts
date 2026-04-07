@@ -16,7 +16,7 @@ import {
   getGameSnapshot,
   removeGame,
   startGameForRoom,
-  takeShot,
+  takeShotChecked,
 } from "../gameState.js";
 import type {
   ClientMessage,
@@ -354,7 +354,7 @@ export function registerSocketServer({ wss, runtime, balanceService, exchangeDis
           runtime.send(ws, { type: "error", message: "não é sua vez" });
           return;
         }
-        const applied = takeShot(
+        const applied = takeShotChecked(
           merged.roomId,
           merged.userId,
           Number(merged.angle ?? 0),
@@ -365,6 +365,13 @@ export function registerSocketServer({ wss, runtime, balanceService, exchangeDis
           merged.spinX === undefined ? 0 : Number(merged.spinX),
           merged.spinY === undefined ? 0 : Number(merged.spinY),
         );
+        if (!applied.ok || !applied.game) {
+          runtime.send(ws, { type: "error", message: applied.error === "shot_not_ready" ? "a mesa ainda não está pronta para outra tacada" : applied.error === "shot_not_applied" ? "a tacada não foi aplicada no estado autoritativo" : "não foi possível aplicar a tacada" });
+          if (applied.game) {
+            runtime.send(ws, { type: "game_state", payload: applied.game });
+          }
+          return;
+        }
         const clearedAim = runtime.clearAimState(merged.roomId, merged.userId);
         if (clearedAim) {
           runtime.broadcastAim(merged.roomId, clearedAim);
@@ -372,10 +379,13 @@ export function registerSocketServer({ wss, runtime, balanceService, exchangeDis
         runtime.touchRoomActivity(merged.roomId, "ws_take_shot");
         console.log("[sinuca-shoot-ws-applied]", JSON.stringify({
           roomId: merged.roomId,
-          shotSequence: applied?.shotSequence ?? null,
-          turnUserId: applied?.turnUserId ?? null,
-          phase: applied?.phase ?? null,
+          shotSequence: applied.game.shotSequence,
+          turnUserId: applied.game.turnUserId,
+          phase: applied.game.phase,
+          status: applied.game.status,
+          snapshotRevision: applied.game.snapshotRevision,
         }));
+        runtime.send(ws, { type: "game_state", payload: applied.game });
         runtime.broadcastGame(merged.roomId);
         return;
       }
