@@ -656,11 +656,29 @@ async function handleSyncAimHttp(req: Request, res: Response) {
 async function handleGetGameHttp(req: Request, res: Response) {
   const roomId = normalizeIntString(req.params?.roomId ?? firstString(req.body?.roomId) ?? firstString(req.query?.roomId));
   const sinceSeq = Number(firstString(req.body?.sinceSeq) ?? firstString(req.query?.sinceSeq) ?? 0);
+  const session = resolveRequestSession(req);
+  console.log('[sinuca-game-snapshot-http]', JSON.stringify({
+    method: req.method,
+    url: req.url ?? null,
+    roomId,
+    sinceSeq: Number.isFinite(sinceSeq) ? sinceSeq : 0,
+    userId: session.userId,
+    guildId: session.guildId,
+    instanceId: session.instanceId,
+  }));
   if (!roomId) {
+    console.log('[sinuca-game-snapshot-http-rejected]', JSON.stringify({ reason: 'missing_room_id', url: req.url ?? null }));
     res.status(400).json({ error: "missing_room_id" });
     return;
   }
   const game = getGameSnapshot(roomId, Number.isFinite(sinceSeq) ? sinceSeq : 0);
+  console.log('[sinuca-game-snapshot-http-result]', JSON.stringify({
+    roomId,
+    hasGame: Boolean(game),
+    gameId: game?.gameId ?? null,
+    shotSequence: game?.shotSequence ?? null,
+    status: game?.status ?? null,
+  }));
   sendNoStoreJson(res, { game });
 }
 
@@ -797,6 +815,10 @@ app.get("/games/:roomId/aim", handleGetAimHttp);
 app.get("/api/games/:roomId/aim", handleGetAimHttp);
 app.get("/games/:roomId", handleGetGameHttp);
 app.get("/api/games/:roomId", handleGetGameHttp);
+app.get("/game/:roomId", handleGetGameHttp);
+app.get("/api/game/:roomId", handleGetGameHttp);
+app.get("/rooms/:roomId/game", handleGetGameHttp);
+app.get("/api/rooms/:roomId/game", handleGetGameHttp);
 app.get("/rooms/create", handleCreateRoomHttp);
 app.post("/rooms/create", handleCreateRoomHttp);
 app.get("/api/rooms/create", handleCreateRoomHttp);

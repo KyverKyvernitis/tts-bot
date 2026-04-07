@@ -356,6 +356,7 @@ export default function App() {
     recentWsHistory: [] as string[],
   });
   const gameShootBusyRef = useRef(false);
+  const pendingRealtimeSubscriptionRef = useRef<{ roomId: string | null; reason: string | null }>({ roomId: null, reason: null });
 
   useEffect(() => {
     let mounted = true;
@@ -964,6 +965,7 @@ export default function App() {
   const subscribeRoomRealtime = (roomId: string, reason: string) => {
     const socket = socketRef.current;
     if (!roomId) {
+      pendingRealtimeSubscriptionRef.current = { roomId: null, reason };
       gameBootstrapDebugRef.current.wsSubscribeSent = false;
       gameBootstrapDebugRef.current.wsSubscribeRoomId = null;
       gameBootstrapDebugRef.current.wsSubscribeReason = 'missing_room_id';
@@ -974,6 +976,7 @@ export default function App() {
       return false;
     }
     if (!socket || socket.readyState !== WebSocket.OPEN) {
+      pendingRealtimeSubscriptionRef.current = { roomId, reason };
       gameBootstrapDebugRef.current.wsSubscribeSent = false;
       gameBootstrapDebugRef.current.wsSubscribeRoomId = roomId;
       gameBootstrapDebugRef.current.wsSubscribeReason = 'socket_not_open';
@@ -984,6 +987,7 @@ export default function App() {
       pushGameBootstrapHistory('ws', `subscribe_room:blocked:socket_not_open:${roomId}:${reason}`);
       return false;
     }
+    pendingRealtimeSubscriptionRef.current = { roomId: null, reason: null };
     socket.send(JSON.stringify({
       type: "subscribe_room",
       payload: {
@@ -1360,7 +1364,7 @@ export default function App() {
     gameBootstrapDebugRef.current.lastHttpStatus = 'started';
     gameBootstrapDebugRef.current.lastHttpOutcome = reason;
     gameBootstrapDebugRef.current.lastHttpUrl = null;
-    gameBootstrapDebugRef.current.lastHttpRouteMode = 'strict_api';
+    gameBootstrapDebugRef.current.lastHttpRouteMode = null;
     pushGameBootstrapHistory('http', `start:${roomId}:${reason}`);
     if (shouldBlockHttpGameDuringRealtime(roomId, reason)) {
       gameBootstrapDebugRef.current.lastHttpStatus = 'blocked';
@@ -1404,75 +1408,133 @@ export default function App() {
     }
 
     const attempts: string[] = [];
+    const requestVariants: Array<{ routeMode: string; url: string; init: RequestInit }> = [];
+    for (const baseUrl of resolveStrictApiCandidates(`/rooms/${encodeURIComponent(roomId)}/game`)) {
+      const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+      if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
+      requestVariants.push({
+        routeMode: 'strict_api_room_game',
+        url: url.toString(),
+        init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' },
+      });
+    }
+    for (const baseUrl of resolveStrictApiCandidates(`/games/${encodeURIComponent(roomId)}`)) {
+      const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+      if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
+      requestVariants.push({
+        routeMode: 'strict_api_games',
+        url: url.toString(),
+        init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' },
+      });
+    }
+    for (const baseUrl of resolveApiCandidates('/balance')) {
+      const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+      url.searchParams.set('action', 'game_get');
+      url.searchParams.set('roomId', roomId);
+      if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
+      requestVariants.push({
+        routeMode: 'balance_game_get',
+        url: url.toString(),
+        init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' },
+      });
+    }
+
     try {
-      for (const baseUrl of resolveStrictApiCandidates(`/games/${roomId}`)) {
+      for (const variant of requestVariants) {
         try {
-          const url = new URL(baseUrl, window.location.origin);
-          if (sinceSeq > 0) url.searchParams.set("sinceSeq", String(sinceSeq));
-          gameBootstrapDebugRef.current.lastHttpUrl = url.toString();
-          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3200);
+          gameBootstrapDebugRef.current.lastHttpUrl = variant.url;
+          gameBootstrapDebugRef.current.lastHttpRouteMode = variant.routeMode;
+          const response = await fetchWithTimeout(variant.url, variant.init, variant.routeMode === 'balance_game_get' ? 3200 : 3600);
           const raw = await response.text();
-          const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
-          if (response.ok) {
-            if (parsed?.game) {
-              gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
-              gameBootstrapDebugRef.current.lastHttpOutcome = `game:${parsed.game.gameId}`;
-              pushGameBootstrapHistory('http', `ok:${response.status}:${url.toString()}:game:${parsed.game.gameId}`);
-              const debugNow = performance.now();
-              const debugState = snapshotDebugRef.current;
-              const incomingRevision = Number.isFinite(parsed.game.snapshotRevision) ? parsed.game.snapshotRevision : 0;
-              if (debugNow - debugState.lastLoggedAt >= SNAPSHOT_DEBUG_LOG_EVERY_MS || debugState.lastRevision !== incomingRevision || debugState.lastSource !== 'http') {
-                logSnapshotDebug('recv', { source: 'http', roomId, status: parsed.game.status, shotSequence: parsed.game.shotSequence, revision: incomingRevision, dtMs: debugState.lastReceivedAt ? Math.round(debugNow - debugState.lastReceivedAt) : null });
-                debugState.lastLoggedAt = debugNow;
-              }
-              debugState.roomId = roomId;
-              debugState.lastReceivedAt = debugNow;
-              debugState.lastRevision = incomingRevision;
-              debugState.lastSource = 'http';
-              if (bootstrapToken != null) {
-                const bootstrapSession = gameBootstrapSessionRef.current;
-                if (bootstrapSession.roomId !== roomId || bootstrapSession.token !== bootstrapToken) {
-                  logSnapshotDebug('ignore', {
-                    source: 'http',
-                    roomId,
-                    gameId: parsed.game.gameId,
-                    reason,
-                    status: parsed.game.status,
-                    shotSequence: parsed.game.shotSequence,
-                    revision: incomingRevision,
-                    why: 'stale_bootstrap_http_result',
-                    bootstrapToken,
-                    activeBootstrapToken: bootstrapSession.token,
-                  });
-                  return null;
-                }
-              }
-              const applied = applyIncomingGame('http', parsed.game, reason);
-              if (applied) setScreen("game");
-              return applied;
-            }
+          const contentType = response.headers.get('content-type') ?? '';
+          const trimmed = raw.trim();
+          if (trimmed.startsWith('<') || /text\/html/i.test(contentType)) {
             gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
-            gameBootstrapDebugRef.current.lastHttpOutcome = parsed?.error ? `empty:${parsed.error}` : 'empty:no_game';
-            pushGameBootstrapHistory('http', `empty:${response.status}:${url.toString()}:${parsed?.error ?? 'no_game'}`);
-            return null;
+            gameBootstrapDebugRef.current.lastHttpOutcome = 'html_response';
+            pushGameBootstrapHistory('http', `html:${variant.routeMode}:${response.status}:${variant.url}`);
+            attempts.push(`${variant.routeMode}:${variant.url}:${response.status}:html_response`);
+            continue;
           }
+
+          let parsed: { game?: GameSnapshot | null; error?: string } | null = null;
+          if (raw) {
+            try {
+              parsed = JSON.parse(raw) as { game?: GameSnapshot | null; error?: string };
+            } catch (error) {
+              gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
+              gameBootstrapDebugRef.current.lastHttpOutcome = 'invalid_json';
+              pushGameBootstrapHistory('http', `invalid_json:${variant.routeMode}:${response.status}:${variant.url}`);
+              attempts.push(`${variant.routeMode}:${variant.url}:${response.status}:invalid_json:${error instanceof Error ? error.message : 'unknown'}`);
+              continue;
+            }
+          }
+
+          if (response.ok && parsed?.game) {
+            gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
+            gameBootstrapDebugRef.current.lastHttpOutcome = `game:${parsed.game.gameId}`;
+            pushGameBootstrapHistory('http', `ok:${variant.routeMode}:${response.status}:${variant.url}:game:${parsed.game.gameId}`);
+            const debugNow = performance.now();
+            const debugState = snapshotDebugRef.current;
+            const incomingRevision = Number.isFinite(parsed.game.snapshotRevision) ? parsed.game.snapshotRevision : 0;
+            if (debugNow - debugState.lastLoggedAt >= SNAPSHOT_DEBUG_LOG_EVERY_MS || debugState.lastRevision !== incomingRevision || debugState.lastSource !== 'http') {
+              logSnapshotDebug('recv', { source: 'http', routeMode: variant.routeMode, roomId, status: parsed.game.status, shotSequence: parsed.game.shotSequence, revision: incomingRevision, dtMs: debugState.lastReceivedAt ? Math.round(debugNow - debugState.lastReceivedAt) : null });
+              debugState.lastLoggedAt = debugNow;
+            }
+            debugState.roomId = roomId;
+            debugState.lastReceivedAt = debugNow;
+            debugState.lastRevision = incomingRevision;
+            debugState.lastSource = 'http';
+            if (bootstrapToken != null) {
+              const bootstrapSession = gameBootstrapSessionRef.current;
+              if (bootstrapSession.roomId !== roomId || bootstrapSession.token !== bootstrapToken) {
+                logSnapshotDebug('ignore', {
+                  source: 'http',
+                  routeMode: variant.routeMode,
+                  roomId,
+                  gameId: parsed.game.gameId,
+                  reason,
+                  status: parsed.game.status,
+                  shotSequence: parsed.game.shotSequence,
+                  revision: incomingRevision,
+                  why: 'stale_bootstrap_http_result',
+                  bootstrapToken,
+                  activeBootstrapToken: bootstrapSession.token,
+                });
+                return null;
+              }
+            }
+            const applied = applyIncomingGame('http', parsed.game, `${reason}:${variant.routeMode}`);
+            if (applied) setScreen('game');
+            return applied;
+          }
+
+          if (response.ok) {
+            const outcome = parsed?.error ? `empty:${parsed.error}` : 'empty:no_game';
+            gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
+            gameBootstrapDebugRef.current.lastHttpOutcome = outcome;
+            pushGameBootstrapHistory('http', `empty:${variant.routeMode}:${response.status}:${variant.url}:${parsed?.error ?? 'no_game'}`);
+            attempts.push(`${variant.routeMode}:${variant.url}:${response.status}:${outcome}`);
+            continue;
+          }
+
           gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
-          gameBootstrapDebugRef.current.lastHttpOutcome = (parsed?.error ?? raw.slice(0, 180)) || "empty";
-          pushGameBootstrapHistory('http', `http:${response.status}:${url.toString()}:${(parsed?.error ?? raw.slice(0, 80)) || 'empty'}`);
-          attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+          gameBootstrapDebugRef.current.lastHttpOutcome = (parsed?.error ?? trimmed.slice(0, 180)) || 'empty';
+          pushGameBootstrapHistory('http', `http:${variant.routeMode}:${response.status}:${variant.url}:${(parsed?.error ?? trimmed.slice(0, 80)) || 'empty'}`);
+          attempts.push(`${variant.routeMode}:${variant.url}:${response.status}:${(parsed?.error ?? trimmed.slice(0, 180)) || 'empty'}`);
         } catch (error) {
+          const message = error instanceof Error ? error.message : 'unknown';
           gameBootstrapDebugRef.current.lastHttpStatus = 'exception';
-          gameBootstrapDebugRef.current.lastHttpOutcome = error instanceof Error ? error.message : 'unknown';
-          pushGameBootstrapHistory('http', `exception:${baseUrl}:${error instanceof Error ? error.message : 'unknown'}`);
-          attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
+          gameBootstrapDebugRef.current.lastHttpOutcome = message;
+          pushGameBootstrapHistory('http', `exception:${variant.routeMode}:${variant.url}:${message}`);
+          attempts.push(`${variant.routeMode}:${variant.url}:exception:${message}`);
         }
       }
 
       if (attempts.length) {
         gameBootstrapDebugRef.current.lastHttpStatus = gameBootstrapDebugRef.current.lastHttpStatus ?? 'failed';
-        gameBootstrapDebugRef.current.lastHttpOutcome = gameBootstrapDebugRef.current.lastHttpOutcome ?? attempts.join(" | ");
+        gameBootstrapDebugRef.current.lastHttpOutcome = gameBootstrapDebugRef.current.lastHttpOutcome ?? attempts.join(' | ');
         pushGameBootstrapHistory('http', `failed:${roomId}:${reason}:${attempts[attempts.length - 1]}`);
-        setAuthDebug((current) => current ? `${current} • game:http_failed:${reason}:${attempts.join(" | ")}` : `game:http_failed:${reason}:${attempts.join(" | ")}`);
+        setAuthDebug((current) => current ? `${current} • game:http_failed:${reason}:${attempts.join(' | ')}` : `game:http_failed:${reason}:${attempts.join(' | ')}`);
       }
       return null;
     } finally {
@@ -1481,6 +1543,7 @@ export default function App() {
       }
     }
   };
+
 
   const pushAimToState = (payload: AimStateSnapshot | null) => {
     if (!payload) return;
@@ -1955,6 +2018,15 @@ export default function App() {
       setConnectionState("connected");
       setErrorMessage(null);
       setAuthDebug((current: string | null) => current ? `${current} • ws:open` : "ws:open");
+      const pendingRoomId = pendingRealtimeSubscriptionRef.current.roomId
+        ?? (currentScreenRef.current === 'game'
+          ? (currentRoomRef.current?.roomId ?? createDraftRoomIdRef.current ?? null)
+          : currentScreenRef.current === 'room' || currentScreenRef.current === 'create'
+            ? (currentRoomRef.current?.roomId ?? createDraftRoomIdRef.current ?? null)
+            : null);
+      if (pendingRoomId) {
+        subscribeRoomRealtime(pendingRoomId, pendingRealtimeSubscriptionRef.current.reason ?? 'socket_open_resubscribe');
+      }
     });
 
     socket.addEventListener("message", (event) => {

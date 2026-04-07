@@ -5,25 +5,51 @@ import {
   fetchWithTimeout,
   resolveApiCandidates,
   resolveLegacyBalanceAction,
+  resolveStrictApiCandidates,
 } from "./httpClient";
 import type { HttpTransportResult } from "./lobbyApi";
 
 export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promise<HttpTransportResult<{ game?: GameSnapshot | null; error?: string }>> {
   const attempts: string[] = [];
+  const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
 
-  for (const baseUrl of resolveApiCandidates(`/games/${roomId}`)) {
+  for (const baseUrl of resolveStrictApiCandidates(`/rooms/${encodeURIComponent(roomId)}/game`)) {
+    const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
+    requestVariants.push({ label: `STRICT_ROOM_GAME:${baseUrl}`, url: url.toString(), init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' } });
+  }
+
+  for (const baseUrl of resolveStrictApiCandidates(`/games/${encodeURIComponent(roomId)}`)) {
+    const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
+    requestVariants.push({ label: `STRICT_GAMES:${baseUrl}`, url: url.toString(), init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' } });
+  }
+
+  for (const baseUrl of resolveApiCandidates('/balance')) {
+    const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    url.searchParams.set('action', 'game_get');
+    url.searchParams.set('roomId', roomId);
+    if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
+    requestVariants.push({ label: `BALANCE_GAME_GET:${baseUrl}`, url: url.toString(), init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' } });
+  }
+
+  for (const variant of requestVariants) {
     try {
-      const url = new URL(baseUrl, window.location.origin);
-      if (sinceSeq > 0) url.searchParams.set("sinceSeq", String(sinceSeq));
-      const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3200);
+      const response = await fetchWithTimeout(variant.url, variant.init, variant.label.startsWith('BALANCE_') ? 3200 : 3600);
       const raw = await response.text();
+      const contentType = response.headers.get('content-type') ?? '';
+      const trimmed = raw.trim();
+      if (trimmed.startsWith('<') || /text\/html/i.test(contentType)) {
+        attempts.push(`${variant.label}:${response.status}:html_response`);
+        continue;
+      }
       const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
       if (response.ok) {
-        return { data: parsed, attempts, okLabel: baseUrl };
+        return { data: parsed, attempts, okLabel: variant.label };
       }
-      attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
+      attempts.push(`${variant.label}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
     } catch (error) {
-      attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
+      attempts.push(`${variant.label}:exception:${error instanceof Error ? error.message : "unknown"}`);
     }
   }
 
