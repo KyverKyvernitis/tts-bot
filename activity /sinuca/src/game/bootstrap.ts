@@ -82,7 +82,7 @@ export function getRealtimeHttpGuardState(params: {
   }
 
   const activeGameSimulating = activeGame?.roomId === roomId && activeGame.status === "simulating";
-  const localLockActive = lock.roomId === roomId;
+  const localLockActive = lock.roomId === roomId && lock.source !== "local_shot";
   return {
     sameRoom: true,
     isRealtimeLocked: activeGameSimulating || localLockActive,

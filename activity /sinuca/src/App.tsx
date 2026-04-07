@@ -2315,7 +2315,6 @@ export default function App() {
             setErrorMessage(null);
             try {
               const previousSeq = game?.roomId === room.roomId ? game.shotSequence : 0;
-              armRealtimeHttpLock(room.roomId, previousSeq + 1, 'local_shot');
               const sentOverSocket = sendMessage({
                 type: "take_shot",
                 payload: {

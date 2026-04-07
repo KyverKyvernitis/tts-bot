@@ -1760,6 +1760,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     snapAnimRef.current = { startedAt: shotStartedAt, power: shotPower, fired: true };
     clearQueuedSfx(queuedSfxRef);
     SFX.prime();
+    pendingShotVisualRef.current = null;
     if (liveCueBall) {
       const livePreview = computeAimPreview(liveCueBall, state.renderBalls, aimAngleRef.current);
       const travelLimit = livePreview.contactX !== null && livePreview.contactY !== null
@@ -1767,28 +1768,12 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         : Math.max(24, Math.hypot(livePreview.endX - liveCueBall.x, livePreview.endY - liveCueBall.y));
       const estimatedSpeedPxPerMs = lerp(0.95, 4.85, Math.pow(shotPower, 0.58));
       const impactAtMs = travelLimit > 1 ? clamp(travelLimit / estimatedSpeedPxPerMs, 18, 210) : null;
-      pendingShotVisualRef.current = {
-        startedAt: shotStartedAt,
-        shotSequenceAtDispatch: game.shotSequence,
-        revisionAtDispatch: game.snapshotRevision ?? 0,
-        angle: aimAngleRef.current,
-        power: shotPower,
-        cueX: liveCueBall.x,
-        cueY: liveCueBall.y,
-        travelLimit,
-        estimatedSpeedPxPerMs,
-        impactType: livePreview.hitBall ? "ball" : "cushion",
-        impactAtMs,
-        firstImpactPlayed: false,
-      };
+      const impactType: "ball" | "cushion" | null = livePreview.hitBall ? "ball" : "cushion";
       SFX.cueHit(shotPower);
-      if (impactAtMs !== null) {
+      if (impactAtMs !== null && impactType) {
         queueSfx(queuedSfxRef, impactAtMs, () => {
-          const pending = pendingShotVisualRef.current;
-          if (!pending || pending.startedAt !== shotStartedAt || pending.firstImpactPlayed) return;
-          pending.firstImpactPlayed = true;
-          if (pending.impactType === "ball") SFX.ballHit();
-          else if (pending.impactType === "cushion") SFX.cushion();
+          if (impactType === "ball") SFX.ballHit();
+          else if (impactType === "cushion") SFX.cushion();
         });
       }
     }
@@ -2212,6 +2197,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const remoteCuePlacementActive = Boolean(
         remoteAimFresh
         && remoteAimState
+        && remoteMode === "place"
         && game.status === "waiting_shot"
         && game.ballInHandUserId === remoteAimState.userId
         && remoteAimState.cueX !== null
@@ -2315,33 +2301,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       );
 
       updateBallSpinCache(ballSpinRef.current, drawBalls, now);
-      const shotKick = !animating ? pendingShotVisualRef.current : null;
-      if (shotKick && drawCueBall) {
-        const kickElapsed = now - shotKick.startedAt;
-        const KICK_MS = 140;
-        const eventTime = shotKick.impactAtMs ?? KICK_MS;
-        const activeMs = Math.min(KICK_MS, Math.max(eventTime + 18, 72));
-        if (kickElapsed >= activeMs) {
-          pendingShotVisualRef.current = null;
-        } else {
-          const kickDistanceRaw = kickElapsed * shotKick.estimatedSpeedPxPerMs;
-          const kickDistance = Math.min(shotKick.travelLimit, kickDistanceRaw);
-          const easedRatio = shotKick.travelLimit > 0 ? clamp(kickDistance / shotKick.travelLimit, 0, 1) : 0;
-          const easedKick = 1 - Math.pow(1 - easedRatio, 2.2);
-          const finalDistance = shotKick.travelLimit * easedKick;
-          const kickX = shotKick.cueX + Math.cos(shotKick.angle) * finalDistance;
-          const kickY = shotKick.cueY + Math.sin(shotKick.angle) * finalDistance;
-          let cueReplaced = false;
-          drawBalls = drawBalls.map((ball) => {
-            if (ball.number !== 0 || ball.pocketed) return ball;
-            cueReplaced = true;
-            return { ...ball, x: kickX, y: kickY, pocketed: false };
-          });
-          drawCueBall = cueReplaced
-            ? drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? drawCueBall
-            : { ...drawCueBall, x: kickX, y: kickY, pocketed: false };
-        }
-      } else if (animating) {
+      if (pendingShotVisualRef.current) {
         pendingShotVisualRef.current = null;
       }
 
