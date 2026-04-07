@@ -338,6 +338,19 @@ export default function App() {
   const realtimeHttpLockRef = useRef<RealtimeHttpLockState>({ roomId: null, shotSequence: 0, armedAt: 0, source: null });
   const shotDispatchRef = useRef<ShotDispatchState>({ roomId: null, expectedShotSequence: 0, transport: null, startedAt: 0, reason: null });
   const gameBootstrapSessionRef = useRef<GameBootstrapSessionState>({ token: 0, roomId: null, expectedGameId: null, startedAt: 0, completedAt: 0 });
+  const gameBootstrapDebugRef = useRef({
+    httpAttempts: 0,
+    lastHttpStatus: null as string | null,
+    lastHttpOutcome: null as string | null,
+    lastHttpUrl: null as string | null,
+    wsSubscribeSent: false,
+    wsSubscribeRoomId: null as string | null,
+    lastRealtimeEventType: null as string | null,
+    lastRealtimeRoomId: null as string | null,
+    lastRealtimeGameId: null as string | null,
+    lastRealtimeAccepted: null as string | null,
+    lastRealtimeReason: null as string | null,
+  });
   const gameShootBusyRef = useRef(false);
 
   useEffect(() => {
@@ -953,6 +966,9 @@ export default function App() {
         userId: state.currentUser.userId,
       },
     }, { silent: true });
+    gameBootstrapDebugRef.current.wsSubscribeSent = delivered;
+    gameBootstrapDebugRef.current.wsSubscribeRoomId = roomId;
+    gameBootstrapDebugRef.current.lastRealtimeReason = reason;
     if (delivered) {
       setAuthDebug((current) => current ? `${current} • room:ws_subscribe:${reason}:${roomId}` : `room:ws_subscribe:${reason}:${roomId}`);
     }
@@ -1081,7 +1097,24 @@ export default function App() {
     realtimeHttpLockRef.current = { roomId: null, shotSequence: 0, armedAt: 0, source: null };
   };
 
-  const resetGameRuntimeState = (roomId?: string | null, options?: { clearGame?: boolean; reason?: string }) => resetGameRuntimeStateFromModule({
+  const resetGameBootstrapDebug = () => {
+    gameBootstrapDebugRef.current = {
+      httpAttempts: 0,
+      lastHttpStatus: null,
+      lastHttpOutcome: null,
+      lastHttpUrl: null,
+      wsSubscribeSent: false,
+      wsSubscribeRoomId: null,
+      lastRealtimeEventType: null,
+      lastRealtimeRoomId: null,
+      lastRealtimeGameId: null,
+      lastRealtimeAccepted: null,
+      lastRealtimeReason: null,
+    };
+  };
+
+  const resetGameRuntimeState = (roomId?: string | null, options?: { clearGame?: boolean; reason?: string }) => {
+    resetGameRuntimeStateFromModule({
     currentRoomId: currentRoomRef.current?.roomId ?? null,
     currentGameRoomId: currentGameRef.current?.roomId ?? null,
     clearShotDispatch,
@@ -1099,6 +1132,8 @@ export default function App() {
     currentGameRef,
     clearTimeoutFn: window.clearTimeout,
   }, roomId, options);
+    resetGameBootstrapDebug();
+  };
 
   const getRealtimeHttpGuardState = (roomId: string) => getRealtimeHttpGuardStateFromModule({
     roomId,
@@ -1171,6 +1206,11 @@ export default function App() {
   ): GameSnapshot | null => {
     if (!incoming) return null;
     if (!isIncomingGameValidForBootstrap(gameBootstrapSessionRef.current, incoming)) {
+      gameBootstrapDebugRef.current.lastRealtimeEventType = source === 'ws' ? 'game_state' : `game_${source}`;
+      gameBootstrapDebugRef.current.lastRealtimeRoomId = incoming.roomId;
+      gameBootstrapDebugRef.current.lastRealtimeGameId = incoming.gameId;
+      gameBootstrapDebugRef.current.lastRealtimeAccepted = 'no';
+      gameBootstrapDebugRef.current.lastRealtimeReason = 'bootstrap_session_mismatch';
       logSnapshotDebug("ignore", {
         source,
         roomId: incoming.roomId,
@@ -1187,6 +1227,11 @@ export default function App() {
       return null;
     }
     if (source === "http" && shouldBlockHttpGameDuringRealtime(incoming.roomId, reason)) {
+      gameBootstrapDebugRef.current.lastRealtimeEventType = `game_${source}`;
+      gameBootstrapDebugRef.current.lastRealtimeRoomId = incoming.roomId;
+      gameBootstrapDebugRef.current.lastRealtimeGameId = incoming.gameId;
+      gameBootstrapDebugRef.current.lastRealtimeAccepted = 'no';
+      gameBootstrapDebugRef.current.lastRealtimeReason = 'blocked_http_game_fetch_during_realtime';
       logSnapshotDebug('ignore', {
         source,
         roomId: incoming.roomId,
@@ -1250,6 +1295,11 @@ export default function App() {
         recovery.lastRequestedRevision = 0;
       }
 
+      gameBootstrapDebugRef.current.lastRealtimeEventType = source === 'ws' ? 'game_state' : `game_${source}`;
+      gameBootstrapDebugRef.current.lastRealtimeRoomId = merged.roomId;
+      gameBootstrapDebugRef.current.lastRealtimeGameId = merged.gameId;
+      gameBootstrapDebugRef.current.lastRealtimeAccepted = 'yes';
+      gameBootstrapDebugRef.current.lastRealtimeReason = reason;
       completeGameBootstrapSession(gameBootstrapSessionRef.current, merged.roomId, merged.gameId);
       logSnapshotDebug('apply', {
         source,
@@ -1266,7 +1316,13 @@ export default function App() {
   };
 
   const fetchGameStateOverHttp = async (roomId: string, reason: string, sinceSeq = 0, bootstrapToken?: number): Promise<GameSnapshot | null> => {
+    gameBootstrapDebugRef.current.httpAttempts += 1;
+    gameBootstrapDebugRef.current.lastHttpStatus = 'started';
+    gameBootstrapDebugRef.current.lastHttpOutcome = reason;
+    gameBootstrapDebugRef.current.lastHttpUrl = null;
     if (shouldBlockHttpGameDuringRealtime(roomId, reason)) {
+      gameBootstrapDebugRef.current.lastHttpStatus = 'blocked';
+      gameBootstrapDebugRef.current.lastHttpOutcome = 'blocked_http_game_fetch_during_realtime';
       const activeGame = currentGameRef.current;
       logSnapshotDebug('skip', {
         source: 'http',
@@ -1310,11 +1366,14 @@ export default function App() {
         try {
           const url = new URL(baseUrl, window.location.origin);
           if (sinceSeq > 0) url.searchParams.set("sinceSeq", String(sinceSeq));
+          gameBootstrapDebugRef.current.lastHttpUrl = url.toString();
           const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3200);
           const raw = await response.text();
           const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
           if (response.ok) {
             if (parsed?.game) {
+              gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
+              gameBootstrapDebugRef.current.lastHttpOutcome = `game:${parsed.game.gameId}`;
               const debugNow = performance.now();
               const debugState = snapshotDebugRef.current;
               const incomingRevision = Number.isFinite(parsed.game.snapshotRevision) ? parsed.game.snapshotRevision : 0;
@@ -1348,15 +1407,23 @@ export default function App() {
               if (applied) setScreen("game");
               return applied;
             }
+            gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
+            gameBootstrapDebugRef.current.lastHttpOutcome = parsed?.error ? `empty:${parsed.error}` : 'empty:no_game';
             return null;
           }
+          gameBootstrapDebugRef.current.lastHttpStatus = String(response.status);
+          gameBootstrapDebugRef.current.lastHttpOutcome = (parsed?.error ?? raw.slice(0, 180)) || "empty";
           attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
         } catch (error) {
+          gameBootstrapDebugRef.current.lastHttpStatus = 'exception';
+          gameBootstrapDebugRef.current.lastHttpOutcome = error instanceof Error ? error.message : 'unknown';
           attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
         }
       }
 
       if (attempts.length) {
+        gameBootstrapDebugRef.current.lastHttpStatus = gameBootstrapDebugRef.current.lastHttpStatus ?? 'failed';
+        gameBootstrapDebugRef.current.lastHttpOutcome = gameBootstrapDebugRef.current.lastHttpOutcome ?? attempts.join(" | ");
         setAuthDebug((current) => current ? `${current} • game:http_failed:${reason}:${attempts.join(" | ")}` : `game:http_failed:${reason}:${attempts.join(" | ")}`);
       }
       return null;
@@ -1888,6 +1955,10 @@ export default function App() {
           return;
         }
         if (payload.type === "game_state") {
+          gameBootstrapDebugRef.current.lastRealtimeEventType = 'game_state';
+          gameBootstrapDebugRef.current.lastRealtimeRoomId = payload.payload.roomId;
+          gameBootstrapDebugRef.current.lastRealtimeGameId = payload.payload.gameId;
+          gameBootstrapDebugRef.current.lastRealtimeReason = 'ws_game_state';
           const debugNow = performance.now();
           const debugState = snapshotDebugRef.current;
           const incomingRevision = Number.isFinite(payload.payload.snapshotRevision) ? payload.payload.snapshotRevision : 0;
@@ -1909,7 +1980,10 @@ export default function App() {
             recovery.inFlight = false;
             recovery.lastProgressAt = debugNow;
           }
-          applyIncomingGame('ws', payload.payload, 'ws_game_state');
+          const applied = applyIncomingGame('ws', payload.payload, 'ws_game_state');
+          if (!applied) {
+            gameBootstrapDebugRef.current.lastRealtimeAccepted = 'no';
+          }
           setRemoteAim((current) => current?.roomId === payload.payload.roomId && payload.payload.turnUserId !== state.currentUser.userId && payload.payload.status !== "finished" ? current : null);
           setScreen("game");
           setErrorMessage(null);
@@ -2253,6 +2327,8 @@ export default function App() {
     isSocketOpen,
     shouldRunHttpGamePolling,
     fetchGameStateOverHttp,
+    subscribeRoomRealtime,
+    gameBootstrapDebugRef,
   });
 
   return (

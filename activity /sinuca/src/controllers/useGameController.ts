@@ -49,6 +49,20 @@ export type UseGameControllerParams = {
   isSocketOpen: () => boolean;
   shouldRunHttpGamePolling: (roomId: string) => boolean;
   fetchGameStateOverHttp: (roomId: string, reason: string, sinceSeq?: number, bootstrapToken?: number) => Promise<GameSnapshot | null>;
+  subscribeRoomRealtime: (roomId: string, reason: string) => boolean;
+  gameBootstrapDebugRef: { current: {
+    httpAttempts: number;
+    lastHttpStatus: string | null;
+    lastHttpOutcome: string | null;
+    lastHttpUrl: string | null;
+    wsSubscribeSent: boolean;
+    wsSubscribeRoomId: string | null;
+    lastRealtimeEventType: string | null;
+    lastRealtimeRoomId: string | null;
+    lastRealtimeGameId: string | null;
+    lastRealtimeAccepted: string | null;
+    lastRealtimeReason: string | null;
+  } };
 };
 
 export function useGameController(params: UseGameControllerParams) {
@@ -86,6 +100,8 @@ export function useGameController(params: UseGameControllerParams) {
     isSocketOpen,
     shouldRunHttpGamePolling,
     fetchGameStateOverHttp,
+    subscribeRoomRealtime,
+    gameBootstrapDebugRef,
   } = params;
 
   const [gameLoadingTimedOut, setGameLoadingTimedOut] = useState(false);
@@ -136,6 +152,7 @@ export function useGameController(params: UseGameControllerParams) {
     const bootstrapToken = ensureGameBootstrapSession(gameBootstrapSessionRef.current, roomId, null);
     const needsBootstrapForRoom = () => needsGameBootstrap(roomId, currentGameRef.current, gameBootstrapSessionRef.current);
 
+    subscribeRoomRealtime(roomId, 'game_bootstrap_enter');
     if (needsBootstrapForRoom()) {
       logSnapshotDebug('recover', {
         source: 'http',
@@ -154,11 +171,14 @@ export function useGameController(params: UseGameControllerParams) {
 
     const interval = window.setInterval(() => {
       if (!needsBootstrapForRoom()) return;
+      if (wsGameStateRef.current.roomId !== roomId) {
+        subscribeRoomRealtime(roomId, 'game_bootstrap_retry_subscribe');
+      }
       const retryToken = ensureGameBootstrapSession(gameBootstrapSessionRef.current, roomId, null);
       void fetchGameStateOverHttp(roomId, 'force_bootstrap_retry', 0, retryToken);
     }, GAME_BOOTSTRAP_RETRY_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [bootstrapped, currentGameRef, fetchGameStateOverHttp, gameBootstrapSessionRef, isSocketOpen, logSnapshotDebug, room?.roomId, screen, wsGameStateRef]);
+  }, [bootstrapped, currentGameRef, fetchGameStateOverHttp, gameBootstrapSessionRef, isSocketOpen, logSnapshotDebug, room?.roomId, screen, subscribeRoomRealtime, wsGameStateRef]);
 
   useEffect(() => {
     if (!bootstrapped || screen !== 'game' || !room?.roomId) return;
@@ -242,6 +262,7 @@ export function useGameController(params: UseGameControllerParams) {
     game,
     gameBootstrapSessionRef,
     gameLoadingTimedOut,
+    gameBootstrapDebugRef,
     logSnapshotDebug,
     room?.roomId,
     screen,
