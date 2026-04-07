@@ -132,7 +132,7 @@ export function useGameController(params: UseGameControllerParams) {
       logSnapshotDebug('recover', {
         source: 'http',
         roomId,
-        reason: 'game_bootstrap_missing',
+        reason: 'force_bootstrap_missing',
         status: currentGameRef.current?.status ?? null,
         shotSequence: currentGameRef.current?.shotSequence ?? null,
         revision: Number.isFinite(currentGameRef.current?.snapshotRevision) ? currentGameRef.current!.snapshotRevision : null,
@@ -141,12 +141,12 @@ export function useGameController(params: UseGameControllerParams) {
         wsRoomId: wsGameStateRef.current.roomId,
         wsAgeMs: wsGameStateRef.current.lastReceivedAt ? Math.round(performance.now() - wsGameStateRef.current.lastReceivedAt) : null,
       });
-      void fetchGameStateOverHttp(roomId, 'game_bootstrap_missing', 0);
+      void fetchGameStateOverHttp(roomId, 'force_bootstrap_missing', 0);
     }
 
     const interval = window.setInterval(() => {
       if (!needsBootstrapForRoom()) return;
-      void fetchGameStateOverHttp(roomId, 'game_bootstrap_retry', 0);
+      void fetchGameStateOverHttp(roomId, 'force_bootstrap_retry', 0);
     }, GAME_BOOTSTRAP_RETRY_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [bootstrapped, currentGameRef, fetchGameStateOverHttp, isSocketOpen, logSnapshotDebug, room?.roomId, screen, wsGameStateRef]);

@@ -96,6 +96,7 @@ export function shouldBlockHttpGameDuringRealtime(params: {
   const guard = getRealtimeHttpGuardState({ roomId, activeGame, activeRoomId, lock });
   if (!guard.sameRoom || !guard.isRealtimeLocked) return false;
   if (reason.startsWith("force_recover_")) return false;
+  if (reason.startsWith("force_bootstrap_")) return false;
   return true;
 }
 

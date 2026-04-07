@@ -1090,6 +1090,7 @@ export default function App() {
     setRemoteAim,
     setGameShootBusy,
     setGame,
+    currentGameRef,
     clearTimeoutFn: window.clearTimeout,
   }, roomId, options);
 
@@ -1506,6 +1507,7 @@ export default function App() {
     }, reason);
     if (result?.room) setRoom(result.room);
     if (result?.game) {
+      currentGameRef.current = result.game;
       setGame(result.game);
       setScreen("game");
       return result.game;

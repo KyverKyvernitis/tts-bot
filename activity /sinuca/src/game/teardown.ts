@@ -41,6 +41,7 @@ export type ResetGameRuntimeDeps = {
   setRemoteAim: (value: AimStateSnapshot | null) => void;
   setGameShootBusy: (value: boolean) => void;
   setGame: (value: GameSnapshot | null) => void;
+  currentGameRef?: { current: GameSnapshot | null };
   clearTimeoutFn?: (timeoutId: number) => void;
 };
 
@@ -80,6 +81,7 @@ export function resetGameRuntimeState(
   deps.setRemoteAim(null);
   deps.setGameShootBusy(false);
   if (options?.clearGame ?? true) {
+    if (deps.currentGameRef) deps.currentGameRef.current = null;
     deps.setGame(null);
   }
 }
