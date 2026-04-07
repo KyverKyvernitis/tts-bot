@@ -38,6 +38,7 @@ export type UseGameControllerParams = {
   setCreateDraftRoomId: Dispatch<SetStateAction<string | null>>;
   setLocallyOwnedRoomId: Dispatch<SetStateAction<string | null>>;
   setRoom: Dispatch<SetStateAction<RoomSnapshot | null>>;
+  setGame: Dispatch<SetStateAction<GameSnapshot | null>>;
   setGameStartBusy: Dispatch<SetStateAction<boolean>>;
   setScreen: Dispatch<SetStateAction<LobbyScreen>>;
   requestRooms: () => Promise<void>;
@@ -74,6 +75,7 @@ export function useGameController(params: UseGameControllerParams) {
     setCreateDraftRoomId,
     setLocallyOwnedRoomId,
     setRoom,
+    setGame,
     setGameStartBusy,
     setScreen,
     requestRooms,
@@ -87,6 +89,7 @@ export function useGameController(params: UseGameControllerParams) {
   } = params;
 
   const [gameLoadingTimedOut, setGameLoadingTimedOut] = useState(false);
+  const [loadingOverlayDebug, setLoadingOverlayDebug] = useState("");
 
   useEffect(() => {
     if (!bootstrapped || screen !== 'game' || !room?.roomId) return;
@@ -191,6 +194,61 @@ export function useGameController(params: UseGameControllerParams) {
     return () => window.clearTimeout(timeout);
   }, [game, room?.roomId, screen]);
 
+  useEffect(() => {
+    if (screen !== 'game' || !room?.roomId) {
+      setLoadingOverlayDebug("");
+      return;
+    }
+
+    const currentRefGame = currentGameRef.current;
+    const bootstrap = gameBootstrapSessionRef.current;
+    const wsState = wsGameStateRef.current;
+    const hasStateGame = Boolean(game && game.roomId === room.roomId);
+    const hasRefGame = Boolean(currentRefGame && currentRefGame.roomId === room.roomId);
+
+    if (!hasStateGame && hasRefGame && currentRefGame) {
+      const sessionMatches = bootstrap.roomId === room.roomId
+        && (!bootstrap.expectedGameId || bootstrap.expectedGameId === currentRefGame.gameId);
+      if (sessionMatches) {
+        logSnapshotDebug('recover', {
+          source: 'local',
+          roomId: room.roomId,
+          gameId: currentRefGame.gameId,
+          reason: 'hydrate_state_from_current_game_ref',
+          bootstrapToken: bootstrap.token,
+          bootstrapGameId: bootstrap.expectedGameId,
+        });
+        setGame(currentRefGame);
+        setGameLoadingTimedOut(false);
+      }
+    }
+
+    const phase = hasStateGame ? 'ready_state_game' : hasRefGame ? 'ref_game_only' : bootstrap.completedAt ? 'awaiting_state_after_complete' : 'bootstrapping';
+    const wsAgeMs = wsState.lastReceivedAt ? Math.round(performance.now() - wsState.lastReceivedAt) : null;
+    setLoadingOverlayDebug([
+      `phase=${phase}`,
+      `roomId=${room.roomId}`,
+      `gameState=${hasStateGame ? (game?.gameId ?? 'present') : 'null'}`,
+      `refGame=${hasRefGame ? (currentRefGame?.gameId ?? 'present') : 'null'}`,
+      `expectedGameId=${bootstrap.expectedGameId ?? 'null'}`,
+      `bootstrapToken=${bootstrap.token}`,
+      `bootstrapDone=${bootstrap.completedAt ? 'yes' : 'no'}`,
+      `wsRoomId=${wsState.roomId ?? 'null'}`,
+      `wsAgeMs=${wsAgeMs ?? 'null'}`,
+      `loadingTimedOut=${gameLoadingTimedOut ? 'yes' : 'no'}`,
+    ].join('\n'));
+  }, [
+    currentGameRef,
+    game,
+    gameBootstrapSessionRef,
+    gameLoadingTimedOut,
+    logSnapshotDebug,
+    room?.roomId,
+    screen,
+    setGame,
+    wsGameStateRef,
+  ]);
+
   const forceReturnToLobbyFromLoading = useCallback(async (reason: string) => {
     if (!room || game || roomExitBusy) return;
     const roomId = room.roomId;
@@ -250,6 +308,7 @@ export function useGameController(params: UseGameControllerParams) {
 
   return {
     gameLoadingTimedOut,
+    loadingOverlayDebug,
     forceReturnToLobbyFromLoading,
     syncGameScreenState,
     resetGameLoadingTimeout: () => setGameLoadingTimedOut(false),

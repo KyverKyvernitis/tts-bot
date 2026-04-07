@@ -2219,7 +2219,7 @@ export default function App() {
 
   const heroEntryEditable = Boolean(isServer && heroSecondaryLabel && (screen === "create" || (screen === "room" && room && isRoomHost)));
 
-  const { gameLoadingTimedOut, forceReturnToLobbyFromLoading } = useGameController({
+  const { gameLoadingTimedOut, forceReturnToLobbyFromLoading, loadingOverlayDebug } = useGameController({
     bootstrapped,
     screen,
     room,
@@ -2242,6 +2242,7 @@ export default function App() {
     setCreateDraftRoomId,
     setLocallyOwnedRoomId,
     setRoom,
+    setGame,
     setGameStartBusy,
     setScreen,
     requestRooms,
@@ -2776,6 +2777,11 @@ export default function App() {
                 <p className="plain-copy" style={{ marginTop: 10 }}>
                   A mesa demorou demais para sincronizar. Você pode voltar ao lobby e encerrar esta sala agora.
                 </p>
+              ) : null}
+              {loadingOverlayDebug ? (
+                <pre className="plain-copy" style={{ marginTop: 12, textAlign: "left", whiteSpace: "pre-wrap", maxWidth: 560, opacity: 0.78 }}>
+                  {loadingOverlayDebug}
+                </pre>
               ) : null}
               <div style={{ display: "flex", justifyContent: "center", marginTop: 14 }}>
                 <button
