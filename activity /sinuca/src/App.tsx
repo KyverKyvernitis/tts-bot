@@ -14,6 +14,14 @@ import lobbyBackground from "./assets/lobby-bg.png";
 import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.wav";
 import lobbyBgmAsset from "./assets/lobby-bgm-cat-cafe.mp3";
 import GameStage from "./games/GameStage";
+import {
+  DEFAULT_PUBLIC_HOST,
+  dispatchLeaveBeacon,
+  fetchWithTimeout,
+  resolveApiCandidates,
+} from "./transport/httpClient";
+import { fetchRoomStateRequest, fetchRoomsRequest, postRoomActionRequest } from "./transport/lobbyApi";
+import { fetchGameStateRequest, postGameActionRequest } from "./transport/gameApi";
 
 const DISCORD_ID_RE = /^\d{17,20}$/;
 
@@ -64,93 +72,6 @@ type IncomingMessage =
   | { type: "oauth_token_result"; payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null } }
   | { type: "aim_state"; payload: AimStateSnapshot }
   | { type: "room_closed"; payload: { roomId: string; reason: string; message: string } };
-
-const DEFAULT_PUBLIC_HOST = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || "osakaagiota.duckdns.org";
-
-function joinBaseAndPath(base: string, path: string) {
-  const normalizedBase = base.endsWith("/") ? base.slice(0, -1) : base;
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return `${normalizedBase}${normalizedPath}`;
-}
-
-function resolvePublicBaseCandidates() {
-  const configuredApiBase = (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim();
-  const configuredPublicHost = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim();
-  const candidates: string[] = [window.location.origin];
-
-  if (configuredApiBase) {
-    candidates.push(configuredApiBase);
-  }
-
-  const directHost = configuredPublicHost || DEFAULT_PUBLIC_HOST;
-  if (directHost) {
-    const withScheme = /^https?:\/\//i.test(directHost) ? directHost : `https://${directHost}`;
-    candidates.push(withScheme);
-  }
-
-  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
-}
-
-function resolveApiCandidates(path: string) {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const candidates: string[] = [`/api${normalizedPath}`];
-
-  for (const base of resolvePublicBaseCandidates()) {
-    candidates.push(joinBaseAndPath(base, `/api${normalizedPath}`));
-  }
-
-  for (const base of resolvePublicBaseCandidates()) {
-    candidates.push(joinBaseAndPath(base, normalizedPath));
-  }
-
-  candidates.push(normalizedPath);
-  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
-}
-
-function resolveStrictApiCandidates(path: string) {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const apiPath = normalizedPath.startsWith("/api/") || normalizedPath === "/api"
-    ? normalizedPath
-    : `/api${normalizedPath}`;
-  const candidates: string[] = [apiPath];
-
-  for (const base of resolvePublicBaseCandidates()) {
-    candidates.push(joinBaseAndPath(base, apiPath));
-  }
-
-  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
-}
-
-function buildQueryStringFromPayload(payload: Record<string, unknown>) {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(payload)) {
-    if (value === undefined || value === null) continue;
-    if (typeof value === "boolean") {
-      params.set(key, value ? "true" : "false");
-      continue;
-    }
-    if (typeof value === "number") {
-      if (!Number.isFinite(value)) continue;
-      params.set(key, `${value}`);
-      continue;
-    }
-    params.set(key, String(value));
-  }
-  return params.toString();
-}
-
-function resolveLegacyBalanceAction(path: string) {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  if (normalizedPath === "/rooms") return "rooms_list";
-  if (normalizedPath === "/rooms/create") return "room_create";
-  if (normalizedPath === "/rooms/join") return "room_join";
-  if (normalizedPath === "/rooms/leave") return "room_leave";
-  if (normalizedPath === "/rooms/ready") return "room_ready";
-  if (normalizedPath === "/rooms/stake") return "room_stake";
-  if (normalizedPath === "/games/start") return "game_start";
-  if (/^\/rooms\/[^/]+$/.test(normalizedPath)) return "room_get";
-  return null;
-}
 
 function resolveSocketUrl() {
   const configured = (import.meta.env.VITE_SINUCA_WS_URL as string | undefined)?.trim();
@@ -211,59 +132,6 @@ function logSnapshotDebug(scope: string, payload: Record<string, unknown>) {
   console.log(`[sinuca-snapshot-${scope}]`, JSON.stringify(payload));
 }
 
-
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs = 2500) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
-
-function appendNoStoreNonce(urlLike: string | URL, nonce?: string) {
-  const url = new URL(urlLike.toString(), window.location.origin);
-  url.searchParams.set("_rt", nonce ?? `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-  return url;
-}
-
-
-function dispatchLeaveBeacon(roomId: string, userId: string, closeRoom: boolean) {
-  const payload = new URLSearchParams();
-  payload.set('roomId', roomId);
-  payload.set('userId', userId);
-  payload.set('closeRoom', String(closeRoom));
-  payload.set('reason', closeRoom ? 'activity_unload_close' : 'activity_unload_leave');
-
-  for (const baseUrl of resolveStrictApiCandidates('/rooms/leave')) {
-    try {
-      if (typeof navigator.sendBeacon === 'function') {
-        const blob = new Blob([payload.toString()], { type: 'application/x-www-form-urlencoded;charset=UTF-8' });
-        if (navigator.sendBeacon(baseUrl, blob)) return true;
-      }
-    } catch {
-      // ignore and continue with keepalive fallback
-    }
-  }
-
-  for (const baseUrl of resolveStrictApiCandidates('/rooms/leave')) {
-    try {
-      void fetch(baseUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-        body: payload.toString(),
-        credentials: 'same-origin',
-        keepalive: true,
-      });
-      return true;
-    } catch {
-      // ignore and keep trying other candidates
-    }
-  }
-
-  return false;
-}
 
 export default function App() {
   const [state, setState] = useState<ActivityBootstrap>(initialState);
@@ -693,58 +561,21 @@ export default function App() {
   };
 
   const fetchRoomsOverHttp = async (reason: string) => {
-    const attempts: string[] = [];
+    const result = await fetchRoomsRequest({
+      mode: state.context.mode,
+      guildId: state.context.guildId,
+      channelId: state.context.channelId,
+    });
 
-    for (const baseUrl of resolveStrictApiCandidates("/rooms")) {
-      try {
-        const url = appendNoStoreNonce(baseUrl, `${Date.now()}`);
-        url.searchParams.set("mode", state.context.mode);
-        if (state.context.guildId) url.searchParams.set("guildId", state.context.guildId);
-        if (state.context.channelId) url.searchParams.set("channelId", state.context.channelId);
-        const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin", cache: "no-store" });
-        const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { rooms?: RoomSnapshot[]; error?: string } : null;
-        if (response.ok && Array.isArray(parsed?.rooms)) {
-          setRooms(parsed.rooms);
-          setErrorMessage(null);
-          setAuthDebug((current) => current ? `${current} • rooms:http_ok:${reason}:api:${baseUrl}` : `rooms:http_ok:${reason}:api:${baseUrl}`);
-          return true;
-        }
-        attempts.push(`API:${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "unknown";
-        attempts.push(`API:${baseUrl}:exception:${message}`);
-      }
+    if (result.data?.rooms) {
+      setRooms(result.data.rooms);
+      setErrorMessage(null);
+      setAuthDebug((current) => current ? `${current} • rooms:http_ok:${reason}:${result.okLabel ?? "unknown"}` : `rooms:http_ok:${reason}:${result.okLabel ?? "unknown"}`);
+      return true;
     }
 
-    const legacyAction = resolveLegacyBalanceAction("/rooms");
-    if (legacyAction) {
-      for (const baseUrl of resolveApiCandidates("/balance")) {
-        try {
-          const url = appendNoStoreNonce(baseUrl, `${Date.now()}`);
-          url.searchParams.set("action", legacyAction);
-          url.searchParams.set("mode", state.context.mode);
-          if (state.context.guildId) url.searchParams.set("guildId", state.context.guildId);
-          if (state.context.channelId) url.searchParams.set("channelId", state.context.channelId);
-          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin", cache: "no-store" });
-          const raw = await response.text();
-          const parsed = raw ? JSON.parse(raw) as { rooms?: RoomSnapshot[]; error?: string } : null;
-          if (response.ok && Array.isArray(parsed?.rooms)) {
-            setRooms(parsed.rooms);
-            setErrorMessage(null);
-            setAuthDebug((current) => current ? `${current} • rooms:http_ok:${reason}:balance:${baseUrl}` : `rooms:http_ok:${reason}:balance:${baseUrl}`);
-            return true;
-          }
-          attempts.push(`BALANCE:${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "unknown";
-          attempts.push(`BALANCE:${baseUrl}:exception:${message}`);
-        }
-      }
-    }
-
-    if (attempts.length) {
-      setAuthDebug((current) => current ? `${current} • rooms:http_failed:${reason}:${attempts.join(" | ")}` : `rooms:http_failed:${reason}:${attempts.join(" | ")}`);
+    if (result.attempts.length) {
+      setAuthDebug((current) => current ? `${current} • rooms:http_failed:${reason}:${result.attempts.join(" | ")}` : `rooms:http_failed:${reason}:${result.attempts.join(" | ")}`);
     }
     return false;
   };
@@ -753,7 +584,6 @@ export default function App() {
     if (shouldBlockHttpAuxDuringRealtime(roomId, "room", reason)) {
       return currentRoomRef.current?.roomId === roomId ? currentRoomRef.current : null;
     }
-    const attempts: string[] = [];
 
     const applyRoomResult = (parsed: { room?: RoomSnapshot | null } | null) => {
       if (parsed?.room) {
@@ -784,142 +614,26 @@ export default function App() {
       return parsed?.room ?? null;
     };
 
-    for (const baseUrl of resolveStrictApiCandidates(`/rooms/${encodeURIComponent(roomId)}`)) {
-      try {
-        const requestUrl = appendNoStoreNonce(baseUrl, `${Date.now()}`);
-        const response = await fetchWithTimeout(requestUrl.toString(), { method: "GET", credentials: "same-origin", cache: "no-store" });
-        const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
-        if (response.ok) {
-          setAuthDebug((current) => current ? `${current} • room:http_ok:${reason}:api:${baseUrl}` : `room:http_ok:${reason}:api:${baseUrl}`);
-          return applyRoomResult(parsed);
-        }
-        attempts.push(`API:${requestUrl.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "unknown";
-        attempts.push(`API:${baseUrl}:exception:${message}`);
-      }
+    const result = await fetchRoomStateRequest(roomId);
+    if (result.okLabel) {
+      setAuthDebug((current) => current ? `${current} • room:http_ok:${reason}:${result.okLabel}` : `room:http_ok:${reason}:${result.okLabel}`);
+      return applyRoomResult(result.data ?? null);
     }
 
-    const legacyAction = resolveLegacyBalanceAction(`/rooms/${encodeURIComponent(roomId)}`);
-    if (legacyAction) {
-      for (const baseUrl of resolveApiCandidates("/balance")) {
-        try {
-          const requestUrl = appendNoStoreNonce(baseUrl, `${Date.now()}`);
-          requestUrl.searchParams.set("action", legacyAction);
-          requestUrl.searchParams.set("roomId", roomId);
-          const response = await fetchWithTimeout(requestUrl.toString(), { method: "GET", credentials: "same-origin", cache: "no-store" });
-          const raw = await response.text();
-          const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string } : null;
-          if (response.ok) {
-            setAuthDebug((current) => current ? `${current} • room:http_ok:${reason}:balance:${baseUrl}` : `room:http_ok:${reason}:balance:${baseUrl}`);
-            return applyRoomResult(parsed);
-          }
-          attempts.push(`BALANCE:${requestUrl.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "unknown";
-          attempts.push(`BALANCE:${baseUrl}:exception:${message}`);
-        }
-      }
-    }
-
-    if (attempts.length) {
-      setAuthDebug((current) => current ? `${current} • room:http_failed:${reason}:${attempts.join(" | ")}` : `room:http_failed:${reason}:${attempts.join(" | ")}`);
+    if (result.attempts.length) {
+      setAuthDebug((current) => current ? `${current} • room:http_failed:${reason}:${result.attempts.join(" | ")}` : `room:http_failed:${reason}:${result.attempts.join(" | ")}`);
     }
     return null;
   };
 
   const postRoomActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
-    const attempts: string[] = [];
-    const query = buildQueryStringFromPayload(payload);
-    const legacyAction = resolveLegacyBalanceAction(path);
-
-    const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
-    for (const baseUrl of resolveStrictApiCandidates(path)) {
-      requestVariants.push({
-        label: `API_POST_JSON:${baseUrl}`,
-        url: baseUrl,
-        init: {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "same-origin",
-          body: JSON.stringify(payload),
-        },
-      });
-      requestVariants.push({
-        label: `API_POST_FORM:${baseUrl}`,
-        url: baseUrl,
-        init: {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-          credentials: "same-origin",
-          body: query,
-        },
-      });
-      const getUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-      if (query) {
-        const queryUrl = new URL(getUrl.toString(), window.location.origin);
-        const params = new URLSearchParams(query);
-        params.forEach((value, key) => queryUrl.searchParams.set(key, value));
-        requestVariants.push({
-          label: `API_GET_QUERY:${baseUrl}`,
-          url: queryUrl.toString(),
-          init: {
-            method: "GET",
-            credentials: "same-origin",
-            cache: "no-store",
-          },
-        });
-      }
+    const result = await postRoomActionRequest(path, payload);
+    if (result.okLabel) {
+      setAuthDebug((current) => current ? `${current} • room_action:http_ok:${reason}:${result.okLabel}` : `room_action:http_ok:${reason}:${result.okLabel}`);
+      return result.data;
     }
-
-    if (legacyAction) {
-      for (const baseUrl of resolveApiCandidates("/balance")) {
-        const queryUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-        queryUrl.searchParams.set("action", legacyAction);
-        const params = new URLSearchParams(query);
-        params.forEach((value, key) => queryUrl.searchParams.set(key, value));
-        requestVariants.push({
-          label: `BALANCE_GET_QUERY:${baseUrl}`,
-          url: queryUrl.toString(),
-          init: {
-            method: "GET",
-            credentials: "same-origin",
-            cache: "no-store",
-          },
-        });
-        requestVariants.push({
-          label: `BALANCE_POST_FORM:${baseUrl}`,
-          url: baseUrl,
-          init: {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-            credentials: "same-origin",
-            body: buildQueryStringFromPayload({ action: legacyAction, ...payload }),
-          },
-        });
-      }
-    }
-
-    for (const variant of requestVariants) {
-      try {
-        const response = await fetchWithTimeout(variant.url, variant.init, variant.label.startsWith("BALANCE_") ? 3200 : 3500);
-        const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; closed?: boolean; error?: string; detail?: string } : null;
-        if (response.ok) {
-          setErrorMessage(null);
-          setAuthDebug((current) => current ? `${current} • room_action:http_ok:${reason}:${variant.label}` : `room_action:http_ok:${reason}:${variant.label}`);
-          return parsed;
-        }
-        const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
-        attempts.push(`${variant.label}:${response.status}:${detail}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "unknown";
-        attempts.push(`${variant.label}:exception:${message}`);
-      }
-    }
-    if (attempts.length) {
-      setAuthDebug((current) => current ? `${current} • room_action:http_failed:${reason}:${attempts.join(" | ")}` : `room_action:http_failed:${reason}:${attempts.join(" | ")}`);
+    if (result.attempts.length) {
+      setAuthDebug((current) => current ? `${current} • room_action:http_failed:${reason}:${result.attempts.join(" | ")}` : `room_action:http_failed:${reason}:${result.attempts.join(" | ")}`);
     }
     return null;
   };
@@ -1295,42 +1009,29 @@ export default function App() {
       recovery.lastRequestedRevision = activeGame?.roomId === roomId && Number.isFinite(activeGame.snapshotRevision) ? activeGame.snapshotRevision : 0;
     }
 
-    const attempts: string[] = [];
     try {
-      for (const baseUrl of resolveApiCandidates(`/games/${roomId}`)) {
-        try {
-          const url = new URL(baseUrl, window.location.origin);
-          if (sinceSeq > 0) url.searchParams.set("sinceSeq", String(sinceSeq));
-          const response = await fetchWithTimeout(url.toString(), { method: "GET", credentials: "same-origin" }, 3200);
-          const raw = await response.text();
-          const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
-          if (response.ok) {
-            if (parsed?.game) {
-              const debugNow = performance.now();
-              const debugState = snapshotDebugRef.current;
-              const incomingRevision = Number.isFinite(parsed.game.snapshotRevision) ? parsed.game.snapshotRevision : 0;
-              if (debugNow - debugState.lastLoggedAt >= SNAPSHOT_DEBUG_LOG_EVERY_MS || debugState.lastRevision !== incomingRevision || debugState.lastSource !== 'http') {
-                logSnapshotDebug('recv', { source: 'http', roomId, status: parsed.game.status, shotSequence: parsed.game.shotSequence, revision: incomingRevision, dtMs: debugState.lastReceivedAt ? Math.round(debugNow - debugState.lastReceivedAt) : null });
-                debugState.lastLoggedAt = debugNow;
-              }
-              debugState.roomId = roomId;
-              debugState.lastReceivedAt = debugNow;
-              debugState.lastRevision = incomingRevision;
-              debugState.lastSource = 'http';
-              const applied = applyIncomingGame('http', parsed.game, reason);
-              if (applied) setScreen("game");
-              return applied;
-            }
-            return null;
-          }
-          attempts.push(`${url.toString()}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
-        } catch (error) {
-          attempts.push(`${baseUrl}:exception:${error instanceof Error ? error.message : "unknown"}`);
+      const result = await fetchGameStateRequest(roomId, sinceSeq);
+      if (result.data?.game) {
+        const debugNow = performance.now();
+        const debugState = snapshotDebugRef.current;
+        const incomingRevision = Number.isFinite(result.data.game.snapshotRevision) ? result.data.game.snapshotRevision : 0;
+        if (debugNow - debugState.lastLoggedAt >= SNAPSHOT_DEBUG_LOG_EVERY_MS || debugState.lastRevision !== incomingRevision || debugState.lastSource !== 'http') {
+          logSnapshotDebug('recv', { source: 'http', roomId, status: result.data.game.status, shotSequence: result.data.game.shotSequence, revision: incomingRevision, dtMs: debugState.lastReceivedAt ? Math.round(debugNow - debugState.lastReceivedAt) : null });
+          debugState.lastLoggedAt = debugNow;
         }
+        debugState.roomId = roomId;
+        debugState.lastReceivedAt = debugNow;
+        debugState.lastRevision = incomingRevision;
+        debugState.lastSource = 'http';
+        const applied = applyIncomingGame('http', result.data.game, reason);
+        if (applied) setScreen("game");
+        return applied;
       }
-
-      if (attempts.length) {
-        setAuthDebug((current) => current ? `${current} • game:http_failed:${reason}:${attempts.join(" | ")}` : `game:http_failed:${reason}:${attempts.join(" | ")}`);
+      if (result.okLabel) {
+        return null;
+      }
+      if (result.attempts.length) {
+        setAuthDebug((current) => current ? `${current} • game:http_failed:${reason}:${result.attempts.join(" | ")}` : `game:http_failed:${reason}:${result.attempts.join(" | ")}`);
       }
       return null;
     } finally {
@@ -1422,97 +1123,13 @@ export default function App() {
   };
 
   const postGameActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
-    const attempts: string[] = [];
-    const query = buildQueryStringFromPayload(payload);
-    const legacyAction = resolveLegacyBalanceAction(path);
-    const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
-
-    for (const baseUrl of resolveApiCandidates(path)) {
-      requestVariants.push({
-        label: `API_POST_JSON:${baseUrl}`,
-        url: baseUrl,
-        init: {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "same-origin",
-          body: JSON.stringify(payload),
-        },
-      });
-      requestVariants.push({
-        label: `API_POST_FORM:${baseUrl}`,
-        url: baseUrl,
-        init: {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-          credentials: "same-origin",
-          body: query,
-        },
-      });
-      if (query) {
-        const getUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-        const queryUrl = new URL(getUrl.toString(), window.location.origin);
-        const params = new URLSearchParams(query);
-        params.forEach((value, key) => queryUrl.searchParams.set(key, value));
-        requestVariants.push({
-          label: `API_GET_QUERY:${baseUrl}`,
-          url: queryUrl.toString(),
-          init: {
-            method: "GET",
-            credentials: "same-origin",
-            cache: "no-store",
-          },
-        });
-      }
+    const result = await postGameActionRequest(path, payload, reason);
+    if (result.okLabel) {
+      setAuthDebug((current) => current ? `${current} • game_action:http_ok:${reason}:${result.okLabel}` : `game_action:http_ok:${reason}:${result.okLabel}`);
+      return result.data;
     }
-
-    if (legacyAction) {
-      for (const baseUrl of resolveApiCandidates("/balance")) {
-        const queryUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-        queryUrl.searchParams.set("action", legacyAction);
-        const params = new URLSearchParams(query);
-        params.forEach((value, key) => queryUrl.searchParams.set(key, value));
-        requestVariants.push({
-          label: `BALANCE_GET_QUERY:${baseUrl}`,
-          url: queryUrl.toString(),
-          init: {
-            method: "GET",
-            credentials: "same-origin",
-            cache: "no-store",
-          },
-        });
-        requestVariants.push({
-          label: `BALANCE_POST_FORM:${baseUrl}`,
-          url: baseUrl,
-          init: {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-            credentials: "same-origin",
-            body: buildQueryStringFromPayload({ action: legacyAction, ...payload }),
-          },
-        });
-      }
-    }
-
-    for (const variant of requestVariants) {
-      try {
-        console.log("[sinuca-http-action]", JSON.stringify({ path, label: variant.label, url: variant.url, reason, payload }));
-        const response = await fetchWithTimeout(variant.url, variant.init, variant.label.startsWith("BALANCE_") ? 3200 : 4200);
-        const raw = await response.text();
-        const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string; detail?: string } : null;
-        if (response.ok) {
-          setAuthDebug((current) => current ? `${current} • game_action:http_ok:${reason}:${variant.label}` : `game_action:http_ok:${reason}:${variant.label}`);
-          return parsed;
-        }
-        const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
-        attempts.push(`${variant.label}:${response.status}:${detail}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "unknown";
-        attempts.push(`${variant.label}:exception:${message}`);
-      }
-    }
-
-    if (attempts.length) {
-      setAuthDebug((current) => current ? `${current} • game_action:http_failed:${reason}:${attempts.join(" | ")}` : `game_action:http_failed:${reason}:${attempts.join(" | ")}`);
+    if (result.attempts.length) {
+      setAuthDebug((current) => current ? `${current} • game_action:http_failed:${reason}:${result.attempts.join(" | ")}` : `game_action:http_failed:${reason}:${result.attempts.join(" | ")}`);
     }
     return null;
   };
