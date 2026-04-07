@@ -2207,7 +2207,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         && remoteAimState
         && remoteAimState.visible
         && remoteMode !== "idle"
-        && game.status !== "finished"
+        && game.status === "waiting_shot"
       );
       const fallbackRemoteCueX = remoteAimState?.cueX ?? drawCueBall?.x ?? cueBall?.x ?? DEFAULT_CUE_X;
       const fallbackRemoteCueY = remoteAimState?.cueY ?? drawCueBall?.y ?? cueBall?.y ?? DEFAULT_CUE_Y;
@@ -2269,7 +2269,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             : remoteMode === "place"
               ? 0.08
               : 0.05;
-      } else if (!remoteAimFresh || remoteMode === "idle") {
+      } else if (!remoteAimFresh || remoteMode === "idle" || game.status !== "waiting_shot") {
         remoteVisual.initialized = false;
       }
 

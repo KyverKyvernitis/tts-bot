@@ -428,7 +428,10 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
       return;
     }
     const nextGame = takeShot(roomId, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY);
-    runtime.clearAimState(roomId, userId);
+    const clearedAim = runtime.clearAimState(roomId, userId);
+    if (clearedAim) {
+      runtime.broadcastAim(roomId, clearedAim);
+    }
     runtime.touchRoomActivity(roomId, "http_take_shot");
     console.log("[sinuca-shoot-http-applied]", JSON.stringify({
       roomId,

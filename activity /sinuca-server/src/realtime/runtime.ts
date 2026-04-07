@@ -49,7 +49,7 @@ export interface ActivityRealtimeRuntime {
   broadcastGame(roomId: string): void;
   broadcastAim(roomId: string, payload: AimStateSnapshot, except?: WebSocket | null): void;
   storeAimState(roomId: string, payload: AimStateSnapshot): void;
-  clearAimState(roomId: string, userId?: string | null): void;
+  clearAimState(roomId: string, userId?: string | null): AimStateSnapshot | null;
   dropAimState(roomId: string): void;
   getAimState(roomId: string): AimStateSnapshot | null;
   buildAimPayload(input: {
@@ -126,19 +126,21 @@ export function createActivityRealtimeRuntime(): ActivityRealtimeRuntime {
 
   function clearAimState(roomId: string, userId?: string | null) {
     const current = latestAimByRoom.get(roomId);
-    if (!current) return;
-    if (userId && current.userId !== userId) return;
+    if (!current) return null;
+    if (userId && current.userId !== userId) return null;
     const nextRevision = (aimRevisionByRoom.get(roomId) ?? current.snapshotRevision ?? 0) + 1;
-    latestAimByRoom.set(roomId, {
+    const cleared = {
       ...current,
       visible: false,
       power: 0,
-      mode: "idle",
+      mode: "idle" as const,
       updatedAt: Date.now(),
       seq: current.seq + 1,
       snapshotRevision: nextRevision,
-    });
+    };
+    latestAimByRoom.set(roomId, cleared);
     aimRevisionByRoom.set(roomId, nextRevision);
+    return cleared;
   }
 
 

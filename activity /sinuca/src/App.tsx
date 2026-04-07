@@ -1020,8 +1020,15 @@ export default function App() {
     if (!payload) return;
     setRemoteAim((current) => {
       if (payload.userId === state.currentUser.userId) return current;
-      if (current && current.roomId === payload.roomId && current.userId === payload.userId && payload.seq < current.seq) {
-        return current;
+      if (!current || current.roomId !== payload.roomId || current.userId !== payload.userId) {
+        return payload;
+      }
+      const currentRevision = Number.isFinite(current.snapshotRevision) ? current.snapshotRevision : 0;
+      const nextRevision = Number.isFinite(payload.snapshotRevision) ? payload.snapshotRevision : 0;
+      if (nextRevision < currentRevision) return current;
+      if (nextRevision === currentRevision) {
+        if (payload.seq < current.seq) return current;
+        if (payload.seq === current.seq && payload.updatedAt < current.updatedAt) return current;
       }
       return payload;
     });
@@ -1313,7 +1320,7 @@ export default function App() {
       setRemoteAim(null);
       return;
     }
-    if (game.turnUserId === state.currentUser.userId || game.status === "finished") {
+    if (game.turnUserId === state.currentUser.userId || game.status !== "waiting_shot") {
       setRemoteAim(null);
     }
   }, [game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
@@ -1490,7 +1497,7 @@ export default function App() {
           if (!applied) {
             gameBootstrapDebugRef.current.lastRealtimeAccepted = 'no';
           }
-          setRemoteAim((current) => current?.roomId === payload.payload.roomId && payload.payload.turnUserId !== state.currentUser.userId && payload.payload.status !== "finished" ? current : null);
+          setRemoteAim((current) => current?.roomId === payload.payload.roomId && payload.payload.turnUserId !== state.currentUser.userId && payload.payload.status === "waiting_shot" ? current : null);
           setScreen("game");
           setErrorMessage(null);
           return;

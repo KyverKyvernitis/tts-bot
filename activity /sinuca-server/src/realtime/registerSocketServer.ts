@@ -365,7 +365,10 @@ export function registerSocketServer({ wss, runtime, balanceService, exchangeDis
           merged.spinX === undefined ? 0 : Number(merged.spinX),
           merged.spinY === undefined ? 0 : Number(merged.spinY),
         );
-        runtime.clearAimState(merged.roomId, merged.userId);
+        const clearedAim = runtime.clearAimState(merged.roomId, merged.userId);
+        if (clearedAim) {
+          runtime.broadcastAim(merged.roomId, clearedAim);
+        }
         runtime.touchRoomActivity(merged.roomId, "ws_take_shot");
         console.log("[sinuca-shoot-ws-applied]", JSON.stringify({
           roomId: merged.roomId,
