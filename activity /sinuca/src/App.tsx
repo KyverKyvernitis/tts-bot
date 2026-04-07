@@ -1332,10 +1332,13 @@ export default function App() {
     const tick = async () => {
       const aim = await fetchAimStateOverHttp(room.roomId, 'poll');
       if (cancelled) return;
-      if (aim && aim.roomId === room.roomId && aim.userId !== state.currentUser.userId && aim.visible && aim.mode !== 'idle') {
-        pushAimToState(aim);
-      } else if (aim && aim.roomId === room.roomId && aim.userId !== state.currentUser.userId && !aim.visible) {
-        setRemoteAim((current) => current?.roomId === room.roomId ? null : current);
+      if (aim && aim.roomId === room.roomId && aim.userId !== state.currentUser.userId) {
+        const shouldKeepRemoteCuePlacement = game.ballInHandUserId === aim.userId && aim.cueX !== null && aim.cueY !== null;
+        if ((aim.visible && aim.mode !== 'idle') || shouldKeepRemoteCuePlacement) {
+          pushAimToState(aim);
+        } else {
+          setRemoteAim((current) => current?.roomId === room.roomId ? null : current);
+        }
       }
     };
     void tick();
@@ -1344,7 +1347,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [connectionState, game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
+  }, [connectionState, game?.ballInHandUserId, game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
 
   useEffect(() => () => {
     if (aimHttpTimerRef.current !== null) {

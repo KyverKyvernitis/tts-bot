@@ -2209,14 +2209,31 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         && remoteMode !== "idle"
         && game.status === "waiting_shot"
       );
-      const fallbackRemoteCueX = remoteAimState?.cueX ?? drawCueBall?.x ?? cueBall?.x ?? DEFAULT_CUE_X;
-      const fallbackRemoteCueY = remoteAimState?.cueY ?? drawCueBall?.y ?? cueBall?.y ?? DEFAULT_CUE_Y;
-      const remoteCueSource = remoteCanRender
+      const remoteCuePlacementActive = Boolean(
+        remoteAimFresh
+        && remoteAimState
+        && game.status === "waiting_shot"
+        && game.ballInHandUserId === remoteAimState.userId
+        && remoteAimState.cueX !== null
+        && remoteAimState.cueY !== null
+      );
+      const authoritativeRemoteCue = drawCueBall ?? cueBall ?? {
+        id: "ball-0-remote-authoritative",
+        number: 0,
+        x: DEFAULT_CUE_X,
+        y: DEFAULT_CUE_Y,
+        pocketed: false,
+      };
+      const remoteCueSource = remoteCanRender || remoteCuePlacementActive
         ? {
             id: "ball-0-remote-overlay",
             number: 0,
-            x: fallbackRemoteCueX,
-            y: fallbackRemoteCueY,
+            x: remoteCuePlacementActive || remoteMode === "place"
+              ? (remoteAimState?.cueX ?? authoritativeRemoteCue.x)
+              : authoritativeRemoteCue.x,
+            y: remoteCuePlacementActive || remoteMode === "place"
+              ? (remoteAimState?.cueY ?? authoritativeRemoteCue.y)
+              : authoritativeRemoteCue.y,
             pocketed: false,
           }
         : null;
@@ -2225,11 +2242,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       let remoteAimAngle = 0;
       let remotePullRatio = 0.05;
 
-      if (remoteCanRender && remoteAimState && remoteCueSource) {
-        const targetX = remoteAimState.cueX ?? remoteCueSource.x;
-        const targetY = remoteAimState.cueY ?? remoteCueSource.y;
+      if ((remoteCanRender || remoteCuePlacementActive) && remoteAimState && remoteCueSource) {
+        const targetX = remoteCuePlacementActive || remoteMode === "place"
+          ? (remoteAimState.cueX ?? remoteCueSource.x)
+          : remoteCueSource.x;
+        const targetY = remoteCuePlacementActive || remoteMode === "place"
+          ? (remoteAimState.cueY ?? remoteCueSource.y)
+          : remoteCueSource.y;
         const targetAngle = remoteAimState.angle;
-        const targetPull = clamp(remoteAimState.power ?? 0, 0, 1);
+        const targetPull = remoteCanRender ? clamp(remoteAimState.power ?? 0, 0, 1) : 0;
         const hardSnap = !remoteVisual.initialized
           || remoteAimState.seq < remoteVisual.seq
           || Math.abs(targetX - remoteVisual.x) > 180
@@ -2243,9 +2264,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           remoteVisual.seq = remoteAimState.seq;
           remoteVisual.initialized = true;
         } else {
-          const posLerp = remoteMode === "place" ? 0.72 : 0.42;
-          const angleLerp = remoteMode === "aim" ? 0.36 : remoteMode === "power" ? 0.3 : 0.2;
-          const pullLerp = remoteMode === "power" ? 0.5 : 0.26;
+          const posLerp = remoteCuePlacementActive || remoteMode === "place" ? 0.72 : 0.42;
+          const angleLerp = remoteCanRender ? (remoteMode === "aim" ? 0.36 : remoteMode === "power" ? 0.3 : 0.2) : 0.18;
+          const pullLerp = remoteCanRender && remoteMode === "power" ? 0.5 : 0.26;
           remoteVisual.x = lerp(remoteVisual.x, targetX, posLerp);
           remoteVisual.y = lerp(remoteVisual.y, targetY, posLerp);
           remoteVisual.angle = lerpAngle(remoteVisual.angle, targetAngle, angleLerp);
@@ -2262,28 +2283,25 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           pocketed: false,
         };
         remoteAimAngle = remoteVisual.angle;
-        remotePullRatio = remoteMode === "power"
-          ? clamp(0.2 + remoteVisual.pull * 0.8, 0.2, 0.98)
-          : remoteMode === "aim"
-            ? 0.1
-            : remoteMode === "place"
-              ? 0.08
-              : 0.05;
-      } else if (!remoteAimFresh || remoteMode === "idle" || game.status !== "waiting_shot") {
+        remotePullRatio = remoteCanRender
+          ? (remoteMode === "power"
+              ? clamp(0.2 + remoteVisual.pull * 0.8, 0.2, 0.98)
+              : remoteMode === "aim"
+                ? 0.1
+                : remoteMode === "place"
+                  ? 0.08
+                  : 0.05)
+          : 0.08;
+      } else if (!remoteAimFresh || (!remoteCanRender && !remoteCuePlacementActive) || game.status !== "waiting_shot") {
         remoteVisual.initialized = false;
       }
 
-      const remoteCueMoved = Boolean(
-        remoteCueBall
-        && drawCueBall
-        && (Math.abs(remoteCueBall.x - drawCueBall.x) > 0.15 || Math.abs(remoteCueBall.y - drawCueBall.y) > 0.15)
-      );
-      if (remoteCueBall && (game.ballInHandUserId === remoteAimState?.userId || remoteMode === "place" || remoteCueMoved)) {
+      if (remoteCueBall && remoteCuePlacementActive) {
         let replacedCue = false;
         drawBalls = drawBalls.map((ball) => {
           if (ball.number !== 0) return ball;
           replacedCue = true;
-          return { ...ball, x: remoteCueBall!.x, y: remoteCueBall!.y, pocketed: false };
+          return { ...ball, x: remoteCueBall.x, y: remoteCueBall.y, pocketed: false };
         });
         if (!replacedCue) drawBalls = [remoteCueBall, ...drawBalls];
         drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? remoteCueBall;
