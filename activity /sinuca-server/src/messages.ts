@@ -222,6 +222,12 @@ export interface OAuthTokenResultPayload {
   detail: string | null;
 }
 
+export interface RoomClosedPayload {
+  roomId: string;
+  reason: string;
+  message: string;
+}
+
 export type ServerMessage =
   | { type: "ready" }
   | { type: "session_context"; payload: SessionContextPayload }
@@ -233,4 +239,5 @@ export type ServerMessage =
   | { type: "balance_debug"; payload: BalanceDebugSnapshot }
   | { type: "oauth_token_result"; payload: OAuthTokenResultPayload }
   | { type: "aim_state"; payload: AimStateSnapshot }
+  | { type: "room_closed"; payload: RoomClosedPayload }
   | { type: "error"; message: string };

@@ -62,7 +62,8 @@ type IncomingMessage =
   | { type: "balance_debug"; payload: BalanceDebugSnapshot }
   | { type: "session_context"; payload: SessionContextPayload }
   | { type: "oauth_token_result"; payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null } }
-  | { type: "aim_state"; payload: AimStateSnapshot };
+  | { type: "aim_state"; payload: AimStateSnapshot }
+  | { type: "room_closed"; payload: { roomId: string; reason: string; message: string } };
 
 const DEFAULT_PUBLIC_HOST = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || "osakaagiota.duckdns.org";
 
@@ -290,6 +291,7 @@ export default function App() {
   const [gameStartBusy, setGameStartBusy] = useState(false);
   const [gameShootBusy, setGameShootBusy] = useState(false);
   const [roomExitBusy, setRoomExitBusy] = useState(false);
+  const [gameLoadingTimedOut, setGameLoadingTimedOut] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const roomEntryMenuRef = useRef<HTMLDivElement | null>(null);
   const createEntryMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1838,6 +1840,22 @@ export default function App() {
           setErrorMessage(null);
           return;
         }
+        if (payload.type === "room_closed") {
+          const activeRoomId = currentRoomRef.current?.roomId ?? createDraftRoomIdRef.current;
+          if (activeRoomId !== payload.payload.roomId) return;
+          const wasHost = currentRoomRef.current?.hostUserId === currentUserIdRef.current || locallyOwnedRoomIdRef.current === payload.payload.roomId;
+          unloadLeaveSentRef.current = null;
+          setRoomEntryMenuOpen(false);
+          setCreateEntryMenuOpen(false);
+          setCreateDraftRoomId(null);
+          setLocallyOwnedRoomId((current) => current === payload.payload.roomId ? null : current);
+          resetGameRuntimeState(payload.payload.roomId, { clearGame: true, reason: `ws_room_closed_${payload.payload.reason}` });
+          setRoom(null);
+          setScreen(wasHost ? "home" : "list");
+          setErrorMessage(payload.payload.message);
+          void requestRooms();
+          return;
+        }
         if (payload.type === "game_state") {
           const debugNow = performance.now();
           const debugState = snapshotDebugRef.current;
@@ -2176,6 +2194,50 @@ export default function App() {
     }
     setGameShootBusy(false);
   }, [game?.shotSequence, game?.turnUserId, game?.updatedAt, screen]);
+
+  useEffect(() => {
+    if (screen !== "game" || !room?.roomId || game) {
+      setGameLoadingTimedOut(false);
+      return;
+    }
+    setGameLoadingTimedOut(false);
+    const timeout = window.setTimeout(() => {
+      setGameLoadingTimedOut(true);
+    }, 8000);
+    return () => window.clearTimeout(timeout);
+  }, [game?.gameId, room?.roomId, screen]);
+
+  const forceReturnToLobbyFromLoading = async (reason: string) => {
+    if (!room || game || roomExitBusy) return;
+    const roomId = room.roomId;
+    const closeRoom = room.hostUserId === state.currentUser.userId || locallyOwnedRoomIdRef.current === roomId;
+    const nextScreen: LobbyScreen = closeRoom ? "home" : "list";
+
+    setRoomExitBusy(true);
+    setErrorMessage(null);
+
+    try {
+      const result = await leaveRoomOverHttp(roomId, reason, { closeRoom });
+      if (result === null) {
+        dispatchLeaveBeacon(roomId, state.currentUser.userId, closeRoom);
+        setErrorMessage(closeRoom
+          ? "A mesa travou no carregamento. Voltando ao lobby e tentando fechar a sala."
+          : "A mesa travou no carregamento. Voltando ao lobby e tentando sair da sala.");
+      }
+    } finally {
+      unloadLeaveSentRef.current = null;
+      setRoomEntryMenuOpen(false);
+      setCreateEntryMenuOpen(false);
+      setCreateDraftRoomId(null);
+      setLocallyOwnedRoomId((current) => current === roomId ? null : current);
+      resetGameRuntimeState(roomId, { clearGame: true, reason });
+      setRoom(null);
+      setGameStartBusy(false);
+      setScreen(nextScreen);
+      setRoomExitBusy(false);
+      void requestRooms();
+    }
+  };
 
   const exitCurrentRoom = async (reason: string) => {
     if (!room || roomExitBusy) return;
@@ -2776,6 +2838,21 @@ export default function App() {
             <div className="empty-card empty-card--soft empty-card--home empty-card--list">
               <strong>Carregando a mesa...</strong>
               <span>Sincronizando a partida para os dois lados.</span>
+              {gameLoadingTimedOut ? (
+                <p className="plain-copy" style={{ marginTop: 10 }}>
+                  A mesa demorou demais para sincronizar. Você pode voltar ao lobby e encerrar esta sala agora.
+                </p>
+              ) : null}
+              <div style={{ display: "flex", justifyContent: "center", marginTop: 14 }}>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => { void forceReturnToLobbyFromLoading(isRoomHost ? "http_force_close_loading_lobby" : "http_force_leave_loading_lobby"); }}
+                  disabled={roomExitBusy}
+                >
+                  {roomExitBusy ? "Voltando..." : "Voltar ao lobby"}
+                </button>
+              </div>
             </div>
           </section>
         )

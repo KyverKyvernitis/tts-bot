@@ -19,6 +19,7 @@ import {
   toSnapshot,
   unsubscribeSocket,
 } from "./rooms.js";
+import type { RoomRecord } from "./rooms.js";
 import type {
   AimPointerMode,
   AimStateSnapshot,
@@ -214,6 +215,8 @@ const socketSession = new Map<WebSocket, SessionContextPayload>();
 const balanceWatchers = new Map<WebSocket, { guildId: string; userId: string; lastSent: string }>();
 const latestAimByRoom = new Map<string, AimStateSnapshot>();
 const aimRevisionByRoom = new Map<string, number>();
+const roomActivityAt = new Map<string, number>();
+const ROOM_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
 const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI || "";
 const mongoDbName = process.env.MONGODB_DB || process.env.MONGO_DB_NAME || process.env.MONGODB_DB_NAME || "chat_revive";
@@ -222,6 +225,50 @@ let mongoClient: MongoClient | null = null;
 
 function send(ws: WebSocket, payload: ServerMessage) {
   ws.send(JSON.stringify(payload));
+}
+
+function touchRoomActivity(roomId: string, source: string) {
+  roomActivityAt.set(roomId, Date.now());
+  console.log("[sinuca-room-activity]", JSON.stringify({ roomId, source, at: roomActivityAt.get(roomId) }));
+}
+
+function clearRoomActivity(roomId: string) {
+  roomActivityAt.delete(roomId);
+}
+
+function notifyRoomClosed(room: RoomRecord, reason: string, message: string) {
+  for (const subscriber of getSubscribers(room.roomId)) {
+    if (subscriber.readyState !== 1) continue;
+    send(subscriber, {
+      type: "room_closed",
+      payload: {
+        roomId: room.roomId,
+        reason,
+        message,
+      },
+    });
+  }
+}
+
+function closeRoomAndNotify(roomId: string, reason: string, message: string) {
+  const room = getRoom(roomId);
+  if (!room) {
+    clearRoomActivity(roomId);
+    latestAimByRoom.delete(roomId);
+    aimRevisionByRoom.delete(roomId);
+    removeGame(roomId);
+    return null;
+  }
+  notifyRoomClosed(room, reason, message);
+  latestAimByRoom.delete(roomId);
+  aimRevisionByRoom.delete(roomId);
+  removeGame(roomId);
+  clearRoomActivity(roomId);
+  const closedRoom = closeRoom(roomId);
+  if (closedRoom) {
+    broadcastRoomList({ guildId: closedRoom.guildId, channelId: closedRoom.channelId, mode: closedRoom.mode });
+  }
+  return closedRoom;
 }
 
 function storeAimState(roomId: string, payload: AimStateSnapshot) {
@@ -443,6 +490,7 @@ async function handleCreateRoomHttp(req: Request, res: Response) {
     tableType: requestedTableType,
     stakeChips: Number.isFinite(stakeChips) ? stakeChips : null,
   });
+  touchRoomActivity(room.roomId, "http_create_room");
   broadcastRoom(room.roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
   sendNoStoreJson(res, { room: toSnapshot(room) });
@@ -465,6 +513,7 @@ async function handleJoinRoomHttp(req: Request, res: Response) {
     res.status(404).json({ error: "room_not_found" });
     return;
   }
+  touchRoomActivity(room.roomId, "http_join_room");
   broadcastRoom(room.roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
   sendNoStoreJson(res, { room: toSnapshot(room) });
@@ -490,14 +539,16 @@ async function handleLeaveRoomHttp(req: Request, res: Response) {
     ? null
     : removePlayer(roomId, userId);
   const closedRoom = shouldCloseRoom && previous && previous.hostUserId === userId
-    ? closeRoom(roomId)
+    ? closeRoomAndNotify(roomId, "host_closed_room", "A sala foi fechada pelo anfitrião.")
     : null;
   if (room) {
+    touchRoomActivity(room.roomId, "http_leave_room_remaining");
     broadcastRoom(room.roomId);
     broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
-  } else if (closedRoom) {
-    broadcastRoomList({ guildId: closedRoom.guildId, channelId: closedRoom.channelId, mode: closedRoom.mode });
-  } else if (previous) {
+  } else if (!closedRoom && previous) {
+    clearRoomActivity(previous.roomId);
+    latestAimByRoom.delete(previous.roomId);
+    aimRevisionByRoom.delete(previous.roomId);
     broadcastRoomList({ guildId: previous.guildId, channelId: previous.channelId, mode: previous.mode });
   }
   sendNoStoreJson(res, { room: room ? toSnapshot(room) : null, closed: Boolean(closedRoom) });
@@ -519,6 +570,7 @@ async function handleReadyRoomHttp(req: Request, res: Response) {
     res.status(404).json({ error: "room_not_found" });
     return;
   }
+  touchRoomActivity(room.roomId, "http_set_ready");
   broadcastRoom(room.roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
   sendNoStoreJson(res, { room: toSnapshot(room) });
@@ -550,6 +602,7 @@ async function handleUpdateStakeRoomHttp(req: Request, res: Response) {
     res.status(404).json({ error: "room_not_found" });
     return;
   }
+  touchRoomActivity(room.roomId, "http_update_stake");
   broadcastRoom(room.roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
   sendNoStoreJson(res, { room: toSnapshot(room) });
@@ -595,6 +648,7 @@ async function handleSyncAimHttp(req: Request, res: Response) {
     return;
   }
   storeAimState(roomId, payload);
+  touchRoomActivity(roomId, "http_sync_aim");
   broadcastAim(roomId, payload);
   res.json({ aim: payload });
 }
@@ -648,6 +702,7 @@ async function handleStartGameHttp(req: Request, res: Response) {
   setRoomInGame(roomId, true);
   const game = startGameForRoom(room);
   latestAimByRoom.delete(roomId);
+  touchRoomActivity(roomId, "http_start_game");
   broadcastRoom(roomId);
   broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
   broadcastGame(roomId);
@@ -714,6 +769,7 @@ async function handleShootGameHttp(req: Request, res: Response) {
     return;
   }
   clearAimState(roomId, userId);
+  touchRoomActivity(roomId, "http_take_shot");
   console.log("[sinuca-shoot-http-applied]", JSON.stringify({
     roomId,
     userId,
@@ -1158,6 +1214,25 @@ const balanceTicker = setInterval(() => {
   }
 }, 2000);
 
+const roomIdleTicker = setInterval(() => {
+  const now = Date.now();
+  for (const [roomId, lastActivity] of roomActivityAt.entries()) {
+    if (now - lastActivity < ROOM_IDLE_TIMEOUT_MS) continue;
+    const room = getRoom(roomId);
+    if (!room) {
+      clearRoomActivity(roomId);
+      continue;
+    }
+    console.log("[sinuca-room-idle-close]", JSON.stringify({
+      roomId,
+      idleMs: now - lastActivity,
+      status: room.status,
+      players: room.players.length,
+    }));
+    closeRoomAndNotify(roomId, "idle_timeout", "A sala foi fechada por 5 minutos de inatividade.");
+  }
+}, 15000);
+
 wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   const resolved = resolveRequestSession(req);
   const session: SessionContextPayload = {
@@ -1281,6 +1356,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       }
       const room = createRoom(instanceId, guildId ?? null, channelId ?? null, userId, displayName, merged.avatarUrl ?? null, { tableType: merged.tableType ?? null, stakeChips: merged.stakeChips ?? null });
       console.log("[sinuca-create-room-result]", JSON.stringify({ roomId: room.roomId, guildId: room.guildId, channelId: room.channelId, mode: room.mode, tableType: room.tableType, stakeChips: room.stakeChips, players: room.players.length, status: room.status }));
+      touchRoomActivity(room.roomId, "ws_create_room");
       subscribeSocket(room.roomId, ws);
       broadcastRoom(room.roomId);
       broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
@@ -1298,6 +1374,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "mesa não encontrada" });
         return;
       }
+      touchRoomActivity(room.roomId, "ws_join_room");
       subscribeSocket(room.roomId, ws);
       broadcastRoom(room.roomId);
       broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
@@ -1333,15 +1410,17 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         ? null
         : removePlayer(merged.roomId, merged.userId);
       const closedRoom = shouldCloseRoom && previous && previous.hostUserId === merged.userId
-        ? closeRoom(merged.roomId)
+        ? closeRoomAndNotify(merged.roomId, "host_closed_room", "A sala foi fechada pelo anfitrião.")
         : null;
       unsubscribeSocket(ws);
       if (room) {
+        touchRoomActivity(room.roomId, "ws_leave_room_remaining");
         broadcastRoom(room.roomId);
         broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
-      } else if (closedRoom) {
-        broadcastRoomList({ guildId: closedRoom.guildId, channelId: closedRoom.channelId, mode: closedRoom.mode });
-      } else if (previous) {
+      } else if (!closedRoom && previous) {
+        clearRoomActivity(previous.roomId);
+        latestAimByRoom.delete(previous.roomId);
+        aimRevisionByRoom.delete(previous.roomId);
         broadcastRoomList({ guildId: previous.guildId, channelId: previous.channelId, mode: previous.mode });
       }
       return;
@@ -1366,6 +1445,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       setRoomInGame(room.roomId, true);
       startGameForRoom(room);
       latestAimByRoom.delete(room.roomId);
+      touchRoomActivity(room.roomId, "ws_start_game");
       broadcastRoom(room.roomId);
       broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
       broadcastGame(room.roomId);
@@ -1398,6 +1478,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       });
 
       storeAimState(merged.roomId, payload);
+      touchRoomActivity(merged.roomId, "ws_sync_aim");
       broadcastAim(merged.roomId, payload, ws);
       return;
     }
@@ -1440,6 +1521,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         merged.spinY === undefined ? 0 : Number(merged.spinY),
       );
       clearAimState(merged.roomId, merged.userId);
+      touchRoomActivity(merged.roomId, "ws_take_shot");
       console.log("[sinuca-shoot-ws-applied]", JSON.stringify({
         roomId: merged.roomId,
         shotSequence: applied?.shotSequence ?? null,
@@ -1461,6 +1543,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         send(ws, { type: "error", message: "mesa não encontrada" });
         return;
       }
+      touchRoomActivity(room.roomId, "ws_set_ready");
       broadcastRoom(room.roomId);
       broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
     }
