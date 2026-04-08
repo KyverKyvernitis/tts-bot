@@ -9,7 +9,7 @@ import {
   writeCachedToken,
   writeCachedUser,
 } from "./sdk/discord";
-import type { ActivityBootstrap, ActivityUser, AimPointerMode, AimStateSnapshot, BalanceDebugSnapshot, BalanceSnapshot, GameSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
+import type { ActivityBootstrap, ActivityUser, AimPointerMode, AimStateSnapshot, BalanceDebugSnapshot, BalanceSnapshot, GameBallSnapshot, GameSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.wav";
@@ -48,6 +48,79 @@ const DISCORD_ID_RE = /^\d{17,20}$/;
 
 function isResolvedDiscordUserId(value: string | null | undefined): value is string {
   return typeof value === "string" && DISCORD_ID_RE.test(value);
+}
+
+
+const SHOT_BOOTSTRAP_CUE_EPSILON_PX = 1.8;
+const SHOT_BOOTSTRAP_TOTAL_DRIFT_EPSILON_PX = 7;
+const SHOT_BOOTSTRAP_MAX_DRIFT_EPSILON_PX = 2.2;
+
+function findCueBall(balls: GameBallSnapshot[]) {
+  return balls.find((ball) => ball.number === 0) ?? null;
+}
+
+function compareBallSnapshots(
+  previousBalls: GameBallSnapshot[],
+  nextBalls: GameBallSnapshot[],
+) {
+  const previousById = new Map(previousBalls.map((ball) => [ball.id, ball]));
+  let totalDrift = 0;
+  let maxDrift = 0;
+  let changedCount = 0;
+
+  for (const nextBall of nextBalls) {
+    const previousBall = previousById.get(nextBall.id);
+    if (!previousBall) {
+      changedCount += 1;
+      maxDrift = Math.max(maxDrift, 999);
+      totalDrift += 999;
+      continue;
+    }
+    if (previousBall.pocketed !== nextBall.pocketed) {
+      changedCount += 1;
+      maxDrift = Math.max(maxDrift, 999);
+      totalDrift += 999;
+      continue;
+    }
+    const drift = Math.hypot(nextBall.x - previousBall.x, nextBall.y - previousBall.y);
+    if (drift > 0.01) changedCount += 1;
+    totalDrift += drift;
+    if (drift > maxDrift) maxDrift = drift;
+  }
+
+  return { totalDrift, maxDrift, changedCount };
+}
+
+function isBootstrapSimulatingSnapshot(
+  current: GameSnapshot,
+  incoming: GameSnapshot,
+) {
+  if (current.roomId !== incoming.roomId || current.gameId !== incoming.gameId) return false;
+  if (incoming.status !== "simulating") return false;
+  if (incoming.shotSequence <= current.shotSequence) return false;
+
+  const currentCueBall = findCueBall(current.balls);
+  const incomingCueBall = findCueBall(incoming.balls);
+  if (!currentCueBall || !incomingCueBall) return false;
+  if (currentCueBall.pocketed || incomingCueBall.pocketed) return false;
+
+  const cueDrift = Math.hypot(incomingCueBall.x - currentCueBall.x, incomingCueBall.y - currentCueBall.y);
+  const tableDelta = compareBallSnapshots(current.balls, incoming.balls);
+
+  return cueDrift <= SHOT_BOOTSTRAP_CUE_EPSILON_PX
+    && tableDelta.totalDrift <= SHOT_BOOTSTRAP_TOTAL_DRIFT_EPSILON_PX
+    && tableDelta.maxDrift <= SHOT_BOOTSTRAP_MAX_DRIFT_EPSILON_PX;
+}
+
+function mergeBootstrapSimulatingSnapshot(
+  current: GameSnapshot,
+  incoming: GameSnapshot,
+) {
+  return {
+    ...incoming,
+    balls: current.balls,
+    lastShot: incoming.lastShot ?? current.lastShot,
+  };
 }
 
 const initialState: ActivityBootstrap = {
@@ -897,6 +970,9 @@ export default function App() {
         if (currentRevision > incomingRevision) return current;
         if (currentRevision === incomingRevision && current.updatedAt > incoming.updatedAt) return current;
       }
+      if (isBootstrapSimulatingSnapshot(current, incoming)) {
+        return mergeBootstrapSimulatingSnapshot(current, incoming);
+      }
     }
     return {
       ...incoming,
@@ -951,6 +1027,25 @@ export default function App() {
     }
 
     const previousGame = currentGameRef.current;
+    const bootstrapSimulatingSnapshot = Boolean(previousGame && isBootstrapSimulatingSnapshot(previousGame, incoming));
+    if (bootstrapSimulatingSnapshot && previousGame) {
+      const previousCueBall = findCueBall(previousGame.balls);
+      const incomingCueBall = findCueBall(incoming.balls);
+      const tableDelta = compareBallSnapshots(previousGame.balls, incoming.balls);
+      logSnapshotDebug('hold', {
+        source,
+        roomId: incoming.roomId,
+        gameId: incoming.gameId,
+        reason,
+        status: incoming.status,
+        shotSequence: incoming.shotSequence,
+        revision: Number.isFinite(incoming.snapshotRevision) ? incoming.snapshotRevision : 0,
+        why: 'bootstrap_simulating_snapshot',
+        cueDrift: previousCueBall && incomingCueBall ? Math.round(Math.hypot(incomingCueBall.x - previousCueBall.x, incomingCueBall.y - previousCueBall.y) * 100) / 100 : null,
+        totalDrift: Math.round(tableDelta.totalDrift * 100) / 100,
+        maxDrift: Math.round(tableDelta.maxDrift * 100) / 100,
+      });
+    }
     const merged = mergeIncomingGame(previousGame, incoming);
     setGame(merged);
 
@@ -966,7 +1061,7 @@ export default function App() {
         || (merged.shotSequence === previousGame.shotSequence && (mergedRevision > previousRevision || merged.updatedAt > previousGame.updatedAt));
 
       const shotDispatch = shotDispatchRef.current;
-      if (shotDispatch.roomId === merged.roomId && merged.shotSequence >= shotDispatch.expectedShotSequence) {
+      if (!bootstrapSimulatingSnapshot && shotDispatch.roomId === merged.roomId && merged.shotSequence >= shotDispatch.expectedShotSequence) {
         clearShotDispatch(merged.roomId, `authoritative_${source}`);
       }
 
