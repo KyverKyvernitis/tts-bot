@@ -45,7 +45,7 @@ export type GameBootstrapSessionState = {
 export const GAME_SIM_WATCHDOG_INTERVAL_MS = 220;
 export const GAME_SIM_STALL_RECOVERY_MS = 900;
 export const GAME_BOOTSTRAP_RETRY_INTERVAL_MS = 350;
-export const GAME_POLL_INTERVAL_MS = 220;
+export const GAME_POLL_INTERVAL_MS = 90;
 export const GAME_LOADING_TIMEOUT_MS = 8000;
 export const REALTIME_GAME_HEALTH_MAX_AGE_MS = 1800;
 
@@ -99,12 +99,14 @@ export function shouldBlockHttpGameDuringRealtime(params: {
   activeGame: GameSnapshot | null;
   activeRoomId: string | null;
   lock: RealtimeHttpLockState;
+  isRealtimeHealthy?: boolean;
 }) {
-  const { roomId, reason, activeGame, activeRoomId, lock } = params;
+  const { roomId, reason, activeGame, activeRoomId, lock, isRealtimeHealthy = false } = params;
   const guard = getRealtimeHttpGuardState({ roomId, activeGame, activeRoomId, lock });
   if (!guard.sameRoom || !guard.isRealtimeLocked) return false;
   if (reason.startsWith("force_recover_")) return false;
   if (reason.startsWith("force_bootstrap_")) return false;
+  if (!isRealtimeHealthy) return false;
   return true;
 }
 
@@ -118,7 +120,7 @@ export function shouldRunHttpGamePolling(params: {
 }) {
   const { roomId, activeGame, activeRoomId, lock, isRealtimeHealthy, session } = params;
   const guard = getRealtimeHttpGuardState({ roomId, activeGame, activeRoomId, lock });
-  if (guard.isRealtimeLocked) return false;
+  if (guard.isRealtimeLocked) return !isRealtimeHealthy;
   if (!activeGame || activeGame.roomId !== roomId) return true;
   if (session?.roomId === roomId && !session.completedAt) return true;
   if (session?.roomId === roomId && session.expectedGameId && activeGame.gameId !== session.expectedGameId) return true;

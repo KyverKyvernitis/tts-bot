@@ -853,6 +853,7 @@ export default function App() {
     activeGame: currentGameRef.current,
     activeRoomId: currentRoomRef.current?.roomId ?? null,
     lock: realtimeHttpLockRef.current,
+    isRealtimeHealthy: isRealtimeSocketHealthy(roomId),
   });
 
   const shouldRunHttpGamePolling = (roomId: string) => shouldRunHttpGamePollingFromModule({
