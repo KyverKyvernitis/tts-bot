@@ -81,6 +81,7 @@ export function resolveLegacyBalanceAction(path: string) {
   if (normalizedPath === "/rooms/ready") return "room_ready";
   if (normalizedPath === "/rooms/stake") return "room_stake";
   if (normalizedPath === "/games/start") return "game_start";
+  if (normalizedPath === "/games/shoot") return "game_shoot";
   if (normalizedPath === "/games/debug") return "ui_debug";
   if (/^\/rooms\/[^/]+$/.test(normalizedPath)) return "room_get";
   return null;
