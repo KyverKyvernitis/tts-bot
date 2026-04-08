@@ -45,7 +45,7 @@ export type GameBootstrapSessionState = {
 export const GAME_SIM_WATCHDOG_INTERVAL_MS = 220;
 export const GAME_SIM_STALL_RECOVERY_MS = 900;
 export const GAME_BOOTSTRAP_RETRY_INTERVAL_MS = 350;
-export const GAME_POLL_INTERVAL_MS = 90;
+export const GAME_POLL_INTERVAL_MS = 60;
 export const GAME_LOADING_TIMEOUT_MS = 8000;
 export const REALTIME_GAME_HEALTH_MAX_AGE_MS = 1800;
 

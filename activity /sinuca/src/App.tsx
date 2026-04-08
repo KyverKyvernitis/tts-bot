@@ -1622,7 +1622,7 @@ export default function App() {
       }
     };
     void tick();
-    const interval = window.setInterval(() => { void tick(); }, 90);
+    const interval = window.setInterval(() => { void tick(); }, 60);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
