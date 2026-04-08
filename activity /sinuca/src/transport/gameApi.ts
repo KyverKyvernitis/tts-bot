@@ -7,7 +7,32 @@ import {
   resolveLegacyBalanceAction,
   resolveStrictApiCandidates,
 } from "./httpClient";
-import type { HttpTransportResult } from "./lobbyApi";
+import type { HttpTransportMeta, HttpTransportResult } from "./lobbyApi";
+
+function parseJsonSafely<T>(raw: string): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function buildResponsePreview(raw: string, maxLength = 320): string {
+  const compact = raw.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function buildTransportMeta(label: string, url: string, response: Response, raw: string): HttpTransportMeta {
+  return {
+    label,
+    url,
+    status: response.status,
+    contentType: response.headers.get('content-type'),
+    responsePreview: buildResponsePreview(raw),
+  };
+}
 
 export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promise<HttpTransportResult<{ game?: GameSnapshot | null; error?: string }>> {
   const attempts: string[] = [];
@@ -43,9 +68,9 @@ export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promi
         attempts.push(`${variant.label}:${response.status}:html_response`);
         continue;
       }
-      const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; error?: string } : null;
+      const parsed = parseJsonSafely<{ game?: GameSnapshot | null; error?: string }>(raw);
       if (response.ok) {
-        return { data: parsed, attempts, okLabel: variant.label };
+        return { data: parsed, attempts, okLabel: variant.label, okMeta: buildTransportMeta(variant.label, variant.url, response, raw) };
       }
       attempts.push(`${variant.label}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
     } catch (error) {
@@ -133,9 +158,9 @@ export async function postGameActionRequest(path: string, payload: Record<string
       console.log("[sinuca-http-action]", JSON.stringify({ path, label: variant.label, url: variant.url, reason, payload }));
       const response = await fetchWithTimeout(variant.url, variant.init, variant.label.startsWith("BALANCE_") ? 3200 : 4200);
       const raw = await response.text();
-      const parsed = raw ? JSON.parse(raw) as { game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string; detail?: string } : null;
+      const parsed = parseJsonSafely<{ game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string; detail?: string }>(raw);
       if (response.ok) {
-        return { data: parsed, attempts, okLabel: variant.label };
+        return { data: parsed, attempts, okLabel: variant.label, okMeta: buildTransportMeta(variant.label, variant.url, response, raw) };
       }
       const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
       attempts.push(`${variant.label}:${response.status}:${detail}`);

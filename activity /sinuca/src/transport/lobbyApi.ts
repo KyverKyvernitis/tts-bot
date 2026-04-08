@@ -8,10 +8,19 @@ import {
   resolveStrictApiCandidates,
 } from "./httpClient";
 
+export interface HttpTransportMeta {
+  label: string;
+  url: string;
+  status: number | null;
+  contentType: string | null;
+  responsePreview: string | null;
+}
+
 export interface HttpTransportResult<T> {
   data: T | null;
   attempts: string[];
   okLabel: string | null;
+  okMeta?: HttpTransportMeta | null;
 }
 
 export async function fetchRoomsRequest(params: {

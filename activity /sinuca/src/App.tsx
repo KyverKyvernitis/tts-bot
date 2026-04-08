@@ -91,6 +91,23 @@ function logShotTransport(scope: string, payload: Record<string, unknown>) {
   console.log(`[sinuca-shot-transport-${scope}]`, JSON.stringify(payload));
 }
 
+function compactDebugText(value: string | null | undefined, maxLength = 320): string | null {
+  if (!value) return null;
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return null;
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function compactDebugJson(value: unknown, maxLength = 320): string | null {
+  if (value === undefined) return null;
+  try {
+    return compactDebugText(JSON.stringify(value), maxLength);
+  } catch {
+    return compactDebugText(String(value), maxLength);
+  }
+}
+
 type ShotPipelineDebugState = {
   lastStage: string;
   lastStageAt: number | null;
@@ -108,6 +125,21 @@ type ShotPipelineDebugState = {
   shotSequence: number | null;
   gameStatus: string | null;
   ballInHandUserId: string | null;
+  currentUserId: string | null;
+  turnUserId: string | null;
+  requestPath: string | null;
+  requestRouteLabel: string | null;
+  requestBodyPreview: string | null;
+  responseStatusCode: number | null;
+  responseContentType: string | null;
+  responseBodyPreview: string | null;
+  pollRouteLabel: string | null;
+  pollStatusCode: number | null;
+  pollGameId: string | null;
+  pollShotSequence: number | null;
+  pollGameStatus: string | null;
+  pollTurnUserId: string | null;
+  pollResponsePreview: string | null;
   angle: number | null;
   power: number | null;
   cueX: number | null;
@@ -132,6 +164,21 @@ const initialShotPipelineDebug: ShotPipelineDebugState = {
   shotSequence: null,
   gameStatus: null,
   ballInHandUserId: null,
+  currentUserId: null,
+  turnUserId: null,
+  requestPath: null,
+  requestRouteLabel: null,
+  requestBodyPreview: null,
+  responseStatusCode: null,
+  responseContentType: null,
+  responseBodyPreview: null,
+  pollRouteLabel: null,
+  pollStatusCode: null,
+  pollGameId: null,
+  pollShotSequence: null,
+  pollGameStatus: null,
+  pollTurnUserId: null,
+  pollResponsePreview: null,
   angle: null,
   power: null,
   cueX: null,
@@ -1027,6 +1074,18 @@ export default function App() {
         gameBootstrapDebugRef.current.lastHttpUrl = result.okLabel;
         gameBootstrapDebugRef.current.lastHttpRouteMode = result.okLabel;
       }
+      if (currentScreenRef.current === 'game' && currentRoomRef.current?.roomId === roomId) {
+        setShotPipelineDebug((current) => ({
+          ...current,
+          pollRouteLabel: result.okLabel ?? current.pollRouteLabel,
+          pollStatusCode: result.okMeta?.status ?? current.pollStatusCode,
+          pollGameId: result.data?.game?.gameId ?? current.pollGameId,
+          pollShotSequence: result.data?.game?.shotSequence ?? current.pollShotSequence,
+          pollGameStatus: result.data?.game?.status ?? current.pollGameStatus,
+          pollTurnUserId: result.data?.game?.turnUserId ?? current.pollTurnUserId,
+          pollResponsePreview: compactDebugText(result.okMeta?.responsePreview ?? null, 360) ?? current.pollResponsePreview,
+        }));
+      }
       if (result.data) {
         gameBootstrapDebugRef.current.lastHttpStatus = 'ok';
         gameBootstrapDebugRef.current.lastHttpOutcome = reason;
@@ -1161,13 +1220,10 @@ export default function App() {
     const result = await postGameActionRequest(path, payload, reason);
     if (result.data) {
       setAuthDebug((current) => current ? `${current} • game_action:http_ok:${reason}:${result.okLabel ?? "direct"}` : `game_action:http_ok:${reason}:${result.okLabel ?? "direct"}`);
-      return result.data;
-    }
-
-    if (result.attempts.length) {
+    } else if (result.attempts.length) {
       setAuthDebug((current) => current ? `${current} • game_action:http_failed:${reason}:${result.attempts.join(" | ")}` : `game_action:http_failed:${reason}:${result.attempts.join(" | ")}`);
     }
-    return null;
+    return result;
   };
 
   const startGameOverHttp = async (roomId: string, reason: string, overrideUserId?: string | null) => {
@@ -1175,14 +1231,14 @@ export default function App() {
       roomId,
       userId: overrideUserId ?? state.currentUser.userId,
     }, reason);
-    if (result?.room) setRoom(result.room);
-    if (result?.game) {
-      ensureGameBootstrapSession(gameBootstrapSessionRef.current, roomId, result.game.gameId);
-      currentGameRef.current = result.game;
-      setGame(result.game);
-      completeGameBootstrapSession(gameBootstrapSessionRef.current, roomId, result.game.gameId);
+    if (result.data?.room) setRoom(result.data.room);
+    if (result.data?.game) {
+      ensureGameBootstrapSession(gameBootstrapSessionRef.current, roomId, result.data.game.gameId);
+      currentGameRef.current = result.data.game;
+      setGame(result.data.game);
+      completeGameBootstrapSession(gameBootstrapSessionRef.current, roomId, result.data.game.gameId);
       setScreen("game");
-      return result.game;
+      return result.data.game;
     }
 
     const refreshedRoom = await fetchRoomStateOverHttp(roomId, `${reason}:verify_room_after_start`);
@@ -1201,7 +1257,8 @@ export default function App() {
   };
 
   const shootGameOverHttp = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }, reason: string) => {
-    const previousSeq = game?.roomId === roomId ? game.shotSequence : 0;
+    const activeGame = game?.roomId === roomId ? game : null;
+    const previousSeq = activeGame?.shotSequence ?? 0;
     markShotDispatch(roomId, previousSeq + 1, 'http', reason);
     const payload = {
       roomId,
@@ -1214,13 +1271,24 @@ export default function App() {
       spinX: shot.spinX ?? 0,
       spinY: shot.spinY ?? 0,
     };
+    const requestBodyPreview = compactDebugJson(payload, 420);
 
     console.log("[sinuca-shoot-dispatch]", JSON.stringify({ reason, previousSeq, payload }));
     pushShotPipelineDebug({
       stage: 'http_shoot_dispatch',
       roomId,
-      gameId: game?.roomId === roomId ? game.gameId : null,
+      gameId: activeGame?.gameId ?? null,
       shotSequence: previousSeq,
+      gameStatus: activeGame?.status ?? null,
+      ballInHandUserId: activeGame?.ballInHandUserId ?? null,
+      currentUserId: state.currentUser.userId,
+      turnUserId: activeGame?.turnUserId ?? null,
+      requestPath: '/games/shoot',
+      requestRouteLabel: null,
+      requestBodyPreview,
+      responseStatusCode: null,
+      responseContentType: null,
+      responseBodyPreview: null,
       lastTransport: reason.startsWith('http_fallback') ? 'http_fallback' : 'http_primary',
       httpFallbackAttempted: reason.startsWith('http_fallback') ? true : undefined,
       httpPrimaryAttempted: reason.startsWith('http_primary') ? true : undefined,
@@ -1230,23 +1298,56 @@ export default function App() {
       cueY: shot.cueY ?? null,
       note: reason,
     });
-    let result = await postGameActionOverHttp("/games/shoot", payload, reason);
-    logShotTransport('http_post_result', { roomId, previousSeq, reason, hasGame: Boolean(result?.game), gameStatus: result?.game?.status ?? null, gameShotSequence: result?.game?.shotSequence ?? null });
+    const result = await postGameActionOverHttp("/games/shoot", payload, reason);
+    const responseMeta = result.okMeta ?? null;
+    const responsePreview = compactDebugText(responseMeta?.responsePreview ?? null, 420);
+    logShotTransport('http_post_result', {
+      roomId,
+      previousSeq,
+      reason,
+      okLabel: result.okLabel,
+      responseStatus: responseMeta?.status ?? null,
+      responseContentType: responseMeta?.contentType ?? null,
+      hasGame: Boolean(result.data?.game),
+      responsePreview,
+      gameStatus: result.data?.game?.status ?? null,
+      gameShotSequence: result.data?.game?.shotSequence ?? null,
+    });
     pushShotPipelineDebug({
       stage: 'http_post_result',
       roomId,
-      gameId: result?.game?.gameId ?? (game?.roomId === roomId ? game.gameId : null),
-      shotSequence: result?.game?.shotSequence ?? previousSeq,
-      gameStatus: result?.game?.status ?? null,
+      gameId: result.data?.game?.gameId ?? (activeGame?.gameId ?? null),
+      shotSequence: result.data?.game?.shotSequence ?? previousSeq,
+      gameStatus: result.data?.game?.status ?? activeGame?.status ?? null,
+      ballInHandUserId: result.data?.game?.ballInHandUserId ?? activeGame?.ballInHandUserId ?? null,
+      currentUserId: state.currentUser.userId,
+      turnUserId: result.data?.game?.turnUserId ?? activeGame?.turnUserId ?? null,
+      requestPath: '/games/shoot',
+      requestRouteLabel: result.okLabel ?? null,
+      requestBodyPreview,
+      responseStatusCode: responseMeta?.status ?? null,
+      responseContentType: responseMeta?.contentType ?? null,
+      responseBodyPreview: responsePreview,
       lastTransport: reason.startsWith('http_fallback') ? 'http_fallback' : 'http_primary',
       httpFallbackAttempted: reason.startsWith('http_fallback') ? true : undefined,
       httpPrimaryAttempted: reason.startsWith('http_primary') ? true : undefined,
-      note: result?.game ? 'HTTP devolveu game' : 'HTTP não devolveu game',
-      lastBlockReason: result?.game ? null : 'http_no_game',
+      note: result.data?.game ? 'HTTP devolveu game' : 'HTTP não devolveu game',
+      lastBlockReason: result.data?.game ? null : 'http_no_game',
     });
-    sendShotDebugPing('http_post_result', { roomId, previousSeq, reason, hasGame: Boolean(result?.game), gameStatus: result?.game?.status ?? null, gameShotSequence: result?.game?.shotSequence ?? null });
-    if (result?.game) {
-      return applyIncomingGame('http', result.game, `${reason}:post_result`);
+    sendShotDebugPing('http_post_result', {
+      roomId,
+      previousSeq,
+      reason,
+      okLabel: result.okLabel,
+      responseStatus: responseMeta?.status ?? null,
+      responseContentType: responseMeta?.contentType ?? null,
+      responsePreview,
+      hasGame: Boolean(result.data?.game),
+      gameStatus: result.data?.game?.status ?? null,
+      gameShotSequence: result.data?.game?.shotSequence ?? null,
+    });
+    if (result.data?.game) {
+      return applyIncomingGame('http', result.data.game, `${reason}:post_result`);
     }
 
     const refreshedAfterPost = await fetchGameStateOverHttp(roomId, `${reason}:verify_after_post`, previousSeq);
@@ -1435,6 +1536,21 @@ export default function App() {
       shotSequence: patch.shotSequence !== undefined ? patch.shotSequence : current.shotSequence,
       gameStatus: patch.gameStatus !== undefined ? patch.gameStatus : current.gameStatus,
       ballInHandUserId: patch.ballInHandUserId !== undefined ? patch.ballInHandUserId : current.ballInHandUserId,
+      currentUserId: patch.currentUserId !== undefined ? patch.currentUserId : current.currentUserId,
+      turnUserId: patch.turnUserId !== undefined ? patch.turnUserId : current.turnUserId,
+      requestPath: patch.requestPath !== undefined ? patch.requestPath : current.requestPath,
+      requestRouteLabel: patch.requestRouteLabel !== undefined ? patch.requestRouteLabel : current.requestRouteLabel,
+      requestBodyPreview: patch.requestBodyPreview !== undefined ? patch.requestBodyPreview : current.requestBodyPreview,
+      responseStatusCode: patch.responseStatusCode !== undefined ? patch.responseStatusCode : current.responseStatusCode,
+      responseContentType: patch.responseContentType !== undefined ? patch.responseContentType : current.responseContentType,
+      responseBodyPreview: patch.responseBodyPreview !== undefined ? patch.responseBodyPreview : current.responseBodyPreview,
+      pollRouteLabel: patch.pollRouteLabel !== undefined ? patch.pollRouteLabel : current.pollRouteLabel,
+      pollStatusCode: patch.pollStatusCode !== undefined ? patch.pollStatusCode : current.pollStatusCode,
+      pollGameId: patch.pollGameId !== undefined ? patch.pollGameId : current.pollGameId,
+      pollShotSequence: patch.pollShotSequence !== undefined ? patch.pollShotSequence : current.pollShotSequence,
+      pollGameStatus: patch.pollGameStatus !== undefined ? patch.pollGameStatus : current.pollGameStatus,
+      pollTurnUserId: patch.pollTurnUserId !== undefined ? patch.pollTurnUserId : current.pollTurnUserId,
+      pollResponsePreview: patch.pollResponsePreview !== undefined ? patch.pollResponsePreview : current.pollResponsePreview,
       angle: patch.angle !== undefined ? patch.angle : current.angle,
       power: patch.power !== undefined ? patch.power : current.power,
       cueX: patch.cueX !== undefined ? patch.cueX : current.cueX,
@@ -2454,6 +2570,8 @@ export default function App() {
               shotSequence: game?.roomId === room.roomId ? game.shotSequence : null,
               gameStatus: game?.roomId === room.roomId ? game.status : null,
               ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
+              currentUserId: state.currentUser.userId,
+              turnUserId: game?.roomId === room.roomId ? game.turnUserId : null,
               angle: event.angle ?? null,
               power: event.power ?? null,
               cueX: event.cueX ?? null,
@@ -2467,6 +2585,8 @@ export default function App() {
               shotSequence: game?.roomId === room.roomId ? game.shotSequence : null,
               gameStatus: game?.roomId === room.roomId ? game.status : null,
               ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
+              currentUserId: state.currentUser.userId,
+              turnUserId: game?.roomId === room.roomId ? game.turnUserId : null,
               angle: event.angle ?? null,
               power: event.power ?? null,
               cueX: event.cueX ?? null,
@@ -2507,6 +2627,8 @@ export default function App() {
               shotSequence: game?.roomId === room.roomId ? game.shotSequence : null,
               gameStatus: game?.roomId === room.roomId ? game.status : null,
               ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
+              currentUserId: state.currentUser.userId,
+              turnUserId: game?.roomId === room.roomId ? game.turnUserId : null,
               angle: shot.angle,
               power: shot.power,
               cueX: shot.cueX ?? null,
@@ -2563,6 +2685,8 @@ export default function App() {
                 shotSequence: previousSeq,
                 gameStatus: game?.roomId === room.roomId ? game.status : null,
                 ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
+                currentUserId: state.currentUser.userId,
+                turnUserId: game?.roomId === room.roomId ? game.turnUserId : null,
                 angle: shot.angle,
                 power: shot.power,
                 cueX: shot.cueX ?? null,
@@ -2591,6 +2715,8 @@ export default function App() {
                 gameId: game?.roomId === room.roomId ? game.gameId : null,
                 shotSequence: previousSeq,
                 gameStatus: game?.roomId === room.roomId ? game.status : null,
+                currentUserId: state.currentUser.userId,
+                turnUserId: game?.roomId === room.roomId ? game.turnUserId : null,
                 lastTransport: 'ws',
                 wsAttempted: true,
                 wsDelivered: sentOverSocket,
@@ -2649,6 +2775,8 @@ export default function App() {
                       roomId: room.roomId,
                       gameId: game?.roomId === room.roomId ? game.gameId : null,
                       shotSequence: previousSeq,
+                      currentUserId: state.currentUser.userId,
+                      turnUserId: game?.roomId === room.roomId ? game.turnUserId : null,
                       lastTransport: 'http_fallback',
                       httpFallbackAttempted: true,
                       note: 'fallback HTTP da tacada após WS sem avanço autoritativo',
@@ -2671,6 +2799,8 @@ export default function App() {
                       roomId: room.roomId,
                       gameId: game?.roomId === room.roomId ? game.gameId : null,
                       shotSequence: previousSeq,
+                      currentUserId: state.currentUser.userId,
+                      turnUserId: game?.roomId === room.roomId ? game.turnUserId : null,
                       lastTransport: 'http_verify',
                       note: reason,
                       lastBlockReason: ambiguousAuthoritativeState ? 'ambiguous_authoritative_state' : (stalledSimulating ? 'stalled_simulating' : 'waiting_for_new_shot'),
@@ -2687,6 +2817,8 @@ export default function App() {
                 roomId: room.roomId,
                 gameId: game?.roomId === room.roomId ? game.gameId : null,
                 shotSequence: previousSeq,
+                currentUserId: state.currentUser.userId,
+                turnUserId: game?.roomId === room.roomId ? game.turnUserId : null,
                 lastTransport: 'http_primary',
                 httpPrimaryAttempted: true,
                 note: 'fallback HTTP primário porque WS falhou',
@@ -2701,6 +2833,8 @@ export default function App() {
                   roomId: room.roomId,
                   gameId: game?.roomId === room.roomId ? game.gameId : null,
                   shotSequence: previousSeq,
+                  currentUserId: state.currentUser.userId,
+                  turnUserId: game?.roomId === room.roomId ? game.turnUserId : null,
                   lastTransport: 'http_primary',
                   lastBlockReason: 'no_game_returned',
                   note: 'HTTP respondeu sem game',

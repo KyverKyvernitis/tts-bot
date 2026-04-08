@@ -41,6 +41,21 @@ type ShotPipelineDebugState = {
   shotSequence: number | null;
   gameStatus: string | null;
   ballInHandUserId: string | null;
+  currentUserId: string | null;
+  turnUserId: string | null;
+  requestPath: string | null;
+  requestRouteLabel: string | null;
+  requestBodyPreview: string | null;
+  responseStatusCode: number | null;
+  responseContentType: string | null;
+  responseBodyPreview: string | null;
+  pollRouteLabel: string | null;
+  pollStatusCode: number | null;
+  pollGameId: string | null;
+  pollShotSequence: number | null;
+  pollGameStatus: string | null;
+  pollTurnUserId: string | null;
+  pollResponsePreview: string | null;
   angle: number | null;
   power: number | null;
   cueX: number | null;
@@ -210,10 +225,25 @@ export default function GameScreen({
                 <div><strong>Shot seq</strong><span>{shotPipelineDebug.shotSequence ?? "—"}</span></div>
                 <div><strong>Status</strong><span>{shotPipelineDebug.gameStatus ?? "—"}</span></div>
                 <div><strong>Ball in hand</strong><span>{shotPipelineDebug.ballInHandUserId ?? "—"}</span></div>
+                <div><strong>Usuário atual</strong><span>{shotPipelineDebug.currentUserId ?? "—"}</span></div>
+                <div><strong>Turno</strong><span>{shotPipelineDebug.turnUserId ?? "—"}</span></div>
                 <div><strong>Ângulo</strong><span>{shotPipelineDebug.angle ?? "—"}</span></div>
                 <div><strong>Power</strong><span>{shotPipelineDebug.power ?? "—"}</span></div>
                 <div><strong>Cue X</strong><span>{shotPipelineDebug.cueX ?? "—"}</span></div>
                 <div><strong>Cue Y</strong><span>{shotPipelineDebug.cueY ?? "—"}</span></div>
+                <div><strong>Req. path</strong><span>{shotPipelineDebug.requestPath ?? "—"}</span></div>
+                <div><strong>Req. rota</strong><span>{shotPipelineDebug.requestRouteLabel ?? "—"}</span></div>
+                <div><strong>HTTP status</strong><span>{shotPipelineDebug.responseStatusCode ?? "—"}</span></div>
+                <div><strong>HTTP type</strong><span>{shotPipelineDebug.responseContentType ?? "—"}</span></div>
+                <div><strong>game_get rota</strong><span>{shotPipelineDebug.pollRouteLabel ?? "—"}</span></div>
+                <div><strong>game_get status</strong><span>{shotPipelineDebug.pollStatusCode ?? "—"}</span></div>
+                <div><strong>game_get game</strong><span>{shotPipelineDebug.pollGameId ?? "—"}</span></div>
+                <div><strong>game_get seq</strong><span>{shotPipelineDebug.pollShotSequence ?? "—"}</span></div>
+                <div><strong>game_get turno</strong><span>{shotPipelineDebug.pollTurnUserId ?? "—"}</span></div>
+                <div><strong>game_get estado</strong><span>{shotPipelineDebug.pollGameStatus ?? "—"}</span></div>
+                <div style={fullRowStyle}><strong>Req. body</strong><span>{shotPipelineDebug.requestBodyPreview ?? "—"}</span></div>
+                <div style={fullRowStyle}><strong>HTTP preview</strong><span>{shotPipelineDebug.responseBodyPreview ?? "—"}</span></div>
+                <div style={fullRowStyle}><strong>game_get preview</strong><span>{shotPipelineDebug.pollResponsePreview ?? "—"}</span></div>
                 <div style={fullRowStyle}><strong>Nota</strong><span>{shotPipelineDebug.note ?? "sem nota"}</span></div>
               </div>
             </div>
