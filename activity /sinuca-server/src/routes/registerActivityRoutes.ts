@@ -454,6 +454,45 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     res.json({ game: nextGame.game });
   }
 
+  async function handleUiDebugHttp(req: Request, res: Response) {
+    const session = resolveRequestSession(req);
+    const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
+    const stage = firstString(merged.stage) ?? 'unknown';
+    const roomId = normalizeIntString(merged.roomId);
+    const gameId = firstString(merged.gameId);
+    const reason = firstString(merged.reason);
+    const note = firstString(merged.note);
+    const angle = merged.angle === undefined ? null : Number(merged.angle);
+    const power = merged.power === undefined ? null : Number(merged.power);
+    const cueX = merged.cueX === undefined ? null : Number(merged.cueX);
+    const cueY = merged.cueY === undefined ? null : Number(merged.cueY);
+    const shotSequence = merged.shotSequence === undefined ? null : Number(merged.shotSequence);
+    const gameStatus = firstString(merged.gameStatus);
+    const ballInHandUserId = normalizeIntString(merged.ballInHandUserId);
+    console.log('[sinuca-ui-debug]', JSON.stringify({
+      method: req.method,
+      url: req.url ?? null,
+      session,
+      merged,
+      stage,
+      roomId,
+      gameId,
+      reason,
+      note,
+      angle,
+      power,
+      cueX,
+      cueY,
+      shotSequence,
+      gameStatus,
+      ballInHandUserId,
+      origin: req.headers.origin ?? null,
+      referer: req.headers.referer ?? null,
+      ua: req.headers['user-agent'] ?? null,
+    }));
+    sendNoStoreJson(res, { ok: true, stage, roomId, gameId });
+  }
+
   async function handleBalance(req: Request, res: Response) {
     const session = resolveRequestSession(req);
     const action = firstString(req.body?.action) ?? firstString(req.query?.action);
@@ -500,6 +539,9 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     }
     if (action === BALANCE_ACTIONS.gameShoot) {
       return void handleShootGameHttp(req, res);
+    }
+    if (action === BALANCE_ACTIONS.uiDebug) {
+      return void handleUiDebugHttp(req, res);
     }
     const bodyGuildId = typeof req.body?.guildId === "string" ? req.body.guildId : null;
     const bodyUserId = typeof req.body?.userId === "string" ? req.body.userId : null;
@@ -565,5 +607,6 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
   registerPostOnly(app, GAME_ROUTE_PATHS.start, handleStartGameHttp);
   registerPostOnly(app, GAME_ROUTE_PATHS.aimAction, handleSyncAimHttp);
   registerGetPost(app, GAME_ROUTE_PATHS.shootAction, handleShootGameHttp);
+  registerGetPost(app, GAME_ROUTE_PATHS.debug, handleUiDebugHttp);
   registerGetPost(app, BALANCE_ROUTE_PATHS, handleBalance);
 }

@@ -21,6 +21,7 @@ export const GAME_ROUTE_PATHS = {
   gameByRoom: ["/games/:roomId", "/api/games/:roomId"] as const,
   legacyGameByRoom: ["/game/:roomId", "/api/game/:roomId"] as const,
   start: ["/games/start", "/api/games/start"] as const,
+  debug: ["/games/debug", "/api/games/debug"] as const,
 } as const;
 
 export const BALANCE_ACTIONS = {
@@ -36,6 +37,7 @@ export const BALANCE_ACTIONS = {
   gameStart: "game_start",
   gameAimSync: "game_aim_sync",
   gameShoot: "game_shoot",
+  uiDebug: "ui_debug",
 } as const;
 
 export const ROOM_CLOSE_REASONS = {

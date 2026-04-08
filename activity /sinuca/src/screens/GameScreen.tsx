@@ -11,6 +11,41 @@ type ShotInput = {
   spinY?: number | null;
 };
 
+export type ShotPipelineDebugEvent = {
+  stage: string;
+  roomId?: string | null;
+  angle?: number | null;
+  power?: number | null;
+  cueX?: number | null;
+  cueY?: number | null;
+  reason?: string | null;
+  note?: string | null;
+};
+
+type ShotPipelineDebugState = {
+  lastStage: string;
+  lastStageAt: number | null;
+  lastBlockReason: string | null;
+  lastTransport: string | null;
+  wsAttempted: boolean;
+  wsDelivered: boolean | null;
+  httpFallbackAttempted: boolean;
+  httpPrimaryAttempted: boolean;
+  debugPingCount: number;
+  lastPingStage: string | null;
+  lastPingStatus: string | null;
+  roomId: string | null;
+  gameId: string | null;
+  shotSequence: number | null;
+  gameStatus: string | null;
+  ballInHandUserId: string | null;
+  angle: number | null;
+  power: number | null;
+  cueX: number | null;
+  cueY: number | null;
+  note: string | null;
+};
+
 type AimUpdate = {
   visible: boolean;
   angle: number;
@@ -31,6 +66,8 @@ type GameScreenProps = {
   opponentAim: AimStateSnapshot | null;
   gameLoadingTimedOut: boolean;
   loadingOverlayDebug: string;
+  shotPipelineDebug: ShotPipelineDebugState;
+  onShotDebugEvent: (event: ShotPipelineDebugEvent) => void;
   onAimStateChange: (aim: AimUpdate) => void;
   onExit: () => void;
   onShoot: (shot: ShotInput) => Promise<void>;
@@ -47,6 +84,8 @@ export default function GameScreen({
   opponentAim,
   gameLoadingTimedOut,
   loadingOverlayDebug,
+  shotPipelineDebug,
+  onShotDebugEvent,
   onAimStateChange,
   onExit,
   onShoot,
@@ -54,6 +93,7 @@ export default function GameScreen({
 }: GameScreenProps) {
   if (game) {
     return (
+      <>
       <GameStage
         room={room}
         game={game}
@@ -64,7 +104,35 @@ export default function GameScreen({
         onAimStateChange={onAimStateChange}
         onExit={onExit}
         onShoot={onShoot}
+        onShotDebugEvent={onShotDebugEvent}
       />
+      <section className="debug-card">
+        <h3 className="debug-card__title">Debug da tacada</h3>
+        <div className="debug-card__grid">
+          <div><strong>Última etapa</strong><span>{shotPipelineDebug.lastStage}</span></div>
+          <div><strong>Hora</strong><span>{shotPipelineDebug.lastStageAt ? new Date(shotPipelineDebug.lastStageAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—"}</span></div>
+          <div><strong>Bloqueio</strong><span>{shotPipelineDebug.lastBlockReason ?? "nenhum"}</span></div>
+          <div><strong>Transporte</strong><span>{shotPipelineDebug.lastTransport ?? "nenhum"}</span></div>
+          <div><strong>WS tentou</strong><span>{shotPipelineDebug.wsAttempted ? "sim" : "não"}</span></div>
+          <div><strong>WS entregou</strong><span>{shotPipelineDebug.wsDelivered === null ? "—" : (shotPipelineDebug.wsDelivered ? "sim" : "não")}</span></div>
+          <div><strong>HTTP fallback</strong><span>{shotPipelineDebug.httpFallbackAttempted ? "sim" : "não"}</span></div>
+          <div><strong>HTTP primário</strong><span>{shotPipelineDebug.httpPrimaryAttempted ? "sim" : "não"}</span></div>
+          <div><strong>Ping etapa</strong><span>{shotPipelineDebug.lastPingStage ?? "nenhum"}</span></div>
+          <div><strong>Ping status</strong><span>{shotPipelineDebug.lastPingStatus ?? "nenhum"}</span></div>
+          <div><strong>Qtd. pings</strong><span>{shotPipelineDebug.debugPingCount}</span></div>
+          <div><strong>Room</strong><span>{shotPipelineDebug.roomId ?? "—"}</span></div>
+          <div><strong>Game</strong><span>{shotPipelineDebug.gameId ?? "—"}</span></div>
+          <div><strong>Shot seq</strong><span>{shotPipelineDebug.shotSequence ?? "—"}</span></div>
+          <div><strong>Status</strong><span>{shotPipelineDebug.gameStatus ?? "—"}</span></div>
+          <div><strong>Ball in hand</strong><span>{shotPipelineDebug.ballInHandUserId ?? "—"}</span></div>
+          <div><strong>Ângulo</strong><span>{shotPipelineDebug.angle ?? "—"}</span></div>
+          <div><strong>Power</strong><span>{shotPipelineDebug.power ?? "—"}</span></div>
+          <div><strong>Cue X</strong><span>{shotPipelineDebug.cueX ?? "—"}</span></div>
+          <div><strong>Cue Y</strong><span>{shotPipelineDebug.cueY ?? "—"}</span></div>
+          <div style={{ gridColumn: "1 / -1" }}><strong>Nota</strong><span>{shotPipelineDebug.note ?? "sem nota"}</span></div>
+        </div>
+      </section>
+      </>
     );
   }
 

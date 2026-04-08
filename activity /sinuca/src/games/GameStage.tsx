@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointer
 import type { AimPointerMode, AimStateSnapshot, BallGroup, GameBallSnapshot, GameShotFrame, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
 import tableAsset from "../assets/game/pool-table-public.png";
 import cueAsset from "../assets/game/pool-cue-public.png";
+import type { ShotPipelineDebugEvent } from "../screens/GameScreen";
 
 // ─── Ball sprite imports removed — we use canvas-rendered balls exclusively ────
 // The canvas drawFallbackBall() renders much higher quality balls with
@@ -142,6 +143,7 @@ type Props = {
   exitBusy: boolean;
   opponentAim: AimStateSnapshot | null;
   onShoot: (shot: ShotInput) => Promise<void>;
+  onShotDebugEvent?: (event: ShotPipelineDebugEvent) => void;
   onAimStateChange?: (aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => void;
   onExit: () => void;
 };
@@ -1202,7 +1204,7 @@ function createImage(src: string) {
 
 // ─── Main component ───────────────────────────────────────────────────────
 
-export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, onShoot, onAimStateChange, onExit }: Props) {
+export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, onShoot, onShotDebugEvent, onAimStateChange, onExit }: Props) {
   const [displayBalls, setDisplayBalls] = useState<GameBallSnapshot[]>(game.balls);
   const [power, setPower] = useState(POWER_MIN);
   const [, setAimAngle] = useState(0);
@@ -1781,6 +1783,17 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     emitAimState({ visible: false, angle: aimAngleRef.current, cueX: liveCueBall?.x ?? null, cueY: liveCueBall?.y ?? null, mode: "idle" }, true);
 
     if (!liveCueBall || !canInteractRef.current || shootBusyRef.current) {
+      const reason = !liveCueBall ? 'missing_live_cue_ball' : (!canInteractRef.current ? 'cannot_interact' : 'shoot_busy');
+      onShotDebugEvent?.({
+        stage: 'ui_commit_blocked',
+        roomId: room.roomId,
+        angle: aimAngleRef.current,
+        power: shotPower,
+        cueX: liveCueBall?.x ?? null,
+        cueY: liveCueBall?.y ?? null,
+        reason,
+        note: `commit bloqueado: ${reason}`,
+      });
       animatePowerReturn(shotPower);
       return;
     }
@@ -1809,6 +1822,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       shotSequence: game.shotSequence,
       turnUserId: game.turnUserId,
     }));
+    onShotDebugEvent?.({
+      stage: 'ui_commit',
+      roomId: room.roomId,
+      angle: aimAngleRef.current,
+      power: shotPower,
+      cueX: state.isBallInHand ? liveCueBall.x : null,
+      cueY: state.isBallInHand ? liveCueBall.y : null,
+      note: state.isBallInHand ? 'ui_commit com ball in hand' : 'ui_commit normal',
+    });
 
     if (state.isBallInHand) {
       localCuePlacementRef.current = { x: liveCueBall.x, y: liveCueBall.y };
@@ -1816,6 +1838,16 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
     // Fire the real shot immediately, then let visual/audio reactions happen in parallel.
     void onShootRef.current(payload).catch((error) => {
+      onShotDebugEvent?.({
+        stage: 'ui_commit_error',
+        roomId: room.roomId,
+        angle: payload.angle,
+        power: payload.power,
+        cueX: payload.cueX ?? null,
+        cueY: payload.cueY ?? null,
+        reason: 'ui_commit_error',
+        note: error instanceof Error ? error.message : String(error),
+      });
       console.warn("[sinuca-shot-ui-error]", JSON.stringify({ message: error instanceof Error ? error.message : String(error) }));
     });
     animatePowerReturn(shotPower);

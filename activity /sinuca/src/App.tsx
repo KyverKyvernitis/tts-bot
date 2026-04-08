@@ -91,6 +91,54 @@ function logShotTransport(scope: string, payload: Record<string, unknown>) {
   console.log(`[sinuca-shot-transport-${scope}]`, JSON.stringify(payload));
 }
 
+type ShotPipelineDebugState = {
+  lastStage: string;
+  lastStageAt: number | null;
+  lastBlockReason: string | null;
+  lastTransport: string | null;
+  wsAttempted: boolean;
+  wsDelivered: boolean | null;
+  httpFallbackAttempted: boolean;
+  httpPrimaryAttempted: boolean;
+  debugPingCount: number;
+  lastPingStage: string | null;
+  lastPingStatus: string | null;
+  roomId: string | null;
+  gameId: string | null;
+  shotSequence: number | null;
+  gameStatus: string | null;
+  ballInHandUserId: string | null;
+  angle: number | null;
+  power: number | null;
+  cueX: number | null;
+  cueY: number | null;
+  note: string | null;
+};
+
+const initialShotPipelineDebug: ShotPipelineDebugState = {
+  lastStage: 'idle',
+  lastStageAt: null,
+  lastBlockReason: null,
+  lastTransport: null,
+  wsAttempted: false,
+  wsDelivered: null,
+  httpFallbackAttempted: false,
+  httpPrimaryAttempted: false,
+  debugPingCount: 0,
+  lastPingStage: null,
+  lastPingStatus: null,
+  roomId: null,
+  gameId: null,
+  shotSequence: null,
+  gameStatus: null,
+  ballInHandUserId: null,
+  angle: null,
+  power: null,
+  cueX: null,
+  cueY: null,
+  note: null,
+};
+
 
 export default function App() {
   const [state, setState] = useState<ActivityBootstrap>(initialState);
@@ -118,6 +166,7 @@ export default function App() {
   const [gameStartBusy, setGameStartBusy] = useState(false);
   const [gameShootBusy, setGameShootBusy] = useState(false);
   const [roomExitBusy, setRoomExitBusy] = useState(false);
+  const [shotPipelineDebug, setShotPipelineDebug] = useState<ShotPipelineDebugState>(initialShotPipelineDebug);
   const socketRef = useRef<WebSocket | null>(null);
   const roomEntryMenuRef = useRef<HTMLDivElement | null>(null);
   const createEntryMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1167,8 +1216,35 @@ export default function App() {
     };
 
     console.log("[sinuca-shoot-dispatch]", JSON.stringify({ reason, previousSeq, payload }));
+    pushShotPipelineDebug({
+      stage: 'http_shoot_dispatch',
+      roomId,
+      gameId: game?.roomId === roomId ? game.gameId : null,
+      shotSequence: previousSeq,
+      lastTransport: reason.startsWith('http_fallback') ? 'http_fallback' : 'http_primary',
+      httpFallbackAttempted: reason.startsWith('http_fallback') ? true : undefined,
+      httpPrimaryAttempted: reason.startsWith('http_primary') ? true : undefined,
+      angle: shot.angle,
+      power: shot.power,
+      cueX: shot.cueX ?? null,
+      cueY: shot.cueY ?? null,
+      note: reason,
+    });
     let result = await postGameActionOverHttp("/games/shoot", payload, reason);
     logShotTransport('http_post_result', { roomId, previousSeq, reason, hasGame: Boolean(result?.game), gameStatus: result?.game?.status ?? null, gameShotSequence: result?.game?.shotSequence ?? null });
+    pushShotPipelineDebug({
+      stage: 'http_post_result',
+      roomId,
+      gameId: result?.game?.gameId ?? (game?.roomId === roomId ? game.gameId : null),
+      shotSequence: result?.game?.shotSequence ?? previousSeq,
+      gameStatus: result?.game?.status ?? null,
+      lastTransport: reason.startsWith('http_fallback') ? 'http_fallback' : 'http_primary',
+      httpFallbackAttempted: reason.startsWith('http_fallback') ? true : undefined,
+      httpPrimaryAttempted: reason.startsWith('http_primary') ? true : undefined,
+      note: result?.game ? 'HTTP devolveu game' : 'HTTP não devolveu game',
+      lastBlockReason: result?.game ? null : 'http_no_game',
+    });
+    sendShotDebugPing('http_post_result', { roomId, previousSeq, reason, hasGame: Boolean(result?.game), gameStatus: result?.game?.status ?? null, gameShotSequence: result?.game?.shotSequence ?? null });
     if (result?.game) {
       return applyIncomingGame('http', result.game, `${reason}:post_result`);
     }
@@ -1179,6 +1255,16 @@ export default function App() {
     }
 
     console.warn("[sinuca-shoot-missing]", JSON.stringify({ roomId, previousSeq, reason }));
+    pushShotPipelineDebug({
+      stage: 'http_missing',
+      roomId,
+      gameId: game?.roomId === roomId ? game.gameId : null,
+      shotSequence: previousSeq,
+      lastTransport: reason.startsWith('http_fallback') ? 'http_fallback' : 'http_primary',
+      lastBlockReason: 'http_missing',
+      note: 'A tacada não voltou do HTTP nem avançou no snapshot',
+    });
+    sendShotDebugPing('http_missing', { roomId, previousSeq, reason });
     clearShotDispatch(roomId, 'http_missing');
     setErrorMessage("A tacada não chegou ao servidor.");
     return null;
@@ -1327,6 +1413,65 @@ export default function App() {
       setErrorMessage("o servidor da activity não está disponível agora");
     }
     return delivered;
+  };
+
+  const pushShotPipelineDebug = (patch: Partial<ShotPipelineDebugState> & { stage: string }) => {
+    const now = Date.now();
+    setShotPipelineDebug((current) => ({
+      ...current,
+      lastStage: patch.stage,
+      lastStageAt: now,
+      lastBlockReason: patch.lastBlockReason !== undefined ? patch.lastBlockReason : current.lastBlockReason,
+      lastTransport: patch.lastTransport !== undefined ? patch.lastTransport : current.lastTransport,
+      wsAttempted: patch.wsAttempted !== undefined ? patch.wsAttempted : current.wsAttempted,
+      wsDelivered: patch.wsDelivered !== undefined ? patch.wsDelivered : current.wsDelivered,
+      httpFallbackAttempted: patch.httpFallbackAttempted !== undefined ? patch.httpFallbackAttempted : current.httpFallbackAttempted,
+      httpPrimaryAttempted: patch.httpPrimaryAttempted !== undefined ? patch.httpPrimaryAttempted : current.httpPrimaryAttempted,
+      debugPingCount: current.debugPingCount,
+      lastPingStage: patch.lastPingStage !== undefined ? patch.lastPingStage : current.lastPingStage,
+      lastPingStatus: patch.lastPingStatus !== undefined ? patch.lastPingStatus : current.lastPingStatus,
+      roomId: patch.roomId !== undefined ? patch.roomId : current.roomId,
+      gameId: patch.gameId !== undefined ? patch.gameId : current.gameId,
+      shotSequence: patch.shotSequence !== undefined ? patch.shotSequence : current.shotSequence,
+      gameStatus: patch.gameStatus !== undefined ? patch.gameStatus : current.gameStatus,
+      ballInHandUserId: patch.ballInHandUserId !== undefined ? patch.ballInHandUserId : current.ballInHandUserId,
+      angle: patch.angle !== undefined ? patch.angle : current.angle,
+      power: patch.power !== undefined ? patch.power : current.power,
+      cueX: patch.cueX !== undefined ? patch.cueX : current.cueX,
+      cueY: patch.cueY !== undefined ? patch.cueY : current.cueY,
+      note: patch.note !== undefined ? patch.note : current.note,
+    }));
+  };
+
+  const sendShotDebugPing = (stage: string, payload: Record<string, unknown>) => {
+    const roomId = typeof payload.roomId === 'string' ? payload.roomId : null;
+    const debugPayload = {
+      stage,
+      roomId,
+      gameId: typeof payload.gameId === 'string' ? payload.gameId : null,
+      userId: state.currentUser.userId,
+      screen,
+      ...payload,
+    };
+    void postGameActionRequest('/games/debug', debugPayload, `shot_debug_${stage}`).then((result) => {
+      const status = result.data ? `ok:${result.okLabel ?? 'direct'}` : `failed:${result.attempts[0] ?? 'no_route'}`;
+      setShotPipelineDebug((current) => ({
+        ...current,
+        debugPingCount: current.debugPingCount + 1,
+        lastPingStage: stage,
+        lastPingStatus: status,
+      }));
+      logShotTransport('debug_ping', { stage, roomId, status });
+    }).catch((error) => {
+      const status = `exception:${error instanceof Error ? error.message : 'unknown'}`;
+      setShotPipelineDebug((current) => ({
+        ...current,
+        debugPingCount: current.debugPingCount + 1,
+        lastPingStage: stage,
+        lastPingStatus: status,
+      }));
+      logShotTransport('debug_ping', { stage, roomId, status });
+    });
   };
 
   useEffect(() => {
@@ -2300,6 +2445,36 @@ export default function App() {
           opponentAim={remoteAim && remoteAim.roomId === room.roomId ? remoteAim : null}
           gameLoadingTimedOut={gameLoadingTimedOut}
           loadingOverlayDebug={loadingOverlayDebug}
+          shotPipelineDebug={shotPipelineDebug}
+          onShotDebugEvent={(event) => {
+            pushShotPipelineDebug({
+              stage: event.stage,
+              roomId: event.roomId ?? room.roomId,
+              gameId: game?.roomId === room.roomId ? game.gameId : null,
+              shotSequence: game?.roomId === room.roomId ? game.shotSequence : null,
+              gameStatus: game?.roomId === room.roomId ? game.status : null,
+              ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
+              angle: event.angle ?? null,
+              power: event.power ?? null,
+              cueX: event.cueX ?? null,
+              cueY: event.cueY ?? null,
+              note: event.note ?? null,
+              lastBlockReason: event.reason ?? undefined,
+            });
+            sendShotDebugPing(event.stage, {
+              roomId: event.roomId ?? room.roomId,
+              gameId: game?.roomId === room.roomId ? game.gameId : null,
+              shotSequence: game?.roomId === room.roomId ? game.shotSequence : null,
+              gameStatus: game?.roomId === room.roomId ? game.status : null,
+              ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
+              angle: event.angle ?? null,
+              power: event.power ?? null,
+              cueX: event.cueX ?? null,
+              cueY: event.cueY ?? null,
+              reason: event.reason ?? null,
+              note: event.note ?? null,
+            });
+          }}
           onAimStateChange={(aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => {
             if (!room) return;
             const deliveredOverSocket = sendMessage({
@@ -2325,7 +2500,40 @@ export default function App() {
           onShoot={async (shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }) => {
             if (!room) return;
             const existingDispatch = shotDispatchRef.current;
+            pushShotPipelineDebug({
+              stage: 'on_shoot_entered',
+              roomId: room.roomId,
+              gameId: game?.roomId === room.roomId ? game.gameId : null,
+              shotSequence: game?.roomId === room.roomId ? game.shotSequence : null,
+              gameStatus: game?.roomId === room.roomId ? game.status : null,
+              ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
+              angle: shot.angle,
+              power: shot.power,
+              cueX: shot.cueX ?? null,
+              cueY: shot.cueY ?? null,
+              note: 'onShoot entrou',
+              lastBlockReason: null,
+            });
+            sendShotDebugPing('on_shoot_entered', {
+              roomId: room.roomId,
+              gameId: game?.roomId === room.roomId ? game.gameId : null,
+              shotSequence: game?.roomId === room.roomId ? game.shotSequence : null,
+              gameStatus: game?.roomId === room.roomId ? game.status : null,
+              ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
+              angle: shot.angle,
+              power: shot.power,
+              cueX: shot.cueX ?? null,
+              cueY: shot.cueY ?? null,
+            });
             if (gameShootBusyRef.current || (existingDispatch.roomId === room.roomId && performance.now() - existingDispatch.startedAt < 1500)) {
+              pushShotPipelineDebug({
+                stage: 'shot_dispatch_locked',
+                roomId: room.roomId,
+                lastTransport: existingDispatch.transport,
+                lastBlockReason: 'shot_dispatch_locked',
+                note: existingDispatch.transport ? `transport=${existingDispatch.transport}` : 'dispatch ainda travado',
+              });
+              sendShotDebugPing('shot_dispatch_locked', { roomId: room.roomId, reason: 'shot_dispatch_locked', transport: existingDispatch.transport });
               console.warn("[sinuca-shoot-ui]", JSON.stringify({ roomId: room.roomId, reason: "shot_dispatch_locked", transport: existingDispatch.transport }));
               return;
             }
@@ -2348,6 +2556,20 @@ export default function App() {
                 gameStatus: game?.roomId === room.roomId ? game.status : null,
                 ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
               });
+              pushShotPipelineDebug({
+                stage: 'ui_dispatch',
+                roomId: room.roomId,
+                gameId: game?.roomId === room.roomId ? game.gameId : null,
+                shotSequence: previousSeq,
+                gameStatus: game?.roomId === room.roomId ? game.status : null,
+                ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
+                angle: shot.angle,
+                power: shot.power,
+                cueX: shot.cueX ?? null,
+                cueY: shot.cueY ?? null,
+                note: 'dispatch da tacada iniciado',
+                lastBlockReason: null,
+              });
               const sentOverSocket = sendMessage({
                 type: "take_shot",
                 payload: {
@@ -2363,6 +2585,32 @@ export default function App() {
                 },
               }, { silent: true, trace: 'take_shot_primary' });
 
+              pushShotPipelineDebug({
+                stage: 'ws_send_attempt',
+                roomId: room.roomId,
+                gameId: game?.roomId === room.roomId ? game.gameId : null,
+                shotSequence: previousSeq,
+                gameStatus: game?.roomId === room.roomId ? game.status : null,
+                lastTransport: 'ws',
+                wsAttempted: true,
+                wsDelivered: sentOverSocket,
+                angle: shot.angle,
+                power: shot.power,
+                cueX: shot.cueX ?? null,
+                cueY: shot.cueY ?? null,
+                note: sentOverSocket ? 'WS tentou enviar a tacada' : 'WS falhou ao enviar a tacada',
+                lastBlockReason: sentOverSocket ? null : 'ws_send_failed',
+              });
+              sendShotDebugPing(sentOverSocket ? 'ws_send_attempt' : 'ws_send_failed', {
+                roomId: room.roomId,
+                gameId: game?.roomId === room.roomId ? game.gameId : null,
+                previousSeq,
+                angle: shot.angle,
+                power: shot.power,
+                cueX: shot.cueX ?? null,
+                cueY: shot.cueY ?? null,
+                gameStatus: game?.roomId === room.roomId ? game.status : null,
+              });
               if (sentOverSocket) {
                 markShotDispatch(room.roomId, previousSeq + 1, 'ws', 'ws_primary_shoot');
                 window.setTimeout(() => {
@@ -2396,6 +2644,17 @@ export default function App() {
                   const recovery = simRecoveryRef.current;
                   if (waitingForNewShot && dispatch.roomId === room.roomId && dispatch.expectedShotSequence === previousSeq + 1) {
                     logShotTransport('http_fallback_trigger', { roomId: room.roomId, previousSeq, reason: 'ws_no_authoritative_advance' });
+                    pushShotPipelineDebug({
+                      stage: 'http_fallback_trigger',
+                      roomId: room.roomId,
+                      gameId: game?.roomId === room.roomId ? game.gameId : null,
+                      shotSequence: previousSeq,
+                      lastTransport: 'http_fallback',
+                      httpFallbackAttempted: true,
+                      note: 'fallback HTTP da tacada após WS sem avanço autoritativo',
+                      lastBlockReason: 'ws_no_authoritative_advance',
+                    });
+                    sendShotDebugPing('http_fallback_trigger', { roomId: room.roomId, previousSeq, reason: 'ws_no_authoritative_advance' });
                     void shootGameOverHttp(room.roomId, shot, `http_fallback_after_ws_${previousSeq}`);
                     return;
                   }
@@ -2407,15 +2666,46 @@ export default function App() {
                         ? `verify_after_shot_ambiguous_${previousSeq}`
                         : 'ws_verify_after_shot';
                     logShotTransport('http_verify_trigger', { roomId: room.roomId, previousSeq, sinceSeq, reason });
+                    pushShotPipelineDebug({
+                      stage: 'http_verify_trigger',
+                      roomId: room.roomId,
+                      gameId: game?.roomId === room.roomId ? game.gameId : null,
+                      shotSequence: previousSeq,
+                      lastTransport: 'http_verify',
+                      note: reason,
+                      lastBlockReason: ambiguousAuthoritativeState ? 'ambiguous_authoritative_state' : (stalledSimulating ? 'stalled_simulating' : 'waiting_for_new_shot'),
+                    });
+                    sendShotDebugPing('http_verify_trigger', { roomId: room.roomId, previousSeq, sinceSeq, reason });
                     void fetchGameStateOverHttp(room.roomId, reason, sinceSeq);
                   }
                 }, 320);
                 return;
               }
               logShotTransport('http_primary_trigger', { roomId: room.roomId, previousSeq, reason: 'ws_send_failed' });
+              pushShotPipelineDebug({
+                stage: 'http_primary_trigger',
+                roomId: room.roomId,
+                gameId: game?.roomId === room.roomId ? game.gameId : null,
+                shotSequence: previousSeq,
+                lastTransport: 'http_primary',
+                httpPrimaryAttempted: true,
+                note: 'fallback HTTP primário porque WS falhou',
+                lastBlockReason: 'ws_send_failed',
+              });
+              sendShotDebugPing('http_primary_trigger', { roomId: room.roomId, previousSeq, reason: 'ws_send_failed' });
 
               const applied = await shootGameOverHttp(room.roomId, shot, "http_primary_shot_post");
               if (!applied) {
+                pushShotPipelineDebug({
+                  stage: 'http_primary_no_game',
+                  roomId: room.roomId,
+                  gameId: game?.roomId === room.roomId ? game.gameId : null,
+                  shotSequence: previousSeq,
+                  lastTransport: 'http_primary',
+                  lastBlockReason: 'no_game_returned',
+                  note: 'HTTP respondeu sem game',
+                });
+                sendShotDebugPing('http_primary_no_game', { roomId: room.roomId, previousSeq, reason: 'no_game_returned' });
                 console.warn("[sinuca-shoot-ui]", JSON.stringify({ roomId: room.roomId, reason: "no_game_returned" }));
               }
             } finally {
