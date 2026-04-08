@@ -115,13 +115,13 @@ const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
 const REALTIME_VISUAL_SNAP_DISTANCE = 54;
 const REALTIME_SNAPSHOT_QUEUE_LIMIT = 32;
-const REALTIME_RENDER_DELAY_MS = 168;
-const REALTIME_MAX_EXTRAPOLATION_MS = 4;
+const REALTIME_RENDER_DELAY_MS = 142;
+const REALTIME_MAX_EXTRAPOLATION_MS = 16;
 const PENDING_SHOT_VISUAL_MAX_MS = 1150;
 const PENDING_SHOT_POST_IMPACT_HOLD_MS = 240;
 const SNAPSHOT_RENDER_DEBUG_ENABLED = false;
 const SNAPSHOT_RENDER_DEBUG_LOG_EVERY_MS = 450;
-const POCKET_CAPTURE_DISTANCE = BALL_RADIUS * 1.08;
+const POCKET_CAPTURE_DISTANCE = BALL_RADIUS * 1.2;
 const RAIL_TRAVEL_DURATION_MS = 860;
 const RAIL_SETTLE_DELAY_MS = 110;
 const CUE_RETURN_HOLD_MS = 420;
@@ -556,6 +556,8 @@ type RealtimeSoundCooldownState = {
   lastBallAt: number;
   lastCushionAt: number;
   lastPocketAt: number;
+  movingIds: Set<string>;
+  wallIds: Set<string>;
 };
 
 function emitRealtimeImpactSounds(
@@ -566,19 +568,21 @@ function emitRealtimeImpactSounds(
 ) {
   const previousById = new Map(previousBalls.map((ball) => [ball.id, ball]));
   let newlyPocketed = false;
-  let movingNonCue = 0;
-  let wallTouch = false;
+  const movingIds = new Set<string>();
+  const wallIds = new Set<string>();
 
   for (const ball of nextBalls) {
     const previous = previousById.get(ball.id);
     if (!previous) continue;
-    if (ball.pocketed && !previous.pocketed) newlyPocketed = true;
+    if (ball.pocketed && !previous.pocketed) {
+      newlyPocketed = true;
+      continue;
+    }
+    if (ball.pocketed) continue;
     const moved = Math.hypot(ball.x - previous.x, ball.y - previous.y);
-    if (!ball.pocketed && ball.id !== 'ball-0' && moved > 0.8) movingNonCue += 1;
-    if (!ball.pocketed && moved > 0.5) {
-      if (ball.x <= PLAY_MIN_X + 2.4 || ball.x >= PLAY_MAX_X - 2.4 || ball.y <= PLAY_MIN_Y + 2.4 || ball.y >= PLAY_MAX_Y - 2.4) {
-        wallTouch = true;
-      }
+    if (ball.id !== "ball-0" && moved > 0.82) movingIds.add(ball.id);
+    if (moved > 0.62 && (ball.x <= PLAY_MIN_X + 2.4 || ball.x >= PLAY_MAX_X - 2.4 || ball.y <= PLAY_MIN_Y + 2.4 || ball.y >= PLAY_MAX_Y - 2.4)) {
+      wallIds.add(ball.id);
     }
   }
 
@@ -586,13 +590,20 @@ function emitRealtimeImpactSounds(
     SFX.pocket();
     cooldown.lastPocketAt = now;
   }
-  if (movingNonCue > 0 && now - cooldown.lastBallAt > 72) {
+
+  const newlyMoving = Array.from(movingIds).filter((id) => !cooldown.movingIds.has(id));
+  const newlyWall = Array.from(wallIds).filter((id) => !cooldown.wallIds.has(id));
+
+  if (newlyMoving.length > 0 && now - cooldown.lastBallAt > 105) {
     SFX.ballHit();
     cooldown.lastBallAt = now;
-  } else if (wallTouch && now - cooldown.lastCushionAt > 86 && !newlyPocketed) {
+  } else if (!newlyPocketed && newlyWall.length > 0 && now - cooldown.lastCushionAt > 120) {
     SFX.cushion();
     cooldown.lastCushionAt = now;
   }
+
+  cooldown.movingIds = movingIds;
+  cooldown.wallIds = wallIds;
 }
 
 function framesNearlyMatch(a: GameShotFrame, b: GameShotFrame, tolerance = 0.12) {
@@ -704,31 +715,28 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     const dx = ball.x - current.lastX;
     const dy = ball.y - current.lastY;
     const distance = Math.hypot(dx, dy);
-    const measuredVisualSpeed = distance / elapsedFrames;
-    const moving = distance > 0.0022;
-    const targetAxis = moving ? Math.atan2(dy, dx) - Math.PI / 2 : current.axis;
-    const axisBlend = distance > 0.14 ? 0.5 : distance > 0.03 ? 0.28 : 0.14;
+    const moving = distance > 0.0028;
+    const targetAxis = moving ? Math.atan2(dy, dx) + Math.PI / 2 : current.axis;
+    const axisBlend = distance > 0.12 ? 0.48 : distance > 0.03 ? 0.24 : 0.14;
     current.axis = lerpAngle(current.axis, targetAxis, axisBlend);
 
-    const targetPhaseVelocity = moving
-      ? (distance / (BALL_VISUAL_RADIUS * 1.02 * elapsedFrames))
-      : 0;
-    const phaseBlend = moving ? (distance > 0.1 ? 0.54 : distance > 0.025 ? 0.3 : 0.16) : (current.visualSpeed < 0.02 ? 0.58 : 0.28);
-    current.phaseVelocity = lerp(current.phaseVelocity, targetPhaseVelocity, phaseBlend);
-    current.visualSpeed = lerp(current.visualSpeed, moving ? measuredVisualSpeed : 0, moving ? 0.5 : (current.visualSpeed < 0.02 ? 0.56 : 0.22));
-
-    if (!moving) {
-      current.phaseVelocity *= current.visualSpeed < 0.02 ? 0.42 : 0.74;
-      if (Math.abs(current.phaseVelocity) < 0.0016 && current.visualSpeed < 0.008) {
+    if (moving) {
+      const measuredPhaseVelocity = distance / (BALL_VISUAL_RADIUS * 1.04 * elapsedFrames);
+      current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, distance > 0.1 ? 0.52 : distance > 0.025 ? 0.34 : 0.18);
+      current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.48);
+      current.lastX = ball.x;
+      current.lastY = ball.y;
+    } else {
+      current.phaseVelocity *= current.visualSpeed < 0.02 ? 0.46 : 0.82;
+      current.visualSpeed *= current.visualSpeed < 0.02 ? 0.36 : 0.84;
+      if (Math.abs(current.phaseVelocity) < 0.0014 && current.visualSpeed < 0.008) {
         current.phaseVelocity = 0;
         current.visualSpeed = 0;
       }
     }
 
-    current.phase = normalizePhase(current.phase - current.phaseVelocity * elapsedFrames);
+    current.phase = normalizePhase(current.phase + current.phaseVelocity * elapsedFrames);
     current.labelDepth = Math.cos(current.phase);
-    current.lastX = ball.x;
-    current.lastY = ball.y;
     current.lastSeenAt = now;
   }
 
@@ -752,51 +760,65 @@ function drawStripedWrapBand(
   r: number,
   color: string,
   phase: number,
-  _scale: number,
+  scale: number,
 ) {
-  if (typeof document === 'undefined') return;
-  const size = Math.max(8, Math.ceil(r * 2 + 6));
-  const offscreen = document.createElement('canvas');
-  offscreen.width = size;
-  offscreen.height = size;
-  const off = offscreen.getContext('2d');
-  if (!off) return;
-
-  const image = off.createImageData(size, size);
-  const data = image.data;
-  const rgb = hexToRgb(color);
-  const cosPhase = Math.cos(phase);
-  const sinPhase = Math.sin(phase);
-  const stripeHalfWidth = 0.33;
-  const stripeSoftness = 0.08;
-
-  for (let py = 0; py < size; py += 1) {
-    for (let px = 0; px < size; px += 1) {
-      const sx = (px + 0.5 - size * 0.5) / r;
-      const sy = (py + 0.5 - size * 0.5) / r;
-      const radialSq = sx * sx + sy * sy;
-      if (radialSq > 1) continue;
-      const sz = Math.sqrt(Math.max(0, 1 - radialSq));
-      const rotatedY = sy * cosPhase - sz * sinPhase;
-      const bandDistance = Math.abs(rotatedY);
-      if (bandDistance > stripeHalfWidth + stripeSoftness) continue;
-      const softness = 1 - clamp((bandDistance - stripeHalfWidth) / stripeSoftness, 0, 1);
-      const light = clamp(0.68 + sz * 0.24 - sx * 0.08 + sy * 0.05, 0.3, 1.04);
-      const idx = (py * size + px) * 4;
-      data[idx] = clamp(Math.round(rgb.r * light), 0, 255);
-      data[idx + 1] = clamp(Math.round(rgb.g * light), 0, 255);
-      data[idx + 2] = clamp(Math.round(rgb.b * light), 0, 255);
-      data[idx + 3] = clamp(Math.round(255 * softness), 0, 255);
-    }
-  }
-
-  off.putImageData(image, 0, 0);
+  const innerR = Math.max(1, r - 0.55 * scale);
+  const rowStep = Math.max(0.8, 0.9 * scale);
+  const sampleStep = Math.max(0.7, 0.9 * scale);
+  const bandHalf = 0.34;
+  const cosP = Math.cos(phase);
+  const sinP = Math.sin(phase);
 
   ctx.save();
   ctx.beginPath();
-  ctx.arc(0, 0, Math.max(1, r - 0.45), 0, Math.PI * 2);
+  ctx.arc(0, 0, innerR, 0, Math.PI * 2);
   ctx.clip();
-  ctx.drawImage(offscreen, -size * 0.5, -size * 0.5);
+
+  const stripeGrad = ctx.createLinearGradient(-innerR, 0, innerR, 0);
+  stripeGrad.addColorStop(0, shadeColor(color, -18));
+  stripeGrad.addColorStop(0.22, color);
+  stripeGrad.addColorStop(0.5, shadeColor(color, 10));
+  stripeGrad.addColorStop(0.78, color);
+  stripeGrad.addColorStop(1, shadeColor(color, -20));
+  ctx.fillStyle = stripeGrad;
+
+  for (let py = -innerR; py <= innerR; py += rowStep) {
+    const xSpan = Math.sqrt(Math.max(0, innerR * innerR - py * py));
+    let segmentStart: number | null = null;
+    let lastInsideX = -xSpan;
+    for (let px = -xSpan; px <= xSpan + sampleStep * 0.5; px += sampleStep) {
+      const nx = clamp(px / innerR, -1, 1);
+      const ny = clamp(py / innerR, -1, 1);
+      const nzSq = 1 - nx * nx - ny * ny;
+      const nz = nzSq > 0 ? Math.sqrt(nzSq) : 0;
+      const localY = ny * cosP - nz * sinP;
+      const insideStripe = Math.abs(localY) <= bandHalf;
+      if (insideStripe && segmentStart === null) segmentStart = px;
+      if (insideStripe) lastInsideX = px;
+      const shouldFlush = (!insideStripe && segmentStart !== null) || (segmentStart !== null && px >= xSpan);
+      if (shouldFlush && segmentStart !== null) {
+        const endX = insideStripe ? px : lastInsideX + sampleStep;
+        ctx.fillRect(segmentStart, py - rowStep * 0.54, Math.max(sampleStep, endX - segmentStart), rowStep * 1.08);
+        segmentStart = null;
+      }
+    }
+  }
+
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(0, 0, innerR, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.globalAlpha = 0.22;
+  ctx.strokeStyle = "rgba(18, 24, 36, 0.34)";
+  ctx.lineWidth = Math.max(0.8, 1.05 * scale);
+  const stripeEdge = innerR * (0.34 + 0.08 * Math.abs(Math.cos(phase)));
+  const stripeCenter = -Math.sin(phase) * innerR * 0.36;
+  ctx.beginPath();
+  ctx.ellipse(0, stripeCenter - stripeEdge, innerR * 0.9, innerR * 0.12, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, stripeCenter + stripeEdge, innerR * 0.9, innerR * 0.12, 0, 0, Math.PI * 2);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -1051,23 +1073,76 @@ function drawBall(
   spin: BallSpinState | undefined = undefined,
 ) {
   const r = BALL_VISUAL_RADIUS * scale;
+  const color = ballColor(ball.number);
   const spinPhase = spin?.phase ?? 0;
   const spinAxis = spin?.axis ?? 0;
-  const sprite = getBallSprite(ball.number, spinPhase);
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
-  ctx.rotate(ball.number === 0 ? 0 : spinAxis);
-  ctx.shadowColor = "rgba(0, 0, 0, 0.44)";
-  ctx.shadowBlur = 8 * scale;
-  ctx.shadowOffsetX = 0.8 * scale;
-  ctx.shadowOffsetY = 4 * scale;
 
-  if (sprite) {
-    ctx.drawImage(sprite, -r, -r, r * 2, r * 2);
+  ctx.shadowColor = "rgba(0, 0, 0, 0.48)";
+  ctx.shadowBlur = 9 * scale;
+  ctx.shadowOffsetX = 0.9 * scale;
+  ctx.shadowOffsetY = 4.5 * scale;
+
+  const baseGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r * 1.3);
+  if (ball.number === 0) {
+    baseGrad.addColorStop(0, "#ffffff");
+    baseGrad.addColorStop(0.45, "#e8f0f8");
+    baseGrad.addColorStop(1, "#b0c5da");
+  } else if (ball.number === 8) {
+    baseGrad.addColorStop(0, "#4a5260");
+    baseGrad.addColorStop(0.3, "#1e2330");
+    baseGrad.addColorStop(1, "#050709");
+  } else if (ball.number >= 9) {
+    baseGrad.addColorStop(0, "#ffffff");
+    baseGrad.addColorStop(0.65, "#f4f7fb");
+    baseGrad.addColorStop(1, "#ccd6e2");
   } else {
-    drawBallFaceSprite(ctx, ball.number, r, spinPhase);
+    baseGrad.addColorStop(0, "#fff8d8");
+    baseGrad.addColorStop(0.18, color);
+    baseGrad.addColorStop(1, shadeColor(color, -55));
   }
+
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fillStyle = baseGrad;
+  ctx.fill();
+  ctx.shadowColor = "transparent";
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(0, 0, r - 0.45 * scale, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(0,0,0,0.18)";
+  ctx.lineWidth = 0.9 * scale;
+  ctx.stroke();
+  ctx.restore();
+
+  if (ball.number > 0) {
+    const isStripe = ball.number >= 9;
+    ctx.save();
+    ctx.rotate(spinAxis);
+    if (isStripe) drawStripedWrapBand(ctx, r, color, spinPhase, scale);
+    drawBallLabel(ctx, ball, r, spinPhase, scale, color, isStripe);
+    ctx.restore();
+  }
+
+  const shadowGrad = ctx.createRadialGradient(r * 0.14, r * 0.28, r * 0.1, 0, r * 0.26, r * 1.04);
+  shadowGrad.addColorStop(0, "rgba(10, 12, 18, 0)");
+  shadowGrad.addColorStop(1, "rgba(10, 12, 18, 0.16)");
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fillStyle = shadowGrad;
+  ctx.fill();
+
+  const specGrad = ctx.createRadialGradient(-r * 0.34, -r * 0.38, 0, -r * 0.28, -r * 0.3, r * 0.55);
+  specGrad.addColorStop(0, "rgba(255, 255, 255, 0.72)");
+  specGrad.addColorStop(0.35, "rgba(255, 255, 255, 0.22)");
+  specGrad.addColorStop(1, "rgba(255, 255, 255, 0)");
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fillStyle = specGrad;
+  ctx.fill();
 
   ctx.restore();
 }
@@ -1477,9 +1552,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const snapAnimRef = useRef<{ startedAt: number; power: number; fired: boolean } | null>(null);
   const pendingShotVisualRef = useRef<{ startedAt: number; shotSequenceAtDispatch: number; revisionAtDispatch: number; angle: number; power: number; cueX: number; cueY: number; travelLimit: number; estimatedSpeedPxPerMs: number; impactType: "ball" | "cushion" | null; impactAtMs: number | null; firstImpactPlayed: boolean } | null>(null);
   const queuedSfxRef = useRef<number[]>([]);
-  const playbackSoundStateRef = useRef<{ seq: number; frameIndex: number; lastBallAt: number; lastCushionAt: number }>({ seq: 0, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0 });
+  const playbackSoundStateRef = useRef<{ seq: number; frameIndex: number; lastBallAt: number; lastCushionAt: number; movingIds: Set<string>; wallIds: Set<string> }>({ seq: 0, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0, movingIds: new Set(), wallIds: new Set() });
   const realtimeSoundSnapshotRef = useRef<{ roomId: string | null; revision: number; balls: GameBallSnapshot[] }>({ roomId: game.roomId, revision: game.snapshotRevision ?? 0, balls: game.balls.map((ball) => ({ ...ball })) });
-  const realtimeSoundCooldownRef = useRef<RealtimeSoundCooldownState>({ roomId: game.roomId, lastBallAt: 0, lastCushionAt: 0, lastPocketAt: 0 });
+  const realtimeSoundCooldownRef = useRef<RealtimeSoundCooldownState>({ roomId: game.roomId, lastBallAt: 0, lastCushionAt: 0, lastPocketAt: 0, movingIds: new Set(), wallIds: new Set() });
   const canInteractRef = useRef(false);
   const shootBusyRef = useRef(false);
   const onShootRef = useRef(onShoot);
@@ -1656,8 +1731,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         const progress = computePendingShotProgress(pending, now);
         const authoritativeDistanceFromStart = Math.hypot(incomingCueBall.x - pending.cueX, incomingCueBall.y - pending.cueY);
         const authoritativeDistanceFromExpected = Math.hypot(incomingCueBall.x - progress.expectedCueX, incomingCueBall.y - progress.expectedCueY);
-        const staleBootstrapSnapshot = authoritativeDistanceFromStart <= Math.max(2.4, BALL_RADIUS * 0.26)
-          && authoritativeDistanceFromExpected >= Math.max(18, BALL_RADIUS * 2.15)
+        const staleBootstrapSnapshot = authoritativeDistanceFromStart <= Math.max(4.8, BALL_RADIUS * 0.5)
+          && authoritativeDistanceFromExpected >= Math.max(12, BALL_RADIUS * 1.45)
           && progress.elapsed < PENDING_SHOT_VISUAL_MAX_MS;
         if (staleBootstrapSnapshot) {
           const debugState = snapshotRenderDebugRef.current;
@@ -1713,7 +1788,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     };
     setAnimating(true);
     setAnimatingSeq(game.lastShot.seq);
-    playbackSoundStateRef.current = { seq: game.lastShot.seq, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0 };
+    playbackSoundStateRef.current = { seq: game.lastShot.seq, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0, movingIds: new Set(), wallIds: new Set() };
   }, [animating, game]);
 
   useEffect(() => {
@@ -2480,7 +2555,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const holdSnapshot = queue[0];
           const extrapolationMs = Math.max(0, renderServerTime - holdSnapshot.serverAt);
           const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, Math.min(extrapolationMs, REALTIME_MAX_EXTRAPOLATION_MS));
-          const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 62), 0.08, 0.14);
+          const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 72), 0.09, 0.18);
           const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
@@ -2517,6 +2592,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             balls: latestAuthoritativeSnapshot.balls.map((ball) => ({ ...ball })),
           };
           realtimeSoundCooldownRef.current.roomId = room.roomId;
+          realtimeSoundCooldownRef.current.movingIds = new Set();
+          realtimeSoundCooldownRef.current.wallIds = new Set();
         } else if (latestAuthoritativeSnapshot.revision > soundSnapshot.revision) {
           emitRealtimeImpactSounds(soundSnapshot.balls, latestAuthoritativeSnapshot.balls, now, realtimeSoundCooldownRef.current);
           realtimeSoundSnapshotRef.current = {
@@ -2567,35 +2644,37 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         const soundFrameIndex = Math.min(playback.frames.length - 1, Math.floor(rawIndex));
         const soundState = playbackSoundStateRef.current;
         if (soundState.seq !== playback.seq) {
-          playbackSoundStateRef.current = { seq: playback.seq, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0 };
+          playbackSoundStateRef.current = { seq: playback.seq, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0, movingIds: new Set(), wallIds: new Set() };
         }
         if (soundFrameIndex > playbackSoundStateRef.current.frameIndex) {
           const prevFrame = playback.frames[Math.max(0, soundFrameIndex - 1)]?.balls ?? [];
           const currFrame = playback.frames[soundFrameIndex]?.balls ?? [];
           const prevMap = new Map(prevFrame.map((ball) => [ball.id, ball]));
           let newlyPocketed = false;
-          let movingNonCue = 0;
-          let wallTouch = false;
+          const movingIds = new Set<string>();
+          const wallIds = new Set<string>();
           for (const ball of currFrame) {
             const prevBall = prevMap.get(ball.id);
             if (!prevBall) continue;
             if (ball.pocketed && !prevBall.pocketed) newlyPocketed = true;
             const moved = Math.hypot(ball.x - prevBall.x, ball.y - prevBall.y);
-            if (!ball.pocketed && ball.id !== "ball-0" && moved > 0.8) movingNonCue += 1;
-            if (!ball.pocketed && moved > 0.55) {
-              if (ball.x <= PLAY_MIN_X + 2.4 || ball.x >= PLAY_MAX_X - 2.4 || ball.y <= PLAY_MIN_Y + 2.4 || ball.y >= PLAY_MAX_Y - 2.4) {
-                wallTouch = true;
-              }
+            if (!ball.pocketed && ball.id !== "ball-0" && moved > 0.8) movingIds.add(ball.id);
+            if (!ball.pocketed && moved > 0.6 && (ball.x <= PLAY_MIN_X + 2.4 || ball.x >= PLAY_MAX_X - 2.4 || ball.y <= PLAY_MIN_Y + 2.4 || ball.y >= PLAY_MAX_Y - 2.4)) {
+              wallIds.add(ball.id);
             }
           }
           const stateNow = playbackSoundStateRef.current;
-          if (movingNonCue > 0 && now - stateNow.lastBallAt > 72) {
+          const newlyMoving = Array.from(movingIds).filter((id) => !stateNow.movingIds.has(id));
+          const newlyWall = Array.from(wallIds).filter((id) => !stateNow.wallIds.has(id));
+          if (newlyMoving.length > 0 && now - stateNow.lastBallAt > 105) {
             SFX.ballHit();
             stateNow.lastBallAt = now;
-          } else if (wallTouch && now - stateNow.lastCushionAt > 84 && !newlyPocketed) {
+          } else if (newlyWall.length > 0 && now - stateNow.lastCushionAt > 120 && !newlyPocketed) {
             SFX.cushion();
             stateNow.lastCushionAt = now;
           }
+          stateNow.movingIds = movingIds;
+          stateNow.wallIds = wallIds;
           stateNow.frameIndex = soundFrameIndex;
         }
       }

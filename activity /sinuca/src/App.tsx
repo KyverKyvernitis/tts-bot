@@ -51,9 +51,9 @@ function isResolvedDiscordUserId(value: string | null | undefined): value is str
 }
 
 
-const SHOT_BOOTSTRAP_CUE_EPSILON_PX = 3.6;
-const SHOT_BOOTSTRAP_TOTAL_DRIFT_EPSILON_PX = 14;
-const SHOT_BOOTSTRAP_MAX_DRIFT_EPSILON_PX = 4.2;
+const SHOT_BOOTSTRAP_CUE_EPSILON_PX = 5.4;
+const SHOT_BOOTSTRAP_TOTAL_DRIFT_EPSILON_PX = 18;
+const SHOT_BOOTSTRAP_MAX_DRIFT_EPSILON_PX = 5.8;
 
 function findCueBall(balls: GameBallSnapshot[]) {
   return balls.find((ball) => ball.number === 0) ?? null;
@@ -168,7 +168,7 @@ type LobbyScreen = "home" | "create" | "list" | "room" | "game";
 type TableType = "stake" | "casual";
 
 
-const SNAPSHOT_DEBUG_ENABLED = true;
+const SNAPSHOT_DEBUG_ENABLED = false;
 const SNAPSHOT_DEBUG_LOG_EVERY_MS = 450;
 
 function logSnapshotDebug(scope: string, payload: Record<string, unknown>) {
