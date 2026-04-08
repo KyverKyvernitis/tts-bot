@@ -408,7 +408,7 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     const calledPocket = merged.calledPocket === undefined ? null : Number(merged.calledPocket);
     const spinX = merged.spinX === undefined ? 0 : Number(merged.spinX);
     const spinY = merged.spinY === undefined ? 0 : Number(merged.spinY);
-    console.log("[sinuca-shoot-http]", JSON.stringify({ method: req.method, roomId, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY }));
+    console.log("[sinuca-shoot-http]", JSON.stringify({ method: req.method, session, request: { query: req.query ?? null, body: req.body ?? null }, merged, roomId, userId, angle, power, cueX, cueY, calledPocket, spinX, spinY }));
     if (!roomId || !userId) {
       res.status(400).json({ error: "missing_shot_identifiers" });
       return;

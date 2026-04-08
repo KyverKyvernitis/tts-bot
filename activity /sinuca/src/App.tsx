@@ -87,6 +87,10 @@ function logSnapshotDebug(scope: string, payload: Record<string, unknown>) {
   console.log(`[sinuca-snapshot-${scope}]`, JSON.stringify(payload));
 }
 
+function logShotTransport(scope: string, payload: Record<string, unknown>) {
+  console.log(`[sinuca-shot-transport-${scope}]`, JSON.stringify(payload));
+}
+
 
 export default function App() {
   const [state, setState] = useState<ActivityBootstrap>(initialState);
@@ -1164,6 +1168,7 @@ export default function App() {
 
     console.log("[sinuca-shoot-dispatch]", JSON.stringify({ reason, previousSeq, payload }));
     let result = await postGameActionOverHttp("/games/shoot", payload, reason);
+    logShotTransport('http_post_result', { roomId, previousSeq, reason, hasGame: Boolean(result?.game), gameStatus: result?.game?.status ?? null, gameShotSequence: result?.game?.shotSequence ?? null });
     if (result?.game) {
       return applyIncomingGame('http', result.game, `${reason}:post_result`);
     }
@@ -1303,8 +1308,21 @@ export default function App() {
   }, [bootstrapped, createStake, instanceId, screen, state.context.channelId, state.context.guildId, state.context.mode, state.currentUser.avatarUrl, state.currentUser.displayName, state.currentUser.userId]);
 
 
-  const sendMessage = (payload: object, options?: { silent?: boolean }) => {
-    const delivered = sendSocketMessage(socketRef.current, payload);
+  const sendMessage = (payload: object, options?: { silent?: boolean; trace?: string }) => {
+    const socket = socketRef.current;
+    const payloadType = typeof payload === "object" && payload !== null && "type" in (payload as Record<string, unknown>)
+      ? String((payload as Record<string, unknown>).type ?? "unknown")
+      : "unknown";
+    const delivered = sendSocketMessage(socket, payload);
+    logShotTransport('ws_send', {
+      trace: options?.trace ?? null,
+      delivered,
+      payloadType,
+      readyState: socket?.readyState ?? null,
+      roomId: typeof payload === 'object' && payload !== null && 'payload' in (payload as Record<string, unknown>)
+        ? ((payload as { payload?: Record<string, unknown> }).payload?.roomId ?? null)
+        : null,
+    });
     if (!delivered && !options?.silent) {
       setErrorMessage("o servidor da activity não está disponível agora");
     }
@@ -2315,6 +2333,21 @@ export default function App() {
             setErrorMessage(null);
             try {
               const previousSeq = game?.roomId === room.roomId ? game.shotSequence : 0;
+              logShotTransport('ui_dispatch', {
+                roomId: room.roomId,
+                previousSeq,
+                currentUserId: state.currentUser.userId,
+                gameId: game?.roomId === room.roomId ? game.gameId : null,
+                angle: shot.angle,
+                power: shot.power,
+                cueX: shot.cueX ?? null,
+                cueY: shot.cueY ?? null,
+                calledPocket: shot.calledPocket ?? null,
+                spinX: shot.spinX ?? 0,
+                spinY: shot.spinY ?? 0,
+                gameStatus: game?.roomId === room.roomId ? game.status : null,
+                ballInHandUserId: game?.roomId === room.roomId ? game.ballInHandUserId ?? null : null,
+              });
               const sentOverSocket = sendMessage({
                 type: "take_shot",
                 payload: {
@@ -2328,13 +2361,14 @@ export default function App() {
                   spinX: shot.spinX ?? 0,
                   spinY: shot.spinY ?? 0,
                 },
-              }, { silent: true });
+              }, { silent: true, trace: 'take_shot_primary' });
 
               if (sentOverSocket) {
                 markShotDispatch(room.roomId, previousSeq + 1, 'ws', 'ws_primary_shoot');
                 window.setTimeout(() => {
                   const latestGame = currentGameRef.current;
                   const wsState = wsGameStateRef.current;
+                  const dispatch = shotDispatchRef.current;
                   const waitingForNewShot = !latestGame
                     || latestGame.roomId !== room.roomId
                     || latestGame.shotSequence <= previousSeq;
@@ -2346,8 +2380,25 @@ export default function App() {
                     && latestGame.shotSequence > previousSeq
                     && latestGame.status !== 'simulating'
                     && latestGame.lastShot?.seq !== latestGame.shotSequence;
+                  logShotTransport('post_ws_check', {
+                    roomId: room.roomId,
+                    previousSeq,
+                    latestShotSequence: latestGame?.roomId === room.roomId ? latestGame.shotSequence : null,
+                    latestStatus: latestGame?.roomId === room.roomId ? latestGame.status : null,
+                    wsLastReceivedAt: lastAuthoritativeAt || null,
+                    dispatchRoomId: dispatch.roomId,
+                    dispatchTransport: dispatch.transport,
+                    waitingForNewShot,
+                    stalledSimulating,
+                    ambiguousAuthoritativeState,
+                  });
                   if (!waitingForNewShot && !stalledSimulating && !ambiguousAuthoritativeState) return;
                   const recovery = simRecoveryRef.current;
+                  if (waitingForNewShot && dispatch.roomId === room.roomId && dispatch.expectedShotSequence === previousSeq + 1) {
+                    logShotTransport('http_fallback_trigger', { roomId: room.roomId, previousSeq, reason: 'ws_no_authoritative_advance' });
+                    void shootGameOverHttp(room.roomId, shot, `http_fallback_after_ws_${previousSeq}`);
+                    return;
+                  }
                   if (!recovery.inFlight) {
                     const sinceSeq = latestGame?.roomId === room.roomId ? Math.max(previousSeq, latestGame.shotSequence) : previousSeq;
                     const reason = stalledSimulating
@@ -2355,11 +2406,13 @@ export default function App() {
                       : ambiguousAuthoritativeState
                         ? `verify_after_shot_ambiguous_${previousSeq}`
                         : 'ws_verify_after_shot';
+                    logShotTransport('http_verify_trigger', { roomId: room.roomId, previousSeq, sinceSeq, reason });
                     void fetchGameStateOverHttp(room.roomId, reason, sinceSeq);
                   }
-                }, 420);
+                }, 320);
                 return;
               }
+              logShotTransport('http_primary_trigger', { roomId: room.roomId, previousSeq, reason: 'ws_send_failed' });
 
               const applied = await shootGameOverHttp(room.roomId, shot, "http_primary_shot_post");
               if (!applied) {

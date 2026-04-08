@@ -23,8 +23,15 @@ export function resolveSocketUrl() {
 }
 
 export function sendSocketMessage(socket: WebSocket | null | undefined, payload: object) {
+  const payloadType = typeof payload === "object" && payload !== null && "type" in (payload as Record<string, unknown>)
+    ? String((payload as Record<string, unknown>).type ?? "unknown")
+    : "unknown";
   if (!socket || socket.readyState !== WebSocket.OPEN) {
+    console.warn("[sinuca-ws-send-skipped]", JSON.stringify({ payloadType, readyState: socket?.readyState ?? null }));
     return false;
+  }
+  if (payloadType === "take_shot" || payloadType === "sync_aim" || payloadType === "init_context") {
+    console.log("[sinuca-ws-send]", JSON.stringify({ payloadType, readyState: socket.readyState }));
   }
   socket.send(JSON.stringify(payload));
   return true;

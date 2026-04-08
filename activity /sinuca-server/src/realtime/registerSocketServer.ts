@@ -119,15 +119,24 @@ export function registerSocketServer({ wss, runtime, balanceService, exchangeDis
 
     ws.on("message", async (raw: unknown) => {
       let data: ClientMessage;
+      let rawText = "";
       try {
-        const rawText = typeof raw === "string" ? raw : (raw as { toString?: (encoding?: string) => string })?.toString?.("utf-8") ?? String(raw);
+        rawText = typeof raw === "string" ? raw : (raw as { toString?: (encoding?: string) => string })?.toString?.("utf-8") ?? String(raw);
         data = JSON.parse(rawText) as ClientMessage;
       } catch {
+        console.warn("[sinuca-ws-invalid-payload]", JSON.stringify({ rawPreview: rawText.slice(0, 240) }));
         runtime.send(ws, { type: "error", message: "payload inválido" });
         return;
       }
 
       const activeSession = socketSession.get(ws) ?? session;
+      if (data.type === "take_shot" || data.type === "sync_aim" || data.type === "init_context") {
+        console.log("[sinuca-ws-recv]", JSON.stringify({
+          type: data.type,
+          activeSession,
+          payload: (data as { payload?: unknown }).payload ?? null,
+        }));
+      }
 
       if (data.type === "ping") {
         runtime.send(ws, { type: "pong" });
@@ -331,6 +340,8 @@ export function registerSocketServer({ wss, runtime, balanceService, exchangeDis
       if (data.type === "take_shot") {
         const merged = mergeWithSession(data.payload, activeSession);
         console.log("[sinuca-shoot-ws]", JSON.stringify({
+          activeSession,
+          request: data.payload,
           roomId: merged.roomId,
           userId: merged.userId ?? null,
           angle: Number(merged.angle ?? 0),

@@ -1795,12 +1795,29 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       spinY: 0,
     };
 
+    console.log("[sinuca-shot-ui-commit]", JSON.stringify({
+      shotPower,
+      angle: aimAngleRef.current,
+      cueX: state.isBallInHand ? liveCueBall.x : null,
+      cueY: state.isBallInHand ? liveCueBall.y : null,
+      isBallInHand: state.isBallInHand,
+      needEightCall: state.needEightCall,
+      selectedPocket: state.selectedPocket ?? null,
+      canInteract: canInteractRef.current,
+      shootBusy: shootBusyRef.current,
+      gameStatus: game.status,
+      shotSequence: game.shotSequence,
+      turnUserId: game.turnUserId,
+    }));
+
     if (state.isBallInHand) {
       localCuePlacementRef.current = { x: liveCueBall.x, y: liveCueBall.y };
     }
 
     // Fire the real shot immediately, then let visual/audio reactions happen in parallel.
-    void onShootRef.current(payload).catch(() => {});
+    void onShootRef.current(payload).catch((error) => {
+      console.warn("[sinuca-shot-ui-error]", JSON.stringify({ message: error instanceof Error ? error.message : String(error) }));
+    });
     animatePowerReturn(shotPower);
       };
 
