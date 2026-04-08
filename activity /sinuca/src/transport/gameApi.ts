@@ -70,7 +70,11 @@ export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promi
       }
       const parsed = parseJsonSafely<{ game?: GameSnapshot | null; error?: string }>(raw);
       if (response.ok) {
-        return { data: parsed, attempts, okLabel: variant.label, okMeta: buildTransportMeta(variant.label, variant.url, response, raw) };
+        if (parsed) {
+          return { data: parsed, attempts, okLabel: variant.label, okMeta: buildTransportMeta(variant.label, variant.url, response, raw) };
+        }
+        attempts.push(`${variant.label}:${response.status}:invalid_json_success`);
+        continue;
       }
       attempts.push(`${variant.label}:${response.status}:${(parsed?.error ?? raw.slice(0, 180)) || "empty"}`);
     } catch (error) {
@@ -158,9 +162,19 @@ export async function postGameActionRequest(path: string, payload: Record<string
       console.log("[sinuca-http-action]", JSON.stringify({ path, label: variant.label, url: variant.url, reason, payload }));
       const response = await fetchWithTimeout(variant.url, variant.init, variant.label.startsWith("BALANCE_") ? 3200 : 4200);
       const raw = await response.text();
+      const contentType = response.headers.get('content-type') ?? '';
+      const trimmed = raw.trim();
+      if (trimmed.startsWith('<') || /text\/html/i.test(contentType)) {
+        attempts.push(`${variant.label}:${response.status}:html_response`);
+        continue;
+      }
       const parsed = parseJsonSafely<{ game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string; detail?: string }>(raw);
       if (response.ok) {
-        return { data: parsed, attempts, okLabel: variant.label, okMeta: buildTransportMeta(variant.label, variant.url, response, raw) };
+        if (parsed) {
+          return { data: parsed, attempts, okLabel: variant.label, okMeta: buildTransportMeta(variant.label, variant.url, response, raw) };
+        }
+        attempts.push(`${variant.label}:${response.status}:invalid_json_success`);
+        continue;
       }
       const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
       attempts.push(`${variant.label}:${response.status}:${detail}`);
