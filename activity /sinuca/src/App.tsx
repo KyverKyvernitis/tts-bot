@@ -51,9 +51,9 @@ function isResolvedDiscordUserId(value: string | null | undefined): value is str
 }
 
 
-const SHOT_BOOTSTRAP_CUE_EPSILON_PX = 1.8;
-const SHOT_BOOTSTRAP_TOTAL_DRIFT_EPSILON_PX = 7;
-const SHOT_BOOTSTRAP_MAX_DRIFT_EPSILON_PX = 2.2;
+const SHOT_BOOTSTRAP_CUE_EPSILON_PX = 3.6;
+const SHOT_BOOTSTRAP_TOTAL_DRIFT_EPSILON_PX = 14;
+const SHOT_BOOTSTRAP_MAX_DRIFT_EPSILON_PX = 4.2;
 
 function findCueBall(balls: GameBallSnapshot[]) {
   return balls.find((ball) => ball.number === 0) ?? null;

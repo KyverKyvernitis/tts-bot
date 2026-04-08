@@ -4884,7 +4884,7 @@ button:focus-visible {
 .pool-stage__table-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) 58px;
+  grid-template-columns: 72px minmax(0, 1fr) 72px;
   gap: 10px;
   align-items: center;
 }
@@ -4893,8 +4893,8 @@ button:focus-visible {
 .pool-stage__return-rail {
   align-self: center;
   justify-self: center;
-  width: 54px;
-  min-width: 54px;
+  width: 70px;
+  min-width: 70px;
   height: min(82vh, 500px);
   display: grid;
   place-items: center;
@@ -4908,27 +4908,43 @@ button:focus-visible {
   height: 100%;
 }
 
+.pool-stage__return-intake,
 .pool-stage__return-lane {
   position: absolute;
-  right: 6px;
-  top: 18px;
-  bottom: 28px;
-  border: 3px solid rgba(218, 229, 247, 0.58);
-  border-left: 0;
-  border-radius: 0 18px 18px 0;
+  border-color: rgba(218, 229, 247, 0.64);
   filter: drop-shadow(0 0 6px rgba(255,255,255,0.12));
 }
 
-.pool-stage__return-lane--outer { width: 34px; }
-.pool-stage__return-lane--mid { width: 24px; right: 11px; opacity: 0.92; }
-.pool-stage__return-lane--inner { width: 14px; right: 16px; opacity: 0.86; }
+.pool-stage__return-intake {
+  left: 0;
+  height: 0;
+  border-top: 3px solid rgba(218, 229, 247, 0.64);
+  top: 18px;
+}
+
+.pool-stage__return-intake--outer { width: 24px; }
+.pool-stage__return-intake--mid { width: 20px; top: 23px; opacity: 0.92; }
+.pool-stage__return-intake--inner { width: 16px; top: 28px; opacity: 0.86; }
+
+.pool-stage__return-lane {
+  right: 7px;
+  top: 18px;
+  bottom: 28px;
+  border: 3px solid rgba(218, 229, 247, 0.64);
+  border-left: 0;
+  border-radius: 0 18px 18px 0;
+}
+
+.pool-stage__return-lane--outer { width: 40px; }
+.pool-stage__return-lane--mid { width: 30px; right: 12px; top: 23px; bottom: 33px; opacity: 0.92; }
+.pool-stage__return-lane--inner { width: 20px; right: 17px; top: 28px; bottom: 38px; opacity: 0.86; }
 
 .pool-stage__return-cup {
   position: absolute;
-  left: 8px;
+  left: 10px;
   right: 8px;
   bottom: 8px;
-  height: 22px;
+  height: 24px;
   border-radius: 999px;
   background: linear-gradient(180deg, rgba(16, 26, 48, 0.82), rgba(7, 11, 22, 0.96));
   border: 1px solid rgba(255,255,255,0.08);
@@ -4952,9 +4968,9 @@ button:focus-visible {
 }
 
 .pool-stage__return-ball--travel {
-  top: 22px;
-  left: calc(30px + var(--rail-lane-offset));
-  animation: pool-stage-return-travel 760ms cubic-bezier(0.24, 0.74, 0.24, 1) forwards;
+  top: 16px;
+  left: 8px;
+  animation: pool-stage-return-travel 860ms cubic-bezier(0.2, 0.78, 0.24, 1) forwards;
 }
 
 .pool-stage__return-ball--settled {
@@ -4964,20 +4980,29 @@ button:focus-visible {
 
 @keyframes pool-stage-return-travel {
   0% {
-    top: 22px;
-    left: calc(30px + var(--rail-lane-offset));
+    top: 16px;
+    left: 8px;
+    transform: scale(0.92);
   }
-  60% {
+  18% {
+    top: 16px;
+    left: calc(28px + var(--rail-lane-offset));
+    transform: scale(1);
+  }
+  72% {
     top: calc(100% - 42px);
-    left: calc(30px + var(--rail-lane-offset));
+    left: calc(28px + var(--rail-lane-offset));
+    transform: scale(1);
   }
-  84% {
+  86% {
     top: calc(100% - 24px);
-    left: 14px;
+    left: 16px;
+    transform: scale(0.98);
   }
   100% {
     top: calc(100% - var(--rail-slot-y));
     left: var(--rail-slot-x);
+    transform: scale(1);
   }
 }
 
@@ -5289,7 +5314,7 @@ button:focus-visible {
   }
 
   .pool-stage__table-layout {
-    grid-template-columns: 60px minmax(0, 1fr) 52px;
+    grid-template-columns: 60px minmax(0, 1fr) 64px;
     gap: 10px;
   }
 
@@ -5314,8 +5339,8 @@ button:focus-visible {
   }
 
   .pool-stage__return-rail {
-    width: 50px;
-    min-width: 50px;
+    width: 62px;
+    min-width: 62px;
     height: min(78vh, 430px);
   }
 }
@@ -5396,7 +5421,7 @@ button:focus-visible {
   }
 
  .pool-stage__table-layout {
-    grid-template-columns: 54px minmax(0, 1fr) 46px;
+    grid-template-columns: 54px minmax(0, 1fr) 58px;
     gap: 6px;
   }
 
@@ -5426,8 +5451,8 @@ button:focus-visible {
   }
 
   .pool-stage__return-rail {
-    width: 44px;
-    min-width: 44px;
+    width: 56px;
+    min-width: 56px;
     height: min(72vh, 360px);
   }
 
