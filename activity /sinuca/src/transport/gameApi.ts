@@ -33,10 +33,137 @@ function buildTransportMeta(label: string, url: string, response: Response, raw:
     responsePreview: buildResponsePreview(raw),
   };
 }
+function dedupeVariants<T extends { label: string; url: string; init: RequestInit }>(variants: T[]): T[] {
+  const seen = new Set<string>();
+  const deduped: T[] = [];
+  for (const variant of variants) {
+    const method = (variant.init.method ?? "GET").toUpperCase();
+    const body = typeof variant.init.body === "string" ? variant.init.body : "";
+    const key = `${method}|${variant.url}|${body}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(variant);
+  }
+  return deduped;
+}
+
+function buildApiActionVariants(path: string, payload: Record<string, unknown>) {
+  const query = buildQueryStringFromPayload(payload);
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const baseCandidates = normalizedPath.startsWith("/games/")
+    ? resolveStrictApiCandidates(normalizedPath)
+    : resolveApiCandidates(normalizedPath);
+  const variants: Array<{ label: string; url: string; init: RequestInit }> = [];
+
+  for (const baseUrl of baseCandidates) {
+    variants.push({
+      label: `API_POST_JSON:${baseUrl}`,
+      url: baseUrl,
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(payload),
+      },
+    });
+    variants.push({
+      label: `API_POST_FORM:${baseUrl}`,
+      url: baseUrl,
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        credentials: "same-origin",
+        body: query,
+      },
+    });
+    if (query) {
+      const getUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+      const queryUrl = new URL(getUrl.toString(), window.location.origin);
+      const params = new URLSearchParams(query);
+      params.forEach((value, key) => queryUrl.searchParams.set(key, value));
+      variants.push({
+        label: `API_GET_QUERY:${baseUrl}`,
+        url: queryUrl.toString(),
+        init: {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store",
+        },
+      });
+    }
+  }
+
+  return variants;
+}
+
+function buildLegacyActionVariants(legacyAction: string, payload: Record<string, unknown>) {
+  const query = buildQueryStringFromPayload(payload);
+  const variants: Array<{ label: string; url: string; init: RequestInit }> = [];
+  for (const baseUrl of resolveApiCandidates("/balance")) {
+    const queryUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    queryUrl.searchParams.set("action", legacyAction);
+    const params = new URLSearchParams(query);
+    params.forEach((value, key) => queryUrl.searchParams.set(key, value));
+    variants.push({
+      label: `BALANCE_GET_QUERY:${baseUrl}`,
+      url: queryUrl.toString(),
+      init: {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+      },
+    });
+    variants.push({
+      label: `BALANCE_POST_FORM:${baseUrl}`,
+      url: baseUrl,
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        credentials: "same-origin",
+        body: buildQueryStringFromPayload({ action: legacyAction, ...payload }),
+      },
+    });
+  }
+  return variants;
+}
+
+function resolveActionVariants(path: string, payload: Record<string, unknown>) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const legacyAction = resolveLegacyBalanceAction(normalizedPath);
+  const apiVariants = buildApiActionVariants(normalizedPath, payload);
+  const legacyVariants = legacyAction ? buildLegacyActionVariants(legacyAction, payload) : [];
+
+  if (normalizedPath === "/games/shoot" || normalizedPath === "/games/debug") {
+    return dedupeVariants([...legacyVariants, ...apiVariants]);
+  }
+  if (normalizedPath.startsWith("/games/")) {
+    return dedupeVariants([...apiVariants, ...legacyVariants]);
+  }
+  return dedupeVariants([...apiVariants, ...legacyVariants]);
+}
+
+function resolveActionTimeoutMs(path: string, label: string) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  if (normalizedPath === "/games/shoot") {
+    return label.startsWith("BALANCE_") ? 1200 : 1400;
+  }
+  if (normalizedPath.startsWith("/games/")) {
+    return label.startsWith("BALANCE_") ? 1500 : 1800;
+  }
+  return label.startsWith("BALANCE_") ? 3200 : 4200;
+}
 
 export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promise<HttpTransportResult<{ game?: GameSnapshot | null; error?: string }>> {
   const attempts: string[] = [];
   const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
+
+  for (const baseUrl of resolveApiCandidates('/balance')) {
+    const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    url.searchParams.set('action', 'game_get');
+    url.searchParams.set('roomId', roomId);
+    if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
+    requestVariants.push({ label: `BALANCE_GAME_GET:${baseUrl}`, url: url.toString(), init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' } });
+  }
 
   for (const baseUrl of resolveStrictApiCandidates(`/rooms/${encodeURIComponent(roomId)}/game`)) {
     const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
@@ -50,17 +177,9 @@ export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promi
     requestVariants.push({ label: `STRICT_GAMES:${baseUrl}`, url: url.toString(), init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' } });
   }
 
-  for (const baseUrl of resolveApiCandidates('/balance')) {
-    const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-    url.searchParams.set('action', 'game_get');
-    url.searchParams.set('roomId', roomId);
-    if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
-    requestVariants.push({ label: `BALANCE_GAME_GET:${baseUrl}`, url: url.toString(), init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' } });
-  }
-
-  for (const variant of requestVariants) {
+  for (const variant of dedupeVariants(requestVariants)) {
     try {
-      const response = await fetchWithTimeout(variant.url, variant.init, variant.label.startsWith('BALANCE_') ? 3200 : 3600);
+      const response = await fetchWithTimeout(variant.url, variant.init, variant.label.startsWith('BALANCE_') ? 1200 : 1500);
       const raw = await response.text();
       const contentType = response.headers.get('content-type') ?? '';
       const trimmed = raw.trim();
@@ -87,80 +206,12 @@ export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promi
 
 export async function postGameActionRequest(path: string, payload: Record<string, unknown>, reason: string): Promise<HttpTransportResult<{ game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string; detail?: string }>> {
   const attempts: string[] = [];
-  const query = buildQueryStringFromPayload(payload);
-  const legacyAction = resolveLegacyBalanceAction(path);
-  const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
-
-  for (const baseUrl of resolveApiCandidates(path)) {
-    requestVariants.push({
-      label: `API_POST_JSON:${baseUrl}`,
-      url: baseUrl,
-      init: {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify(payload),
-      },
-    });
-    requestVariants.push({
-      label: `API_POST_FORM:${baseUrl}`,
-      url: baseUrl,
-      init: {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-        credentials: "same-origin",
-        body: query,
-      },
-    });
-    if (query) {
-      const getUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-      const queryUrl = new URL(getUrl.toString(), window.location.origin);
-      const params = new URLSearchParams(query);
-      params.forEach((value, key) => queryUrl.searchParams.set(key, value));
-      requestVariants.push({
-        label: `API_GET_QUERY:${baseUrl}`,
-        url: queryUrl.toString(),
-        init: {
-          method: "GET",
-          credentials: "same-origin",
-          cache: "no-store",
-        },
-      });
-    }
-  }
-
-  if (legacyAction) {
-    for (const baseUrl of resolveApiCandidates("/balance")) {
-      const queryUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-      queryUrl.searchParams.set("action", legacyAction);
-      const params = new URLSearchParams(query);
-      params.forEach((value, key) => queryUrl.searchParams.set(key, value));
-      requestVariants.push({
-        label: `BALANCE_GET_QUERY:${baseUrl}`,
-        url: queryUrl.toString(),
-        init: {
-          method: "GET",
-          credentials: "same-origin",
-          cache: "no-store",
-        },
-      });
-      requestVariants.push({
-        label: `BALANCE_POST_FORM:${baseUrl}`,
-        url: baseUrl,
-        init: {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-          credentials: "same-origin",
-          body: buildQueryStringFromPayload({ action: legacyAction, ...payload }),
-        },
-      });
-    }
-  }
+  const requestVariants = resolveActionVariants(path, payload);
 
   for (const variant of requestVariants) {
     try {
       console.log("[sinuca-http-action]", JSON.stringify({ path, label: variant.label, url: variant.url, reason, payload }));
-      const response = await fetchWithTimeout(variant.url, variant.init, variant.label.startsWith("BALANCE_") ? 3200 : 4200);
+      const response = await fetchWithTimeout(variant.url, variant.init, resolveActionTimeoutMs(path, variant.label));
       const raw = await response.text();
       const contentType = response.headers.get('content-type') ?? '';
       const trimmed = raw.trim();
