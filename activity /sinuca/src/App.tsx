@@ -97,7 +97,9 @@ function isBootstrapSimulatingSnapshot(
 ) {
   if (current.roomId !== incoming.roomId || current.gameId !== incoming.gameId) return false;
   if (incoming.status !== "simulating") return false;
-  if (incoming.shotSequence <= current.shotSequence) return false;
+  const advancingSequence = incoming.shotSequence > current.shotSequence;
+  const sameSequenceBootstrap = incoming.shotSequence === current.shotSequence && current.status === "simulating";
+  if (!advancingSequence && !sameSequenceBootstrap) return false;
 
   const currentCueBall = findCueBall(current.balls);
   const incomingCueBall = findCueBall(incoming.balls);
@@ -116,9 +118,23 @@ function mergeBootstrapSimulatingSnapshot(
   current: GameSnapshot,
   incoming: GameSnapshot,
 ) {
+  const incomingBallMap = new Map(incoming.balls.map((ball) => [ball.id, ball]));
+  const mergedBalls = current.balls.map((ball) => {
+    const incomingBall = incomingBallMap.get(ball.id);
+    if (!incomingBall) return ball;
+    if (incomingBall.pocketed && !ball.pocketed) {
+      return {
+        ...ball,
+        x: incomingBall.x,
+        y: incomingBall.y,
+        pocketed: true,
+      };
+    }
+    return ball;
+  });
   return {
     ...incoming,
-    balls: current.balls,
+    balls: mergedBalls,
     lastShot: incoming.lastShot ?? current.lastShot,
   };
 }
