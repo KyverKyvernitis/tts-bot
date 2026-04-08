@@ -117,8 +117,8 @@ const REALTIME_VISUAL_SNAP_DISTANCE = 54;
 const REALTIME_SNAPSHOT_QUEUE_LIMIT = 24;
 const REALTIME_RENDER_DELAY_MS = 34;
 const REALTIME_MAX_EXTRAPOLATION_MS = 72;
-const PENDING_SHOT_VISUAL_MAX_MS = 240;
-const PENDING_SHOT_POST_IMPACT_HOLD_MS = 84;
+const PENDING_SHOT_VISUAL_MAX_MS = 560;
+const PENDING_SHOT_POST_IMPACT_HOLD_MS = 112;
 const SNAPSHOT_RENDER_DEBUG_ENABLED = true;
 const SNAPSHOT_RENDER_DEBUG_LOG_EVERY_MS = 450;
 
@@ -393,13 +393,13 @@ function interpolateSnapshotBalls(
     const dy = ball.y - prev.y;
     const dist = Math.hypot(dx, dy);
     const isCueBall = ball.number === 0;
-    const softSnapDistance = isCueBall ? REALTIME_VISUAL_SNAP_DISTANCE * 2.4 : REALTIME_VISUAL_SNAP_DISTANCE;
-    const hardSnapDistance = isCueBall ? softSnapDistance * 1.9 : softSnapDistance * 2.25;
+    const softSnapDistance = isCueBall ? REALTIME_VISUAL_SNAP_DISTANCE * 3.1 : REALTIME_VISUAL_SNAP_DISTANCE * 1.28;
+    const hardSnapDistance = isCueBall ? softSnapDistance * 2.35 : softSnapDistance * 2.45;
     if (dist >= hardSnapDistance) return { ...ball };
     const appliedAlpha = dist >= softSnapDistance
-      ? clamp(Math.max(alpha, isCueBall ? 0.46 : 0.4), isCueBall ? 0.46 : 0.4, isCueBall ? 0.8 : 0.72)
+      ? clamp(Math.max(alpha, isCueBall ? 0.28 : 0.24), isCueBall ? 0.28 : 0.24, isCueBall ? 0.68 : 0.6)
       : isCueBall && dist >= REALTIME_VISUAL_SNAP_DISTANCE
-        ? clamp(Math.max(alpha, 0.42), 0.42, 0.82)
+        ? clamp(Math.max(alpha, 0.24), 0.24, 0.64)
         : alpha;
     return {
       ...ball,
@@ -1487,9 +1487,18 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const authoritativeCueBall = game.balls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
     if (!authoritativeCueBall) return;
     const revision = game.snapshotRevision ?? 0;
-    const revisionAdvanced = revision > pending.revisionAtDispatch + 1 || game.shotSequence > pending.shotSequenceAtDispatch;
-    const authoritativeMoved = Math.hypot(authoritativeCueBall.x - pending.cueX, authoritativeCueBall.y - pending.cueY) > 0.75;
-    if (revisionAdvanced || authoritativeMoved) {
+    const shotSequenceAdvanced = game.shotSequence > pending.shotSequenceAtDispatch;
+    const revisionAdvanced = revision > pending.revisionAtDispatch + 1;
+    const authoritativeDistanceFromStart = Math.hypot(authoritativeCueBall.x - pending.cueX, authoritativeCueBall.y - pending.cueY);
+    const travelMs = Math.max(18, pending.impactAtMs ?? Math.max(32, pending.travelLimit / Math.max(0.85, pending.estimatedSpeedPxPerMs)));
+    const expectedProgress = clamp(pendingAge / travelMs, 0, 1);
+    const expectedTravelDistance = pending.travelLimit * (1 - Math.pow(1 - expectedProgress, 2.4));
+    const expectedCueX = pending.cueX + Math.cos(pending.angle) * expectedTravelDistance;
+    const expectedCueY = pending.cueY + Math.sin(pending.angle) * expectedTravelDistance;
+    const authoritativeNearExpected = Math.hypot(authoritativeCueBall.x - expectedCueX, authoritativeCueBall.y - expectedCueY) <= Math.max(14, BALL_RADIUS * 1.4);
+    const authoritativeClearlyStarted = authoritativeDistanceFromStart > Math.max(1.2, BALL_RADIUS * 0.22);
+    const authoritativeMadeMeaningfulProgress = authoritativeDistanceFromStart > Math.max(8, pending.travelLimit * 0.2);
+    if (authoritativeNearExpected || (authoritativeClearlyStarted && (authoritativeMadeMeaningfulProgress || revisionAdvanced || shotSequenceAdvanced))) {
       pendingShotVisualRef.current = null;
     }
   }, [animating, game.balls, game.snapshotRevision, game.shotSequence, game.status]);
@@ -2378,11 +2387,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const pendingShotVisual = pendingShotVisualRef.current;
       if (!animating && pendingShotVisual && drawCueBall) {
         const elapsed = now - pendingShotVisual.startedAt;
-        if (elapsed >= PENDING_SHOT_VISUAL_MAX_MS) {
+        const shouldExpirePending = elapsed >= PENDING_SHOT_VISUAL_MAX_MS && game.status !== "simulating";
+        if (shouldExpirePending) {
           pendingShotVisualRef.current = null;
         } else {
+          const heldElapsed = Math.min(elapsed, PENDING_SHOT_VISUAL_MAX_MS);
           const travelMs = Math.max(18, pendingShotVisual.impactAtMs ?? Math.max(32, pendingShotVisual.travelLimit / Math.max(0.85, pendingShotVisual.estimatedSpeedPxPerMs)));
-          const moveProgress = clamp(elapsed / travelMs, 0, 1);
+          const moveProgress = clamp(heldElapsed / travelMs, 0, 1);
           const easedMove = 1 - Math.pow(1 - moveProgress, 2.4);
           const travelDistance = pendingShotVisual.travelLimit * easedMove;
           const optimisticCue = {
@@ -2393,10 +2404,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           };
           drawBalls = drawBalls.map((ball) => (ball.number === 0 ? optimisticCue : ball));
           drawCueBall = optimisticCue;
-          if (pendingShotVisual.impactType && !pendingShotVisual.firstImpactPlayed && pendingShotVisual.impactAtMs !== null && elapsed >= pendingShotVisual.impactAtMs) {
+          if (pendingShotVisual.impactType && !pendingShotVisual.firstImpactPlayed && pendingShotVisual.impactAtMs !== null && heldElapsed >= pendingShotVisual.impactAtMs) {
             pendingShotVisual.firstImpactPlayed = true;
           }
-          if (moveProgress >= 1 && elapsed >= travelMs + PENDING_SHOT_POST_IMPACT_HOLD_MS) {
+          if (moveProgress >= 1 && heldElapsed >= travelMs + PENDING_SHOT_POST_IMPACT_HOLD_MS && game.status !== "simulating") {
             pendingShotVisualRef.current = null;
           }
         }
