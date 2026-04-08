@@ -114,9 +114,9 @@ const AIM_SYNC_INTERVAL_MS = 22;
 const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
 const REALTIME_VISUAL_SNAP_DISTANCE = 54;
-const REALTIME_SNAPSHOT_QUEUE_LIMIT = 24;
-const REALTIME_RENDER_DELAY_MS = 92;
-const REALTIME_MAX_EXTRAPOLATION_MS = 44;
+const REALTIME_SNAPSHOT_QUEUE_LIMIT = 32;
+const REALTIME_RENDER_DELAY_MS = 128;
+const REALTIME_MAX_EXTRAPOLATION_MS = 18;
 const PENDING_SHOT_VISUAL_MAX_MS = 1150;
 const PENDING_SHOT_POST_IMPACT_HOLD_MS = 240;
 const SNAPSHOT_RENDER_DEBUG_ENABLED = true;
@@ -195,6 +195,24 @@ type RealtimeSnapshotEntry = {
   serverAt: number;
   velocities: Record<string, SnapshotVelocity>;
 };
+
+function drawRoundedBandPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) {
+  const r = clamp(radius, 0, Math.min(width, height) * 0.5);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -393,19 +411,66 @@ function interpolateSnapshotBalls(
     const dy = ball.y - prev.y;
     const dist = Math.hypot(dx, dy);
     const isCueBall = ball.number === 0;
-    const softSnapDistance = isCueBall ? REALTIME_VISUAL_SNAP_DISTANCE * 3.8 : REALTIME_VISUAL_SNAP_DISTANCE * 1.58;
-    const hardSnapDistance = isCueBall ? softSnapDistance * 2.85 : softSnapDistance * 2.9;
+    const softSnapDistance = isCueBall ? REALTIME_VISUAL_SNAP_DISTANCE * 4.2 : REALTIME_VISUAL_SNAP_DISTANCE * 1.9;
+    const hardSnapDistance = isCueBall ? softSnapDistance * 3.1 : softSnapDistance * 3.2;
     if (dist >= hardSnapDistance) return { ...ball };
+    const minAlpha = isCueBall ? 0.12 : 0.1;
+    const maxAlpha = isCueBall ? 0.42 : 0.34;
     const appliedAlpha = dist >= softSnapDistance
-      ? clamp(Math.max(alpha, isCueBall ? 0.16 : 0.14), isCueBall ? 0.16 : 0.14, isCueBall ? 0.46 : 0.38)
+      ? clamp(Math.max(alpha, minAlpha), minAlpha, maxAlpha)
       : isCueBall && dist >= REALTIME_VISUAL_SNAP_DISTANCE
-        ? clamp(Math.max(alpha, 0.14), 0.14, 0.42)
+        ? clamp(Math.max(alpha, 0.11), 0.11, 0.36)
         : alpha;
     return {
       ...ball,
       x: lerp(prev.x, ball.x, appliedAlpha),
       y: lerp(prev.y, ball.y, appliedAlpha),
       pocketed: (appliedAlpha < 0.5 ? prev.pocketed : ball.pocketed),
+    };
+  });
+}
+
+function interpolateSnapshotEntries(
+  fromSnapshot: RealtimeSnapshotEntry,
+  toSnapshot: RealtimeSnapshotEntry,
+  t: number,
+) {
+  const eased = clamp(t, 0, 1);
+  const t2 = eased * eased;
+  const t3 = t2 * eased;
+  const h00 = 2 * t3 - 3 * t2 + 1;
+  const h10 = t3 - 2 * t2 + eased;
+  const h01 = -2 * t3 + 3 * t2;
+  const h11 = t3 - t2;
+  const spanMs = Math.max(1, toSnapshot.serverAt - fromSnapshot.serverAt);
+  const fromMap = new Map(fromSnapshot.balls.map((ball) => [ball.id, ball]));
+
+  return toSnapshot.balls.map((ball) => {
+    const start = fromMap.get(ball.id);
+    if (!start) return { ...ball };
+    const linearX = lerp(start.x, ball.x, eased);
+    const linearY = lerp(start.y, ball.y, eased);
+    const fromVelocity = fromSnapshot.velocities[ball.id] ?? { x: (ball.x - start.x) / spanMs, y: (ball.y - start.y) / spanMs, pocketed: ball.pocketed };
+    const toVelocity = toSnapshot.velocities[ball.id] ?? fromVelocity;
+    const tangent0X = fromVelocity.x * spanMs;
+    const tangent0Y = fromVelocity.y * spanMs;
+    const tangent1X = toVelocity.x * spanMs;
+    const tangent1Y = toVelocity.y * spanMs;
+    let x = h00 * start.x + h10 * tangent0X + h01 * ball.x + h11 * tangent1X;
+    let y = h00 * start.y + h10 * tangent0Y + h01 * ball.y + h11 * tangent1Y;
+    const guardX = Math.abs(ball.x - start.x) * 0.45 + 10;
+    const guardY = Math.abs(ball.y - start.y) * 0.45 + 10;
+    const minX = Math.min(start.x, ball.x) - guardX;
+    const maxX = Math.max(start.x, ball.x) + guardX;
+    const minY = Math.min(start.y, ball.y) - guardY;
+    const maxY = Math.max(start.y, ball.y) + guardY;
+    if (!Number.isFinite(x) || x < minX || x > maxX) x = linearX;
+    if (!Number.isFinite(y) || y < minY || y > maxY) y = linearY;
+    return {
+      ...ball,
+      x,
+      y,
+      pocketed: (eased < 0.5 ? start.pocketed : ball.pocketed),
     };
   });
 }
@@ -568,22 +633,30 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     const dx = ball.x - current.lastX;
     const dy = ball.y - current.lastY;
     const distance = Math.hypot(dx, dy);
-    const targetAxis = distance > 0.01 ? Math.atan2(dy, dx) + Math.PI / 2 : current.axis;
-    current.axis = lerpAngle(current.axis, targetAxis, distance > 0.08 ? 0.5 : 0.18);
+    const measuredVisualSpeed = distance / elapsedFrames;
+    const moving = distance > 0.0035;
+    const targetAxis = moving ? Math.atan2(dy, dx) - Math.PI / 2 : current.axis;
+    const axisBlend = distance > 0.14 ? 0.42 : distance > 0.03 ? 0.24 : 0.12;
+    current.axis = lerpAngle(current.axis, targetAxis, axisBlend);
 
-    if (distance > 0.01) {
-      const measuredPhaseVelocity = distance / (BALL_VISUAL_RADIUS * 1.04 * elapsedFrames);
-      current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, 0.62);
-      current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.56);
-      current.lastX = ball.x;
-      current.lastY = ball.y;
-    } else {
-      current.phaseVelocity *= 0.92;
-      current.visualSpeed *= 0.9;
+    const targetPhaseVelocity = moving
+      ? -(distance / (BALL_VISUAL_RADIUS * 1.02 * elapsedFrames))
+      : 0;
+    const phaseBlend = moving ? (distance > 0.1 ? 0.44 : distance > 0.025 ? 0.26 : 0.14) : (current.visualSpeed < 0.03 ? 0.5 : 0.28);
+    current.phaseVelocity = lerp(current.phaseVelocity, targetPhaseVelocity, phaseBlend);
+    current.visualSpeed = lerp(current.visualSpeed, moving ? measuredVisualSpeed : 0, moving ? 0.42 : (current.visualSpeed < 0.03 ? 0.46 : 0.22));
+
+    if (!moving) {
+      if (Math.abs(current.phaseVelocity) < 0.003 && current.visualSpeed < 0.012) {
+        current.phaseVelocity = 0;
+        current.visualSpeed = 0;
+      }
     }
 
     current.phase = (current.phase + current.phaseVelocity * elapsedFrames) % (Math.PI * 2);
     current.labelDepth = Math.cos(current.phase);
+    current.lastX = ball.x;
+    current.lastY = ball.y;
     current.lastSeenAt = now;
   }
 
@@ -600,61 +673,34 @@ function drawStripedWrapBand(
   scale: number,
 ) {
   const innerR = Math.max(1, r - 0.55 * scale);
-  const rowStep = Math.max(0.8, 0.9 * scale);
-  const sampleStep = Math.max(0.7, 0.9 * scale);
-  const bandHalf = 0.34;
-  const cosP = Math.cos(phase);
-  const sinP = Math.sin(phase);
+  const bandHeight = innerR * 0.72;
+  const bandCenterY = -Math.sin(phase) * innerR * 0.34;
+  const bandSquash = clamp(0.44 + Math.abs(Math.cos(phase)) * 0.56, 0.44, 1);
 
   ctx.save();
   ctx.beginPath();
   ctx.arc(0, 0, innerR, 0, Math.PI * 2);
   ctx.clip();
+
+  ctx.translate(0, bandCenterY);
+  ctx.scale(1, bandSquash);
 
   const stripeGrad = ctx.createLinearGradient(-innerR, 0, innerR, 0);
-  stripeGrad.addColorStop(0, shadeColor(color, -18));
-  stripeGrad.addColorStop(0.22, color);
-  stripeGrad.addColorStop(0.5, shadeColor(color, 10));
-  stripeGrad.addColorStop(0.78, color);
-  stripeGrad.addColorStop(1, shadeColor(color, -20));
+  stripeGrad.addColorStop(0, shadeColor(color, -16));
+  stripeGrad.addColorStop(0.18, color);
+  stripeGrad.addColorStop(0.5, shadeColor(color, 8));
+  stripeGrad.addColorStop(0.82, color);
+  stripeGrad.addColorStop(1, shadeColor(color, -18));
   ctx.fillStyle = stripeGrad;
 
-  for (let py = -innerR; py <= innerR; py += rowStep) {
-    const xSpan = Math.sqrt(Math.max(0, innerR * innerR - py * py));
-    let segmentStart: number | null = null;
-    let lastInsideX = -xSpan;
-    for (let px = -xSpan; px <= xSpan + sampleStep * 0.5; px += sampleStep) {
-      const nx = clamp(px / innerR, -1, 1);
-      const ny = clamp(py / innerR, -1, 1);
-      const nzSq = 1 - nx * nx - ny * ny;
-      const nz = nzSq > 0 ? Math.sqrt(nzSq) : 0;
-      const localY = ny * cosP - nz * sinP;
-      const insideStripe = Math.abs(localY) <= bandHalf;
-      if (insideStripe && segmentStart === null) segmentStart = px;
-      if (insideStripe) lastInsideX = px;
-      const shouldFlush = (!insideStripe && segmentStart !== null) || (segmentStart !== null && px >= xSpan);
-      if (shouldFlush && segmentStart !== null) {
-        const endX = insideStripe ? px : lastInsideX + sampleStep;
-        ctx.fillRect(segmentStart, py - rowStep * 0.54, Math.max(sampleStep, endX - segmentStart), rowStep * 1.08);
-        segmentStart = null;
-      }
-    }
-  }
+  const bandRadius = bandHeight * 0.46;
+  drawRoundedBandPath(ctx, -innerR * 1.06, -bandHeight * 0.5, innerR * 2.12, bandHeight, bandRadius);
+  ctx.fill();
 
-  ctx.restore();
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(0, 0, innerR, 0, Math.PI * 2);
-  ctx.clip();
-  ctx.globalAlpha = 0.28;
-  ctx.strokeStyle = "rgba(18, 24, 36, 0.34)";
-  ctx.lineWidth = Math.max(0.8, 1.05 * scale);
-  const stripeEdge = innerR * (0.34 + 0.08 * Math.abs(Math.cos(phase)));
-  const stripeCenter = -Math.sin(phase) * innerR * 0.36;
-  ctx.beginPath();
-  ctx.ellipse(0, stripeCenter - stripeEdge, innerR * 0.9, innerR * 0.12, 0, 0, Math.PI * 2);
-  ctx.ellipse(0, stripeCenter + stripeEdge, innerR * 0.9, innerR * 0.12, 0, 0, Math.PI * 2);
+  ctx.globalAlpha = 0.18;
+  ctx.strokeStyle = 'rgba(18, 24, 36, 0.52)';
+  ctx.lineWidth = Math.max(0.7, 0.95 * scale);
+  drawRoundedBandPath(ctx, -innerR * 1.02, -bandHeight * 0.48, innerR * 2.04, bandHeight * 0.96, bandRadius);
   ctx.stroke();
   ctx.restore();
 }
@@ -2203,12 +2249,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           let smoothedBalls: GameBallSnapshot[];
           if (rawT <= 1) {
             const eased = clamp(rawT, 0, 1);
-            const smoothStep = eased * eased * (3 - 2 * eased);
-            smoothedBalls = interpolateSnapshotBalls(fromSnapshot.balls, toSnapshot.balls, smoothStep);
+            const hermiteBalls = interpolateSnapshotEntries(fromSnapshot, toSnapshot, eased);
+            const carry = clamp((now - realtimeVisualLastAtRef.current) / 42, 0.16, 0.34);
+            smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, hermiteBalls, carry);
           } else {
             const overshootMs = Math.max(0, renderServerTime - toSnapshot.serverAt);
-            const extrapolated = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, overshootMs);
-            const carry = clamp(0.14 + Math.min(0.16, overshootMs / Math.max(REALTIME_MAX_EXTRAPOLATION_MS, 1)), 0.14, 0.3);
+            const extrapolated = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, Math.min(overshootMs, REALTIME_MAX_EXTRAPOLATION_MS));
+            const carry = clamp(0.1 + Math.min(0.08, overshootMs / Math.max(REALTIME_MAX_EXTRAPOLATION_MS, 1)), 0.1, 0.18);
             smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
           }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
@@ -2225,8 +2272,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         } else if (queue.length === 1) {
           const holdSnapshot = queue[0];
           const extrapolationMs = Math.max(0, renderServerTime - holdSnapshot.serverAt);
-          const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, extrapolationMs);
-          const carry = clamp((now - realtimeVisualLastAtRef.current) / 52, 0.1, 0.24);
+          const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, Math.min(extrapolationMs, REALTIME_MAX_EXTRAPOLATION_MS));
+          const carry = clamp((now - realtimeVisualLastAtRef.current) / 58, 0.08, 0.16);
           const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
