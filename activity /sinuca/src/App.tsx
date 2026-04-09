@@ -38,6 +38,10 @@ import { fetchBalanceRequest } from "./transport/balanceApi";
 import { fetchGameStateRequest, postGameActionRequest } from "./transport/gameApi";
 import { dispatchLeaveBeacon, fetchWithTimeout, resolveApiCandidates } from "./transport/httpClient";
 import { fetchRoomStateRequest, fetchRoomsRequest, postRoomActionRequest } from "./transport/lobbyApi";
+
+const POPUP_DEBT_SOUND_PATH = "/audio/ui/popup_debt.ogg";
+const POPUP_ERROR_SOUND_PATH = "/audio/ui/popup_error.ogg";
+const MATCH_START_SOUND_PATH = "/audio/ui/match_start.ogg";
 import { sendSubscribeRoomMessage } from "./realtime/roomRealtime";
 import { type IncomingMessage, type OAuthExchangeResult } from "./realtime/messages";
 import { resolveSocketUrl, sendSocketMessage } from "./realtime/socketClient";
@@ -167,7 +171,7 @@ type AuthState = "checking" | "ready" | "needs_consent";
 type LobbyScreen = "home" | "create" | "list" | "room" | "game";
 type TableType = "stake" | "casual";
 type ChipGateDialogKind = "bonus" | "debt" | "negative";
-type ChipGateDialogSource = "create" | "start";
+type ChipGateDialogSource = "create" | "join";
 
 type ChipGateDialogState = {
   kind: ChipGateDialogKind;
@@ -328,9 +332,13 @@ export default function App() {
   const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
   const balanceReceiptRef = useRef<number>(0);
   const uiClickAudioRef = useRef<HTMLAudioElement | null>(null);
+  const popupDebtAudioRef = useRef<HTMLAudioElement | null>(null);
+  const popupErrorAudioRef = useRef<HTMLAudioElement | null>(null);
+  const matchStartAudioRef = useRef<HTMLAudioElement | null>(null);
   const lobbyBgmAudioRef = useRef<HTMLAudioElement | null>(null);
   const lobbyBgmFadeTimerRef = useRef<number | null>(null);
   const previousScreenRef = useRef<LobbyScreen>("home");
+  const matchStartSoundKeyRef = useRef<string | null>(null);
   const currentScreenRef = useRef<LobbyScreen>("home");
   const currentGameRef = useRef<GameSnapshot | null>(null);
   const createDraftRoomIdRef = useRef<string | null>(null);
@@ -402,6 +410,33 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const popupDebt = new Audio(POPUP_DEBT_SOUND_PATH);
+    popupDebt.preload = "auto";
+    popupDebt.volume = 0.24;
+    popupDebtAudioRef.current = popupDebt;
+
+    const popupError = new Audio(POPUP_ERROR_SOUND_PATH);
+    popupError.preload = "auto";
+    popupError.volume = 0.22;
+    popupErrorAudioRef.current = popupError;
+
+    const matchStart = new Audio(MATCH_START_SOUND_PATH);
+    matchStart.preload = "auto";
+    matchStart.volume = 0.2;
+    matchStartAudioRef.current = matchStart;
+
+    return () => {
+      popupDebtAudioRef.current = null;
+      popupErrorAudioRef.current = null;
+      matchStartAudioRef.current = null;
+      for (const audio of [popupDebt, popupError, matchStart]) {
+        audio.pause();
+        audio.src = "";
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     const audio = new Audio(lobbyBgmAsset);
     audio.loop = true;
     audio.preload = "auto";
@@ -457,12 +492,39 @@ export default function App() {
     } catch {}
   };
 
+  const playOneShot = (ref: { current: HTMLAudioElement | null }) => {
+    const audio = ref.current;
+    if (!audio) return;
+    try {
+      audio.currentTime = 0;
+      void audio.play().catch(() => undefined);
+    } catch {}
+  };
+
   const handleShellClickCapture = (event: MouseEvent<HTMLElement>) => {
     const target = event.target as HTMLElement | null;
     const button = target?.closest("button") as HTMLButtonElement | null;
     if (!button || button.disabled) return;
     playUiClick();
   };
+
+
+  useEffect(() => {
+    if (!chipGateDialog) return;
+    if (chipGateDialog.kind === "bonus") return;
+    playOneShot(popupDebtAudioRef);
+  }, [chipGateDialog]);
+
+  useEffect(() => {
+    const key = room?.status === "in_game" && room?.roomId ? `${room.roomId}:in_game` : null;
+    if (!key) {
+      matchStartSoundKeyRef.current = null;
+      return;
+    }
+    if (matchStartSoundKeyRef.current === key) return;
+    matchStartSoundKeyRef.current = key;
+    playOneShot(matchStartAudioRef);
+  }, [room?.roomId, room?.status]);
 
   useEffect(() => {
     const previousScreen = previousScreenRef.current;
@@ -625,10 +687,13 @@ export default function App() {
     };
   });
 
-  const showTransientNotice = (message: string) => {
+  const showTransientNotice = (message: string, options?: { tone?: "error" | null }) => {
     if (transientNoticeTimerRef.current) {
       window.clearTimeout(transientNoticeTimerRef.current);
       transientNoticeTimerRef.current = null;
+    }
+    if (options?.tone === "error") {
+      playOneShot(popupErrorAudioRef);
     }
     setTransientNotice(message);
     transientNoticeTimerRef.current = window.setTimeout(() => {
@@ -900,7 +965,7 @@ export default function App() {
       return null;
     }
     if (result?.errorDetail && (shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail) || result.errorCode === "opponent_confirmation_required")) {
-      showTransientNotice(result.errorDetail);
+      showTransientNotice(result.errorDetail, { tone: shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail) ? "error" : null });
     }
     if (result?.data?.room) {
       setRoom(result.data.room);
@@ -912,13 +977,34 @@ export default function App() {
     return null;
   };
 
-  const joinRoomOverHttp = async (roomId: string, reason: string) => {
+  const joinRoomOverHttp = async (roomId: string, reason: string, confirmation?: { confirmBonus?: boolean; confirmDebt?: boolean }) => {
+    const targetRoom = rooms.find((entry) => entry.roomId === roomId) ?? room ?? null;
+    const stake = targetRoom?.tableType === "stake" ? Number(targetRoom?.stakeChips ?? 0) || 0 : 0;
     const result = await postRoomActionOverHttp("/rooms/join", {
       roomId,
       userId: state.currentUser.userId,
       displayName: state.currentUser.displayName,
       avatarUrl: state.currentUser.avatarUrl ?? null,
+      confirmBonus: confirmation?.confirmBonus ?? false,
+      confirmDebt: confirmation?.confirmDebt ?? false,
     }, reason);
+    const dialog = buildChipGateDialog({
+      errorCode: result?.errorCode,
+      errorDetail: result?.errorDetail,
+      errorPayload: result?.errorPayload,
+      source: "join",
+      stake,
+      tableType: targetRoom?.tableType === "stake" ? "stake" : "casual",
+      roomId,
+    });
+    if (dialog) {
+      setChipGateDialog(dialog);
+      return null;
+    }
+    if (result?.errorDetail && (shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail) || result.errorCode === "opponent_confirmation_required" || result.errorCode === "stake_confirmation_required")) {
+      showTransientNotice(result.errorDetail, { tone: shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail) ? "error" : null });
+      return null;
+    }
     if (result?.data?.room) {
       setRoom(result.data.room);
       setScreen("room");
@@ -1520,31 +1606,13 @@ export default function App() {
     return result;
   };
 
-  const startGameOverHttp = async (roomId: string, reason: string, overrideUserId?: string | null, confirmation?: { confirmBonus?: boolean; confirmDebt?: boolean }) => {
-    const activeRoom = room?.roomId === roomId ? room : null;
-    const stake = activeRoom?.tableType === "stake" ? Number(activeRoom?.stakeChips ?? 0) || 0 : 0;
+  const startGameOverHttp = async (roomId: string, reason: string, overrideUserId?: string | null) => {
     const result = await postGameActionOverHttp("/games/start", {
       roomId,
       userId: overrideUserId ?? state.currentUser.userId,
-      confirmBonus: confirmation?.confirmBonus ?? false,
-      confirmDebt: confirmation?.confirmDebt ?? false,
     }, reason);
-    const dialog = buildChipGateDialog({
-      errorCode: result.errorCode,
-      errorDetail: result.errorDetail,
-      errorPayload: result.errorPayload,
-      source: "start",
-      stake,
-      tableType: activeRoom?.tableType === "stake" ? "stake" : "casual",
-      roomId,
-      overrideUserId: overrideUserId ?? null,
-    });
-    if (dialog) {
-      setChipGateDialog(dialog);
-      return null;
-    }
-    if (result.errorDetail && (shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail) || result.errorCode === "opponent_confirmation_required")) {
-      showTransientNotice(result.errorDetail);
+    if (result.errorDetail && (shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail) || result.errorCode === "opponent_confirmation_required" || result.errorCode === "stake_confirmation_required")) {
+      showTransientNotice(result.errorDetail, { tone: shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail) ? "error" : null });
       return null;
     }
     if (result.data?.room) setRoom(result.data.room);
@@ -1585,9 +1653,9 @@ export default function App() {
           tableType: chipGateDialog.tableType,
         }, confirmation);
         if (created) setChipGateDialog(null);
-      } else if (chipGateDialog.source === "start" && chipGateDialog.roomId) {
-        const started = await startGameOverHttp(chipGateDialog.roomId, 'chip_gate_confirm_start', chipGateDialog.overrideUserId, confirmation);
-        if (started) setChipGateDialog(null);
+      } else if (chipGateDialog.source === "join" && chipGateDialog.roomId) {
+        const joined = await joinRoomOverHttp(chipGateDialog.roomId, 'chip_gate_confirm_join', confirmation);
+        if (joined) setChipGateDialog(null);
       }
     } finally {
       setChipGateBusy(false);

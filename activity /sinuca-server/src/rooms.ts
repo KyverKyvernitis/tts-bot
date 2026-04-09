@@ -1,11 +1,23 @@
 import type { WebSocket } from "ws";
 import type { ListRoomsPayload, RoomSnapshot, RoomStatus, TableType } from "./messages.js";
 
+export type StakeGateAcceptanceKind = "ok" | "bonus" | "debt" | "negative";
+
+export interface StakeGateAcceptance {
+  kind: StakeGateAcceptanceKind;
+  stakeChips: number;
+  resultingChips: number;
+  resultingBonusChips: number;
+  bonusToUse: number;
+  acceptedAt: number;
+}
+
 export interface PlayerRef {
   userId: string;
   displayName: string;
   ready: boolean;
   avatarUrl?: string | null;
+  stakeGateAcceptance?: StakeGateAcceptance | null;
 }
 
 export interface RoomRecord {
@@ -93,6 +105,10 @@ export function createRoom(
     if (hostPlayer) {
       hostPlayer.displayName = displayName;
       hostPlayer.avatarUrl = avatarUrl ?? hostPlayer.avatarUrl ?? null;
+      hostPlayer.stakeGateAcceptance = null;
+    }
+    for (const player of existing.players) {
+      player.stakeGateAcceptance = null;
     }
     existing.status = computeStatus(existing);
     return existing;
@@ -108,7 +124,7 @@ export function createRoom(
     stakeChips: tableType === "stake" ? normalizedStake : null,
     hostUserId: userId,
     hostDisplayName: displayName,
-    players: [{ userId, displayName, ready: false, avatarUrl: avatarUrl ?? null }],
+    players: [{ userId, displayName, ready: false, avatarUrl: avatarUrl ?? null, stakeGateAcceptance: null }],
     status: "waiting",
     stakeLabel: tableType === "stake" ? `${normalizedStake} fichas` : "casual",
     createdAt: Date.now(),
@@ -146,7 +162,7 @@ export function addPlayer(roomId: string, userId: string, displayName: string, a
     existing.avatarUrl = avatarUrl ?? existing.avatarUrl ?? null;
   } else {
     if (room.players.length >= 2) return room;
-    room.players.push({ userId, displayName, ready: false, avatarUrl: avatarUrl ?? null });
+    room.players.push({ userId, displayName, ready: false, avatarUrl: avatarUrl ?? null, stakeGateAcceptance: null });
   }
   room.status = computeStatus(room);
   return room;
@@ -195,8 +211,29 @@ export function setRoomStake(roomId: string, hostUserId: string, options?: { tab
     if (player.userId === room.hostUserId) continue;
     player.ready = false;
   }
+  for (const player of room.players) {
+    player.stakeGateAcceptance = null;
+  }
 
   room.status = computeStatus(room);
+  return room;
+}
+
+export function setPlayerStakeGateAcceptance(roomId: string, userId: string, acceptance: StakeGateAcceptance | null): RoomRecord | null {
+  const room = rooms.get(roomId);
+  if (!room) return null;
+  const player = room.players.find((entry) => entry.userId === userId);
+  if (!player) return room;
+  player.stakeGateAcceptance = acceptance;
+  return room;
+}
+
+export function clearAllStakeGateAcceptances(roomId: string): RoomRecord | null {
+  const room = rooms.get(roomId);
+  if (!room) return null;
+  for (const player of room.players) {
+    player.stakeGateAcceptance = null;
+  }
   return room;
 }
 

@@ -6,12 +6,14 @@ import {
   getRoom,
   removePlayer,
   setPlayerReady,
+  setPlayerStakeGateAcceptance,
   setRoomInGame,
   setRoomStake,
   toSnapshot,
   listRooms,
   toggleRematchReady,
   clearRematchReady,
+  type PlayerRef,
 } from "../rooms.js";
 import {
   getInitialRuleSet,
@@ -57,6 +59,34 @@ export interface RegisterActivityRoutesOptions {
 }
 
 export function registerActivityRoutes({ app, runtime, balanceService, exchangeDiscordCode }: RegisterActivityRoutesOptions) {
+
+  function previewReasonToAcceptanceKind(reason: Awaited<ReturnType<typeof balanceService.previewStakeSpend>>["reason"]) {
+    if (reason === "bonus_confirm_required") return "bonus" as const;
+    if (reason === "debt_confirm_required") return "debt" as const;
+    if (reason === "negative_confirm_required") return "negative" as const;
+    return "ok" as const;
+  }
+
+  function applyStakeGateAcceptance(roomId: string, userId: string, requiredChips: number, preview: Awaited<ReturnType<typeof balanceService.previewStakeSpend>>) {
+    setPlayerStakeGateAcceptance(roomId, userId, {
+      kind: previewReasonToAcceptanceKind(preview.reason),
+      stakeChips: requiredChips,
+      resultingChips: preview.resultingChips,
+      resultingBonusChips: preview.resultingBonusChips,
+      bonusToUse: preview.bonusToUse,
+      acceptedAt: Date.now(),
+    });
+  }
+
+  function acceptanceMatchesPreview(player: PlayerRef | undefined, requiredChips: number, preview: Awaited<ReturnType<typeof balanceService.previewStakeSpend>>) {
+    const acceptance = player?.stakeGateAcceptance;
+    if (!acceptance) return false;
+    return acceptance.kind === previewReasonToAcceptanceKind(preview.reason)
+      && acceptance.stakeChips === requiredChips
+      && acceptance.resultingChips === preview.resultingChips
+      && acceptance.resultingBonusChips === preview.resultingBonusChips
+      && acceptance.bonusToUse === preview.bonusToUse;
+  }
 
 
   function buildStakeGateResponse(args: {
@@ -240,12 +270,13 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     const normalizedStake = Number.isFinite(stakeChips) ? Math.max(0, stakeChips) : 0;
     const confirmBonus = booleanish(merged.confirmBonus, false);
     const confirmDebt = booleanish(merged.confirmDebt, false);
+    let createPreview: Awaited<ReturnType<typeof balanceService.previewStakeSpend>> | null = null;
     if (requestedTableType === "stake" && normalizedStake > 0 && guildId) {
-      const preview = await balanceService.previewStakeSpend(guildId, userId, normalizedStake);
-      const confirmSatisfied = preview.reason === "ok"
-        || (preview.reason === "bonus_confirm_required" && confirmBonus)
-        || ((preview.reason === "debt_confirm_required" || preview.reason === "negative_confirm_required") && confirmDebt);
-      if (!preview.canProceed || !confirmSatisfied) {
+      createPreview = await balanceService.previewStakeSpend(guildId, userId, normalizedStake);
+      const confirmSatisfied = createPreview.reason === "ok"
+        || (createPreview.reason === "bonus_confirm_required" && confirmBonus)
+        || ((createPreview.reason === "debt_confirm_required" || createPreview.reason === "negative_confirm_required") && confirmDebt);
+      if (!createPreview.canProceed || !confirmSatisfied) {
         const payload = await buildStakePreviewResponse({ guildId, userId, requiredChips: normalizedStake });
         console.log("[sinuca-create-room-http-rejected]", JSON.stringify({ roomId: null, userId, guildId, reason: payload.error, requiredChips: normalizedStake, currentChips: payload.currentChips, currentBonusChips: payload.currentBonusChips, resultingChips: payload.resultingChips, resultingBonusChips: payload.resultingBonusChips, bonusToUse: payload.bonusToUse }));
         res.status(409).json(payload);
@@ -256,6 +287,9 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
       tableType: requestedTableType,
       stakeChips: Number.isFinite(stakeChips) ? stakeChips : null,
     });
+    if (createPreview && requestedTableType === "stake" && normalizedStake > 0) {
+      applyStakeGateAcceptance(room.roomId, userId, normalizedStake, createPreview);
+    }
     runtime.touchRoomActivity(room.roomId, "http_create_room");
     runtime.broadcastRoom(room.roomId);
     runtime.broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
@@ -269,15 +303,39 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     const userId = normalizeIntString(merged.userId);
     const displayName = firstString(merged.displayName);
     const avatarUrl = firstString(merged.avatarUrl);
-    console.log("[sinuca-join-room-http-request]", JSON.stringify({ session, merged: { roomId, userId, displayName, avatarUrl } }));
+    const confirmBonus = booleanish(merged.confirmBonus, false);
+    const confirmDebt = booleanish(merged.confirmDebt, false);
+    console.log("[sinuca-join-room-http-request]", JSON.stringify({ session, merged: { roomId, userId, displayName, avatarUrl, confirmBonus, confirmDebt } }));
     if (!roomId || !userId || !displayName) {
       res.status(400).json({ error: "missing_join_identifiers" });
       return;
+    }
+    const existingRoom = getRoom(roomId);
+    if (!existingRoom) {
+      res.status(404).json({ error: "room_not_found" });
+      return;
+    }
+    const requiredStake = existingRoom.tableType === "stake" ? Math.max(0, Number(existingRoom.stakeChips ?? 0) || 0) : 0;
+    let joinPreview: Awaited<ReturnType<typeof balanceService.previewStakeSpend>> | null = null;
+    if (requiredStake > 0 && existingRoom.guildId) {
+      joinPreview = await balanceService.previewStakeSpend(existingRoom.guildId, userId, requiredStake);
+      const confirmSatisfied = joinPreview.reason === "ok"
+        || (joinPreview.reason === "bonus_confirm_required" && confirmBonus)
+        || ((joinPreview.reason === "debt_confirm_required" || joinPreview.reason === "negative_confirm_required") && confirmDebt);
+      if (!joinPreview.canProceed || !confirmSatisfied) {
+        const payload = await buildStakePreviewResponse({ guildId: existingRoom.guildId, userId, requiredChips: requiredStake });
+        console.log("[sinuca-join-room-http-rejected]", JSON.stringify({ roomId, userId, guildId: existingRoom.guildId, reason: payload.error, requiredChips: requiredStake, currentChips: payload.currentChips, currentBonusChips: payload.currentBonusChips, resultingChips: payload.resultingChips, resultingBonusChips: payload.resultingBonusChips, bonusToUse: payload.bonusToUse }));
+        res.status(409).json(payload);
+        return;
+      }
     }
     const room = addPlayer(roomId, userId, displayName, avatarUrl ?? null);
     if (!room) {
       res.status(404).json({ error: "room_not_found" });
       return;
+    }
+    if (joinPreview && requiredStake > 0) {
+      applyStakeGateAcceptance(room.roomId, userId, requiredStake, joinPreview);
     }
     runtime.touchRoomActivity(room.roomId, "http_join_room");
     runtime.broadcastRoom(room.roomId);
@@ -483,26 +541,36 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
       return;
     }
     const requiredStake = room.tableType === "stake" ? Math.max(0, Number(room.stakeChips ?? 0) || 0) : 0;
-    const confirmBonus = booleanish(merged.confirmBonus, false);
-    const confirmDebt = booleanish(merged.confirmDebt, false);
     if (requiredStake > 0 && room.guildId) {
       const hostPreview = await balanceService.previewStakeSpend(room.guildId, room.hostUserId, requiredStake);
-      const hostConfirmSatisfied = hostPreview.reason === "ok"
-        || (hostPreview.reason === "bonus_confirm_required" && confirmBonus)
-        || ((hostPreview.reason === "debt_confirm_required" || hostPreview.reason === "negative_confirm_required") && confirmDebt);
-      if (!hostPreview.canProceed || !hostConfirmSatisfied) {
-        const payload = await buildStakePreviewResponse({ guildId: room.guildId, userId: room.hostUserId, requiredChips: requiredStake });
+      const hostPlayer = room.players.find((player) => player.userId === room.hostUserId);
+      const hostAccepted = hostPreview.reason === "ok" || acceptanceMatchesPreview(hostPlayer, requiredStake, hostPreview);
+      if (!hostPreview.canProceed || !hostAccepted) {
+        const payload = !hostPreview.canProceed
+          ? await buildStakePreviewResponse({ guildId: room.guildId, userId: room.hostUserId, requiredChips: requiredStake })
+          : buildStakeGateResponse({
+              error: "stake_confirmation_required",
+              detail: "Confirme suas fichas ao criar ou entrar na sala antes de iniciar.",
+              blockedUserId: room.hostUserId,
+              requiredChips: requiredStake,
+              currentChips: hostPreview.currentChips,
+              currentBonusChips: hostPreview.currentBonusChips,
+              resultingChips: hostPreview.resultingChips,
+              resultingBonusChips: hostPreview.resultingBonusChips,
+              bonusToUse: hostPreview.bonusToUse,
+            });
         console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: payload.error, requiredStake, currentChips: payload.currentChips, currentBonusChips: payload.currentBonusChips, resultingChips: payload.resultingChips, bonusToUse: payload.bonusToUse }));
         res.status(409).json(payload);
         return;
       }
       const opponentPreview = await balanceService.previewStakeSpend(room.guildId, opponent.userId, requiredStake);
-      if (!opponentPreview.canProceed || opponentPreview.reason !== "ok") {
+      const opponentAccepted = opponentPreview.reason === "ok" || acceptanceMatchesPreview(opponent, requiredStake, opponentPreview);
+      if (!opponentPreview.canProceed || !opponentAccepted) {
         const payload = !opponentPreview.canProceed
           ? await buildStakePreviewResponse({ guildId: room.guildId, userId: opponent.userId, requiredChips: requiredStake })
           : buildStakeGateResponse({
               error: "opponent_confirmation_required",
-              detail: "O outro jogador precisa confirmar saldo antes de continuar",
+              detail: "O outro jogador precisa confirmar as fichas ao entrar na sala antes de iniciar.",
               blockedUserId: opponent.userId,
               requiredChips: requiredStake,
               currentChips: opponentPreview.currentChips,
