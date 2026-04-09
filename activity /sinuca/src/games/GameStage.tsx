@@ -714,10 +714,26 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     const elapsedFrames = Math.max(1, elapsedMs / (1000 / 60));
     const dx = ball.x - current.lastX;
     const dy = ball.y - current.lastY;
-    const distance = Math.hypot(dx, dy);
+    const rawDistance = Math.hypot(dx, dy);
+
+    // Teleport detection: if ball jumped more than 5px in one frame, treat as
+    // position reset (settle snap, state sync) — don't let it spike spin velocity
+    const TELEPORT_THRESHOLD = 5.0 * elapsedFrames;
+    if (rawDistance > TELEPORT_THRESHOLD) {
+      current.lastX = ball.x;
+      current.lastY = ball.y;
+      current.lastSeenAt = now;
+      // Gently decay existing spin instead of spiking it
+      current.phaseVelocity *= 0.6;
+      current.visualSpeed *= 0.5;
+      continue;
+    }
+
+    const distance = rawDistance;
     const moving = distance > 0.0028;
     const targetAxis = moving ? Math.atan2(dy, dx) : current.axis;
-    const axisBlend = distance > 0.12 ? 0.62 : distance > 0.03 ? 0.38 : 0.18;
+    // Instant axis snap at high speed so stripe follows direction changes immediately
+    const axisBlend = distance > 0.5 ? 0.92 : distance > 0.12 ? 0.68 : distance > 0.03 ? 0.38 : 0.18;
     current.axis = lerpAngle(current.axis, targetAxis, axisBlend);
 
     if (moving) {
@@ -766,27 +782,42 @@ function drawStripeBand(
 ) {
   const cosP = Math.cos(phase);
   const sinP = Math.sin(phase);
-  // The stripe band center shifts perpendicular to the rolling axis
-  const STRIPE_HALF = r * 0.48;
+  const STRIPE_HALF = r * 0.50;
   const bandCy = sinP * STRIPE_HALF;
-  // The visible band height narrows as it approaches the top/bottom of the sphere
-  const bandHalfH = Math.max(r * 0.06 * scale, Math.abs(cosP) * STRIPE_HALF + r * 0.05);
+  // Band narrows as it wraps around the top/bottom of the sphere
+  const bandHalfH = Math.max(r * 0.05 * scale, Math.abs(cosP) * STRIPE_HALF + r * 0.04);
 
   ctx.save();
+  // Clip to sphere
   ctx.beginPath();
   ctx.arc(0, 0, r - 0.4 * scale, 0, Math.PI * 2);
   ctx.clip();
 
-  const g = ctx.createLinearGradient(0, bandCy - bandHalfH, 0, bandCy + bandHalfH);
+  // Draw curved stripe using elliptical arc paths instead of flat rect
+  // Upper edge of stripe band
+  const topY = bandCy - bandHalfH;
+  const botY = bandCy + bandHalfH;
+  // Curvature: edges of stripe curve inward at the ball edges (sphere effect)
+  const curvature = Math.abs(cosP) * r * 0.18;
+
+  ctx.beginPath();
+  ctx.moveTo(-r, topY);
+  ctx.quadraticCurveTo(0, topY - curvature, r, topY);
+  ctx.lineTo(r, botY);
+  ctx.quadraticCurveTo(0, botY + curvature, -r, botY);
+  ctx.closePath();
+
+  const g = ctx.createLinearGradient(0, topY - curvature, 0, botY + curvature);
   g.addColorStop(0, "rgba(255,255,255,0)");
-  g.addColorStop(0.1, shadeColor(color, -22));
-  g.addColorStop(0.42, color);
-  g.addColorStop(0.58, shadeColor(color, 16));
-  g.addColorStop(0.9, shadeColor(color, -22));
+  g.addColorStop(0.08, shadeColor(color, -28));
+  g.addColorStop(0.35, color);
+  g.addColorStop(0.50, shadeColor(color, 20));
+  g.addColorStop(0.65, color);
+  g.addColorStop(0.92, shadeColor(color, -28));
   g.addColorStop(1, "rgba(255,255,255,0)");
 
   ctx.fillStyle = g;
-  ctx.fillRect(-r, bandCy - bandHalfH - 1, r * 2, (bandHalfH + 1) * 2);
+  ctx.fill();
 
   ctx.restore();
 }
@@ -2468,6 +2499,16 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         const settlePlayback = () => {
           if (playbackSettlingRef.current) return;
           playbackSettlingRef.current = true;
+          // Pre-sync visual refs to final positions BEFORE the state update fires,
+          // so there's no position jump that would cause micro-flicks or spin spikes
+          const lastFrameBalls = frameToDisplayBalls(playback.frames[playback.frames.length - 1].balls, playback.baseBalls);
+          realtimeVisualBallsRef.current = lastFrameBalls.map((ball) => ({ ...ball }));
+          realtimeVisualLastAtRef.current = now;
+          // Also sync spin cache lastX/lastY to final positions
+          for (const ball of lastFrameBalls) {
+            const spin = ballSpinRef.current.get(ball.id);
+            if (spin) { spin.lastX = ball.x; spin.lastY = ball.y; spin.lastSeenAt = now; }
+          }
           window.setTimeout(() => {
             if (playbackRef.current?.seq !== playback.seq) return;
             lastAnimatedSeqRef.current = playback.seq;
@@ -2488,8 +2529,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const localT = clamp(rawIndex - frameIndex, 0, 1);
           drawBalls = interpolateFrameBalls(playback.baseBalls, frameA.balls, frameB.balls, localT);
           drawCueBall = drawBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
-          const nearFinalFrame = frameIndex >= Math.max(0, playback.frames.length - 3);
-          if (nearFinalFrame && ballsNearlyMatchFrame(drawBalls, playback.frames[playback.frames.length - 1].balls, 0.16)) {
+          const nearFinalFrame = frameIndex >= Math.max(0, playback.frames.length - 4);
+          if (nearFinalFrame && ballsNearlyMatchFrame(drawBalls, playback.frames[playback.frames.length - 1].balls, 0.5)) {
             settlePlayback();
           }
         }
