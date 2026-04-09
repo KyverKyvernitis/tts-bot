@@ -66,7 +66,11 @@ export interface ActivityRealtimeRuntime {
   startLifecycle(): () => void;
 }
 
-export function createActivityRealtimeRuntime(): ActivityRealtimeRuntime {
+export interface ActivityRealtimeRuntimeOptions {
+  onFinishedGame?: (args: { room: RoomRecord; game: import("../messages.js").GameSnapshot }) => Promise<void> | void;
+}
+
+export function createActivityRealtimeRuntime(options: ActivityRealtimeRuntimeOptions = {}): ActivityRealtimeRuntime {
   const contextWatchers = new Map<string, Set<WebSocket>>();
   const socketContext = new Map<WebSocket, string>();
   const latestAimByRoom = new Map<string, AimStateSnapshot>();
@@ -74,6 +78,7 @@ export function createActivityRealtimeRuntime(): ActivityRealtimeRuntime {
   const roomActivityAt = new Map<string, number>();
   const pendingRealtimeBroadcastRooms = new Set<string>();
   const realtimeDebugByRoom = new Map<string, { lastLogAt: number; lastStepAt: number; lastBroadcastAt: number; stepCount: number; broadcastCount: number; maxStepGapMs: number; maxBroadcastGapMs: number; }>();
+  const finishedGameCallbacksSent = new Set<string>();
 
   function touchRoomActivity(roomId: string, source: string) {
     roomActivityAt.set(roomId, Date.now());
@@ -252,6 +257,15 @@ export function createActivityRealtimeRuntime(): ActivityRealtimeRuntime {
     const payload: ServerMessage = { type: "game_state", payload: game };
     for (const client of getSubscribers(roomId)) {
       send(client, payload);
+    }
+    if (game.status === "finished" && game.gameId && !finishedGameCallbacksSent.has(game.gameId)) {
+      finishedGameCallbacksSent.add(game.gameId);
+      const room = getRoom(roomId);
+      if (room && options.onFinishedGame) {
+        void Promise.resolve(options.onFinishedGame({ room, game })).catch((error) => {
+          console.error("[sinuca-finished-callback] failed", error);
+        });
+      }
     }
   }
 

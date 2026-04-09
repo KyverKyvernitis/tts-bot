@@ -301,6 +301,7 @@ export default function App() {
   const [createRoomBusy, setCreateRoomBusy] = useState(false);
   const [gameStartBusy, setGameStartBusy] = useState(false);
   const [gameShootBusy, setGameShootBusy] = useState(false);
+  const [transientNotice, setTransientNotice] = useState<string | null>(null);
   const [roomExitBusy, setRoomExitBusy] = useState(false);
   const [shotPipelineDebug, setShotPipelineDebug] = useState<ShotPipelineDebugState>(initialShotPipelineDebug);
   const socketRef = useRef<WebSocket | null>(null);
@@ -318,6 +319,7 @@ export default function App() {
   const createDraftRoomIdRef = useRef<string | null>(null);
   const locallyOwnedRoomIdRef = useRef<string | null>(null);
   const currentRoomRef = useRef<RoomSnapshot | null>(null);
+  const transientNoticeTimerRef = useRef<number | null>(null);
   const isRoomHostRef = useRef(false);
   const currentUserIdRef = useRef<string | null>(null);
   const unloadLeaveSentRef = useRef<string | null>(null);
@@ -606,6 +608,26 @@ export default function App() {
     };
   });
 
+  const showTransientNotice = (message: string) => {
+    if (transientNoticeTimerRef.current) {
+      window.clearTimeout(transientNoticeTimerRef.current);
+      transientNoticeTimerRef.current = null;
+    }
+    setTransientNotice(message);
+    transientNoticeTimerRef.current = window.setTimeout(() => {
+      setTransientNotice(null);
+      transientNoticeTimerRef.current = null;
+    }, 2200);
+  };
+
+  useEffect(() => () => {
+    if (transientNoticeTimerRef.current) window.clearTimeout(transientNoticeTimerRef.current);
+  }, []);
+
+  const shouldShowInsufficientChipsNotice = (errorCode?: string | null, errorDetail?: string | null) => {
+    return errorCode === "insufficient_chips" || /não tem fichas pra continuar/i.test(errorDetail ?? '');
+  };
+
   const fetchBalanceOverHttp = async (reason: string) => {
     if (!isServer || !state.context.guildId || !resolvedUser) return false;
 
@@ -709,6 +731,9 @@ export default function App() {
       setErrorMessage(null);
       setAuthDebug((current) => current ? `${current} • room_action:http_ok:${reason}:${result.okLabel ?? "direct"}` : `room_action:http_ok:${reason}:${result.okLabel ?? "direct"}`);
       return result.data;
+    }
+    if (shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail)) {
+      showTransientNotice("Você não tem fichas pra continuar");
     }
     if (result.attempts.length) {
       setAuthDebug((current) => current ? `${current} • room_action:http_failed:${reason}:${result.attempts.join(" | ")}` : `room_action:http_failed:${reason}:${result.attempts.join(" | ")}`);
@@ -1395,6 +1420,10 @@ export default function App() {
       roomId,
       userId: overrideUserId ?? state.currentUser.userId,
     }, reason);
+    if (shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail)) {
+      showTransientNotice("Você não tem fichas pra continuar");
+      return null;
+    }
     if (result.data?.room) setRoom(result.data.room);
     if (result.data?.game) {
       ensureGameBootstrapSession(gameBootstrapSessionRef.current, roomId, result.data.game.gameId);
@@ -2296,6 +2325,11 @@ export default function App() {
       style={{ backgroundImage: `linear-gradient(180deg, rgba(4, 10, 17, 0.12), rgba(4, 10, 17, 0.46)), url(${lobbyBackground})` }}
       onClickCapture={handleShellClickCapture}
     >
+      {transientNotice ? (
+        <div className="activity-notice activity-notice--visible" role="status" aria-live="polite">
+          <div className="activity-notice__panel">{transientNotice}</div>
+        </div>
+      ) : null}
       {screen !== "game" ? (
       <header className={`hero-card hero-card--compact hero-card--landscape ${(createEntryMenuOpen || roomEntryMenuOpen) ? "hero-card--menu-open" : ""}`}>
         <div className="hero-card__copy">

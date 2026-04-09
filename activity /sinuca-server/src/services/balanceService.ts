@@ -17,9 +17,22 @@ export interface BalanceLookupResult {
   debug: BalanceDebugSnapshot;
 }
 
+export interface UserBalanceState extends BalanceSnapshot {
+  docFound: boolean;
+}
+
+export interface MatchStakeSettlementInput {
+  guildId: string;
+  winnerUserId: string;
+  loserUserId: string;
+  stakeChips: number;
+}
+
 export interface BalanceService {
   readonly config: BalanceServiceConfig;
   fetchBalance(guildId: string, userId: string, session?: SessionContextPayload): Promise<BalanceLookupResult>;
+  getUserBalanceState(guildId: string, userId: string): Promise<UserBalanceState>;
+  applyMatchStakeSettlement(input: MatchStakeSettlementInput): Promise<void>;
   buildMissingIdentifiersDebug(args: {
     session?: SessionContextPayload | null;
     guildId: string | null;
@@ -36,6 +49,7 @@ export interface BalanceService {
 
 export function createBalanceService(config: BalanceServiceConfig): BalanceService {
   let mongoClient: MongoClient | null = null;
+  const DEFAULT_NORMAL_CHIPS = 100;
 
   async function ensureMongo() {
     if (!config.mongoUri) return null;
@@ -128,6 +142,67 @@ export function createBalanceService(config: BalanceServiceConfig): BalanceServi
     };
   }
 
+
+
+  async function getBalanceCollection() {
+    return await ensureMongo();
+  }
+
+  async function findUserDoc(guildId: string, userId: string) {
+    const coll = await getBalanceCollection();
+    if (!coll) return { coll: null, doc: null };
+    const querySpec = buildBalanceQuery(guildId, userId);
+    let doc = await coll.findOne(querySpec.mongo);
+    if (!doc) {
+      const stringQuery = { type: "user", guild_id: querySpec.debug.guild_id ?? "", user_id: querySpec.debug.user_id ?? "" };
+      if (stringQuery.guild_id && stringQuery.user_id) {
+        doc = await coll.findOne(stringQuery);
+      }
+    }
+    return { coll, doc };
+  }
+
+  async function getUserBalanceState(guildId: string, userId: string): Promise<UserBalanceState> {
+    const { doc } = await findUserDoc(guildId, userId);
+    if (!doc) {
+      return { chips: DEFAULT_NORMAL_CHIPS, bonusChips: 0, docFound: false };
+    }
+    const chips = Number(doc?.chips ?? DEFAULT_NORMAL_CHIPS);
+    const bonusChips = Number(doc?.bonus_chips ?? 0);
+    return {
+      chips: Number.isFinite(chips) ? chips : DEFAULT_NORMAL_CHIPS,
+      bonusChips: Number.isFinite(bonusChips) ? bonusChips : 0,
+      docFound: true,
+    };
+  }
+
+  async function applyChipDelta(guildId: string, userId: string, delta: number) {
+    const { coll, doc } = await findUserDoc(guildId, userId);
+    if (!coll) throw new Error('mongo_unavailable');
+    const normalizedGuildId = normalizeIntString(guildId) ?? guildId;
+    const normalizedUserId = normalizeIntString(userId) ?? userId;
+    const guildLong = toMongoLong(normalizedGuildId);
+    const userLong = toMongoLong(normalizedUserId);
+    if (doc?._id) {
+      await coll.updateOne({ _id: doc._id }, { $inc: { chips: delta } });
+      return;
+    }
+    await coll.insertOne({
+      type: 'user',
+      guild_id: guildLong ?? normalizedGuildId,
+      user_id: userLong ?? normalizedUserId,
+      chips: DEFAULT_NORMAL_CHIPS + delta,
+      bonus_chips: 0,
+    });
+  }
+
+  async function applyMatchStakeSettlement(input: MatchStakeSettlementInput): Promise<void> {
+    const stake = Math.max(0, Number(input.stakeChips ?? 0) || 0);
+    if (!stake) return;
+    await applyChipDelta(input.guildId, input.winnerUserId, stake);
+    await applyChipDelta(input.guildId, input.loserUserId, -stake);
+  }
+
   async function fetchBalance(guildId: string, userId: string, session?: SessionContextPayload): Promise<BalanceLookupResult> {
     const coll = await ensureMongo();
     const querySpec = buildBalanceQuery(guildId, userId);
@@ -197,6 +272,8 @@ export function createBalanceService(config: BalanceServiceConfig): BalanceServi
   return {
     config,
     fetchBalance,
+    getUserBalanceState,
+    applyMatchStakeSettlement,
     buildMissingIdentifiersDebug,
     buildErrorDebug,
   };

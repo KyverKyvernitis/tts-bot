@@ -3,6 +3,8 @@ import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { registerActivityRoutes } from "./routes/registerActivityRoutes.js";
 import { createBalanceService } from "./services/balanceService.js";
+import { createDiscordMessageService } from "./services/discordMessageService.js";
+import { createMatchSettlementService } from "./services/matchSettlementService.js";
 import { createActivityRealtimeRuntime } from "./realtime/runtime.js";
 import { registerSocketServer } from "./realtime/registerSocketServer.js";
 
@@ -100,7 +102,14 @@ const balanceService = createBalanceService({
   mongoCollectionName: process.env.MONGODB_COLLECTION || process.env.MONGO_COLLECTION_NAME || process.env.MONGODB_COLLECTION_NAME || "settings",
 });
 
-const realtimeRuntime = createActivityRealtimeRuntime();
+const discordMessageService = createDiscordMessageService();
+const matchSettlementService = createMatchSettlementService({ balanceService, discordMessageService });
+
+const realtimeRuntime = createActivityRealtimeRuntime({
+  onFinishedGame: async ({ room, game }) => {
+    await matchSettlementService.handleFinishedGame(room, game);
+  },
+});
 
 registerActivityRoutes({
   app,

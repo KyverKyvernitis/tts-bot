@@ -55,6 +55,18 @@ export interface RegisterActivityRoutesOptions {
 }
 
 export function registerActivityRoutes({ app, runtime, balanceService, exchangeDiscordCode }: RegisterActivityRoutesOptions) {
+
+
+  async function buildInsufficientStakeResponse(args: { guildId: string; userId: string; requiredChips: number }) {
+    const state = await balanceService.getUserBalanceState(args.guildId, args.userId);
+    return {
+      error: "insufficient_chips",
+      detail: "Você não tem fichas pra continuar",
+      blockedUserId: args.userId,
+      availableChips: state.chips,
+      requiredChips: args.requiredChips,
+    } as const;
+  }
   const handleHealth: RequestHandler = (req, res) => {
     console.log("[sinuca-health]", JSON.stringify({ origin: req.headers.origin ?? null, ua: req.headers["user-agent"] ?? null, url: req.url ?? null }));
     sendNoStoreJson(res, { ok: true, rules: getInitialRuleSet() });
@@ -154,6 +166,16 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     if (!instanceId || !userId || !displayName) {
       res.status(400).json({ error: "incomplete_session" });
       return;
+    }
+    const normalizedStake = Number.isFinite(stakeChips) ? Math.max(0, stakeChips) : 0;
+    if (requestedTableType === "stake" && normalizedStake > 0 && guildId) {
+      const balanceState = await balanceService.getUserBalanceState(guildId, userId);
+      if (balanceState.chips < normalizedStake) {
+        const payload = await buildInsufficientStakeResponse({ guildId, userId, requiredChips: normalizedStake });
+        console.log("[sinuca-create-room-http-rejected]", JSON.stringify({ roomId: null, userId, guildId, reason: "insufficient_chips", availableChips: balanceState.chips, requiredChips: normalizedStake }));
+        res.status(409).json(payload);
+        return;
+      }
     }
     const room = createRoom(instanceId, guildId, channelId, userId, displayName, avatarUrl ?? null, {
       tableType: requestedTableType,
@@ -384,6 +406,23 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
       console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: "room_not_ready", opponentUserId: opponent?.userId ?? null, opponentReady: opponent?.ready ?? null }));
       res.status(409).json({ error: "room_not_ready" });
       return;
+    }
+    const requiredStake = room.tableType === "stake" ? Math.max(0, Number(room.stakeChips ?? 0) || 0) : 0;
+    if (requiredStake > 0 && room.guildId) {
+      const hostBalance = await balanceService.getUserBalanceState(room.guildId, room.hostUserId);
+      if (hostBalance.chips < requiredStake) {
+        const payload = await buildInsufficientStakeResponse({ guildId: room.guildId, userId: room.hostUserId, requiredChips: requiredStake });
+        console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: "insufficient_chips_host", requiredStake, availableChips: hostBalance.chips }));
+        res.status(409).json(payload);
+        return;
+      }
+      const opponentBalance = await balanceService.getUserBalanceState(room.guildId, opponent.userId);
+      if (opponentBalance.chips < requiredStake) {
+        const payload = await buildInsufficientStakeResponse({ guildId: room.guildId, userId: opponent.userId, requiredChips: requiredStake });
+        console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: "insufficient_chips_guest", requiredStake, availableChips: opponentBalance.chips, blockedUserId: opponent.userId }));
+        res.status(409).json(payload);
+        return;
+      }
     }
     setRoomInGame(roomId, true);
     const game = startGameForRoom(room);

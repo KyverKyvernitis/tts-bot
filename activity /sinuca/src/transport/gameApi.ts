@@ -190,7 +190,7 @@ export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promi
       const parsed = parseJsonSafely<{ game?: GameSnapshot | null; error?: string }>(raw);
       if (response.ok) {
         if (parsed) {
-          return { data: parsed, attempts, okLabel: variant.label, okMeta: buildTransportMeta(variant.label, variant.url, response, raw) };
+          return { data: parsed, attempts, okLabel: variant.label, okMeta: buildTransportMeta(variant.label, variant.url, response, raw), errorCode: null, errorDetail: null, errorStatus: null };
         }
         attempts.push(`${variant.label}:${response.status}:invalid_json_success`);
         continue;
@@ -201,11 +201,14 @@ export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promi
     }
   }
 
-  return { data: null, attempts, okLabel: null };
+  return { data: null, attempts, okLabel: null, errorCode: null, errorDetail: null, errorStatus: null };
 }
 
 export async function postGameActionRequest(path: string, payload: Record<string, unknown>, reason: string): Promise<HttpTransportResult<{ game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string; detail?: string }>> {
   const attempts: string[] = [];
+  let errorCode: string | null = null;
+  let errorDetail: string | null = null;
+  let errorStatus: number | null = null;
   const requestVariants = resolveActionVariants(path, payload);
 
   for (const variant of requestVariants) {
@@ -222,13 +225,16 @@ export async function postGameActionRequest(path: string, payload: Record<string
       const parsed = parseJsonSafely<{ game?: GameSnapshot | null; room?: RoomSnapshot | null; error?: string; detail?: string }>(raw);
       if (response.ok) {
         if (parsed) {
-          return { data: parsed, attempts, okLabel: variant.label, okMeta: buildTransportMeta(variant.label, variant.url, response, raw) };
+          return { data: parsed, attempts, okLabel: variant.label, okMeta: buildTransportMeta(variant.label, variant.url, response, raw), errorCode: null, errorDetail: null, errorStatus: null };
         }
         attempts.push(`${variant.label}:${response.status}:invalid_json_success`);
         continue;
       }
-      const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
-      attempts.push(`${variant.label}:${response.status}:${detail}`);
+      const detail = parsed?.detail ?? parsed?.error ?? (raw.slice(0, 180) || "empty");
+      errorCode = parsed?.error ?? errorCode;
+      errorDetail = detail ?? errorDetail;
+      errorStatus = response.status;
+      attempts.push(`${variant.label}:${response.status}:${parsed?.error ?? detail}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown";
       attempts.push(`${variant.label}:exception:${message}`);

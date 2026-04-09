@@ -21,6 +21,9 @@ export interface HttpTransportResult<T> {
   attempts: string[];
   okLabel: string | null;
   okMeta?: HttpTransportMeta | null;
+  errorCode?: string | null;
+  errorDetail?: string | null;
+  errorStatus?: number | null;
 }
 
 export async function fetchRoomsRequest(params: {
@@ -72,7 +75,7 @@ export async function fetchRoomsRequest(params: {
     }
   }
 
-  return { data: null, attempts, okLabel: null };
+  return { data: null, attempts, okLabel: null, errorCode: null, errorDetail: null, errorStatus: null };
 }
 
 export async function fetchRoomStateRequest(roomId: string): Promise<HttpTransportResult<{ room?: RoomSnapshot | null; error?: string }>> {
@@ -115,11 +118,14 @@ export async function fetchRoomStateRequest(roomId: string): Promise<HttpTranspo
     }
   }
 
-  return { data: null, attempts, okLabel: null };
+  return { data: null, attempts, okLabel: null, errorCode: null, errorDetail: null, errorStatus: null };
 }
 
 export async function postRoomActionRequest(path: string, payload: Record<string, unknown>): Promise<HttpTransportResult<{ room?: RoomSnapshot | null; error?: string; detail?: string }>> {
   const attempts: string[] = [];
+  let errorCode: string | null = null;
+  let errorDetail: string | null = null;
+  let errorStatus: number | null = null;
   const query = buildQueryStringFromPayload(payload);
   const legacyAction = resolveLegacyBalanceAction(path);
 
@@ -196,15 +202,18 @@ export async function postRoomActionRequest(path: string, payload: Record<string
       const raw = await response.text();
       const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string; detail?: string } : null;
       if (response.ok) {
-        return { data: parsed, attempts, okLabel: variant.label };
+        return { data: parsed, attempts, okLabel: variant.label, errorCode: null, errorDetail: null, errorStatus: null };
       }
-      const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
-      attempts.push(`${variant.label}:${response.status}:${detail}`);
+      const detail = parsed?.detail ?? parsed?.error ?? (raw.slice(0, 180) || "empty");
+      errorCode = parsed?.error ?? errorCode;
+      errorDetail = detail ?? errorDetail;
+      errorStatus = response.status;
+      attempts.push(`${variant.label}:${response.status}:${parsed?.error ?? detail}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown";
       attempts.push(`${variant.label}:exception:${message}`);
     }
   }
 
-  return { data: null, attempts, okLabel: null };
+  return { data: null, attempts, okLabel: null, errorCode, errorDetail, errorStatus };
 }
