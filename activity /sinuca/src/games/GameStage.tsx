@@ -2994,7 +2994,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           <div ref={powerTrackRef} className="pool-stage__power-track">
             <div
               className="pool-stage__power-gradient"
-              style={{ clipPath: `inset(calc(${(displayedPowerCueTop * 100).toFixed(1)}% + 10px) 0 0 0)` }}
+              style={{ clipPath: `inset(0 0 calc(${((1 - displayedPowerCueTop) * 100).toFixed(1)}% + 10px) 0)` }}
             />
             <div className="pool-stage__power-guides" />
             <div className="pool-stage__power-cue" style={{ top: `calc(${(displayedPowerCueTop * 100).toFixed(1)}% - 2px)` }}>
