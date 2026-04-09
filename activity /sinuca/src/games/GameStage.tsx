@@ -154,6 +154,7 @@ type Props = {
   onShotDebugEvent?: (event: ShotPipelineDebugEvent) => void;
   onAimStateChange?: (aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => void;
   onExit: () => void;
+  onPlayAgain?: () => void;
 };
 
 type PointerMode = "idle" | "aim" | "place" | "power";
@@ -709,10 +710,12 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     // Higher threshold: float noise from interpolation shouldn't trigger spin
     const moving = distance > 0.15;
 
-    // axis is kept for potential future use but NOT used for rendering anymore
+    // axis controls the orientation of the stripe rotation on screen
     if (moving) {
       const targetAxis = Math.atan2(dy, dx);
-      current.axis = lerpAngle(current.axis, targetAxis, 0.5);
+      // Snap fast at high speed so stripe follows direction changes immediately
+      const axisBlend = distance > 0.8 ? 0.95 : distance > 0.3 ? 0.75 : 0.45;
+      current.axis = lerpAngle(current.axis, targetAxis, axisBlend);
     }
 
     if (moving) {
@@ -1117,10 +1120,11 @@ function drawBall(
 
   if (ball.number > 0) {
     const isStripe = ball.number >= 9;
-    // No ctx.rotate(spinAxis) — stripe stays horizontal like the reference.
-    // Phase alone controls the vertical displacement (rolling effect).
+    ctx.save();
+    ctx.rotate(spinAxis);
     if (isStripe) drawStripeBand(ctx, r, color, spinPhase, scale);
     drawBallLabel(ctx, ball, r, spinPhase, scale, color, isStripe);
+    ctx.restore();
   }
 
   const shadowGrad = ctx.createRadialGradient(r * 0.14, r * 0.28, r * 0.1, 0, r * 0.26, r * 1.04);
@@ -1509,7 +1513,7 @@ function createImage(src: string) {
 
 // ─── Main component ───────────────────────────────────────────────────────
 
-export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, onShoot, onShotDebugEvent, onAimStateChange, onExit }: Props) {
+export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, onShoot, onShotDebugEvent, onAimStateChange, onExit, onPlayAgain }: Props) {
   const [displayBalls, setDisplayBalls] = useState<GameBallSnapshot[]>(game.balls);
   const [railBalls, setRailBalls] = useState<RailBallAnimation[]>(() => buildSettledRailBalls(game.balls));
   const [power, setPower] = useState(POWER_MIN);
@@ -1856,7 +1860,14 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   useEffect(() => {
     const settled = buildSettledRailBalls(game.balls);
     const nextCaptured = new Set(settled.map((ball) => ball.id));
-    const nextHidden = new Set(game.balls.filter((ball) => ball.pocketed).map((ball) => ball.id));
+    // Only add ALREADY-hidden balls to nextHidden. Newly pocketed balls should NOT
+    // be hidden here — the render loop needs to see them to trigger pocket animation.
+    const nextHidden = new Set<string>();
+    for (const ball of game.balls) {
+      if (ball.pocketed && hiddenPocketIdsRef.current.has(ball.id)) {
+        nextHidden.add(ball.id);
+      }
+    }
     const differs = settled.length !== railBalls.length || settled.some((ball, index) => {
       const current = railBalls[index];
       return !current || current.id !== ball.id || current.number !== ball.number || current.state !== "settled";
@@ -3161,6 +3172,46 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           </div>
         </aside>
       </div>
+
+      {game.status === "finished" && (
+        <div className="pool-stage__endgame-overlay">
+          <div className="pool-stage__endgame-card">
+            <div className={`pool-stage__endgame-icon ${game.winnerUserId === currentUserId ? "pool-stage__endgame-icon--win" : "pool-stage__endgame-icon--lose"}`}>
+              {game.winnerUserId === currentUserId ? "🏆" : "😞"}
+            </div>
+            <h2 className="pool-stage__endgame-title">
+              {game.winnerUserId === currentUserId ? "Você venceu!" : "Você perdeu!"}
+            </h2>
+            {game.tableType !== "casual" && game.stakeChips ? (
+              <div className={`pool-stage__endgame-chips ${game.winnerUserId === currentUserId ? "pool-stage__endgame-chips--win" : "pool-stage__endgame-chips--lose"}`}>
+                {game.winnerUserId === currentUserId ? "+" : "-"}{game.stakeChips} fichas
+              </div>
+            ) : (
+              <div className="pool-stage__endgame-chips pool-stage__endgame-chips--casual">
+                Amistoso
+              </div>
+            )}
+            <div className="pool-stage__endgame-actions">
+              <button
+                type="button"
+                className="pool-stage__endgame-btn pool-stage__endgame-btn--lobby"
+                disabled={exitBusy}
+                onClick={onExit}
+              >
+                Lobby
+              </button>
+              <button
+                type="button"
+                className="pool-stage__endgame-btn pool-stage__endgame-btn--again"
+                disabled={!onPlayAgain || exitBusy}
+                onClick={() => onPlayAgain?.()}
+              >
+                Jogar novamente
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
