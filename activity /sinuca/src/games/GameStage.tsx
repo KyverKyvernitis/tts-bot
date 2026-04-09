@@ -115,7 +115,7 @@ const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
 const REALTIME_VISUAL_SNAP_DISTANCE = 54;
 const REALTIME_SNAPSHOT_QUEUE_LIMIT = 32;
-const REALTIME_RENDER_DELAY_MS = 142;
+const REALTIME_RENDER_DELAY_MS = 108;
 const REALTIME_MAX_EXTRAPOLATION_MS = 16;
 const PENDING_SHOT_VISUAL_MAX_MS = 1150;
 const PENDING_SHOT_POST_IMPACT_HOLD_MS = 240;
@@ -580,7 +580,7 @@ function emitRealtimeImpactSounds(
     }
     if (ball.pocketed) continue;
     const moved = Math.hypot(ball.x - previous.x, ball.y - previous.y);
-    if (ball.id !== "ball-0" && moved > 0.82) movingIds.add(ball.id);
+    if (ball.id !== "ball-0" && moved > 1.6) movingIds.add(ball.id);
     if (moved > 0.62 && (ball.x <= PLAY_MIN_X + 2.4 || ball.x >= PLAY_MAX_X - 2.4 || ball.y <= PLAY_MIN_Y + 2.4 || ball.y >= PLAY_MAX_Y - 2.4)) {
       wallIds.add(ball.id);
     }
@@ -594,10 +594,10 @@ function emitRealtimeImpactSounds(
   const newlyMoving = Array.from(movingIds).filter((id) => !cooldown.movingIds.has(id));
   const newlyWall = Array.from(wallIds).filter((id) => !cooldown.wallIds.has(id));
 
-  if (newlyMoving.length > 0 && now - cooldown.lastBallAt > 105) {
+  if (newlyMoving.length > 0 && now - cooldown.lastBallAt > 200) {
     SFX.ballHit();
     cooldown.lastBallAt = now;
-  } else if (!newlyPocketed && newlyWall.length > 0 && now - cooldown.lastCushionAt > 120) {
+  } else if (!newlyPocketed && newlyWall.length > 0 && now - cooldown.lastCushionAt > 140) {
     SFX.cushion();
     cooldown.lastCushionAt = now;
   }
@@ -716,7 +716,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     const dy = ball.y - current.lastY;
     const distance = Math.hypot(dx, dy);
     const moving = distance > 0.0028;
-    const targetAxis = moving ? Math.atan2(dy, dx) + Math.PI / 2 : current.axis;
+    const targetAxis = moving ? Math.atan2(dy, dx) : current.axis;
     const axisBlend = distance > 0.12 ? 0.48 : distance > 0.03 ? 0.24 : 0.14;
     current.axis = lerpAngle(current.axis, targetAxis, axisBlend);
 
@@ -735,7 +735,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
       }
     }
 
-    current.phase = normalizePhase(current.phase + current.phaseVelocity * elapsedFrames);
+    current.phase = normalizePhase(current.phase - current.phaseVelocity * elapsedFrames);
     current.labelDepth = Math.cos(current.phase);
     current.lastSeenAt = now;
   }
@@ -1731,8 +1731,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         const progress = computePendingShotProgress(pending, now);
         const authoritativeDistanceFromStart = Math.hypot(incomingCueBall.x - pending.cueX, incomingCueBall.y - pending.cueY);
         const authoritativeDistanceFromExpected = Math.hypot(incomingCueBall.x - progress.expectedCueX, incomingCueBall.y - progress.expectedCueY);
-        const staleBootstrapSnapshot = authoritativeDistanceFromStart <= Math.max(4.8, BALL_RADIUS * 0.5)
-          && authoritativeDistanceFromExpected >= Math.max(12, BALL_RADIUS * 1.45)
+        const staleBootstrapSnapshot = authoritativeDistanceFromStart <= Math.max(BALL_RADIUS * 1.3, 17)
+          && authoritativeDistanceFromExpected >= Math.max(9, BALL_RADIUS * 0.9)
           && progress.elapsed < PENDING_SHOT_VISUAL_MAX_MS;
         if (staleBootstrapSnapshot) {
           const debugState = snapshotRenderDebugRef.current;
@@ -2666,10 +2666,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const stateNow = playbackSoundStateRef.current;
           const newlyMoving = Array.from(movingIds).filter((id) => !stateNow.movingIds.has(id));
           const newlyWall = Array.from(wallIds).filter((id) => !stateNow.wallIds.has(id));
-          if (newlyMoving.length > 0 && now - stateNow.lastBallAt > 105) {
+          if (newlyMoving.length > 0 && now - stateNow.lastBallAt > 160) {
             SFX.ballHit();
             stateNow.lastBallAt = now;
-          } else if (newlyWall.length > 0 && now - stateNow.lastCushionAt > 120 && !newlyPocketed) {
+          } else if (newlyWall.length > 0 && now - stateNow.lastCushionAt > 140 && !newlyPocketed) {
             SFX.cushion();
             stateNow.lastCushionAt = now;
           }
@@ -2815,6 +2815,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           };
           drawBalls = drawBalls.map((ball) => (ball.number === 0 ? optimisticCue : ball));
           drawCueBall = optimisticCue;
+          // Sync visual ref so next frame lerp starts from optimistic pos, eliminating rollback
+          realtimeVisualBallsRef.current = realtimeVisualBallsRef.current.map(
+            b => b.number === 0 ? { ...b, x: optimisticCue.x, y: optimisticCue.y } : b
+          );
           if (pendingShotVisual.impactType && !pendingShotVisual.firstImpactPlayed && pendingShotVisual.impactAtMs !== null && heldElapsed >= pendingShotVisual.impactAtMs) {
             pendingShotVisual.firstImpactPlayed = true;
           }
@@ -2938,12 +2942,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const src = ballIconCache.get(entry.number);
     const column = entry.slot % 3;
     const row = Math.floor(entry.slot / 3);
-    const style = {
-      ['--rail-lane-offset' as const]: `${entry.lane * 8}px`,
-      ['--rail-slot-x' as const]: `${14 + column * 13}px`,
-      ['--rail-slot-y' as const]: `${24 + row * 13}px`,
-    } as CSSProperties;
-    return { entry, src, style };
+    return { entry, src, column, row };
   });
 
   // ─── JSX ────────────────────────────────────────────────────────────────
@@ -3060,23 +3059,25 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         </div>
 
         <aside className="pool-stage__return-rail" aria-hidden="true">
-          <div className="pool-stage__return-track">
-            <span className="pool-stage__return-intake pool-stage__return-intake--outer" />
-            <span className="pool-stage__return-intake pool-stage__return-intake--mid" />
-            <span className="pool-stage__return-intake pool-stage__return-intake--inner" />
-            <span className="pool-stage__return-lane pool-stage__return-lane--outer" />
-            <span className="pool-stage__return-lane pool-stage__return-lane--mid" />
-            <span className="pool-stage__return-lane pool-stage__return-lane--inner" />
-            <span className="pool-stage__return-cup" />
-            {railEntries.map(({ entry, src, style }) => (
-              <span
-                key={entry.id}
-                className={`pool-stage__return-ball ${entry.state === "travel" ? "pool-stage__return-ball--travel" : "pool-stage__return-ball--settled"}`}
-                style={style}
-              >
-                {src ? <img src={src} alt="" /> : null}
-              </span>
-            ))}
+          <div className="pool-stage__rail-body">
+            <div className="pool-stage__rail-channels">
+              {([0, 1, 2] as const).map((col) => (
+                <div key={col} className="pool-stage__rail-ch">
+                  {railEntries
+                    .filter(({ column }) => column === col)
+                    .map(({ entry, src, row }) => (
+                      <span
+                        key={entry.id}
+                        className={`pool-stage__rail-slot-ball pool-stage__rail-slot-ball--${entry.state}`}
+                        style={{ '--rail-row': row } as CSSProperties}
+                      >
+                        {src ? <img src={src} alt="" /> : null}
+                      </span>
+                    ))}
+                </div>
+              ))}
+            </div>
+            <div className="pool-stage__rail-base" />
           </div>
         </aside>
       </div>
