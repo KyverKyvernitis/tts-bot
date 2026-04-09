@@ -694,42 +694,47 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     const dy = ball.y - current.lastY;
     const rawDistance = Math.hypot(dx, dy);
 
-    // Teleport detection: if ball jumped more than 5px in one frame, treat as
-    // position reset (settle snap, state sync) — don't let it spike spin velocity
+    // Teleport detection: large jumps from state sync — don't spike spin
     const TELEPORT_THRESHOLD = 5.0 * elapsedFrames;
     if (rawDistance > TELEPORT_THRESHOLD) {
       current.lastX = ball.x;
       current.lastY = ball.y;
       current.lastSeenAt = now;
-      // Gently decay existing spin instead of spiking it
       current.phaseVelocity *= 0.6;
       current.visualSpeed *= 0.5;
       continue;
     }
 
     const distance = rawDistance;
-    const moving = distance > 0.0028;
-    const targetAxis = moving ? Math.atan2(dy, dx) : current.axis;
-    // Instant axis snap at high speed so stripe follows direction changes immediately
-    const axisBlend = distance > 0.5 ? 0.92 : distance > 0.12 ? 0.68 : distance > 0.03 ? 0.38 : 0.18;
-    current.axis = lerpAngle(current.axis, targetAxis, axisBlend);
+    // Higher threshold: float noise from interpolation shouldn't trigger spin
+    const moving = distance > 0.15;
+
+    // axis is kept for potential future use but NOT used for rendering anymore
+    if (moving) {
+      const targetAxis = Math.atan2(dy, dx);
+      current.axis = lerpAngle(current.axis, targetAxis, 0.5);
+    }
 
     if (moving) {
       const measuredPhaseVelocity = distance / (BALL_VISUAL_RADIUS * 1.04 * elapsedFrames);
-      current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, distance > 0.1 ? 0.72 : distance > 0.025 ? 0.55 : 0.40);
-      current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.62);
+      // Almost 1:1 with real movement — 1 frame delay instead of 4
+      current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, 0.85);
+      current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.85);
       current.lastX = ball.x;
       current.lastY = ball.y;
     } else {
-      current.phaseVelocity *= current.visualSpeed < 0.02 ? 0.72 : 0.91;
-      current.visualSpeed *= current.visualSpeed < 0.02 ? 0.65 : 0.90;
-      if (Math.abs(current.phaseVelocity) < 0.0008 && current.visualSpeed < 0.005) {
+      // Continuous decay based on speed — no binary jump
+      const speedRatio = clamp(current.visualSpeed / 0.5, 0, 1);
+      const decay = lerp(0.75, 0.96, speedRatio);
+      current.phaseVelocity *= decay;
+      current.visualSpeed *= decay;
+      if (Math.abs(current.phaseVelocity) < 0.0005 && current.visualSpeed < 0.003) {
         current.phaseVelocity = 0;
         current.visualSpeed = 0;
       }
     }
 
-    current.phase = normalizePhase(current.phase - current.phaseVelocity * elapsedFrames);
+    current.phase = normalizePhase(current.phase + current.phaseVelocity * elapsedFrames);
     current.labelDepth = Math.cos(current.phase);
     current.lastSeenAt = now;
   }
@@ -1112,11 +1117,10 @@ function drawBall(
 
   if (ball.number > 0) {
     const isStripe = ball.number >= 9;
-    ctx.save();
-    ctx.rotate(spinAxis);
+    // No ctx.rotate(spinAxis) — stripe stays horizontal like the reference.
+    // Phase alone controls the vertical displacement (rolling effect).
     if (isStripe) drawStripeBand(ctx, r, color, spinPhase, scale);
     drawBallLabel(ctx, ball, r, spinPhase, scale, color, isStripe);
-    ctx.restore();
   }
 
   const shadowGrad = ctx.createRadialGradient(r * 0.14, r * 0.28, r * 0.1, 0, r * 0.26, r * 1.04);
