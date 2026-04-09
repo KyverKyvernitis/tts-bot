@@ -106,7 +106,7 @@ const OPENING_RACK = [
   [15, 6, 13, 4, 5],
 ] as const;
 
-const POCKET_ANIM_DURATION = 320;
+const POCKET_ANIM_DURATION = 480;
 const POWER_MIN = 0.0009;
 const POWER_RETURN_MS = 180;
 const POWER_CURVE_EXPONENT = 5.1;
@@ -121,7 +121,7 @@ const PENDING_SHOT_VISUAL_MAX_MS = 1150;
 const PENDING_SHOT_POST_IMPACT_HOLD_MS = 240;
 const SNAPSHOT_RENDER_DEBUG_ENABLED = false;
 const SNAPSHOT_RENDER_DEBUG_LOG_EVERY_MS = 450;
-const POCKET_CAPTURE_DISTANCE = BALL_RADIUS * 1.2;
+const POCKET_CAPTURE_DISTANCE = BALL_RADIUS * 1.6;
 const RAIL_TRAVEL_DURATION_MS = 860;
 const RAIL_SETTLE_DELAY_MS = 110;
 const CUE_RETURN_HOLD_MS = 420;
@@ -717,19 +717,19 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     const distance = Math.hypot(dx, dy);
     const moving = distance > 0.0028;
     const targetAxis = moving ? Math.atan2(dy, dx) : current.axis;
-    const axisBlend = distance > 0.12 ? 0.48 : distance > 0.03 ? 0.24 : 0.14;
+    const axisBlend = distance > 0.12 ? 0.62 : distance > 0.03 ? 0.38 : 0.18;
     current.axis = lerpAngle(current.axis, targetAxis, axisBlend);
 
     if (moving) {
       const measuredPhaseVelocity = distance / (BALL_VISUAL_RADIUS * 1.04 * elapsedFrames);
-      current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, distance > 0.1 ? 0.52 : distance > 0.025 ? 0.34 : 0.18);
-      current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.48);
+      current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, distance > 0.1 ? 0.72 : distance > 0.025 ? 0.55 : 0.40);
+      current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.62);
       current.lastX = ball.x;
       current.lastY = ball.y;
     } else {
-      current.phaseVelocity *= current.visualSpeed < 0.02 ? 0.46 : 0.82;
-      current.visualSpeed *= current.visualSpeed < 0.02 ? 0.36 : 0.84;
-      if (Math.abs(current.phaseVelocity) < 0.0014 && current.visualSpeed < 0.008) {
+      current.phaseVelocity *= current.visualSpeed < 0.02 ? 0.72 : 0.91;
+      current.visualSpeed *= current.visualSpeed < 0.02 ? 0.65 : 0.90;
+      if (Math.abs(current.phaseVelocity) < 0.0008 && current.visualSpeed < 0.005) {
         current.phaseVelocity = 0;
         current.visualSpeed = 0;
       }
@@ -1126,13 +1126,26 @@ function drawPocketAnimation(
 ) {
   const elapsed = now - anim.startedAt;
   const t = clamp(elapsed / POCKET_ANIM_DURATION, 0, 1);
-  const eased = t * t;
-  const scale = lerp(1, 0.08, eased);
-  const alpha = lerp(1, 0, Math.pow(t, 0.7));
-  if (alpha <= 0.02) return;
+  // Gravity-like easing: slow start, fast pull into pocket
+  const gravityT = t < 0.3 ? t * t * (1 / 0.09) * 0.09 : 0.09 + (1 - 0.09) * Math.pow((t - 0.3) / 0.7, 1.6);
+  const eased = clamp(gravityT, 0, 1);
+  // Scale shrinks from 1 → 0, accelerating at the end
+  const scale = lerp(1, 0.02, Math.pow(eased, 0.8));
+  // Alpha fades out in the last 40%
+  const alpha = t < 0.6 ? 1 : lerp(1, 0, (t - 0.6) / 0.4);
+  if (alpha <= 0.01 || scale <= 0.02) return;
+  // Spiral offset: ball spirals slightly as it falls in
+  const spiralAngle = eased * Math.PI * 2.5;
+  const spiralRadius = (1 - eased) * BALL_VISUAL_RADIUS * 0.6;
+  const spiralX = Math.cos(spiralAngle) * spiralRadius;
+  const spiralY = Math.sin(spiralAngle) * spiralRadius;
   ctx.save();
   ctx.globalAlpha = alpha;
-  const ball = { ...anim.ball, x: lerp(anim.ball.x, anim.pocketX, eased), y: lerp(anim.ball.y, anim.pocketY, eased) };
+  const ball = {
+    ...anim.ball,
+    x: lerp(anim.ball.x, anim.pocketX, eased) + spiralX * (1 - eased),
+    y: lerp(anim.ball.y, anim.pocketY, eased) + spiralY * (1 - eased),
+  };
   drawBall(ctx, ball, scale, spin);
   ctx.restore();
 }
@@ -1283,11 +1296,11 @@ function drawCue(
 ) {
   const dirX = Math.cos(aimAngle);
   const dirY = Math.sin(aimAngle);
-  const cueGap = BALL_RADIUS + 18 + pullRatio * 88;
-  const cueLength = 720;
+  const cueGap = BALL_RADIUS + 14 + pullRatio * 72;
+  const cueLength = 440;
   const drawHeight = cueSprite.complete && cueSprite.naturalWidth
-    ? Math.max(10, cueLength * (cueSprite.naturalHeight / cueSprite.naturalWidth))
-    : 10;
+    ? Math.max(6, cueLength * (cueSprite.naturalHeight / cueSprite.naturalWidth) * 0.6)
+    : 6;
 
   ctx.save();
   ctx.translate(cueBall.x - dirX * cueGap, cueBall.y - dirY * cueGap);
@@ -1305,7 +1318,7 @@ function drawCue(
     grad.addColorStop(0.95, "#e8d088");
     grad.addColorStop(1, "#f0f0f0");
     ctx.strokeStyle = grad;
-    ctx.lineWidth = 4.5;
+    ctx.lineWidth = 2.8;
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(0, 0);
@@ -2501,13 +2514,26 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           if (rawT <= 1) {
             const eased = clamp(rawT, 0, 1);
             const hermiteBalls = interpolateSnapshotEntries(fromSnapshot, toSnapshot, eased);
-            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 44), 0.14, 0.3);
+            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 36), 0.18, 0.42);
             smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, hermiteBalls, carry);
+            // Snap nearly-stopped balls to target to eliminate micro-flick jitter
+            for (let i = 0; i < smoothedBalls.length; i++) {
+              const target = hermiteBalls[i];
+              if (!target) continue;
+              const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
+              if (dist < 0.35) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
+            }
           } else {
             const overshootMs = Math.max(0, renderServerTime - toSnapshot.serverAt);
             const extrapolated = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, Math.min(overshootMs, REALTIME_MAX_EXTRAPOLATION_MS));
-            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 58), 0.08, 0.16);
+            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 48), 0.12, 0.24);
             smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
+            for (let i = 0; i < smoothedBalls.length; i++) {
+              const target = extrapolated[i];
+              if (!target) continue;
+              const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
+              if (dist < 0.35) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
+            }
           }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
@@ -2524,8 +2550,14 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const holdSnapshot = queue[0];
           const extrapolationMs = Math.max(0, renderServerTime - holdSnapshot.serverAt);
           const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, Math.min(extrapolationMs, REALTIME_MAX_EXTRAPOLATION_MS));
-          const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 72), 0.09, 0.18);
+          const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 52), 0.14, 0.28);
           const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
+          for (let i = 0; i < smoothedBalls.length; i++) {
+            const target = extrapolated[i];
+            if (!target) continue;
+            const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
+            if (dist < 0.35) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
+          }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
           drawBalls = smoothedBalls;
@@ -2928,27 +2960,42 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           {exitBusy ? "…" : "≡"}
         </button>
 
-        <div className={`pool-stage__player ${game.turnUserId === leftPlayer?.userId ? "pool-stage__player--active" : ""}`}>
-          <div className="pool-stage__avatar">
-            {leftPlayer?.avatarUrl ? <img src={leftPlayer.avatarUrl} alt={cleanName(leftPlayer.displayName)} /> : <span>{playerInitials(leftPlayer)}</span>}
-          </div>
-          <div className="pool-stage__player-copy">
-            <strong>{cleanName(leftPlayer?.displayName ?? "Jogador")}</strong>
-            <div className="pool-stage__pips">
-              {Array.from({ length: 7 }).map((_, index) => {
-                const number = leftPocketed[index] ?? null;
-                return number !== null
-                  ? <BallPip key={`left-${index}`} number={number} />
-                  : <span key={`left-${index}`} className="pool-stage__pip" />;
-              })}
-            </div>
+        <div className={`pool-stage__player-side pool-stage__player-side--left ${game.turnUserId === leftPlayer?.userId ? "pool-stage__player-side--active" : ""}`}>
+          <strong>{cleanName(leftPlayer?.displayName ?? "Jogador")}</strong>
+          <div className="pool-stage__pips">
+            {Array.from({ length: 7 }).map((_, index) => {
+              const number = leftPocketed[index] ?? null;
+              return number !== null
+                ? <BallPip key={`left-${index}`} number={number} />
+                : <span key={`left-${index}`} className="pool-stage__pip" />;
+            })}
           </div>
         </div>
 
-        <div className="pool-stage__status">
-          <span className="pool-stage__stake">{cueLabel}</span>
-          <strong>{statusText}</strong>
-          <small>{phaseText}</small>
+        <div className="pool-stage__hud-center">
+          <div className={`pool-stage__avatar ${game.turnUserId === leftPlayer?.userId ? "pool-stage__avatar--active" : ""}`}>
+            {leftPlayer?.avatarUrl ? <img src={leftPlayer.avatarUrl} alt={cleanName(leftPlayer.displayName)} /> : <span>{playerInitials(leftPlayer)}</span>}
+          </div>
+          <div className="pool-stage__status-badge">
+            <span className="pool-stage__stake">{cueLabel}</span>
+            <strong>{statusText}</strong>
+            <small>{phaseText}</small>
+          </div>
+          <div className={`pool-stage__avatar ${game.turnUserId === rightPlayer?.userId ? "pool-stage__avatar--active" : ""}`}>
+            {rightPlayer?.avatarUrl ? <img src={rightPlayer.avatarUrl} alt={cleanName(rightPlayer.displayName)} /> : <span>{playerInitials(rightPlayer)}</span>}
+          </div>
+        </div>
+
+        <div className={`pool-stage__player-side pool-stage__player-side--right ${game.turnUserId === rightPlayer?.userId ? "pool-stage__player-side--active" : ""}`}>
+          <div className="pool-stage__pips pool-stage__pips--right">
+            {Array.from({ length: 7 }).map((_, index) => {
+              const number = rightPocketed[index] ?? null;
+              return number !== null
+                ? <BallPip key={`right-${index}`} number={number} />
+                : <span key={`right-${index}`} className="pool-stage__pip" />;
+            })}
+          </div>
+          <strong>{cleanName(rightPlayer?.displayName ?? "Adversário")}</strong>
         </div>
 
         {(() => {
@@ -2958,22 +3005,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             <div className="pool-stage__cue-indicator" aria-label="Bola branca fora da mesa" />
           ) : null;
         })()}
-        <div className={`pool-stage__player pool-stage__player--right ${game.turnUserId === rightPlayer?.userId ? "pool-stage__player--active" : ""}`}>
-          <div className="pool-stage__player-copy pool-stage__player-copy--right">
-            <strong>{cleanName(rightPlayer?.displayName ?? "Adversário")}</strong>
-            <div className="pool-stage__pips pool-stage__pips--right">
-              {Array.from({ length: 7 }).map((_, index) => {
-                const number = rightPocketed[index] ?? null;
-                return number !== null
-                  ? <BallPip key={`right-${index}`} number={number} />
-                  : <span key={`right-${index}`} className="pool-stage__pip" />;
-              })}
-            </div>
-          </div>
-          <div className="pool-stage__avatar">
-            {rightPlayer?.avatarUrl ? <img src={rightPlayer.avatarUrl} alt={cleanName(rightPlayer.displayName)} /> : <span>{playerInitials(rightPlayer)}</span>}
-          </div>
-        </div>
       </div>
 
       <div className="pool-stage__table-layout">
@@ -3036,8 +3067,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         </div>
 
         <aside className="pool-stage__return-rail" aria-hidden="true">
-          <div className="pool-stage__rail-body">
-            <div className="pool-stage__rail-track">
+          <div className="pool-stage__rail-arm-h" />
+          <div className="pool-stage__rail-arm-v">
+            <div className="pool-stage__rail-channel">
               {railEntries.map(({ entry, src }) => (
                 <span
                   key={entry.id}
