@@ -88,6 +88,7 @@ type GameScreenProps = {
   onAimStateChange: (aim: AimUpdate) => void;
   onExit: () => void;
   onShoot: (shot: ShotInput) => Promise<void>;
+  onPlayAgain?: () => void;
   onForceReturnToLobby: () => void;
 };
 
@@ -106,6 +107,7 @@ export default function GameScreen({
   onAimStateChange,
   onExit,
   onShoot,
+  onPlayAgain,
   onForceReturnToLobby,
 }: GameScreenProps) {
   if (game) {
@@ -121,6 +123,7 @@ export default function GameScreen({
           onExit={onExit}
           onShoot={onShoot}
           onShotDebugEvent={onShotDebugEvent}
+          onPlayAgain={onPlayAgain}
         />
     );
   }

@@ -454,6 +454,44 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     res.json({ game: nextGame.game });
   }
 
+  async function handleRematchHttp(req: Request, res: Response) {
+    const session = resolveRequestSession(req);
+    const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
+    const roomId = normalizeIntString(merged.roomId);
+    const userId = normalizeIntString(merged.userId);
+    console.log("[sinuca-rematch-http]", JSON.stringify({ roomId, userId }));
+    if (!roomId || !userId) {
+      res.status(400).json({ error: "missing_rematch_identifiers" });
+      return;
+    }
+    const room = getRoom(roomId);
+    if (!room) {
+      res.status(404).json({ error: "room_not_found" });
+      return;
+    }
+    if (!room.players.some((p) => p.userId === userId)) {
+      res.status(403).json({ error: "not_in_room" });
+      return;
+    }
+    if (room.players.length < 2) {
+      res.status(409).json({ error: "need_two_players" });
+      return;
+    }
+    // Remove old game and start fresh
+    removeGame(roomId);
+    // Mark all players as ready for instant start
+    for (const player of room.players) { player.ready = true; }
+    setRoomInGame(roomId, true);
+    const game = startGameForRoom(room);
+    runtime.dropAimState(roomId);
+    runtime.touchRoomActivity(roomId, "http_rematch");
+    runtime.broadcastRoom(roomId);
+    runtime.broadcastRoomList({ guildId: room.guildId, channelId: room.channelId, mode: room.mode });
+    runtime.broadcastGame(roomId);
+    console.log("[sinuca-rematch-http-applied]", JSON.stringify({ roomId, userId, gameId: game.gameId, turnUserId: game.turnUserId }));
+    sendNoStoreJson(res, { game, room: toSnapshot(room) });
+  }
+
   async function handleUiDebugHttp(req: Request, res: Response) {
     const session = resolveRequestSession(req);
     const merged = mergeWithSession({ ...(req.query ?? {}), ...(req.body ?? {}) }, session);
@@ -539,6 +577,9 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     }
     if (action === BALANCE_ACTIONS.gameShoot) {
       return void handleShootGameHttp(req, res);
+    }
+    if (action === BALANCE_ACTIONS.gameRematch) {
+      return void handleRematchHttp(req, res);
     }
     if (action === BALANCE_ACTIONS.uiDebug) {
       return void handleUiDebugHttp(req, res);

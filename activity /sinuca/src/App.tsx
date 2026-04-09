@@ -2780,6 +2780,28 @@ export default function App() {
             }
           }}
           onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room_game" : "http_primary_leave_room_game"); }}
+          onPlayAgain={() => {
+            if (!room) return;
+            void (async () => {
+              setRoomExitBusy(true);
+              try {
+                const result = await postGameActionRequest("/games/rematch", {
+                  roomId: room.roomId,
+                  userId: state.currentUser.userId,
+                }, "rematch");
+                if (result.data?.game) {
+                  setGame(result.data.game);
+                }
+                if (result.data?.room) {
+                  setRoom(result.data.room as RoomSnapshot);
+                }
+              } catch (err) {
+                console.error("[sinuca-rematch-error]", err);
+              } finally {
+                setRoomExitBusy(false);
+              }
+            })();
+          }}
           onForceReturnToLobby={() => { void forceReturnToLobbyFromLoading(isRoomHost ? "http_force_close_loading_lobby" : "http_force_leave_loading_lobby"); }}
           onShoot={async (shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }) => {
             if (!room) return;
