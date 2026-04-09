@@ -71,7 +71,7 @@ const SFX = (() => {
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
 const BALL_RADIUS = 13;
-const BALL_VISUAL_RADIUS = 12; // Closer to reference proportions
+const BALL_VISUAL_RADIUS = 16;
 const BALL_DIAMETER = BALL_RADIUS * 2;
 const MAX_PLAYBACK_DURATION_MS = 3500;
 const FELT_LEFT = 69;
@@ -122,7 +122,7 @@ const PENDING_SHOT_POST_IMPACT_HOLD_MS = 240;
 const SNAPSHOT_RENDER_DEBUG_ENABLED = false;
 const SNAPSHOT_RENDER_DEBUG_LOG_EVERY_MS = 450;
 const POCKET_CAPTURE_DISTANCE = BALL_RADIUS * 1.6;
-const RAIL_TRAVEL_DURATION_MS = 860;
+const RAIL_TRAVEL_DURATION_MS = 1100;
 const RAIL_SETTLE_DELAY_MS = 110;
 const CUE_RETURN_HOLD_MS = 420;
 const BALL_SPRITE_SIZE = 72;
@@ -569,50 +569,19 @@ function emitRealtimeImpactSounds(
   now: number,
   cooldown: RealtimeSoundCooldownState,
 ) {
+  // Only emit pocket sounds in realtime path. Ball-hit and cushion sounds
+  // are unreliable here because snapshot timing is irregular — they're handled
+  // properly in the playback path instead.
   const previousById = new Map(previousBalls.map((ball) => [ball.id, ball]));
-  let newlyPocketed = false;
-  const movingIds = new Set<string>();
-  const wallIds = new Set<string>();
-
   for (const ball of nextBalls) {
     const previous = previousById.get(ball.id);
     if (!previous) continue;
-    if (ball.pocketed && !previous.pocketed) {
-      newlyPocketed = true;
-      continue;
-    }
-    if (ball.pocketed) continue;
-    const dx = ball.x - previous.x;
-    const dy = ball.y - previous.y;
-    const moved = Math.hypot(dx, dy);
-    if (ball.id !== "ball-0" && moved > 1.6) movingIds.add(ball.id);
-    if (moved > 0.62 && (ball.x <= PLAY_MIN_X + 2.4 || ball.x >= PLAY_MAX_X - 2.4 || ball.y <= PLAY_MIN_Y + 2.4 || ball.y >= PLAY_MAX_Y - 2.4)) {
-      wallIds.add(ball.id);
+    if (ball.pocketed && !previous.pocketed && now - cooldown.lastPocketAt > 90) {
+      SFX.pocket();
+      cooldown.lastPocketAt = now;
+      break;
     }
   }
-
-  if (newlyPocketed && now - cooldown.lastPocketAt > 90) {
-    SFX.pocket();
-    cooldown.lastPocketAt = now;
-  }
-
-  // Only count a ball as "newly moving" if it wasn't moving before AND
-  // it actually started moving (not just continued). This prevents
-  // re-triggering sounds every snapshot while balls are rolling.
-  const newlyMoving = Array.from(movingIds).filter((id) => !cooldown.movingIds.has(id));
-  const newlyWall = Array.from(wallIds).filter((id) => !cooldown.wallIds.has(id));
-
-  // Longer cooldowns to prevent sound spam during continuous simulation
-  if (newlyMoving.length > 0 && now - cooldown.lastBallAt > 350) {
-    SFX.ballHit();
-    cooldown.lastBallAt = now;
-  } else if (!newlyPocketed && newlyWall.length > 0 && now - cooldown.lastCushionAt > 300) {
-    SFX.cushion();
-    cooldown.lastCushionAt = now;
-  }
-
-  cooldown.movingIds = movingIds;
-  cooldown.wallIds = wallIds;
 }
 
 function framesNearlyMatch(a: GameShotFrame, b: GameShotFrame, tolerance = 0.12) {
@@ -760,7 +729,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
       }
     }
 
-    current.phase = normalizePhase(current.phase + current.phaseVelocity * elapsedFrames);
+    current.phase = normalizePhase(current.phase - current.phaseVelocity * elapsedFrames);
     current.labelDepth = Math.cos(current.phase);
     current.lastSeenAt = now;
   }
@@ -1695,13 +1664,24 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (animating) return;
     if (game.status === "simulating") return;
     let nextBalls = game.balls;
+    // On simulation end, prefer current visual positions to prevent jump
+    if (realtimeVisualBallsRef.current.length) {
+      const visualMap = new Map(realtimeVisualBallsRef.current.map(b => [b.id, b]));
+      nextBalls = game.balls.map(ball => {
+        const vis = visualMap.get(ball.id);
+        if (!vis || ball.pocketed !== vis.pocketed) return ball;
+        // Use visual position if close, server position if far (authoritative correction)
+        const dist = Math.hypot(ball.x - vis.x, ball.y - vis.y);
+        return dist < 8 ? { ...ball, x: vis.x, y: vis.y } : ball;
+      });
+    }
     if (game.ballInHandUserId === currentUserId && localCuePlacementRef.current) {
       const placed = clampCuePosition(
         localCuePlacementRef.current.x,
         localCuePlacementRef.current.y,
         game.shotSequence === 0,
       );
-      nextBalls = game.balls.map((ball) => (ball.number === 0 ? { ...ball, x: placed.x, y: placed.y, pocketed: false } : ball));
+      nextBalls = nextBalls.map((ball) => (ball.number === 0 ? { ...ball, x: placed.x, y: placed.y, pocketed: false } : ball));
     }
     setDisplayBalls(nextBalls);
   }, [animating, currentUserId, game.ballInHandUserId, game.balls, game.shotSequence, game.status]);
@@ -1771,14 +1751,17 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           && authoritativeDistanceFromExpected >= Math.max(9, BALL_RADIUS * 0.9)
           && progress.elapsed < PENDING_SHOT_VISUAL_MAX_MS;
         if (staleBootstrapSnapshot) {
-          const debugState = snapshotRenderDebugRef.current;
-          if (now - debugState.lastLoggedAt >= SNAPSHOT_RENDER_DEBUG_LOG_EVERY_MS || debugState.lastMode !== 'skip_stale_pending') {
-            logRenderSnapshotDebug({ event: 'skip_stale_pending', roomId: room.roomId, revision: nextRevision, queueSize: queue.length, pendingAgeMs: Math.round(progress.elapsed), authoritativeDistanceFromStart: Math.round(authoritativeDistanceFromStart * 100) / 100, authoritativeDistanceFromExpected: Math.round(authoritativeDistanceFromExpected * 100) / 100 });
-            debugState.lastLoggedAt = now;
-            debugState.lastQueueSize = queue.length;
-            debugState.lastMode = 'skip_stale_pending';
+          // Instead of rejecting the snapshot entirely, accept it but override
+          // the cue ball position with the optimistic one. This way other balls
+          // start moving visually during the break while the cue stays smooth.
+          const optimisticCueX = progress.expectedCueX;
+          const optimisticCueY = progress.expectedCueY;
+          for (let i = 0; i < incomingBalls.length; i++) {
+            if (incomingBalls[i].number === 0 && !incomingBalls[i].pocketed) {
+              incomingBalls[i] = { ...incomingBalls[i], x: optimisticCueX, y: optimisticCueY };
+            }
           }
-          return;
+          // Fall through to push the modified snapshot
         }
       }
     }
@@ -2590,25 +2573,25 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           if (rawT <= 1) {
             const eased = clamp(rawT, 0, 1);
             const hermiteBalls = interpolateSnapshotEntries(fromSnapshot, toSnapshot, eased);
-            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 36), 0.18, 0.42);
+            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 28), 0.28, 0.55);
             smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, hermiteBalls, carry);
             // Snap nearly-stopped balls to target to eliminate micro-flick jitter
             for (let i = 0; i < smoothedBalls.length; i++) {
               const target = hermiteBalls[i];
               if (!target) continue;
               const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
-              if (dist < 0.6) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
+              if (dist < 1.0) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
             }
           } else {
             const overshootMs = Math.max(0, renderServerTime - toSnapshot.serverAt);
             const extrapolated = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, Math.min(overshootMs, REALTIME_MAX_EXTRAPOLATION_MS));
-            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 48), 0.12, 0.24);
+            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 36), 0.20, 0.38);
             smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
             for (let i = 0; i < smoothedBalls.length; i++) {
               const target = extrapolated[i];
               if (!target) continue;
               const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
-              if (dist < 0.6) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
+              if (dist < 1.0) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
             }
           }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
@@ -2626,13 +2609,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const holdSnapshot = queue[0];
           const extrapolationMs = Math.max(0, renderServerTime - holdSnapshot.serverAt);
           const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, Math.min(extrapolationMs, REALTIME_MAX_EXTRAPOLATION_MS));
-          const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 52), 0.14, 0.28);
+          const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 40), 0.22, 0.40);
           const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
           for (let i = 0; i < smoothedBalls.length; i++) {
             const target = extrapolated[i];
             if (!target) continue;
             const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
-            if (dist < 0.6) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
+            if (dist < 1.0) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
           }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
@@ -2881,6 +2864,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         // Only expire pending visual when NOT simulating AND past max time
         const shouldExpirePending = elapsed >= PENDING_SHOT_VISUAL_MAX_MS && game.status !== "simulating";
         if (shouldExpirePending) {
+          // Sync cue ball in visual ref to current server-smoothed position before clearing
+          const serverCue = drawBalls.find(b => b.number === 0 && !b.pocketed);
+          if (serverCue) {
+            realtimeVisualBallsRef.current = realtimeVisualBallsRef.current.map(
+              b => b.number === 0 ? { ...b, x: serverCue.x, y: serverCue.y } : b
+            );
+            const spin = ballSpinRef.current.get(serverCue.id);
+            if (spin) { spin.lastX = serverCue.x; spin.lastY = serverCue.y; }
+          }
           pendingShotVisualRef.current = null;
         } else if (game.status === "simulating" && elapsed > PENDING_SHOT_VISUAL_MAX_MS) {
           // During simulation after max time, stop moving the cue optimistically

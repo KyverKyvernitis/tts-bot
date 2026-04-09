@@ -5023,32 +5023,36 @@ button:focus-visible {
 .pool-stage__rail-ball--travel {
   bottom: calc(3px + var(--rail-slot, 0) * 27px);
   transform: translateX(-50%);
-  animation: rail-roll-down 900ms cubic-bezier(0.45, 0, 0.85, 0.35) forwards;
+  animation: rail-roll-down 1100ms cubic-bezier(0.12, 0, 0.39, 1) forwards;
 }
 
 @keyframes rail-roll-down {
   0% {
-    transform: translateX(-50%) translateY(-100%);
+    transform: translateX(-50%) translateY(-500px) rotate(0deg);
     opacity: 0;
   }
-  5% {
+  4% {
     opacity: 1;
   }
-  /* Ball rolls through the channel with accelerating gravity */
-  40% {
-    transform: translateX(-50%) translateY(-260px);
+  /* Gravity-accelerated descent through the channel */
+  25% {
+    transform: translateX(-50%) translateY(-340px) rotate(180deg);
   }
-  70% {
-    transform: translateX(-50%) translateY(-60px);
+  50% {
+    transform: translateX(-50%) translateY(-140px) rotate(420deg);
   }
+  75% {
+    transform: translateX(-50%) translateY(-25px) rotate(640deg);
+  }
+  /* Small bounce at landing */
   88% {
-    transform: translateX(-50%) translateY(4px);
+    transform: translateX(-50%) translateY(5px) rotate(700deg);
   }
   94% {
-    transform: translateX(-50%) translateY(-2px);
+    transform: translateX(-50%) translateY(-2px) rotate(715deg);
   }
   100% {
-    transform: translateX(-50%) translateY(0);
+    transform: translateX(-50%) translateY(0) rotate(720deg);
   }
 }
 
