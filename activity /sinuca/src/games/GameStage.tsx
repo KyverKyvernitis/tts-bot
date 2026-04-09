@@ -115,8 +115,8 @@ const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
 const REALTIME_VISUAL_SNAP_DISTANCE = 54;
 const REALTIME_SNAPSHOT_QUEUE_LIMIT = 32;
-const REALTIME_RENDER_DELAY_MS = 108;
-const REALTIME_MAX_EXTRAPOLATION_MS = 16;
+const REALTIME_RENDER_DELAY_MS = 60;
+const REALTIME_MAX_EXTRAPOLATION_MS = 28;
 const PENDING_SHOT_VISUAL_MAX_MS = 1150;
 const PENDING_SHOT_POST_IMPACT_HOLD_MS = 240;
 const SNAPSHOT_RENDER_DEBUG_ENABLED = false;
@@ -1283,8 +1283,8 @@ function drawCue(
 ) {
   const dirX = Math.cos(aimAngle);
   const dirY = Math.sin(aimAngle);
-  const cueGap = BALL_RADIUS + 24 + pullRatio * 118;
-  const cueLength = 1040;
+  const cueGap = BALL_RADIUS + 18 + pullRatio * 88;
+  const cueLength = 720;
   const drawHeight = cueSprite.complete && cueSprite.naturalWidth
     ? Math.max(10, cueLength * (cueSprite.naturalHeight / cueSprite.naturalWidth))
     : 10;
@@ -1305,7 +1305,7 @@ function drawCue(
     grad.addColorStop(0.95, "#e8d088");
     grad.addColorStop(1, "#f0f0f0");
     ctx.strokeStyle = grad;
-    ctx.lineWidth = 7;
+    ctx.lineWidth = 4.5;
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(0, 0);
@@ -2951,6 +2951,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           <small>{phaseText}</small>
         </div>
 
+        {(() => {
+          const cuePocketed = game.balls.find(b => b.number === 0)?.pocketed ?? false;
+          const showCueIndicator = cuePocketed || game.ballInHandUserId != null;
+          return showCueIndicator ? (
+            <div className="pool-stage__cue-indicator" aria-label="Bola branca fora da mesa" />
+          ) : null;
+        })()}
         <div className={`pool-stage__player pool-stage__player--right ${game.turnUserId === rightPlayer?.userId ? "pool-stage__player--active" : ""}`}>
           <div className="pool-stage__player-copy pool-stage__player-copy--right">
             <strong>{cleanName(rightPlayer?.displayName ?? "Adversário")}</strong>
@@ -2985,9 +2992,12 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           onLostPointerCapture={handlePowerLostCapture}
         >
           <div ref={powerTrackRef} className="pool-stage__power-track">
-            <div className="pool-stage__power-gradient" />
+            <div
+              className="pool-stage__power-gradient"
+              style={{ clipPath: `inset(calc(${(displayedPowerCueTop * 100).toFixed(1)}% + 10px) 0 0 0)` }}
+            />
             <div className="pool-stage__power-guides" />
-            <div className="pool-stage__power-cue" style={{ top: `calc(${(displayedPowerCueTop * 100).toFixed(1)}% + 4px)` }}>
+            <div className="pool-stage__power-cue" style={{ top: `calc(${(displayedPowerCueTop * 100).toFixed(1)}% - 2px)` }}>
               <span className="pool-stage__power-cue-tip" />
               <span className="pool-stage__power-cue-ferrule" />
               <span className="pool-stage__power-cue-shaft" />
