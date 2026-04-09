@@ -735,7 +735,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
       }
     }
 
-    current.phase = normalizePhase(current.phase - current.phaseVelocity * elapsedFrames);
+    current.phase = normalizePhase(current.phase + current.phaseVelocity * elapsedFrames);
     current.labelDepth = Math.cos(current.phase);
     current.lastSeenAt = now;
   }
@@ -755,70 +755,39 @@ function hexToRgb(hex: string) {
   };
 }
 
-function drawStripedWrapBand(
+// ─── Fast gradient-based stripe rendering (replaces pixel-loop) ───────────
+// Much lower CPU cost, smooth animation, no frame stutter.
+function drawStripeBand(
   ctx: CanvasRenderingContext2D,
   r: number,
   color: string,
   phase: number,
   scale: number,
 ) {
-  const innerR = Math.max(1, r - 0.55 * scale);
-  const rowStep = Math.max(0.8, 0.9 * scale);
-  const sampleStep = Math.max(0.7, 0.9 * scale);
-  const bandHalf = 0.34;
   const cosP = Math.cos(phase);
   const sinP = Math.sin(phase);
+  // The stripe band center shifts perpendicular to the rolling axis
+  const STRIPE_HALF = r * 0.48;
+  const bandCy = sinP * STRIPE_HALF;
+  // The visible band height narrows as it approaches the top/bottom of the sphere
+  const bandHalfH = Math.max(r * 0.06 * scale, Math.abs(cosP) * STRIPE_HALF + r * 0.05);
 
   ctx.save();
   ctx.beginPath();
-  ctx.arc(0, 0, innerR, 0, Math.PI * 2);
+  ctx.arc(0, 0, r - 0.4 * scale, 0, Math.PI * 2);
   ctx.clip();
 
-  const stripeGrad = ctx.createLinearGradient(-innerR, 0, innerR, 0);
-  stripeGrad.addColorStop(0, shadeColor(color, -18));
-  stripeGrad.addColorStop(0.22, color);
-  stripeGrad.addColorStop(0.5, shadeColor(color, 10));
-  stripeGrad.addColorStop(0.78, color);
-  stripeGrad.addColorStop(1, shadeColor(color, -20));
-  ctx.fillStyle = stripeGrad;
+  const g = ctx.createLinearGradient(0, bandCy - bandHalfH, 0, bandCy + bandHalfH);
+  g.addColorStop(0, "rgba(255,255,255,0)");
+  g.addColorStop(0.1, shadeColor(color, -22));
+  g.addColorStop(0.42, color);
+  g.addColorStop(0.58, shadeColor(color, 16));
+  g.addColorStop(0.9, shadeColor(color, -22));
+  g.addColorStop(1, "rgba(255,255,255,0)");
 
-  for (let py = -innerR; py <= innerR; py += rowStep) {
-    const xSpan = Math.sqrt(Math.max(0, innerR * innerR - py * py));
-    let segmentStart: number | null = null;
-    let lastInsideX = -xSpan;
-    for (let px = -xSpan; px <= xSpan + sampleStep * 0.5; px += sampleStep) {
-      const nx = clamp(px / innerR, -1, 1);
-      const ny = clamp(py / innerR, -1, 1);
-      const nzSq = 1 - nx * nx - ny * ny;
-      const nz = nzSq > 0 ? Math.sqrt(nzSq) : 0;
-      const localY = ny * cosP - nz * sinP;
-      const insideStripe = Math.abs(localY) <= bandHalf;
-      if (insideStripe && segmentStart === null) segmentStart = px;
-      if (insideStripe) lastInsideX = px;
-      const shouldFlush = (!insideStripe && segmentStart !== null) || (segmentStart !== null && px >= xSpan);
-      if (shouldFlush && segmentStart !== null) {
-        const endX = insideStripe ? px : lastInsideX + sampleStep;
-        ctx.fillRect(segmentStart, py - rowStep * 0.54, Math.max(sampleStep, endX - segmentStart), rowStep * 1.08);
-        segmentStart = null;
-      }
-    }
-  }
+  ctx.fillStyle = g;
+  ctx.fillRect(-r, bandCy - bandHalfH - 1, r * 2, (bandHalfH + 1) * 2);
 
-  ctx.restore();
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(0, 0, innerR, 0, Math.PI * 2);
-  ctx.clip();
-  ctx.globalAlpha = 0.22;
-  ctx.strokeStyle = "rgba(18, 24, 36, 0.34)";
-  ctx.lineWidth = Math.max(0.8, 1.05 * scale);
-  const stripeEdge = innerR * (0.34 + 0.08 * Math.abs(Math.cos(phase)));
-  const stripeCenter = -Math.sin(phase) * innerR * 0.36;
-  ctx.beginPath();
-  ctx.ellipse(0, stripeCenter - stripeEdge, innerR * 0.9, innerR * 0.12, 0, 0, Math.PI * 2);
-  ctx.ellipse(0, stripeCenter + stripeEdge, innerR * 0.9, innerR * 0.12, 0, 0, Math.PI * 2);
-  ctx.stroke();
   ctx.restore();
 }
 
@@ -924,7 +893,7 @@ function drawBallFaceSprite(
   ctx.restore();
 
   if (number > 0) {
-    if (isStripe) drawStripedWrapBand(ctx, r, color, phase, 1);
+    if (isStripe) drawStripeBand(ctx, r, color, phase, 1);
     drawBallLabel(ctx, ball, r, phase, 1, color, isStripe);
   }
 
@@ -1122,7 +1091,7 @@ function drawBall(
     const isStripe = ball.number >= 9;
     ctx.save();
     ctx.rotate(spinAxis);
-    if (isStripe) drawStripedWrapBand(ctx, r, color, spinPhase, scale);
+    if (isStripe) drawStripeBand(ctx, r, color, spinPhase, scale);
     drawBallLabel(ctx, ball, r, spinPhase, scale, color, isStripe);
     ctx.restore();
   }
@@ -2938,12 +2907,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     );
   }
 
-  const railEntries = railBalls.map((entry) => {
-    const src = ballIconCache.get(entry.number);
-    const column = entry.slot % 3;
-    const row = Math.floor(entry.slot / 3);
-    return { entry, src, column, row };
-  });
+  const railEntries = railBalls.map((entry) => ({
+    entry,
+    src: ballIconCache.get(entry.number),
+  }));
 
   // ─── JSX ────────────────────────────────────────────────────────────────
 
@@ -3060,24 +3027,17 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
         <aside className="pool-stage__return-rail" aria-hidden="true">
           <div className="pool-stage__rail-body">
-            <div className="pool-stage__rail-channels">
-              {([0, 1, 2] as const).map((col) => (
-                <div key={col} className="pool-stage__rail-ch">
-                  {railEntries
-                    .filter(({ column }) => column === col)
-                    .map(({ entry, src, row }) => (
-                      <span
-                        key={entry.id}
-                        className={`pool-stage__rail-slot-ball pool-stage__rail-slot-ball--${entry.state}`}
-                        style={{ '--rail-row': row } as CSSProperties}
-                      >
-                        {src ? <img src={src} alt="" /> : null}
-                      </span>
-                    ))}
-                </div>
+            <div className="pool-stage__rail-track">
+              {railEntries.map(({ entry, src }) => (
+                <span
+                  key={entry.id}
+                  className={`pool-stage__rail-ball pool-stage__rail-ball--${entry.state}`}
+                  style={{ '--rail-slot': entry.slot } as CSSProperties}
+                >
+                  {src ? <img src={src} alt="" /> : null}
+                </span>
               ))}
             </div>
-            <div className="pool-stage__rail-base" />
           </div>
         </aside>
       </div>
