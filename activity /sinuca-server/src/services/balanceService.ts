@@ -28,10 +28,25 @@ export interface MatchStakeSettlementInput {
   stakeChips: number;
 }
 
+export type StakeSpendReason = "ok" | "bonus_confirm_required" | "debt_confirm_required" | "negative_confirm_required" | "insufficient_chips";
+
+export interface StakeSpendPreview {
+  currentChips: number;
+  currentBonusChips: number;
+  resultingChips: number;
+  resultingBonusChips: number;
+  bonusToUse: number;
+  normalToUse: number;
+  canProceed: boolean;
+  needsConfirmation: boolean;
+  reason: StakeSpendReason;
+}
+
 export interface BalanceService {
   readonly config: BalanceServiceConfig;
   fetchBalance(guildId: string, userId: string, session?: SessionContextPayload): Promise<BalanceLookupResult>;
   getUserBalanceState(guildId: string, userId: string): Promise<UserBalanceState>;
+  previewStakeSpend(guildId: string, userId: string, stakeChips: number): Promise<StakeSpendPreview>;
   applyMatchStakeSettlement(input: MatchStakeSettlementInput): Promise<void>;
   buildMissingIdentifiersDebug(args: {
     session?: SessionContextPayload | null;
@@ -50,6 +65,7 @@ export interface BalanceService {
 export function createBalanceService(config: BalanceServiceConfig): BalanceService {
   let mongoClient: MongoClient | null = null;
   const DEFAULT_NORMAL_CHIPS = 100;
+  const MAX_CHIP_DEBT = 100;
 
   async function ensureMongo() {
     if (!config.mongoUri) return null;
@@ -176,6 +192,67 @@ export function createBalanceService(config: BalanceServiceConfig): BalanceServi
     };
   }
 
+  async function previewStakeSpend(guildId: string, userId: string, stakeChips: number): Promise<StakeSpendPreview> {
+    const state = await getUserBalanceState(guildId, userId);
+    const spend = Math.max(0, Number(stakeChips ?? 0) || 0);
+    const currentChips = Number(state.chips ?? DEFAULT_NORMAL_CHIPS);
+    const currentBonusChips = Math.max(0, Number(state.bonusChips ?? 0) || 0);
+    const bonusToUse = Math.min(currentBonusChips, spend);
+    const normalToUse = spend - bonusToUse;
+    const resultingBonusChips = currentBonusChips - bonusToUse;
+    const resultingChips = currentChips - normalToUse;
+    if (resultingChips < -MAX_CHIP_DEBT) {
+      return {
+        currentChips,
+        currentBonusChips,
+        resultingChips,
+        resultingBonusChips,
+        bonusToUse,
+        normalToUse,
+        canProceed: false,
+        needsConfirmation: false,
+        reason: "insufficient_chips",
+      };
+    }
+    if (resultingChips < 0) {
+      return {
+        currentChips,
+        currentBonusChips,
+        resultingChips,
+        resultingBonusChips,
+        bonusToUse,
+        normalToUse,
+        canProceed: true,
+        needsConfirmation: true,
+        reason: currentChips < 0 ? "negative_confirm_required" : "debt_confirm_required",
+      };
+    }
+    if (bonusToUse > 0) {
+      return {
+        currentChips,
+        currentBonusChips,
+        resultingChips,
+        resultingBonusChips,
+        bonusToUse,
+        normalToUse,
+        canProceed: true,
+        needsConfirmation: true,
+        reason: "bonus_confirm_required",
+      };
+    }
+    return {
+      currentChips,
+      currentBonusChips,
+      resultingChips,
+      resultingBonusChips,
+      bonusToUse,
+      normalToUse,
+      canProceed: true,
+      needsConfirmation: false,
+      reason: "ok",
+    };
+  }
+
   async function applyChipDelta(guildId: string, userId: string, delta: number) {
     const { coll, doc } = await findUserDoc(guildId, userId);
     if (!coll) throw new Error('mongo_unavailable');
@@ -196,11 +273,36 @@ export function createBalanceService(config: BalanceServiceConfig): BalanceServi
     });
   }
 
+  async function applyStakeCost(guildId: string, userId: string, stakeChips: number): Promise<StakeSpendPreview> {
+    const preview = await previewStakeSpend(guildId, userId, stakeChips);
+    if (!preview.canProceed) {
+      throw new Error('insufficient_chips');
+    }
+    const { coll, doc } = await findUserDoc(guildId, userId);
+    if (!coll) throw new Error('mongo_unavailable');
+    const normalizedGuildId = normalizeIntString(guildId) ?? guildId;
+    const normalizedUserId = normalizeIntString(userId) ?? userId;
+    const guildLong = toMongoLong(normalizedGuildId);
+    const userLong = toMongoLong(normalizedUserId);
+    if (doc?._id) {
+      await coll.updateOne({ _id: doc._id }, { $inc: { chips: -preview.normalToUse, bonus_chips: -preview.bonusToUse } });
+      return preview;
+    }
+    await coll.insertOne({
+      type: 'user',
+      guild_id: guildLong ?? normalizedGuildId,
+      user_id: userLong ?? normalizedUserId,
+      chips: preview.resultingChips,
+      bonus_chips: preview.resultingBonusChips,
+    });
+    return preview;
+  }
+
   async function applyMatchStakeSettlement(input: MatchStakeSettlementInput): Promise<void> {
     const stake = Math.max(0, Number(input.stakeChips ?? 0) || 0);
     if (!stake) return;
     await applyChipDelta(input.guildId, input.winnerUserId, stake);
-    await applyChipDelta(input.guildId, input.loserUserId, -stake);
+    await applyStakeCost(input.guildId, input.loserUserId, stake);
   }
 
   async function fetchBalance(guildId: string, userId: string, session?: SessionContextPayload): Promise<BalanceLookupResult> {
@@ -273,6 +375,7 @@ export function createBalanceService(config: BalanceServiceConfig): BalanceServi
     config,
     fetchBalance,
     getUserBalanceState,
+    previewStakeSpend,
     applyMatchStakeSettlement,
     buildMissingIdentifiersDebug,
     buildErrorDebug,

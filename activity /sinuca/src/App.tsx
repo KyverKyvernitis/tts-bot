@@ -166,7 +166,22 @@ type ConnectionState = "connecting" | "connected" | "offline";
 type AuthState = "checking" | "ready" | "needs_consent";
 type LobbyScreen = "home" | "create" | "list" | "room" | "game";
 type TableType = "stake" | "casual";
+type ChipGateDialogKind = "bonus" | "debt" | "negative";
+type ChipGateDialogSource = "create" | "start";
 
+type ChipGateDialogState = {
+  kind: ChipGateDialogKind;
+  source: ChipGateDialogSource;
+  title: string;
+  body: string;
+  confirmLabel: string;
+  resultingChips: number;
+  bonusToUse: number;
+  stake: number;
+  tableType: TableType;
+  roomId: string | null;
+  overrideUserId: string | null;
+};
 
 const SNAPSHOT_DEBUG_ENABLED = false;
 const SNAPSHOT_DEBUG_LOG_EVERY_MS = 450;
@@ -302,6 +317,8 @@ export default function App() {
   const [gameStartBusy, setGameStartBusy] = useState(false);
   const [gameShootBusy, setGameShootBusy] = useState(false);
   const [transientNotice, setTransientNotice] = useState<string | null>(null);
+  const [chipGateDialog, setChipGateDialog] = useState<ChipGateDialogState | null>(null);
+  const [chipGateBusy, setChipGateBusy] = useState(false);
   const [roomExitBusy, setRoomExitBusy] = useState(false);
   const [shotPipelineDebug, setShotPipelineDebug] = useState<ShotPipelineDebugState>(initialShotPipelineDebug);
   const socketRef = useRef<WebSocket | null>(null);
@@ -628,6 +645,81 @@ export default function App() {
     return errorCode === "insufficient_chips" || /não tem fichas pra continuar/i.test(errorDetail ?? '');
   };
 
+  const readNumberFromPayload = (payload: Record<string, unknown> | null | undefined, key: string, fallback = 0) => {
+    const value = payload?.[key];
+    const parsed = typeof value === "number" ? value : Number(value ?? fallback);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+
+  const readStringFromPayload = (payload: Record<string, unknown> | null | undefined, key: string) => {
+    const value = payload?.[key];
+    return typeof value === "string" ? value : null;
+  };
+
+  const buildChipGateDialog = (args: {
+    errorCode?: string | null;
+    errorDetail?: string | null;
+    errorPayload?: Record<string, unknown> | null;
+    source: ChipGateDialogSource;
+    stake: number;
+    tableType: TableType;
+    roomId?: string | null;
+    overrideUserId?: string | null;
+  }): ChipGateDialogState | null => {
+    const payload = args.errorPayload ?? null;
+    const blockedUserId = readStringFromPayload(payload, "blockedUserId");
+    if (blockedUserId && blockedUserId !== state.currentUser.userId) return null;
+    const errorCode = args.errorCode ?? readStringFromPayload(payload, "error");
+    const resultingChips = readNumberFromPayload(payload, "resultingChips", balance.chips);
+    const bonusToUse = readNumberFromPayload(payload, "bonusToUse", 0);
+    if (errorCode === "bonus_confirm_required") {
+      return {
+        kind: "bonus",
+        source: args.source,
+        title: "Usar fichas bônus?",
+        body: "Você pode continuar usando suas fichas bônus antes das fichas normais.",
+        confirmLabel: `Sim (usar ${bonusToUse} fichas bônus)`,
+        resultingChips,
+        bonusToUse,
+        stake: args.stake,
+        tableType: args.tableType,
+        roomId: args.roomId ?? null,
+        overrideUserId: args.overrideUserId ?? null,
+      };
+    }
+    if (errorCode === "debt_confirm_required") {
+      return {
+        kind: "debt",
+        source: args.source,
+        title: "Ao continuar você ficará devendo",
+        body: args.errorDetail ?? "Ao continuar você ficará devendo. Tem certeza?",
+        confirmLabel: `Sim (ficar com -${Math.abs(resultingChips)} fichas)`,
+        resultingChips,
+        bonusToUse,
+        stake: args.stake,
+        tableType: args.tableType,
+        roomId: args.roomId ?? null,
+        overrideUserId: args.overrideUserId ?? null,
+      };
+    }
+    if (errorCode === "negative_confirm_required") {
+      return {
+        kind: "negative",
+        source: args.source,
+        title: "Você está negativado",
+        body: args.errorDetail ?? "Você está negativado. Se continuar, sua dívida vai aumentar. Tem certeza?",
+        confirmLabel: `Sim (ficar com -${Math.abs(resultingChips)} fichas)`,
+        resultingChips,
+        bonusToUse,
+        stake: args.stake,
+        tableType: args.tableType,
+        roomId: args.roomId ?? null,
+        overrideUserId: args.overrideUserId ?? null,
+      };
+    }
+    return null;
+  };
+
   const fetchBalanceOverHttp = async (reason: string) => {
     if (!isServer || !state.context.guildId || !resolvedUser) return false;
 
@@ -730,15 +822,10 @@ export default function App() {
     if (result.data) {
       setErrorMessage(null);
       setAuthDebug((current) => current ? `${current} • room_action:http_ok:${reason}:${result.okLabel ?? "direct"}` : `room_action:http_ok:${reason}:${result.okLabel ?? "direct"}`);
-      return result.data;
-    }
-    if (shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail)) {
-      showTransientNotice("Você não tem fichas pra continuar");
-    }
-    if (result.attempts.length) {
+    } else if (result.attempts.length) {
       setAuthDebug((current) => current ? `${current} • room_action:http_failed:${reason}:${result.attempts.join(" | ")}` : `room_action:http_failed:${reason}:${result.attempts.join(" | ")}`);
     }
-    return null;
+    return result;
   };
 
   const subscribeRoomRealtime = (roomId: string, reason: string) => {
@@ -784,7 +871,7 @@ export default function App() {
     return true;
   };
 
-  const createRoomOverHttp = async (reason: string, override?: { stake: number; tableType: TableType }) => {
+  const createRoomOverHttp = async (reason: string, override?: { stake: number; tableType: TableType }, confirmation?: { confirmBonus?: boolean; confirmDebt?: boolean }) => {
     const nextStake = override?.stake ?? createStake;
     const nextTableType = override?.tableType ?? createTableType;
     const result = await postRoomActionOverHttp("/rooms/create", {
@@ -797,13 +884,30 @@ export default function App() {
       avatarUrl: state.currentUser.avatarUrl ?? null,
       tableType: isServer ? nextTableType : "casual",
       stakeChips: isServer && nextTableType === "stake" && nextStake > 0 ? nextStake : null,
+      confirmBonus: confirmation?.confirmBonus ?? false,
+      confirmDebt: confirmation?.confirmDebt ?? false,
     }, reason);
-    if (result?.room) {
-      setRoom(result.room);
-      setCreateDraftRoomId(result.room.roomId);
-      setLocallyOwnedRoomId(result.room.roomId);
-      subscribeRoomRealtime(result.room.roomId, `${reason}:http_created`);
-      return result.room;
+    const dialog = buildChipGateDialog({
+      errorCode: result?.errorCode,
+      errorDetail: result?.errorDetail,
+      errorPayload: result?.errorPayload,
+      source: "create",
+      stake: nextStake,
+      tableType: nextTableType,
+    });
+    if (dialog) {
+      setChipGateDialog(dialog);
+      return null;
+    }
+    if (result?.errorDetail && (shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail) || result.errorCode === "opponent_confirmation_required")) {
+      showTransientNotice(result.errorDetail);
+    }
+    if (result?.data?.room) {
+      setRoom(result.data.room);
+      setCreateDraftRoomId(result.data.room.roomId);
+      setLocallyOwnedRoomId(result.data.room.roomId);
+      subscribeRoomRealtime(result.data.room.roomId, `${reason}:http_created`);
+      return result.data.room;
     }
     return null;
   };
@@ -815,24 +919,25 @@ export default function App() {
       displayName: state.currentUser.displayName,
       avatarUrl: state.currentUser.avatarUrl ?? null,
     }, reason);
-    if (result?.room) {
-      setRoom(result.room);
+    if (result?.data?.room) {
+      setRoom(result.data.room);
       setScreen("room");
-      if (result.room.hostUserId !== state.currentUser.userId) {
+      if (result.data.room.hostUserId !== state.currentUser.userId) {
         setLocallyOwnedRoomId(null);
       }
-      subscribeRoomRealtime(result.room.roomId, `${reason}:http_joined`);
-      return result.room;
+      subscribeRoomRealtime(result.data.room.roomId, `${reason}:http_joined`);
+      return result.data.room;
     }
     return null;
   };
 
   const leaveRoomOverHttp = async (roomId: string, reason: string, options?: { closeRoom?: boolean }) => {
-    return await postRoomActionOverHttp("/rooms/leave", {
+    const result = await postRoomActionOverHttp("/rooms/leave", {
       roomId,
       userId: state.currentUser.userId,
       closeRoom: options?.closeRoom ?? false,
     }, reason);
+    return result.data ?? null;
   };
 
   const setReadyOverHttp = async (roomId: string, ready: boolean, reason: string) => {
@@ -841,9 +946,9 @@ export default function App() {
       userId: state.currentUser.userId,
       ready,
     }, reason);
-    if (result?.room) {
-      setRoom(result.room);
-      return result.room;
+    if (result?.data?.room) {
+      setRoom(result.data.room);
+      return result.data.room;
     }
     return null;
   };
@@ -855,9 +960,9 @@ export default function App() {
       stakeChips: stake,
       tableType: stake === 0 ? "casual" : "stake",
     }, reason);
-    if (result?.room) {
-      setRoom(result.room);
-      return result.room;
+    if (result?.data?.room) {
+      setRoom(result.data.room);
+      return result.data.room;
     }
     return null;
   };
@@ -1415,13 +1520,31 @@ export default function App() {
     return result;
   };
 
-  const startGameOverHttp = async (roomId: string, reason: string, overrideUserId?: string | null) => {
+  const startGameOverHttp = async (roomId: string, reason: string, overrideUserId?: string | null, confirmation?: { confirmBonus?: boolean; confirmDebt?: boolean }) => {
+    const activeRoom = room?.roomId === roomId ? room : null;
+    const stake = activeRoom?.tableType === "stake" ? Number(activeRoom?.stakeChips ?? 0) || 0 : 0;
     const result = await postGameActionOverHttp("/games/start", {
       roomId,
       userId: overrideUserId ?? state.currentUser.userId,
+      confirmBonus: confirmation?.confirmBonus ?? false,
+      confirmDebt: confirmation?.confirmDebt ?? false,
     }, reason);
-    if (shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail)) {
-      showTransientNotice("Você não tem fichas pra continuar");
+    const dialog = buildChipGateDialog({
+      errorCode: result.errorCode,
+      errorDetail: result.errorDetail,
+      errorPayload: result.errorPayload,
+      source: "start",
+      stake,
+      tableType: activeRoom?.tableType === "stake" ? "stake" : "casual",
+      roomId,
+      overrideUserId: overrideUserId ?? null,
+    });
+    if (dialog) {
+      setChipGateDialog(dialog);
+      return null;
+    }
+    if (result.errorDetail && (shouldShowInsufficientChipsNotice(result.errorCode, result.errorDetail) || result.errorCode === "opponent_confirmation_required")) {
+      showTransientNotice(result.errorDetail);
       return null;
     }
     if (result.data?.room) setRoom(result.data.room);
@@ -1447,6 +1570,28 @@ export default function App() {
       return applied;
     }
     return null;
+  };
+
+  const confirmChipGateDialog = async () => {
+    if (!chipGateDialog || chipGateBusy) return;
+    setChipGateBusy(true);
+    try {
+      const confirmation = chipGateDialog.kind === "bonus"
+        ? { confirmBonus: true, confirmDebt: false }
+        : { confirmBonus: false, confirmDebt: true };
+      if (chipGateDialog.source === "create") {
+        const created = await createRoomOverHttp('chip_gate_confirm_create', {
+          stake: chipGateDialog.stake,
+          tableType: chipGateDialog.tableType,
+        }, confirmation);
+        if (created) setChipGateDialog(null);
+      } else if (chipGateDialog.source === "start" && chipGateDialog.roomId) {
+        const started = await startGameOverHttp(chipGateDialog.roomId, 'chip_gate_confirm_start', chipGateDialog.overrideUserId, confirmation);
+        if (started) setChipGateDialog(null);
+      }
+    } finally {
+      setChipGateBusy(false);
+    }
   };
 
   const shootGameOverHttp = async (roomId: string, shot: { angle: number; power: number; cueX?: number | null; cueY?: number | null; calledPocket?: number | null; spinX?: number | null; spinY?: number | null }, reason: string) => {
@@ -2325,6 +2470,24 @@ export default function App() {
       style={{ backgroundImage: `linear-gradient(180deg, rgba(4, 10, 17, 0.12), rgba(4, 10, 17, 0.46)), url(${lobbyBackground})` }}
       onClickCapture={handleShellClickCapture}
     >
+      {chipGateDialog ? (
+        <div className="activity-confirm" role="dialog" aria-modal="true" aria-live="polite">
+          <div className="activity-confirm__backdrop" onClick={() => { if (!chipGateBusy) setChipGateDialog(null); }} />
+          <div className="activity-confirm__panel">
+            <div className="activity-confirm__title">{chipGateDialog.title}</div>
+            <div className="activity-confirm__body">{chipGateDialog.body}</div>
+            {chipGateDialog.kind !== "bonus" ? (
+              <div className="activity-confirm__summary">Saldo após continuar: <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span></div>
+            ) : null}
+            <div className="activity-confirm__actions">
+              <button type="button" className="activity-confirm__button activity-confirm__button--ghost" disabled={chipGateBusy} onClick={() => setChipGateDialog(null)}>Melhor não...</button>
+              <button type="button" className="activity-confirm__button activity-confirm__button--danger" disabled={chipGateBusy} onClick={() => { void confirmChipGateDialog(); }}>
+                {chipGateDialog.kind === "bonus" ? chipGateDialog.confirmLabel : <>Sim (ficar com <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span> fichas)</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {transientNotice ? (
         <div className="activity-notice activity-notice--visible" role="status" aria-live="polite">
           <div className="activity-notice__panel">{transientNotice}</div>

@@ -24,6 +24,7 @@ export interface HttpTransportResult<T> {
   errorCode?: string | null;
   errorDetail?: string | null;
   errorStatus?: number | null;
+  errorPayload?: Record<string, unknown> | null;
 }
 
 export async function fetchRoomsRequest(params: {
@@ -75,7 +76,7 @@ export async function fetchRoomsRequest(params: {
     }
   }
 
-  return { data: null, attempts, okLabel: null, errorCode: null, errorDetail: null, errorStatus: null };
+  return { data: null, attempts, okLabel: null, errorCode: null, errorDetail: null, errorStatus: null, errorPayload: null };
 }
 
 export async function fetchRoomStateRequest(roomId: string): Promise<HttpTransportResult<{ room?: RoomSnapshot | null; error?: string }>> {
@@ -118,7 +119,7 @@ export async function fetchRoomStateRequest(roomId: string): Promise<HttpTranspo
     }
   }
 
-  return { data: null, attempts, okLabel: null, errorCode: null, errorDetail: null, errorStatus: null };
+  return { data: null, attempts, okLabel: null, errorCode: null, errorDetail: null, errorStatus: null, errorPayload: null };
 }
 
 export async function postRoomActionRequest(path: string, payload: Record<string, unknown>): Promise<HttpTransportResult<{ room?: RoomSnapshot | null; error?: string; detail?: string }>> {
@@ -126,6 +127,7 @@ export async function postRoomActionRequest(path: string, payload: Record<string
   let errorCode: string | null = null;
   let errorDetail: string | null = null;
   let errorStatus: number | null = null;
+  let errorPayload: Record<string, unknown> | null = null;
   const query = buildQueryStringFromPayload(payload);
   const legacyAction = resolveLegacyBalanceAction(path);
 
@@ -202,12 +204,13 @@ export async function postRoomActionRequest(path: string, payload: Record<string
       const raw = await response.text();
       const parsed = raw ? JSON.parse(raw) as { room?: RoomSnapshot | null; error?: string; detail?: string } : null;
       if (response.ok) {
-        return { data: parsed, attempts, okLabel: variant.label, errorCode: null, errorDetail: null, errorStatus: null };
+        return { data: parsed, attempts, okLabel: variant.label, errorCode: null, errorDetail: null, errorStatus: null, errorPayload: null };
       }
       const detail = parsed?.detail ?? parsed?.error ?? (raw.slice(0, 180) || "empty");
       errorCode = parsed?.error ?? errorCode;
       errorDetail = detail ?? errorDetail;
       errorStatus = response.status;
+      errorPayload = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
       attempts.push(`${variant.label}:${response.status}:${parsed?.error ?? detail}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown";
@@ -215,5 +218,5 @@ export async function postRoomActionRequest(path: string, payload: Record<string
     }
   }
 
-  return { data: null, attempts, okLabel: null, errorCode, errorDetail, errorStatus };
+  return { data: null, attempts, okLabel: null, errorCode, errorDetail, errorStatus, errorPayload };
 }

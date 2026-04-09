@@ -59,16 +59,84 @@ export interface RegisterActivityRoutesOptions {
 export function registerActivityRoutes({ app, runtime, balanceService, exchangeDiscordCode }: RegisterActivityRoutesOptions) {
 
 
-  async function buildInsufficientStakeResponse(args: { guildId: string; userId: string; requiredChips: number }) {
-    const state = await balanceService.getUserBalanceState(args.guildId, args.userId);
+  function buildStakeGateResponse(args: {
+    error: string;
+    detail: string;
+    blockedUserId: string;
+    requiredChips: number;
+    currentChips: number;
+    currentBonusChips: number;
+    resultingChips: number;
+    resultingBonusChips: number;
+    bonusToUse: number;
+  }) {
     return {
+      error: args.error,
+      detail: args.detail,
+      blockedUserId: args.blockedUserId,
+      requiredChips: args.requiredChips,
+      currentChips: args.currentChips,
+      currentBonusChips: args.currentBonusChips,
+      resultingChips: args.resultingChips,
+      resultingBonusChips: args.resultingBonusChips,
+      bonusToUse: args.bonusToUse,
+    } as const;
+  }
+
+  async function buildStakePreviewResponse(args: { guildId: string; userId: string; requiredChips: number }) {
+    const preview = await balanceService.previewStakeSpend(args.guildId, args.userId, args.requiredChips);
+    if (preview.reason === "bonus_confirm_required") {
+      return buildStakeGateResponse({
+        error: "bonus_confirm_required",
+        detail: "Usar fichas bônus?",
+        blockedUserId: args.userId,
+        requiredChips: args.requiredChips,
+        currentChips: preview.currentChips,
+        currentBonusChips: preview.currentBonusChips,
+        resultingChips: preview.resultingChips,
+        resultingBonusChips: preview.resultingBonusChips,
+        bonusToUse: preview.bonusToUse,
+      });
+    }
+    if (preview.reason === "debt_confirm_required") {
+      return buildStakeGateResponse({
+        error: "debt_confirm_required",
+        detail: "Ao continuar você ficará devendo. Tem certeza?",
+        blockedUserId: args.userId,
+        requiredChips: args.requiredChips,
+        currentChips: preview.currentChips,
+        currentBonusChips: preview.currentBonusChips,
+        resultingChips: preview.resultingChips,
+        resultingBonusChips: preview.resultingBonusChips,
+        bonusToUse: preview.bonusToUse,
+      });
+    }
+    if (preview.reason === "negative_confirm_required") {
+      return buildStakeGateResponse({
+        error: "negative_confirm_required",
+        detail: "Você está negativado. Se continuar, sua dívida vai aumentar. Tem certeza?",
+        blockedUserId: args.userId,
+        requiredChips: args.requiredChips,
+        currentChips: preview.currentChips,
+        currentBonusChips: preview.currentBonusChips,
+        resultingChips: preview.resultingChips,
+        resultingBonusChips: preview.resultingBonusChips,
+        bonusToUse: preview.bonusToUse,
+      });
+    }
+    return buildStakeGateResponse({
       error: "insufficient_chips",
       detail: "Você não tem fichas pra continuar",
       blockedUserId: args.userId,
-      availableChips: state.chips,
       requiredChips: args.requiredChips,
-    } as const;
+      currentChips: preview.currentChips,
+      currentBonusChips: preview.currentBonusChips,
+      resultingChips: preview.resultingChips,
+      resultingBonusChips: preview.resultingBonusChips,
+      bonusToUse: preview.bonusToUse,
+    });
   }
+
   const handleHealth: RequestHandler = (req, res) => {
     console.log("[sinuca-health]", JSON.stringify({ origin: req.headers.origin ?? null, ua: req.headers["user-agent"] ?? null, url: req.url ?? null }));
     sendNoStoreJson(res, { ok: true, rules: getInitialRuleSet() });
@@ -170,11 +238,16 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
       return;
     }
     const normalizedStake = Number.isFinite(stakeChips) ? Math.max(0, stakeChips) : 0;
+    const confirmBonus = booleanish(merged.confirmBonus, false);
+    const confirmDebt = booleanish(merged.confirmDebt, false);
     if (requestedTableType === "stake" && normalizedStake > 0 && guildId) {
-      const balanceState = await balanceService.getUserBalanceState(guildId, userId);
-      if (balanceState.chips < normalizedStake) {
-        const payload = await buildInsufficientStakeResponse({ guildId, userId, requiredChips: normalizedStake });
-        console.log("[sinuca-create-room-http-rejected]", JSON.stringify({ roomId: null, userId, guildId, reason: "insufficient_chips", availableChips: balanceState.chips, requiredChips: normalizedStake }));
+      const preview = await balanceService.previewStakeSpend(guildId, userId, normalizedStake);
+      const confirmSatisfied = preview.reason === "ok"
+        || (preview.reason === "bonus_confirm_required" && confirmBonus)
+        || ((preview.reason === "debt_confirm_required" || preview.reason === "negative_confirm_required") && confirmDebt);
+      if (!preview.canProceed || !confirmSatisfied) {
+        const payload = await buildStakePreviewResponse({ guildId, userId, requiredChips: normalizedStake });
+        console.log("[sinuca-create-room-http-rejected]", JSON.stringify({ roomId: null, userId, guildId, reason: payload.error, requiredChips: normalizedStake, currentChips: payload.currentChips, currentBonusChips: payload.currentBonusChips, resultingChips: payload.resultingChips, resultingBonusChips: payload.resultingBonusChips, bonusToUse: payload.bonusToUse }));
         res.status(409).json(payload);
         return;
       }
@@ -410,18 +483,35 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
       return;
     }
     const requiredStake = room.tableType === "stake" ? Math.max(0, Number(room.stakeChips ?? 0) || 0) : 0;
+    const confirmBonus = booleanish(merged.confirmBonus, false);
+    const confirmDebt = booleanish(merged.confirmDebt, false);
     if (requiredStake > 0 && room.guildId) {
-      const hostBalance = await balanceService.getUserBalanceState(room.guildId, room.hostUserId);
-      if (hostBalance.chips < requiredStake) {
-        const payload = await buildInsufficientStakeResponse({ guildId: room.guildId, userId: room.hostUserId, requiredChips: requiredStake });
-        console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: "insufficient_chips_host", requiredStake, availableChips: hostBalance.chips }));
+      const hostPreview = await balanceService.previewStakeSpend(room.guildId, room.hostUserId, requiredStake);
+      const hostConfirmSatisfied = hostPreview.reason === "ok"
+        || (hostPreview.reason === "bonus_confirm_required" && confirmBonus)
+        || ((hostPreview.reason === "debt_confirm_required" || hostPreview.reason === "negative_confirm_required") && confirmDebt);
+      if (!hostPreview.canProceed || !hostConfirmSatisfied) {
+        const payload = await buildStakePreviewResponse({ guildId: room.guildId, userId: room.hostUserId, requiredChips: requiredStake });
+        console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: payload.error, requiredStake, currentChips: payload.currentChips, currentBonusChips: payload.currentBonusChips, resultingChips: payload.resultingChips, bonusToUse: payload.bonusToUse }));
         res.status(409).json(payload);
         return;
       }
-      const opponentBalance = await balanceService.getUserBalanceState(room.guildId, opponent.userId);
-      if (opponentBalance.chips < requiredStake) {
-        const payload = await buildInsufficientStakeResponse({ guildId: room.guildId, userId: opponent.userId, requiredChips: requiredStake });
-        console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: "insufficient_chips_guest", requiredStake, availableChips: opponentBalance.chips, blockedUserId: opponent.userId }));
+      const opponentPreview = await balanceService.previewStakeSpend(room.guildId, opponent.userId, requiredStake);
+      if (!opponentPreview.canProceed || opponentPreview.reason !== "ok") {
+        const payload = !opponentPreview.canProceed
+          ? await buildStakePreviewResponse({ guildId: room.guildId, userId: opponent.userId, requiredChips: requiredStake })
+          : buildStakeGateResponse({
+              error: "opponent_confirmation_required",
+              detail: "O outro jogador precisa confirmar saldo antes de continuar",
+              blockedUserId: opponent.userId,
+              requiredChips: requiredStake,
+              currentChips: opponentPreview.currentChips,
+              currentBonusChips: opponentPreview.currentBonusChips,
+              resultingChips: opponentPreview.resultingChips,
+              resultingBonusChips: opponentPreview.resultingBonusChips,
+              bonusToUse: opponentPreview.bonusToUse,
+            });
+        console.log("[sinuca-start-http-rejected]", JSON.stringify({ roomId, userId, reason: payload.error, requiredStake, blockedUserId: opponent.userId, currentChips: payload.currentChips, currentBonusChips: payload.currentBonusChips, resultingChips: payload.resultingChips, bonusToUse: payload.bonusToUse }));
         res.status(409).json(payload);
         return;
       }
