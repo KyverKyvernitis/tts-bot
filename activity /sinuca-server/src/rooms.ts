@@ -22,6 +22,7 @@ export interface RoomRecord {
   status: RoomStatus;
   stakeLabel: string;
   createdAt: number;
+  rematchReadyUserIds: string[];
 }
 
 const rooms = new Map<string, RoomRecord>();
@@ -111,6 +112,7 @@ export function createRoom(
     status: "waiting",
     stakeLabel: tableType === "stake" ? `${normalizedStake} fichas` : "casual",
     createdAt: Date.now(),
+    rematchReadyUserIds: [],
   };
   rooms.set(room.roomId, room);
   roomSockets.set(room.roomId, new Set());
@@ -229,6 +231,25 @@ export function unsubscribeSocket(ws: WebSocket) {
   }
 }
 
+export function toggleRematchReady(roomId: string, userId: string): RoomRecord | null {
+  const room = rooms.get(roomId);
+  if (!room) return null;
+  if (!room.players.some((p) => p.userId === userId)) return null;
+  if (!room.rematchReadyUserIds) room.rematchReadyUserIds = [];
+  const idx = room.rematchReadyUserIds.indexOf(userId);
+  if (idx >= 0) {
+    room.rematchReadyUserIds.splice(idx, 1);
+  } else {
+    room.rematchReadyUserIds.push(userId);
+  }
+  return room;
+}
+
+export function clearRematchReady(roomId: string): void {
+  const room = rooms.get(roomId);
+  if (room) room.rematchReadyUserIds = [];
+}
+
 export function toSnapshot(room: RoomRecord): RoomSnapshot {
   return {
     roomId: room.roomId,
@@ -244,5 +265,6 @@ export function toSnapshot(room: RoomRecord): RoomSnapshot {
     status: room.status,
     stakeLabel: room.stakeLabel,
     createdAt: room.createdAt,
+    rematchReadyUserIds: room.rematchReadyUserIds?.length ? room.rematchReadyUserIds : undefined,
   };
 }

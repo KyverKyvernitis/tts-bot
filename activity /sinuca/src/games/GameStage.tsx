@@ -154,7 +154,7 @@ type Props = {
   onShotDebugEvent?: (event: ShotPipelineDebugEvent) => void;
   onAimStateChange?: (aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => void;
   onExit: () => void;
-  onPlayAgain?: () => void;
+  onRematchReady?: () => void;
 };
 
 type PointerMode = "idle" | "aim" | "place" | "power";
@@ -1513,7 +1513,7 @@ function createImage(src: string) {
 
 // ─── Main component ───────────────────────────────────────────────────────
 
-export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, onShoot, onShotDebugEvent, onAimStateChange, onExit, onPlayAgain }: Props) {
+export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, onShoot, onShotDebugEvent, onAimStateChange, onExit, onRematchReady }: Props) {
   const [displayBalls, setDisplayBalls] = useState<GameBallSnapshot[]>(game.balls);
   const [railBalls, setRailBalls] = useState<RailBallAnimation[]>(() => buildSettledRailBalls(game.balls));
   const [power, setPower] = useState(POWER_MIN);
@@ -3173,45 +3173,59 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         </aside>
       </div>
 
-      {game.status === "finished" && (
-        <div className="pool-stage__endgame-overlay">
-          <div className="pool-stage__endgame-card">
-            <div className={`pool-stage__endgame-icon ${game.winnerUserId === currentUserId ? "pool-stage__endgame-icon--win" : "pool-stage__endgame-icon--lose"}`}>
-              {game.winnerUserId === currentUserId ? "🏆" : "😞"}
-            </div>
-            <h2 className="pool-stage__endgame-title">
-              {game.winnerUserId === currentUserId ? "Você venceu!" : "Você perdeu!"}
-            </h2>
-            {game.tableType !== "casual" && game.stakeChips ? (
-              <div className={`pool-stage__endgame-chips ${game.winnerUserId === currentUserId ? "pool-stage__endgame-chips--win" : "pool-stage__endgame-chips--lose"}`}>
-                {game.winnerUserId === currentUserId ? "+" : "-"}{game.stakeChips} fichas
+      {game.status === "finished" && (() => {
+        const isWinner = game.winnerUserId === currentUserId;
+        const rematchReady = room.rematchReadyUserIds ?? [];
+        const readyCount = rematchReady.length;
+        const myReady = rematchReady.includes(currentUserId);
+        return (
+          <div className="pool-stage__endgame-overlay">
+            <div className="pool-stage__endgame-card">
+              <img
+                className="pool-stage__endgame-emoji"
+                src={isWinner
+                  ? "https://cdn.discordapp.com/emojis/1485043651292827788.webp?size=96"
+                  : "https://cdn.discordapp.com/emojis/1485043671077228786.webp?size=96"
+                }
+                alt={isWinner ? "Vitória" : "Derrota"}
+                width="56"
+                height="56"
+                draggable={false}
+              />
+              <h2 className="pool-stage__endgame-title">
+                {isWinner ? "Você venceu!" : "Você perdeu!"}
+              </h2>
+              {game.tableType !== "casual" && game.stakeChips ? (
+                <div className={`pool-stage__endgame-chips ${isWinner ? "pool-stage__endgame-chips--win" : "pool-stage__endgame-chips--lose"}`}>
+                  {isWinner ? "+" : "-"}{game.stakeChips} fichas
+                </div>
+              ) : (
+                <div className="pool-stage__endgame-chips pool-stage__endgame-chips--casual">
+                  Amistoso
+                </div>
+              )}
+              <div className="pool-stage__endgame-actions">
+                <button
+                  type="button"
+                  className="pool-stage__endgame-btn pool-stage__endgame-btn--lobby"
+                  disabled={exitBusy}
+                  onClick={onExit}
+                >
+                  Lobby
+                </button>
+                <button
+                  type="button"
+                  className={`pool-stage__endgame-btn pool-stage__endgame-btn--again ${myReady ? "pool-stage__endgame-btn--ready" : ""}`}
+                  disabled={!onRematchReady || exitBusy || myReady}
+                  onClick={() => onRematchReady?.()}
+                >
+                  {myReady ? `Aguardando... (${readyCount}/2)` : `Jogar novamente (${readyCount}/2)`}
+                </button>
               </div>
-            ) : (
-              <div className="pool-stage__endgame-chips pool-stage__endgame-chips--casual">
-                Amistoso
-              </div>
-            )}
-            <div className="pool-stage__endgame-actions">
-              <button
-                type="button"
-                className="pool-stage__endgame-btn pool-stage__endgame-btn--lobby"
-                disabled={exitBusy}
-                onClick={onExit}
-              >
-                Lobby
-              </button>
-              <button
-                type="button"
-                className="pool-stage__endgame-btn pool-stage__endgame-btn--again"
-                disabled={!onPlayAgain || exitBusy}
-                onClick={() => onPlayAgain?.()}
-              >
-                Jogar novamente
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </section>
   );
 }

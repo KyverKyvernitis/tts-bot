@@ -2814,25 +2814,24 @@ export default function App() {
             }
           }}
           onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room_game" : "http_primary_leave_room_game"); }}
-          onPlayAgain={() => {
+          onRematchReady={() => {
             if (!room) return;
             void (async () => {
-              setRoomExitBusy(true);
               try {
-                const result = await postGameActionRequest("/games/rematch", {
+                const result = await postGameActionRequest("/games/rematch-ready", {
                   roomId: room.roomId,
                   userId: state.currentUser.userId,
-                }, "rematch");
-                if (result.data?.game) {
-                  setGame(result.data.game);
-                }
+                }, "rematch_ready");
+                // Room state updates come through WebSocket broadcast.
+                // If the server also started the game (2/2), game state arrives via broadcast too.
                 if (result.data?.room) {
                   setRoom(result.data.room as RoomSnapshot);
                 }
+                if (result.data?.game) {
+                  setGame(result.data.game);
+                }
               } catch (err) {
-                console.error("[sinuca-rematch-error]", err);
-              } finally {
-                setRoomExitBusy(false);
+                console.error("[sinuca-rematch-ready-error]", err);
               }
             })();
           }}

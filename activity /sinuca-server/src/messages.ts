@@ -189,6 +189,7 @@ export interface RoomSnapshot {
   status: RoomStatus;
   stakeLabel: string;
   createdAt: number;
+  rematchReadyUserIds?: string[];
 }
 
 export interface BalanceSnapshot {

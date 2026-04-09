@@ -37,7 +37,7 @@ export const BALANCE_ACTIONS = {
   gameStart: "game_start",
   gameAimSync: "game_aim_sync",
   gameShoot: "game_shoot",
-  gameRematch: "game_rematch",
+  gameRematchReady: "game_rematch_ready",
   uiDebug: "ui_debug",
 } as const;
 
