@@ -71,7 +71,7 @@ const SFX = (() => {
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
 const BALL_RADIUS = 13;
-const BALL_VISUAL_RADIUS = 15; // Draw slightly larger than physics for visibility (#8)
+const BALL_VISUAL_RADIUS = 12; // Closer to reference proportions
 const BALL_DIAMETER = BALL_RADIUS * 2;
 const MAX_PLAYBACK_DURATION_MS = 3500;
 const FELT_LEFT = 69;
@@ -416,6 +416,9 @@ function extrapolateSnapshotBalls(
   return baseBalls.map((ball) => {
     const velocity = velocities[ball.id];
     if (!velocity || ball.pocketed || velocity.pocketed) return { ...ball };
+    // Don't extrapolate nearly-stopped balls — prevents oscillation at sim end
+    const speed = Math.hypot(velocity.x, velocity.y);
+    if (speed < 0.0005) return { ...ball };
     return {
       ...ball,
       x: ball.x + velocity.x * stepMs,
@@ -579,7 +582,9 @@ function emitRealtimeImpactSounds(
       continue;
     }
     if (ball.pocketed) continue;
-    const moved = Math.hypot(ball.x - previous.x, ball.y - previous.y);
+    const dx = ball.x - previous.x;
+    const dy = ball.y - previous.y;
+    const moved = Math.hypot(dx, dy);
     if (ball.id !== "ball-0" && moved > 1.6) movingIds.add(ball.id);
     if (moved > 0.62 && (ball.x <= PLAY_MIN_X + 2.4 || ball.x >= PLAY_MAX_X - 2.4 || ball.y <= PLAY_MIN_Y + 2.4 || ball.y >= PLAY_MAX_Y - 2.4)) {
       wallIds.add(ball.id);
@@ -591,13 +596,17 @@ function emitRealtimeImpactSounds(
     cooldown.lastPocketAt = now;
   }
 
+  // Only count a ball as "newly moving" if it wasn't moving before AND
+  // it actually started moving (not just continued). This prevents
+  // re-triggering sounds every snapshot while balls are rolling.
   const newlyMoving = Array.from(movingIds).filter((id) => !cooldown.movingIds.has(id));
   const newlyWall = Array.from(wallIds).filter((id) => !cooldown.wallIds.has(id));
 
-  if (newlyMoving.length > 0 && now - cooldown.lastBallAt > 200) {
+  // Longer cooldowns to prevent sound spam during continuous simulation
+  if (newlyMoving.length > 0 && now - cooldown.lastBallAt > 350) {
     SFX.ballHit();
     cooldown.lastBallAt = now;
-  } else if (!newlyPocketed && newlyWall.length > 0 && now - cooldown.lastCushionAt > 140) {
+  } else if (!newlyPocketed && newlyWall.length > 0 && now - cooldown.lastCushionAt > 300) {
     SFX.cushion();
     cooldown.lastCushionAt = now;
   }
@@ -780,43 +789,57 @@ function drawStripeBand(
   phase: number,
   scale: number,
 ) {
+  // 3D sphere projection: the stripe is an equatorial band on a sphere.
+  // As the sphere rotates (phase), the band wraps around:
+  // - phase=0: band centered, full width (facing viewer)
+  // - phase=±π/2: band at edge, very thin (wrapping around side)
+  // - phase=±π: band on back, hidden
+
   const cosP = Math.cos(phase);
   const sinP = Math.sin(phase);
-  const STRIPE_HALF = r * 0.50;
-  const bandCy = sinP * STRIPE_HALF;
-  // Band narrows as it wraps around the top/bottom of the sphere
-  const bandHalfH = Math.max(r * 0.05 * scale, Math.abs(cosP) * STRIPE_HALF + r * 0.04);
+
+  // Band center position (shifts along rotation axis in projected space)
+  const bandCenterY = sinP * r * 0.52;
+
+  // Apparent band half-height: max when facing (cosP=±1), min when wrapping (cosP≈0)
+  const facingWidth = r * 0.52;
+  const apparentHalfH = Math.abs(cosP) * facingWidth;
+  if (apparentHalfH < r * 0.03) return; // Band is on the back, skip drawing
 
   ctx.save();
-  // Clip to sphere
   ctx.beginPath();
-  ctx.arc(0, 0, r - 0.4 * scale, 0, Math.PI * 2);
+  ctx.arc(0, 0, r - 0.3 * scale, 0, Math.PI * 2);
   ctx.clip();
 
-  // Draw curved stripe using elliptical arc paths instead of flat rect
-  // Upper edge of stripe band
-  const topY = bandCy - bandHalfH;
-  const botY = bandCy + bandHalfH;
-  // Curvature: edges of stripe curve inward at the ball edges (sphere effect)
-  const curvature = Math.abs(cosP) * r * 0.18;
+  // Draw band with curved edges to simulate wrapping around sphere surface
+  const topY = bandCenterY - apparentHalfH;
+  const botY = bandCenterY + apparentHalfH;
+  // Edges curve inward more when band is near the sphere edge
+  const edgeCurve = (1 - Math.abs(cosP)) * r * 0.28 + Math.abs(cosP) * r * 0.08;
 
   ctx.beginPath();
   ctx.moveTo(-r, topY);
-  ctx.quadraticCurveTo(0, topY - curvature, r, topY);
+  ctx.quadraticCurveTo(0, topY - edgeCurve, r, topY);
   ctx.lineTo(r, botY);
-  ctx.quadraticCurveTo(0, botY + curvature, -r, botY);
+  ctx.quadraticCurveTo(0, botY + edgeCurve, -r, botY);
   ctx.closePath();
 
-  const g = ctx.createLinearGradient(0, topY - curvature, 0, botY + curvature);
-  g.addColorStop(0, "rgba(255,255,255,0)");
-  g.addColorStop(0.08, shadeColor(color, -28));
-  g.addColorStop(0.35, color);
-  g.addColorStop(0.50, shadeColor(color, 20));
-  g.addColorStop(0.65, color);
-  g.addColorStop(0.92, shadeColor(color, -28));
-  g.addColorStop(1, "rgba(255,255,255,0)");
-
+  // Gradient: brighter at center of sphere, darker at edges (curvature)
+  const g = ctx.createRadialGradient(0, bandCenterY, 0, 0, bandCenterY, r * 1.1);
+  g.addColorStop(0, shadeColor(color, 22));
+  g.addColorStop(0.5, color);
+  g.addColorStop(0.85, shadeColor(color, -30));
+  g.addColorStop(1, shadeColor(color, -50));
   ctx.fillStyle = g;
+  ctx.fill();
+
+  // Soft edge fade overlay
+  const edgeFade = ctx.createLinearGradient(0, topY - edgeCurve, 0, botY + edgeCurve);
+  edgeFade.addColorStop(0, "rgba(255,255,255,0.12)");
+  edgeFade.addColorStop(0.15, "rgba(255,255,255,0)");
+  edgeFade.addColorStop(0.85, "rgba(255,255,255,0)");
+  edgeFade.addColorStop(1, "rgba(0,0,0,0.08)");
+  ctx.fillStyle = edgeFade;
   ctx.fill();
 
   ctx.restore();
@@ -2547,6 +2570,18 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           while (queue.length >= 3 && queue[1].serverAt <= renderServerTime - 2) {
             queue.shift();
           }
+          // After shifting, replace fromSnapshot balls with current visual positions
+          // so interpolation always starts from what's on screen → no visual jumps
+          if (realtimeVisualBallsRef.current.length && queue.length >= 2) {
+            const visualMap = new Map(realtimeVisualBallsRef.current.map(b => [b.id, b]));
+            queue[0] = {
+              ...queue[0],
+              balls: queue[0].balls.map(b => {
+                const vis = visualMap.get(b.id);
+                return vis ? { ...b, x: vis.x, y: vis.y } : b;
+              }),
+            };
+          }
           const fromSnapshot = queue[0];
           const toSnapshot = queue[1] ?? queue[0];
           const span = Math.max(1, toSnapshot.serverAt - fromSnapshot.serverAt);
@@ -2562,7 +2597,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
               const target = hermiteBalls[i];
               if (!target) continue;
               const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
-              if (dist < 0.35) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
+              if (dist < 0.6) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
             }
           } else {
             const overshootMs = Math.max(0, renderServerTime - toSnapshot.serverAt);
@@ -2573,7 +2608,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
               const target = extrapolated[i];
               if (!target) continue;
               const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
-              if (dist < 0.35) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
+              if (dist < 0.6) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
             }
           }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
@@ -2597,7 +2632,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             const target = extrapolated[i];
             if (!target) continue;
             const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
-            if (dist < 0.35) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
+            if (dist < 0.6) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
           }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
@@ -2651,6 +2686,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       for (const ball of drawBalls) { if (ball.pocketed) currentPocketedIds.add(ball.id); }
       for (const ball of drawBalls) {
         if (hiddenPocketIdsRef.current.has(ball.id)) continue;
+        // Protect cue ball from premature capture while pending shot visual is active
+        if (ball.number === 0 && pendingShotVisualRef.current && !ball.pocketed) continue;
         let closestPocket: typeof POCKETS[number] = POCKETS[0];
         let minDist = Infinity;
         for (const pocket of POCKETS) {
@@ -2841,9 +2878,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const pendingShotVisual = pendingShotVisualRef.current;
       if (!animating && pendingShotVisual && drawCueBall) {
         const elapsed = now - pendingShotVisual.startedAt;
+        // Only expire pending visual when NOT simulating AND past max time
         const shouldExpirePending = elapsed >= PENDING_SHOT_VISUAL_MAX_MS && game.status !== "simulating";
         if (shouldExpirePending) {
           pendingShotVisualRef.current = null;
+        } else if (game.status === "simulating" && elapsed > PENDING_SHOT_VISUAL_MAX_MS) {
+          // During simulation after max time, stop moving the cue optimistically
+          // but keep the ref alive to protect the cue ball from vanishing
         } else {
           const progress = computePendingShotProgress(pendingShotVisual, now);
           const heldElapsed = progress.heldElapsed;
