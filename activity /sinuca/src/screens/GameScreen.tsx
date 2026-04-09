@@ -122,8 +122,6 @@ export default function GameScreen({
           onShoot={onShoot}
           onShotDebugEvent={onShotDebugEvent}
         />
-
-      </>
     );
   }
 
