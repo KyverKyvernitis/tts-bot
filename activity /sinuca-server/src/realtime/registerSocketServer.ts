@@ -246,6 +246,10 @@ export function registerSocketServer({ wss, runtime, balanceService, exchangeDis
         }
         subscribeSocket(room.roomId, ws);
         runtime.send(ws, { type: "room_state", payload: toSnapshot(room) });
+        const activeAim = runtime.getAimState(room.roomId);
+        if (activeAim) {
+          runtime.send(ws, { type: "aim_state", payload: activeAim });
+        }
         return;
       }
 

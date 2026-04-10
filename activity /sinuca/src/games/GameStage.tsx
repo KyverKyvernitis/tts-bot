@@ -718,16 +718,23 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     // Higher threshold: float noise from interpolation shouldn't trigger spin
     const moving = distance > 0.08;
 
-    // axis controls the orientation of the stripe rotation on screen
+    // The stripe/number motion is animated along the local Y axis in drawStripeBand()/drawBallLabel().
+    // To make that apparent roll follow the actual table translation, the rendered spin axis must be
+    // perpendicular to the travel direction, not aligned with it.
     if (moving) {
-      const targetAxis = Math.atan2(dy, dx);
+      const movementAngle = Math.atan2(dy, dx);
+      const targetAxis = movementAngle - Math.PI * 0.5;
       // Snap fast at high speed so stripe follows direction changes immediately
       const axisBlend = distance > 1.2 ? 0.98 : distance > 0.45 ? 0.88 : 0.62;
       current.axis = lerpAngle(current.axis, targetAxis, axisBlend);
     }
 
     if (moving) {
-      const measuredPhaseVelocity = distance / (BALL_VISUAL_RADIUS * 1.04 * elapsedFrames);
+      const projectedTravelX = Math.cos(current.axis + Math.PI * 0.5);
+      const projectedTravelY = Math.sin(current.axis + Math.PI * 0.5);
+      const signedDistance = dx * projectedTravelX + dy * projectedTravelY;
+      const phaseDistance = Math.abs(signedDistance) > distance * 0.22 ? signedDistance : distance;
+      const measuredPhaseVelocity = phaseDistance / (BALL_VISUAL_RADIUS * 1.04 * elapsedFrames);
       // Almost 1:1 with real movement — 1 frame delay instead of 4
       current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, 0.92);
       current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.9);
@@ -1381,25 +1388,12 @@ function drawRemoteAimOverlay(
   const showPlacementRing = mode === "place";
   const showGuide = mode !== "place";
 
-  ctx.save();
-  ctx.globalAlpha = mode === "place" ? 0.78 : 0.5;
-  drawBall(ctx, cueBall, 1);
-  ctx.restore();
-
-  if (showGuide) {
-    ctx.save();
-    ctx.globalAlpha = mode === "power" ? 0.68 : 0.62;
-    ctx.strokeStyle = "rgba(244, 248, 255, 0.96)";
-    ctx.lineWidth = mode === "power" ? 2.8 : 2.35;
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(cueBall.x, cueBall.y);
-    ctx.lineTo(lineEndX, lineEndY);
-    ctx.stroke();
-    ctx.restore();
-  }
-
   if (showPlacementRing) {
+    ctx.save();
+    ctx.globalAlpha = 0.72;
+    drawBall(ctx, cueBall, 1);
+    ctx.restore();
+
     ctx.save();
     ctx.globalAlpha = 0.82;
     ctx.setLineDash([7, 5]);
@@ -1411,8 +1405,33 @@ function drawRemoteAimOverlay(
     ctx.restore();
   }
 
+  if (showGuide) {
+    if (preview) {
+      ctx.save();
+      ctx.globalAlpha = mode === "power" ? 0.48 : 0.4;
+      drawAimLine(ctx, cueBall, preview, false);
+      ctx.restore();
+
+      ctx.save();
+      ctx.globalAlpha = mode === "power" ? 0.42 : 0.34;
+      drawGhostBall(ctx, cueBall, preview, clamp(pullRatio, 0.12, 1), false);
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.globalAlpha = mode === "power" ? 0.68 : 0.62;
+      ctx.strokeStyle = "rgba(244, 248, 255, 0.96)";
+      ctx.lineWidth = mode === "power" ? 2.8 : 2.35;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(cueBall.x, cueBall.y);
+      ctx.lineTo(lineEndX, lineEndY);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   ctx.save();
-  ctx.globalAlpha = mode === "power" ? 0.64 : mode === "aim" ? 0.56 : 0.48;
+  ctx.globalAlpha = mode === "power" ? 0.56 : mode === "aim" ? 0.5 : 0.46;
   drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
   ctx.restore();
 }
