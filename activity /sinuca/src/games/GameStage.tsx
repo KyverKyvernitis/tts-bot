@@ -3199,6 +3199,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 r:${aimPipelineDebug.roomId ?? '-'} me:${aimPipelineDebug.currentUserId ?? '-'} turn:${aimPipelineDebug.turnUserId ?? '-'} opp:${aimPipelineDebug.currentUserId && aimPipelineDebug.turnUserId ? (aimPipelineDebug.currentUserId !== aimPipelineDebug.turnUserId ? 'y' : 'n') : '-'}
 app u:${aimPipelineDebug.appRemoteAimUserId ?? '-'} m:${aimPipelineDebug.appRemoteAimMode ?? '-'} v:${aimPipelineDebug.appRemoteAimVisible === null ? '-' : String(aimPipelineDebug.appRemoteAimVisible)} q:${aimPipelineDebug.appRemoteAimSeq ?? '-'} a:${aimPipelineDebug.appRemoteAimAgeMs ?? '-'}
 cue:${aimPipelineDebug.appRemoteAimCueX ?? '-'},${aimPipelineDebug.appRemoteAimCueY ?? '-'} ws:${aimPipelineDebug.rxWsCount}/${aimPipelineDebug.lastWsSeq ?? '-'} ht:${aimPipelineDebug.rxHttpCount}/${aimPipelineDebug.lastHttpSeq ?? '-'} tx:${aimPipelineDebug.txCount}/${aimPipelineDebug.lastTxSeq ?? '-'}
+fa:${aimPipelineDebug.httpFetchAttemptCount}/${aimPipelineDebug.lastHttpFetchStatus ?? '-'} sa:${aimPipelineDebug.httpSyncAttemptCount}/${aimPipelineDebug.lastHttpSyncStatus ?? '-'}
 seen:${aimPipelineDebug.lastRemoteSeenAgeMs ?? '-'} clr:${aimPipelineDebug.clearCount} why:${aimPipelineDebug.lastClearReason ?? '-'}`}</pre>
         <pre
           style={{

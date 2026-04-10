@@ -106,9 +106,13 @@ export interface AimPipelineDebugSnapshot {
   rxHttpCount: number;
   txCount: number;
   clearCount: number;
+  httpFetchAttemptCount: number;
+  httpSyncAttemptCount: number;
   lastWsAgeMs: number | null;
   lastHttpAgeMs: number | null;
   lastTxAgeMs: number | null;
+  lastHttpFetchStatus: string | null;
+  lastHttpSyncStatus: string | null;
   lastWsMode: AimPointerMode | null;
   lastHttpMode: AimPointerMode | null;
   lastTxMode: AimPointerMode | null;
