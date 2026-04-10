@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from "react";
-import type { AimPointerMode, AimStateSnapshot, BallGroup, GameBallSnapshot, GameShotFrame, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
+import type { AimPipelineDebugSnapshot, AimPointerMode, AimStateSnapshot, BallGroup, GameBallSnapshot, GameShotFrame, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
 import tableAsset from "../assets/game/pool-table-public.png";
 import cueAsset from "../assets/game/pool-cue-public.png";
 import type { ShotPipelineDebugEvent } from "../screens/GameScreen";
@@ -150,6 +150,7 @@ type Props = {
   shootBusy: boolean;
   exitBusy: boolean;
   opponentAim: AimStateSnapshot | null;
+  aimPipelineDebug: AimPipelineDebugSnapshot;
   onShoot: (shot: ShotInput) => Promise<void>;
   onShotDebugEvent?: (event: ShotPipelineDebugEvent) => void;
   onAimStateChange?: (aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => void;
@@ -1552,7 +1553,7 @@ function createImage(src: string) {
 
 // ─── Main component ───────────────────────────────────────────────────────
 
-export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, onShoot, onShotDebugEvent, onAimStateChange, onExit, onRematchReady }: Props) {
+export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, aimPipelineDebug, onShoot, onShotDebugEvent, onAimStateChange, onExit, onRematchReady }: Props) {
   const [displayBalls, setDisplayBalls] = useState<GameBallSnapshot[]>(game.balls);
   const [railBalls, setRailBalls] = useState<RailBallAnimation[]>(() => buildSettledRailBalls(game.balls));
   const [power, setPower] = useState(POWER_MIN);
@@ -3069,10 +3070,38 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     );
   }
 
-  const railEntries = railBalls.map((entry) => ({
-    entry,
-    src: ballIconCache.get(entry.number),
-  }));
+  const panelRemoteAim = opponentAim && opponentAim.userId !== currentUserId ? opponentAim : null;
+  const panelRemoteAgeMs = panelRemoteAim ? Math.max(0, Date.now() - panelRemoteAim.updatedAt) : null;
+  const panelRemoteFresh = Boolean(panelRemoteAim && panelRemoteAgeMs !== null && panelRemoteAgeMs < REMOTE_AIM_STALE_MS);
+  const panelRemoteMode: AimPointerMode = panelRemoteAim?.mode ?? "idle";
+  const panelRemoteCanRender = Boolean(
+    panelRemoteFresh
+    && panelRemoteAim
+    && panelRemoteAim.visible
+    && game.status === "waiting_shot"
+    && (panelRemoteMode === "aim" || panelRemoteMode === "power")
+  );
+  const panelRemoteCuePlacementActive = Boolean(
+    panelRemoteFresh
+    && panelRemoteAim
+    && panelRemoteMode === "place"
+    && game.status === "waiting_shot"
+    && panelRemoteAim.cueX !== null
+    && panelRemoteAim.cueY !== null
+  );
+  const panelRemoteHasCuePreview = Boolean(
+    panelRemoteFresh
+    && panelRemoteAim
+    && panelRemoteAim.cueX !== null
+    && panelRemoteAim.cueY !== null
+    && panelRemoteMode !== "idle"
+  );
+  const panelRemoteOverlayVisible = Boolean(
+    panelRemoteFresh
+    && panelRemoteAim
+    && (panelRemoteCanRender || panelRemoteCuePlacementActive || panelRemoteHasCuePreview)
+    && (panelRemoteMode === "aim" || panelRemoteMode === "power" || panelRemoteMode === "place")
+  );
 
   // ─── JSX ────────────────────────────────────────────────────────────────
 
@@ -3135,6 +3164,52 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             <div className="pool-stage__cue-indicator" aria-label="Bola branca fora da mesa" />
           ) : null;
         })()}
+      </div>
+
+      <div
+        style={{
+          margin: "8px 14px 0",
+          display: "grid",
+          gap: 6,
+          gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
+          pointerEvents: "none",
+        }}
+      >
+        <pre
+          style={{
+            margin: 0,
+            padding: "8px 10px",
+            borderRadius: 10,
+            background: "rgba(5, 8, 14, 0.82)",
+            color: "#eaf4ff",
+            font: "11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace",
+            whiteSpace: "pre-wrap",
+          }}
+        >{`APP aim dbg
+conn=${aimPipelineDebug.connectionState} room=${aimPipelineDebug.roomId ?? '-'}
+status=${aimPipelineDebug.gameStatus ?? '-'} turn=${aimPipelineDebug.turnUserId ?? '-'} me=${aimPipelineDebug.currentUserId ?? '-'}
+appRemote mode=${aimPipelineDebug.appRemoteAimMode ?? '-'} vis=${aimPipelineDebug.appRemoteAimVisible === null ? '-' : String(aimPipelineDebug.appRemoteAimVisible)} seq=${aimPipelineDebug.appRemoteAimSeq ?? '-'} age=${aimPipelineDebug.appRemoteAimAgeMs ?? '-'}ms src=${aimPipelineDebug.lastPushSource ?? '-'}
+appRemote cue=${aimPipelineDebug.appRemoteAimCueX ?? '-'}, ${aimPipelineDebug.appRemoteAimCueY ?? '-'} rev=${aimPipelineDebug.appRemoteAimSnapshotRevision ?? '-'}
+rx ws=${aimPipelineDebug.rxWsCount} age=${aimPipelineDebug.lastWsAgeMs ?? '-'}ms mode=${aimPipelineDebug.lastWsMode ?? '-'} seq=${aimPipelineDebug.lastWsSeq ?? '-'} cue=${aimPipelineDebug.lastWsCueX ?? '-'}, ${aimPipelineDebug.lastWsCueY ?? '-'}
+rx http=${aimPipelineDebug.rxHttpCount} age=${aimPipelineDebug.lastHttpAgeMs ?? '-'}ms mode=${aimPipelineDebug.lastHttpMode ?? '-'} seq=${aimPipelineDebug.lastHttpSeq ?? '-'} cue=${aimPipelineDebug.lastHttpCueX ?? '-'}, ${aimPipelineDebug.lastHttpCueY ?? '-'}
+tx=${aimPipelineDebug.txCount} age=${aimPipelineDebug.lastTxAgeMs ?? '-'}ms mode=${aimPipelineDebug.lastTxMode ?? '-'} seq=${aimPipelineDebug.lastTxSeq ?? '-'} cue=${aimPipelineDebug.lastTxCueX ?? '-'}, ${aimPipelineDebug.lastTxCueY ?? '-'}
+lastSeen=${aimPipelineDebug.lastRemoteSeenAgeMs ?? '-'}ms clears=${aimPipelineDebug.clearCount} reason=${aimPipelineDebug.lastClearReason ?? '-'}`}</pre>
+        <pre
+          style={{
+            margin: 0,
+            padding: "8px 10px",
+            borderRadius: 10,
+            background: "rgba(14, 9, 20, 0.82)",
+            color: "#f4eaff",
+            font: "11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace",
+            whiteSpace: "pre-wrap",
+          }}
+        >{`STAGE aim dbg
+prop=${panelRemoteAim ? 'yes' : 'no'} fresh=${panelRemoteFresh ? 'yes' : 'no'} mode=${panelRemoteMode}
+propUser=${panelRemoteAim?.userId ?? '-'} propRoom=${panelRemoteAim?.roomId ?? '-'} age=${panelRemoteAgeMs ?? '-'}ms
+propVisible=${panelRemoteAim ? String(panelRemoteAim.visible) : '-'} seq=${panelRemoteAim?.seq ?? '-'} cue=${panelRemoteAim?.cueX ?? '-'}, ${panelRemoteAim?.cueY ?? '-'}
+canRender=${panelRemoteCanRender ? 'yes' : 'no'} place=${panelRemoteCuePlacementActive ? 'yes' : 'no'} preview=${panelRemoteHasCuePreview ? 'yes' : 'no'} overlay=${panelRemoteOverlayVisible ? 'yes' : 'no'}
+gameStatus=${game.status} ballInHandUser=${game.ballInHandUserId ?? '-'} turn=${game.turnUserId}`}</pre>
       </div>
 
       <div className="pool-stage__table-layout">

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { CSSProperties } from "react";
-import type { AimPointerMode, AimStateSnapshot, GameSnapshot, RoomSnapshot } from "../types/activity";
+import type { AimPipelineDebugSnapshot, AimPointerMode, AimStateSnapshot, GameSnapshot, RoomSnapshot } from "../types/activity";
 import GameStage from "../games/GameStage";
 
 type ShotInput = {
@@ -81,6 +81,7 @@ type GameScreenProps = {
   exitBusy: boolean;
   isRoomHost: boolean;
   opponentAim: AimStateSnapshot | null;
+  aimPipelineDebug: AimPipelineDebugSnapshot;
   gameLoadingTimedOut: boolean;
   loadingOverlayDebug: string;
   shotPipelineDebug: ShotPipelineDebugState;
@@ -100,6 +101,7 @@ export default function GameScreen({
   exitBusy,
   isRoomHost,
   opponentAim,
+  aimPipelineDebug,
   gameLoadingTimedOut,
   loadingOverlayDebug,
   shotPipelineDebug,
@@ -119,6 +121,7 @@ export default function GameScreen({
           shootBusy={shootBusy}
           exitBusy={exitBusy}
           opponentAim={opponentAim}
+          aimPipelineDebug={aimPipelineDebug}
           onAimStateChange={onAimStateChange}
           onExit={onExit}
           onShoot={onShoot}

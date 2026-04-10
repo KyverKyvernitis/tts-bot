@@ -85,6 +85,46 @@ export interface GameShotSnapshot {
   createdAt: number;
 }
 
+
+export interface AimPipelineDebugSnapshot {
+  connectionState: string;
+  roomId: string | null;
+  gameStatus: string | null;
+  turnUserId: string | null;
+  currentUserId: string | null;
+  appRemoteAimRoomId: string | null;
+  appRemoteAimUserId: string | null;
+  appRemoteAimMode: AimPointerMode | null;
+  appRemoteAimVisible: boolean | null;
+  appRemoteAimSeq: number | null;
+  appRemoteAimAgeMs: number | null;
+  appRemoteAimCueX: number | null;
+  appRemoteAimCueY: number | null;
+  appRemoteAimSnapshotRevision: number | null;
+  lastRemoteSeenAgeMs: number | null;
+  rxWsCount: number;
+  rxHttpCount: number;
+  txCount: number;
+  clearCount: number;
+  lastWsAgeMs: number | null;
+  lastHttpAgeMs: number | null;
+  lastTxAgeMs: number | null;
+  lastWsMode: AimPointerMode | null;
+  lastHttpMode: AimPointerMode | null;
+  lastTxMode: AimPointerMode | null;
+  lastWsSeq: number | null;
+  lastHttpSeq: number | null;
+  lastTxSeq: number | null;
+  lastWsCueX: number | null;
+  lastWsCueY: number | null;
+  lastHttpCueX: number | null;
+  lastHttpCueY: number | null;
+  lastTxCueX: number | null;
+  lastTxCueY: number | null;
+  lastPushSource: "ws" | "http" | null;
+  lastClearReason: string | null;
+}
+
 export interface AimStateSnapshot {
   roomId: string;
   userId: string;
