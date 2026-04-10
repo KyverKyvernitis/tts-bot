@@ -3070,6 +3070,11 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     );
   }
 
+  const railEntries = railBalls.map((entry: RailBallAnimation) => ({
+    entry,
+    src: ballIconCache.get(entry.number) ?? null,
+  }));
+
   const panelRemoteAim = opponentAim && opponentAim.userId !== currentUserId ? opponentAim : null;
   const panelRemoteAgeMs = panelRemoteAim ? Math.max(0, Date.now() - panelRemoteAim.updatedAt) : null;
   const panelRemoteFresh = Boolean(panelRemoteAim && panelRemoteAgeMs !== null && panelRemoteAgeMs < REMOTE_AIM_STALE_MS);
