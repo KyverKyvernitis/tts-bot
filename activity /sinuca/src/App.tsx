@@ -177,8 +177,6 @@ type ChipGateDialogState = {
   kind: ChipGateDialogKind;
   source: ChipGateDialogSource;
   title: string;
-  body: string;
-  confirmLabel: string;
   resultingChips: number;
   stake: number;
   tableType: TableType;
@@ -739,8 +737,6 @@ export default function App() {
         kind: "debt",
         source: args.source,
         title: "Ao continuar você ficará devendo",
-        body: `Seu saldo após iniciar a partida ficará em -${Math.abs(resultingChips)} fichas. Tem certeza?`,
-        confirmLabel: `Sim (ficar com -${Math.abs(resultingChips)} fichas)`,
         resultingChips,
         stake: args.stake,
         tableType: args.tableType,
@@ -753,8 +749,6 @@ export default function App() {
         kind: "negative",
         source: args.source,
         title: "Você está negativado",
-        body: `Se continuar, seu saldo ficará em -${Math.abs(resultingChips)} fichas. Tem certeza?`,
-        confirmLabel: `Sim (ficar com -${Math.abs(resultingChips)} fichas)`,
         resultingChips,
         stake: args.stake,
         tableType: args.tableType,
@@ -2534,12 +2528,17 @@ export default function App() {
             <div className="activity-confirm__panel-bg" aria-hidden="true" />
             <div className="activity-confirm__content">
               <div className="activity-confirm__title">{chipGateDialog.title}</div>
-              <div className="activity-confirm__body">{chipGateDialog.body}</div>
-              <div className="activity-confirm__summary">Saldo após continuar: <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span></div>
+              <div className="activity-confirm__body">
+                {chipGateDialog.kind === "negative" ? "Se continuar, seu saldo ficará em " : "Seu saldo ficará em "}
+                <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)} fichas</span>
+                .
+              </div>
               <div className="activity-confirm__actions">
                 <button type="button" className="activity-confirm__button activity-confirm__button--ghost" disabled={chipGateBusy} onClick={() => setChipGateDialog(null)}>Melhor não...</button>
                 <button type="button" className="activity-confirm__button activity-confirm__button--danger" disabled={chipGateBusy} onClick={() => { void confirmChipGateDialog(); }}>
-                  {chipGateDialog.confirmLabel}
+                  <span>Sim (ficar com </span>
+                  <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span>
+                  <span> fichas)</span>
                 </button>
               </div>
             </div>
