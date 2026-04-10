@@ -55,9 +55,10 @@ function isResolvedDiscordUserId(value: string | null | undefined): value is str
 }
 
 
-const SHOT_BOOTSTRAP_CUE_EPSILON_PX = 5.4;
+const SHOT_BOOTSTRAP_CUE_EPSILON_PX = 4.2;
 const SHOT_BOOTSTRAP_TOTAL_DRIFT_EPSILON_PX = 18;
 const SHOT_BOOTSTRAP_MAX_DRIFT_EPSILON_PX = 5.8;
+const SHOT_BOOTSTRAP_MAX_NON_CUE_DRIFT_EPSILON_PX = 0.45;
 
 function findCueBall(balls: GameBallSnapshot[]) {
   return balls.find((ball) => ball.number === 0) ?? null;
@@ -71,6 +72,8 @@ function compareBallSnapshots(
   let totalDrift = 0;
   let maxDrift = 0;
   let changedCount = 0;
+  let maxNonCueDrift = 0;
+  let movedNonCueCount = 0;
 
   for (const nextBall of nextBalls) {
     const previousBall = previousById.get(nextBall.id);
@@ -78,21 +81,33 @@ function compareBallSnapshots(
       changedCount += 1;
       maxDrift = Math.max(maxDrift, 999);
       totalDrift += 999;
+      if (nextBall.number !== 0) {
+        maxNonCueDrift = Math.max(maxNonCueDrift, 999);
+        movedNonCueCount += 1;
+      }
       continue;
     }
     if (previousBall.pocketed !== nextBall.pocketed) {
       changedCount += 1;
       maxDrift = Math.max(maxDrift, 999);
       totalDrift += 999;
+      if (nextBall.number !== 0) {
+        maxNonCueDrift = Math.max(maxNonCueDrift, 999);
+        movedNonCueCount += 1;
+      }
       continue;
     }
     const drift = Math.hypot(nextBall.x - previousBall.x, nextBall.y - previousBall.y);
     if (drift > 0.01) changedCount += 1;
     totalDrift += drift;
     if (drift > maxDrift) maxDrift = drift;
+    if (nextBall.number !== 0) {
+      if (drift > 0.01) movedNonCueCount += 1;
+      if (drift > maxNonCueDrift) maxNonCueDrift = drift;
+    }
   }
 
-  return { totalDrift, maxDrift, changedCount };
+  return { totalDrift, maxDrift, changedCount, maxNonCueDrift, movedNonCueCount };
 }
 
 function isBootstrapSimulatingSnapshot(
@@ -115,7 +130,8 @@ function isBootstrapSimulatingSnapshot(
 
   return cueDrift <= SHOT_BOOTSTRAP_CUE_EPSILON_PX
     && tableDelta.totalDrift <= SHOT_BOOTSTRAP_TOTAL_DRIFT_EPSILON_PX
-    && tableDelta.maxDrift <= SHOT_BOOTSTRAP_MAX_DRIFT_EPSILON_PX;
+    && tableDelta.maxDrift <= SHOT_BOOTSTRAP_MAX_DRIFT_EPSILON_PX
+    && tableDelta.maxNonCueDrift <= SHOT_BOOTSTRAP_MAX_NON_CUE_DRIFT_EPSILON_PX;
 }
 
 function mergeBootstrapSimulatingSnapshot(

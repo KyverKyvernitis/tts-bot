@@ -115,7 +115,7 @@ const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
 const REALTIME_VISUAL_SNAP_DISTANCE = 54;
 const REALTIME_SNAPSHOT_QUEUE_LIMIT = 32;
-const REALTIME_RENDER_DELAY_MS = 60;
+const REALTIME_RENDER_DELAY_MS = 52;
 const REALTIME_MAX_EXTRAPOLATION_MS = 28;
 const PENDING_SHOT_VISUAL_MAX_MS = 1150;
 const PENDING_SHOT_POST_IMPACT_HOLD_MS = 240;
@@ -126,7 +126,7 @@ const RAIL_TRAVEL_DURATION_MS = 1100;
 const RAIL_SETTLE_DELAY_MS = 110;
 const CUE_RETURN_HOLD_MS = 420;
 const BALL_SPRITE_SIZE = 72;
-const BALL_SPRITE_PHASE_BUCKETS = 64;
+const BALL_SPRITE_PHASE_BUCKETS = 96;
 
 function logRenderSnapshotDebug(payload: Record<string, unknown>) {
   if (!SNAPSHOT_RENDER_DEBUG_ENABLED) return;
@@ -438,25 +438,33 @@ function interpolateSnapshotBalls(
   return targetBalls.map((ball) => {
     const prev = fromMap.get(ball.id);
     if (!prev) return { ...ball };
+    if (prev.pocketed !== ball.pocketed) return { ...ball };
+
     const dx = ball.x - prev.x;
     const dy = ball.y - prev.y;
     const dist = Math.hypot(dx, dy);
     const isCueBall = ball.number === 0;
-    const softSnapDistance = isCueBall ? REALTIME_VISUAL_SNAP_DISTANCE * 4.8 : REALTIME_VISUAL_SNAP_DISTANCE * 2.2;
-    const hardSnapDistance = isCueBall ? softSnapDistance * 3.6 : softSnapDistance * 3.5;
+    const softSnapDistance = isCueBall ? REALTIME_VISUAL_SNAP_DISTANCE * 3.8 : REALTIME_VISUAL_SNAP_DISTANCE * 2.1;
+    const hardSnapDistance = isCueBall ? softSnapDistance * 2.6 : softSnapDistance * 2.45;
+
     if (dist >= hardSnapDistance) return { ...ball };
-    const minAlpha = isCueBall ? 0.1 : 0.08;
-    const maxAlpha = isCueBall ? 0.34 : 0.28;
-    const appliedAlpha = dist >= softSnapDistance
-      ? clamp(Math.max(alpha, minAlpha), minAlpha, maxAlpha)
-      : isCueBall && dist >= REALTIME_VISUAL_SNAP_DISTANCE
-        ? clamp(Math.max(alpha, 0.11), 0.11, 0.36)
-        : alpha;
+    if (dist <= (isCueBall ? 0.42 : 0.32)) return { ...ball };
+
+    const responseFloor = isCueBall ? 0.24 : 0.2;
+    const responseCeil = isCueBall ? 0.88 : 0.82;
+    const distanceBoost = clamp(dist / (isCueBall ? 18 : 14), 0, 1) * (isCueBall ? 0.34 : 0.3);
+    const appliedAlpha = clamp(Math.max(alpha, responseFloor) + distanceBoost, responseFloor, responseCeil);
+    const nextX = lerp(prev.x, ball.x, appliedAlpha);
+    const nextY = lerp(prev.y, ball.y, appliedAlpha);
+    const residual = dist * (1 - appliedAlpha);
+    if (residual <= (isCueBall ? 0.4 : 0.28)) {
+      return { ...ball };
+    }
     return {
       ...ball,
-      x: lerp(prev.x, ball.x, appliedAlpha),
-      y: lerp(prev.y, ball.y, appliedAlpha),
-      pocketed: (appliedAlpha < 0.5 ? prev.pocketed : ball.pocketed),
+      x: nextX,
+      y: nextY,
+      pocketed: ball.pocketed,
     };
   });
 }
@@ -696,7 +704,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     const rawDistance = Math.hypot(dx, dy);
 
     // Teleport detection: large jumps from state sync — don't spike spin
-    const TELEPORT_THRESHOLD = 5.0 * elapsedFrames;
+    const TELEPORT_THRESHOLD = 18.0 * elapsedFrames;
     if (rawDistance > TELEPORT_THRESHOLD) {
       current.lastX = ball.x;
       current.lastY = ball.y;
@@ -708,21 +716,21 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
 
     const distance = rawDistance;
     // Higher threshold: float noise from interpolation shouldn't trigger spin
-    const moving = distance > 0.15;
+    const moving = distance > 0.08;
 
     // axis controls the orientation of the stripe rotation on screen
     if (moving) {
       const targetAxis = Math.atan2(dy, dx);
       // Snap fast at high speed so stripe follows direction changes immediately
-      const axisBlend = distance > 0.8 ? 0.95 : distance > 0.3 ? 0.75 : 0.45;
+      const axisBlend = distance > 1.2 ? 0.98 : distance > 0.45 ? 0.88 : 0.62;
       current.axis = lerpAngle(current.axis, targetAxis, axisBlend);
     }
 
     if (moving) {
       const measuredPhaseVelocity = distance / (BALL_VISUAL_RADIUS * 1.04 * elapsedFrames);
       // Almost 1:1 with real movement — 1 frame delay instead of 4
-      current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, 0.85);
-      current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.85);
+      current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, 0.92);
+      current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.9);
       current.lastX = ball.x;
       current.lastY = ball.y;
     } else {
@@ -2568,18 +2576,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           while (queue.length >= 3 && queue[1].serverAt <= renderServerTime - 2) {
             queue.shift();
           }
-          // After shifting, replace fromSnapshot balls with current visual positions
-          // so interpolation always starts from what's on screen → no visual jumps
-          if (realtimeVisualBallsRef.current.length && queue.length >= 2) {
-            const visualMap = new Map(realtimeVisualBallsRef.current.map(b => [b.id, b]));
-            queue[0] = {
-              ...queue[0],
-              balls: queue[0].balls.map(b => {
-                const vis = visualMap.get(b.id);
-                return vis ? { ...b, x: vis.x, y: vis.y } : b;
-              }),
-            };
-          }
           const fromSnapshot = queue[0];
           const toSnapshot = queue[1] ?? queue[0];
           const span = Math.max(1, toSnapshot.serverAt - fromSnapshot.serverAt);
@@ -2588,7 +2584,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           if (rawT <= 1) {
             const eased = clamp(rawT, 0, 1);
             const hermiteBalls = interpolateSnapshotEntries(fromSnapshot, toSnapshot, eased);
-            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 28), 0.28, 0.55);
+            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 18), 0.42, 0.82);
             smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, hermiteBalls, carry);
             // Snap nearly-stopped balls to target to eliminate micro-flick jitter
             for (let i = 0; i < smoothedBalls.length; i++) {
@@ -2600,7 +2596,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           } else {
             const overshootMs = Math.max(0, renderServerTime - toSnapshot.serverAt);
             const extrapolated = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, Math.min(overshootMs, REALTIME_MAX_EXTRAPOLATION_MS));
-            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 36), 0.20, 0.38);
+            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 20), 0.38, 0.76);
             smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
             for (let i = 0; i < smoothedBalls.length; i++) {
               const target = extrapolated[i];
@@ -2624,7 +2620,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const holdSnapshot = queue[0];
           const extrapolationMs = Math.max(0, renderServerTime - holdSnapshot.serverAt);
           const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, Math.min(extrapolationMs, REALTIME_MAX_EXTRAPOLATION_MS));
-          const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 40), 0.22, 0.40);
+          const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 22), 0.4, 0.78);
           const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
           for (let i = 0; i < smoothedBalls.length; i++) {
             const target = extrapolated[i];
