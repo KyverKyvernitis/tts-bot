@@ -3173,41 +3173,46 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
       <div
         style={{
-          margin: "6px 10px 0",
+          position: "absolute",
+          top: 58,
+          left: 8,
+          zIndex: 60,
           display: "grid",
-          gap: 4,
-          gridTemplateColumns: "repeat(auto-fit, minmax(188px, 1fr))",
+          gap: 3,
+          width: "min(250px, calc(100% - 16px))",
           pointerEvents: "none",
         }}
       >
         <pre
           style={{
             margin: 0,
-            padding: "5px 7px",
-            borderRadius: 8,
-            background: "rgba(5, 8, 14, 0.88)",
+            padding: "4px 6px",
+            borderRadius: 7,
+            background: "rgba(5, 8, 14, 0.96)",
             color: "#f3f8ff",
-            boxShadow: "0 2px 8px rgba(0, 0, 0, 0.28)",
-            font: "9px/1.22 ui-monospace, SFMono-Regular, Menlo, monospace",
+            boxShadow: "0 4px 12px rgba(0, 0, 0, 0.42)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            font: "8px/1.16 ui-monospace, SFMono-Regular, Menlo, monospace",
             whiteSpace: "pre-wrap",
           }}
-        >{`APP dbg  ${aimPipelineDebug.connectionState}  src:${aimPipelineDebug.lastPushSource ?? '-'}
+        >{`APP dbg ${aimPipelineDebug.connectionState} src:${aimPipelineDebug.lastPushSource ?? '-'}
 r:${aimPipelineDebug.roomId ?? '-'} st:${aimPipelineDebug.gameStatus ?? '-'} turn:${aimPipelineDebug.turnUserId ?? '-'}
 app m:${aimPipelineDebug.appRemoteAimMode ?? '-'} v:${aimPipelineDebug.appRemoteAimVisible === null ? '-' : String(aimPipelineDebug.appRemoteAimVisible)} q:${aimPipelineDebug.appRemoteAimSeq ?? '-'} a:${aimPipelineDebug.appRemoteAimAgeMs ?? '-'}
-cue:${aimPipelineDebug.appRemoteAimCueX ?? '-'},${aimPipelineDebug.appRemoteAimCueY ?? '-'} ws:${aimPipelineDebug.rxWsCount}/${aimPipelineDebug.lastWsSeq ?? '-'} http:${aimPipelineDebug.rxHttpCount}/${aimPipelineDebug.lastHttpSeq ?? '-'} tx:${aimPipelineDebug.txCount}/${aimPipelineDebug.lastTxSeq ?? '-'}
+cue:${aimPipelineDebug.appRemoteAimCueX ?? '-'},${aimPipelineDebug.appRemoteAimCueY ?? '-'} ws:${aimPipelineDebug.rxWsCount}/${aimPipelineDebug.lastWsSeq ?? '-'} ht:${aimPipelineDebug.rxHttpCount}/${aimPipelineDebug.lastHttpSeq ?? '-'} tx:${aimPipelineDebug.txCount}/${aimPipelineDebug.lastTxSeq ?? '-'}
 seen:${aimPipelineDebug.lastRemoteSeenAgeMs ?? '-'} clr:${aimPipelineDebug.clearCount} why:${aimPipelineDebug.lastClearReason ?? '-'}`}</pre>
         <pre
           style={{
             margin: 0,
-            padding: "5px 7px",
-            borderRadius: 8,
-            background: "rgba(14, 9, 20, 0.88)",
+            padding: "4px 6px",
+            borderRadius: 7,
+            background: "rgba(14, 9, 20, 0.96)",
             color: "#fff2ff",
-            boxShadow: "0 2px 8px rgba(0, 0, 0, 0.28)",
-            font: "9px/1.22 ui-monospace, SFMono-Regular, Menlo, monospace",
+            boxShadow: "0 4px 12px rgba(0, 0, 0, 0.42)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            font: "8px/1.16 ui-monospace, SFMono-Regular, Menlo, monospace",
             whiteSpace: "pre-wrap",
           }}
-        >{`STAGE dbg  p:${panelRemoteAim ? 'y' : 'n'} f:${panelRemoteFresh ? 'y' : 'n'} o:${panelRemoteOverlayVisible ? 'y' : 'n'}
+        >{`STAGE dbg p:${panelRemoteAim ? 'y' : 'n'} f:${panelRemoteFresh ? 'y' : 'n'} o:${panelRemoteOverlayVisible ? 'y' : 'n'}
 m:${panelRemoteMode} q:${panelRemoteAim?.seq ?? '-'} a:${panelRemoteAgeMs ?? '-'} vis:${panelRemoteAim ? String(panelRemoteAim.visible) : '-'}
 cue:${panelRemoteAim?.cueX ?? '-'},${panelRemoteAim?.cueY ?? '-'} cr:${panelRemoteCanRender ? 'y' : 'n'} pl:${panelRemoteCuePlacementActive ? 'y' : 'n'} pv:${panelRemoteHasCuePreview ? 'y' : 'n'}
 st:${game.status} bih:${game.ballInHandUserId ?? '-'} turn:${game.turnUserId}`}</pre>
