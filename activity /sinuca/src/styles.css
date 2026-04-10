@@ -2146,7 +2146,7 @@ button:focus-visible {
 .game-hud__player,
 .game-hud__center {
   border-radius: 18px;
-  padding: 12px 14px;
+  padding: 11px 14px;
 }
 
 .game-hud__player {
@@ -2741,7 +2741,7 @@ button:focus-visible {
 
   .game-scorecard {
     grid-template-columns: 50px minmax(0, 1fr);
-    padding: 12px 14px;
+    padding: 11px 14px;
   }
 
   .game-scorecard__avatar {
@@ -5739,7 +5739,6 @@ button:focus-visible {
   position: relative;
   z-index: 1;
   width: min(92vw, 448px);
-  min-height: 238px;
   border-radius: 24px;
   overflow: hidden;
   border: 1px solid rgba(193, 226, 255, 0.18);
@@ -5766,7 +5765,7 @@ button:focus-visible {
 .activity-confirm__content {
   position: relative;
   z-index: 1;
-  padding: 20px 20px 16px;
+  padding: 18px 20px 10px;
 }
 
 .activity-confirm__title {
@@ -5778,7 +5777,7 @@ button:focus-visible {
 }
 
 .activity-confirm__body {
-  margin-top: 10px;
+  margin-top: 8px;
   font-family: var(--font-ui);
   font-size: 0.96rem;
   line-height: 1.5;
@@ -5796,13 +5795,13 @@ button:focus-visible {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
-  margin-top: 16px;
+  margin-top: 12px;
 }
 
 .activity-confirm__button {
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 15px;
-  padding: 12px 14px;
+  padding: 11px 14px;
   font-family: var(--font-ui);
   font-size: 0.94rem;
   font-weight: 800;

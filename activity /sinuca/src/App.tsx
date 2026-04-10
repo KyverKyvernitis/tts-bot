@@ -831,6 +831,15 @@ export default function App() {
         } else if (currentScreenRef.current === "create" && parsed.room.players.length > 1) {
           setScreen("room");
         }
+        const activeGame = currentGameRef.current;
+        if (
+          currentScreenRef.current === "game"
+          && activeGame
+          && activeGame.roomId === parsed.room.roomId
+          && activeGame.status === "finished"
+        ) {
+          void fetchGameStateOverHttp(parsed.room.roomId, `${reason}:room_followup_game`, activeGame.shotSequence);
+        }
       } else if (currentScreenRef.current === "room" || currentScreenRef.current === "game") {
         resetGameRuntimeState(roomId, { clearGame: true, reason: `${reason}:room_missing` });
         setRoom(null);
@@ -2363,23 +2372,35 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped) return;
-    if (screen === "game") return;
-    const activeRoomId = screen === "room"
+    const activeRoomId = screen === "game"
       ? room?.roomId ?? null
-      : screen === "create"
-        ? createDraftRoomIdRef.current ?? createDraftRoomId
-        : null;
+      : screen === "room"
+        ? room?.roomId ?? null
+        : screen === "create"
+          ? createDraftRoomIdRef.current ?? createDraftRoomId
+          : null;
     if (!activeRoomId) return;
 
+    const pollWhileFinishedGame = screen === "game" && game?.roomId === activeRoomId && game?.status === "finished";
+    if (screen === "game" && !pollWhileFinishedGame) return;
+
     const isConnected = connectionState === "connected";
-    void fetchRoomStateOverHttp(activeRoomId, isConnected ? "connected_room_sync_initial" : "offline_initial");
+    const initialReason = pollWhileFinishedGame
+      ? (isConnected ? "finished_room_sync_initial" : "finished_room_sync_offline_initial")
+      : (isConnected ? "connected_room_sync_initial" : "offline_initial");
+    const intervalReason = pollWhileFinishedGame
+      ? (isConnected ? "finished_room_sync_fallback" : "finished_room_sync_offline")
+      : (isConnected ? "connected_room_sync_fallback" : "offline_poll");
+    const intervalMs = pollWhileFinishedGame ? (isConnected ? 700 : 1000) : (isConnected ? 2000 : 2500);
+
+    void fetchRoomStateOverHttp(activeRoomId, initialReason);
 
     const interval = window.setInterval(() => {
-      void fetchRoomStateOverHttp(activeRoomId, isConnected ? "connected_room_sync_fallback" : "offline_poll");
-    }, isConnected ? 2000 : 2500);
+      void fetchRoomStateOverHttp(activeRoomId, intervalReason);
+    }, intervalMs);
 
     return () => window.clearInterval(interval);
-  }, [bootstrapped, connectionState, createDraftRoomId, room?.roomId, screen]);
+  }, [bootstrapped, connectionState, createDraftRoomId, game?.roomId, game?.status, room?.roomId, screen]);
 
 
 
