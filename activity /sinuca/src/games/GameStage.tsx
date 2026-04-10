@@ -3173,48 +3173,44 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
       <div
         style={{
-          margin: "8px 14px 0",
+          margin: "6px 10px 0",
           display: "grid",
-          gap: 6,
-          gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
+          gap: 4,
+          gridTemplateColumns: "repeat(auto-fit, minmax(188px, 1fr))",
           pointerEvents: "none",
         }}
       >
         <pre
           style={{
             margin: 0,
-            padding: "8px 10px",
-            borderRadius: 10,
-            background: "rgba(5, 8, 14, 0.82)",
-            color: "#eaf4ff",
-            font: "11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace",
+            padding: "5px 7px",
+            borderRadius: 8,
+            background: "rgba(5, 8, 14, 0.88)",
+            color: "#f3f8ff",
+            boxShadow: "0 2px 8px rgba(0, 0, 0, 0.28)",
+            font: "9px/1.22 ui-monospace, SFMono-Regular, Menlo, monospace",
             whiteSpace: "pre-wrap",
           }}
-        >{`APP aim dbg
-conn=${aimPipelineDebug.connectionState} room=${aimPipelineDebug.roomId ?? '-'}
-status=${aimPipelineDebug.gameStatus ?? '-'} turn=${aimPipelineDebug.turnUserId ?? '-'} me=${aimPipelineDebug.currentUserId ?? '-'}
-appRemote mode=${aimPipelineDebug.appRemoteAimMode ?? '-'} vis=${aimPipelineDebug.appRemoteAimVisible === null ? '-' : String(aimPipelineDebug.appRemoteAimVisible)} seq=${aimPipelineDebug.appRemoteAimSeq ?? '-'} age=${aimPipelineDebug.appRemoteAimAgeMs ?? '-'}ms src=${aimPipelineDebug.lastPushSource ?? '-'}
-appRemote cue=${aimPipelineDebug.appRemoteAimCueX ?? '-'}, ${aimPipelineDebug.appRemoteAimCueY ?? '-'} rev=${aimPipelineDebug.appRemoteAimSnapshotRevision ?? '-'}
-rx ws=${aimPipelineDebug.rxWsCount} age=${aimPipelineDebug.lastWsAgeMs ?? '-'}ms mode=${aimPipelineDebug.lastWsMode ?? '-'} seq=${aimPipelineDebug.lastWsSeq ?? '-'} cue=${aimPipelineDebug.lastWsCueX ?? '-'}, ${aimPipelineDebug.lastWsCueY ?? '-'}
-rx http=${aimPipelineDebug.rxHttpCount} age=${aimPipelineDebug.lastHttpAgeMs ?? '-'}ms mode=${aimPipelineDebug.lastHttpMode ?? '-'} seq=${aimPipelineDebug.lastHttpSeq ?? '-'} cue=${aimPipelineDebug.lastHttpCueX ?? '-'}, ${aimPipelineDebug.lastHttpCueY ?? '-'}
-tx=${aimPipelineDebug.txCount} age=${aimPipelineDebug.lastTxAgeMs ?? '-'}ms mode=${aimPipelineDebug.lastTxMode ?? '-'} seq=${aimPipelineDebug.lastTxSeq ?? '-'} cue=${aimPipelineDebug.lastTxCueX ?? '-'}, ${aimPipelineDebug.lastTxCueY ?? '-'}
-lastSeen=${aimPipelineDebug.lastRemoteSeenAgeMs ?? '-'}ms clears=${aimPipelineDebug.clearCount} reason=${aimPipelineDebug.lastClearReason ?? '-'}`}</pre>
+        >{`APP dbg  ${aimPipelineDebug.connectionState}  src:${aimPipelineDebug.lastPushSource ?? '-'}
+r:${aimPipelineDebug.roomId ?? '-'} st:${aimPipelineDebug.gameStatus ?? '-'} turn:${aimPipelineDebug.turnUserId ?? '-'}
+app m:${aimPipelineDebug.appRemoteAimMode ?? '-'} v:${aimPipelineDebug.appRemoteAimVisible === null ? '-' : String(aimPipelineDebug.appRemoteAimVisible)} q:${aimPipelineDebug.appRemoteAimSeq ?? '-'} a:${aimPipelineDebug.appRemoteAimAgeMs ?? '-'}
+cue:${aimPipelineDebug.appRemoteAimCueX ?? '-'},${aimPipelineDebug.appRemoteAimCueY ?? '-'} ws:${aimPipelineDebug.rxWsCount}/${aimPipelineDebug.lastWsSeq ?? '-'} http:${aimPipelineDebug.rxHttpCount}/${aimPipelineDebug.lastHttpSeq ?? '-'} tx:${aimPipelineDebug.txCount}/${aimPipelineDebug.lastTxSeq ?? '-'}
+seen:${aimPipelineDebug.lastRemoteSeenAgeMs ?? '-'} clr:${aimPipelineDebug.clearCount} why:${aimPipelineDebug.lastClearReason ?? '-'}`}</pre>
         <pre
           style={{
             margin: 0,
-            padding: "8px 10px",
-            borderRadius: 10,
-            background: "rgba(14, 9, 20, 0.82)",
-            color: "#f4eaff",
-            font: "11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace",
+            padding: "5px 7px",
+            borderRadius: 8,
+            background: "rgba(14, 9, 20, 0.88)",
+            color: "#fff2ff",
+            boxShadow: "0 2px 8px rgba(0, 0, 0, 0.28)",
+            font: "9px/1.22 ui-monospace, SFMono-Regular, Menlo, monospace",
             whiteSpace: "pre-wrap",
           }}
-        >{`STAGE aim dbg
-prop=${panelRemoteAim ? 'yes' : 'no'} fresh=${panelRemoteFresh ? 'yes' : 'no'} mode=${panelRemoteMode}
-propUser=${panelRemoteAim?.userId ?? '-'} propRoom=${panelRemoteAim?.roomId ?? '-'} age=${panelRemoteAgeMs ?? '-'}ms
-propVisible=${panelRemoteAim ? String(panelRemoteAim.visible) : '-'} seq=${panelRemoteAim?.seq ?? '-'} cue=${panelRemoteAim?.cueX ?? '-'}, ${panelRemoteAim?.cueY ?? '-'}
-canRender=${panelRemoteCanRender ? 'yes' : 'no'} place=${panelRemoteCuePlacementActive ? 'yes' : 'no'} preview=${panelRemoteHasCuePreview ? 'yes' : 'no'} overlay=${panelRemoteOverlayVisible ? 'yes' : 'no'}
-gameStatus=${game.status} ballInHandUser=${game.ballInHandUserId ?? '-'} turn=${game.turnUserId}`}</pre>
+        >{`STAGE dbg  p:${panelRemoteAim ? 'y' : 'n'} f:${panelRemoteFresh ? 'y' : 'n'} o:${panelRemoteOverlayVisible ? 'y' : 'n'}
+m:${panelRemoteMode} q:${panelRemoteAim?.seq ?? '-'} a:${panelRemoteAgeMs ?? '-'} vis:${panelRemoteAim ? String(panelRemoteAim.visible) : '-'}
+cue:${panelRemoteAim?.cueX ?? '-'},${panelRemoteAim?.cueY ?? '-'} cr:${panelRemoteCanRender ? 'y' : 'n'} pl:${panelRemoteCuePlacementActive ? 'y' : 'n'} pv:${panelRemoteHasCuePreview ? 'y' : 'n'}
+st:${game.status} bih:${game.ballInHandUserId ?? '-'} turn:${game.turnUserId}`}</pre>
       </div>
 
       <div className="pool-stage__table-layout">
