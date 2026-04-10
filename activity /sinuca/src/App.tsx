@@ -170,7 +170,7 @@ type ConnectionState = "connecting" | "connected" | "offline";
 type AuthState = "checking" | "ready" | "needs_consent";
 type LobbyScreen = "home" | "create" | "list" | "room" | "game";
 type TableType = "stake" | "casual";
-type ChipGateDialogKind = "bonus" | "debt" | "negative";
+type ChipGateDialogKind = "debt" | "negative";
 type ChipGateDialogSource = "create" | "join";
 
 type ChipGateDialogState = {
@@ -180,7 +180,6 @@ type ChipGateDialogState = {
   body: string;
   confirmLabel: string;
   resultingChips: number;
-  bonusToUse: number;
   stake: number;
   tableType: TableType;
   roomId: string | null;
@@ -511,7 +510,6 @@ export default function App() {
 
   useEffect(() => {
     if (!chipGateDialog) return;
-    if (chipGateDialog.kind === "bonus") return;
     playOneShot(popupDebtAudioRef);
   }, [chipGateDialog]);
 
@@ -736,22 +734,6 @@ export default function App() {
     if (blockedUserId && blockedUserId !== state.currentUser.userId) return null;
     const errorCode = args.errorCode ?? readStringFromPayload(payload, "error");
     const resultingChips = readNumberFromPayload(payload, "resultingChips", balance.chips);
-    const bonusToUse = readNumberFromPayload(payload, "bonusToUse", 0);
-    if (errorCode === "bonus_confirm_required") {
-      return {
-        kind: "bonus",
-        source: args.source,
-        title: "Usar fichas bônus?",
-        body: "Você pode continuar usando suas fichas bônus antes das fichas normais.",
-        confirmLabel: `Sim (usar ${bonusToUse} fichas bônus)`,
-        resultingChips,
-        bonusToUse,
-        stake: args.stake,
-        tableType: args.tableType,
-        roomId: args.roomId ?? null,
-        overrideUserId: args.overrideUserId ?? null,
-      };
-    }
     if (errorCode === "debt_confirm_required") {
       return {
         kind: "debt",
@@ -760,7 +742,6 @@ export default function App() {
         body: args.errorDetail ?? "Ao continuar você ficará devendo. Tem certeza?",
         confirmLabel: `Sim (ficar com -${Math.abs(resultingChips)} fichas)`,
         resultingChips,
-        bonusToUse,
         stake: args.stake,
         tableType: args.tableType,
         roomId: args.roomId ?? null,
@@ -775,7 +756,6 @@ export default function App() {
         body: args.errorDetail ?? "Você está negativado. Se continuar, sua dívida vai aumentar. Tem certeza?",
         confirmLabel: `Sim (ficar com -${Math.abs(resultingChips)} fichas)`,
         resultingChips,
-        bonusToUse,
         stake: args.stake,
         tableType: args.tableType,
         roomId: args.roomId ?? null,
@@ -1642,19 +1622,18 @@ export default function App() {
 
   const confirmChipGateDialog = async () => {
     if (!chipGateDialog || chipGateBusy) return;
+    const pendingDialog = chipGateDialog;
     setChipGateBusy(true);
     try {
-      const confirmation = chipGateDialog.kind === "bonus"
-        ? { confirmBonus: true, confirmDebt: false }
-        : { confirmBonus: false, confirmDebt: true };
-      if (chipGateDialog.source === "create") {
+      const confirmation = { confirmBonus: false, confirmDebt: true };
+      if (pendingDialog.source === "create") {
         const created = await createRoomOverHttp('chip_gate_confirm_create', {
-          stake: chipGateDialog.stake,
-          tableType: chipGateDialog.tableType,
+          stake: pendingDialog.stake,
+          tableType: pendingDialog.tableType,
         }, confirmation);
         if (created) setChipGateDialog(null);
-      } else if (chipGateDialog.source === "join" && chipGateDialog.roomId) {
-        const joined = await joinRoomOverHttp(chipGateDialog.roomId, 'chip_gate_confirm_join', confirmation);
+      } else if (pendingDialog.source === "join" && pendingDialog.roomId) {
+        const joined = await joinRoomOverHttp(pendingDialog.roomId, 'chip_gate_confirm_join', confirmation);
         if (joined) setChipGateDialog(null);
       }
     } finally {
@@ -2544,13 +2523,11 @@ export default function App() {
           <div className="activity-confirm__panel">
             <div className="activity-confirm__title">{chipGateDialog.title}</div>
             <div className="activity-confirm__body">{chipGateDialog.body}</div>
-            {chipGateDialog.kind !== "bonus" ? (
-              <div className="activity-confirm__summary">Saldo após continuar: <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span></div>
-            ) : null}
+            <div className="activity-confirm__summary">Saldo após continuar: <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span></div>
             <div className="activity-confirm__actions">
               <button type="button" className="activity-confirm__button activity-confirm__button--ghost" disabled={chipGateBusy} onClick={() => setChipGateDialog(null)}>Melhor não...</button>
               <button type="button" className="activity-confirm__button activity-confirm__button--danger" disabled={chipGateBusy} onClick={() => { void confirmChipGateDialog(); }}>
-                {chipGateDialog.kind === "bonus" ? chipGateDialog.confirmLabel : <>Sim (ficar com <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span> fichas)</>}
+                <>Sim (ficar com <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span> fichas)</>
               </button>
             </div>
           </div>

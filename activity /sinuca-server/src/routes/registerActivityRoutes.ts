@@ -61,7 +61,6 @@ export interface RegisterActivityRoutesOptions {
 export function registerActivityRoutes({ app, runtime, balanceService, exchangeDiscordCode }: RegisterActivityRoutesOptions) {
 
   function previewReasonToAcceptanceKind(reason: Awaited<ReturnType<typeof balanceService.previewStakeSpend>>["reason"]) {
-    if (reason === "bonus_confirm_required") return "bonus" as const;
     if (reason === "debt_confirm_required") return "debt" as const;
     if (reason === "negative_confirm_required") return "negative" as const;
     return "ok" as const;
@@ -115,19 +114,6 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
 
   async function buildStakePreviewResponse(args: { guildId: string; userId: string; requiredChips: number }) {
     const preview = await balanceService.previewStakeSpend(args.guildId, args.userId, args.requiredChips);
-    if (preview.reason === "bonus_confirm_required") {
-      return buildStakeGateResponse({
-        error: "bonus_confirm_required",
-        detail: "Usar fichas bônus?",
-        blockedUserId: args.userId,
-        requiredChips: args.requiredChips,
-        currentChips: preview.currentChips,
-        currentBonusChips: preview.currentBonusChips,
-        resultingChips: preview.resultingChips,
-        resultingBonusChips: preview.resultingBonusChips,
-        bonusToUse: preview.bonusToUse,
-      });
-    }
     if (preview.reason === "debt_confirm_required") {
       return buildStakeGateResponse({
         error: "debt_confirm_required",
@@ -274,7 +260,6 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     if (requestedTableType === "stake" && normalizedStake > 0 && guildId) {
       createPreview = await balanceService.previewStakeSpend(guildId, userId, normalizedStake);
       const confirmSatisfied = createPreview.reason === "ok"
-        || (createPreview.reason === "bonus_confirm_required" && confirmBonus)
         || ((createPreview.reason === "debt_confirm_required" || createPreview.reason === "negative_confirm_required") && confirmDebt);
       if (!createPreview.canProceed || !confirmSatisfied) {
         const payload = await buildStakePreviewResponse({ guildId, userId, requiredChips: normalizedStake });
@@ -320,7 +305,6 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
     if (requiredStake > 0 && existingRoom.guildId) {
       joinPreview = await balanceService.previewStakeSpend(existingRoom.guildId, userId, requiredStake);
       const confirmSatisfied = joinPreview.reason === "ok"
-        || (joinPreview.reason === "bonus_confirm_required" && confirmBonus)
         || ((joinPreview.reason === "debt_confirm_required" || joinPreview.reason === "negative_confirm_required") && confirmDebt);
       if (!joinPreview.canProceed || !confirmSatisfied) {
         const payload = await buildStakePreviewResponse({ guildId: existingRoom.guildId, userId, requiredChips: requiredStake });

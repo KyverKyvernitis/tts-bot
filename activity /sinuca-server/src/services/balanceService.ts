@@ -28,7 +28,7 @@ export interface MatchStakeSettlementInput {
   stakeChips: number;
 }
 
-export type StakeSpendReason = "ok" | "bonus_confirm_required" | "debt_confirm_required" | "negative_confirm_required" | "insufficient_chips";
+export type StakeSpendReason = "ok" | "debt_confirm_required" | "negative_confirm_required" | "insufficient_chips";
 
 export interface StakeSpendPreview {
   currentChips: number;
@@ -225,19 +225,6 @@ export function createBalanceService(config: BalanceServiceConfig): BalanceServi
         canProceed: true,
         needsConfirmation: true,
         reason: currentChips < 0 ? "negative_confirm_required" : "debt_confirm_required",
-      };
-    }
-    if (bonusToUse > 0) {
-      return {
-        currentChips,
-        currentBonusChips,
-        resultingChips,
-        resultingBonusChips,
-        bonusToUse,
-        normalToUse,
-        canProceed: true,
-        needsConfirmation: true,
-        reason: "bonus_confirm_required",
       };
     }
     return {
