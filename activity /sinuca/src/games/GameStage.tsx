@@ -3196,8 +3196,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             whiteSpace: "pre-wrap",
           }}
         >{`APP dbg ${aimPipelineDebug.connectionState} src:${aimPipelineDebug.lastPushSource ?? '-'}
-r:${aimPipelineDebug.roomId ?? '-'} st:${aimPipelineDebug.gameStatus ?? '-'} turn:${aimPipelineDebug.turnUserId ?? '-'}
-app m:${aimPipelineDebug.appRemoteAimMode ?? '-'} v:${aimPipelineDebug.appRemoteAimVisible === null ? '-' : String(aimPipelineDebug.appRemoteAimVisible)} q:${aimPipelineDebug.appRemoteAimSeq ?? '-'} a:${aimPipelineDebug.appRemoteAimAgeMs ?? '-'}
+r:${aimPipelineDebug.roomId ?? '-'} me:${aimPipelineDebug.currentUserId ?? '-'} turn:${aimPipelineDebug.turnUserId ?? '-'} opp:${aimPipelineDebug.currentUserId && aimPipelineDebug.turnUserId ? (aimPipelineDebug.currentUserId !== aimPipelineDebug.turnUserId ? 'y' : 'n') : '-'}
+app u:${aimPipelineDebug.appRemoteAimUserId ?? '-'} m:${aimPipelineDebug.appRemoteAimMode ?? '-'} v:${aimPipelineDebug.appRemoteAimVisible === null ? '-' : String(aimPipelineDebug.appRemoteAimVisible)} q:${aimPipelineDebug.appRemoteAimSeq ?? '-'} a:${aimPipelineDebug.appRemoteAimAgeMs ?? '-'}
 cue:${aimPipelineDebug.appRemoteAimCueX ?? '-'},${aimPipelineDebug.appRemoteAimCueY ?? '-'} ws:${aimPipelineDebug.rxWsCount}/${aimPipelineDebug.lastWsSeq ?? '-'} ht:${aimPipelineDebug.rxHttpCount}/${aimPipelineDebug.lastHttpSeq ?? '-'} tx:${aimPipelineDebug.txCount}/${aimPipelineDebug.lastTxSeq ?? '-'}
 seen:${aimPipelineDebug.lastRemoteSeenAgeMs ?? '-'} clr:${aimPipelineDebug.clearCount} why:${aimPipelineDebug.lastClearReason ?? '-'}`}</pre>
         <pre
@@ -3213,9 +3213,9 @@ seen:${aimPipelineDebug.lastRemoteSeenAgeMs ?? '-'} clr:${aimPipelineDebug.clear
             whiteSpace: "pre-wrap",
           }}
         >{`STAGE dbg p:${panelRemoteAim ? 'y' : 'n'} f:${panelRemoteFresh ? 'y' : 'n'} o:${panelRemoteOverlayVisible ? 'y' : 'n'}
-m:${panelRemoteMode} q:${panelRemoteAim?.seq ?? '-'} a:${panelRemoteAgeMs ?? '-'} vis:${panelRemoteAim ? String(panelRemoteAim.visible) : '-'}
+me:${currentUserId} turn:${game.turnUserId} opp:${game.turnUserId !== currentUserId ? 'y' : 'n'} m:${panelRemoteMode} q:${panelRemoteAim?.seq ?? '-'} a:${panelRemoteAgeMs ?? '-'} vis:${panelRemoteAim ? String(panelRemoteAim.visible) : '-'}
 cue:${panelRemoteAim?.cueX ?? '-'},${panelRemoteAim?.cueY ?? '-'} cr:${panelRemoteCanRender ? 'y' : 'n'} pl:${panelRemoteCuePlacementActive ? 'y' : 'n'} pv:${panelRemoteHasCuePreview ? 'y' : 'n'}
-st:${game.status} bih:${game.ballInHandUserId ?? '-'} turn:${game.turnUserId}`}</pre>
+st:${game.status} bih:${game.ballInHandUserId ?? '-'} ru:${panelRemoteAim?.userId ?? '-'}`}</pre>
       </div>
 
       <div className="pool-stage__table-layout">
