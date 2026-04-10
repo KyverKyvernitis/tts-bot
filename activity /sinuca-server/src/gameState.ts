@@ -178,6 +178,20 @@ function toFrameBalls(balls: PhysicsBall[]) {
   }));
 }
 
+function toBallSnapshot(ball: PhysicsBall): GameBallSnapshot {
+  return {
+    id: ball.id,
+    number: ball.number,
+    x: ball.x,
+    y: ball.y,
+    pocketed: ball.pocketed,
+    velocityX: Number(ball.vx.toFixed(4)),
+    velocityY: Number(ball.vy.toFixed(4)),
+    spinRoll: Number(ball.roll.toFixed(4)),
+    spinSide: Number(ball.sideSpin.toFixed(4)),
+  };
+}
+
 function currentFrame(balls: PhysicsBall[]): GameShotFrame {
   return { balls: toFrameBalls(balls) };
 }
@@ -211,7 +225,7 @@ function bumpSnapshotRevision(game: GameRecord) {
 function toSnapshot(game: GameRecord, sinceSeq?: number | null): GameSnapshot {
   return {
     ...game,
-    balls: game.balls.map(({ vx: _vx, vy: _vy, roll: _roll, sideSpin: _sideSpin, ...ball }) => ball),
+    balls: game.balls.map((ball) => toBallSnapshot(ball)),
     lastShot: game.lastShot && (!sinceSeq || game.lastShot.seq > sinceSeq) ? game.lastShot : null,
   };
 }

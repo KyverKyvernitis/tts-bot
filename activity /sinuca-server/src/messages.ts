@@ -94,6 +94,10 @@ export interface GameBallSnapshot {
   x: number;
   y: number;
   pocketed: boolean;
+  velocityX?: number;
+  velocityY?: number;
+  spinRoll?: number;
+  spinSide?: number;
 }
 
 export interface GameShotFrameBall {

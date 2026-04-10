@@ -364,6 +364,7 @@ export default function App() {
   const pendingAimHttpRef = useRef<PendingAimHttpState>(null);
   const aimHttpTimerRef = useRef<number | null>(null);
   const lastAimHttpSentAtRef = useRef(0);
+  const lastRemoteAimAtRef = useRef<Record<string, number>>({});
   const snapshotDebugRef = useRef<SnapshotDebugState>({ roomId: null, lastReceivedAt: 0, lastLoggedAt: 0, lastRevision: -1, lastSource: null });
   const wsGameStateRef = useRef<WsGameStateRefState>({ roomId: null, lastReceivedAt: 0, shotSequence: 0, revision: 0 });
   const simRecoveryRef = useRef<SimRecoveryState>({ roomId: null, shotSequence: 0, revision: 0, lastProgressAt: 0, lastRecoveryAt: 0, recoveryCount: 0, inFlight: false, lastRequestedShotSequence: 0, lastRequestedRevision: 0 });
@@ -1509,8 +1510,9 @@ export default function App() {
 
   const pushAimToState = (payload: AimStateSnapshot | null) => {
     if (!payload) return;
+    if (payload.userId === state.currentUser.userId) return;
+    lastRemoteAimAtRef.current[payload.roomId] = payload.updatedAt;
     setRemoteAim((current) => {
-      if (payload.userId === state.currentUser.userId) return current;
       if (!current || current.roomId !== payload.roomId || current.userId !== payload.userId) {
         return payload;
       }
@@ -1554,19 +1556,21 @@ export default function App() {
     return false;
   };
 
-  const scheduleAimHttpSync = (roomId: string, aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => {
-    if (isRealtimeSocketHealthy(roomId)) return;
-    if (shouldBlockHttpAuxDuringRealtime(roomId, 'aim', 'room_aim_sync')) return;
+  const scheduleAimHttpSync = (roomId: string, aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }, options?: { allowWhileRealtimeHealthy?: boolean; reason?: string }) => {
+    const allowWhileRealtimeHealthy = Boolean(options?.allowWhileRealtimeHealthy);
+    if (!allowWhileRealtimeHealthy && isRealtimeSocketHealthy(roomId)) return;
+    const debugReason = options?.reason ?? (allowWhileRealtimeHealthy ? 'ws_backup' : 'room_aim_sync');
+    if (!allowWhileRealtimeHealthy && shouldBlockHttpAuxDuringRealtime(roomId, 'aim', debugReason)) return;
     pendingAimHttpRef.current = { roomId, aim };
     const flush = () => {
       const pending = pendingAimHttpRef.current;
       if (!pending) return;
       pendingAimHttpRef.current = null;
       lastAimHttpSentAtRef.current = Date.now();
-      void syncAimOverHttp(pending.roomId, pending.aim, 'scheduled').catch(() => {});
+      void syncAimOverHttp(pending.roomId, pending.aim, debugReason).catch(() => {});
     };
     const now = Date.now();
-    const minGap = aim.mode === 'place' ? 55 : 75;
+    const minGap = aim.mode === 'place' ? 48 : aim.mode === 'power' ? 64 : 72;
     const wait = Math.max(0, minGap - (now - lastAimHttpSentAtRef.current));
     if (aimHttpTimerRef.current !== null) window.clearTimeout(aimHttpTimerRef.current);
     if (wait === 0 || !aim.visible || aim.mode === 'idle') {
@@ -1579,8 +1583,8 @@ export default function App() {
     }, wait);
   };
 
-  const fetchAimStateOverHttp = async (roomId: string, reason: string) => {
-    if (shouldBlockHttpAuxDuringRealtime(roomId, "aim", reason)) {
+  const fetchAimStateOverHttp = async (roomId: string, reason: string, options?: { allowWhileRealtimeHealthy?: boolean }) => {
+    if (!options?.allowWhileRealtimeHealthy && shouldBlockHttpAuxDuringRealtime(roomId, "aim", reason)) {
       return null;
     }
     for (const baseUrl of resolveApiCandidates(`/games/${roomId}/aim`)) {
@@ -2041,6 +2045,33 @@ export default function App() {
       window.clearInterval(interval);
     };
   }, [connectionState, game?.ballInHandUserId, game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
+
+  useEffect(() => {
+    if (screen !== 'game' || !room || !game) return;
+    if (game.status !== 'waiting_shot' || game.turnUserId === state.currentUser.userId) return;
+    const currentRemoteAim = remoteAim && remoteAim.roomId === room.roomId ? remoteAim : null;
+    if (currentRemoteAim && Date.now() - currentRemoteAim.updatedAt < 450) return;
+    const lastSeenAt = lastRemoteAimAtRef.current[room.roomId] ?? 0;
+    const shouldProbe = connectionState !== 'connected' || Date.now() - lastSeenAt > 180;
+    if (!shouldProbe) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void fetchAimStateOverHttp(room.roomId, connectionState === 'connected' ? 'reconcile_waiting_turn' : 'poll', {
+        allowWhileRealtimeHealthy: connectionState === 'connected',
+      }).then((aim) => {
+        if (cancelled || !aim) return;
+        if (aim.roomId !== room.roomId || aim.userId === state.currentUser.userId) return;
+        const shouldKeepRemoteCuePlacement = game.ballInHandUserId === aim.userId && aim.cueX !== null && aim.cueY !== null;
+        if ((aim.visible && aim.mode !== 'idle') || shouldKeepRemoteCuePlacement) {
+          pushAimToState(aim);
+        }
+      });
+    }, connectionState === 'connected' ? 90 : 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [connectionState, game?.ballInHandUserId, game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, remoteAim, room?.roomId, screen, state.currentUser.userId]);
 
   useEffect(() => () => {
     if (aimHttpTimerRef.current !== null) {
@@ -3067,9 +3098,10 @@ export default function App() {
                 mode: aim.mode,
               },
             }, { silent: true });
-            if (!deliveredOverSocket) {
-              scheduleAimHttpSync(room.roomId, aim);
-            }
+            scheduleAimHttpSync(room.roomId, aim, {
+              allowWhileRealtimeHealthy: true,
+              reason: deliveredOverSocket ? 'ws_backup' : 'ws_unavailable',
+            });
           }}
           onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room_game" : "http_primary_leave_room_game"); }}
           onRematchReady={() => {
