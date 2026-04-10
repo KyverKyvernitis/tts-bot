@@ -5738,15 +5738,34 @@ button:focus-visible {
 .activity-confirm__panel {
   position: relative;
   z-index: 1;
-  width: min(92vw, 432px);
-  padding: 20px 18px 16px;
-  border-radius: 22px;
-  background: linear-gradient(180deg, rgba(13, 22, 36, 0.94), rgba(8, 15, 26, 0.9));
+  width: min(92vw, 448px);
+  min-height: 238px;
+  border-radius: 24px;
+  overflow: hidden;
   border: 1px solid rgba(193, 226, 255, 0.18);
   box-shadow: 0 26px 60px rgba(0, 0, 0, 0.36);
   color: #f4f8ff;
   text-align: center;
   animation: activityConfirmPop 190ms cubic-bezier(.2,.86,.2,1);
+  background: linear-gradient(180deg, rgba(13, 22, 36, 0.72), rgba(8, 15, 26, 0.78));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.activity-confirm__panel-bg {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(6, 12, 22, 0.38), rgba(6, 12, 22, 0.54)),
+    url("/images/ui/popup_bg.png") center/cover no-repeat;
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.activity-confirm__content {
+  position: relative;
+  z-index: 1;
+  padding: 20px 18px 16px;
 }
 
 .activity-confirm__title {
@@ -5784,14 +5803,16 @@ button:focus-visible {
 }
 
 .activity-confirm__button {
-  border: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 15px;
   padding: 12px 14px;
   font-family: var(--font-ui);
   font-size: 0.94rem;
   font-weight: 800;
   cursor: pointer;
-  transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease, opacity 140ms ease;
+  transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease, opacity 140ms ease, border-color 140ms ease;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 
 .activity-confirm__button:hover:not(:disabled) {
@@ -5804,15 +5825,17 @@ button:focus-visible {
 }
 
 .activity-confirm__button--ghost {
-  background: rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.04));
   color: #eef4ff;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
 }
 
 .activity-confirm__button--danger {
-  background: linear-gradient(180deg, #3f7bff, #2f60ca);
+  background: linear-gradient(180deg, rgba(72, 132, 255, 0.72), rgba(47, 96, 202, 0.62));
   color: #f8fbff;
-  box-shadow: 0 10px 24px rgba(35, 95, 220, 0.28);
+  box-shadow: 0 10px 24px rgba(35, 95, 220, 0.22), inset 0 1px 0 rgba(255,255,255,0.08);
+  border-color: rgba(166, 206, 255, 0.28);
 }
 
 @keyframes activityOverlayFade {

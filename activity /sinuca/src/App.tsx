@@ -739,7 +739,7 @@ export default function App() {
         kind: "debt",
         source: args.source,
         title: "Ao continuar você ficará devendo",
-        body: args.errorDetail ?? "Ao continuar você ficará devendo. Tem certeza?",
+        body: `Seu saldo após iniciar a partida ficará em -${Math.abs(resultingChips)} fichas. Tem certeza?`,
         confirmLabel: `Sim (ficar com -${Math.abs(resultingChips)} fichas)`,
         resultingChips,
         stake: args.stake,
@@ -753,7 +753,7 @@ export default function App() {
         kind: "negative",
         source: args.source,
         title: "Você está negativado",
-        body: args.errorDetail ?? "Você está negativado. Se continuar, sua dívida vai aumentar. Tem certeza?",
+        body: `Se continuar, seu saldo ficará em -${Math.abs(resultingChips)} fichas. Tem certeza?`,
         confirmLabel: `Sim (ficar com -${Math.abs(resultingChips)} fichas)`,
         resultingChips,
         stake: args.stake,
@@ -1631,10 +1631,20 @@ export default function App() {
           stake: pendingDialog.stake,
           tableType: pendingDialog.tableType,
         }, confirmation);
-        if (created) setChipGateDialog(null);
+        if (created) {
+          setErrorMessage(null);
+          setChipGateDialog(null);
+          setRoom(created);
+          setScreen("room");
+        }
       } else if (pendingDialog.source === "join" && pendingDialog.roomId) {
         const joined = await joinRoomOverHttp(pendingDialog.roomId, 'chip_gate_confirm_join', confirmation);
-        if (joined) setChipGateDialog(null);
+        if (joined) {
+          setErrorMessage(null);
+          setChipGateDialog(null);
+          setRoom(joined);
+          setScreen("room");
+        }
       }
     } finally {
       setChipGateBusy(false);
@@ -2520,15 +2530,18 @@ export default function App() {
       {chipGateDialog ? (
         <div className="activity-confirm" role="dialog" aria-modal="true" aria-live="polite">
           <div className="activity-confirm__backdrop" onClick={() => { if (!chipGateBusy) setChipGateDialog(null); }} />
-          <div className="activity-confirm__panel">
-            <div className="activity-confirm__title">{chipGateDialog.title}</div>
-            <div className="activity-confirm__body">{chipGateDialog.body}</div>
-            <div className="activity-confirm__summary">Saldo após continuar: <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span></div>
-            <div className="activity-confirm__actions">
-              <button type="button" className="activity-confirm__button activity-confirm__button--ghost" disabled={chipGateBusy} onClick={() => setChipGateDialog(null)}>Melhor não...</button>
-              <button type="button" className="activity-confirm__button activity-confirm__button--danger" disabled={chipGateBusy} onClick={() => { void confirmChipGateDialog(); }}>
-                <>Sim (ficar com <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span> fichas)</>
-              </button>
+          <div className={`activity-confirm__panel activity-confirm__panel--${chipGateDialog.kind}`}>
+            <div className="activity-confirm__panel-bg" aria-hidden="true" />
+            <div className="activity-confirm__content">
+              <div className="activity-confirm__title">{chipGateDialog.title}</div>
+              <div className="activity-confirm__body">{chipGateDialog.body}</div>
+              <div className="activity-confirm__summary">Saldo após continuar: <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span></div>
+              <div className="activity-confirm__actions">
+                <button type="button" className="activity-confirm__button activity-confirm__button--ghost" disabled={chipGateBusy} onClick={() => setChipGateDialog(null)}>Melhor não...</button>
+                <button type="button" className="activity-confirm__button activity-confirm__button--danger" disabled={chipGateBusy} onClick={() => { void confirmChipGateDialog(); }}>
+                  {chipGateDialog.confirmLabel}
+                </button>
+              </div>
             </div>
           </div>
         </div>

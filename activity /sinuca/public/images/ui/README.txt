@@ -1,0 +1,1 @@
+Substitua popup_bg.png pela arte de fundo do popup. Mantém este nome e proporção 16:9 (recomendado 1600x900 ou 1280x720).
