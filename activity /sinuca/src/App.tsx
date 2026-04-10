@@ -364,6 +364,8 @@ export default function App() {
   const pendingAimHttpRef = useRef<PendingAimHttpState>(null);
   const aimHttpTimerRef = useRef<number | null>(null);
   const lastAimHttpSentAtRef = useRef(0);
+  const lastLocalAimModeRef = useRef<AimPointerMode | null>(null);
+  const lastLocalAimVisibleRef = useRef<boolean>(false);
   const lastRemoteAimAtRef = useRef<Record<string, number>>({});
   const snapshotDebugRef = useRef<SnapshotDebugState>({ roomId: null, lastReceivedAt: 0, lastLoggedAt: 0, lastRevision: -1, lastSource: null });
   const wsGameStateRef = useRef<WsGameStateRefState>({ roomId: null, lastReceivedAt: 0, shotSequence: 0, revision: 0 });
@@ -1561,22 +1563,46 @@ export default function App() {
     if (!allowWhileRealtimeHealthy && isRealtimeSocketHealthy(roomId)) return;
     const debugReason = options?.reason ?? (allowWhileRealtimeHealthy ? 'ws_backup' : 'room_aim_sync');
     if (!allowWhileRealtimeHealthy && shouldBlockHttpAuxDuringRealtime(roomId, 'aim', debugReason)) return;
-    pendingAimHttpRef.current = { roomId, aim };
+
+    const nextAim = {
+      visible: aim.visible,
+      angle: aim.angle,
+      cueX: aim.cueX ?? null,
+      cueY: aim.cueY ?? null,
+      power: aim.power ?? 0,
+      seq: aim.seq ?? 0,
+      mode: aim.mode,
+    };
+    pendingAimHttpRef.current = { roomId, aim: nextAim };
+
     const flush = () => {
       const pending = pendingAimHttpRef.current;
       if (!pending) return;
       pendingAimHttpRef.current = null;
       lastAimHttpSentAtRef.current = Date.now();
+      lastLocalAimModeRef.current = pending.aim.mode;
+      lastLocalAimVisibleRef.current = pending.aim.visible;
       void syncAimOverHttp(pending.roomId, pending.aim, debugReason).catch(() => {});
     };
+
     const now = Date.now();
-    const minGap = aim.mode === 'place' ? 24 : aim.mode === 'power' ? 32 : 40;
-    const wait = Math.max(0, minGap - (now - lastAimHttpSentAtRef.current));
-    if (aimHttpTimerRef.current !== null) window.clearTimeout(aimHttpTimerRef.current);
-    if (wait === 0 || !aim.visible || aim.mode === 'idle') {
+    const minGap = nextAim.mode === 'place' ? 24 : nextAim.mode === 'power' ? 32 : 40;
+    const modeChanged = lastLocalAimModeRef.current !== nextAim.mode;
+    const visibilityChanged = lastLocalAimVisibleRef.current !== nextAim.visible;
+    const dueNow = now - lastAimHttpSentAtRef.current >= minGap;
+    const mustFlushNow = !nextAim.visible || nextAim.mode === 'idle' || modeChanged || visibilityChanged;
+
+    if (mustFlushNow || dueNow) {
+      if (aimHttpTimerRef.current !== null) {
+        window.clearTimeout(aimHttpTimerRef.current);
+        aimHttpTimerRef.current = null;
+      }
       flush();
       return;
     }
+
+    const wait = Math.max(0, minGap - (now - lastAimHttpSentAtRef.current));
+    if (aimHttpTimerRef.current !== null) return;
     aimHttpTimerRef.current = window.setTimeout(() => {
       aimHttpTimerRef.current = null;
       flush();
@@ -2014,6 +2040,8 @@ export default function App() {
 
   useEffect(() => {
     if (screen !== "game" || !room || !game) {
+      lastLocalAimModeRef.current = null;
+      lastLocalAimVisibleRef.current = false;
       setRemoteAim(null);
       return;
     }
@@ -2031,7 +2059,7 @@ export default function App() {
     }
     let cancelled = false;
     let inFlight = false;
-    const pollIntervalMs = connectionState === 'connected' ? 95 : 60;
+    const pollIntervalMs = connectionState === 'connected' ? 85 : 60;
     const freshnessMs = connectionState === 'connected' ? 150 : 220;
 
     const applyFetchedAim = (aim: AimStateSnapshot | null) => {
@@ -2055,7 +2083,8 @@ export default function App() {
         currentRemoteAim?.updatedAt ?? 0,
       );
       const needsReconcile = !currentRemoteAim || Date.now() - lastSeenAt >= freshnessMs;
-      if (!needsReconcile && connectionState === 'connected') return;
+      const shouldPollContinuously = connectionState === 'connected';
+      if (!needsReconcile && !shouldPollContinuously) return;
       inFlight = true;
       try {
         const aim = await fetchAimStateOverHttp(room.roomId, connectionState === 'connected' ? 'reconcile_waiting_turn_loop' : 'poll_loop', {
