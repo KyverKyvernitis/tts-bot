@@ -2319,15 +2319,16 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped || connectionState !== "connected") return;
-    if (screen === "game") return;
-    const activeRoomId = screen === "room"
-      ? room?.roomId ?? null
-      : screen === "create"
-        ? createDraftRoomIdRef.current ?? createDraftRoomId
-        : null;
+    const activeRoomId = screen === "game"
+      ? room?.roomId ?? game?.roomId ?? null
+      : screen === "room"
+        ? room?.roomId ?? null
+        : screen === "create"
+          ? createDraftRoomIdRef.current ?? createDraftRoomId
+          : null;
     if (!activeRoomId) return;
     subscribeRoomRealtime(activeRoomId, `effect_${screen}`);
-  }, [bootstrapped, connectionState, createDraftRoomId, room?.roomId, screen, state.currentUser.userId]);
+  }, [bootstrapped, connectionState, createDraftRoomId, game?.roomId, room?.roomId, screen, state.currentUser.userId]);
 
   useEffect(() => {
     if (!bootstrapped) return;

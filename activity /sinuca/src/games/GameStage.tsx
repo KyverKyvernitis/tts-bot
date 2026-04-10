@@ -733,7 +733,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
       const projectedTravelX = Math.cos(current.axis + Math.PI * 0.5);
       const projectedTravelY = Math.sin(current.axis + Math.PI * 0.5);
       const signedDistance = dx * projectedTravelX + dy * projectedTravelY;
-      const phaseDistance = Math.abs(signedDistance) > distance * 0.22 ? signedDistance : distance;
+      const phaseDistance = Math.abs(signedDistance) > distance * 0.22 ? -signedDistance : -distance;
       const measuredPhaseVelocity = phaseDistance / (BALL_VISUAL_RADIUS * 1.04 * elapsedFrames);
       // Almost 1:1 with real movement — 1 frame delay instead of 4
       current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, 0.92);
@@ -2881,7 +2881,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       }
 
       const remoteOverlayVisible = Boolean(
-        remoteCanRender
+        (remoteCanRender || remoteCuePlacementActive)
         && remoteAimState
         && remoteCueBall
         && (remoteMode === "aim" || remoteMode === "power" || remoteMode === "place")
