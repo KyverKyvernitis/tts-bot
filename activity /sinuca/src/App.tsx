@@ -36,7 +36,7 @@ import {
 } from "./game/teardown";
 import { fetchBalanceRequest } from "./transport/balanceApi";
 import { fetchGameStateRequest, postGameActionRequest } from "./transport/gameApi";
-import { appendNoStoreNonce, dispatchLeaveBeacon, fetchWithTimeout, resolveApiCandidates } from "./transport/httpClient";
+import { appendNoStoreNonce, dispatchLeaveBeacon, fetchWithTimeout, resolveStrictApiCandidates } from "./transport/httpClient";
 import { fetchRoomStateRequest, fetchRoomsRequest, postRoomActionRequest } from "./transport/lobbyApi";
 import { sendSubscribeRoomMessage } from "./realtime/roomRealtime";
 import { type IncomingMessage, type OAuthExchangeResult } from "./realtime/messages";
@@ -1674,7 +1674,7 @@ export default function App() {
       bodyForm.set(key, value === null ? '' : String(value));
     }
     const attempts: Array<{ url: string; init: RequestInit; statusLabel: string }> = [];
-    for (const baseUrl of resolveApiCandidates('/games/aim')) {
+    for (const baseUrl of resolveStrictApiCandidates('/games/aim')) {
       attempts.push({
         url: baseUrl,
         init: {
@@ -1751,7 +1751,7 @@ export default function App() {
       return null;
     }
     aimPipelineDebugRef.current.httpFetchAttemptCount += 1;
-    for (const baseUrl of resolveApiCandidates(`/games/${roomId}/aim`)) {
+    for (const baseUrl of resolveStrictApiCandidates(`/games/${roomId}/aim`)) {
       try {
         const url = appendNoStoreNonce(baseUrl);
         const response = await fetchWithTimeout(url, { method: 'GET', credentials: 'same-origin', cache: 'no-store' }, 1200);
