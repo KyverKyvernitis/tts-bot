@@ -1570,7 +1570,7 @@ export default function App() {
       void syncAimOverHttp(pending.roomId, pending.aim, debugReason).catch(() => {});
     };
     const now = Date.now();
-    const minGap = aim.mode === 'place' ? 48 : aim.mode === 'power' ? 64 : 72;
+    const minGap = aim.mode === 'place' ? 24 : aim.mode === 'power' ? 32 : 40;
     const wait = Math.max(0, minGap - (now - lastAimHttpSentAtRef.current));
     if (aimHttpTimerRef.current !== null) window.clearTimeout(aimHttpTimerRef.current);
     if (wait === 0 || !aim.visible || aim.mode === 'idle') {
@@ -2023,55 +2023,57 @@ export default function App() {
   }, [game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
 
   useEffect(() => {
-    if (screen !== 'game' || !room || !game || game.status === 'finished' || game.status === 'simulating' || game.turnUserId === state.currentUser.userId) return;
-    if (connectionState === 'connected') return;
+    if (screen !== 'game' || !room || !game) {
+      return;
+    }
+    if (game.status === 'finished' || game.status === 'simulating' || game.turnUserId === state.currentUser.userId) {
+      return;
+    }
     let cancelled = false;
-    const tick = async () => {
-      const aim = await fetchAimStateOverHttp(room.roomId, 'poll');
+    let inFlight = false;
+    const pollIntervalMs = connectionState === 'connected' ? 95 : 60;
+    const freshnessMs = connectionState === 'connected' ? 150 : 220;
+
+    const applyFetchedAim = (aim: AimStateSnapshot | null) => {
       if (cancelled) return;
-      if (aim && aim.roomId === room.roomId && aim.userId !== state.currentUser.userId) {
-        const shouldKeepRemoteCuePlacement = game.ballInHandUserId === aim.userId && aim.cueX !== null && aim.cueY !== null;
-        if ((aim.visible && aim.mode !== 'idle') || shouldKeepRemoteCuePlacement) {
-          pushAimToState(aim);
-        } else {
-          setRemoteAim((current) => current?.roomId === room.roomId ? null : current);
-        }
+      if (!aim || aim.roomId !== room.roomId || aim.userId === state.currentUser.userId) {
+        return;
+      }
+      const shouldKeepRemoteCuePlacement = aim.cueX !== null && aim.cueY !== null && aim.mode !== 'idle';
+      if ((aim.visible && aim.mode !== 'idle') || shouldKeepRemoteCuePlacement) {
+        pushAimToState(aim);
+      } else {
+        setRemoteAim((current) => current?.roomId === room.roomId ? null : current);
       }
     };
+
+    const tick = async () => {
+      if (cancelled || inFlight) return;
+      const currentRemoteAim = remoteAim && remoteAim.roomId === room.roomId ? remoteAim : null;
+      const lastSeenAt = Math.max(
+        lastRemoteAimAtRef.current[room.roomId] ?? 0,
+        currentRemoteAim?.updatedAt ?? 0,
+      );
+      const needsReconcile = !currentRemoteAim || Date.now() - lastSeenAt >= freshnessMs;
+      if (!needsReconcile && connectionState === 'connected') return;
+      inFlight = true;
+      try {
+        const aim = await fetchAimStateOverHttp(room.roomId, connectionState === 'connected' ? 'reconcile_waiting_turn_loop' : 'poll_loop', {
+          allowWhileRealtimeHealthy: connectionState === 'connected',
+        });
+        applyFetchedAim(aim);
+      } finally {
+        inFlight = false;
+      }
+    };
+
     void tick();
-    const interval = window.setInterval(() => { void tick(); }, 60);
+    const interval = window.setInterval(() => { void tick(); }, pollIntervalMs);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [connectionState, game?.ballInHandUserId, game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
-
-  useEffect(() => {
-    if (screen !== 'game' || !room || !game) return;
-    if (game.status !== 'waiting_shot' || game.turnUserId === state.currentUser.userId) return;
-    const currentRemoteAim = remoteAim && remoteAim.roomId === room.roomId ? remoteAim : null;
-    if (currentRemoteAim && Date.now() - currentRemoteAim.updatedAt < 450) return;
-    const lastSeenAt = lastRemoteAimAtRef.current[room.roomId] ?? 0;
-    const shouldProbe = connectionState !== 'connected' || Date.now() - lastSeenAt > 180;
-    if (!shouldProbe) return;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void fetchAimStateOverHttp(room.roomId, connectionState === 'connected' ? 'reconcile_waiting_turn' : 'poll', {
-        allowWhileRealtimeHealthy: connectionState === 'connected',
-      }).then((aim) => {
-        if (cancelled || !aim) return;
-        if (aim.roomId !== room.roomId || aim.userId === state.currentUser.userId) return;
-        const shouldKeepRemoteCuePlacement = game.ballInHandUserId === aim.userId && aim.cueX !== null && aim.cueY !== null;
-        if ((aim.visible && aim.mode !== 'idle') || shouldKeepRemoteCuePlacement) {
-          pushAimToState(aim);
-        }
-      });
-    }, connectionState === 'connected' ? 90 : 0);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [connectionState, game?.ballInHandUserId, game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, remoteAim, room?.roomId, screen, state.currentUser.userId]);
+  }, [connectionState, game?.roomId, game?.status, game?.turnUserId, remoteAim, room?.roomId, screen, state.currentUser.userId]);
 
   useEffect(() => () => {
     if (aimHttpTimerRef.current !== null) {

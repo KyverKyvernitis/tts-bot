@@ -1390,12 +1390,12 @@ function drawRemoteAimOverlay(
 
   if (showPlacementRing) {
     ctx.save();
-    ctx.globalAlpha = 0.86;
+    ctx.globalAlpha = 0.96;
     drawBall(ctx, cueBall, 1);
     ctx.restore();
 
     ctx.save();
-    ctx.globalAlpha = 0.82;
+    ctx.globalAlpha = 0.92;
     ctx.setLineDash([7, 5]);
     ctx.beginPath();
     ctx.arc(cueBall.x, cueBall.y, BALL_VISUAL_RADIUS + 8, 0, Math.PI * 2);
@@ -1408,17 +1408,17 @@ function drawRemoteAimOverlay(
   if (showGuide) {
     if (preview) {
       ctx.save();
-      ctx.globalAlpha = mode === "power" ? 0.62 : 0.54;
+      ctx.globalAlpha = mode === "power" ? 0.84 : 0.76;
       drawAimLine(ctx, cueBall, preview, false);
       ctx.restore();
 
       ctx.save();
-      ctx.globalAlpha = mode === "power" ? 0.54 : 0.46;
+      ctx.globalAlpha = mode === "power" ? 0.72 : 0.64;
       drawGhostBall(ctx, cueBall, preview, clamp(pullRatio, 0.12, 1), false);
       ctx.restore();
     } else {
       ctx.save();
-      ctx.globalAlpha = mode === "power" ? 0.78 : 0.72;
+      ctx.globalAlpha = mode === "power" ? 0.9 : 0.84;
       ctx.strokeStyle = "rgba(244, 248, 255, 0.96)";
       ctx.lineWidth = mode === "power" ? 2.8 : 2.35;
       ctx.lineCap = "round";
@@ -1431,7 +1431,7 @@ function drawRemoteAimOverlay(
   }
 
   ctx.save();
-  ctx.globalAlpha = mode === "power" ? 0.72 : mode === "aim" ? 0.64 : 0.58;
+  ctx.globalAlpha = mode === "power" ? 0.88 : mode === "aim" ? 0.8 : 0.74;
   drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
   ctx.restore();
 }
@@ -1471,6 +1471,7 @@ function drawPoolTable(
   now: number,
   ballSpinCache: Map<string, BallSpinState>,
   remoteOverlay: { cueBall: GameBallSnapshot; aimAngle: number; preview: AimPreview | null; pullRatio: number; mode: AimPointerMode } | null,
+  remoteDebug: { mode: AimPointerMode; seq: number; ageMs: number; cueX: number | null; cueY: number | null } | null,
 ) {
   ctx.clearRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
 
@@ -1511,6 +1512,17 @@ function drawPoolTable(
   // STEP 4: Ghost ball circle AFTER balls (so it's visible on top)
   if (cueBall && showGuide && preview) {
     drawGhostBall(ctx, cueBall, preview, previewPowerRatio, illegalTarget);
+  }
+
+  if (remoteDebug) {
+    ctx.save();
+    ctx.fillStyle = "rgba(0, 0, 0, 0.62)";
+    ctx.fillRect(12, 12, 250, 46);
+    ctx.fillStyle = "rgba(255,255,255,0.94)";
+    ctx.font = "12px system-ui, sans-serif";
+    ctx.fillText(`remote ${remoteDebug.mode} • seq ${remoteDebug.seq} • ${Math.round(remoteDebug.ageMs)}ms`, 20, 30);
+    ctx.fillText(`cue ${remoteDebug.cueX === null ? 'null' : remoteDebug.cueX.toFixed(1)}, ${remoteDebug.cueY === null ? 'null' : remoteDebug.cueY.toFixed(1)}`, 20, 47);
+    ctx.restore();
   }
 
   // Pocket animations
@@ -2786,7 +2798,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         && remoteAimState
         && remoteMode === "place"
         && game.status === "waiting_shot"
-        && game.ballInHandUserId === remoteAimState.userId
         && remoteAimState.cueX !== null
         && remoteAimState.cueY !== null
       );
@@ -2800,9 +2811,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const remoteHasCuePreview = Boolean(
         remoteAimFresh
         && remoteAimState
-        && game.ballInHandUserId === remoteAimState.userId
         && remoteAimState.cueX !== null
         && remoteAimState.cueY !== null
+        && remoteMode !== "idle"
       );
       const remoteCueSource = remoteCanRender || remoteCuePlacementActive || remoteHasCuePreview
         ? {
@@ -2888,9 +2899,10 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       }
 
       const remoteOverlayVisible = Boolean(
-        (remoteCanRender || remoteCuePlacementActive || remoteHasCuePreview)
+        remoteAimFresh
         && remoteAimState
         && remoteCueBall
+        && (remoteCanRender || remoteCuePlacementActive || remoteHasCuePreview)
         && (remoteMode === "aim" || remoteMode === "power" || remoteMode === "place")
       );
 
@@ -2988,6 +3000,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         now,
         ballSpinRef.current,
         remoteOverlayVisible && remoteCueBall ? { cueBall: remoteCueBall, aimAngle: remoteAimAngle, preview: remotePreview, pullRatio: remotePullRatio, mode: remoteMode } : null,
+        remoteAimFresh && remoteAimState ? {
+          mode: remoteMode,
+          seq: remoteAimState.seq,
+          ageMs: Date.now() - remoteAimState.updatedAt,
+          cueX: remoteAimState.cueX ?? null,
+          cueY: remoteAimState.cueY ?? null,
+        } : null,
       );
 
       drawLoopRef.current = window.requestAnimationFrame(draw);
