@@ -2192,12 +2192,15 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const previousMode = pointerModeRef.current;
     const latestCueBall = renderStateRef.current.cueBall;
     const placedCue = previousMode === "place" ? localCuePlacementRef.current : null;
+    const settledCueX = placedCue?.x ?? latestCueBall?.x ?? cueBall?.x ?? null;
+    const settledCueY = placedCue?.y ?? latestCueBall?.y ?? cueBall?.y ?? null;
+    const settledRemoteMode: AimPointerMode = previousMode === "place" ? "place" : "aim";
     emitAimState({
-      visible: false,
+      visible: true,
       angle: aimAngleRef.current,
-      cueX: placedCue?.x ?? latestCueBall?.x ?? cueBall?.x ?? null,
-      cueY: placedCue?.y ?? latestCueBall?.y ?? cueBall?.y ?? null,
-      mode: "idle",
+      cueX: settledCueX,
+      cueY: settledCueY,
+      mode: settledRemoteMode,
     }, true);
     setPointerModeSafe("idle");
   };
