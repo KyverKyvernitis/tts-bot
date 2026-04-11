@@ -129,8 +129,9 @@ const POCKET_CAPTURE_DISTANCE = BALL_RADIUS * 1.6;
 const RAIL_TRAVEL_DURATION_MS = 1100;
 const RAIL_SETTLE_DELAY_MS = 110;
 const CUE_RETURN_HOLD_MS = 420;
-const BALL_SPRITE_SIZE = 44;
-const BALL_SPRITE_PHASE_BUCKETS = 28;
+const BALL_SPRITE_SIZE = 34;
+const BALL_SPRITE_POLE_BUCKETS = 16;
+const BALL_SPRITE_UP_BUCKETS = 8;
 const AIM_RENDER_METRICS = { ballRadius: BALL_RADIUS, ballVisualRadius: BALL_VISUAL_RADIUS } as const;
 
 function logRenderSnapshotDebug(payload: Record<string, unknown>) {
@@ -942,8 +943,8 @@ function sphericalCapMask(dotValue: number, threshold: number, feather: number) 
   return smoothstep(threshold - feather, threshold + feather, dotValue);
 }
 
-function quantizeUnitComponent(value: number) {
-  return Math.round(clamp((value + 1) * 0.5, 0, 1) * (BALL_SPRITE_PHASE_BUCKETS - 1));
+function quantizeUnitComponent(value: number, buckets: number) {
+  return Math.round(clamp((value + 1) * 0.5, 0, 1) * (buckets - 1));
 }
 
 function buildBallSurfaceCacheKey(ball: GameBallSnapshot, orientation: Quaternion) {
@@ -951,12 +952,12 @@ function buildBallSurfaceCacheKey(ball: GameBallSnapshot, orientation: Quaternio
   const up = rotateVectorByQuaternion({ x: 0, y: 1, z: 0 }, orientation);
   return [
     ball.number,
-    quantizeUnitComponent(pole.x),
-    quantizeUnitComponent(pole.y),
-    quantizeUnitComponent(pole.z),
-    quantizeUnitComponent(up.x),
-    quantizeUnitComponent(up.y),
-    quantizeUnitComponent(up.z),
+    quantizeUnitComponent(pole.x, BALL_SPRITE_POLE_BUCKETS),
+    quantizeUnitComponent(pole.y, BALL_SPRITE_POLE_BUCKETS),
+    quantizeUnitComponent(pole.z, BALL_SPRITE_POLE_BUCKETS),
+    quantizeUnitComponent(up.x, BALL_SPRITE_UP_BUCKETS),
+    quantizeUnitComponent(up.y, BALL_SPRITE_UP_BUCKETS),
+    quantizeUnitComponent(up.z, BALL_SPRITE_UP_BUCKETS),
   ].join(':');
 }
 
@@ -1031,7 +1032,7 @@ function getBallSurfaceSprite(ball: GameBallSnapshot, orientation: Quaternion, c
   if (existing) return existing;
   const sprite = renderBallSurfaceSprite(ball, orientation, colorHex);
   ballSurfaceSpriteCache.set(key, sprite);
-  if (ballSurfaceSpriteCache.size > 720) {
+  if (ballSurfaceSpriteCache.size > 220) {
     const oldest = ballSurfaceSpriteCache.keys().next().value;
     if (oldest) ballSurfaceSpriteCache.delete(oldest);
   }
@@ -1076,6 +1077,57 @@ function drawBallNumberText(
   ctx.restore();
 }
 
+function drawCheapBallBody(
+  ctx: CanvasRenderingContext2D,
+  ball: GameBallSnapshot,
+  r: number,
+  orientation: Quaternion,
+  scale: number,
+  color: string,
+) {
+  const isCue = ball.number === 0;
+  const isEight = ball.number === 8;
+  const baseFill = isCue ? '#f6f9fd' : isEight ? '#14181f' : color;
+
+  const fill = ctx.createRadialGradient(-r * 0.34, -r * 0.44, r * 0.12, 0, 0, r * 1.04);
+  fill.addColorStop(0, isCue ? '#ffffff' : shadeColor(baseFill, 44));
+  fill.addColorStop(0.42, baseFill);
+  fill.addColorStop(1, shadeColor(baseFill, -34));
+  ctx.beginPath();
+  ctx.fillStyle = fill;
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (ball.number > 0 && ball.number < 9) {
+    const frontPole = rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation);
+    const visiblePole = frontPole.z >= 0 ? frontPole : { x: -frontPole.x, y: -frontPole.y, z: -frontPole.z };
+    const frontFactor = smoothstep(0.08, 0.94, visiblePole.z);
+    if (frontFactor > 0.06) {
+      const labelX = visiblePole.x * r * 0.72;
+      const labelY = visiblePole.y * r * 0.72;
+      const scaleX = lerp(0.42, 1, frontFactor);
+      const scaleY = lerp(0.22, 1, frontFactor);
+      ctx.save();
+      ctx.translate(labelX, labelY);
+      ctx.scale(scaleX, scaleY);
+      ctx.globalAlpha = clamp(0.12 + frontFactor * 1.02, 0, 1);
+      ctx.beginPath();
+      ctx.fillStyle = 'rgba(252,252,254,0.98)';
+      ctx.arc(0, 0, r * 0.42, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(labelX, labelY, r * 0.42 * scaleX, r * 0.42 * scaleY, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+      ctx.lineWidth = 0.8 * scale;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
 function drawBall(
   ctx: CanvasRenderingContext2D,
   ball: GameBallSnapshot,
@@ -1095,8 +1147,12 @@ function drawBall(
   ctx.shadowOffsetX = 0.9 * scale;
   ctx.shadowOffsetY = 4.5 * scale;
 
-  const sprite = getBallSurfaceSprite(ball, orientation, color);
-  ctx.drawImage(sprite, -r, -r, r * 2, r * 2);
+  if (isStripe) {
+    const sprite = getBallSurfaceSprite(ball, orientation, color);
+    ctx.drawImage(sprite, -r, -r, r * 2, r * 2);
+  } else {
+    drawCheapBallBody(ctx, ball, r, orientation, scale, color);
+  }
   ctx.shadowColor = 'transparent';
 
   ctx.save();
