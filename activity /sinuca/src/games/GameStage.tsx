@@ -200,6 +200,7 @@ type BallSpinState = {
   sideVelocity: number;
   bankVelocity: number;
   lastHeading: number | null;
+  restFrames: number;
 };
 
 type SnapshotVelocity = { x: number; y: number; pocketed: boolean };
@@ -753,6 +754,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
         sideVelocity: 0,
         bankVelocity: 0,
         lastHeading: null,
+        restFrames: 0,
       });
       continue;
     }
@@ -773,43 +775,51 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
       current.sideVelocity *= 0.45;
       current.bankVelocity *= 0.4;
       current.visualSpeed *= 0.5;
+      current.restFrames = 0;
       continue;
     }
 
     const velocityX = Number.isFinite(ball.velocityX) ? (ball.velocityX as number) : dx / elapsedFrames;
     const velocityY = Number.isFinite(ball.velocityY) ? (ball.velocityY as number) : dy / elapsedFrames;
     const velocitySpeed = Math.hypot(velocityX, velocityY);
-    const heading = velocitySpeed > 0.0001 ? Math.atan2(velocityY, velocityX) : current.lastHeading;
     const rollSource = Number.isFinite(ball.spinRoll) ? (ball.spinRoll as number) : velocitySpeed;
     const sideSource = Number.isFinite(ball.spinSide) ? (ball.spinSide as number) : 0;
-    const moving = rawDistance > 0.02 || velocitySpeed > 0.02 || Math.abs(sideSource) > 0.02 || Math.abs(rollSource) > 0.02;
+    const movementHeading = rawDistance > 0.055
+      ? Math.atan2(dy, dx)
+      : velocitySpeed > 0.11
+        ? Math.atan2(velocityY, velocityX)
+        : current.lastHeading;
+    const moving = rawDistance > 0.022 || velocitySpeed > 0.03 || Math.abs(sideSource) > 0.025 || Math.abs(rollSource) > 0.03;
+    const nearRest = rawDistance < 0.045 && velocitySpeed < 0.08 && Math.abs(sideSource) < 0.04 && Math.abs(rollSource) < 0.08;
 
-    if (moving && heading !== null) {
+    if (moving && movementHeading !== null && !nearRest) {
       const rollFromTravel = rawDistance / (BALL_VISUAL_RADIUS * 1.02 * elapsedFrames);
       const rollFromState = rollSource / (BALL_VISUAL_RADIUS * 1.06);
       const rollBlend = velocitySpeed > 0.02 ? 0.6 : 0.35;
       const targetRollVelocity = clamp(lerp(rollFromTravel, rollFromState, rollBlend), -1.18, 1.18);
       const targetSideVelocity = clamp(sideSource / (BALL_VISUAL_RADIUS * 4.3), -0.22, 0.22);
-      const headingTurn = current.lastHeading === null ? 0 : angleDelta(heading, current.lastHeading);
-      const targetBankVelocity = clamp(headingTurn * 0.34 + targetSideVelocity * 0.55, -0.18, 0.18);
+      const headingTurn = current.lastHeading === null ? 0 : angleDelta(movementHeading, current.lastHeading);
+      const targetBankVelocity = clamp(headingTurn * 0.3 + targetSideVelocity * 0.46, -0.16, 0.16);
       const speedBlend = rawDistance > 1.35 ? 0.82 : rawDistance > 0.42 ? 0.68 : 0.42;
       current.rollVelocity = lerp(current.rollVelocity, targetRollVelocity, speedBlend);
-      current.sideVelocity = lerp(current.sideVelocity, targetSideVelocity, 0.38 + speedBlend * 0.32);
-      current.bankVelocity = lerp(current.bankVelocity, targetBankVelocity, 0.3 + speedBlend * 0.28);
-      current.lastHeading = heading;
+      current.sideVelocity = lerp(current.sideVelocity, targetSideVelocity, 0.34 + speedBlend * 0.28);
+      current.bankVelocity = lerp(current.bankVelocity, targetBankVelocity, 0.26 + speedBlend * 0.24);
+      current.lastHeading = movementHeading;
       current.visualSpeed = lerp(current.visualSpeed, Math.max(visualSpeed, velocitySpeed), 0.82);
+      current.restFrames = 0;
     } else {
-      const decay = clamp(0.78 + current.visualSpeed * 0.24, 0.78, 0.97);
+      current.restFrames = Math.min(16, current.restFrames + 1);
+      const decay = nearRest ? 0.74 : clamp(0.78 + current.visualSpeed * 0.24, 0.78, 0.97);
       current.rollVelocity *= decay;
-      current.sideVelocity *= 0.9;
-      current.bankVelocity *= 0.88;
+      current.sideVelocity *= nearRest ? 0.78 : 0.9;
+      current.bankVelocity *= nearRest ? 0.72 : 0.88;
       current.visualSpeed *= decay;
       if (Math.abs(current.rollVelocity) < 0.00045) current.rollVelocity = 0;
       if (Math.abs(current.sideVelocity) < 0.0003) current.sideVelocity = 0;
       if (Math.abs(current.bankVelocity) < 0.0003) current.bankVelocity = 0;
     }
 
-    const effectiveHeading = heading ?? current.lastHeading ?? 0;
+    const effectiveHeading = current.lastHeading ?? movementHeading ?? 0;
     const rollAxis = {
       x: -Math.sin(effectiveHeading),
       y: Math.cos(effectiveHeading),
@@ -821,14 +831,22 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
       z: 0,
     };
 
-    const rollStep = -current.rollVelocity * elapsedFrames;
-    const sideStep = current.sideVelocity * elapsedFrames;
-    const bankStep = current.bankVelocity * elapsedFrames;
+    let rollStep = current.rollVelocity * elapsedFrames;
+    let sideStep = current.sideVelocity * elapsedFrames;
+    let bankStep = current.bankVelocity * elapsedFrames;
+
+    if (current.restFrames >= 2) {
+      const settling = clamp((current.restFrames - 1) / 8, 0, 1);
+      const freeze = 1 - settling;
+      rollStep *= freeze;
+      sideStep *= freeze * 0.72;
+      bankStep *= freeze * 0.58;
+    }
 
     let orientation = current.orientation;
-    orientation = applyOrientationStep(orientation, rollAxis, rollStep);
-    orientation = applyOrientationStep(orientation, { x: 0, y: 0, z: 1 }, sideStep);
-    orientation = applyOrientationStep(orientation, bankAxis, bankStep);
+    if (Math.abs(rollStep) > 0.00001) orientation = applyOrientationStep(orientation, rollAxis, rollStep);
+    if (Math.abs(sideStep) > 0.00001) orientation = applyOrientationStep(orientation, { x: 0, y: 0, z: 1 }, sideStep);
+    if (Math.abs(bankStep) > 0.00001) orientation = applyOrientationStep(orientation, bankAxis, bankStep);
     current.orientation = orientation;
 
     current.lastX = ball.x;
@@ -863,8 +881,7 @@ function drawStripeBand(
   const screenLen = Math.hypot(pole.x, pole.y);
   const bandAngle = screenLen > 0.001 ? Math.atan2(pole.y, pole.x) + Math.PI * 0.5 : 0;
   const facing = clamp(Math.abs(pole.z), 0, 1);
-  const bandCenterY = screenLen * r * 0.5;
-  const apparentHalfH = lerp(r * 0.065, r * 0.54, facing);
+  const apparentHalfH = lerp(r * 0.075, r * 0.5, Math.pow(facing, 0.82));
   if (apparentHalfH < r * 0.03) return;
 
   ctx.save();
@@ -873,9 +890,9 @@ function drawStripeBand(
   ctx.arc(0, 0, r - 0.3 * scale, 0, Math.PI * 2);
   ctx.clip();
 
-  const topY = bandCenterY - apparentHalfH;
-  const botY = bandCenterY + apparentHalfH;
-  const edgeCurve = lerp(r * 0.28, r * 0.09, facing);
+  const topY = -apparentHalfH;
+  const botY = apparentHalfH;
+  const edgeCurve = lerp(r * 0.22, r * 0.08, facing);
 
   ctx.beginPath();
   ctx.moveTo(-r, topY);
@@ -884,43 +901,46 @@ function drawStripeBand(
   ctx.quadraticCurveTo(0, botY + edgeCurve, -r, botY);
   ctx.closePath();
 
-  const g = ctx.createRadialGradient(0, bandCenterY, 0, 0, bandCenterY, r * 1.1);
-  g.addColorStop(0, shadeColor(color, 22));
-  g.addColorStop(0.48, color);
-  g.addColorStop(0.84, shadeColor(color, -28));
-  g.addColorStop(1, shadeColor(color, -50));
+  const g = ctx.createLinearGradient(0, topY - edgeCurve, 0, botY + edgeCurve);
+  g.addColorStop(0, shadeColor(color, -18));
+  g.addColorStop(0.24, color);
+  g.addColorStop(0.5, shadeColor(color, 18));
+  g.addColorStop(0.76, color);
+  g.addColorStop(1, shadeColor(color, -26));
   ctx.fillStyle = g;
   ctx.fill();
 
   const edgeFade = ctx.createLinearGradient(0, topY - edgeCurve, 0, botY + edgeCurve);
-  edgeFade.addColorStop(0, 'rgba(255,255,255,0.12)');
-  edgeFade.addColorStop(0.14, 'rgba(255,255,255,0)');
-  edgeFade.addColorStop(0.86, 'rgba(255,255,255,0)');
+  edgeFade.addColorStop(0, 'rgba(255,255,255,0.1)');
+  edgeFade.addColorStop(0.16, 'rgba(255,255,255,0)');
+  edgeFade.addColorStop(0.84, 'rgba(255,255,255,0)');
   edgeFade.addColorStop(1, 'rgba(0,0,0,0.08)');
   ctx.fillStyle = edgeFade;
   ctx.fill();
   ctx.restore();
 }
 
-function drawBallLabel(
+function drawBallLabelFace(
   ctx: CanvasRenderingContext2D,
   ball: GameBallSnapshot,
   r: number,
-  pole: Vec3,
+  normal: Vec3,
   scale: number,
   color: string,
   isStripe: boolean,
 ) {
-  const labelDepth = pole.z;
-  if (labelDepth < -0.16) return;
+  const labelDepth = normal.z;
+  if (labelDepth < -0.78) return;
 
-  const labelX = pole.x * r * 0.74;
-  const labelY = pole.y * r * 0.74;
-  const depthAlpha = clamp(0.2 + (labelDepth + 0.16) * 0.86, 0.2, 1);
   const frontFactor = clamp((labelDepth + 1) * 0.5, 0, 1);
-  const diskScaleY = lerp(0.56, 0.98, frontFactor);
-  const diskScaleX = lerp(0.7, 1, frontFactor);
-  const diskR = r * (isStripe ? 0.4 : 0.43);
+  const depthAlpha = clamp(0.04 + Math.pow(frontFactor, 1.18), 0.04, 1);
+  if (depthAlpha < 0.06) return;
+
+  const labelX = normal.x * r * 0.72;
+  const labelY = normal.y * r * 0.72;
+  const diskScaleY = lerp(0.38, 0.98, frontFactor);
+  const diskScaleX = lerp(0.58, 1, frontFactor);
+  const diskR = r * (isStripe ? 0.39 : 0.425);
   const diskGrad = ctx.createRadialGradient(labelX - diskR * 0.2, labelY - diskR * 0.2, 0, labelX, labelY, diskR);
   diskGrad.addColorStop(0, '#ffffff');
   diskGrad.addColorStop(1, '#e7eef5');
@@ -937,7 +957,7 @@ function drawBallLabel(
 
   const fontSize = clamp(Math.round((ball.number >= 10 ? 7 : 8.5) * scale), 5, 18);
   ctx.save();
-  ctx.globalAlpha = clamp(depthAlpha + 0.06, 0.28, 1);
+  ctx.globalAlpha = clamp(depthAlpha + 0.04, 0.08, 1);
   ctx.fillStyle = ball.number === 8 ? '#f2f4f8' : color;
   ctx.font = `900 ${fontSize}px Inter, system-ui, sans-serif`;
   ctx.textAlign = 'center';
@@ -949,6 +969,25 @@ function drawBallLabel(
   ctx.strokeText(text, labelX, labelY + fontSize * 0.04);
   ctx.fillText(text, labelX, labelY + fontSize * 0.04);
   ctx.restore();
+}
+
+function drawBallLabel(
+  ctx: CanvasRenderingContext2D,
+  ball: GameBallSnapshot,
+  r: number,
+  pole: Vec3,
+  scale: number,
+  color: string,
+  isStripe: boolean,
+) {
+  const faces = [
+    pole,
+    { x: -pole.x, y: -pole.y, z: -pole.z },
+  ].sort((left, right) => left.z - right.z);
+
+  for (const face of faces) {
+    drawBallLabelFace(ctx, ball, r, face, scale, color, isStripe);
+  }
 }
 
 function drawBall(
@@ -2640,26 +2679,37 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             if (spin) { spin.lastX = serverCue.x; spin.lastY = serverCue.y; }
           }
           pendingShotVisualRef.current = null;
-        } else if (game.status === "simulating" && elapsed > PENDING_SHOT_VISUAL_MAX_MS) {
-          // During simulation after max time, stop moving the cue optimistically
-          // but keep the ref alive to protect the cue ball from vanishing
         } else {
           const progress = computePendingShotProgress(pendingShotVisual, now);
           const heldElapsed = progress.heldElapsed;
           const travelMs = progress.travelMs;
           const moveProgress = progress.moveProgress;
+          const shotDirX = Math.cos(pendingShotVisual.angle);
+          const shotDirY = Math.sin(pendingShotVisual.angle);
+          const authoritativeAdvance = ((drawCueBall.x - pendingShotVisual.cueX) * shotDirX) + ((drawCueBall.y - pendingShotVisual.cueY) * shotDirY);
+          const optimisticAdvance = ((progress.expectedCueX - pendingShotVisual.cueX) * shotDirX) + ((progress.expectedCueY - pendingShotVisual.cueY) * shotDirY);
+          const noBacktrackAdvance = game.status === "simulating"
+            ? Math.max(authoritativeAdvance, optimisticAdvance)
+            : optimisticAdvance;
           const optimisticCue = {
             ...drawCueBall,
-            x: progress.expectedCueX,
-            y: progress.expectedCueY,
+            x: pendingShotVisual.cueX + shotDirX * noBacktrackAdvance,
+            y: pendingShotVisual.cueY + shotDirY * noBacktrackAdvance,
             pocketed: false,
           };
           drawBalls = drawBalls.map((ball) => (ball.number === 0 ? optimisticCue : ball));
           drawCueBall = optimisticCue;
-          // Sync visual ref so next frame lerp starts from optimistic pos, eliminating rollback
+          // Sync visual ref so next frame lerp starts from the forward-most cue position,
+          // preventing the quick rollback/return snap right after shot start.
           realtimeVisualBallsRef.current = realtimeVisualBallsRef.current.map(
             b => b.number === 0 ? { ...b, x: optimisticCue.x, y: optimisticCue.y } : b
           );
+          const spin = ballSpinRef.current.get(drawCueBall.id);
+          if (spin) {
+            spin.lastX = optimisticCue.x;
+            spin.lastY = optimisticCue.y;
+            spin.lastSeenAt = now;
+          }
           if (pendingShotVisual.impactType && !pendingShotVisual.firstImpactPlayed && pendingShotVisual.impactAtMs !== null && heldElapsed >= pendingShotVisual.impactAtMs) {
             pendingShotVisual.firstImpactPlayed = true;
           }
