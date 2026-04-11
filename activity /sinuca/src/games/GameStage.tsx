@@ -330,6 +330,65 @@ function shadeColor(hex: string, amount: number): string {
   return `rgb(${r},${g},${b})`;
 }
 
+function angleDelta(target: number, current: number) {
+  let delta = target - current;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  return delta;
+}
+
+function normalizeVec3(vec: Vec3): Vec3 {
+  const len = Math.hypot(vec.x, vec.y, vec.z) || 1;
+  return { x: vec.x / len, y: vec.y / len, z: vec.z / len };
+}
+
+function multiplyQuaternion(a: Quaternion, b: Quaternion): Quaternion {
+  return {
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+  };
+}
+
+function normalizeQuaternion(q: Quaternion): Quaternion {
+  const len = Math.hypot(q.x, q.y, q.z, q.w) || 1;
+  return { x: q.x / len, y: q.y / len, z: q.z / len, w: q.w / len };
+}
+
+function applyOrientationStep(orientation: Quaternion, axis: Vec3, angle: number): Quaternion {
+  if (!Number.isFinite(angle) || Math.abs(angle) < 0.000001) return orientation;
+  const normalizedAxis = normalizeVec3(axis);
+  const half = angle * 0.5;
+  const s = Math.sin(half);
+  const step = {
+    x: normalizedAxis.x * s,
+    y: normalizedAxis.y * s,
+    z: normalizedAxis.z * s,
+    w: Math.cos(half),
+  };
+  return normalizeQuaternion(multiplyQuaternion(step, orientation));
+}
+
+function rotateVectorByQuaternion(vec: Vec3, q: Quaternion): Vec3 {
+  const qvec = { x: q.x, y: q.y, z: q.z };
+  const uv = {
+    x: qvec.y * vec.z - qvec.z * vec.y,
+    y: qvec.z * vec.x - qvec.x * vec.z,
+    z: qvec.x * vec.y - qvec.y * vec.x,
+  };
+  const uuv = {
+    x: qvec.y * uv.z - qvec.z * uv.y,
+    y: qvec.z * uv.x - qvec.x * uv.z,
+    z: qvec.x * uv.y - qvec.y * uv.x,
+  };
+  return {
+    x: vec.x + (uv.x * q.w + uuv.x) * 2,
+    y: vec.y + (uv.y * q.w + uuv.y) * 2,
+    z: vec.z + (uv.z * q.w + uuv.z) * 2,
+  };
+}
+
 function frameToDisplayBalls(frameBalls: GameShotFrameBall[], previousBalls: GameBallSnapshot[]) {
   const map = new Map(frameBalls.map((ball) => [ball.id, ball]));
   return previousBalls.map((ball) => {
@@ -1008,6 +1067,99 @@ function drawPocketAnimation(
 }
 
 // ─── Aim guide (reference-style: clean line + ghost ball) ─────────────────
+
+function findFirstBoundaryHit(cueBall: GameBallSnapshot, angle: number) {
+  const dx = Math.cos(angle);
+  const dy = Math.sin(angle);
+  const limits: number[] = [];
+  if (dx > 0.0001) limits.push((PLAY_MAX_X - cueBall.x) / dx);
+  if (dx < -0.0001) limits.push((PLAY_MIN_X - cueBall.x) / dx);
+  if (dy > 0.0001) limits.push((PLAY_MAX_Y - cueBall.y) / dy);
+  if (dy < -0.0001) limits.push((PLAY_MIN_Y - cueBall.y) / dy);
+  const distance = Math.min(...limits.filter((value) => Number.isFinite(value) && value > 0));
+  return { x: cueBall.x + dx * distance, y: cueBall.y + dy * distance, distance };
+}
+
+function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[], angle: number): AimPreview {
+  const dx = Math.cos(angle);
+  const dy = Math.sin(angle);
+  const boundary = findFirstBoundaryHit(cueBall, angle);
+  let hitBall: GameBallSnapshot | null = null;
+  let hitDistance = boundary.distance;
+  let contactX: number | null = null;
+  let contactY: number | null = null;
+  let cueDeflectX: number | null = null;
+  let cueDeflectY: number | null = null;
+  let targetGuideX: number | null = null;
+  let targetGuideY: number | null = null;
+  let targetGuideScale = 1;
+  let hitFullness = 1;
+  let cueTangentX: number | null = null;
+  let cueTangentY: number | null = null;
+
+  for (const ball of balls) {
+    if (ball.pocketed || ball.number === 0) continue;
+    const relX = ball.x - cueBall.x;
+    const relY = ball.y - cueBall.y;
+    const projection = relX * dx + relY * dy;
+    if (projection <= 1) continue;
+    const perpendicularSq = relX * relX + relY * relY - projection * projection;
+    const limit = BALL_DIAMETER * BALL_DIAMETER;
+    if (perpendicularSq < 0 || perpendicularSq > limit) continue;
+    const approach = projection - Math.sqrt(Math.max(0, limit - perpendicularSq));
+    if (approach < hitDistance) {
+      hitDistance = approach;
+      hitBall = ball;
+      contactX = cueBall.x + dx * approach;
+      contactY = cueBall.y + dy * approach;
+    }
+  }
+
+  if (hitBall && contactX !== null && contactY !== null) {
+    const nx = hitBall.x - contactX;
+    const ny = hitBall.y - contactY;
+    const nlen = Math.hypot(nx, ny) || 1;
+    const nnx = nx / nlen;
+    const nny = ny / nlen;
+    const dotN = clamp(dx * nnx + dy * nny, 0, 1);
+    hitFullness = clamp(dotN, 0.16, 1);
+    targetGuideScale = clamp(Math.pow(hitFullness, 0.92), 0.14, 1);
+    const targetGuideLength = lerp(16, 72, targetGuideScale);
+    targetGuideX = hitBall.x + nnx * targetGuideLength;
+    targetGuideY = hitBall.y + nny * targetGuideLength;
+    const remVx = dx - dotN * nnx;
+    const remVy = dy - dotN * nny;
+    const remLen = Math.hypot(remVx, remVy);
+    const DEFLECT_DIST = 100;
+    if (remLen > 0.05) {
+      cueTangentX = remVx / remLen;
+      cueTangentY = remVy / remLen;
+      cueDeflectX = contactX + cueTangentX * DEFLECT_DIST;
+      cueDeflectY = contactY + cueTangentY * DEFLECT_DIST;
+    } else {
+      cueTangentX = 0;
+      cueTangentY = 0;
+      cueDeflectX = contactX;
+      cueDeflectY = contactY;
+    }
+  }
+
+  return {
+    endX: cueBall.x + dx * hitDistance,
+    endY: cueBall.y + dy * hitDistance,
+    hitBall,
+    contactX,
+    contactY,
+    cueDeflectX,
+    cueDeflectY,
+    targetGuideX,
+    targetGuideY,
+    targetGuideScale,
+    hitFullness,
+    cueTangentX,
+    cueTangentY,
+  };
+}
 
 // ─── Table render cache ───────────────────────────────────────────────────
 
