@@ -129,8 +129,8 @@ const POCKET_CAPTURE_DISTANCE = BALL_RADIUS * 1.6;
 const RAIL_TRAVEL_DURATION_MS = 1100;
 const RAIL_SETTLE_DELAY_MS = 110;
 const CUE_RETURN_HOLD_MS = 420;
-const BALL_SPRITE_SIZE = 72;
-const BALL_SPRITE_PHASE_BUCKETS = 96;
+const BALL_SPRITE_SIZE = 44;
+const BALL_SPRITE_PHASE_BUCKETS = 28;
 const AIM_RENDER_METRICS = { ballRadius: BALL_RADIUS, ballVisualRadius: BALL_VISUAL_RADIUS } as const;
 
 function logRenderSnapshotDebug(payload: Record<string, unknown>) {
@@ -970,11 +970,13 @@ function renderBallSurfaceSprite(ball: GameBallSnapshot, orientation: Quaternion
 
   const image = ctx.createImageData(size, size);
   const data = image.data;
-  const radius = size * 0.5 - 2;
+  const radius = size * 0.5 - 1.5;
   const center = size * 0.5;
   const inverse = quaternionConjugate(orientation);
   const baseColor = ball.number === 0 ? BALL_WHITE_RGB : ball.number === 8 ? BALL_BLACK_RGB : hexToRgb(colorHex);
   const isStripe = ball.number >= 9;
+  const frontPole = rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation);
+  const visibleLabelSign = frontPole.z >= 0 ? 1 : -1;
 
   for (let y = 0; y < size; y += 1) {
     for (let x = 0; x < size; x += 1) {
@@ -1002,9 +1004,7 @@ function renderBallSurfaceSprite(ball: GameBallSnapshot, orientation: Quaternion
       }
 
       if (ball.number > 0) {
-        const frontDisk = sphericalCapMask(localPoint.z, 0.84, 0.06);
-        const backDisk = sphericalCapMask(-localPoint.z, 0.84, 0.06);
-        const diskMask = Math.max(frontDisk, backDisk);
+        const diskMask = sphericalCapMask(localPoint.z * visibleLabelSign, 0.84, 0.06);
         if (diskMask > 0) surface = blendRgb(surface, BALL_NUMBER_DISK_RGB, diskMask);
       }
 
@@ -1031,7 +1031,7 @@ function getBallSurfaceSprite(ball: GameBallSnapshot, orientation: Quaternion, c
   if (existing) return existing;
   const sprite = renderBallSurfaceSprite(ball, orientation, colorHex);
   ballSurfaceSpriteCache.set(key, sprite);
-  if (ballSurfaceSpriteCache.size > 1800) {
+  if (ballSurfaceSpriteCache.size > 720) {
     const oldest = ballSurfaceSpriteCache.keys().next().value;
     if (oldest) ballSurfaceSpriteCache.delete(oldest);
   }
