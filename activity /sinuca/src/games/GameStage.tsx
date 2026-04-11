@@ -320,7 +320,13 @@ function estimateCueVisualSpeedPxPerMs(power: number) {
 }
 
 function maxCueVisualLeadPx(power: number) {
-  return lerp(0.8, 7.2, Math.pow(clamp(power, 0, 1), 0.94));
+  return lerp(0.45, 4.2, Math.pow(clamp(power, 0, 1), 1.18));
+}
+
+function maxCueAdvanceStepPx(power: number, estimatedSpeedPxPerMs: number, deltaMs: number) {
+  const shapedPower = Math.pow(clamp(power, 0, 1), 1.28);
+  const conservativeSpeed = estimatedSpeedPxPerMs * lerp(0.48, 0.82, shapedPower);
+  return Math.max(0.18, conservativeSpeed * Math.max(1, deltaMs));
 }
 
 function lerp(from: number, to: number, t: number) {
@@ -1473,6 +1479,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const ballSpinRef = useRef<Map<string, BallSpinState>>(new Map());
   const snapAnimRef = useRef<{ startedAt: number; power: number; fired: boolean } | null>(null);
   const pendingShotVisualRef = useRef<{ startedAt: number; shotSequenceAtDispatch: number; revisionAtDispatch: number; angle: number; power: number; cueX: number; cueY: number; travelLimit: number; estimatedSpeedPxPerMs: number; impactType: "ball" | "cushion" | null; impactAtMs: number | null; firstImpactPlayed: boolean } | null>(null);
+  const pendingShotAdvanceRef = useRef<{ advance: number; lastAt: number } | null>(null);
   const queuedSfxRef = useRef<number[]>([]);
   const playbackSoundStateRef = useRef<{ seq: number; frameIndex: number; lastBallAt: number; lastCushionAt: number; movingIds: Set<string>; wallIds: Set<string> }>({ seq: 0, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0, movingIds: new Set(), wallIds: new Set() });
   const realtimeSoundSnapshotRef = useRef<{ roomId: string | null; revision: number; balls: GameBallSnapshot[] }>({ roomId: game.roomId, revision: game.snapshotRevision ?? 0, balls: game.balls.map((ball) => ({ ...ball })) });
@@ -1737,12 +1744,14 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!pending) return;
     if (animating) {
       pendingShotVisualRef.current = null;
+      pendingShotAdvanceRef.current = null;
       return;
     }
     const progress = computePendingShotProgress(pending, performance.now());
     const absoluteExpiryMs = PENDING_SHOT_VISUAL_MAX_MS + PENDING_SHOT_POST_IMPACT_HOLD_MS + 260;
     if (progress.elapsed >= absoluteExpiryMs && game.status !== "simulating") {
       pendingShotVisualRef.current = null;
+      pendingShotAdvanceRef.current = null;
       return;
     }
     if (game.status !== "simulating") return;
@@ -1759,6 +1768,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const hardExpiryDuringSimMs = absoluteExpiryMs + 360;
     if (authoritativeNearExpected || (authoritativeClearlyStarted && (authoritativeMadeMeaningfulProgress || revisionAdvanced || shotSequenceAdvanced)) || progress.elapsed >= hardExpiryDuringSimMs) {
       pendingShotVisualRef.current = null;
+      pendingShotAdvanceRef.current = null;
     }
   }, [animating, game.balls, game.snapshotRevision, game.shotSequence, game.status]);
 
@@ -2109,6 +2119,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     clearQueuedSfx(queuedSfxRef);
     SFX.prime();
     pendingShotVisualRef.current = null;
+    pendingShotAdvanceRef.current = null;
     if (liveCueBall) {
       const livePreview = computeAimPreview(liveCueBall, state.renderBalls, aimAngleRef.current);
       const travelLimit = livePreview.contactX !== null && livePreview.contactY !== null
@@ -2131,6 +2142,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         impactAtMs,
         firstImpactPlayed: false,
       };
+      pendingShotAdvanceRef.current = { advance: 0, lastAt: shotStartedAt };
       SFX.cueHit(shotPower);
       if (impactAtMs !== null && impactType) {
         queueSfx(queuedSfxRef, impactAtMs, () => {
@@ -2801,6 +2813,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             if (spin) { spin.lastX = serverCue.x; spin.lastY = serverCue.y; }
           }
           pendingShotVisualRef.current = null;
+          pendingShotAdvanceRef.current = null;
         } else {
           const progress = computePendingShotProgress(pendingShotVisual, now);
           const heldElapsed = progress.heldElapsed;
@@ -2810,10 +2823,16 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const shotDirY = Math.sin(pendingShotVisual.angle);
           const authoritativeAdvance = ((drawCueBall.x - pendingShotVisual.cueX) * shotDirX) + ((drawCueBall.y - pendingShotVisual.cueY) * shotDirY);
           const optimisticAdvance = ((progress.expectedCueX - pendingShotVisual.cueX) * shotDirX) + ((progress.expectedCueY - pendingShotVisual.cueY) * shotDirY);
+          const advanceState = pendingShotAdvanceRef.current ?? { advance: 0, lastAt: pendingShotVisual.startedAt };
+          const deltaMs = clamp(now - advanceState.lastAt, 1, 34);
           const maxLead = maxCueVisualLeadPx(pendingShotVisual.power);
-          const noBacktrackAdvance = game.status === "simulating"
+          const targetAdvance = game.status === "simulating"
             ? Math.max(authoritativeAdvance, Math.min(optimisticAdvance, authoritativeAdvance + maxLead))
             : optimisticAdvance;
+          const stepCap = maxCueAdvanceStepPx(pendingShotVisual.power, pendingShotVisual.estimatedSpeedPxPerMs, deltaMs);
+          const monotonicAdvance = Math.max(advanceState.advance, targetAdvance);
+          const noBacktrackAdvance = Math.min(monotonicAdvance, advanceState.advance + stepCap);
+          pendingShotAdvanceRef.current = { advance: noBacktrackAdvance, lastAt: now };
           const optimisticCue = {
             ...drawCueBall,
             x: pendingShotVisual.cueX + shotDirX * noBacktrackAdvance,
@@ -2838,6 +2857,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           }
           if (moveProgress >= 1 && heldElapsed >= travelMs + PENDING_SHOT_POST_IMPACT_HOLD_MS && game.status !== "simulating") {
             pendingShotVisualRef.current = null;
+            pendingShotAdvanceRef.current = null;
           }
         }
       }
