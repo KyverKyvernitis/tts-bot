@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from "react";
-import type { AimPipelineDebugSnapshot, AimPointerMode, AimStateSnapshot, BallGroup, GameBallSnapshot, GameShotFrame, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
+import type { AimPointerMode, AimStateSnapshot, BallGroup, GameBallSnapshot, GameShotFrame, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
 import tableAsset from "../assets/game/pool-table-public.png";
 import cueAsset from "../assets/game/pool-cue-public.png";
 import type { ShotPipelineDebugEvent } from "../screens/GameScreen";
@@ -150,7 +150,6 @@ type Props = {
   shootBusy: boolean;
   exitBusy: boolean;
   opponentAim: AimStateSnapshot | null;
-  aimPipelineDebug: AimPipelineDebugSnapshot;
   onShoot: (shot: ShotInput) => Promise<void>;
   onShotDebugEvent?: (event: ShotPipelineDebugEvent) => void;
   onAimStateChange?: (aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => void;
@@ -1200,7 +1199,13 @@ function drawPocketAnimation(
 // ─── Aim guide (reference-style: clean line + ghost ball) ─────────────────
 
 // Aim line only — drawn BEFORE balls
-function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, preview: AimPreview, illegalTarget: boolean) {
+function drawAimLine(
+  ctx: CanvasRenderingContext2D,
+  cueBall: GameBallSnapshot,
+  preview: AimPreview,
+  illegalTarget: boolean,
+  options?: { showTargetGuide?: boolean },
+) {
   const hasHit = preview.contactX !== null && preview.contactY !== null && preview.hitBall;
   const lineEndX = hasHit ? preview.contactX! : preview.endX;
   const lineEndY = hasHit ? preview.contactY! : preview.endY;
@@ -1227,7 +1232,9 @@ function drawAimLine(ctx: CanvasRenderingContext2D, cueBall: GameBallSnapshot, p
   ctx.stroke();
   ctx.restore();
 
-  if (!illegalTarget && hasHit && preview.hitBall && preview.targetGuideX !== null && preview.targetGuideY !== null) {
+  const showTargetGuide = options?.showTargetGuide ?? true;
+
+  if (showTargetGuide && !illegalTarget && hasHit && preview.hitBall && preview.targetGuideX !== null && preview.targetGuideY !== null) {
     const guideScale = clamp(preview.targetGuideScale, 0.14, 1);
     ctx.save();
     ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
@@ -1410,12 +1417,7 @@ function drawRemoteAimOverlay(
     if (preview) {
       ctx.save();
       ctx.globalAlpha = mode === "power" ? 0.84 : 0.76;
-      drawAimLine(ctx, cueBall, preview, false);
-      ctx.restore();
-
-      ctx.save();
-      ctx.globalAlpha = mode === "power" ? 0.72 : 0.64;
-      drawGhostBall(ctx, cueBall, preview, clamp(pullRatio, 0.12, 1), false);
+      drawAimLine(ctx, cueBall, preview, false, { showTargetGuide: false });
       ctx.restore();
     } else {
       ctx.save();
@@ -1431,10 +1433,12 @@ function drawRemoteAimOverlay(
     }
   }
 
-  ctx.save();
-  ctx.globalAlpha = mode === "power" ? 0.88 : mode === "aim" ? 0.8 : 0.74;
-  drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
-  ctx.restore();
+  if (showGuide) {
+    ctx.save();
+    ctx.globalAlpha = mode === "power" ? 0.88 : 0.8;
+    drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
+    ctx.restore();
+  }
 }
 
 // ─── Table render cache ───────────────────────────────────────────────────
@@ -1472,7 +1476,6 @@ function drawPoolTable(
   now: number,
   ballSpinCache: Map<string, BallSpinState>,
   remoteOverlay: { cueBall: GameBallSnapshot; aimAngle: number; preview: AimPreview | null; pullRatio: number; mode: AimPointerMode } | null,
-  remoteDebug: { mode: AimPointerMode; seq: number; ageMs: number; cueX: number | null; cueY: number | null } | null,
 ) {
   ctx.clearRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
 
@@ -1515,16 +1518,6 @@ function drawPoolTable(
     drawGhostBall(ctx, cueBall, preview, previewPowerRatio, illegalTarget);
   }
 
-  if (remoteDebug) {
-    ctx.save();
-    ctx.fillStyle = "rgba(0, 0, 0, 0.62)";
-    ctx.fillRect(12, 12, 250, 46);
-    ctx.fillStyle = "rgba(255,255,255,0.94)";
-    ctx.font = "12px system-ui, sans-serif";
-    ctx.fillText(`remote ${remoteDebug.mode} • seq ${remoteDebug.seq} • ${Math.round(remoteDebug.ageMs)}ms`, 20, 30);
-    ctx.fillText(`cue ${remoteDebug.cueX === null ? 'null' : remoteDebug.cueX.toFixed(1)}, ${remoteDebug.cueY === null ? 'null' : remoteDebug.cueY.toFixed(1)}`, 20, 47);
-    ctx.restore();
-  }
 
   // Pocket animations
   for (const anim of pocketAnimations) {
@@ -1553,7 +1546,7 @@ function createImage(src: string) {
 
 // ─── Main component ───────────────────────────────────────────────────────
 
-export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, aimPipelineDebug, onShoot, onShotDebugEvent, onAimStateChange, onExit, onRematchReady }: Props) {
+export default function GameStage({ room, game, currentUserId, shootBusy, exitBusy, opponentAim, onShoot, onShotDebugEvent, onAimStateChange, onExit, onRematchReady }: Props) {
   const [displayBalls, setDisplayBalls] = useState<GameBallSnapshot[]>(game.balls);
   const [railBalls, setRailBalls] = useState<RailBallAnimation[]>(() => buildSettledRailBalls(game.balls));
   const [power, setPower] = useState(POWER_MIN);
@@ -3004,13 +2997,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         now,
         ballSpinRef.current,
         remoteOverlayVisible && remoteCueBall ? { cueBall: remoteCueBall, aimAngle: remoteAimAngle, preview: remotePreview, pullRatio: remotePullRatio, mode: remoteMode } : null,
-        remoteAimFresh && remoteAimState ? {
-          mode: remoteMode,
-          seq: remoteAimState.seq,
-          ageMs: Date.now() - remoteAimState.updatedAt,
-          cueX: remoteAimState.cueX ?? null,
-          cueY: remoteAimState.cueY ?? null,
-        } : null,
       );
 
       drawLoopRef.current = window.requestAnimationFrame(draw);
@@ -3078,39 +3064,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     src: ballIconCache.get(entry.number) ?? null,
   }));
 
-  const panelRemoteAim = opponentAim && opponentAim.userId !== currentUserId ? opponentAim : null;
-  const panelRemoteAgeMs = panelRemoteAim ? Math.max(0, Date.now() - panelRemoteAim.updatedAt) : null;
-  const panelRemoteFresh = Boolean(panelRemoteAim && panelRemoteAgeMs !== null && panelRemoteAgeMs < REMOTE_AIM_STALE_MS);
-  const panelRemoteMode: AimPointerMode = panelRemoteAim?.mode ?? "idle";
-  const panelRemoteCanRender = Boolean(
-    panelRemoteFresh
-    && panelRemoteAim
-    && panelRemoteAim.visible
-    && game.status === "waiting_shot"
-    && (panelRemoteMode === "aim" || panelRemoteMode === "power")
-  );
-  const panelRemoteCuePlacementActive = Boolean(
-    panelRemoteFresh
-    && panelRemoteAim
-    && panelRemoteMode === "place"
-    && game.status === "waiting_shot"
-    && panelRemoteAim.cueX !== null
-    && panelRemoteAim.cueY !== null
-  );
-  const panelRemoteHasCuePreview = Boolean(
-    panelRemoteFresh
-    && panelRemoteAim
-    && panelRemoteAim.cueX !== null
-    && panelRemoteAim.cueY !== null
-    && panelRemoteMode !== "idle"
-  );
-  const panelRemoteOverlayVisible = Boolean(
-    panelRemoteFresh
-    && panelRemoteAim
-    && (panelRemoteCanRender || panelRemoteCuePlacementActive || panelRemoteHasCuePreview)
-    && (panelRemoteMode === "aim" || panelRemoteMode === "power" || panelRemoteMode === "place")
-  );
-
   // ─── JSX ────────────────────────────────────────────────────────────────
 
   return (
@@ -3172,54 +3125,6 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             <div className="pool-stage__cue-indicator" aria-label="Bola branca fora da mesa" />
           ) : null;
         })()}
-      </div>
-
-      <div
-        style={{
-          position: "absolute",
-          top: 58,
-          left: 8,
-          zIndex: 60,
-          display: "grid",
-          gap: 3,
-          width: "min(250px, calc(100% - 16px))",
-          pointerEvents: "none",
-        }}
-      >
-        <pre
-          style={{
-            margin: 0,
-            padding: "4px 6px",
-            borderRadius: 7,
-            background: "rgba(5, 8, 14, 0.96)",
-            color: "#f3f8ff",
-            boxShadow: "0 4px 12px rgba(0, 0, 0, 0.42)",
-            border: "1px solid rgba(255,255,255,0.08)",
-            font: "8px/1.16 ui-monospace, SFMono-Regular, Menlo, monospace",
-            whiteSpace: "pre-wrap",
-          }}
-        >{`APP dbg ${aimPipelineDebug.connectionState} src:${aimPipelineDebug.lastPushSource ?? '-'}
-r:${aimPipelineDebug.roomId ?? '-'} me:${aimPipelineDebug.currentUserId ?? '-'} turn:${aimPipelineDebug.turnUserId ?? '-'} opp:${aimPipelineDebug.currentUserId && aimPipelineDebug.turnUserId ? (aimPipelineDebug.currentUserId !== aimPipelineDebug.turnUserId ? 'y' : 'n') : '-'}
-app u:${aimPipelineDebug.appRemoteAimUserId ?? '-'} m:${aimPipelineDebug.appRemoteAimMode ?? '-'} v:${aimPipelineDebug.appRemoteAimVisible === null ? '-' : String(aimPipelineDebug.appRemoteAimVisible)} q:${aimPipelineDebug.appRemoteAimSeq ?? '-'} a:${aimPipelineDebug.appRemoteAimAgeMs ?? '-'}
-cue:${aimPipelineDebug.appRemoteAimCueX ?? '-'},${aimPipelineDebug.appRemoteAimCueY ?? '-'} ws:${aimPipelineDebug.rxWsCount}/${aimPipelineDebug.lastWsSeq ?? '-'} ht:${aimPipelineDebug.rxHttpCount}/${aimPipelineDebug.lastHttpSeq ?? '-'} tx:${aimPipelineDebug.txCount}/${aimPipelineDebug.lastTxSeq ?? '-'}
-fa:${aimPipelineDebug.httpFetchAttemptCount}/${aimPipelineDebug.lastHttpFetchStatus ?? '-'} sa:${aimPipelineDebug.httpSyncAttemptCount}/${aimPipelineDebug.lastHttpSyncStatus ?? '-'}
-seen:${aimPipelineDebug.lastRemoteSeenAgeMs ?? '-'} clr:${aimPipelineDebug.clearCount} why:${aimPipelineDebug.lastClearReason ?? '-'}`}</pre>
-        <pre
-          style={{
-            margin: 0,
-            padding: "4px 6px",
-            borderRadius: 7,
-            background: "rgba(14, 9, 20, 0.96)",
-            color: "#fff2ff",
-            boxShadow: "0 4px 12px rgba(0, 0, 0, 0.42)",
-            border: "1px solid rgba(255,255,255,0.08)",
-            font: "8px/1.16 ui-monospace, SFMono-Regular, Menlo, monospace",
-            whiteSpace: "pre-wrap",
-          }}
-        >{`STAGE dbg p:${panelRemoteAim ? 'y' : 'n'} f:${panelRemoteFresh ? 'y' : 'n'} o:${panelRemoteOverlayVisible ? 'y' : 'n'}
-me:${currentUserId} turn:${game.turnUserId} opp:${game.turnUserId !== currentUserId ? 'y' : 'n'} m:${panelRemoteMode} q:${panelRemoteAim?.seq ?? '-'} a:${panelRemoteAgeMs ?? '-'} vis:${panelRemoteAim ? String(panelRemoteAim.visible) : '-'}
-cue:${panelRemoteAim?.cueX ?? '-'},${panelRemoteAim?.cueY ?? '-'} cr:${panelRemoteCanRender ? 'y' : 'n'} pl:${panelRemoteCuePlacementActive ? 'y' : 'n'} pv:${panelRemoteHasCuePreview ? 'y' : 'n'}
-st:${game.status} bih:${game.ballInHandUserId ?? '-'} ru:${panelRemoteAim?.userId ?? '-'}`}</pre>
       </div>
 
       <div className="pool-stage__table-layout">
@@ -3285,7 +3190,7 @@ st:${game.status} bih:${game.ballInHandUserId ?? '-'} ru:${panelRemoteAim?.userI
           <div className="pool-stage__rail-arm-h" />
           <div className="pool-stage__rail-arm-v">
             <div className="pool-stage__rail-channel">
-              {railEntries.map(({ entry, src }) => (
+              {railEntries.map(({ entry, src }: { entry: RailBallAnimation; src: string | null }) => (
                 <span
                   key={entry.id}
                   className={`pool-stage__rail-ball pool-stage__rail-ball--${entry.state}`}

@@ -9,7 +9,7 @@ import {
   writeCachedToken,
   writeCachedUser,
 } from "./sdk/discord";
-import type { ActivityBootstrap, ActivityUser, AimPipelineDebugSnapshot, AimPointerMode, AimStateSnapshot, BalanceDebugSnapshot, BalanceSnapshot, GameBallSnapshot, GameSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
+import type { ActivityBootstrap, ActivityUser, AimPointerMode, AimStateSnapshot, BalanceDebugSnapshot, BalanceSnapshot, GameBallSnapshot, GameSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.wav";
@@ -36,7 +36,8 @@ import {
 } from "./game/teardown";
 import { fetchBalanceRequest } from "./transport/balanceApi";
 import { fetchGameStateRequest, postGameActionRequest } from "./transport/gameApi";
-import { appendNoStoreNonce, buildQueryStringFromPayload, dispatchLeaveBeacon, fetchWithTimeout, resolveApiCandidates, resolveStrictApiCandidates } from "./transport/httpClient";
+import { fetchAimStateRequest, syncAimStateRequest } from "./transport/aimApi";
+import { dispatchLeaveBeacon } from "./transport/httpClient";
 import { fetchRoomStateRequest, fetchRoomsRequest, postRoomActionRequest } from "./transport/lobbyApi";
 import { sendSubscribeRoomMessage } from "./realtime/roomRealtime";
 import { type IncomingMessage, type OAuthExchangeResult } from "./realtime/messages";
@@ -268,104 +269,6 @@ type ShotPipelineDebugState = {
   note: string | null;
 };
 
-type AimPipelineDebugMutableState = {
-  rxWsCount: number;
-  rxHttpCount: number;
-  txCount: number;
-  clearCount: number;
-  httpFetchAttemptCount: number;
-  httpSyncAttemptCount: number;
-  lastWsAt: number | null;
-  lastHttpAt: number | null;
-  lastTxAt: number | null;
-  lastWsMode: AimPointerMode | null;
-  lastHttpMode: AimPointerMode | null;
-  lastTxMode: AimPointerMode | null;
-  lastWsSeq: number | null;
-  lastHttpSeq: number | null;
-  lastTxSeq: number | null;
-  lastWsCueX: number | null;
-  lastWsCueY: number | null;
-  lastHttpCueX: number | null;
-  lastHttpCueY: number | null;
-  lastTxCueX: number | null;
-  lastTxCueY: number | null;
-  lastPushSource: "ws" | "http" | null;
-  lastClearReason: string | null;
-  lastHttpFetchStatus: string | null;
-  lastHttpSyncStatus: string | null;
-};
-
-const initialAimPipelineDebugMutableState: AimPipelineDebugMutableState = {
-  rxWsCount: 0,
-  rxHttpCount: 0,
-  txCount: 0,
-  clearCount: 0,
-  httpFetchAttemptCount: 0,
-  httpSyncAttemptCount: 0,
-  lastWsAt: null,
-  lastHttpAt: null,
-  lastTxAt: null,
-  lastWsMode: null,
-  lastHttpMode: null,
-  lastTxMode: null,
-  lastWsSeq: null,
-  lastHttpSeq: null,
-  lastTxSeq: null,
-  lastWsCueX: null,
-  lastWsCueY: null,
-  lastHttpCueX: null,
-  lastHttpCueY: null,
-  lastTxCueX: null,
-  lastTxCueY: null,
-  lastPushSource: null,
-  lastClearReason: null,
-  lastHttpFetchStatus: null,
-  lastHttpSyncStatus: null,
-};
-
-const initialAimPipelineDebugPanel: AimPipelineDebugSnapshot = {
-  connectionState: "connecting",
-  roomId: null,
-  gameStatus: null,
-  turnUserId: null,
-  currentUserId: null,
-  appRemoteAimRoomId: null,
-  appRemoteAimUserId: null,
-  appRemoteAimMode: null,
-  appRemoteAimVisible: null,
-  appRemoteAimSeq: null,
-  appRemoteAimAgeMs: null,
-  appRemoteAimCueX: null,
-  appRemoteAimCueY: null,
-  appRemoteAimSnapshotRevision: null,
-  lastRemoteSeenAgeMs: null,
-  rxWsCount: 0,
-  rxHttpCount: 0,
-  txCount: 0,
-  clearCount: 0,
-  httpFetchAttemptCount: 0,
-  httpSyncAttemptCount: 0,
-  lastWsAgeMs: null,
-  lastHttpAgeMs: null,
-  lastTxAgeMs: null,
-  lastHttpFetchStatus: null,
-  lastHttpSyncStatus: null,
-  lastWsMode: null,
-  lastHttpMode: null,
-  lastTxMode: null,
-  lastWsSeq: null,
-  lastHttpSeq: null,
-  lastTxSeq: null,
-  lastWsCueX: null,
-  lastWsCueY: null,
-  lastHttpCueX: null,
-  lastHttpCueY: null,
-  lastTxCueX: null,
-  lastTxCueY: null,
-  lastPushSource: null,
-  lastClearReason: null,
-};
 
 const initialShotPipelineDebug: ShotPipelineDebugState = {
   lastStage: 'idle',
@@ -437,7 +340,6 @@ export default function App() {
   const [chipGateBusy, setChipGateBusy] = useState(false);
   const [roomExitBusy, setRoomExitBusy] = useState(false);
   const [shotPipelineDebug, setShotPipelineDebug] = useState<ShotPipelineDebugState>(initialShotPipelineDebug);
-  const [aimPipelineDebug, setAimPipelineDebug] = useState<AimPipelineDebugSnapshot>(initialAimPipelineDebugPanel);
   const socketRef = useRef<WebSocket | null>(null);
   const roomEntryMenuRef = useRef<HTMLDivElement | null>(null);
   const createEntryMenuRef = useRef<HTMLDivElement | null>(null);
@@ -465,7 +367,6 @@ export default function App() {
   const aimHttpTimerRef = useRef<number | null>(null);
   const lastAimHttpSentAtRef = useRef(0);
   const lastRemoteAimAtRef = useRef<Record<string, number>>({});
-  const aimPipelineDebugRef = useRef<AimPipelineDebugMutableState>({ ...initialAimPipelineDebugMutableState });
   const snapshotDebugRef = useRef<SnapshotDebugState>({ roomId: null, lastReceivedAt: 0, lastLoggedAt: 0, lastRevision: -1, lastSource: null });
   const wsGameStateRef = useRef<WsGameStateRefState>({ roomId: null, lastReceivedAt: 0, shotSequence: 0, revision: 0 });
   const simRecoveryRef = useRef<SimRecoveryState>({ roomId: null, shotSequence: 0, revision: 0, lastProgressAt: 0, lastRecoveryAt: 0, recoveryCount: 0, inFlight: false, lastRequestedShotSequence: 0, lastRequestedRevision: 0 });
@@ -1609,36 +1510,12 @@ export default function App() {
   };
 
 
-  const recordAimPipelineClear = (reason: string) => {
-    aimPipelineDebugRef.current.clearCount += 1;
-    aimPipelineDebugRef.current.lastClearReason = reason;
-  };
-
-  const clearRemoteAimForDebug = (reason: string) => {
-    recordAimPipelineClear(reason);
+  const clearRemoteAim = () => {
     setRemoteAim((current) => current ? null : current);
   };
 
-  const pushAimToState = (payload: AimStateSnapshot | null, source: "ws" | "http") => {
-    if (!payload) return;
-    if (payload.userId === state.currentUser.userId) return;
-    const now = Date.now();
-    if (source === "ws") {
-      aimPipelineDebugRef.current.rxWsCount += 1;
-      aimPipelineDebugRef.current.lastWsAt = now;
-      aimPipelineDebugRef.current.lastWsMode = payload.mode;
-      aimPipelineDebugRef.current.lastWsSeq = payload.seq;
-      aimPipelineDebugRef.current.lastWsCueX = payload.cueX ?? null;
-      aimPipelineDebugRef.current.lastWsCueY = payload.cueY ?? null;
-    } else {
-      aimPipelineDebugRef.current.rxHttpCount += 1;
-      aimPipelineDebugRef.current.lastHttpAt = now;
-      aimPipelineDebugRef.current.lastHttpMode = payload.mode;
-      aimPipelineDebugRef.current.lastHttpSeq = payload.seq;
-      aimPipelineDebugRef.current.lastHttpCueX = payload.cueX ?? null;
-      aimPipelineDebugRef.current.lastHttpCueY = payload.cueY ?? null;
-    }
-    aimPipelineDebugRef.current.lastPushSource = source;
+  const pushAimToState = (payload: AimStateSnapshot | null) => {
+    if (!payload || payload.userId === state.currentUser.userId) return;
     lastRemoteAimAtRef.current[payload.roomId] = payload.updatedAt;
     setRemoteAim((current) => {
       if (!current || current.roomId !== payload.roomId || current.userId !== payload.userId) {
@@ -1655,110 +1532,36 @@ export default function App() {
     });
   };
 
-  const syncAimOverHttp = async (roomId: string, aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }, reason: string) => {
-    aimPipelineDebugRef.current.httpSyncAttemptCount += 1;
-    const payload = {
-      roomId,
-      userId: state.currentUser.userId,
-      visible: aim.visible,
-      angle: aim.angle,
-      cueX: aim.cueX ?? null,
-      cueY: aim.cueY ?? null,
-      power: aim.power ?? 0,
-      seq: aim.seq ?? 0,
-      mode: aim.mode,
-    };
-    const bodyJson = JSON.stringify(payload);
-    const bodyForm = new URLSearchParams();
-    for (const [key, value] of Object.entries(payload)) {
-      bodyForm.set(key, value === null ? '' : String(value));
-    }
-    const attempts: Array<{ url: string; init: RequestInit; statusLabel: string }> = [];
-
-    const balanceQuery = buildQueryStringFromPayload({ action: 'game_aim_sync', ...payload });
-    for (const baseUrl of resolveApiCandidates('/balance')) {
-      const queryUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-      const params = new URLSearchParams(balanceQuery);
-      params.forEach((value, key) => queryUrl.searchParams.set(key, value));
-      attempts.push({
-        url: baseUrl,
-        init: {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-          credentials: 'same-origin',
-          body: buildQueryStringFromPayload({ action: 'game_aim_sync', ...payload }),
-          keepalive: true,
-        },
-        statusLabel: `bal_form@${baseUrl}`,
-      });
-      attempts.push({
-        url: queryUrl.toString(),
-        init: {
-          method: 'GET',
-          credentials: 'same-origin',
-          cache: 'no-store',
-          keepalive: true,
-        },
-        statusLabel: `bal_get@${baseUrl}`,
-      });
-    }
-
-    for (const baseUrl of resolveStrictApiCandidates('/games/aim')) {
-      attempts.push({
-        url: baseUrl,
-        init: {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body: bodyJson,
-          keepalive: true,
-        },
-        statusLabel: `json@${baseUrl}`,
-      });
-      attempts.push({
-        url: baseUrl,
-        init: {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-          credentials: 'same-origin',
-          body: bodyForm.toString(),
-          keepalive: true,
-        },
-        statusLabel: `form@${baseUrl}`,
-      });
-    }
-    for (const attempt of attempts) {
-      try {
-        const response = await fetchWithTimeout(attempt.url, attempt.init, 1200);
-        const contentType = response.headers.get('content-type') ?? '';
-        const raw = await response.text();
-        if (raw.trim().startsWith('<') || /text\/html/i.test(contentType)) {
-          aimPipelineDebugRef.current.lastHttpSyncStatus = `${attempt.statusLabel}:html:${response.status}`;
-          continue;
-        }
-        aimPipelineDebugRef.current.lastHttpSyncStatus = `${attempt.statusLabel}:${response.status}`;
-        if (response.ok) return true;
-      } catch (error) {
-        const message = error instanceof Error ? error.name : 'err';
-        aimPipelineDebugRef.current.lastHttpSyncStatus = `${attempt.statusLabel}:ex:${message}`;
-      }
-    }
-    setAuthDebug((current) => current ? `${current} • aim_sync_http_failed:${reason}:${roomId}` : `aim_sync_http_failed:${reason}:${roomId}`);
-    return false;
-  };
-
-  const scheduleAimHttpSync = (roomId: string, aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }, options?: { allowWhileRealtimeHealthy?: boolean; reason?: string }) => {
+  const scheduleAimHttpSync = (
+    roomId: string,
+    aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode },
+    options?: { allowWhileRealtimeHealthy?: boolean; reason?: string },
+  ) => {
     const allowWhileRealtimeHealthy = Boolean(options?.allowWhileRealtimeHealthy);
     if (!allowWhileRealtimeHealthy && isRealtimeSocketHealthy(roomId)) return;
-    const debugReason = options?.reason ?? (allowWhileRealtimeHealthy ? 'ws_backup' : 'room_aim_sync');
-    if (!allowWhileRealtimeHealthy && shouldBlockHttpAuxDuringRealtime(roomId, 'aim', debugReason)) return;
+    const requestReason = options?.reason ?? (allowWhileRealtimeHealthy ? 'ws_backup' : 'room_aim_sync');
+    if (!allowWhileRealtimeHealthy && shouldBlockHttpAuxDuringRealtime(roomId, 'aim', requestReason)) return;
     pendingAimHttpRef.current = { roomId, aim };
     const flush = () => {
       const pending = pendingAimHttpRef.current;
       if (!pending) return;
       pendingAimHttpRef.current = null;
       lastAimHttpSentAtRef.current = Date.now();
-      void syncAimOverHttp(pending.roomId, pending.aim, debugReason).catch(() => {});
+      void syncAimStateRequest({
+        roomId: pending.roomId,
+        userId: state.currentUser.userId,
+        visible: pending.aim.visible,
+        angle: pending.aim.angle,
+        cueX: pending.aim.cueX ?? null,
+        cueY: pending.aim.cueY ?? null,
+        power: pending.aim.power ?? 0,
+        seq: pending.aim.seq ?? 0,
+        mode: pending.aim.mode,
+      }).then((result) => {
+        if (!result.data && result.attempts.length) {
+          setAuthDebug((current) => current ? `${current} • aim_sync_http_failed:${requestReason}:${pending.roomId}:${result.attempts.join(' | ')}` : `aim_sync_http_failed:${requestReason}:${pending.roomId}:${result.attempts.join(' | ')}`);
+        }
+      }).catch(() => {});
     };
     const now = Date.now();
     const minGap = aim.mode === 'place' ? 24 : aim.mode === 'power' ? 32 : 40;
@@ -1775,65 +1578,16 @@ export default function App() {
   };
 
   const fetchAimStateOverHttp = async (roomId: string, reason: string, options?: { allowWhileRealtimeHealthy?: boolean }) => {
-    if (!options?.allowWhileRealtimeHealthy && shouldBlockHttpAuxDuringRealtime(roomId, "aim", reason)) {
-      aimPipelineDebugRef.current.lastHttpFetchStatus = `blocked:${reason}`;
+    if (!options?.allowWhileRealtimeHealthy && shouldBlockHttpAuxDuringRealtime(roomId, 'aim', reason)) {
       return null;
     }
-    aimPipelineDebugRef.current.httpFetchAttemptCount += 1;
-    const attempts: string[] = [];
-
-    for (const baseUrl of resolveApiCandidates('/balance')) {
-      try {
-        const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-        url.searchParams.set('action', 'game_aim_get');
-        url.searchParams.set('roomId', roomId);
-        const response = await fetchWithTimeout(url, { method: 'GET', credentials: 'same-origin', cache: 'no-store' }, 1200);
-        const contentType = response.headers.get('content-type') ?? '';
-        const raw = await response.text();
-        if (raw.trim().startsWith('<') || /text\/html/i.test(contentType)) {
-          aimPipelineDebugRef.current.lastHttpFetchStatus = `bal_html:${response.status}`;
-          attempts.push(`bal_html:${response.status}`);
-          continue;
-        }
-        const parsed = raw ? JSON.parse(raw) as { aim?: AimStateSnapshot | null } : null;
-        if (response.ok) {
-          aimPipelineDebugRef.current.lastHttpFetchStatus = parsed?.aim ? `bal_ok:${parsed.aim.seq}` : 'bal_ok:empty';
-          return parsed?.aim ?? null;
-        }
-        aimPipelineDebugRef.current.lastHttpFetchStatus = `bal_${response.status}:${parsed?.aim ? 'payload' : 'noaim'}`;
-        attempts.push(`bal_${response.status}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.name : 'err';
-        aimPipelineDebugRef.current.lastHttpFetchStatus = `bal_ex:${message}`;
-        attempts.push(`bal_ex:${message}`);
-      }
+    const result = await fetchAimStateRequest(roomId);
+    if (result.data?.aim) {
+      return result.data.aim;
     }
-
-    for (const baseUrl of resolveStrictApiCandidates(`/games/${roomId}/aim`)) {
-      try {
-        const url = appendNoStoreNonce(baseUrl);
-        const response = await fetchWithTimeout(url, { method: 'GET', credentials: 'same-origin', cache: 'no-store' }, 1200);
-        const contentType = response.headers.get('content-type') ?? '';
-        const raw = await response.text();
-        if (raw.trim().startsWith('<') || /text\/html/i.test(contentType)) {
-          aimPipelineDebugRef.current.lastHttpFetchStatus = `html:${response.status}`;
-          attempts.push(`html:${response.status}`);
-          continue;
-        }
-        const parsed = raw ? JSON.parse(raw) as { aim?: AimStateSnapshot | null } : null;
-        if (response.ok) {
-          aimPipelineDebugRef.current.lastHttpFetchStatus = parsed?.aim ? `ok:${parsed.aim.seq}` : 'ok:empty';
-          return parsed?.aim ?? null;
-        }
-        aimPipelineDebugRef.current.lastHttpFetchStatus = `${response.status}:${parsed?.aim ? 'payload' : 'noaim'}`;
-        attempts.push(`${response.status}:${parsed?.aim ? 'payload' : 'noaim'}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.name : 'err';
-        aimPipelineDebugRef.current.lastHttpFetchStatus = `ex:${message}`;
-        attempts.push(`ex:${message}`);
-      }
+    if (result.attempts.length) {
+      setAuthDebug((current) => current ? `${current} • aim_get_http_failed:${reason}:${roomId}:${result.attempts.join(' | ')}` : `aim_get_http_failed:${reason}:${roomId}:${result.attempts.join(' | ')}`);
     }
-    setAuthDebug((current) => current ? `${current} • aim_get_http_failed:${reason}:${roomId}:${attempts.join('|')}` : `aim_get_http_failed:${reason}:${roomId}:${attempts.join('|')}`);
     return null;
   };
 
@@ -2252,7 +2006,7 @@ export default function App() {
 
   useEffect(() => {
     if (screen !== "game" || !room || !game) {
-      clearRemoteAimForDebug("turn_or_status_reset");
+      clearRemoteAim();
       return;
     }
     if (game.turnUserId === state.currentUser.userId || game.status !== "waiting_shot") {
@@ -2279,9 +2033,8 @@ export default function App() {
       }
       const shouldKeepRemoteCuePlacement = aim.cueX !== null && aim.cueY !== null && aim.mode !== 'idle';
       if ((aim.visible && aim.mode !== 'idle') || shouldKeepRemoteCuePlacement) {
-        pushAimToState(aim, "http");
+        pushAimToState(aim);
       } else {
-        recordAimPipelineClear("http_reconcile_invisible_or_idle");
         setRemoteAim((current) => current?.roomId === room.roomId ? null : current);
       }
     };
@@ -2321,64 +2074,6 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    if (screen !== "game") {
-      setAimPipelineDebug((current) => current.roomId === null && current.connectionState === connectionState ? current : { ...initialAimPipelineDebugPanel, connectionState, currentUserId: state.currentUser.userId });
-      return;
-    }
-
-    const tick = () => {
-      const now = Date.now();
-      const currentRemoteAim = remoteAim && room && remoteAim.roomId === room.roomId ? remoteAim : remoteAim;
-      const metrics = aimPipelineDebugRef.current;
-      setAimPipelineDebug({
-        connectionState,
-        roomId: room?.roomId ?? null,
-        gameStatus: game?.status ?? null,
-        turnUserId: game?.turnUserId ?? null,
-        currentUserId: state.currentUser.userId,
-        appRemoteAimRoomId: currentRemoteAim?.roomId ?? null,
-        appRemoteAimUserId: currentRemoteAim?.userId ?? null,
-        appRemoteAimMode: currentRemoteAim?.mode ?? null,
-        appRemoteAimVisible: currentRemoteAim?.visible ?? null,
-        appRemoteAimSeq: currentRemoteAim?.seq ?? null,
-        appRemoteAimAgeMs: currentRemoteAim ? Math.max(0, now - currentRemoteAim.updatedAt) : null,
-        appRemoteAimCueX: currentRemoteAim?.cueX ?? null,
-        appRemoteAimCueY: currentRemoteAim?.cueY ?? null,
-        appRemoteAimSnapshotRevision: currentRemoteAim?.snapshotRevision ?? null,
-        lastRemoteSeenAgeMs: room?.roomId && lastRemoteAimAtRef.current[room.roomId] ? Math.max(0, now - lastRemoteAimAtRef.current[room.roomId]) : null,
-        rxWsCount: metrics.rxWsCount,
-        rxHttpCount: metrics.rxHttpCount,
-        txCount: metrics.txCount,
-        clearCount: metrics.clearCount,
-        httpFetchAttemptCount: metrics.httpFetchAttemptCount,
-        httpSyncAttemptCount: metrics.httpSyncAttemptCount,
-        lastWsAgeMs: metrics.lastWsAt ? Math.max(0, now - metrics.lastWsAt) : null,
-        lastHttpAgeMs: metrics.lastHttpAt ? Math.max(0, now - metrics.lastHttpAt) : null,
-        lastTxAgeMs: metrics.lastTxAt ? Math.max(0, now - metrics.lastTxAt) : null,
-        lastHttpFetchStatus: metrics.lastHttpFetchStatus,
-        lastHttpSyncStatus: metrics.lastHttpSyncStatus,
-        lastWsMode: metrics.lastWsMode,
-        lastHttpMode: metrics.lastHttpMode,
-        lastTxMode: metrics.lastTxMode,
-        lastWsSeq: metrics.lastWsSeq,
-        lastHttpSeq: metrics.lastHttpSeq,
-        lastTxSeq: metrics.lastTxSeq,
-        lastWsCueX: metrics.lastWsCueX,
-        lastWsCueY: metrics.lastWsCueY,
-        lastHttpCueX: metrics.lastHttpCueX,
-        lastHttpCueY: metrics.lastHttpCueY,
-        lastTxCueX: metrics.lastTxCueX,
-        lastTxCueY: metrics.lastTxCueY,
-        lastPushSource: metrics.lastPushSource,
-        lastClearReason: metrics.lastClearReason,
-      });
-    };
-
-    tick();
-    const interval = window.setInterval(tick, 120);
-    return () => window.clearInterval(interval);
-  }, [connectionState, game?.status, game?.turnUserId, remoteAim, room?.roomId, screen, state.currentUser.userId]);
 
 
   const requestRooms = async () => {
@@ -2531,7 +2226,7 @@ export default function App() {
           return;
         }
         if (payload.type === "aim_state") {
-          pushAimToState(payload.payload, "ws");
+          pushAimToState(payload.payload);
           return;
         }
         if (payload.type === "room_list") {
@@ -3347,7 +3042,6 @@ export default function App() {
           exitBusy={roomExitBusy}
           isRoomHost={isRoomHost}
           opponentAim={remoteAim && remoteAim.roomId === room.roomId ? remoteAim : null}
-          aimPipelineDebug={aimPipelineDebug}
           gameLoadingTimedOut={gameLoadingTimedOut}
           loadingOverlayDebug={loadingOverlayDebug}
           shotPipelineDebug={shotPipelineDebug}
@@ -3386,12 +3080,6 @@ export default function App() {
           }}
           onAimStateChange={(aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode }) => {
             if (!room) return;
-            aimPipelineDebugRef.current.txCount += 1;
-            aimPipelineDebugRef.current.lastTxAt = Date.now();
-            aimPipelineDebugRef.current.lastTxMode = aim.mode;
-            aimPipelineDebugRef.current.lastTxSeq = aim.seq ?? 0;
-            aimPipelineDebugRef.current.lastTxCueX = aim.cueX ?? null;
-            aimPipelineDebugRef.current.lastTxCueY = aim.cueY ?? null;
             const deliveredOverSocket = sendMessage({
               type: "sync_aim",
               payload: {
