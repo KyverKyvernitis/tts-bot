@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from "react";
 import type { AimPointerMode, AimStateSnapshot, BallGroup, GameBallSnapshot, GameShotFrame, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
+import { drawAimLine, drawCue, drawGhostBall, drawRemoteAimOverlay, type AimPreview } from "./gameStageAimRender";
 import tableAsset from "../assets/game/pool-table-public.png";
 import cueAsset from "../assets/game/pool-cue-public.png";
 import type { ShotPipelineDebugEvent } from "../screens/GameScreen";
@@ -127,6 +128,7 @@ const RAIL_SETTLE_DELAY_MS = 110;
 const CUE_RETURN_HOLD_MS = 420;
 const BALL_SPRITE_SIZE = 72;
 const BALL_SPRITE_PHASE_BUCKETS = 96;
+const AIM_RENDER_METRICS = { ballRadius: BALL_RADIUS, ballVisualRadius: BALL_VISUAL_RADIUS } as const;
 
 function logRenderSnapshotDebug(payload: Record<string, unknown>) {
   if (!SNAPSHOT_RENDER_DEBUG_ENABLED) return;
@@ -159,22 +161,6 @@ type Props = {
 
 type PointerMode = "idle" | "aim" | "place" | "power";
 type LocalPoint = { x: number; y: number };
-
-type AimPreview = {
-  endX: number;
-  endY: number;
-  hitBall: GameBallSnapshot | null;
-  contactX: number | null;
-  contactY: number | null;
-  cueDeflectX: number | null;
-  cueDeflectY: number | null;
-  targetGuideX: number | null;
-  targetGuideY: number | null;
-  targetGuideScale: number;
-  hitFullness: number;
-  cueTangentX: number | null;
-  cueTangentY: number | null;
-};
 
 type PocketAnimation = {
   ball: GameBallSnapshot;
@@ -1198,249 +1184,6 @@ function drawPocketAnimation(
 
 // ─── Aim guide (reference-style: clean line + ghost ball) ─────────────────
 
-// Aim line only — drawn BEFORE balls
-function drawAimLine(
-  ctx: CanvasRenderingContext2D,
-  cueBall: GameBallSnapshot,
-  preview: AimPreview,
-  illegalTarget: boolean,
-  options?: { showTargetGuide?: boolean },
-) {
-  const hasHit = preview.contactX !== null && preview.contactY !== null && preview.hitBall;
-  const lineEndX = hasHit ? preview.contactX! : preview.endX;
-  const lineEndY = hasHit ? preview.contactY! : preview.endY;
-
-  // Soft glow
-  ctx.save();
-  ctx.strokeStyle = "rgba(200, 230, 255, 0.10)";
-  ctx.lineWidth = 6;
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  ctx.moveTo(cueBall.x, cueBall.y);
-  ctx.lineTo(lineEndX, lineEndY);
-  ctx.stroke();
-  ctx.restore();
-
-  // Main aim line — SOLID, bright
-  ctx.save();
-  ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
-  ctx.lineWidth = 2.15;
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  ctx.moveTo(cueBall.x, cueBall.y);
-  ctx.lineTo(lineEndX, lineEndY);
-  ctx.stroke();
-  ctx.restore();
-
-  const showTargetGuide = options?.showTargetGuide ?? true;
-
-  if (showTargetGuide && !illegalTarget && hasHit && preview.hitBall && preview.targetGuideX !== null && preview.targetGuideY !== null) {
-    const guideScale = clamp(preview.targetGuideScale, 0.14, 1);
-    ctx.save();
-    ctx.strokeStyle = "rgba(245, 250, 255, 0.88)";
-    ctx.lineWidth = lerp(1.05, 2.15, guideScale);
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(preview.hitBall.x, preview.hitBall.y);
-    ctx.lineTo(preview.targetGuideX, preview.targetGuideY);
-    ctx.stroke();
-    ctx.restore();
-
-    ctx.save();
-    ctx.strokeStyle = "rgba(255,255,255,0.72)";
-    ctx.lineWidth = lerp(1.0, 2.15, guideScale);
-    ctx.beginPath();
-    ctx.arc(preview.hitBall.x, preview.hitBall.y, lerp(BALL_VISUAL_RADIUS * 0.42, BALL_VISUAL_RADIUS + 1.5, guideScale), 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
-  }
-}
-
-// Ghost ball circle — drawn AFTER balls so it's visible on top
-function drawIllegalAimMarker(ctx: CanvasRenderingContext2D, x: number, y: number) {
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(x, y, 8.5, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(255, 88, 88, 0.98)";
-  ctx.lineWidth = 2.6;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(x - 5.8, y + 5.8);
-  ctx.lineTo(x + 5.8, y - 5.8);
-  ctx.strokeStyle = "rgba(255, 88, 88, 0.98)";
-  ctx.lineCap = "round";
-  ctx.lineWidth = 2.8;
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawGhostBall(
-  ctx: CanvasRenderingContext2D,
-  cueBall: GameBallSnapshot,
-  preview: AimPreview,
-  powerRatio: number,
-  illegalTarget: boolean,
-) {
-  const hasHit = preview.contactX !== null && preview.contactY !== null && preview.hitBall;
-  const dx = Math.cos(Math.atan2(preview.endY - cueBall.y, preview.endX - cueBall.x));
-  const dy = Math.sin(Math.atan2(preview.endY - cueBall.y, preview.endX - cueBall.x));
-
-  if (hasHit) {
-    const ghostX = preview.contactX!;
-    const ghostY = preview.contactY!;
-
-    if (illegalTarget) {
-      drawIllegalAimMarker(ctx, ghostX, ghostY);
-      return;
-    }
-
-    const ghostScale = clamp(0.18 + preview.hitFullness * 0.82, 0.18, 1);
-    const ghostRadius = BALL_VISUAL_RADIUS * ghostScale;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(ghostX, ghostY, ghostRadius + 2, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(200, 240, 255, 0.25)";
-    ctx.lineWidth = 3;
-    ctx.stroke();
-    ctx.restore();
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(ghostX, ghostY, ghostRadius, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.92)";
-    ctx.lineWidth = 3.05;
-    ctx.stroke();
-    ctx.restore();
-
-    const tangentX = preview.cueTangentX ?? dx;
-    const tangentY = preview.cueTangentY ?? dy;
-    const cueGuideTravel = lerp(62, 176, powerRatio) * lerp(0.28, 1.0, preview.hitFullness);
-    const cueGuideStartX = ghostX + tangentX * 10;
-    const cueGuideStartY = ghostY + tangentY * 10;
-    const cueGuideEndX = ghostX + tangentX * cueGuideTravel;
-    const cueGuideEndY = ghostY + tangentY * cueGuideTravel;
-
-    ctx.save();
-    ctx.strokeStyle = "rgba(248, 252, 255, 0.82)";
-    ctx.lineWidth = clamp(0.95 + preview.hitFullness * 1.25, 0.95, 2.35);
-    ctx.lineCap = "round";
-    ctx.setLineDash([10, 9]);
-    ctx.beginPath();
-    ctx.moveTo(cueGuideStartX, cueGuideStartY);
-    ctx.lineTo(cueGuideEndX, cueGuideEndY);
-    ctx.stroke();
-    ctx.restore();
-    return;
-  }
-
-  if (illegalTarget) {
-    drawIllegalAimMarker(ctx, preview.endX, preview.endY);
-  }
-}
-
-// ─── Cue stick rendering ──────────────────────────────────────────────────
-
-function drawCue(
-  ctx: CanvasRenderingContext2D,
-  cueBall: GameBallSnapshot,
-  aimAngle: number,
-  pullRatio: number,
-  cueSprite: HTMLImageElement,
-) {
-  const dirX = Math.cos(aimAngle);
-  const dirY = Math.sin(aimAngle);
-  const cueGap = BALL_RADIUS + 14 + pullRatio * 72;
-  const cueLength = 440;
-  const drawHeight = cueSprite.complete && cueSprite.naturalWidth
-    ? Math.max(6, cueLength * (cueSprite.naturalHeight / cueSprite.naturalWidth) * 0.6)
-    : 6;
-
-  ctx.save();
-  ctx.translate(cueBall.x - dirX * cueGap, cueBall.y - dirY * cueGap);
-  ctx.rotate(aimAngle);
-  ctx.shadowColor = "rgba(0, 0, 0, 0.25)";
-  ctx.shadowBlur = 6;
-  ctx.shadowOffsetY = 1.5;
-  if (cueSprite.complete && cueSprite.naturalWidth) {
-    ctx.drawImage(cueSprite, -cueLength, -drawHeight / 2, cueLength, drawHeight);
-  } else {
-    // Fallback cue drawing
-    const grad = ctx.createLinearGradient(-cueLength, 0, 0, 0);
-    grad.addColorStop(0, "#8b6914");
-    grad.addColorStop(0.7, "#c9a03c");
-    grad.addColorStop(0.95, "#e8d088");
-    grad.addColorStop(1, "#f0f0f0");
-    ctx.strokeStyle = grad;
-    ctx.lineWidth = 2.8;
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(-cueLength, 0);
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function drawRemoteAimOverlay(
-  ctx: CanvasRenderingContext2D,
-  cueSprite: HTMLImageElement,
-  cueBall: GameBallSnapshot,
-  aimAngle: number,
-  preview: AimPreview | null,
-  pullRatio: number,
-  mode: AimPointerMode,
-) {
-  const lineEndX = preview && preview.contactX !== null && preview.contactY !== null ? preview.contactX : preview?.endX ?? (cueBall.x + Math.cos(aimAngle) * 420);
-  const lineEndY = preview && preview.contactX !== null && preview.contactY !== null ? preview.contactY : preview?.endY ?? (cueBall.y + Math.sin(aimAngle) * 420);
-  const showPlacementRing = mode === "place";
-  const showGuide = mode !== "place";
-
-  if (showPlacementRing) {
-    ctx.save();
-    ctx.globalAlpha = 0.96;
-    drawBall(ctx, cueBall, 1);
-    ctx.restore();
-
-    ctx.save();
-    ctx.globalAlpha = 0.92;
-    ctx.setLineDash([7, 5]);
-    ctx.beginPath();
-    ctx.arc(cueBall.x, cueBall.y, BALL_VISUAL_RADIUS + 8, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
-    ctx.lineWidth = 2.2;
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  if (showGuide) {
-    if (preview) {
-      ctx.save();
-      ctx.globalAlpha = mode === "power" ? 0.84 : 0.76;
-      drawAimLine(ctx, cueBall, preview, false, { showTargetGuide: false });
-      ctx.restore();
-    } else {
-      ctx.save();
-      ctx.globalAlpha = mode === "power" ? 0.9 : 0.84;
-      ctx.strokeStyle = "rgba(244, 248, 255, 0.96)";
-      ctx.lineWidth = mode === "power" ? 2.8 : 2.35;
-      ctx.lineCap = "round";
-      ctx.beginPath();
-      ctx.moveTo(cueBall.x, cueBall.y);
-      ctx.lineTo(lineEndX, lineEndY);
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-
-  if (showGuide) {
-    ctx.save();
-    ctx.globalAlpha = mode === "power" ? 0.88 : 0.8;
-    drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
-    ctx.restore();
-  }
-}
-
 // ─── Table render cache ───────────────────────────────────────────────────
 
 function makeTableCache(image: HTMLImageElement) {
@@ -1499,7 +1242,7 @@ function drawPoolTable(
   // STEP 1: Local aim line + cue BEFORE balls.
   if (cueBall && showGuide && preview) {
     drawAimLine(ctx, cueBall, preview, illegalTarget);
-    drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite);
+    drawCue(ctx, cueBall, aimAngle, pullRatio, cueSprite, AIM_RENDER_METRICS);
   }
 
   // STEP 2: All balls
@@ -1510,12 +1253,12 @@ function drawPoolTable(
 
   // STEP 3: Remote overlay AFTER balls so the transparent cue/mira stay visible.
   if (remoteOverlay) {
-    drawRemoteAimOverlay(ctx, cueSprite, remoteOverlay.cueBall, remoteOverlay.aimAngle, remoteOverlay.preview, remoteOverlay.pullRatio, remoteOverlay.mode);
+    drawRemoteAimOverlay(ctx, cueSprite, remoteOverlay.cueBall, remoteOverlay.aimAngle, remoteOverlay.preview, remoteOverlay.pullRatio, remoteOverlay.mode, AIM_RENDER_METRICS, (overlayCtx, ball, alpha) => drawBall(overlayCtx, ball, alpha));
   }
 
   // STEP 4: Ghost ball circle AFTER balls (so it's visible on top)
   if (cueBall && showGuide && preview) {
-    drawGhostBall(ctx, cueBall, preview, previewPowerRatio, illegalTarget);
+    drawGhostBall(ctx, cueBall, preview, previewPowerRatio, illegalTarget, AIM_RENDER_METRICS);
   }
 
 

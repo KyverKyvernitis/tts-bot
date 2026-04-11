@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { useGameController } from "./controllers/useGameController";
+import { useRemoteAimController } from "./controllers/useRemoteAimController";
 import {
   authorizeDiscordCode,
   authenticateDiscordAccessToken,
@@ -9,7 +10,7 @@ import {
   writeCachedToken,
   writeCachedUser,
 } from "./sdk/discord";
-import type { ActivityBootstrap, ActivityUser, AimPointerMode, AimStateSnapshot, BalanceDebugSnapshot, BalanceSnapshot, GameBallSnapshot, GameSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
+import type { ActivityBootstrap, ActivityUser, AimPointerMode, BalanceDebugSnapshot, BalanceSnapshot, GameBallSnapshot, GameSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
 import lobbyBackground from "./assets/lobby-bg.png";
 import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.wav";
@@ -31,12 +32,10 @@ import {
 } from "./game/bootstrap";
 import {
   resetGameRuntimeState as resetGameRuntimeStateFromModule,
-  type PendingAimHttpState,
   type ShotDispatchState,
 } from "./game/teardown";
 import { fetchBalanceRequest } from "./transport/balanceApi";
 import { fetchGameStateRequest, postGameActionRequest } from "./transport/gameApi";
-import { fetchAimStateRequest, syncAimStateRequest } from "./transport/aimApi";
 import { dispatchLeaveBeacon } from "./transport/httpClient";
 import { fetchRoomStateRequest, fetchRoomsRequest, postRoomActionRequest } from "./transport/lobbyApi";
 import { sendSubscribeRoomMessage } from "./realtime/roomRealtime";
@@ -315,7 +314,6 @@ export default function App() {
   const [bootstrapped, setBootstrapped] = useState(false);
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
   const [game, setGame] = useState<GameSnapshot | null>(null);
-  const [remoteAim, setRemoteAim] = useState<AimStateSnapshot | null>(null);
   const [rooms, setRooms] = useState<RoomSnapshot[]>([]);
   const [screen, setScreen] = useState<LobbyScreen>("home");
   const [createTableType, setCreateTableType] = useState<TableType>("stake");
@@ -363,10 +361,6 @@ export default function App() {
   const isRoomHostRef = useRef(false);
   const currentUserIdRef = useRef<string | null>(null);
   const unloadLeaveSentRef = useRef<string | null>(null);
-  const pendingAimHttpRef = useRef<PendingAimHttpState>(null);
-  const aimHttpTimerRef = useRef<number | null>(null);
-  const lastAimHttpSentAtRef = useRef(0);
-  const lastRemoteAimAtRef = useRef<Record<string, number>>({});
   const snapshotDebugRef = useRef<SnapshotDebugState>({ roomId: null, lastReceivedAt: 0, lastLoggedAt: 0, lastRevision: -1, lastSource: null });
   const wsGameStateRef = useRef<WsGameStateRefState>({ roomId: null, lastReceivedAt: 0, shotSequence: 0, revision: 0 });
   const simRecoveryRef = useRef<SimRecoveryState>({ roomId: null, shotSequence: 0, revision: 0, lastProgressAt: 0, lastRecoveryAt: 0, recoveryCount: 0, inFlight: false, lastRequestedShotSequence: 0, lastRequestedRevision: 0 });
@@ -1137,10 +1131,7 @@ export default function App() {
     simRecoveryRef,
     gameBootstrapSessionRef,
     snapshotDebugRef,
-    aimHttpTimerRef,
-    pendingAimHttpRef,
-    lastAimHttpSentAtRef,
-    setRemoteAim,
+    ...remoteAimResetDeps,
     setGameShootBusy,
     setGame,
     currentGameRef,
@@ -1195,6 +1186,23 @@ export default function App() {
     });
     return true;
   };
+
+  const {
+    remoteAim,
+    acceptIncomingAim,
+    pruneRemoteAimForGameState,
+    scheduleAimHttpSync,
+    resetDeps: remoteAimResetDeps,
+  } = useRemoteAimController({
+    screen,
+    roomId: room?.roomId ?? null,
+    game: game ? { roomId: game.roomId, status: game.status, turnUserId: game.turnUserId } : null,
+    currentUserId: state.currentUser.userId,
+    connectionState,
+    setAuthDebug,
+    isRealtimeSocketHealthy,
+    shouldBlockHttpAuxDuringRealtime,
+  });
 
   const mergeIncomingGame = (current: GameSnapshot | null, incoming: GameSnapshot | null | undefined) => {
     if (!incoming) return current;
@@ -1509,87 +1517,6 @@ export default function App() {
     }
   };
 
-
-  const clearRemoteAim = () => {
-    setRemoteAim((current) => current ? null : current);
-  };
-
-  const pushAimToState = (payload: AimStateSnapshot | null) => {
-    if (!payload || payload.userId === state.currentUser.userId) return;
-    lastRemoteAimAtRef.current[payload.roomId] = payload.updatedAt;
-    setRemoteAim((current) => {
-      if (!current || current.roomId !== payload.roomId || current.userId !== payload.userId) {
-        return payload;
-      }
-      const currentRevision = Number.isFinite(current.snapshotRevision) ? current.snapshotRevision : 0;
-      const nextRevision = Number.isFinite(payload.snapshotRevision) ? payload.snapshotRevision : 0;
-      if (nextRevision < currentRevision) return current;
-      if (nextRevision === currentRevision) {
-        if (payload.seq < current.seq) return current;
-        if (payload.seq === current.seq && payload.updatedAt < current.updatedAt) return current;
-      }
-      return payload;
-    });
-  };
-
-  const scheduleAimHttpSync = (
-    roomId: string,
-    aim: { visible: boolean; angle: number; cueX?: number | null; cueY?: number | null; power?: number | null; seq?: number; mode: AimPointerMode },
-    options?: { allowWhileRealtimeHealthy?: boolean; reason?: string },
-  ) => {
-    const allowWhileRealtimeHealthy = Boolean(options?.allowWhileRealtimeHealthy);
-    if (!allowWhileRealtimeHealthy && isRealtimeSocketHealthy(roomId)) return;
-    const requestReason = options?.reason ?? (allowWhileRealtimeHealthy ? 'ws_backup' : 'room_aim_sync');
-    if (!allowWhileRealtimeHealthy && shouldBlockHttpAuxDuringRealtime(roomId, 'aim', requestReason)) return;
-    pendingAimHttpRef.current = { roomId, aim };
-    const flush = () => {
-      const pending = pendingAimHttpRef.current;
-      if (!pending) return;
-      pendingAimHttpRef.current = null;
-      lastAimHttpSentAtRef.current = Date.now();
-      void syncAimStateRequest({
-        roomId: pending.roomId,
-        userId: state.currentUser.userId,
-        visible: pending.aim.visible,
-        angle: pending.aim.angle,
-        cueX: pending.aim.cueX ?? null,
-        cueY: pending.aim.cueY ?? null,
-        power: pending.aim.power ?? 0,
-        seq: pending.aim.seq ?? 0,
-        mode: pending.aim.mode,
-      }).then((result) => {
-        if (!result.data && result.attempts.length) {
-          setAuthDebug((current) => current ? `${current} • aim_sync_http_failed:${requestReason}:${pending.roomId}:${result.attempts.join(' | ')}` : `aim_sync_http_failed:${requestReason}:${pending.roomId}:${result.attempts.join(' | ')}`);
-        }
-      }).catch(() => {});
-    };
-    const now = Date.now();
-    const minGap = aim.mode === 'place' ? 24 : aim.mode === 'power' ? 32 : 40;
-    const wait = Math.max(0, minGap - (now - lastAimHttpSentAtRef.current));
-    if (aimHttpTimerRef.current !== null) window.clearTimeout(aimHttpTimerRef.current);
-    if (wait === 0 || !aim.visible || aim.mode === 'idle') {
-      flush();
-      return;
-    }
-    aimHttpTimerRef.current = window.setTimeout(() => {
-      aimHttpTimerRef.current = null;
-      flush();
-    }, wait);
-  };
-
-  const fetchAimStateOverHttp = async (roomId: string, reason: string, options?: { allowWhileRealtimeHealthy?: boolean }) => {
-    if (!options?.allowWhileRealtimeHealthy && shouldBlockHttpAuxDuringRealtime(roomId, 'aim', reason)) {
-      return null;
-    }
-    const result = await fetchAimStateRequest(roomId);
-    if (result.data?.aim) {
-      return result.data.aim;
-    }
-    if (result.attempts.length) {
-      setAuthDebug((current) => current ? `${current} • aim_get_http_failed:${reason}:${roomId}:${result.attempts.join(' | ')}` : `aim_get_http_failed:${reason}:${roomId}:${result.attempts.join(' | ')}`);
-    }
-    return null;
-  };
 
   const postGameActionOverHttp = async (path: string, payload: Record<string, unknown>, reason: string) => {
     const result = await postGameActionRequest(path, payload, reason);
@@ -2004,78 +1931,6 @@ export default function App() {
     gameShootBusyRef.current = gameShootBusy;
   }, [gameShootBusy]);
 
-  useEffect(() => {
-    if (screen !== "game" || !room || !game) {
-      clearRemoteAim();
-      return;
-    }
-    if (game.turnUserId === state.currentUser.userId || game.status !== "waiting_shot") {
-      setRemoteAim(null);
-    }
-  }, [game?.roomId, game?.shotSequence, game?.status, game?.turnUserId, room?.roomId, screen, state.currentUser.userId]);
-
-  useEffect(() => {
-    if (screen !== 'game' || !room || !game) {
-      return;
-    }
-    if (game.status === 'finished' || game.status === 'simulating' || game.turnUserId === state.currentUser.userId) {
-      return;
-    }
-    let cancelled = false;
-    let inFlight = false;
-    const pollIntervalMs = connectionState === 'connected' ? 95 : 60;
-    const freshnessMs = connectionState === 'connected' ? 150 : 220;
-
-    const applyFetchedAim = (aim: AimStateSnapshot | null) => {
-      if (cancelled) return;
-      if (!aim || aim.roomId !== room.roomId || aim.userId === state.currentUser.userId) {
-        return;
-      }
-      const shouldKeepRemoteCuePlacement = aim.cueX !== null && aim.cueY !== null && aim.mode !== 'idle';
-      if ((aim.visible && aim.mode !== 'idle') || shouldKeepRemoteCuePlacement) {
-        pushAimToState(aim);
-      } else {
-        setRemoteAim((current) => current?.roomId === room.roomId ? null : current);
-      }
-    };
-
-    const tick = async () => {
-      if (cancelled || inFlight) return;
-      const currentRemoteAim = remoteAim && remoteAim.roomId === room.roomId ? remoteAim : null;
-      const lastSeenAt = Math.max(
-        lastRemoteAimAtRef.current[room.roomId] ?? 0,
-        currentRemoteAim?.updatedAt ?? 0,
-      );
-      const needsReconcile = !currentRemoteAim || Date.now() - lastSeenAt >= freshnessMs;
-      if (!needsReconcile && connectionState === 'connected') return;
-      inFlight = true;
-      try {
-        const aim = await fetchAimStateOverHttp(room.roomId, connectionState === 'connected' ? 'reconcile_waiting_turn_loop' : 'poll_loop', {
-          allowWhileRealtimeHealthy: connectionState === 'connected',
-        });
-        applyFetchedAim(aim);
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    void tick();
-    const interval = window.setInterval(() => { void tick(); }, pollIntervalMs);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [connectionState, game?.roomId, game?.status, game?.turnUserId, remoteAim, room?.roomId, screen, state.currentUser.userId]);
-
-  useEffect(() => () => {
-    if (aimHttpTimerRef.current !== null) {
-      window.clearTimeout(aimHttpTimerRef.current);
-      aimHttpTimerRef.current = null;
-    }
-  }, []);
-
-
-
   const requestRooms = async () => {
     console.log("[sinuca-ui-request-rooms]", {
       mode: state.context.mode,
@@ -2220,13 +2075,13 @@ export default function App() {
           if (!applied) {
             gameBootstrapDebugRef.current.lastRealtimeAccepted = 'no';
           }
-          setRemoteAim((current) => current?.roomId === payload.payload.roomId && payload.payload.turnUserId !== state.currentUser.userId && payload.payload.status === "waiting_shot" ? current : null);
+          pruneRemoteAimForGameState(payload.payload);
           setScreen("game");
           setErrorMessage(null);
           return;
         }
         if (payload.type === "aim_state") {
-          pushAimToState(payload.payload);
+          acceptIncomingAim(payload.payload);
           return;
         }
         if (payload.type === "room_list") {
