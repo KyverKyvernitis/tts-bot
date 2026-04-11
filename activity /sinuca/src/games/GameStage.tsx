@@ -900,52 +900,90 @@ function hexToRgb(hex: string) {
 
 // ─── Fast gradient-based stripe rendering (orientation-driven) ───────────
 
+function visibleLatitudeArc(orientation: Quaternion, latitudeY: number, r: number, samples = 72) {
+  const radius = Math.sqrt(Math.max(0, 1 - latitudeY * latitudeY));
+  const points: { x: number; y: number }[] = [];
+  const visible: boolean[] = [];
+  for (let i = 0; i < samples; i += 1) {
+    const t = (i / samples) * Math.PI * 2;
+    const local = { x: Math.cos(t) * radius, y: latitudeY, z: Math.sin(t) * radius };
+    const view = rotateVectorByQuaternion(local, orientation);
+    points.push({ x: view.x * r, y: view.y * r });
+    visible.push(view.z >= -0.015);
+  }
+  let bestStart = -1;
+  let bestLen = 0;
+  let currentStart = -1;
+  let currentLen = 0;
+  for (let pass = 0; pass < samples * 2; pass += 1) {
+    const idx = pass % samples;
+    if (visible[idx]) {
+      if (currentStart === -1) currentStart = pass;
+      currentLen += 1;
+      if (currentLen > bestLen) {
+        bestLen = currentLen;
+        bestStart = currentStart;
+      }
+    } else {
+      currentStart = -1;
+      currentLen = 0;
+    }
+  }
+  if (bestStart < 0 || bestLen < 2) return [] as { x: number; y: number }[];
+  const result: { x: number; y: number }[] = [];
+  for (let j = 0; j < Math.min(bestLen, samples); j += 1) {
+    result.push(points[(bestStart + j) % samples]);
+  }
+  return result;
+}
+
 function drawStripeBand(
   ctx: CanvasRenderingContext2D,
   r: number,
   color: string,
-  pole: Vec3,
+  orientation: Quaternion,
   scale: number,
 ) {
-  const screenLen = Math.hypot(pole.x, pole.y);
-  const bandAngle = screenLen > 0.001 ? Math.atan2(pole.y, pole.x) + Math.PI * 0.5 : 0;
-  const facing = clamp(Math.abs(pole.z), 0, 1);
-  const apparentHalfH = lerp(r * 0.075, r * 0.5, Math.pow(facing, 0.82));
-  if (apparentHalfH < r * 0.03) return;
+  const bandHalfWidth = 0.44;
+  const upperArc = visibleLatitudeArc(orientation, bandHalfWidth, r);
+  const lowerArc = visibleLatitudeArc(orientation, -bandHalfWidth, r);
+  if (upperArc.length < 2 || lowerArc.length < 2) return;
+
+  const all = [...upperArc, ...lowerArc];
+  const minY = Math.min(...all.map((p) => p.y));
+  const maxY = Math.max(...all.map((p) => p.y));
 
   ctx.save();
-  ctx.rotate(bandAngle);
   ctx.beginPath();
   ctx.arc(0, 0, r - 0.3 * scale, 0, Math.PI * 2);
   ctx.clip();
 
-  const topY = -apparentHalfH;
-  const botY = apparentHalfH;
-  const edgeCurve = lerp(r * 0.22, r * 0.08, facing);
-
   ctx.beginPath();
-  ctx.moveTo(-r, topY);
-  ctx.quadraticCurveTo(0, topY - edgeCurve, r, topY);
-  ctx.lineTo(r, botY);
-  ctx.quadraticCurveTo(0, botY + edgeCurve, -r, botY);
+  ctx.moveTo(upperArc[0].x, upperArc[0].y);
+  for (const point of upperArc.slice(1)) ctx.lineTo(point.x, point.y);
+  for (const point of [...lowerArc].reverse()) ctx.lineTo(point.x, point.y);
   ctx.closePath();
 
-  const g = ctx.createLinearGradient(0, topY - edgeCurve, 0, botY + edgeCurve);
-  g.addColorStop(0, shadeColor(color, -18));
-  g.addColorStop(0.24, color);
-  g.addColorStop(0.5, shadeColor(color, 18));
-  g.addColorStop(0.76, color);
-  g.addColorStop(1, shadeColor(color, -26));
+  const g = ctx.createLinearGradient(0, minY, 0, maxY);
+  g.addColorStop(0, shadeColor(color, -16));
+  g.addColorStop(0.2, color);
+  g.addColorStop(0.5, shadeColor(color, 16));
+  g.addColorStop(0.8, color);
+  g.addColorStop(1, shadeColor(color, -24));
   ctx.fillStyle = g;
   ctx.fill();
 
-  const edgeFade = ctx.createLinearGradient(0, topY - edgeCurve, 0, botY + edgeCurve);
-  edgeFade.addColorStop(0, 'rgba(255,255,255,0.1)');
-  edgeFade.addColorStop(0.16, 'rgba(255,255,255,0)');
-  edgeFade.addColorStop(0.84, 'rgba(255,255,255,0)');
-  edgeFade.addColorStop(1, 'rgba(0,0,0,0.08)');
-  ctx.fillStyle = edgeFade;
-  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.lineWidth = Math.max(0.6, 0.75 * scale);
+  ctx.beginPath();
+  ctx.moveTo(upperArc[0].x, upperArc[0].y);
+  for (const point of upperArc.slice(1)) ctx.lineTo(point.x, point.y);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(lowerArc[0].x, lowerArc[0].y);
+  for (const point of lowerArc.slice(1)) ctx.lineTo(point.x, point.y);
+  ctx.stroke();
+
   ctx.restore();
 }
 
@@ -1010,14 +1048,10 @@ function drawBallLabel(
   color: string,
   isStripe: boolean,
 ) {
-  const frontWeight = smoothstep(0.06, 0.28, pole.z);
-  const backWeight = smoothstep(0.06, 0.28, -pole.z);
-
-  if (frontWeight > 0.001) {
-    drawBallLabelFace(ctx, ball, r, pole, scale, color, isStripe, frontWeight);
-  }
-  if (backWeight > 0.001) {
-    drawBallLabelFace(ctx, ball, r, { x: -pole.x, y: -pole.y, z: -pole.z }, scale, color, isStripe, backWeight);
+  const visiblePole = pole.z >= 0 ? pole : { x: -pole.x, y: -pole.y, z: -pole.z };
+  const weight = smoothstep(-0.02, 0.26, Math.abs(pole.z));
+  if (weight > 0.001) {
+    drawBallLabelFace(ctx, ball, r, visiblePole, scale, color, isStripe, weight);
   }
 }
 
@@ -1029,7 +1063,8 @@ function drawBall(
 ) {
   const r = BALL_VISUAL_RADIUS * scale;
   const color = ballColor(ball.number);
-  const pole = spin ? rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, spin.orientation) : { x: 0, y: 0, z: 1 };
+  const orientation = spin?.orientation ?? { x: 0, y: 0, z: 0, w: 1 };
+  const pole = rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation);
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
@@ -1076,7 +1111,7 @@ function drawBall(
 
   if (ball.number > 0) {
     const isStripe = ball.number >= 9;
-    if (isStripe) drawStripeBand(ctx, r, color, pole, scale);
+    if (isStripe) drawStripeBand(ctx, r, color, orientation, scale);
     drawBallLabel(ctx, ball, r, pole, scale, color, isStripe);
   }
 
