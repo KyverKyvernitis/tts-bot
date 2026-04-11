@@ -305,20 +305,21 @@ function smoothstep(edge0: number, edge1: number, value: number) {
 
 function shapeShotPowerForVisual(power: number) {
   const shotPower = clamp(Number.isFinite(power) ? power : 0.52, POWER_MIN, 1);
-  return shotPower <= 0.36
-    ? shotPower * 0.92
+  return shotPower <= 0.34
+    ? shotPower * 0.72
     : shotPower <= 0.82
-      ? 0.3312 + Math.pow((shotPower - 0.36) / 0.46, 1.42) * 0.3788
+      ? 0.2448 + Math.pow((shotPower - 0.34) / 0.48, 1.5) * 0.4652
       : 0.71 + Math.pow((shotPower - 0.82) / 0.18, 1.88) * 0.29;
 }
 
 function estimateCueVisualSpeedPxPerMs(power: number) {
-  const shotSpeed = SERVER_MIN_SHOT_SPEED + shapeShotPowerForVisual(power) * SERVER_MAX_SHOT_SPEED;
-  return clamp(shotSpeed * SERVER_REALTIME_SPEED_TO_PX_PER_MS, 0.03, 4.1);
+  const shapedPower = Math.pow(shapeShotPowerForVisual(power), 1.14);
+  const shotSpeed = SERVER_MIN_SHOT_SPEED + shapedPower * SERVER_MAX_SHOT_SPEED;
+  return clamp(shotSpeed * SERVER_REALTIME_SPEED_TO_PX_PER_MS, 0.025, 3.55);
 }
 
 function maxCueVisualLeadPx(power: number) {
-  return lerp(6, 24, Math.pow(clamp(power, 0, 1), 0.72));
+  return lerp(0.8, 7.2, Math.pow(clamp(power, 0, 1), 0.94));
 }
 
 function lerp(from: number, to: number, t: number) {
@@ -613,10 +614,12 @@ function computePendingShotProgress(pending: {
 }, now: number) {
   const elapsed = now - pending.startedAt;
   const heldElapsed = Math.min(elapsed, PENDING_SHOT_VISUAL_MAX_MS);
-  const travelMs = Math.max(18, pending.impactAtMs ?? Math.max(32, pending.travelLimit / Math.max(0.85, pending.estimatedSpeedPxPerMs)));
+  const travelMs = Math.max(22, pending.impactAtMs ?? Math.max(40, pending.travelLimit / Math.max(0.72, pending.estimatedSpeedPxPerMs)));
   const moveProgress = clamp(heldElapsed / travelMs, 0, 1);
-  const curve = lerp(1.02, 2.08, Math.pow(clamp(pending.power, 0, 1), 0.82));
-  const easedMove = moveProgress <= 0 ? 0 : 1 - Math.pow(1 - moveProgress, curve);
+  const weakShotBlend = 1 - smoothstep(0.22, 0.72, clamp(pending.power, 0, 1));
+  const slowStart = moveProgress * moveProgress * (3 - 2 * moveProgress);
+  const strongStart = moveProgress <= 0 ? 0 : 1 - Math.pow(1 - moveProgress, lerp(1.02, 1.62, Math.pow(clamp(pending.power, 0, 1), 0.82)));
+  const easedMove = lerp(strongStart, slowStart, weakShotBlend);
   const travelDistance = pending.travelLimit * easedMove;
   const expectedCueX = pending.cueX + Math.cos(pending.angle) * travelDistance;
   const expectedCueY = pending.cueY + Math.sin(pending.angle) * travelDistance;
@@ -898,161 +901,179 @@ function hexToRgb(hex: string) {
   };
 }
 
-// ─── Fast gradient-based stripe rendering (orientation-driven) ───────────
+// ─── Sphere-surface billiard ball rendering ────────────────────────────────
 
-function visibleLatitudeArc(orientation: Quaternion, latitudeY: number, r: number, samples = 72) {
-  const radius = Math.sqrt(Math.max(0, 1 - latitudeY * latitudeY));
-  const points: { x: number; y: number }[] = [];
-  const visible: boolean[] = [];
-  for (let i = 0; i < samples; i += 1) {
-    const t = (i / samples) * Math.PI * 2;
-    const local = { x: Math.cos(t) * radius, y: latitudeY, z: Math.sin(t) * radius };
-    const view = rotateVectorByQuaternion(local, orientation);
-    points.push({ x: view.x * r, y: view.y * r });
-    visible.push(view.z >= -0.015);
-  }
-  let bestStart = -1;
-  let bestLen = 0;
-  let currentStart = -1;
-  let currentLen = 0;
-  for (let pass = 0; pass < samples * 2; pass += 1) {
-    const idx = pass % samples;
-    if (visible[idx]) {
-      if (currentStart === -1) currentStart = pass;
-      currentLen += 1;
-      if (currentLen > bestLen) {
-        bestLen = currentLen;
-        bestStart = currentStart;
+const ballSurfaceSpriteCache = new Map<string, HTMLCanvasElement>();
+const BALL_SURFACE_LIGHT = normalizeVec3({ x: -0.42, y: -0.58, z: 0.7 });
+const BALL_WHITE_RGB = { r: 246, g: 249, b: 253 };
+const BALL_NUMBER_DISK_RGB = { r: 252, g: 252, b: 254 };
+const BALL_BLACK_RGB = { r: 18, g: 21, b: 26 };
+
+function quaternionConjugate(q: Quaternion): Quaternion {
+  return { x: -q.x, y: -q.y, z: -q.z, w: q.w };
+}
+
+function blendRgb(base: { r: number; g: number; b: number }, over: { r: number; g: number; b: number }, alpha: number) {
+  const t = clamp(alpha, 0, 1);
+  return {
+    r: Math.round(base.r + (over.r - base.r) * t),
+    g: Math.round(base.g + (over.g - base.g) * t),
+    b: Math.round(base.b + (over.b - base.b) * t),
+  };
+}
+
+function scaleRgb(color: { r: number; g: number; b: number }, factor: number) {
+  return {
+    r: clamp(Math.round(color.r * factor), 0, 255),
+    g: clamp(Math.round(color.g * factor), 0, 255),
+    b: clamp(Math.round(color.b * factor), 0, 255),
+  };
+}
+
+function smoothBandMask(absY: number, halfWidth: number, feather: number) {
+  if (absY <= halfWidth - feather) return 1;
+  if (absY >= halfWidth + feather) return 0;
+  return 1 - smoothstep(halfWidth - feather, halfWidth + feather, absY);
+}
+
+function sphericalCapMask(dotValue: number, threshold: number, feather: number) {
+  if (dotValue <= threshold - feather) return 0;
+  if (dotValue >= threshold + feather) return 1;
+  return smoothstep(threshold - feather, threshold + feather, dotValue);
+}
+
+function quantizeUnitComponent(value: number) {
+  return Math.round(clamp((value + 1) * 0.5, 0, 1) * (BALL_SPRITE_PHASE_BUCKETS - 1));
+}
+
+function buildBallSurfaceCacheKey(ball: GameBallSnapshot, orientation: Quaternion) {
+  const pole = rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation);
+  const up = rotateVectorByQuaternion({ x: 0, y: 1, z: 0 }, orientation);
+  return [
+    ball.number,
+    quantizeUnitComponent(pole.x),
+    quantizeUnitComponent(pole.y),
+    quantizeUnitComponent(pole.z),
+    quantizeUnitComponent(up.x),
+    quantizeUnitComponent(up.y),
+    quantizeUnitComponent(up.z),
+  ].join(':');
+}
+
+function renderBallSurfaceSprite(ball: GameBallSnapshot, orientation: Quaternion, colorHex: string) {
+  const size = BALL_SPRITE_SIZE;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
+
+  const image = ctx.createImageData(size, size);
+  const data = image.data;
+  const radius = size * 0.5 - 2;
+  const center = size * 0.5;
+  const inverse = quaternionConjugate(orientation);
+  const baseColor = ball.number === 0 ? BALL_WHITE_RGB : ball.number === 8 ? BALL_BLACK_RGB : hexToRgb(colorHex);
+  const isStripe = ball.number >= 9;
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const px = (x + 0.5 - center) / radius;
+      const py = (y + 0.5 - center) / radius;
+      const rr = px * px + py * py;
+      const index = (y * size + x) * 4;
+      if (rr > 1) {
+        data[index + 3] = 0;
+        continue;
       }
-    } else {
-      currentStart = -1;
-      currentLen = 0;
+
+      const pz = Math.sqrt(Math.max(0, 1 - rr));
+      const viewPoint = { x: px, y: py, z: pz };
+      const localPoint = rotateVectorByQuaternion(viewPoint, inverse);
+
+      let surface = baseColor;
+      if (ball.number === 0) {
+        surface = BALL_WHITE_RGB;
+      } else if (ball.number === 8) {
+        surface = BALL_BLACK_RGB;
+      } else if (isStripe) {
+        const stripeMask = smoothBandMask(Math.abs(localPoint.y), 0.34, 0.06);
+        surface = blendRgb(BALL_WHITE_RGB, baseColor, stripeMask);
+      }
+
+      if (ball.number > 0) {
+        const frontDisk = sphericalCapMask(localPoint.z, 0.84, 0.06);
+        const backDisk = sphericalCapMask(-localPoint.z, 0.84, 0.06);
+        const diskMask = Math.max(frontDisk, backDisk);
+        if (diskMask > 0) surface = blendRgb(surface, BALL_NUMBER_DISK_RGB, diskMask);
+      }
+
+      const lambert = clamp(viewPoint.x * BALL_SURFACE_LIGHT.x + viewPoint.y * BALL_SURFACE_LIGHT.y + viewPoint.z * BALL_SURFACE_LIGHT.z, 0, 1);
+      const rim = Math.pow(1 - pz, 1.45);
+      const shade = 0.34 + lambert * 0.74 - rim * 0.12;
+      const lit = scaleRgb(surface, clamp(shade, 0.18, 1.18));
+
+      const edgeAlpha = rr > 0.92 ? 1 - smoothstep(0.92, 1, rr) : 1;
+      data[index] = lit.r;
+      data[index + 1] = lit.g;
+      data[index + 2] = lit.b;
+      data[index + 3] = Math.round(edgeAlpha * 255);
     }
   }
-  if (bestStart < 0 || bestLen < 2) return [] as { x: number; y: number }[];
-  const result: { x: number; y: number }[] = [];
-  for (let j = 0; j < Math.min(bestLen, samples); j += 1) {
-    result.push(points[(bestStart + j) % samples]);
+
+  ctx.putImageData(image, 0, 0);
+  return canvas;
+}
+
+function getBallSurfaceSprite(ball: GameBallSnapshot, orientation: Quaternion, colorHex: string) {
+  const key = buildBallSurfaceCacheKey(ball, orientation);
+  const existing = ballSurfaceSpriteCache.get(key);
+  if (existing) return existing;
+  const sprite = renderBallSurfaceSprite(ball, orientation, colorHex);
+  ballSurfaceSpriteCache.set(key, sprite);
+  if (ballSurfaceSpriteCache.size > 1800) {
+    const oldest = ballSurfaceSpriteCache.keys().next().value;
+    if (oldest) ballSurfaceSpriteCache.delete(oldest);
   }
-  return result;
+  return sprite;
 }
 
-function drawStripeBand(
-  ctx: CanvasRenderingContext2D,
-  r: number,
-  color: string,
-  orientation: Quaternion,
-  scale: number,
-) {
-  const bandHalfWidth = 0.44;
-  const upperArc = visibleLatitudeArc(orientation, bandHalfWidth, r);
-  const lowerArc = visibleLatitudeArc(orientation, -bandHalfWidth, r);
-  if (upperArc.length < 2 || lowerArc.length < 2) return;
-
-  const all = [...upperArc, ...lowerArc];
-  const minY = Math.min(...all.map((p) => p.y));
-  const maxY = Math.max(...all.map((p) => p.y));
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(0, 0, r - 0.3 * scale, 0, Math.PI * 2);
-  ctx.clip();
-
-  ctx.beginPath();
-  ctx.moveTo(upperArc[0].x, upperArc[0].y);
-  for (const point of upperArc.slice(1)) ctx.lineTo(point.x, point.y);
-  for (const point of [...lowerArc].reverse()) ctx.lineTo(point.x, point.y);
-  ctx.closePath();
-
-  const g = ctx.createLinearGradient(0, minY, 0, maxY);
-  g.addColorStop(0, shadeColor(color, -16));
-  g.addColorStop(0.2, color);
-  g.addColorStop(0.5, shadeColor(color, 16));
-  g.addColorStop(0.8, color);
-  g.addColorStop(1, shadeColor(color, -24));
-  ctx.fillStyle = g;
-  ctx.fill();
-
-  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-  ctx.lineWidth = Math.max(0.6, 0.75 * scale);
-  ctx.beginPath();
-  ctx.moveTo(upperArc[0].x, upperArc[0].y);
-  for (const point of upperArc.slice(1)) ctx.lineTo(point.x, point.y);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(lowerArc[0].x, lowerArc[0].y);
-  for (const point of lowerArc.slice(1)) ctx.lineTo(point.x, point.y);
-  ctx.stroke();
-
-  ctx.restore();
-}
-
-function drawBallLabelFace(
+function drawBallNumberText(
   ctx: CanvasRenderingContext2D,
   ball: GameBallSnapshot,
   r: number,
-  normal: Vec3,
+  orientation: Quaternion,
   scale: number,
   color: string,
   isStripe: boolean,
-  alphaMultiplier = 1,
 ) {
-  const labelDepth = normal.z;
-  if (labelDepth < -0.78) return;
+  if (ball.number <= 0) return;
+  const frontPole = rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation);
+  const visiblePole = frontPole.z >= 0 ? frontPole : { x: -frontPole.x, y: -frontPole.y, z: -frontPole.z };
+  const frontFactor = smoothstep(0.08, 0.94, visiblePole.z);
+  if (frontFactor <= 0.06) return;
 
-  const frontFactor = clamp((labelDepth + 1) * 0.5, 0, 1);
-  const depthAlpha = clamp((0.04 + Math.pow(frontFactor, 1.18)) * alphaMultiplier, 0, 1);
-  if (depthAlpha < 0.06) return;
-
-  const labelX = normal.x * r * 0.72;
-  const labelY = normal.y * r * 0.72;
-  const diskScaleY = lerp(0.38, 0.98, frontFactor);
-  const diskScaleX = lerp(0.58, 1, frontFactor);
-  const diskR = r * (isStripe ? 0.39 : 0.425);
-  const diskGrad = ctx.createRadialGradient(labelX - diskR * 0.2, labelY - diskR * 0.2, 0, labelX, labelY, diskR);
-  diskGrad.addColorStop(0, '#ffffff');
-  diskGrad.addColorStop(1, '#e7eef5');
-
-  ctx.save();
-  ctx.globalAlpha = depthAlpha;
-  ctx.translate(labelX, labelY);
-  ctx.scale(diskScaleX, diskScaleY);
-  ctx.beginPath();
-  ctx.arc(0, 0, diskR, 0, Math.PI * 2);
-  ctx.fillStyle = diskGrad;
-  ctx.fill();
-  ctx.restore();
-
+  const labelX = visiblePole.x * r * 0.72;
+  const labelY = visiblePole.y * r * 0.72;
+  const scaleX = lerp(0.42, 1, frontFactor);
+  const scaleY = lerp(0.22, 1, frontFactor);
   const fontSize = clamp(Math.round((ball.number >= 10 ? 7 : 8.5) * scale), 5, 18);
+  const textColor = ball.number === 8 ? '#0f1318' : isStripe ? color : shadeColor(color, -8);
+
   ctx.save();
-  ctx.globalAlpha = clamp(depthAlpha + 0.04, 0.08, 1);
-  ctx.fillStyle = ball.number === 8 ? '#f2f4f8' : color;
+  ctx.translate(labelX, labelY + fontSize * 0.02);
+  ctx.scale(scaleX, scaleY);
+  ctx.globalAlpha = clamp(0.08 + frontFactor * 1.08, 0, 1);
+  ctx.fillStyle = textColor;
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.lineWidth = Math.max(0.7, 0.95 * scale);
   ctx.font = `900 ${fontSize}px Inter, system-ui, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.lineJoin = 'round';
-  ctx.lineWidth = Math.max(1, 1.2 * scale);
   const text = String(ball.number);
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.22)';
-  ctx.strokeText(text, labelX, labelY + fontSize * 0.04);
-  ctx.fillText(text, labelX, labelY + fontSize * 0.04);
+  ctx.strokeText(text, 0, 0);
+  ctx.fillText(text, 0, 0);
   ctx.restore();
-}
-
-function drawBallLabel(
-  ctx: CanvasRenderingContext2D,
-  ball: GameBallSnapshot,
-  r: number,
-  pole: Vec3,
-  scale: number,
-  color: string,
-  isStripe: boolean,
-) {
-  const visiblePole = pole.z >= 0 ? pole : { x: -pole.x, y: -pole.y, z: -pole.z };
-  const weight = smoothstep(-0.02, 0.26, Math.abs(pole.z));
-  if (weight > 0.001) {
-    drawBallLabelFace(ctx, ball, r, visiblePole, scale, color, isStripe, weight);
-  }
 }
 
 function drawBall(
@@ -1064,7 +1085,7 @@ function drawBall(
   const r = BALL_VISUAL_RADIUS * scale;
   const color = ballColor(ball.number);
   const orientation = spin?.orientation ?? { x: 0, y: 0, z: 0, w: 1 };
-  const pole = rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation);
+  const isStripe = ball.number >= 9;
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
@@ -1074,31 +1095,8 @@ function drawBall(
   ctx.shadowOffsetX = 0.9 * scale;
   ctx.shadowOffsetY = 4.5 * scale;
 
-  const lightX = (-0.3 + pole.x * 0.12) * r;
-  const lightY = (-0.3 + pole.y * 0.12) * r;
-  const baseGrad = ctx.createRadialGradient(lightX, lightY, r * 0.05, 0, 0, r * 1.3);
-  if (ball.number === 0) {
-    baseGrad.addColorStop(0, '#ffffff');
-    baseGrad.addColorStop(0.45, '#e8f0f8');
-    baseGrad.addColorStop(1, '#b0c5da');
-  } else if (ball.number === 8) {
-    baseGrad.addColorStop(0, '#4a5260');
-    baseGrad.addColorStop(0.3, '#1e2330');
-    baseGrad.addColorStop(1, '#050709');
-  } else if (ball.number >= 9) {
-    baseGrad.addColorStop(0, '#ffffff');
-    baseGrad.addColorStop(0.65, '#f4f7fb');
-    baseGrad.addColorStop(1, '#ccd6e2');
-  } else {
-    baseGrad.addColorStop(0, '#fff8d8');
-    baseGrad.addColorStop(0.18, color);
-    baseGrad.addColorStop(1, shadeColor(color, -55));
-  }
-
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fillStyle = baseGrad;
-  ctx.fill();
+  const sprite = getBallSurfaceSprite(ball, orientation, color);
+  ctx.drawImage(sprite, -r, -r, r * 2, r * 2);
   ctx.shadowColor = 'transparent';
 
   ctx.save();
@@ -1109,12 +1107,9 @@ function drawBall(
   ctx.stroke();
   ctx.restore();
 
-  if (ball.number > 0) {
-    const isStripe = ball.number >= 9;
-    if (isStripe) drawStripeBand(ctx, r, color, orientation, scale);
-    drawBallLabel(ctx, ball, r, pole, scale, color, isStripe);
-  }
+  drawBallNumberText(ctx, ball, r, orientation, scale, color, isStripe);
 
+  const pole = rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation);
   const shadowGrad = ctx.createRadialGradient(r * 0.14, r * 0.28, r * 0.1, 0, r * 0.26, r * 1.04);
   shadowGrad.addColorStop(0, 'rgba(10, 12, 18, 0)');
   shadowGrad.addColorStop(1, 'rgba(10, 12, 18, 0.16)');
