@@ -177,15 +177,29 @@ type RailBallAnimation = {
   state: "travel" | "settled";
 };
 
+type Quaternion = {
+  x: number;
+  y: number;
+  z: number;
+  w: number;
+};
+
+type Vec3 = {
+  x: number;
+  y: number;
+  z: number;
+};
+
 type BallSpinState = {
-  phase: number;
-  axis: number;
+  orientation: Quaternion;
   lastX: number;
   lastY: number;
   lastSeenAt: number;
-  phaseVelocity: number;
   visualSpeed: number;
-  labelDepth: number;
+  rollVelocity: number;
+  sideVelocity: number;
+  bankVelocity: number;
+  lastHeading: number | null;
 };
 
 type SnapshotVelocity = { x: number; y: number; pocketed: boolean };
@@ -671,14 +685,15 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     const current = cache.get(ball.id);
     if (!current) {
       cache.set(ball.id, {
-        phase: 0,
-        axis: 0,
+        orientation: { x: 0, y: 0, z: 0, w: 1 },
         lastX: ball.x,
         lastY: ball.y,
         lastSeenAt: now,
-        phaseVelocity: 0,
         visualSpeed: 0,
-        labelDepth: 1,
+        rollVelocity: 0,
+        sideVelocity: 0,
+        bankVelocity: 0,
+        lastHeading: null,
       });
       continue;
     }
@@ -688,58 +703,77 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     const dx = ball.x - current.lastX;
     const dy = ball.y - current.lastY;
     const rawDistance = Math.hypot(dx, dy);
+    const visualSpeed = rawDistance / elapsedFrames;
 
-    // Teleport detection: large jumps from state sync — don't spike spin
     const TELEPORT_THRESHOLD = 18.0 * elapsedFrames;
     if (rawDistance > TELEPORT_THRESHOLD) {
       current.lastX = ball.x;
       current.lastY = ball.y;
       current.lastSeenAt = now;
-      current.phaseVelocity *= 0.6;
+      current.rollVelocity *= 0.55;
+      current.sideVelocity *= 0.45;
+      current.bankVelocity *= 0.4;
       current.visualSpeed *= 0.5;
       continue;
     }
 
-    const distance = rawDistance;
-    // Higher threshold: float noise from interpolation shouldn't trigger spin
-    const moving = distance > 0.08;
+    const velocityX = Number.isFinite(ball.velocityX) ? (ball.velocityX as number) : dx / elapsedFrames;
+    const velocityY = Number.isFinite(ball.velocityY) ? (ball.velocityY as number) : dy / elapsedFrames;
+    const velocitySpeed = Math.hypot(velocityX, velocityY);
+    const heading = velocitySpeed > 0.0001 ? Math.atan2(velocityY, velocityX) : current.lastHeading;
+    const rollSource = Number.isFinite(ball.spinRoll) ? (ball.spinRoll as number) : velocitySpeed;
+    const sideSource = Number.isFinite(ball.spinSide) ? (ball.spinSide as number) : 0;
+    const moving = rawDistance > 0.02 || velocitySpeed > 0.02 || Math.abs(sideSource) > 0.02 || Math.abs(rollSource) > 0.02;
 
-    // The stripe/number motion is animated along the local Y axis in drawStripeBand()/drawBallLabel().
-    // To make that apparent roll follow the actual table translation, the rendered spin axis must be
-    // perpendicular to the travel direction, not aligned with it.
-    if (moving) {
-      const movementAngle = Math.atan2(dy, dx);
-      const targetAxis = movementAngle - Math.PI * 0.5;
-      // Snap fast at high speed so stripe follows direction changes immediately
-      const axisBlend = distance > 1.2 ? 0.98 : distance > 0.45 ? 0.88 : 0.62;
-      current.axis = lerpAngle(current.axis, targetAxis, axisBlend);
-    }
-
-    if (moving) {
-      const projectedTravelX = Math.cos(current.axis + Math.PI * 0.5);
-      const projectedTravelY = Math.sin(current.axis + Math.PI * 0.5);
-      const signedDistance = dx * projectedTravelX + dy * projectedTravelY;
-      const phaseDistance = Math.abs(signedDistance) > distance * 0.22 ? -signedDistance : -distance;
-      const measuredPhaseVelocity = phaseDistance / (BALL_VISUAL_RADIUS * 1.04 * elapsedFrames);
-      // Almost 1:1 with real movement — 1 frame delay instead of 4
-      current.phaseVelocity = lerp(current.phaseVelocity, measuredPhaseVelocity, 0.92);
-      current.visualSpeed = lerp(current.visualSpeed, distance / elapsedFrames, 0.9);
-      current.lastX = ball.x;
-      current.lastY = ball.y;
+    if (moving && heading !== null) {
+      const rollFromTravel = rawDistance / (BALL_VISUAL_RADIUS * 1.02 * elapsedFrames);
+      const rollFromState = rollSource / (BALL_VISUAL_RADIUS * 1.06);
+      const rollBlend = velocitySpeed > 0.02 ? 0.6 : 0.35;
+      const targetRollVelocity = clamp(lerp(rollFromTravel, rollFromState, rollBlend), -1.18, 1.18);
+      const targetSideVelocity = clamp(sideSource / (BALL_VISUAL_RADIUS * 4.3), -0.22, 0.22);
+      const headingTurn = current.lastHeading === null ? 0 : angleDelta(heading, current.lastHeading);
+      const targetBankVelocity = clamp(headingTurn * 0.34 + targetSideVelocity * 0.55, -0.18, 0.18);
+      const speedBlend = rawDistance > 1.35 ? 0.82 : rawDistance > 0.42 ? 0.68 : 0.42;
+      current.rollVelocity = lerp(current.rollVelocity, targetRollVelocity, speedBlend);
+      current.sideVelocity = lerp(current.sideVelocity, targetSideVelocity, 0.38 + speedBlend * 0.32);
+      current.bankVelocity = lerp(current.bankVelocity, targetBankVelocity, 0.3 + speedBlend * 0.28);
+      current.lastHeading = heading;
+      current.visualSpeed = lerp(current.visualSpeed, Math.max(visualSpeed, velocitySpeed), 0.82);
     } else {
-      // Continuous decay based on speed — no binary jump
-      const speedRatio = clamp(current.visualSpeed / 0.5, 0, 1);
-      const decay = lerp(0.75, 0.96, speedRatio);
-      current.phaseVelocity *= decay;
+      const decay = clamp(0.78 + current.visualSpeed * 0.24, 0.78, 0.97);
+      current.rollVelocity *= decay;
+      current.sideVelocity *= 0.9;
+      current.bankVelocity *= 0.88;
       current.visualSpeed *= decay;
-      if (Math.abs(current.phaseVelocity) < 0.0005 && current.visualSpeed < 0.003) {
-        current.phaseVelocity = 0;
-        current.visualSpeed = 0;
-      }
+      if (Math.abs(current.rollVelocity) < 0.00045) current.rollVelocity = 0;
+      if (Math.abs(current.sideVelocity) < 0.0003) current.sideVelocity = 0;
+      if (Math.abs(current.bankVelocity) < 0.0003) current.bankVelocity = 0;
     }
 
-    current.phase = normalizePhase(current.phase + current.phaseVelocity * elapsedFrames);
-    current.labelDepth = Math.cos(current.phase);
+    const effectiveHeading = heading ?? current.lastHeading ?? 0;
+    const rollAxis = {
+      x: -Math.sin(effectiveHeading),
+      y: Math.cos(effectiveHeading),
+      z: 0,
+    };
+    const bankAxis = {
+      x: Math.cos(effectiveHeading),
+      y: Math.sin(effectiveHeading),
+      z: 0,
+    };
+
+    const rollStep = -current.rollVelocity * elapsedFrames;
+    const sideStep = current.sideVelocity * elapsedFrames;
+    const bankStep = current.bankVelocity * elapsedFrames;
+
+    let orientation = current.orientation;
+    orientation = applyOrientationStep(orientation, rollAxis, rollStep);
+    orientation = applyOrientationStep(orientation, { x: 0, y: 0, z: 1 }, sideStep);
+    orientation = applyOrientationStep(orientation, bankAxis, bankStep);
+    current.orientation = orientation;
+
+    current.lastX = ball.x;
+    current.lastY = ball.y;
     current.lastSeenAt = now;
   }
 
@@ -758,42 +792,31 @@ function hexToRgb(hex: string) {
   };
 }
 
-// ─── Fast gradient-based stripe rendering (replaces pixel-loop) ───────────
-// Much lower CPU cost, smooth animation, no frame stutter.
+// ─── Fast gradient-based stripe rendering (orientation-driven) ───────────
+
 function drawStripeBand(
   ctx: CanvasRenderingContext2D,
   r: number,
   color: string,
-  phase: number,
+  pole: Vec3,
   scale: number,
 ) {
-  // 3D sphere projection: the stripe is an equatorial band on a sphere.
-  // As the sphere rotates (phase), the band wraps around:
-  // - phase=0: band centered, full width (facing viewer)
-  // - phase=±π/2: band at edge, very thin (wrapping around side)
-  // - phase=±π: band on back, hidden
-
-  const cosP = Math.cos(phase);
-  const sinP = Math.sin(phase);
-
-  // Band center position (shifts along rotation axis in projected space)
-  const bandCenterY = sinP * r * 0.52;
-
-  // Apparent band half-height: max when facing (cosP=±1), min when wrapping (cosP≈0)
-  const facingWidth = r * 0.52;
-  const apparentHalfH = Math.abs(cosP) * facingWidth;
-  if (apparentHalfH < r * 0.03) return; // Band is on the back, skip drawing
+  const screenLen = Math.hypot(pole.x, pole.y);
+  const bandAngle = screenLen > 0.001 ? Math.atan2(pole.y, pole.x) + Math.PI * 0.5 : 0;
+  const facing = clamp(Math.abs(pole.z), 0, 1);
+  const bandCenterY = screenLen * r * 0.5;
+  const apparentHalfH = lerp(r * 0.065, r * 0.54, facing);
+  if (apparentHalfH < r * 0.03) return;
 
   ctx.save();
+  ctx.rotate(bandAngle);
   ctx.beginPath();
   ctx.arc(0, 0, r - 0.3 * scale, 0, Math.PI * 2);
   ctx.clip();
 
-  // Draw band with curved edges to simulate wrapping around sphere surface
   const topY = bandCenterY - apparentHalfH;
   const botY = bandCenterY + apparentHalfH;
-  // Edges curve inward more when band is near the sphere edge
-  const edgeCurve = (1 - Math.abs(cosP)) * r * 0.28 + Math.abs(cosP) * r * 0.08;
+  const edgeCurve = lerp(r * 0.28, r * 0.09, facing);
 
   ctx.beginPath();
   ctx.moveTo(-r, topY);
@@ -802,24 +825,21 @@ function drawStripeBand(
   ctx.quadraticCurveTo(0, botY + edgeCurve, -r, botY);
   ctx.closePath();
 
-  // Gradient: brighter at center of sphere, darker at edges (curvature)
   const g = ctx.createRadialGradient(0, bandCenterY, 0, 0, bandCenterY, r * 1.1);
   g.addColorStop(0, shadeColor(color, 22));
-  g.addColorStop(0.5, color);
-  g.addColorStop(0.85, shadeColor(color, -30));
+  g.addColorStop(0.48, color);
+  g.addColorStop(0.84, shadeColor(color, -28));
   g.addColorStop(1, shadeColor(color, -50));
   ctx.fillStyle = g;
   ctx.fill();
 
-  // Soft edge fade overlay
   const edgeFade = ctx.createLinearGradient(0, topY - edgeCurve, 0, botY + edgeCurve);
-  edgeFade.addColorStop(0, "rgba(255,255,255,0.12)");
-  edgeFade.addColorStop(0.15, "rgba(255,255,255,0)");
-  edgeFade.addColorStop(0.85, "rgba(255,255,255,0)");
-  edgeFade.addColorStop(1, "rgba(0,0,0,0.08)");
+  edgeFade.addColorStop(0, 'rgba(255,255,255,0.12)');
+  edgeFade.addColorStop(0.14, 'rgba(255,255,255,0)');
+  edgeFade.addColorStop(0.86, 'rgba(255,255,255,0)');
+  edgeFade.addColorStop(1, 'rgba(0,0,0,0.08)');
   ctx.fillStyle = edgeFade;
   ctx.fill();
-
   ctx.restore();
 }
 
@@ -827,25 +847,29 @@ function drawBallLabel(
   ctx: CanvasRenderingContext2D,
   ball: GameBallSnapshot,
   r: number,
-  phase: number,
+  pole: Vec3,
   scale: number,
   color: string,
   isStripe: boolean,
 ) {
-  const labelDepth = Math.cos(phase);
-  if (labelDepth < -0.14) return;
-  const labelY = -Math.sin(phase) * r * 0.74;
-  const diskScaleY = 0.64 + Math.max(0, labelDepth) * 0.34;
-  const diskAlpha = clamp(0.22 + (labelDepth + 0.14) * 0.86, 0.22, 1);
+  const labelDepth = pole.z;
+  if (labelDepth < -0.16) return;
+
+  const labelX = pole.x * r * 0.74;
+  const labelY = pole.y * r * 0.74;
+  const depthAlpha = clamp(0.2 + (labelDepth + 0.16) * 0.86, 0.2, 1);
+  const frontFactor = clamp((labelDepth + 1) * 0.5, 0, 1);
+  const diskScaleY = lerp(0.56, 0.98, frontFactor);
+  const diskScaleX = lerp(0.7, 1, frontFactor);
   const diskR = r * (isStripe ? 0.4 : 0.43);
-  const diskGrad = ctx.createRadialGradient(0, labelY - diskR * 0.2, 0, 0, labelY, diskR);
-  diskGrad.addColorStop(0, "#ffffff");
-  diskGrad.addColorStop(1, "#e7eef5");
+  const diskGrad = ctx.createRadialGradient(labelX - diskR * 0.2, labelY - diskR * 0.2, 0, labelX, labelY, diskR);
+  diskGrad.addColorStop(0, '#ffffff');
+  diskGrad.addColorStop(1, '#e7eef5');
 
   ctx.save();
-  ctx.globalAlpha = diskAlpha;
-  ctx.translate(0, labelY);
-  ctx.scale(1, diskScaleY);
+  ctx.globalAlpha = depthAlpha;
+  ctx.translate(labelX, labelY);
+  ctx.scale(diskScaleX, diskScaleY);
   ctx.beginPath();
   ctx.arc(0, 0, diskR, 0, Math.PI * 2);
   ctx.fillStyle = diskGrad;
@@ -854,218 +878,19 @@ function drawBallLabel(
 
   const fontSize = clamp(Math.round((ball.number >= 10 ? 7 : 8.5) * scale), 5, 18);
   ctx.save();
-  ctx.globalAlpha = clamp(diskAlpha + 0.06, 0.28, 1);
-  ctx.translate(0, labelY);
-  ctx.scale(1, diskScaleY);
-  ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = ball.number === 8 ? "#0a0c12" : "#1a1e2a";
-  ctx.fillText(String(ball.number), 0, 0.5 * scale);
+  ctx.globalAlpha = clamp(depthAlpha + 0.06, 0.28, 1);
+  ctx.fillStyle = ball.number === 8 ? '#f2f4f8' : color;
+  ctx.font = `900 ${fontSize}px Inter, system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(1, 1.2 * scale);
+  const text = String(ball.number);
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.22)';
+  ctx.strokeText(text, labelX, labelY + fontSize * 0.04);
+  ctx.fillText(text, labelX, labelY + fontSize * 0.04);
   ctx.restore();
 }
-
-
-
-const BALL_SPRITE_CACHE = new Map<string, HTMLCanvasElement>();
-
-function normalizePhase(phase: number) {
-  const full = Math.PI * 2;
-  let normalized = phase % full;
-  if (normalized < 0) normalized += full;
-  return normalized;
-}
-
-function getBallPhaseBucket(number: number, phase: number) {
-  if (number === 0) return 0;
-  const normalized = normalizePhase(phase);
-  return Math.round((normalized / (Math.PI * 2)) * (BALL_SPRITE_PHASE_BUCKETS - 1));
-}
-
-function drawBallFaceSprite(
-  ctx: CanvasRenderingContext2D,
-  number: number,
-  r: number,
-  phase: number,
-) {
-  const color = ballColor(number);
-  const isStripe = number >= 9;
-  const ball = { id: `sprite-${number}`, number, x: 0, y: 0, pocketed: false } satisfies GameBallSnapshot;
-
-  const baseGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r * 1.3);
-  if (number === 0) {
-    baseGrad.addColorStop(0, "#ffffff");
-    baseGrad.addColorStop(0.45, "#e8f0f8");
-    baseGrad.addColorStop(1, "#b0c5da");
-  } else if (number === 8) {
-    baseGrad.addColorStop(0, "#4a5260");
-    baseGrad.addColorStop(0.3, "#1e2330");
-    baseGrad.addColorStop(1, "#050709");
-  } else if (isStripe) {
-    baseGrad.addColorStop(0, "#ffffff");
-    baseGrad.addColorStop(0.65, "#f4f7fb");
-    baseGrad.addColorStop(1, "#ccd6e2");
-  } else {
-    baseGrad.addColorStop(0, "#fff8d8");
-    baseGrad.addColorStop(0.18, color);
-    baseGrad.addColorStop(1, shadeColor(color, -55));
-  }
-
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fillStyle = baseGrad;
-  ctx.fill();
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(0, 0, r - 0.45, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(0,0,0,0.18)";
-  ctx.lineWidth = 0.9;
-  ctx.stroke();
-  ctx.restore();
-
-  if (number > 0) {
-    if (isStripe) drawStripeBand(ctx, r, color, phase, 1);
-    drawBallLabel(ctx, ball, r, phase, 1, color, isStripe);
-  }
-
-  const shadowGrad = ctx.createRadialGradient(r * 0.14, r * 0.28, r * 0.1, 0, r * 0.26, r * 1.04);
-  shadowGrad.addColorStop(0, "rgba(10, 12, 18, 0)");
-  shadowGrad.addColorStop(1, "rgba(10, 12, 18, 0.16)");
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fillStyle = shadowGrad;
-  ctx.fill();
-
-  const specGrad = ctx.createRadialGradient(-r * 0.34, -r * 0.38, 0, -r * 0.28, -r * 0.3, r * 0.55);
-  specGrad.addColorStop(0, "rgba(255, 255, 255, 0.72)");
-  specGrad.addColorStop(0.35, "rgba(255, 255, 255, 0.22)");
-  specGrad.addColorStop(1, "rgba(255, 255, 255, 0)");
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fillStyle = specGrad;
-  ctx.fill();
-}
-
-function getBallSprite(number: number, phase: number) {
-  if (typeof document === "undefined") return null;
-  const bucket = getBallPhaseBucket(number, phase);
-  const key = `${number}:${bucket}`;
-  const cached = BALL_SPRITE_CACHE.get(key);
-  if (cached) return cached;
-
-  const sprite = document.createElement("canvas");
-  sprite.width = BALL_SPRITE_SIZE;
-  sprite.height = BALL_SPRITE_SIZE;
-  const ctx = sprite.getContext("2d");
-  if (!ctx) return null;
-
-  const r = BALL_SPRITE_SIZE / 2 - 2;
-  const normalizedPhase = number === 0
-    ? 0
-    : (bucket / Math.max(1, BALL_SPRITE_PHASE_BUCKETS - 1)) * Math.PI * 2;
-  ctx.translate(BALL_SPRITE_SIZE / 2, BALL_SPRITE_SIZE / 2);
-  drawBallFaceSprite(ctx, number, r, normalizedPhase);
-  BALL_SPRITE_CACHE.set(key, sprite);
-  return sprite;
-}
-
-// ─── Aim preview computation ───────────────────────────────────────────────
-
-function findFirstBoundaryHit(cueBall: GameBallSnapshot, angle: number) {
-  const dx = Math.cos(angle);
-  const dy = Math.sin(angle);
-  const limits: number[] = [];
-  if (dx > 0.0001) limits.push((PLAY_MAX_X - cueBall.x) / dx);
-  if (dx < -0.0001) limits.push((PLAY_MIN_X - cueBall.x) / dx);
-  if (dy > 0.0001) limits.push((PLAY_MAX_Y - cueBall.y) / dy);
-  if (dy < -0.0001) limits.push((PLAY_MIN_Y - cueBall.y) / dy);
-  const distance = Math.min(...limits.filter((value) => Number.isFinite(value) && value > 0));
-  return { x: cueBall.x + dx * distance, y: cueBall.y + dy * distance, distance };
-}
-
-function computeAimPreview(cueBall: GameBallSnapshot, balls: GameBallSnapshot[], angle: number): AimPreview {
-  const dx = Math.cos(angle);
-  const dy = Math.sin(angle);
-  const boundary = findFirstBoundaryHit(cueBall, angle);
-  let hitBall: GameBallSnapshot | null = null;
-  let hitDistance = boundary.distance;
-  let contactX: number | null = null;
-  let contactY: number | null = null;
-  let cueDeflectX: number | null = null;
-  let cueDeflectY: number | null = null;
-  let targetGuideX: number | null = null;
-  let targetGuideY: number | null = null;
-  let targetGuideScale = 1;
-  let hitFullness = 1;
-  let cueTangentX: number | null = null;
-  let cueTangentY: number | null = null;
-
-  for (const ball of balls) {
-    if (ball.pocketed || ball.number === 0) continue;
-    const relX = ball.x - cueBall.x;
-    const relY = ball.y - cueBall.y;
-    const projection = relX * dx + relY * dy;
-    if (projection <= 1) continue;
-    const perpendicularSq = relX * relX + relY * relY - projection * projection;
-    const limit = BALL_DIAMETER * BALL_DIAMETER;
-    if (perpendicularSq < 0 || perpendicularSq > limit) continue;
-    const approach = projection - Math.sqrt(Math.max(0, limit - perpendicularSq));
-    if (approach < hitDistance) {
-      hitDistance = approach;
-      hitBall = ball;
-      contactX = cueBall.x + dx * approach;
-      contactY = cueBall.y + dy * approach;
-    }
-  }
-
-  if (hitBall && contactX !== null && contactY !== null) {
-    const nx = hitBall.x - contactX;
-    const ny = hitBall.y - contactY;
-    const nlen = Math.hypot(nx, ny) || 1;
-    const nnx = nx / nlen;
-    const nny = ny / nlen;
-    const dotN = clamp(dx * nnx + dy * nny, 0, 1);
-    hitFullness = clamp(dotN, 0.16, 1);
-    targetGuideScale = clamp(Math.pow(hitFullness, 0.92), 0.14, 1);
-    const targetGuideLength = lerp(16, 72, targetGuideScale);
-    targetGuideX = hitBall.x + nnx * targetGuideLength;
-    targetGuideY = hitBall.y + nny * targetGuideLength;
-    const remVx = dx - dotN * nnx;
-    const remVy = dy - dotN * nny;
-    const remLen = Math.hypot(remVx, remVy);
-    const DEFLECT_DIST = 100;
-    if (remLen > 0.05) {
-      cueTangentX = remVx / remLen;
-      cueTangentY = remVy / remLen;
-      cueDeflectX = contactX + cueTangentX * DEFLECT_DIST;
-      cueDeflectY = contactY + cueTangentY * DEFLECT_DIST;
-    } else {
-      cueTangentX = 0;
-      cueTangentY = 0;
-      cueDeflectX = contactX;
-      cueDeflectY = contactY;
-    }
-  }
-
-  return {
-    endX: cueBall.x + dx * hitDistance,
-    endY: cueBall.y + dy * hitDistance,
-    hitBall,
-    contactX,
-    contactY,
-    cueDeflectX,
-    cueDeflectY,
-    targetGuideX,
-    targetGuideY,
-    targetGuideScale,
-    hitFullness,
-    cueTangentX,
-    cueTangentY,
-  };
-}
-
-// ─── Canvas ball rendering (high quality 3D with numbers/stripes) ──────────
 
 function drawBall(
   ctx: CanvasRenderingContext2D,
@@ -1075,32 +900,33 @@ function drawBall(
 ) {
   const r = BALL_VISUAL_RADIUS * scale;
   const color = ballColor(ball.number);
-  const spinPhase = spin?.phase ?? 0;
-  const spinAxis = spin?.axis ?? 0;
+  const pole = spin ? rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, spin.orientation) : { x: 0, y: 0, z: 1 };
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
 
-  ctx.shadowColor = "rgba(0, 0, 0, 0.48)";
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.48)';
   ctx.shadowBlur = 9 * scale;
   ctx.shadowOffsetX = 0.9 * scale;
   ctx.shadowOffsetY = 4.5 * scale;
 
-  const baseGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r * 1.3);
+  const lightX = (-0.3 + pole.x * 0.12) * r;
+  const lightY = (-0.3 + pole.y * 0.12) * r;
+  const baseGrad = ctx.createRadialGradient(lightX, lightY, r * 0.05, 0, 0, r * 1.3);
   if (ball.number === 0) {
-    baseGrad.addColorStop(0, "#ffffff");
-    baseGrad.addColorStop(0.45, "#e8f0f8");
-    baseGrad.addColorStop(1, "#b0c5da");
+    baseGrad.addColorStop(0, '#ffffff');
+    baseGrad.addColorStop(0.45, '#e8f0f8');
+    baseGrad.addColorStop(1, '#b0c5da');
   } else if (ball.number === 8) {
-    baseGrad.addColorStop(0, "#4a5260");
-    baseGrad.addColorStop(0.3, "#1e2330");
-    baseGrad.addColorStop(1, "#050709");
+    baseGrad.addColorStop(0, '#4a5260');
+    baseGrad.addColorStop(0.3, '#1e2330');
+    baseGrad.addColorStop(1, '#050709');
   } else if (ball.number >= 9) {
-    baseGrad.addColorStop(0, "#ffffff");
-    baseGrad.addColorStop(0.65, "#f4f7fb");
-    baseGrad.addColorStop(1, "#ccd6e2");
+    baseGrad.addColorStop(0, '#ffffff');
+    baseGrad.addColorStop(0.65, '#f4f7fb');
+    baseGrad.addColorStop(1, '#ccd6e2');
   } else {
-    baseGrad.addColorStop(0, "#fff8d8");
+    baseGrad.addColorStop(0, '#fff8d8');
     baseGrad.addColorStop(0.18, color);
     baseGrad.addColorStop(1, shadeColor(color, -55));
   }
@@ -1109,37 +935,36 @@ function drawBall(
   ctx.arc(0, 0, r, 0, Math.PI * 2);
   ctx.fillStyle = baseGrad;
   ctx.fill();
-  ctx.shadowColor = "transparent";
+  ctx.shadowColor = 'transparent';
 
   ctx.save();
   ctx.beginPath();
   ctx.arc(0, 0, r - 0.45 * scale, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(0,0,0,0.18)";
+  ctx.strokeStyle = 'rgba(0,0,0,0.18)';
   ctx.lineWidth = 0.9 * scale;
   ctx.stroke();
   ctx.restore();
 
   if (ball.number > 0) {
     const isStripe = ball.number >= 9;
-    ctx.save();
-    ctx.rotate(spinAxis);
-    if (isStripe) drawStripeBand(ctx, r, color, spinPhase, scale);
-    drawBallLabel(ctx, ball, r, spinPhase, scale, color, isStripe);
-    ctx.restore();
+    if (isStripe) drawStripeBand(ctx, r, color, pole, scale);
+    drawBallLabel(ctx, ball, r, pole, scale, color, isStripe);
   }
 
   const shadowGrad = ctx.createRadialGradient(r * 0.14, r * 0.28, r * 0.1, 0, r * 0.26, r * 1.04);
-  shadowGrad.addColorStop(0, "rgba(10, 12, 18, 0)");
-  shadowGrad.addColorStop(1, "rgba(10, 12, 18, 0.16)");
+  shadowGrad.addColorStop(0, 'rgba(10, 12, 18, 0)');
+  shadowGrad.addColorStop(1, 'rgba(10, 12, 18, 0.16)');
   ctx.beginPath();
   ctx.arc(0, 0, r, 0, Math.PI * 2);
   ctx.fillStyle = shadowGrad;
   ctx.fill();
 
-  const specGrad = ctx.createRadialGradient(-r * 0.34, -r * 0.38, 0, -r * 0.28, -r * 0.3, r * 0.55);
-  specGrad.addColorStop(0, "rgba(255, 255, 255, 0.72)");
-  specGrad.addColorStop(0.35, "rgba(255, 255, 255, 0.22)");
-  specGrad.addColorStop(1, "rgba(255, 255, 255, 0)");
+  const specCenterX = (-0.34 + pole.x * 0.08) * r;
+  const specCenterY = (-0.38 + pole.y * 0.08) * r;
+  const specGrad = ctx.createRadialGradient(specCenterX, specCenterY, 0, specCenterX + r * 0.06, specCenterY + r * 0.08, r * 0.55);
+  specGrad.addColorStop(0, 'rgba(255, 255, 255, 0.72)');
+  specGrad.addColorStop(0.35, 'rgba(255, 255, 255, 0.22)');
+  specGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
   ctx.beginPath();
   ctx.arc(0, 0, r, 0, Math.PI * 2);
   ctx.fillStyle = specGrad;
