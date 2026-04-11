@@ -120,6 +120,9 @@ const REALTIME_RENDER_DELAY_MS = 52;
 const REALTIME_MAX_EXTRAPOLATION_MS = 28;
 const PENDING_SHOT_VISUAL_MAX_MS = 1150;
 const PENDING_SHOT_POST_IMPACT_HOLD_MS = 240;
+const SERVER_MIN_SHOT_SPEED = 0.014;
+const SERVER_MAX_SHOT_SPEED = 12.6;
+const SERVER_REALTIME_SPEED_TO_PX_PER_MS = 5.2 / (1000 / 60);
 const SNAPSHOT_RENDER_DEBUG_ENABLED = false;
 const SNAPSHOT_RENDER_DEBUG_LOG_EVERY_MS = 450;
 const POCKET_CAPTURE_DISTANCE = BALL_RADIUS * 1.6;
@@ -292,6 +295,30 @@ function isAimTargetIllegal(
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function smoothstep(edge0: number, edge1: number, value: number) {
+  if (edge0 === edge1) return value < edge0 ? 0 : 1;
+  const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function shapeShotPowerForVisual(power: number) {
+  const shotPower = clamp(Number.isFinite(power) ? power : 0.52, POWER_MIN, 1);
+  return shotPower <= 0.36
+    ? shotPower * 0.92
+    : shotPower <= 0.82
+      ? 0.3312 + Math.pow((shotPower - 0.36) / 0.46, 1.42) * 0.3788
+      : 0.71 + Math.pow((shotPower - 0.82) / 0.18, 1.88) * 0.29;
+}
+
+function estimateCueVisualSpeedPxPerMs(power: number) {
+  const shotSpeed = SERVER_MIN_SHOT_SPEED + shapeShotPowerForVisual(power) * SERVER_MAX_SHOT_SPEED;
+  return clamp(shotSpeed * SERVER_REALTIME_SPEED_TO_PX_PER_MS, 0.03, 4.1);
+}
+
+function maxCueVisualLeadPx(power: number) {
+  return lerp(6, 24, Math.pow(clamp(power, 0, 1), 0.72));
 }
 
 function lerp(from: number, to: number, t: number) {
@@ -576,6 +603,7 @@ function interpolateSnapshotEntries(
 
 function computePendingShotProgress(pending: {
   startedAt: number;
+  power: number;
   angle: number;
   cueX: number;
   cueY: number;
@@ -587,7 +615,8 @@ function computePendingShotProgress(pending: {
   const heldElapsed = Math.min(elapsed, PENDING_SHOT_VISUAL_MAX_MS);
   const travelMs = Math.max(18, pending.impactAtMs ?? Math.max(32, pending.travelLimit / Math.max(0.85, pending.estimatedSpeedPxPerMs)));
   const moveProgress = clamp(heldElapsed / travelMs, 0, 1);
-  const easedMove = 1 - Math.pow(1 - moveProgress, 2.4);
+  const curve = lerp(1.02, 2.08, Math.pow(clamp(pending.power, 0, 1), 0.82));
+  const easedMove = moveProgress <= 0 ? 0 : 1 - Math.pow(1 - moveProgress, curve);
   const travelDistance = pending.travelLimit * easedMove;
   const expectedCueX = pending.cueX + Math.cos(pending.angle) * travelDistance;
   const expectedCueY = pending.cueY + Math.sin(pending.angle) * travelDistance;
@@ -928,12 +957,13 @@ function drawBallLabelFace(
   scale: number,
   color: string,
   isStripe: boolean,
+  alphaMultiplier = 1,
 ) {
   const labelDepth = normal.z;
   if (labelDepth < -0.78) return;
 
   const frontFactor = clamp((labelDepth + 1) * 0.5, 0, 1);
-  const depthAlpha = clamp(0.04 + Math.pow(frontFactor, 1.18), 0.04, 1);
+  const depthAlpha = clamp((0.04 + Math.pow(frontFactor, 1.18)) * alphaMultiplier, 0, 1);
   if (depthAlpha < 0.06) return;
 
   const labelX = normal.x * r * 0.72;
@@ -980,11 +1010,15 @@ function drawBallLabel(
   color: string,
   isStripe: boolean,
 ) {
-  const frontFace = pole.z >= 0
-    ? pole
-    : { x: -pole.x, y: -pole.y, z: -pole.z };
+  const frontWeight = smoothstep(0.06, 0.28, pole.z);
+  const backWeight = smoothstep(0.06, 0.28, -pole.z);
 
-  drawBallLabelFace(ctx, ball, r, frontFace, scale, color, isStripe);
+  if (frontWeight > 0.001) {
+    drawBallLabelFace(ctx, ball, r, pole, scale, color, isStripe, frontWeight);
+  }
+  if (backWeight > 0.001) {
+    drawBallLabelFace(ctx, ball, r, { x: -pole.x, y: -pole.y, z: -pole.z }, scale, color, isStripe, backWeight);
+  }
 }
 
 function drawBall(
@@ -1551,8 +1585,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           // Instead of rejecting the snapshot entirely, accept it but override
           // the cue ball position with the optimistic one. This way other balls
           // start moving visually during the break while the cue stays smooth.
-          const optimisticCueX = progress.expectedCueX;
-          const optimisticCueY = progress.expectedCueY;
+          const shotDirX = Math.cos(pending.angle);
+          const shotDirY = Math.sin(pending.angle);
+          const optimisticAdvance = ((progress.expectedCueX - pending.cueX) * shotDirX) + ((progress.expectedCueY - pending.cueY) * shotDirY);
+          const authoritativeAdvance = ((incomingCueBall.x - pending.cueX) * shotDirX) + ((incomingCueBall.y - pending.cueY) * shotDirY);
+          const clampedAdvance = Math.max(authoritativeAdvance, Math.min(optimisticAdvance, authoritativeAdvance + maxCueVisualLeadPx(pending.power)));
+          const optimisticCueX = pending.cueX + shotDirX * clampedAdvance;
+          const optimisticCueY = pending.cueY + shotDirY * clampedAdvance;
           for (let i = 0; i < incomingBalls.length; i++) {
             if (incomingBalls[i].number === 0 && !incomingBalls[i].pocketed) {
               incomingBalls[i] = { ...incomingBalls[i], x: optimisticCueX, y: optimisticCueY };
@@ -1989,8 +2028,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       const travelLimit = livePreview.contactX !== null && livePreview.contactY !== null
         ? Math.max(20, Math.hypot(livePreview.contactX - liveCueBall.x, livePreview.contactY - liveCueBall.y))
         : Math.max(24, Math.hypot(livePreview.endX - liveCueBall.x, livePreview.endY - liveCueBall.y));
-      const estimatedSpeedPxPerMs = lerp(0.95, 4.85, Math.pow(shotPower, 0.58));
-      const impactAtMs = travelLimit > 1 ? clamp(travelLimit / estimatedSpeedPxPerMs, 18, 210) : null;
+      const estimatedSpeedPxPerMs = estimateCueVisualSpeedPxPerMs(shotPower);
+      const impactAtMs = travelLimit > 1 ? clamp(travelLimit / estimatedSpeedPxPerMs, 22, 240) : null;
       const impactType: "ball" | "cushion" | null = livePreview.hitBall ? "ball" : "cushion";
       pendingShotVisualRef.current = {
         startedAt: shotStartedAt,
@@ -2685,8 +2724,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const shotDirY = Math.sin(pendingShotVisual.angle);
           const authoritativeAdvance = ((drawCueBall.x - pendingShotVisual.cueX) * shotDirX) + ((drawCueBall.y - pendingShotVisual.cueY) * shotDirY);
           const optimisticAdvance = ((progress.expectedCueX - pendingShotVisual.cueX) * shotDirX) + ((progress.expectedCueY - pendingShotVisual.cueY) * shotDirY);
+          const maxLead = maxCueVisualLeadPx(pendingShotVisual.power);
           const noBacktrackAdvance = game.status === "simulating"
-            ? Math.max(authoritativeAdvance, optimisticAdvance)
+            ? Math.max(authoritativeAdvance, Math.min(optimisticAdvance, authoritativeAdvance + maxLead))
             : optimisticAdvance;
           const optimisticCue = {
             ...drawCueBall,
