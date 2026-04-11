@@ -1,5 +1,6 @@
 import type { BallGroup, GameBallSnapshot, GamePhase, GameShotFrame, GameShotSnapshot, GameSnapshot } from "./messages.js";
 import type { RoomRecord } from "./rooms.js";
+import { resolveCollisionFromMask, segmentHitsPocketMask } from "./tableMasks.js";
 
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
@@ -236,14 +237,6 @@ function ballIsMoving(ball: PhysicsBall) {
   return speed > SOFT_STOP_SPEED || Math.abs(ball.sideSpin) > SPIN_STOP_SPEED || Math.abs(ball.roll) > ROLL_STOP_SPEED;
 }
 
-function nearPocket(x: number, y: number) {
-  const pocketSkipRadius = POCKET_WALL_SKIP_RADIUS;
-  for (const pocket of POCKETS) {
-    if (Math.hypot(x - pocket.x, y - pocket.y) < pocketSkipRadius) return true;
-  }
-  return false;
-}
-
 function rotateVelocity(ball: PhysicsBall, radians: number) {
   if (!Number.isFinite(radians) || Math.abs(radians) < 0.000001) return;
   const cos = Math.cos(radians);
@@ -279,13 +272,19 @@ function applyRailResponse(ball: PhysicsBall, normalX: number, normalY: number) 
 }
 
 function handleWallCollision(ball: PhysicsBall) {
+  const maskResolved = resolveCollisionFromMask(ball.x, ball.y, BALL_RADIUS);
+  if (maskResolved) {
+    ball.x = maskResolved.x;
+    ball.y = maskResolved.y;
+    applyRailResponse(ball, maskResolved.normalX, maskResolved.normalY);
+    return true;
+  }
+
   const minX = RAIL_MARGIN_X + BALL_RADIUS;
   const maxX = TABLE_WIDTH - RAIL_MARGIN_X - BALL_RADIUS;
   const minY = RAIL_MARGIN_Y + BALL_RADIUS;
   const maxY = TABLE_HEIGHT - RAIL_MARGIN_Y - BALL_RADIUS;
   let collided = false;
-
-  if (nearPocket(ball.x, ball.y)) return false;
 
   if (ball.x < minX) {
     ball.x = minX;
@@ -312,10 +311,32 @@ function handleWallCollision(ball: PhysicsBall) {
 
 function handlePocket(ball: PhysicsBall, stepScale = 1): number | null {
   if (ball.pocketed) return null;
-  const speed = Math.hypot(ball.vx, ball.vy);
   const prevX = ball.x - ball.vx * stepScale;
   const prevY = ball.y - ball.vy * stepScale;
+  const maskHit = segmentHitsPocketMask(prevX, prevY, ball.x, ball.y);
+  if (maskHit) {
+    let bestIndex = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < POCKETS.length; index += 1) {
+      const pocket = POCKETS[index];
+      const dist = distancePointToSegment(pocket.x, pocket.y, prevX, prevY, ball.x, ball.y);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIndex = index;
+      }
+    }
+    const pocket = POCKETS[bestIndex];
+    ball.pocketed = true;
+    ball.vx = 0;
+    ball.vy = 0;
+    ball.roll = 0;
+    ball.sideSpin = 0;
+    ball.x = pocket.x;
+    ball.y = pocket.y;
+    return bestIndex + 1;
+  }
 
+  const speed = Math.hypot(ball.vx, ball.vy);
   for (let index = 0; index < POCKETS.length; index += 1) {
     const pocket = POCKETS[index];
     const dx = ball.x - pocket.x;
