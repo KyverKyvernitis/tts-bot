@@ -36,7 +36,7 @@ import {
 } from "./game/teardown";
 import { fetchBalanceRequest } from "./transport/balanceApi";
 import { fetchGameStateRequest, postGameActionRequest } from "./transport/gameApi";
-import { appendNoStoreNonce, dispatchLeaveBeacon, fetchWithTimeout, resolveStrictApiCandidates } from "./transport/httpClient";
+import { appendNoStoreNonce, buildQueryStringFromPayload, dispatchLeaveBeacon, fetchWithTimeout, resolveApiCandidates, resolveStrictApiCandidates } from "./transport/httpClient";
 import { fetchRoomStateRequest, fetchRoomsRequest, postRoomActionRequest } from "./transport/lobbyApi";
 import { sendSubscribeRoomMessage } from "./realtime/roomRealtime";
 import { type IncomingMessage, type OAuthExchangeResult } from "./realtime/messages";
@@ -1674,6 +1674,35 @@ export default function App() {
       bodyForm.set(key, value === null ? '' : String(value));
     }
     const attempts: Array<{ url: string; init: RequestInit; statusLabel: string }> = [];
+
+    const balanceQuery = buildQueryStringFromPayload({ action: 'game_aim_sync', ...payload });
+    for (const baseUrl of resolveApiCandidates('/balance')) {
+      const queryUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+      const params = new URLSearchParams(balanceQuery);
+      params.forEach((value, key) => queryUrl.searchParams.set(key, value));
+      attempts.push({
+        url: baseUrl,
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+          credentials: 'same-origin',
+          body: buildQueryStringFromPayload({ action: 'game_aim_sync', ...payload }),
+          keepalive: true,
+        },
+        statusLabel: `bal_form@${baseUrl}`,
+      });
+      attempts.push({
+        url: queryUrl.toString(),
+        init: {
+          method: 'GET',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          keepalive: true,
+        },
+        statusLabel: `bal_get@${baseUrl}`,
+      });
+    }
+
     for (const baseUrl of resolveStrictApiCandidates('/games/aim')) {
       attempts.push({
         url: baseUrl,
@@ -1751,6 +1780,35 @@ export default function App() {
       return null;
     }
     aimPipelineDebugRef.current.httpFetchAttemptCount += 1;
+    const attempts: string[] = [];
+
+    for (const baseUrl of resolveApiCandidates('/balance')) {
+      try {
+        const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+        url.searchParams.set('action', 'game_aim_get');
+        url.searchParams.set('roomId', roomId);
+        const response = await fetchWithTimeout(url, { method: 'GET', credentials: 'same-origin', cache: 'no-store' }, 1200);
+        const contentType = response.headers.get('content-type') ?? '';
+        const raw = await response.text();
+        if (raw.trim().startsWith('<') || /text\/html/i.test(contentType)) {
+          aimPipelineDebugRef.current.lastHttpFetchStatus = `bal_html:${response.status}`;
+          attempts.push(`bal_html:${response.status}`);
+          continue;
+        }
+        const parsed = raw ? JSON.parse(raw) as { aim?: AimStateSnapshot | null } : null;
+        if (response.ok) {
+          aimPipelineDebugRef.current.lastHttpFetchStatus = parsed?.aim ? `bal_ok:${parsed.aim.seq}` : 'bal_ok:empty';
+          return parsed?.aim ?? null;
+        }
+        aimPipelineDebugRef.current.lastHttpFetchStatus = `bal_${response.status}:${parsed?.aim ? 'payload' : 'noaim'}`;
+        attempts.push(`bal_${response.status}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.name : 'err';
+        aimPipelineDebugRef.current.lastHttpFetchStatus = `bal_ex:${message}`;
+        attempts.push(`bal_ex:${message}`);
+      }
+    }
+
     for (const baseUrl of resolveStrictApiCandidates(`/games/${roomId}/aim`)) {
       try {
         const url = appendNoStoreNonce(baseUrl);
@@ -1759,6 +1817,7 @@ export default function App() {
         const raw = await response.text();
         if (raw.trim().startsWith('<') || /text\/html/i.test(contentType)) {
           aimPipelineDebugRef.current.lastHttpFetchStatus = `html:${response.status}`;
+          attempts.push(`html:${response.status}`);
           continue;
         }
         const parsed = raw ? JSON.parse(raw) as { aim?: AimStateSnapshot | null } : null;
@@ -1767,12 +1826,14 @@ export default function App() {
           return parsed?.aim ?? null;
         }
         aimPipelineDebugRef.current.lastHttpFetchStatus = `${response.status}:${parsed?.aim ? 'payload' : 'noaim'}`;
+        attempts.push(`${response.status}:${parsed?.aim ? 'payload' : 'noaim'}`);
       } catch (error) {
         const message = error instanceof Error ? error.name : 'err';
         aimPipelineDebugRef.current.lastHttpFetchStatus = `ex:${message}`;
+        attempts.push(`ex:${message}`);
       }
     }
-    setAuthDebug((current) => current ? `${current} • aim_get_http_failed:${reason}:${roomId}` : `aim_get_http_failed:${reason}:${roomId}`);
+    setAuthDebug((current) => current ? `${current} • aim_get_http_failed:${reason}:${roomId}:${attempts.join('|')}` : `aim_get_http_failed:${reason}:${roomId}:${attempts.join('|')}`);
     return null;
   };
 
