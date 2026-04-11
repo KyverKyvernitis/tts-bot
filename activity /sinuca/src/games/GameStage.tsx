@@ -980,14 +980,11 @@ function drawBallLabel(
   color: string,
   isStripe: boolean,
 ) {
-  const faces = [
-    pole,
-    { x: -pole.x, y: -pole.y, z: -pole.z },
-  ].sort((left, right) => left.z - right.z);
+  const frontFace = pole.z >= 0
+    ? pole
+    : { x: -pole.x, y: -pole.y, z: -pole.z };
 
-  for (const face of faces) {
-    drawBallLabelFace(ctx, ball, r, face, scale, color, isStripe);
-  }
+  drawBallLabelFace(ctx, ball, r, frontFace, scale, color, isStripe);
 }
 
 function drawBall(
