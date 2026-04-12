@@ -23,8 +23,8 @@ const HARD_STOP_SPEED = 0.0062;
 const MIN_SPEED = SOFT_STOP_SPEED;
 const MAX_STEPS = 1800;
 const FRAME_SAMPLE_EVERY = 2;
-const REALTIME_SIM_STEPS_PER_TICK = 1;
-const REALTIME_SIM_TIME_SCALE = 5.2;
+const REALTIME_SIM_STEPS_PER_TICK = 2;
+const REALTIME_SIM_TIME_SCALE = 2.6;
 const MAX_SUBSTEPS = 16;
 const BALL_BALL_RESTITUTION = 0.905;
 const BALL_TANGENT_FRICTION = 0.058;
@@ -687,7 +687,7 @@ function advanceShotSimulation(game: GameRecord, shot: LiveShotState, timeScale 
   const balls = game.balls;
   const scaledTime = Math.max(0.5, timeScale);
   const maxVelocity = balls.reduce((max, ball) => ball.pocketed ? max : Math.max(max, Math.hypot(ball.vx, ball.vy)), 0);
-  const substeps = clamp(Math.ceil((maxVelocity * scaledTime) / 8.8), 1, MAX_SUBSTEPS);
+  const substeps = clamp(Math.ceil((maxVelocity * scaledTime) / 8.8), 2, MAX_SUBSTEPS);
   const stepFactor = scaledTime / substeps;
 
   for (let substep = 0; substep < substeps; substep += 1) {

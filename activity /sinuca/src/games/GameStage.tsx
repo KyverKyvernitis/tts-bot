@@ -116,7 +116,7 @@ const PLACE_SYNC_INTERVAL_MS = 16;
 const REMOTE_AIM_STALE_MS = 12000;
 const REALTIME_VISUAL_SNAP_DISTANCE = 54;
 const REALTIME_SNAPSHOT_QUEUE_LIMIT = 32;
-const REALTIME_RENDER_DELAY_MS = 52;
+const REALTIME_RENDER_DELAY_MS = 72;
 const REALTIME_MAX_EXTRAPOLATION_MS = 28;
 const PENDING_SHOT_VISUAL_MAX_MS = 1150;
 const PENDING_SHOT_POST_IMPACT_HOLD_MS = 240;
@@ -304,27 +304,27 @@ function smoothstep(edge0: number, edge1: number, value: number) {
 }
 
 function shapeShotPowerForVisual(power: number) {
-  const shotPower = clamp(Number.isFinite(power) ? power : 0.52, POWER_MIN, 1);
-  return shotPower <= 0.34
-    ? shotPower * 0.72
+  const shotPower = clamp(Number.isFinite(power) ? power : 0.52, 0.00035, 1);
+  return shotPower <= 0.36
+    ? shotPower * 0.92
     : shotPower <= 0.82
-      ? 0.2448 + Math.pow((shotPower - 0.34) / 0.48, 1.5) * 0.4652
+      ? 0.3312 + Math.pow((shotPower - 0.36) / 0.46, 1.42) * 0.3788
       : 0.71 + Math.pow((shotPower - 0.82) / 0.18, 1.88) * 0.29;
 }
 
 function estimateCueVisualSpeedPxPerMs(power: number) {
-  const shapedPower = Math.pow(shapeShotPowerForVisual(power), 1.14);
+  const shapedPower = shapeShotPowerForVisual(power);
   const shotSpeed = SERVER_MIN_SHOT_SPEED + shapedPower * SERVER_MAX_SHOT_SPEED;
   return clamp(shotSpeed * SERVER_REALTIME_SPEED_TO_PX_PER_MS, 0.025, 3.55);
 }
 
 function maxCueVisualLeadPx(power: number) {
-  return lerp(0.45, 4.2, Math.pow(clamp(power, 0, 1), 1.18));
+  return lerp(0.18, 2.1, Math.pow(clamp(power, 0, 1), 1.12));
 }
 
 function maxCueAdvanceStepPx(power: number, estimatedSpeedPxPerMs: number, deltaMs: number) {
-  const shapedPower = Math.pow(clamp(power, 0, 1), 1.28);
-  const conservativeSpeed = estimatedSpeedPxPerMs * lerp(0.48, 0.82, shapedPower);
+  const shapedPower = Math.pow(clamp(power, 0, 1), 1.18);
+  const conservativeSpeed = estimatedSpeedPxPerMs * lerp(0.38, 0.68, shapedPower);
   return Math.max(0.18, conservativeSpeed * Math.max(1, deltaMs));
 }
 
@@ -617,15 +617,12 @@ function computePendingShotProgress(pending: {
 }, now: number) {
   const elapsed = now - pending.startedAt;
   const heldElapsed = Math.min(elapsed, PENDING_SHOT_VISUAL_MAX_MS);
-  const travelMs = Math.max(22, pending.impactAtMs ?? Math.max(40, pending.travelLimit / Math.max(0.72, pending.estimatedSpeedPxPerMs)));
+  const travelMs = Math.max(22, pending.impactAtMs ?? Math.max(40, pending.travelLimit / Math.max(0.55, pending.estimatedSpeedPxPerMs)));
   const moveProgress = clamp(heldElapsed / travelMs, 0, 1);
-  const weakShotBlend = 1 - smoothstep(0.22, 0.72, clamp(pending.power, 0, 1));
-  const slowStart = moveProgress * moveProgress * (3 - 2 * moveProgress);
-  const strongStart = moveProgress <= 0 ? 0 : 1 - Math.pow(1 - moveProgress, lerp(1.02, 1.62, Math.pow(clamp(pending.power, 0, 1), 0.82)));
-  const easedMove = lerp(strongStart, slowStart, weakShotBlend);
-  const travelDistance = pending.travelLimit * easedMove;
-  const expectedCueX = pending.cueX + Math.cos(pending.angle) * travelDistance;
-  const expectedCueY = pending.cueY + Math.sin(pending.angle) * travelDistance;
+  const conservativeDistance = heldElapsed * pending.estimatedSpeedPxPerMs;
+  const limitedDistance = Math.min(pending.travelLimit, conservativeDistance);
+  const expectedCueX = pending.cueX + Math.cos(pending.angle) * limitedDistance;
+  const expectedCueY = pending.cueY + Math.sin(pending.angle) * limitedDistance;
   return {
     elapsed,
     heldElapsed,
@@ -1715,33 +1712,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const serverDeltaMs = previousEntry ? Math.max(1, nextServerAt - previousEntry.serverAt) : 0;
     const pending = pendingShotVisualRef.current;
     if (pending) {
-      const incomingCueBall = incomingBalls.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
-      if (incomingCueBall) {
-        const progress = computePendingShotProgress(pending, now);
-        const authoritativeDistanceFromStart = Math.hypot(incomingCueBall.x - pending.cueX, incomingCueBall.y - pending.cueY);
-        const authoritativeDistanceFromExpected = Math.hypot(incomingCueBall.x - progress.expectedCueX, incomingCueBall.y - progress.expectedCueY);
-        const staleBootstrapSnapshot = authoritativeDistanceFromStart <= Math.max(BALL_RADIUS * 1.3, 17)
-          && authoritativeDistanceFromExpected >= Math.max(9, BALL_RADIUS * 0.9)
-          && progress.elapsed < PENDING_SHOT_VISUAL_MAX_MS;
-        if (staleBootstrapSnapshot) {
-          // Instead of rejecting the snapshot entirely, accept it but override
-          // the cue ball position with the optimistic one. This way other balls
-          // start moving visually during the break while the cue stays smooth.
-          const shotDirX = Math.cos(pending.angle);
-          const shotDirY = Math.sin(pending.angle);
-          const optimisticAdvance = ((progress.expectedCueX - pending.cueX) * shotDirX) + ((progress.expectedCueY - pending.cueY) * shotDirY);
-          const authoritativeAdvance = ((incomingCueBall.x - pending.cueX) * shotDirX) + ((incomingCueBall.y - pending.cueY) * shotDirY);
-          const clampedAdvance = Math.max(authoritativeAdvance, Math.min(optimisticAdvance, authoritativeAdvance + maxCueVisualLeadPx(pending.power)));
-          const optimisticCueX = pending.cueX + shotDirX * clampedAdvance;
-          const optimisticCueY = pending.cueY + shotDirY * clampedAdvance;
-          for (let i = 0; i < incomingBalls.length; i++) {
-            if (incomingBalls[i].number === 0 && !incomingBalls[i].pocketed) {
-              incomingBalls[i] = { ...incomingBalls[i], x: optimisticCueX, y: optimisticCueY };
-            }
-          }
-          // Fall through to push the modified snapshot
-        }
-      }
+      // Keep authoritative snapshots untouched here. Cue-ball optimism is handled
+      // in a single place during the draw step to avoid one-frame rollback fights
+      // between queue ingestion and visual override.
     }
     const nextEntry: RealtimeSnapshotEntry = {
       balls: incomingBalls,
@@ -2546,34 +2519,17 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           while (queue.length >= 3 && queue[1].serverAt <= renderServerTime - 2) {
             queue.shift();
           }
-          // After shifting, sync queue[0] with current visual positions so interpolation
-          // always starts from what's on screen — prevents discontinuity jumps
-          if (realtimeVisualBallsRef.current.length && queue.length >= 2) {
-            const visualMap = new Map(realtimeVisualBallsRef.current.map(b => [b.id, b]));
-            queue[0] = {
-              ...queue[0],
-              balls: queue[0].balls.map(b => {
-                const vis = visualMap.get(b.id);
-                return vis && !b.pocketed && !vis.pocketed ? { ...b, x: vis.x, y: vis.y } : b;
-              }),
-            };
-          }
           const fromSnapshot = queue[0];
           const toSnapshot = queue[1] ?? queue[0];
           const span = Math.max(1, toSnapshot.serverAt - fromSnapshot.serverAt);
           const rawT = (renderServerTime - fromSnapshot.serverAt) / span;
-          const hasPendingShot = !!pendingShotVisualRef.current;
           let smoothedBalls: GameBallSnapshot[];
           if (rawT <= 1) {
             const eased = clamp(rawT, 0, 1);
-            const hermiteBalls = interpolateSnapshotEntries(fromSnapshot, toSnapshot, eased);
-            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 18), 0.42, 0.82);
-            smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, hermiteBalls, carry, hasPendingShot);
+            smoothedBalls = interpolateSnapshotEntries(fromSnapshot, toSnapshot, eased);
           } else {
             const overshootMs = Math.max(0, renderServerTime - toSnapshot.serverAt);
-            const extrapolated = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, Math.min(overshootMs, REALTIME_MAX_EXTRAPOLATION_MS));
-            const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 20), 0.38, 0.76);
-            smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry, hasPendingShot);
+            smoothedBalls = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, Math.min(overshootMs, REALTIME_MAX_EXTRAPOLATION_MS));
           }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
@@ -2590,9 +2546,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const holdSnapshot = queue[0];
           const extrapolationMs = Math.max(0, renderServerTime - holdSnapshot.serverAt);
           const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, Math.min(extrapolationMs, REALTIME_MAX_EXTRAPOLATION_MS));
-          const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 22), 0.4, 0.78);
-          const hasPendingShot = !!pendingShotVisualRef.current;
-          const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry, hasPendingShot);
+          const smoothedBalls = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, Math.min(extrapolationMs, REALTIME_MAX_EXTRAPOLATION_MS));
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
           drawBalls = smoothedBalls;
