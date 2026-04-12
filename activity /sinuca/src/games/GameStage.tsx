@@ -922,15 +922,18 @@ function hexToRgbObj(hex: string) {
 }
 
 function prerenderNumberTexture(ballNumber: number, size: number): Uint8Array {
-  // Render number text into a small canvas, then extract alpha channel
   const c = document.createElement('canvas');
   c.width = size; c.height = size;
   const ctx = c.getContext('2d');
   if (!ctx) return new Uint8Array(size * size);
-  const fontSize = ballNumber >= 10 ? Math.round(size * 0.38) : Math.round(size * 0.44);
+  const fontSize = ballNumber >= 10 ? Math.round(size * 0.40) : Math.round(size * 0.48);
   ctx.font = `800 ${fontSize}px Inter, system-ui, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  // Outline for legibility (especially ball 8)
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = Math.max(1, size * 0.04);
+  ctx.strokeText(String(ballNumber), size / 2, size / 2 + 1);
   ctx.fillStyle = '#000000';
   ctx.fillText(String(ballNumber), size / 2, size / 2 + 1);
   const img = ctx.getImageData(0, 0, size, size);
@@ -951,12 +954,13 @@ function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
   const isStripe = ballNumber >= 9;
   const isEight = ballNumber === 8;
 
-  // Pre-render number into small texture for sampling
-  const numTexSize = Math.round(R * 0.82 * 2);
+  // Pre-render number into texture for sampling
+  const numTexSize = Math.round(R * 1.6);
   const numAlpha = ballNumber > 0 ? prerenderNumberTexture(ballNumber, numTexSize) : null;
-  const numTexR = numTexSize / 2;
+  // Disk cap radius: sqrt(1 - 0.82²) ≈ 0.572
+  const diskCapR = 0.572;
 
-  // Light direction
+  // Light direction (normalized)
   const lx = -0.36, ly = -0.50, lz = 0.78;
   const lLen = Math.hypot(lx, ly, lz);
   const ldx = lx / lLen, ldy = ly / lLen, ldz = lz / lLen;
@@ -996,6 +1000,7 @@ function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
         const pz = Math.sqrt(1 - rr);
 
         // Rotate around X axis (rolling forward)
+        const rx = px;
         const ry = py * cosA - pz * sinA;
         const rz = py * sinA + pz * cosA;
 
@@ -1004,8 +1009,9 @@ function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
         if (isEight) {
           cr = 18; cg = 22; cb = 30;
         } else if (isStripe) {
+          // Stripe with softer feather (0.10) for smooth sphere wrap
           const absRy = Math.abs(ry);
-          const edge = 0.48, fe = 0.06;
+          const edge = 0.46, fe = 0.10;
           const mask = absRy < edge - fe ? 1 : absRy > edge + fe ? 0 : 1 - (absRy - edge + fe) / (fe * 2);
           cr = 242 + ((rgb.r - 242) * mask) | 0;
           cg = 245 + ((rgb.g - 245) * mask) | 0;
@@ -1016,63 +1022,75 @@ function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
 
         // Number disk (white circle at pole) + number text
         if (ballNumber > 0) {
-          const dotVal = Math.abs(rz);
-          if (dotVal > 0.76) {
-            const diskMask = dotVal < 0.82 ? (dotVal - 0.76) / 0.06 : 1;
+          const absRz = Math.abs(rz);
+          if (absRz > 0.76) {
+            const diskMask = absRz < 0.82 ? (absRz - 0.76) / 0.06 : 1;
             cr = (cr + (252 - cr) * diskMask) | 0;
             cg = (cg + (252 - cg) * diskMask) | 0;
             cb = (cb + (254 - cb) * diskMask) | 0;
 
-            // Sample number texture at this sphere point
-            if (numAlpha && diskMask > 0.3) {
-              // Project pole position to texture coords
-              // The pole is at (0,0,±1). The visible pole after rotation:
-              // poleScreenX = 0 (rotation is around X, pole stays on Y-Z plane)
-              // poleScreenY = -sinA * sign
-              const poleSide = rz >= 0 ? 1 : -1;
-              // Map sphere point relative to pole center in screen space
-              const poleScreenY = -sinA * poleSide;
-              const relX = px;
-              const relY = py - poleScreenY * R / R;
-              // Scale relative to disk size on sphere
-              const diskScreenR = Math.sqrt(1 - 0.82 * 0.82) * R;
-              const texX = (relX * R / diskScreenR + 1) * 0.5 * numTexSize;
-              const texY = (relY * R / diskScreenR + 1) * 0.5 * numTexSize;
-              const txi = Math.floor(texX);
-              const tyi = Math.floor(texY);
+            // Sample number texture using sphere-local coords (rx, ry)
+            if (numAlpha && diskMask > 0.2) {
+              // Mirror for back pole
+              const localRx = rz >= 0 ? rx : -rx;
+              const localRy = rz >= 0 ? ry : -ry;
+              const texX = (localRx / diskCapR * 0.5 + 0.5) * numTexSize;
+              const texY = (localRy / diskCapR * 0.5 + 0.5) * numTexSize;
+              const txi = texX | 0;
+              const tyi = texY | 0;
               if (txi >= 0 && txi < numTexSize && tyi >= 0 && tyi < numTexSize) {
                 const numMask = numAlpha[tyi * numTexSize + txi] / 255;
                 if (numMask > 0.05) {
-                  const textR = isEight ? 230 : 22;
-                  const textG = isEight ? 236 : 26;
-                  const textB = isEight ? 244 : 36;
-                  cr = (cr + (textR - cr) * numMask * diskMask) | 0;
-                  cg = (cg + (textG - cg) * numMask * diskMask) | 0;
-                  cb = (cb + (textB - cb) * numMask * diskMask) | 0;
+                  const textR = isEight ? 228 : 20;
+                  const textG = isEight ? 234 : 24;
+                  const textB = isEight ? 242 : 34;
+                  const blend = numMask * diskMask;
+                  cr = (cr + (textR - cr) * blend) | 0;
+                  cg = (cg + (textG - cg) * blend) | 0;
+                  cb = (cb + (textB - cb) * blend) | 0;
                 }
               }
             }
           }
         }
 
-        // Lighting
+        // Lambert lighting
         const lambert = px * ldx + py * ldy + pz * ldz;
         const lClamped = lambert > 0 ? (lambert < 1 ? lambert : 1) : 0;
-        const rim = (1 - pz); // linear rim is cheaper than pow
+        const rim = 1 - pz;
         const shade = 0.38 + lClamped * 0.70 - rim * rim * 0.12;
         const s = shade < 0.22 ? 0.22 : shade > 1.12 ? 1.12 : shade;
         cr = (cr * s) | 0; if (cr > 255) cr = 255;
         cg = (cg * s) | 0; if (cg > 255) cg = 255;
         cb = (cb * s) | 0; if (cb > 255) cb = 255;
 
-        // Specular (simplified)
+        // Ambient occlusion at bottom (simulates felt contact)
+        if (py > 0.5) {
+          const aoMask = (py - 0.5) * 0.18;
+          cr = (cr * (1 - aoMask)) | 0;
+          cg = (cg * (1 - aoMask)) | 0;
+          cb = (cb * (1 - aoMask)) | 0;
+        }
+
+        // Primary specular (main light reflection)
         const specBase = -0.34 * ldx - 0.38 * ldy + pz * ldz;
-        if (specBase > 0.65) {
-          const specI = ((specBase - 0.65) / 0.35);
-          const spec = specI * specI * specI * 0.55 * 255;
+        if (specBase > 0.62) {
+          const specI = (specBase - 0.62) / 0.38;
+          const spec = specI * specI * specI * 0.52 * 255;
           cr = Math.min(255, cr + spec | 0);
           cg = Math.min(255, cg + spec | 0);
           cb = Math.min(255, cb + spec | 0);
+        }
+
+        // Secondary specular (window reflection — smaller, offset)
+        const spec2X = 0.22, spec2Y = -0.28;
+        const spec2Dot = px * spec2X + py * spec2Y + pz * 0.93;
+        if (spec2Dot > 0.88) {
+          const s2 = (spec2Dot - 0.88) / 0.12;
+          const spec2 = s2 * s2 * 0.35 * 255;
+          cr = Math.min(255, cr + spec2 | 0);
+          cg = Math.min(255, cg + spec2 | 0);
+          cb = Math.min(255, cb + spec2 | 0);
         }
 
         // Edge AA
@@ -1096,6 +1114,54 @@ function ensureAllAtlases() {
   atlasesReady = true;
 }
 
+// Pre-rendered cue ball sprite (eliminates per-frame gradient creation)
+let cueBallSprite: HTMLCanvasElement | null = null;
+
+function getCueBallSprite(): HTMLCanvasElement {
+  if (cueBallSprite) return cueBallSprite;
+  const size = SPRITE_PX;
+  const r = size * 0.5 - 2;
+  const c = size * 0.5;
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
+  const g = ctx.createRadialGradient(c - r * 0.28, c - r * 0.28, r * 0.05, c, c, r * 1.2);
+  g.addColorStop(0, "#ffffff");
+  g.addColorStop(0.35, "#f0f4fa");
+  g.addColorStop(0.70, "#d8e4f0");
+  g.addColorStop(1, "#a8bed8");
+  ctx.beginPath();
+  ctx.arc(c, c, r, 0, Math.PI * 2);
+  ctx.fillStyle = g;
+  ctx.fill();
+  // Specular highlight
+  const sg = ctx.createRadialGradient(c - r * 0.32, c - r * 0.36, 0, c - r * 0.26, c - r * 0.28, r * 0.48);
+  sg.addColorStop(0, "rgba(255,255,255,0.82)");
+  sg.addColorStop(0.4, "rgba(255,255,255,0.25)");
+  sg.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.beginPath();
+  ctx.arc(c, c, r, 0, Math.PI * 2);
+  ctx.fillStyle = sg;
+  ctx.fill();
+  // Second specular (window)
+  const s2 = ctx.createRadialGradient(c + r * 0.18, c - r * 0.24, 0, c + r * 0.20, c - r * 0.22, r * 0.22);
+  s2.addColorStop(0, "rgba(255,255,255,0.38)");
+  s2.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.beginPath();
+  ctx.arc(c, c, r, 0, Math.PI * 2);
+  ctx.fillStyle = s2;
+  ctx.fill();
+  // Outline
+  ctx.beginPath();
+  ctx.arc(c, c, r - 0.4, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(0,0,0,0.14)";
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+  cueBallSprite = canvas;
+  return canvas;
+}
+
 function drawBall(
   ctx: CanvasRenderingContext2D,
   ball: GameBallSnapshot,
@@ -1103,25 +1169,42 @@ function drawBall(
   spin: BallSpinState | undefined = undefined,
 ) {
   const r = BALL_VISUAL_RADIUS * scale;
+  const isFullSize = scale > 0.9;
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
 
-  ctx.shadowColor = "rgba(0, 0, 0, 0.44)";
-  ctx.shadowBlur = 8 * scale;
-  ctx.shadowOffsetX = 0.8 * scale;
-  ctx.shadowOffsetY = 4 * scale;
+  // Contact shadow + felt reflection only at full size (skip during pocket anim)
+  if (isFullSize) {
+    ctx.save();
+    ctx.globalAlpha = 0.26;
+    ctx.beginPath();
+    ctx.ellipse(0, r * 0.82, r * 0.70, r * 0.17, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fill();
+    ctx.restore();
+
+    if (ball.number > 0 && ball.number !== 8) {
+      ctx.save();
+      ctx.globalAlpha = 0.07;
+      ctx.beginPath();
+      ctx.ellipse(0, r * 0.88, r * 0.45, r * 0.10, 0, 0, Math.PI * 2);
+      ctx.fillStyle = ballColor(ball.number);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // Drop shadow
+  ctx.shadowColor = "rgba(0,0,0,0.36)";
+  ctx.shadowBlur = isFullSize ? 7 : 4 * scale;
+  ctx.shadowOffsetX = 0.5 * scale;
+  ctx.shadowOffsetY = 3 * scale;
 
   if (ball.number === 0) {
-    // Cue ball — gradient only
-    const g = ctx.createRadialGradient(-r * 0.28, -r * 0.28, r * 0.05, 0, 0, r * 1.2);
-    g.addColorStop(0, "#ffffff");
-    g.addColorStop(0.42, "#e8f0f8");
-    g.addColorStop(1, "#b0c5da");
-    ctx.beginPath();
-    ctx.arc(0, 0, r, 0, Math.PI * 2);
-    ctx.fillStyle = g;
-    ctx.fill();
+    // Cue ball — pre-rendered sprite
+    const sprite = getCueBallSprite();
+    ctx.drawImage(sprite, -r, -r, r * 2, r * 2);
   } else {
     // Numbered ball — atlas sprite
     const atlas = buildBallAtlas(ball.number);
@@ -1133,7 +1216,7 @@ function drawBall(
     const frameIdx = fi >= SPRITE_FRAMES ? SPRITE_FRAMES - 1 : fi;
 
     ctx.save();
-    ctx.rotate(heading + Math.PI * 0.5);
+    ctx.rotate(heading - Math.PI * 0.5);
     ctx.drawImage(atlas, frameIdx * SPRITE_PX, 0, SPRITE_PX, SPRITE_PX, -r, -r, r * 2, r * 2);
     ctx.restore();
   }
@@ -1314,6 +1397,18 @@ function drawPoolTable(
     ctx.drawImage(tableCache, 0, 0, TABLE_WIDTH, TABLE_HEIGHT);
   }
 
+  // Pocket depth glow — dark gradient inside each pocket for 3D depth
+  for (const pocket of POCKETS) {
+    const pg = ctx.createRadialGradient(pocket.x, pocket.y, 2, pocket.x, pocket.y, 22);
+    pg.addColorStop(0, "rgba(0,0,0,0.65)");
+    pg.addColorStop(0.5, "rgba(0,0,0,0.25)");
+    pg.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, 22, 0, Math.PI * 2);
+    ctx.fillStyle = pg;
+    ctx.fill();
+  }
+
   // Called pocket highlight
   if (needEightCall && selectedPocket !== null) {
     const selected = POCKETS.find((pocket) => pocket.id === selectedPocket) ?? null;
@@ -1354,15 +1449,19 @@ function drawPoolTable(
     drawPocketAnimation(ctx, anim, now, ballSpinCache.get(anim.ball.id));
   }
 
-  // Ball-in-hand indicator
+  // Ball-in-hand indicator — pulsing glow
   if (cueBall && isBallInHand) {
+    const pulse = 0.5 + Math.sin(now * 0.005) * 0.3;
     ctx.save();
-    ctx.setLineDash([8, 6]);
+    ctx.globalAlpha = pulse;
+    const bihGrad = ctx.createRadialGradient(cueBall.x, cueBall.y, BALL_VISUAL_RADIUS, cueBall.x, cueBall.y, BALL_VISUAL_RADIUS + 14);
+    bihGrad.addColorStop(0, "rgba(100,200,255,0.5)");
+    bihGrad.addColorStop(0.5, "rgba(100,200,255,0.15)");
+    bihGrad.addColorStop(1, "rgba(100,200,255,0)");
     ctx.beginPath();
-    ctx.arc(cueBall.x, cueBall.y, BALL_VISUAL_RADIUS + 9, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(255,255,255,0.42)";
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    ctx.arc(cueBall.x, cueBall.y, BALL_VISUAL_RADIUS + 14, 0, Math.PI * 2);
+    ctx.fillStyle = bihGrad;
+    ctx.fill();
     ctx.restore();
   }
 }
