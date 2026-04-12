@@ -203,6 +203,7 @@ type BallSpinState = {
   bankVelocity: number;
   lastHeading: number | null;
   restFrames: number;
+  rollPhase: number;
 };
 
 type SnapshotVelocity = { x: number; y: number; pocketed: boolean };
@@ -789,6 +790,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
         bankVelocity: 0,
         lastHeading: null,
         restFrames: 0,
+        rollPhase: 0,
       });
       continue;
     }
@@ -882,6 +884,7 @@ function updateBallSpinCache(cache: Map<string, BallSpinState>, balls: GameBallS
     if (Math.abs(sideStep) > 0.00001) orientation = applyOrientationStep(orientation, { x: 0, y: 0, z: 1 }, sideStep);
     if (Math.abs(bankStep) > 0.00001) orientation = applyOrientationStep(orientation, bankAxis, bankStep);
     current.orientation = orientation;
+    current.rollPhase += rollStep;
 
     current.lastX = ball.x;
     current.lastY = ball.y;
@@ -905,104 +908,164 @@ function hexToRgb(hex: string) {
 
 // ─── Gradient-based billiard ball rendering (GPU-accelerated) ──────────────
 
-function drawStripeBandFromPole(
-  ctx: CanvasRenderingContext2D,
-  r: number,
-  color: string,
-  pole: Vec3,
-  scale: number,
-) {
-  // The stripe wraps around the equator, perpendicular to the pole axis.
-  // pole.z ≈ ±1 → pole faces/backs us → equator is edge-on → thin stripe at edges
-  // pole.z ≈ 0 → pole is sideways → equator faces us → full colored band
-  const poleMag2D = Math.hypot(pole.x, pole.y);
-  const bandHalfH = Math.max(r * 0.04, poleMag2D * r * 0.50);
-  if (bandHalfH < r * 0.03) return;
+// ─── Pre-rendered sprite sheet system (GPU-fast at runtime) ────────────────
+// Each ball (1-15) gets SPRITE_FRAMES frames showing rotation around one axis.
+// At runtime: pick frame from rollPhase, ctx.rotate(heading), drawImage. ~0.02ms/ball.
 
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(0, 0, r - 0.3 * scale, 0, Math.PI * 2);
-  ctx.clip();
+const SPRITE_FRAMES = 32;
+const SPRITE_PX = 48; // render size for crisp quality at DPR up to 1.5
 
-  // Rotate so the pole projection aligns with local Y → stripe becomes horizontal
-  if (poleMag2D > 0.01) {
-    ctx.rotate(Math.atan2(pole.x, -pole.y));
-  }
+type BallSpriteSheet = HTMLCanvasElement[];
 
-  // Band center shifts based on pole.z (pole tilt toward/away from viewer)
-  const bandCenterY = pole.z * r * 0.50;
-  const topY = bandCenterY - bandHalfH;
-  const botY = bandCenterY + bandHalfH;
-  // Curved edges for sphere wrap effect
-  const edgeCurve = lerp(r * 0.22, r * 0.06, poleMag2D);
+const ballSpriteSheetCache = new Map<number, BallSpriteSheet>();
 
-  ctx.beginPath();
-  ctx.moveTo(-r, topY);
-  ctx.quadraticCurveTo(0, topY - edgeCurve, r, topY);
-  ctx.lineTo(r, botY);
-  ctx.quadraticCurveTo(0, botY + edgeCurve, -r, botY);
-  ctx.closePath();
-
-  const g = ctx.createRadialGradient(0, bandCenterY, 0, 0, bandCenterY, r * 1.1);
-  g.addColorStop(0, shadeColor(color, 18));
-  g.addColorStop(0.45, color);
-  g.addColorStop(0.82, shadeColor(color, -25));
-  g.addColorStop(1, shadeColor(color, -45));
-  ctx.fillStyle = g;
-  ctx.fill();
-
-  ctx.restore();
+function hexToRgbObj(hex: string) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
 }
 
-function drawBallLabelFromPole(
-  ctx: CanvasRenderingContext2D,
-  ball: GameBallSnapshot,
-  r: number,
-  pole: Vec3,
-  scale: number,
-  color: string,
-  isStripe: boolean,
-) {
-  if (ball.number <= 0) return;
-  // Show number on whichever side of the pole faces us
-  const visiblePole = pole.z >= 0 ? pole : { x: -pole.x, y: -pole.y, z: -pole.z };
-  const frontFactor = smoothstep(0.08, 0.88, visiblePole.z);
-  if (frontFactor <= 0.05) return;
+function prerenderBallSpriteSheet(ballNumber: number): BallSpriteSheet {
+  const cached = ballSpriteSheetCache.get(ballNumber);
+  if (cached) return cached;
 
-  const labelX = visiblePole.x * r * 0.70;
-  const labelY = visiblePole.y * r * 0.70;
-  const diskAlpha = clamp(0.12 + frontFactor * 0.96, 0, 1);
-  const diskScaleX = lerp(0.38, 1, frontFactor);
-  const diskScaleY = lerp(0.20, 1, frontFactor);
-  const diskR = r * (isStripe ? 0.38 : 0.42);
+  const size = SPRITE_PX;
+  const radius = size * 0.5 - 2;
+  const center = size * 0.5;
+  const color = ballColor(ballNumber);
+  const rgb = hexToRgbObj(color);
+  const isStripe = ballNumber >= 9;
+  const isEight = ballNumber === 8;
+  const isCue = ballNumber === 0;
+  const lightDir = { x: -0.38, y: -0.52, z: 0.76 };
+  const lLen = Math.hypot(lightDir.x, lightDir.y, lightDir.z);
+  lightDir.x /= lLen; lightDir.y /= lLen; lightDir.z /= lLen;
 
-  // White disk
-  ctx.save();
-  ctx.globalAlpha = diskAlpha;
-  ctx.translate(labelX, labelY);
-  ctx.scale(diskScaleX, diskScaleY);
-  ctx.beginPath();
-  ctx.arc(0, 0, diskR, 0, Math.PI * 2);
-  const diskGrad = ctx.createRadialGradient(0, -diskR * 0.2, 0, 0, 0, diskR);
-  diskGrad.addColorStop(0, "#ffffff");
-  diskGrad.addColorStop(1, "#e8eef5");
-  ctx.fillStyle = diskGrad;
-  ctx.fill();
-  ctx.restore();
+  const frames: HTMLCanvasElement[] = [];
 
-  // Number text
-  const fontSize = clamp(Math.round((ball.number >= 10 ? 7 : 8.5) * scale * Math.max(0.7, frontFactor)), 4, 18);
-  if (fontSize >= 4) {
-    ctx.save();
-    ctx.globalAlpha = diskAlpha;
-    ctx.translate(labelX, labelY);
-    ctx.scale(diskScaleX, diskScaleY);
-    ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillStyle = ball.number === 8 ? "#0a0c12" : "#1a1e2a";
-    ctx.fillText(String(ball.number), 0, 0.5 * scale);
-    ctx.restore();
+  for (let f = 0; f < SPRITE_FRAMES; f++) {
+    const angle = (f / SPRITE_FRAMES) * Math.PI * 2;
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) { frames.push(canvas); continue; }
+
+    const imageData = ctx.createImageData(size, size);
+    const data = imageData.data;
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const px = (x + 0.5 - center) / radius;
+        const py = (y + 0.5 - center) / radius;
+        const rr = px * px + py * py;
+        const idx = (y * size + x) * 4;
+
+        if (rr > 1) { data[idx + 3] = 0; continue; }
+
+        const pz = Math.sqrt(1 - rr);
+
+        // Rotate around X axis (rolling forward)
+        const rx = px;
+        const ry = py * cosA - pz * sinA;
+        const rz = py * sinA + pz * cosA;
+
+        // Color lookup
+        let cr: number, cg: number, cb: number;
+        if (isCue) {
+          cr = 240; cg = 244; cb = 250;
+        } else if (isEight) {
+          cr = 16; cg = 20; cb = 28;
+        } else if (isStripe) {
+          // Stripe: white base, colored equatorial band where |ry| < 0.50
+          const bandEdge = 0.50;
+          const feather = 0.06;
+          const absRy = Math.abs(ry);
+          const bandMask = absRy < bandEdge - feather ? 1
+            : absRy > bandEdge + feather ? 0
+            : 1 - (absRy - (bandEdge - feather)) / (feather * 2);
+          cr = Math.round(240 + (rgb.r - 240) * bandMask);
+          cg = Math.round(244 + (rgb.g - 244) * bandMask);
+          cb = Math.round(250 + (rgb.b - 250) * bandMask);
+        } else {
+          // Solid
+          cr = rgb.r; cg = rgb.g; cb = rgb.b;
+        }
+
+        // Number disk — at pole (0, 0, 1), visible when rz > 0.82
+        if (ballNumber > 0) {
+          const diskThreshold = 0.82;
+          const diskFeather = 0.06;
+          // Check both sides of pole
+          const dotVal = Math.abs(rz);
+          if (dotVal > diskThreshold - diskFeather) {
+            const diskMask = dotVal < diskThreshold + diskFeather
+              ? (dotVal - (diskThreshold - diskFeather)) / (diskFeather * 2)
+              : 1;
+            cr = Math.round(cr + (252 - cr) * diskMask);
+            cg = Math.round(cg + (252 - cg) * diskMask);
+            cb = Math.round(cb + (254 - cb) * diskMask);
+          }
+        }
+
+        // Lambert lighting
+        const lambert = clamp(px * lightDir.x + py * lightDir.y + pz * lightDir.z, 0, 1);
+        const rim = Math.pow(1 - pz, 1.4);
+        const shade = clamp(0.36 + lambert * 0.72 - rim * 0.1, 0.2, 1.15);
+        cr = clamp(Math.round(cr * shade), 0, 255);
+        cg = clamp(Math.round(cg * shade), 0, 255);
+        cb = clamp(Math.round(cb * shade), 0, 255);
+
+        // Specular
+        const specDot = clamp(-0.34 * lightDir.x - 0.38 * lightDir.y + pz * lightDir.z, 0, 1);
+        const spec = Math.pow(specDot, 28) * 0.65;
+        cr = Math.min(255, cr + Math.round(spec * 255));
+        cg = Math.min(255, cg + Math.round(spec * 255));
+        cb = Math.min(255, cb + Math.round(spec * 255));
+
+        // Anti-alias edge
+        const edgeAlpha = rr > 0.92 ? 1 - (rr - 0.92) / 0.08 : 1;
+        data[idx] = cr;
+        data[idx + 1] = cg;
+        data[idx + 2] = cb;
+        data[idx + 3] = Math.round(clamp(edgeAlpha, 0, 1) * 255);
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+
+    // Draw number text on top (only when pole faces us — rz > 0 at pole)
+    if (ballNumber > 0) {
+      // The pole (0,0,1) after rotation: poleY = sinA, poleZ = cosA
+      const poleZ = cosA;
+      if (Math.abs(poleZ) > 0.15) {
+        const poleSide = poleZ >= 0 ? 1 : -1;
+        const poleScreenY = -sinA * poleSide * radius * 0.62;
+        const frontFactor = Math.abs(poleZ);
+        const fontSize = clamp(Math.round((ballNumber >= 10 ? 9 : 11) * frontFactor), 5, 14);
+        ctx.save();
+        ctx.globalAlpha = clamp(0.2 + frontFactor * 0.9, 0, 1);
+        ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = isEight ? '#e8ecf4' : '#1a1e2a';
+        ctx.fillText(String(ballNumber), center, center + poleScreenY);
+        ctx.restore();
+      }
+    }
+
+    frames.push(canvas);
+  }
+
+  ballSpriteSheetCache.set(ballNumber, frames);
+  return frames;
+}
+
+function ensureBallSpriteSheetsReady() {
+  for (let n = 1; n <= 15; n++) {
+    prerenderBallSpriteSheet(n);
   }
 }
 
@@ -1013,41 +1076,46 @@ function drawBall(
   spin: BallSpinState | undefined = undefined,
 ) {
   const r = BALL_VISUAL_RADIUS * scale;
-  const color = ballColor(ball.number);
-  const orientation = spin?.orientation ?? { x: 0, y: 0, z: 0, w: 1 };
-  const isStripe = ball.number >= 9;
 
   ctx.save();
   ctx.translate(ball.x, ball.y);
 
+  // Shadow
   ctx.shadowColor = "rgba(0, 0, 0, 0.48)";
   ctx.shadowBlur = 9 * scale;
   ctx.shadowOffsetX = 0.9 * scale;
   ctx.shadowOffsetY = 4.5 * scale;
 
-  // Base fill
-  const baseGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r * 1.3);
   if (ball.number === 0) {
+    // Cue ball — simple white gradient, no sprite needed
+    const baseGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r * 1.3);
     baseGrad.addColorStop(0, "#ffffff");
     baseGrad.addColorStop(0.45, "#e8f0f8");
     baseGrad.addColorStop(1, "#b0c5da");
-  } else if (ball.number === 8) {
-    baseGrad.addColorStop(0, "#4a5260");
-    baseGrad.addColorStop(0.3, "#1e2330");
-    baseGrad.addColorStop(1, "#050709");
-  } else if (isStripe) {
-    baseGrad.addColorStop(0, "#ffffff");
-    baseGrad.addColorStop(0.65, "#f4f7fb");
-    baseGrad.addColorStop(1, "#ccd6e2");
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fillStyle = baseGrad;
+    ctx.fill();
   } else {
-    baseGrad.addColorStop(0, "#fff8d8");
-    baseGrad.addColorStop(0.18, color);
-    baseGrad.addColorStop(1, shadeColor(color, -55));
+    // Numbered balls — use pre-rendered sprite
+    const sheets = prerenderBallSpriteSheet(ball.number);
+    const rollPhase = spin?.rollPhase ?? 0;
+    const heading = spin?.lastHeading ?? 0;
+    // Pick frame from accumulated roll phase
+    const TWO_PI = Math.PI * 2;
+    const normalizedPhase = ((rollPhase % TWO_PI) + TWO_PI) % TWO_PI;
+    const frameIndex = Math.floor(normalizedPhase / TWO_PI * SPRITE_FRAMES) % SPRITE_FRAMES;
+    const sprite = sheets[frameIndex];
+
+    if (sprite) {
+      ctx.save();
+      // Rotate canvas so the sprite's "forward" aligns with movement direction
+      ctx.rotate(heading + Math.PI * 0.5);
+      ctx.drawImage(sprite, -r, -r, r * 2, r * 2);
+      ctx.restore();
+    }
   }
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fillStyle = baseGrad;
-  ctx.fill();
+
   ctx.shadowColor = "transparent";
 
   // Outline
@@ -1058,36 +1126,6 @@ function drawBall(
   ctx.lineWidth = 0.9 * scale;
   ctx.stroke();
   ctx.restore();
-
-  // Stripe band (for striped balls only) — rendered from quaternion pole
-  const pole = ball.number > 0 ? rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation) : null;
-  if (isStripe && pole) {
-    drawStripeBandFromPole(ctx, r, color, pole, scale);
-  }
-
-  // Number label — driven by same pole
-  if (ball.number > 0 && pole) {
-    drawBallLabelFromPole(ctx, ball, r, pole, scale, color, isStripe);
-  }
-
-  // Shadow overlay
-  const shadowGrad = ctx.createRadialGradient(r * 0.14, r * 0.28, r * 0.1, 0, r * 0.26, r * 1.04);
-  shadowGrad.addColorStop(0, "rgba(10, 12, 18, 0)");
-  shadowGrad.addColorStop(1, "rgba(10, 12, 18, 0.16)");
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fillStyle = shadowGrad;
-  ctx.fill();
-
-  // Specular highlight
-  const specGrad = ctx.createRadialGradient(-r * 0.34, -r * 0.38, 0, -r * 0.28, -r * 0.3, r * 0.55);
-  specGrad.addColorStop(0, "rgba(255, 255, 255, 0.72)");
-  specGrad.addColorStop(0.35, "rgba(255, 255, 255, 0.22)");
-  specGrad.addColorStop(1, "rgba(255, 255, 255, 0)");
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fillStyle = specGrad;
-  ctx.fill();
 
   ctx.restore();
 }
@@ -1453,6 +1491,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   }, [tableSprite, cueSprite]);
 
   useEffect(() => { tableCacheRef.current = makeTableCache(tableSprite); }, [assetsVersion, tableSprite]);
+
+  // Pre-render ball sprite sheets (runs once, ~50ms)
+  useEffect(() => { ensureBallSpriteSheetsReady(); }, []);
 
   useEffect(() => { onAimStateChangeRef.current = onAimStateChange; }, [onAimStateChange]);
   useEffect(() => { displayedGroupsRef.current = displayedGroups; }, [displayedGroups]);
