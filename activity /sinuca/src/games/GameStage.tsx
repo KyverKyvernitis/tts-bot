@@ -525,6 +525,7 @@ function interpolateSnapshotBalls(
   fromBalls: GameBallSnapshot[],
   targetBalls: GameBallSnapshot[],
   alpha: number,
+  skipCueBall = false,
 ) {
   if (!fromBalls.length) return targetBalls.map((ball) => ({ ...ball }));
   const fromMap = new Map(fromBalls.map((ball) => [ball.id, ball]));
@@ -532,31 +533,27 @@ function interpolateSnapshotBalls(
     const prev = fromMap.get(ball.id);
     if (!prev) return { ...ball };
     if (prev.pocketed !== ball.pocketed) return { ...ball };
+    // When pending shot is active, cue ball is controlled elsewhere — don't touch it
+    if (skipCueBall && ball.number === 0) return prev;
 
     const dx = ball.x - prev.x;
     const dy = ball.y - prev.y;
     const dist = Math.hypot(dx, dy);
     const isCueBall = ball.number === 0;
-    const softSnapDistance = isCueBall ? REALTIME_VISUAL_SNAP_DISTANCE * 3.8 : REALTIME_VISUAL_SNAP_DISTANCE * 2.1;
-    const hardSnapDistance = isCueBall ? softSnapDistance * 2.6 : softSnapDistance * 2.45;
 
+    // Only hard-snap on truly huge jumps (teleport/state reset)
+    const hardSnapDistance = isCueBall ? 900 : REALTIME_VISUAL_SNAP_DISTANCE * 5;
     if (dist >= hardSnapDistance) return { ...ball };
-    if (dist <= (isCueBall ? 0.42 : 0.32)) return { ...ball };
 
-    const responseFloor = isCueBall ? 0.24 : 0.2;
-    const responseCeil = isCueBall ? 0.88 : 0.82;
-    const distanceBoost = clamp(dist / (isCueBall ? 18 : 14), 0, 1) * (isCueBall ? 0.34 : 0.3);
+    // Always lerp — never snap prematurely. Let convergence happen naturally.
+    const responseFloor = isCueBall ? 0.28 : 0.22;
+    const responseCeil = isCueBall ? 0.90 : 0.85;
+    const distanceBoost = clamp(dist / (isCueBall ? 16 : 12), 0, 1) * 0.32;
     const appliedAlpha = clamp(Math.max(alpha, responseFloor) + distanceBoost, responseFloor, responseCeil);
-    const nextX = lerp(prev.x, ball.x, appliedAlpha);
-    const nextY = lerp(prev.y, ball.y, appliedAlpha);
-    const residual = dist * (1 - appliedAlpha);
-    if (residual <= (isCueBall ? 0.4 : 0.28)) {
-      return { ...ball };
-    }
     return {
       ...ball,
-      x: nextX,
-      y: nextY,
+      x: lerp(prev.x, ball.x, appliedAlpha),
+      y: lerp(prev.y, ball.y, appliedAlpha),
       pocketed: ball.pocketed,
     };
   });
@@ -2398,34 +2395,34 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           while (queue.length >= 3 && queue[1].serverAt <= renderServerTime - 2) {
             queue.shift();
           }
+          // After shifting, sync queue[0] with current visual positions so interpolation
+          // always starts from what's on screen — prevents discontinuity jumps
+          if (realtimeVisualBallsRef.current.length && queue.length >= 2) {
+            const visualMap = new Map(realtimeVisualBallsRef.current.map(b => [b.id, b]));
+            queue[0] = {
+              ...queue[0],
+              balls: queue[0].balls.map(b => {
+                const vis = visualMap.get(b.id);
+                return vis && !b.pocketed && !vis.pocketed ? { ...b, x: vis.x, y: vis.y } : b;
+              }),
+            };
+          }
           const fromSnapshot = queue[0];
           const toSnapshot = queue[1] ?? queue[0];
           const span = Math.max(1, toSnapshot.serverAt - fromSnapshot.serverAt);
           const rawT = (renderServerTime - fromSnapshot.serverAt) / span;
+          const hasPendingShot = !!pendingShotVisualRef.current;
           let smoothedBalls: GameBallSnapshot[];
           if (rawT <= 1) {
             const eased = clamp(rawT, 0, 1);
             const hermiteBalls = interpolateSnapshotEntries(fromSnapshot, toSnapshot, eased);
             const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 18), 0.42, 0.82);
-            smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, hermiteBalls, carry);
-            // Snap nearly-stopped balls to target to eliminate micro-flick jitter
-            for (let i = 0; i < smoothedBalls.length; i++) {
-              const target = hermiteBalls[i];
-              if (!target) continue;
-              const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
-              if (dist < 1.0) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
-            }
+            smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, hermiteBalls, carry, hasPendingShot);
           } else {
             const overshootMs = Math.max(0, renderServerTime - toSnapshot.serverAt);
             const extrapolated = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, Math.min(overshootMs, REALTIME_MAX_EXTRAPOLATION_MS));
             const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 20), 0.38, 0.76);
-            smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
-            for (let i = 0; i < smoothedBalls.length; i++) {
-              const target = extrapolated[i];
-              if (!target) continue;
-              const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
-              if (dist < 1.0) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
-            }
+            smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry, hasPendingShot);
           }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
@@ -2443,13 +2440,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const extrapolationMs = Math.max(0, renderServerTime - holdSnapshot.serverAt);
           const extrapolated = extrapolateSnapshotBalls(holdSnapshot.balls, holdSnapshot.velocities, Math.min(extrapolationMs, REALTIME_MAX_EXTRAPOLATION_MS));
           const carry = clamp(1 - Math.exp(-(now - realtimeVisualLastAtRef.current) / 22), 0.4, 0.78);
-          const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry);
-          for (let i = 0; i < smoothedBalls.length; i++) {
-            const target = extrapolated[i];
-            if (!target) continue;
-            const dist = Math.hypot(smoothedBalls[i].x - target.x, smoothedBalls[i].y - target.y);
-            if (dist < 1.0) { smoothedBalls[i] = { ...smoothedBalls[i], x: target.x, y: target.y }; }
-          }
+          const hasPendingShot = !!pendingShotVisualRef.current;
+          const smoothedBalls = interpolateSnapshotBalls(realtimeVisualBallsRef.current, extrapolated, carry, hasPendingShot);
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
           drawBalls = smoothedBalls;
