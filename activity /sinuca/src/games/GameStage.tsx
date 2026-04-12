@@ -906,167 +906,194 @@ function hexToRgb(hex: string) {
   };
 }
 
-// ─── Gradient-based billiard ball rendering (GPU-accelerated) ──────────────
+// ─── Single-atlas sprite sheet (1 canvas per ball, 24 frames) ─────────────
+// Runtime cost: 1 drawImage with source rect per ball ≈ 0.01ms
 
-// ─── Pre-rendered sprite sheet system (GPU-fast at runtime) ────────────────
-// Each ball (1-15) gets SPRITE_FRAMES frames showing rotation around one axis.
-// At runtime: pick frame from rollPhase, ctx.rotate(heading), drawImage. ~0.02ms/ball.
+const SPRITE_FRAMES = 24;
+const SPRITE_PX = 44;
+const ATLAS_WIDTH = SPRITE_PX * SPRITE_FRAMES;
 
-const SPRITE_FRAMES = 32;
-const SPRITE_PX = 48; // render size for crisp quality at DPR up to 1.5
-
-type BallSpriteSheet = HTMLCanvasElement[];
-
-const ballSpriteSheetCache = new Map<number, BallSpriteSheet>();
+const ballAtlasCache = new Map<number, HTMLCanvasElement>();
+let atlasesReady = false;
 
 function hexToRgbObj(hex: string) {
   const n = parseInt(hex.replace('#', ''), 16);
   return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
 }
 
-function prerenderBallSpriteSheet(ballNumber: number): BallSpriteSheet {
-  const cached = ballSpriteSheetCache.get(ballNumber);
-  if (cached) return cached;
+function prerenderNumberTexture(ballNumber: number, size: number): Uint8Array {
+  // Render number text into a small canvas, then extract alpha channel
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d');
+  if (!ctx) return new Uint8Array(size * size);
+  const fontSize = ballNumber >= 10 ? Math.round(size * 0.38) : Math.round(size * 0.44);
+  ctx.font = `800 ${fontSize}px Inter, system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#000000';
+  ctx.fillText(String(ballNumber), size / 2, size / 2 + 1);
+  const img = ctx.getImageData(0, 0, size, size);
+  const alpha = new Uint8Array(size * size);
+  for (let i = 0; i < size * size; i++) alpha[i] = img.data[i * 4 + 3];
+  return alpha;
+}
 
-  const size = SPRITE_PX;
-  const radius = size * 0.5 - 2;
-  const center = size * 0.5;
+function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
+  const existing = ballAtlasCache.get(ballNumber);
+  if (existing) return existing;
+
+  const S = SPRITE_PX;
+  const R = S * 0.5 - 2;
+  const C = S * 0.5;
   const color = ballColor(ballNumber);
   const rgb = hexToRgbObj(color);
   const isStripe = ballNumber >= 9;
   const isEight = ballNumber === 8;
-  const isCue = ballNumber === 0;
-  const lightDir = { x: -0.38, y: -0.52, z: 0.76 };
-  const lLen = Math.hypot(lightDir.x, lightDir.y, lightDir.z);
-  lightDir.x /= lLen; lightDir.y /= lLen; lightDir.z /= lLen;
 
-  const frames: HTMLCanvasElement[] = [];
+  // Pre-render number into small texture for sampling
+  const numTexSize = Math.round(R * 0.82 * 2);
+  const numAlpha = ballNumber > 0 ? prerenderNumberTexture(ballNumber, numTexSize) : null;
+  const numTexR = numTexSize / 2;
+
+  // Light direction
+  const lx = -0.36, ly = -0.50, lz = 0.78;
+  const lLen = Math.hypot(lx, ly, lz);
+  const ldx = lx / lLen, ldy = ly / lLen, ldz = lz / lLen;
+
+  // Pre-compute sin/cos for all frames
+  const cosTable = new Float32Array(SPRITE_FRAMES);
+  const sinTable = new Float32Array(SPRITE_FRAMES);
+  for (let f = 0; f < SPRITE_FRAMES; f++) {
+    const a = (f / SPRITE_FRAMES) * Math.PI * 2;
+    cosTable[f] = Math.cos(a);
+    sinTable[f] = Math.sin(a);
+  }
+
+  const atlas = document.createElement('canvas');
+  atlas.width = ATLAS_WIDTH;
+  atlas.height = S;
+  const ctx = atlas.getContext('2d');
+  if (!ctx) { ballAtlasCache.set(ballNumber, atlas); return atlas; }
+
+  const imageData = ctx.createImageData(ATLAS_WIDTH, S);
+  const data = imageData.data;
 
   for (let f = 0; f < SPRITE_FRAMES; f++) {
-    const angle = (f / SPRITE_FRAMES) * Math.PI * 2;
-    const cosA = Math.cos(angle);
-    const sinA = Math.sin(angle);
+    const cosA = cosTable[f];
+    const sinA = sinTable[f];
+    const offsetX = f * S;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) { frames.push(canvas); continue; }
-
-    const imageData = ctx.createImageData(size, size);
-    const data = imageData.data;
-
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const px = (x + 0.5 - center) / radius;
-        const py = (y + 0.5 - center) / radius;
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const px = (x + 0.5 - C) / R;
+        const py = (y + 0.5 - C) / R;
         const rr = px * px + py * py;
-        const idx = (y * size + x) * 4;
+        const idx = (y * ATLAS_WIDTH + offsetX + x) * 4;
 
         if (rr > 1) { data[idx + 3] = 0; continue; }
 
         const pz = Math.sqrt(1 - rr);
 
         // Rotate around X axis (rolling forward)
-        const rx = px;
         const ry = py * cosA - pz * sinA;
         const rz = py * sinA + pz * cosA;
 
-        // Color lookup
+        // Surface color
         let cr: number, cg: number, cb: number;
-        if (isCue) {
-          cr = 240; cg = 244; cb = 250;
-        } else if (isEight) {
-          cr = 16; cg = 20; cb = 28;
+        if (isEight) {
+          cr = 18; cg = 22; cb = 30;
         } else if (isStripe) {
-          // Stripe: white base, colored equatorial band where |ry| < 0.50
-          const bandEdge = 0.50;
-          const feather = 0.06;
           const absRy = Math.abs(ry);
-          const bandMask = absRy < bandEdge - feather ? 1
-            : absRy > bandEdge + feather ? 0
-            : 1 - (absRy - (bandEdge - feather)) / (feather * 2);
-          cr = Math.round(240 + (rgb.r - 240) * bandMask);
-          cg = Math.round(244 + (rgb.g - 244) * bandMask);
-          cb = Math.round(250 + (rgb.b - 250) * bandMask);
+          const edge = 0.48, fe = 0.06;
+          const mask = absRy < edge - fe ? 1 : absRy > edge + fe ? 0 : 1 - (absRy - edge + fe) / (fe * 2);
+          cr = 242 + ((rgb.r - 242) * mask) | 0;
+          cg = 245 + ((rgb.g - 245) * mask) | 0;
+          cb = 250 + ((rgb.b - 250) * mask) | 0;
         } else {
-          // Solid
           cr = rgb.r; cg = rgb.g; cb = rgb.b;
         }
 
-        // Number disk — at pole (0, 0, 1), visible when rz > 0.82
+        // Number disk (white circle at pole) + number text
         if (ballNumber > 0) {
-          const diskThreshold = 0.82;
-          const diskFeather = 0.06;
-          // Check both sides of pole
           const dotVal = Math.abs(rz);
-          if (dotVal > diskThreshold - diskFeather) {
-            const diskMask = dotVal < diskThreshold + diskFeather
-              ? (dotVal - (diskThreshold - diskFeather)) / (diskFeather * 2)
-              : 1;
-            cr = Math.round(cr + (252 - cr) * diskMask);
-            cg = Math.round(cg + (252 - cg) * diskMask);
-            cb = Math.round(cb + (254 - cb) * diskMask);
+          if (dotVal > 0.76) {
+            const diskMask = dotVal < 0.82 ? (dotVal - 0.76) / 0.06 : 1;
+            cr = (cr + (252 - cr) * diskMask) | 0;
+            cg = (cg + (252 - cg) * diskMask) | 0;
+            cb = (cb + (254 - cb) * diskMask) | 0;
+
+            // Sample number texture at this sphere point
+            if (numAlpha && diskMask > 0.3) {
+              // Project pole position to texture coords
+              // The pole is at (0,0,±1). The visible pole after rotation:
+              // poleScreenX = 0 (rotation is around X, pole stays on Y-Z plane)
+              // poleScreenY = -sinA * sign
+              const poleSide = rz >= 0 ? 1 : -1;
+              // Map sphere point relative to pole center in screen space
+              const poleScreenY = -sinA * poleSide;
+              const relX = px;
+              const relY = py - poleScreenY * R / R;
+              // Scale relative to disk size on sphere
+              const diskScreenR = Math.sqrt(1 - 0.82 * 0.82) * R;
+              const texX = (relX * R / diskScreenR + 1) * 0.5 * numTexSize;
+              const texY = (relY * R / diskScreenR + 1) * 0.5 * numTexSize;
+              const txi = Math.floor(texX);
+              const tyi = Math.floor(texY);
+              if (txi >= 0 && txi < numTexSize && tyi >= 0 && tyi < numTexSize) {
+                const numMask = numAlpha[tyi * numTexSize + txi] / 255;
+                if (numMask > 0.05) {
+                  const textR = isEight ? 230 : 22;
+                  const textG = isEight ? 236 : 26;
+                  const textB = isEight ? 244 : 36;
+                  cr = (cr + (textR - cr) * numMask * diskMask) | 0;
+                  cg = (cg + (textG - cg) * numMask * diskMask) | 0;
+                  cb = (cb + (textB - cb) * numMask * diskMask) | 0;
+                }
+              }
+            }
           }
         }
 
-        // Lambert lighting
-        const lambert = clamp(px * lightDir.x + py * lightDir.y + pz * lightDir.z, 0, 1);
-        const rim = Math.pow(1 - pz, 1.4);
-        const shade = clamp(0.36 + lambert * 0.72 - rim * 0.1, 0.2, 1.15);
-        cr = clamp(Math.round(cr * shade), 0, 255);
-        cg = clamp(Math.round(cg * shade), 0, 255);
-        cb = clamp(Math.round(cb * shade), 0, 255);
+        // Lighting
+        const lambert = px * ldx + py * ldy + pz * ldz;
+        const lClamped = lambert > 0 ? (lambert < 1 ? lambert : 1) : 0;
+        const rim = (1 - pz); // linear rim is cheaper than pow
+        const shade = 0.38 + lClamped * 0.70 - rim * rim * 0.12;
+        const s = shade < 0.22 ? 0.22 : shade > 1.12 ? 1.12 : shade;
+        cr = (cr * s) | 0; if (cr > 255) cr = 255;
+        cg = (cg * s) | 0; if (cg > 255) cg = 255;
+        cb = (cb * s) | 0; if (cb > 255) cb = 255;
 
-        // Specular
-        const specDot = clamp(-0.34 * lightDir.x - 0.38 * lightDir.y + pz * lightDir.z, 0, 1);
-        const spec = Math.pow(specDot, 28) * 0.65;
-        cr = Math.min(255, cr + Math.round(spec * 255));
-        cg = Math.min(255, cg + Math.round(spec * 255));
-        cb = Math.min(255, cb + Math.round(spec * 255));
+        // Specular (simplified)
+        const specBase = -0.34 * ldx - 0.38 * ldy + pz * ldz;
+        if (specBase > 0.65) {
+          const specI = ((specBase - 0.65) / 0.35);
+          const spec = specI * specI * specI * 0.55 * 255;
+          cr = Math.min(255, cr + spec | 0);
+          cg = Math.min(255, cg + spec | 0);
+          cb = Math.min(255, cb + spec | 0);
+        }
 
-        // Anti-alias edge
-        const edgeAlpha = rr > 0.92 ? 1 - (rr - 0.92) / 0.08 : 1;
+        // Edge AA
+        const edgeAlpha = rr > 0.91 ? (1 - rr) / 0.09 : 1;
         data[idx] = cr;
         data[idx + 1] = cg;
         data[idx + 2] = cb;
-        data[idx + 3] = Math.round(clamp(edgeAlpha, 0, 1) * 255);
+        data[idx + 3] = (edgeAlpha * 255 + 0.5) | 0;
       }
     }
-
-    ctx.putImageData(imageData, 0, 0);
-
-    // Draw number text on top (only when pole faces us — rz > 0 at pole)
-    if (ballNumber > 0) {
-      // The pole (0,0,1) after rotation: poleY = sinA, poleZ = cosA
-      const poleZ = cosA;
-      if (Math.abs(poleZ) > 0.15) {
-        const poleSide = poleZ >= 0 ? 1 : -1;
-        const poleScreenY = -sinA * poleSide * radius * 0.62;
-        const frontFactor = Math.abs(poleZ);
-        const fontSize = clamp(Math.round((ballNumber >= 10 ? 9 : 11) * frontFactor), 5, 14);
-        ctx.save();
-        ctx.globalAlpha = clamp(0.2 + frontFactor * 0.9, 0, 1);
-        ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = isEight ? '#e8ecf4' : '#1a1e2a';
-        ctx.fillText(String(ballNumber), center, center + poleScreenY);
-        ctx.restore();
-      }
-    }
-
-    frames.push(canvas);
   }
 
-  ballSpriteSheetCache.set(ballNumber, frames);
-  return frames;
+  ctx.putImageData(imageData, 0, 0);
+  ballAtlasCache.set(ballNumber, atlas);
+  return atlas;
 }
 
-function ensureBallSpriteSheetsReady() {
-  for (let n = 1; n <= 15; n++) {
-    prerenderBallSpriteSheet(n);
-  }
+function ensureAllAtlases() {
+  if (atlasesReady) return;
+  for (let n = 1; n <= 15; n++) buildBallAtlas(n);
+  atlasesReady = true;
 }
 
 function drawBall(
@@ -1080,53 +1107,38 @@ function drawBall(
   ctx.save();
   ctx.translate(ball.x, ball.y);
 
-  // Shadow
-  ctx.shadowColor = "rgba(0, 0, 0, 0.48)";
-  ctx.shadowBlur = 9 * scale;
-  ctx.shadowOffsetX = 0.9 * scale;
-  ctx.shadowOffsetY = 4.5 * scale;
+  ctx.shadowColor = "rgba(0, 0, 0, 0.44)";
+  ctx.shadowBlur = 8 * scale;
+  ctx.shadowOffsetX = 0.8 * scale;
+  ctx.shadowOffsetY = 4 * scale;
 
   if (ball.number === 0) {
-    // Cue ball — simple white gradient, no sprite needed
-    const baseGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r * 1.3);
-    baseGrad.addColorStop(0, "#ffffff");
-    baseGrad.addColorStop(0.45, "#e8f0f8");
-    baseGrad.addColorStop(1, "#b0c5da");
+    // Cue ball — gradient only
+    const g = ctx.createRadialGradient(-r * 0.28, -r * 0.28, r * 0.05, 0, 0, r * 1.2);
+    g.addColorStop(0, "#ffffff");
+    g.addColorStop(0.42, "#e8f0f8");
+    g.addColorStop(1, "#b0c5da");
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
-    ctx.fillStyle = baseGrad;
+    ctx.fillStyle = g;
     ctx.fill();
   } else {
-    // Numbered balls — use pre-rendered sprite
-    const sheets = prerenderBallSpriteSheet(ball.number);
+    // Numbered ball — atlas sprite
+    const atlas = buildBallAtlas(ball.number);
     const rollPhase = spin?.rollPhase ?? 0;
     const heading = spin?.lastHeading ?? 0;
-    // Pick frame from accumulated roll phase
     const TWO_PI = Math.PI * 2;
-    const normalizedPhase = ((rollPhase % TWO_PI) + TWO_PI) % TWO_PI;
-    const frameIndex = Math.floor(normalizedPhase / TWO_PI * SPRITE_FRAMES) % SPRITE_FRAMES;
-    const sprite = sheets[frameIndex];
+    const norm = ((rollPhase % TWO_PI) + TWO_PI) % TWO_PI;
+    const fi = (norm / TWO_PI * SPRITE_FRAMES) | 0;
+    const frameIdx = fi >= SPRITE_FRAMES ? SPRITE_FRAMES - 1 : fi;
 
-    if (sprite) {
-      ctx.save();
-      // Rotate canvas so the sprite's "forward" aligns with movement direction
-      ctx.rotate(heading + Math.PI * 0.5);
-      ctx.drawImage(sprite, -r, -r, r * 2, r * 2);
-      ctx.restore();
-    }
+    ctx.save();
+    ctx.rotate(heading + Math.PI * 0.5);
+    ctx.drawImage(atlas, frameIdx * SPRITE_PX, 0, SPRITE_PX, SPRITE_PX, -r, -r, r * 2, r * 2);
+    ctx.restore();
   }
 
   ctx.shadowColor = "transparent";
-
-  // Outline
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(0, 0, r - 0.45 * scale, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(0,0,0,0.18)";
-  ctx.lineWidth = 0.9 * scale;
-  ctx.stroke();
-  ctx.restore();
-
   ctx.restore();
 }
 
@@ -1492,8 +1504,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
 
   useEffect(() => { tableCacheRef.current = makeTableCache(tableSprite); }, [assetsVersion, tableSprite]);
 
-  // Pre-render ball sprite sheets (runs once, ~50ms)
-  useEffect(() => { ensureBallSpriteSheetsReady(); }, []);
+  // Pre-render ball sprite atlases (runs once synchronously before first draw)
+  useMemo(() => { if (typeof document !== 'undefined') ensureAllAtlases(); }, []);
 
   useEffect(() => { onAimStateChangeRef.current = onAimStateChange; }, [onAimStateChange]);
   useEffect(() => { displayedGroupsRef.current = displayedGroups; }, [displayedGroups]);
