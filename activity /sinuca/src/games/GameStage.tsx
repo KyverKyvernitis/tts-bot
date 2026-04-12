@@ -72,7 +72,7 @@ const SFX = (() => {
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
 const BALL_RADIUS = 13;
-const BALL_VISUAL_RADIUS = 16;
+const BALL_VISUAL_RADIUS = 17;
 const BALL_DIAMETER = BALL_RADIUS * 2;
 const MAX_PLAYBACK_DURATION_MS = 3500;
 const FELT_LEFT = 69;
@@ -1020,22 +1020,21 @@ function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
           cr = rgb.r; cg = rgb.g; cb = rgb.b;
         }
 
-        // Number disk (white circle at pole) + number text
+        // Number disk (white circle at front pole only) + number text
+        let skipSpecular = false;
         if (ballNumber > 0) {
-          const absRz = Math.abs(rz);
-          if (absRz > 0.76) {
-            const diskMask = absRz < 0.82 ? (absRz - 0.76) / 0.06 : 1;
+          const frontRz = rz;
+          if (frontRz > 0.76) {
+            const diskMask = frontRz < 0.82 ? (frontRz - 0.76) / 0.06 : 1;
             cr = (cr + (252 - cr) * diskMask) | 0;
             cg = (cg + (252 - cg) * diskMask) | 0;
             cb = (cb + (254 - cb) * diskMask) | 0;
+            if (frontRz > 0.76) skipSpecular = true;
 
-            // Sample number texture using sphere-local coords (rx, ry)
+            // Sample number texture using sphere-local coords on the visible front pole only.
             if (numAlpha && diskMask > 0.2) {
-              // Mirror for back pole
-              const localRx = rz >= 0 ? rx : -rx;
-              const localRy = rz >= 0 ? ry : -ry;
-              const texX = (localRx / diskCapR * 0.5 + 0.5) * numTexSize;
-              const texY = (localRy / diskCapR * 0.5 + 0.5) * numTexSize;
+              const texX = (rx / diskCapR * 0.5 + 0.5) * numTexSize;
+              const texY = (ry / diskCapR * 0.5 + 0.5) * numTexSize;
               const txi = texX | 0;
               const tyi = texY | 0;
               if (txi >= 0 && txi < numTexSize && tyi >= 0 && tyi < numTexSize) {
@@ -1074,7 +1073,7 @@ function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
 
         // Primary specular (main light reflection)
         const specBase = -0.34 * ldx - 0.38 * ldy + pz * ldz;
-        if (specBase > 0.62) {
+        if (!skipSpecular && specBase > 0.62) {
           const specI = (specBase - 0.62) / 0.38;
           const spec = specI * specI * specI * 0.52 * 255;
           cr = Math.min(255, cr + spec | 0);
@@ -1085,7 +1084,7 @@ function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
         // Secondary specular (window reflection — smaller, offset)
         const spec2X = 0.22, spec2Y = -0.28;
         const spec2Dot = px * spec2X + py * spec2Y + pz * 0.93;
-        if (spec2Dot > 0.88) {
+        if (!skipSpecular && spec2Dot > 0.88) {
           const s2 = (spec2Dot - 0.88) / 0.12;
           const spec2 = s2 * s2 * 0.35 * 255;
           cr = Math.min(255, cr + spec2 | 0);
