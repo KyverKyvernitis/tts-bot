@@ -97,8 +97,9 @@ const SFX = (() => {
       play(noise(ac, 0.06, 0.15, 400, 55), ac, 0.2);
     },
     /** Placeholder template for ball-ball collision */
-    ballHit() {
-      playTemplate(BALL_HIT_TEMPLATE_PATH, 0.28);
+    ballHit(intensity = 0.35) {
+      const volume = clamp(0.06 + intensity * 0.44, 0.06, 0.5);
+      playTemplate(BALL_HIT_TEMPLATE_PATH, volume);
     },
     /** Placeholder template for turn start when the turn becomes local */
     turnStart() {
@@ -703,6 +704,14 @@ type RealtimeSoundCooldownState = {
   movingIds: Set<string>;
   wallIds: Set<string>;
 };
+
+function collisionIntensityFromMovement(maxDeltaPx: number) {
+  return clamp((maxDeltaPx - 0.6) / 5.4, 0.08, 1);
+}
+
+function collisionIntensityFromPower(power: number) {
+  return clamp(power * 0.95, 0.12, 1);
+}
 
 function emitRealtimeImpactSounds(
   previousBalls: GameBallSnapshot[],
@@ -1578,7 +1587,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const pendingShotVisualRef = useRef<{ startedAt: number; shotSequenceAtDispatch: number; revisionAtDispatch: number; angle: number; power: number; cueX: number; cueY: number; travelLimit: number; estimatedSpeedPxPerMs: number; impactType: "ball" | "cushion" | null; impactAtMs: number | null; firstImpactPlayed: boolean } | null>(null);
   const pendingShotAdvanceRef = useRef<{ advance: number; lastAt: number } | null>(null);
   const queuedSfxRef = useRef<number[]>([]);
-  const playbackSoundStateRef = useRef<{ seq: number; frameIndex: number; lastBallAt: number; lastCushionAt: number; movingIds: Set<string>; wallIds: Set<string> }>({ seq: 0, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0, movingIds: new Set(), wallIds: new Set() });
+  const playbackSoundStateRef = useRef<{ seq: number; frameIndex: number; lastCushionAt: number; movingIds: Set<string>; wallIds: Set<string> }>({ seq: 0, frameIndex: -1, lastCushionAt: 0, movingIds: new Set(), wallIds: new Set() });
   const realtimeSoundSnapshotRef = useRef<{ roomId: string | null; revision: number; balls: GameBallSnapshot[] }>({ roomId: game.roomId, revision: game.snapshotRevision ?? 0, balls: game.balls.map((ball) => ({ ...ball })) });
   const realtimeSoundCooldownRef = useRef<RealtimeSoundCooldownState>({ roomId: game.roomId, lastBallAt: 0, lastCushionAt: 0, lastPocketAt: 0, movingIds: new Set(), wallIds: new Set() });
   const canInteractRef = useRef(false);
@@ -1812,7 +1821,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     };
     setAnimating(true);
     setAnimatingSeq(game.lastShot.seq);
-    playbackSoundStateRef.current = { seq: game.lastShot.seq, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0, movingIds: new Set(), wallIds: new Set() };
+    playbackSoundStateRef.current = { seq: game.lastShot.seq, frameIndex: -1, lastCushionAt: 0, movingIds: new Set(), wallIds: new Set() };
   }, [animating, game]);
 
   useEffect(() => {
@@ -2250,7 +2259,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       SFX.cueHit(shotPower);
       if (impactAtMs !== null && impactType) {
         queueSfx(queuedSfxRef, impactAtMs, () => {
-          if (impactType === "ball") SFX.ballHit();
+          if (impactType === "ball") SFX.ballHit(collisionIntensityFromPower(shotPower));
           else if (impactType === "cushion") SFX.cushion();
         });
       }
@@ -2726,7 +2735,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         const soundFrameIndex = Math.min(playback.frames.length - 1, Math.floor(rawIndex));
         const soundState = playbackSoundStateRef.current;
         if (soundState.seq !== playback.seq) {
-          playbackSoundStateRef.current = { seq: playback.seq, frameIndex: -1, lastBallAt: 0, lastCushionAt: 0, movingIds: new Set(), wallIds: new Set() };
+          playbackSoundStateRef.current = { seq: playback.seq, frameIndex: -1, lastCushionAt: 0, movingIds: new Set(), wallIds: new Set() };
         }
         if (soundFrameIndex > playbackSoundStateRef.current.frameIndex) {
           const prevFrame = playback.frames[Math.max(0, soundFrameIndex - 1)]?.balls ?? [];
@@ -2735,11 +2744,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           let newlyPocketed = false;
           const movingIds = new Set<string>();
           const wallIds = new Set<string>();
+          const movementById = new Map<string, number>();
           for (const ball of currFrame) {
             const prevBall = prevMap.get(ball.id);
             if (!prevBall) continue;
             if (ball.pocketed && !prevBall.pocketed) newlyPocketed = true;
             const moved = Math.hypot(ball.x - prevBall.x, ball.y - prevBall.y);
+            movementById.set(ball.id, moved);
             if (!ball.pocketed && ball.id !== "ball-0" && moved > 0.8) movingIds.add(ball.id);
             if (!ball.pocketed && moved > 0.6 && (ball.x <= PLAY_MIN_X + 2.4 || ball.x >= PLAY_MAX_X - 2.4 || ball.y <= PLAY_MIN_Y + 2.4 || ball.y >= PLAY_MAX_Y - 2.4)) {
               wallIds.add(ball.id);
@@ -2748,9 +2759,9 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const stateNow = playbackSoundStateRef.current;
           const newlyMoving = Array.from(movingIds).filter((id) => !stateNow.movingIds.has(id));
           const newlyWall = Array.from(wallIds).filter((id) => !stateNow.wallIds.has(id));
-          if (newlyMoving.length > 0 && now - stateNow.lastBallAt > 160) {
-            SFX.ballHit();
-            stateNow.lastBallAt = now;
+          if (newlyMoving.length > 0) {
+            const strongestMove = newlyMoving.reduce((maxMove, id) => Math.max(maxMove, movementById.get(id) ?? 0), 0);
+            SFX.ballHit(collisionIntensityFromMovement(strongestMove));
           } else if (newlyWall.length > 0 && now - stateNow.lastCushionAt > 140 && !newlyPocketed) {
             SFX.cushion();
             stateNow.lastCushionAt = now;
