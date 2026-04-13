@@ -9,13 +9,41 @@ import type { ShotPipelineDebugEvent } from "../screens/GameScreen";
 // The canvas drawFallbackBall() renders much higher quality balls with
 // 3D gradients, numbers, stripes, specular highlights than the old PNG sprites.
 
+// ─── Audio template paths ──────────────────────────────────────────────────
+const POWER_RELEASE_TEMPLATE_PATH = "/audio/game/templates/power_release_template.wav";
+const POCKET_ENTER_TEMPLATE_PATH = "/audio/game/templates/pocket_enter_template.wav";
+const CUE_SCRATCH_TEMPLATE_PATH = "/audio/game/templates/cue_scratch_template.wav";
+const BALL_HIT_TEMPLATE_PATH = "/audio/game/templates/ball_hit_template.wav";
+
 // ─── Web Audio API sound engine ────────────────────────────────────────────
 const SFX = (() => {
   let ctx: AudioContext | null = null;
+  const audioTemplates = new Map<string, HTMLAudioElement>();
   const getCtx = () => {
     if (!ctx) { try { ctx = new AudioContext(); } catch { return null; } }
     if (ctx.state === "suspended") ctx.resume().catch(() => {});
     return ctx;
+  };
+
+  const ensureTemplate = (path: string) => {
+    let audio = audioTemplates.get(path);
+    if (!audio) {
+      audio = new Audio(path);
+      audio.preload = "auto";
+      audioTemplates.set(path, audio);
+    }
+    return audio;
+  };
+
+  const playTemplate = (path: string, volume = 0.35) => {
+    try {
+      const audio = ensureTemplate(path).cloneNode(true) as HTMLAudioElement;
+      audio.volume = Math.max(0, Math.min(1, volume));
+      audio.currentTime = 0;
+      void audio.play().catch(() => undefined);
+    } catch {
+      // ignore missing/blocked template playback
+    }
   };
 
   function noise(ac: AudioContext, duration: number, volume: number, freq: number, decay: number) {
@@ -44,30 +72,30 @@ const SFX = (() => {
   return {
     prime() {
       getCtx();
+      ensureTemplate(POWER_RELEASE_TEMPLATE_PATH);
+      ensureTemplate(POCKET_ENTER_TEMPLATE_PATH);
+      ensureTemplate(CUE_SCRATCH_TEMPLATE_PATH);
+      ensureTemplate(BALL_HIT_TEMPLATE_PATH);
     },
-    /** Cue hitting the ball — sharp high click */
-    cueHit(power = 0.7) {
-      const ac = getCtx(); if (!ac) return;
-      const vol = 0.25 + power * 0.35;
-      play(noise(ac, 0.08, vol, 1800 + power * 600, 45), ac, vol);
+    /** Placeholder template for releasing the power bar / shot release */
+    cueHit(_power = 0.7) {
+      playTemplate(POWER_RELEASE_TEMPLATE_PATH, 0.3);
     },
-    /** Ball falling into pocket — deep satisfying thud */
-    pocket() {
-      const ac = getCtx(); if (!ac) return;
-      play(noise(ac, 0.18, 0.4, 180, 14), ac, 0.5);
+    /** Placeholder template for pocket entry and cue scratch */
+    pocket(kind: "ball" | "scratch" = "ball") {
+      playTemplate(kind === "scratch" ? CUE_SCRATCH_TEMPLATE_PATH : POCKET_ENTER_TEMPLATE_PATH, kind === "scratch" ? 0.4 : 0.35);
     },
     /** Cushion bounce — soft bump */
     cushion() {
       const ac = getCtx(); if (!ac) return;
       play(noise(ac, 0.06, 0.15, 400, 55), ac, 0.2);
     },
-    /** Ball-ball collision — mid click */
+    /** Placeholder template for ball-ball collision */
     ballHit() {
-      const ac = getCtx(); if (!ac) return;
-      play(noise(ac, 0.05, 0.2, 1200, 60), ac, 0.25);
+      playTemplate(BALL_HIT_TEMPLATE_PATH, 0.28);
     },
   };
-})();
+})();;
 
 const TABLE_WIDTH = 1200;
 const TABLE_HEIGHT = 600;
@@ -680,7 +708,7 @@ function emitRealtimeImpactSounds(
     const previous = previousById.get(ball.id);
     if (!previous) continue;
     if (ball.pocketed && !previous.pocketed && now - cooldown.lastPocketAt > 90) {
-      SFX.pocket();
+      SFX.pocket(ball.number === 0 ? "scratch" : "ball");
       cooldown.lastPocketAt = now;
       break;
     }
@@ -2650,7 +2678,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         capturePocketedBall(ball, now);
         const cooldown = realtimeSoundCooldownRef.current;
         if (now - cooldown.lastPocketAt > 90) {
-          SFX.pocket();
+          SFX.pocket(ball.number === 0 ? "scratch" : "ball");
           cooldown.lastPocketAt = now;
         }
       }
