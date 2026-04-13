@@ -10,10 +10,12 @@ import type { ShotPipelineDebugEvent } from "../screens/GameScreen";
 // 3D gradients, numbers, stripes, specular highlights than the old PNG sprites.
 
 // ─── Audio template paths ──────────────────────────────────────────────────
-const POWER_RELEASE_TEMPLATE_PATH = "/audio/game/templates/power_release_template.wav";
+const POWER_RELEASE_SOFT_TEMPLATE_PATH = "/audio/game/templates/power_release_soft_template.wav";
+const POWER_RELEASE_HARD_TEMPLATE_PATH = "/audio/game/templates/power_release_hard_template.wav";
 const POCKET_ENTER_TEMPLATE_PATH = "/audio/game/templates/pocket_enter_template.wav";
 const CUE_SCRATCH_TEMPLATE_PATH = "/audio/game/templates/cue_scratch_template.wav";
 const BALL_HIT_TEMPLATE_PATH = "/audio/game/templates/ball_hit_template.wav";
+const TURN_START_TEMPLATE_PATH = "/audio/game/templates/turn_start_template.wav";
 
 // ─── Web Audio API sound engine ────────────────────────────────────────────
 const SFX = (() => {
@@ -72,14 +74,18 @@ const SFX = (() => {
   return {
     prime() {
       getCtx();
-      ensureTemplate(POWER_RELEASE_TEMPLATE_PATH);
+      ensureTemplate(POWER_RELEASE_SOFT_TEMPLATE_PATH);
+      ensureTemplate(POWER_RELEASE_HARD_TEMPLATE_PATH);
       ensureTemplate(POCKET_ENTER_TEMPLATE_PATH);
       ensureTemplate(CUE_SCRATCH_TEMPLATE_PATH);
       ensureTemplate(BALL_HIT_TEMPLATE_PATH);
+      ensureTemplate(TURN_START_TEMPLATE_PATH);
     },
     /** Placeholder template for releasing the power bar / shot release */
-    cueHit(_power = 0.7) {
-      playTemplate(POWER_RELEASE_TEMPLATE_PATH, 0.3);
+    cueHit(power = 0.7) {
+      const path = power <= 0.45 ? POWER_RELEASE_SOFT_TEMPLATE_PATH : POWER_RELEASE_HARD_TEMPLATE_PATH;
+      const volume = power <= 0.45 ? 0.26 : 0.34;
+      playTemplate(path, volume);
     },
     /** Placeholder template for pocket entry and cue scratch */
     pocket(kind: "ball" | "scratch" = "ball") {
@@ -93,6 +99,10 @@ const SFX = (() => {
     /** Placeholder template for ball-ball collision */
     ballHit() {
       playTemplate(BALL_HIT_TEMPLATE_PATH, 0.28);
+    },
+    /** Placeholder template for turn start when the turn becomes local */
+    turnStart() {
+      playTemplate(TURN_START_TEMPLATE_PATH, 0.32);
     },
   };
 })();;
@@ -1940,6 +1950,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
   const needEightCall = !isOpenTable && myGroup !== null && myRemaining === 0;
   const leftPocketed = useMemo(() => pocketedNumbersForGroup(game.balls, leftGroup), [game.balls, leftGroup]);
   const rightPocketed = useMemo(() => pocketedNumbersForGroup(game.balls, rightGroup), [game.balls, rightGroup]);
+  const previousTurnUserIdRef = useRef<string | null>(game.turnUserId ?? null);
+  const turnStartPrimedRef = useRef(false);
 
   useEffect(() => {
     if (!cueBall) return;
@@ -1951,6 +1963,21 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
       setAimAngle(Math.PI); aimAngleRef.current = Math.PI; drawAimAngleRef.current = Math.PI;
     }
   }, [cueBall?.id, cueBall?.x, cueBall?.y, currentUserId, game.phase, game.turnUserId]);
+
+  useEffect(() => {
+    const currentTurnUserId = game.turnUserId ?? null;
+    const previousTurnUserId = previousTurnUserIdRef.current;
+    if (!turnStartPrimedRef.current) {
+      turnStartPrimedRef.current = true;
+      previousTurnUserIdRef.current = currentTurnUserId;
+      return;
+    }
+    if (previousTurnUserId !== currentTurnUserId && currentTurnUserId === currentUserId && previousTurnUserId !== currentUserId) {
+      SFX.prime();
+      SFX.turnStart();
+    }
+    previousTurnUserIdRef.current = currentTurnUserId;
+  }, [currentUserId, game.turnUserId]);
 
   useEffect(() => { if (!needEightCall) setSelectedPocket(null); }, [needEightCall]);
 
