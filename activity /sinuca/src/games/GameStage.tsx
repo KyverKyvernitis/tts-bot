@@ -129,6 +129,8 @@ const POCKET_CAPTURE_DISTANCE = BALL_RADIUS * 1.6;
 const RAIL_TRAVEL_DURATION_MS = 1100;
 const RAIL_SETTLE_DELAY_MS = 110;
 const CUE_RETURN_HOLD_MS = 420;
+const CUE_SHOT_START_LOCK_MS = 170;
+const CUE_SHOT_START_RELEASE_MS = 120;
 const BALL_SPRITE_SIZE = 72;
 const AIM_RENDER_METRICS = { ballRadius: BALL_RADIUS, ballVisualRadius: BALL_VISUAL_RADIUS } as const;
 
@@ -1037,9 +1039,9 @@ function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
               if (txi >= 0 && txi < numTexSize && tyi >= 0 && tyi < numTexSize) {
                 const numMask = numAlpha[tyi * numTexSize + txi] / 255;
                 if (numMask > 0.05) {
-                  const textR = isEight ? 228 : 20;
-                  const textG = isEight ? 234 : 24;
-                  const textB = isEight ? 242 : 34;
+                  const textR = 18;
+                  const textG = 20;
+                  const textB = 24;
                   const blend = numMask * diskMask;
                   cr = (cr + (textR - cr) * blend) | 0;
                   cg = (cg + (textG - cg) * blend) | 0;
@@ -1072,7 +1074,7 @@ function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
         const specBase = -0.34 * ldx - 0.38 * ldy + pz * ldz;
         if (!skipSpecular && specBase > 0.62) {
           const specI = (specBase - 0.62) / 0.38;
-          const spec = specI * specI * specI * 0.52 * 255;
+          const spec = specI * specI * specI * 0.30 * 255;
           cr = Math.min(255, cr + spec | 0);
           cg = Math.min(255, cg + spec | 0);
           cb = Math.min(255, cb + spec | 0);
@@ -1083,7 +1085,7 @@ function buildBallAtlas(ballNumber: number): HTMLCanvasElement {
         const spec2Dot = px * spec2X + py * spec2Y + pz * 0.93;
         if (!skipSpecular && spec2Dot > 0.88) {
           const s2 = (spec2Dot - 0.88) / 0.12;
-          const spec2 = s2 * s2 * 0.35 * 255;
+          const spec2 = s2 * s2 * 0.18 * 255;
           cr = Math.min(255, cr + spec2 | 0);
           cg = Math.min(255, cg + spec2 | 0);
           cb = Math.min(255, cb + spec2 | 0);
@@ -1133,8 +1135,8 @@ function getCueBallSprite(): HTMLCanvasElement {
   ctx.fill();
   // Specular highlight
   const sg = ctx.createRadialGradient(c - r * 0.32, c - r * 0.36, 0, c - r * 0.26, c - r * 0.28, r * 0.48);
-  sg.addColorStop(0, "rgba(255,255,255,0.82)");
-  sg.addColorStop(0.4, "rgba(255,255,255,0.25)");
+  sg.addColorStop(0, "rgba(255,255,255,0.58)");
+  sg.addColorStop(0.4, "rgba(255,255,255,0.16)");
   sg.addColorStop(1, "rgba(255,255,255,0)");
   ctx.beginPath();
   ctx.arc(c, c, r, 0, Math.PI * 2);
@@ -1142,7 +1144,7 @@ function getCueBallSprite(): HTMLCanvasElement {
   ctx.fill();
   // Second specular (window)
   const s2 = ctx.createRadialGradient(c + r * 0.18, c - r * 0.24, 0, c + r * 0.20, c - r * 0.22, r * 0.22);
-  s2.addColorStop(0, "rgba(255,255,255,0.38)");
+  s2.addColorStop(0, "rgba(255,255,255,0.22)");
   s2.addColorStop(1, "rgba(255,255,255,0)");
   ctx.beginPath();
   ctx.arc(c, c, r, 0, Math.PI * 2);
@@ -1206,14 +1208,28 @@ function drawBall(
     const atlas = buildBallAtlas(ball.number);
     const rollPhase = spin?.rollPhase ?? 0;
     const heading = spin?.lastHeading ?? 0;
+    const visualSpeed = spin?.visualSpeed ?? 0;
+    const restFrames = spin?.restFrames ?? 0;
     const TWO_PI = Math.PI * 2;
     const norm = ((rollPhase % TWO_PI) + TWO_PI) % TWO_PI;
-    const fi = (norm / TWO_PI * SPRITE_FRAMES) | 0;
-    const frameIdx = fi >= SPRITE_FRAMES ? SPRITE_FRAMES - 1 : fi;
+    const framePos = (norm / TWO_PI) * SPRITE_FRAMES;
+    const baseIdx = Math.floor(framePos) % SPRITE_FRAMES;
+    const nextIdx = (baseIdx + 1) % SPRITE_FRAMES;
+    const rawBlend = framePos - Math.floor(framePos);
+    const allowBlend = visualSpeed > 0.085 && restFrames < 2;
+    const blend = allowBlend ? rawBlend : 0;
 
     ctx.save();
     ctx.rotate(heading - Math.PI * 0.5);
-    ctx.drawImage(atlas, frameIdx * SPRITE_PX, 0, SPRITE_PX, SPRITE_PX, -r, -r, r * 2, r * 2);
+    if (blend > 0.001) {
+      ctx.globalAlpha = 1 - blend;
+      ctx.drawImage(atlas, baseIdx * SPRITE_PX, 0, SPRITE_PX, SPRITE_PX, -r, -r, r * 2, r * 2);
+      ctx.globalAlpha = blend;
+      ctx.drawImage(atlas, nextIdx * SPRITE_PX, 0, SPRITE_PX, SPRITE_PX, -r, -r, r * 2, r * 2);
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.drawImage(atlas, baseIdx * SPRITE_PX, 0, SPRITE_PX, SPRITE_PX, -r, -r, r * 2, r * 2);
+    }
     ctx.restore();
   }
 
@@ -1781,6 +1797,8 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     if (!authoritativeCueBall) return;
     const revision = game.snapshotRevision ?? 0;
     const shotSequenceAdvanced = game.shotSequence > pending.shotSequenceAtDispatch;
+    const lockElapsed = progress.elapsed;
+    const withinCueLock = lockElapsed < CUE_SHOT_START_LOCK_MS;
     const revisionAdvanced = revision > pending.revisionAtDispatch + 1;
     const authoritativeDistanceFromStart = Math.hypot(authoritativeCueBall.x - pending.cueX, authoritativeCueBall.y - pending.cueY);
     const authoritativeDistanceFromExpected = Math.hypot(authoritativeCueBall.x - progress.expectedCueX, authoritativeCueBall.y - progress.expectedCueY);
@@ -1788,7 +1806,7 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
     const authoritativeClearlyStarted = authoritativeDistanceFromStart > Math.max(2.2, BALL_RADIUS * 0.4);
     const authoritativeMadeMeaningfulProgress = authoritativeDistanceFromStart > Math.max(9, pending.travelLimit * 0.22);
     const hardExpiryDuringSimMs = absoluteExpiryMs + 360;
-    if (authoritativeNearExpected || (authoritativeClearlyStarted && (authoritativeMadeMeaningfulProgress || revisionAdvanced || shotSequenceAdvanced)) || progress.elapsed >= hardExpiryDuringSimMs) {
+    if ((!withinCueLock && authoritativeNearExpected) || (!withinCueLock && authoritativeClearlyStarted && (authoritativeMadeMeaningfulProgress || revisionAdvanced || shotSequenceAdvanced)) || progress.elapsed >= hardExpiryDuringSimMs) {
       pendingShotVisualRef.current = null;
       pendingShotAdvanceRef.current = null;
     }
@@ -2164,7 +2182,16 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
         impactAtMs,
         firstImpactPlayed: false,
       };
-      pendingShotAdvanceRef.current = { advance: 0, lastAt: shotStartedAt };
+      const initialStep = Math.min(
+        maxCueVisualLeadPx(shotPower) * 0.45,
+        maxCueAdvanceStepPx(shotPower, estimatedSpeedPxPerMs, 16),
+      );
+      pendingShotAdvanceRef.current = { advance: initialStep, lastAt: shotStartedAt };
+      const immediateCueX = liveCueBall.x + Math.cos(aimAngleRef.current) * initialStep;
+      const immediateCueY = liveCueBall.y + Math.sin(aimAngleRef.current) * initialStep;
+      realtimeVisualBallsRef.current = realtimeVisualBallsRef.current.map((b) =>
+        b.number === 0 ? { ...b, x: immediateCueX, y: immediateCueY } : b
+      );
       SFX.cueHit(shotPower);
       if (impactAtMs !== null && impactType) {
         queueSfx(queuedSfxRef, impactAtMs, () => {
@@ -2531,6 +2558,14 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
             const overshootMs = Math.max(0, renderServerTime - toSnapshot.serverAt);
             smoothedBalls = extrapolateSnapshotBalls(toSnapshot.balls, toSnapshot.velocities, Math.min(overshootMs, REALTIME_MAX_EXTRAPOLATION_MS));
           }
+          if (pendingShotVisualRef.current && now - pendingShotVisualRef.current.startedAt < CUE_SHOT_START_LOCK_MS) {
+            const visualCue = realtimeVisualBallsRef.current.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+            if (visualCue) smoothedBalls = smoothedBalls.map((ball) => ball.number === 0 ? { ...ball, x: visualCue.x, y: visualCue.y } : ball);
+          }
+          if (pendingShotVisualRef.current && now - pendingShotVisualRef.current.startedAt < CUE_SHOT_START_LOCK_MS) {
+            const visualCue = realtimeVisualBallsRef.current.find((ball) => ball.number === 0 && !ball.pocketed) ?? null;
+            if (visualCue) smoothedBalls = smoothedBalls.map((ball) => ball.number === 0 ? { ...ball, x: visualCue.x, y: visualCue.y } : ball);
+          }
           realtimeVisualBallsRef.current = smoothedBalls.map((ball) => ({ ...ball }));
           realtimeVisualLastAtRef.current = now;
           drawBalls = smoothedBalls;
@@ -2823,11 +2858,13 @@ export default function GameStage({ room, game, currentUserId, shootBusy, exitBu
           const optimisticAdvance = ((progress.expectedCueX - pendingShotVisual.cueX) * shotDirX) + ((progress.expectedCueY - pendingShotVisual.cueY) * shotDirY);
           const advanceState = pendingShotAdvanceRef.current ?? { advance: 0, lastAt: pendingShotVisual.startedAt };
           const deltaMs = clamp(now - advanceState.lastAt, 1, 34);
-          const maxLead = maxCueVisualLeadPx(pendingShotVisual.power);
+          const lockElapsed = Math.max(0, elapsed);
+          const lockRamp = clamp(lockElapsed / CUE_SHOT_START_RELEASE_MS, 0, 1);
+          const maxLead = maxCueVisualLeadPx(pendingShotVisual.power) * lerp(0.45, 1, lockRamp);
           const targetAdvance = game.status === "simulating"
             ? Math.max(authoritativeAdvance, Math.min(optimisticAdvance, authoritativeAdvance + maxLead))
             : optimisticAdvance;
-          const stepCap = maxCueAdvanceStepPx(pendingShotVisual.power, pendingShotVisual.estimatedSpeedPxPerMs, deltaMs);
+          const stepCap = maxCueAdvanceStepPx(pendingShotVisual.power, pendingShotVisual.estimatedSpeedPxPerMs, deltaMs) * lerp(0.42, 1, lockRamp);
           const monotonicAdvance = Math.max(advanceState.advance, targetAdvance);
           const noBacktrackAdvance = Math.min(monotonicAdvance, advanceState.advance + stepCap);
           pendingShotAdvanceRef.current = { advance: noBacktrackAdvance, lastAt: now };
