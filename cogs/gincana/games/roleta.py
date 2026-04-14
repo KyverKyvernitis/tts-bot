@@ -236,6 +236,19 @@ class GincanaRoletaMixin:
                 return "Seus giros acabaram, mas como você é staff você ainda pode girar."
             return f"Restam {available} giros • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
 
+        def _roleta_spin_message_text(self, state: dict[str, float | int]) -> tuple[str, str]:
+            total = max(ROLETA_SPIN_LIMIT, int(state.get("total", ROLETA_SPIN_LIMIT) or ROLETA_SPIN_LIMIT))
+            wait_text = self._format_roleta_reset_time(float(state.get("reset_in", 0.0) or 0.0))
+            return "🎰 Sem giros por agora", f"Seus {total} giros acabaram. Reset em **{wait_text}**."
+
+        async def _reserve_roleta_spin_state(self, guild_id: int, user_id: int, *, is_staff: bool) -> tuple[bool, dict[str, float | int]]:
+            state = await self._sync_roleta_spin_window(guild_id, user_id)
+            available = int(state.get("available", 0) or 0)
+            if available <= 0:
+                return bool(is_staff), state
+            consumed = await self._consume_roleta_spin(guild_id, user_id)
+            return True, consumed
+
         def _roll_roleta_target_middle(self, *, success: bool) -> list[object]:
             if success:
                 return [7, 7, 7]
@@ -517,8 +530,8 @@ class GincanaRoletaMixin:
                 if view.kind == "roleta":
                     state = await self._sync_roleta_spin_window(guild.id, interaction.user.id)
                     if int(state.get("available", 0) or 0) <= 0 and not is_staff:
-                        wait_text = self._format_roleta_reset_time(float(state.get("reset_in", 0.0) or 0.0))
-                        embed = self._make_embed("🎰 Sem giros por agora", f"Seus {ROLETA_SPIN_LIMIT} giros acabaram. Reset em **{wait_text}**.", ok=False)
+                        title, desc = self._roleta_spin_message_text(state)
+                        embed = self._make_embed(title, desc, ok=False)
                         if interaction.response.is_done():
                             await interaction.followup.send(embed=embed, ephemeral=True)
                         else:
@@ -529,8 +542,15 @@ class GincanaRoletaMixin:
                         confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, interaction.user.id, ROLETA_COST, title="🎰 Confirmar aposta")
                         if not confirmed:
                             return
-                    if int(state.get("available", 0) or 0) > 0:
-                        state = await self._consume_roleta_spin(guild.id, interaction.user.id)
+                    can_spin, state = await self._reserve_roleta_spin_state(guild.id, interaction.user.id, is_staff=is_staff)
+                    if not can_spin:
+                        title, desc = self._roleta_spin_message_text(state)
+                        embed = self._make_embed(title, desc, ok=False)
+                        if interaction.response.is_done():
+                            await interaction.followup.send(embed=embed, ephemeral=True)
+                        else:
+                            await interaction.response.send_message(embed=embed, ephemeral=True)
+                        return
                     footer = self._roleta_footer_text(state=state, is_staff=is_staff)
                     paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, ROLETA_COST)
                     if needs_negative_confirm:
@@ -562,8 +582,8 @@ class GincanaRoletaMixin:
                 else:
                     state = await self._sync_carta_spin_window(guild.id, interaction.user.id)
                     if int(state.get("available", 0) or 0) <= 0 and not is_staff:
-                        wait_text = self._format_roleta_reset_time(float(state.get("reset_in", 0.0) or 0.0))
-                        embed = self._make_embed("🎴 Sem giros por agora", f"Seus {CARTA_SPIN_LIMIT} giros de cartas acabaram. Reset em **{wait_text}**.", ok=False)
+                        title, desc = self._carta_spin_message_text(state)
+                        embed = self._make_embed(title, desc, ok=False)
                         if interaction.response.is_done():
                             await interaction.followup.send(embed=embed, ephemeral=True)
                         else:
@@ -574,8 +594,15 @@ class GincanaRoletaMixin:
                         confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, interaction.user.id, CARTA_COST, title="🎴 Confirmar aposta")
                         if not confirmed:
                             return
-                    if int(state.get("available", 0) or 0) > 0:
-                        state = await self._consume_carta_spin(guild.id, interaction.user.id)
+                    can_spin, state = await self._reserve_carta_spin_state(guild.id, interaction.user.id, is_staff=is_staff)
+                    if not can_spin:
+                        title, desc = self._carta_spin_message_text(state)
+                        embed = self._make_embed(title, desc, ok=False)
+                        if interaction.response.is_done():
+                            await interaction.followup.send(embed=embed, ephemeral=True)
+                        else:
+                            await interaction.response.send_message(embed=embed, ephemeral=True)
+                        return
                     footer = self._carta_footer_text(state=state, is_staff=is_staff)
                     paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, CARTA_COST)
                     if needs_negative_confirm:
@@ -754,7 +781,22 @@ class GincanaRoletaMixin:
 
         def _carta_footer_text(self, *, state: dict[str, float | int], is_staff: bool) -> str:
             available = int(state.get("available", 0) or 0)
+            if available <= 0 and is_staff:
+                return "Seus giros de cartas acabaram, mas como você é staff você ainda pode girar."
             return f"Restam {available} giros de cartas • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
+
+        def _carta_spin_message_text(self, state: dict[str, float | int]) -> tuple[str, str]:
+            total = max(CARTA_SPIN_LIMIT, int(state.get("total", CARTA_SPIN_LIMIT) or CARTA_SPIN_LIMIT))
+            wait_text = self._format_roleta_reset_time(float(state.get("reset_in", 0.0) or 0.0))
+            return "🎴 Sem giros por agora", f"Seus {total} giros de cartas acabaram. Reset em **{wait_text}**."
+
+        async def _reserve_carta_spin_state(self, guild_id: int, user_id: int, *, is_staff: bool) -> tuple[bool, dict[str, float | int]]:
+            state = await self._sync_carta_spin_window(guild_id, user_id)
+            available = int(state.get("available", 0) or 0)
+            if available <= 0:
+                return bool(is_staff), state
+            consumed = await self._consume_carta_spin(guild_id, user_id)
+            return True, consumed
 
         def _pick_carta_result_flavor(self, result_kind: str, *, fallback: str = "") -> str:
             options = {
@@ -1194,10 +1236,10 @@ class GincanaRoletaMixin:
 
             is_staff = isinstance(message.author, discord.Member) and self._is_staff_member(message.author)
             carta_state = await self._sync_carta_spin_window(guild.id, message.author.id)
-            if int(carta_state.get("available", 0) or 0) <= 0:
+            if int(carta_state.get("available", 0) or 0) <= 0 and not is_staff:
                 try:
-                    wait_text = self._format_roleta_reset_time(float(carta_state.get("reset_in", 0.0) or 0.0))
-                    embed = discord.Embed(title="🎴 Sem giros por agora", description=f"Seus {CARTA_SPIN_LIMIT} giros de cartas acabaram. Reset em **{wait_text}**.", color=discord.Color(OFF_COLOR))
+                    title, desc = self._carta_spin_message_text(carta_state)
+                    embed = discord.Embed(title=title, description=desc, color=discord.Color(OFF_COLOR))
                     await message.channel.send(embed=embed)
                 except Exception:
                     pass
@@ -1215,7 +1257,14 @@ class GincanaRoletaMixin:
                 return True
 
             try:
-                carta_state = await self._consume_carta_spin(guild.id, message.author.id)
+                can_spin, carta_state = await self._reserve_carta_spin_state(guild.id, message.author.id, is_staff=is_staff)
+                if not can_spin:
+                    try:
+                        title, desc = self._carta_spin_message_text(carta_state)
+                        await message.channel.send(embed=self._make_embed(title, desc, ok=False))
+                    except Exception:
+                        pass
+                    return True
                 carta_footer = self._carta_footer_text(state=carta_state, is_staff=is_staff)
                 paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, CARTA_COST)
                 if needs_negative_confirm:
@@ -1256,8 +1305,8 @@ class GincanaRoletaMixin:
             roleta_state = await self._sync_roleta_spin_window(guild.id, message.author.id)
             if int(roleta_state.get("available", 0) or 0) <= 0 and not is_staff:
                 try:
-                    wait_text = self._format_roleta_reset_time(float(roleta_state.get("reset_in", 0.0) or 0.0))
-                    embed = discord.Embed(title="🎰 Sem giros por agora", description=f"Seus {ROLETA_SPIN_LIMIT} giros acabaram. Reset em **{wait_text}**.", color=discord.Color(OFF_COLOR))
+                    title, desc = self._roleta_spin_message_text(roleta_state)
+                    embed = discord.Embed(title=title, description=desc, color=discord.Color(OFF_COLOR))
                     await message.channel.send(embed=embed)
                 except Exception:
                     pass
@@ -1279,8 +1328,14 @@ class GincanaRoletaMixin:
                 return True
 
             try:
-                if int(roleta_state.get("available", 0) or 0) > 0:
-                    roleta_state = await self._consume_roleta_spin(guild.id, message.author.id)
+                can_spin, roleta_state = await self._reserve_roleta_spin_state(guild.id, message.author.id, is_staff=is_staff)
+                if not can_spin:
+                    try:
+                        title, desc = self._roleta_spin_message_text(roleta_state)
+                        await message.channel.send(embed=self._make_embed(title, desc, ok=False))
+                    except Exception:
+                        pass
+                    return True
                 roleta_footer = self._roleta_footer_text(state=roleta_state, is_staff=is_staff)
                 paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ROLETA_COST)
                 if needs_negative_confirm:
