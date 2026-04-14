@@ -1,8 +1,11 @@
 import asyncio
+import re
 
 import discord
 
 from config import MUTE_TOGGLE_WORD, TRIGGER_WORD
+
+_ROB_TRIGGER_RE = re.compile(r"^\s*(?:roubar|rob)\s+<@!?\d+>\s*$", re.IGNORECASE)
 
 
 class GincanaMessageRouterMixin:
@@ -47,7 +50,9 @@ class GincanaMessageRouterMixin:
                 "• `daily` — resgata o bônus diário\n"
                 "• `recarga` — entrega 100 fichas bônus quando seu saldo total fica abaixo de 15\n"
                 "• `rank` — ranking dos maiores saldos\n"
-                "• `pay @usuário valor` — transfere fichas normais normais\n\n"
+                "• `pay @usuário valor` — transfere só fichas normais\n"
+                "• `mendigar valor` — pede esmola no chat\n"
+                "• `mendigar valor @usuário` — pede esmola para uma pessoa específica\n\n"
                 "🎮 **Jogos**\n"
                 "• `roleta` — aposta rápida com jackpot\n"
                 "• `buckshot` — rodada de sobrevivência\n"
@@ -93,25 +98,23 @@ class GincanaMessageRouterMixin:
         return True
 
     async def _handle_rob_trigger(self, message: discord.Message) -> bool:
-        content = str(message.content or '').strip()
-        lowered = content.casefold()
-        if lowered.startswith('_'):
+        content = str(message.content or "").strip()
+        if content.casefold().startswith("_"):
             return False
-        if not (lowered.startswith('roubar') or lowered.startswith('rob')):
+        if not _ROB_TRIGGER_RE.fullmatch(content):
             return False
         if message.guild is None:
             return True
-        if not message.mentions:
-            await message.channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Use `roubar @usuário` para tentar a sorte."], ok=False))
-            return True
-        target = message.mentions[0]
+        mentions = [member for member in getattr(message, "mentions", []) if isinstance(member, discord.Member)]
+        if len(mentions) != 1:
+            return False
+        target = mentions[0]
         await self._run_robbery(message.channel, message.guild, message.author, target)
         return True
 
     async def _handle_gincana_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
-
 
         if await self._safe_route_call("_handle_payment_message", message):
             return
@@ -120,6 +123,9 @@ class GincanaMessageRouterMixin:
             return
 
         if await self._safe_route_call("_handle_rob_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_mendigar_trigger", message):
             return
 
         if await self._safe_route_call("_handle_focus_trigger", message):
@@ -136,7 +142,6 @@ class GincanaMessageRouterMixin:
 
         if await self._safe_route_call("_handle_target_trigger", message):
             return
-
 
         if await self._safe_route_call("_handle_corrida_trigger", message):
             return

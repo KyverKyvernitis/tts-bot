@@ -821,7 +821,7 @@ class GincanaBase:
             if remaining > 0:
                 season_line += f" • Reset em {self._format_chip_reset_remaining(remaining)}"
         explain = (
-            f"Líder acima de {CHIPS_SEASON_RESET_THRESHOLD} fichas inicia reset em "
+            f"Líder acima de {CHIPS_SEASON_RESET_THRESHOLD} fichas normais inicia reset em "
             f"{CHIPS_SEASON_RESET_HOURS}h • saldo {CHIPS_DEFAULT}, bônus 0 e estatísticas zeradas."
         )
         return f"{season_line}\n{explain}"

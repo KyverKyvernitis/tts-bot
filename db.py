@@ -1327,6 +1327,12 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
             "weekly_points": 0,
             "weekly_points_week": "",
             "game_stats": {},
+            "daily_last_claim_key": "",
+            "daily_streak": 0,
+            "last_chip_reset_at": 0.0,
+            "chip_recharge_manual_initialized": False,
+            "last_robbery_at": 0.0,
+            "last_mendigar_at": 0.0,
         }
     }
     await self.coll.update_many({"type": "user", "guild_id": guild_id}, update_payload)
@@ -1341,6 +1347,12 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
         updated["weekly_points"] = 0
         updated["weekly_points_week"] = ""
         updated["game_stats"] = {}
+        updated["daily_last_claim_key"] = ""
+        updated["daily_streak"] = 0
+        updated["last_chip_reset_at"] = 0.0
+        updated["chip_recharge_manual_initialized"] = False
+        updated["last_robbery_at"] = 0.0
+        updated["last_mendigar_at"] = 0.0
         self.user_cache[key] = updated
         affected += 1
     return affected

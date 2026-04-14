@@ -4,7 +4,11 @@ import time
 
 import discord
 
-from ..constants import CHIPS_INITIAL, CHIPS_PAY_MIN_BALANCE
+from ..constants import (
+    CHIPS_INITIAL,
+    CHIPS_PAY_MIN_BALANCE,
+    CHIPS_PAY_RECEIVER_MAX_BALANCE,
+)
 
 
 class GincanaPaymentMixin:
@@ -52,6 +56,13 @@ class GincanaPaymentMixin:
         embed.set_footer(text="Pagador e destinatário precisam confirmar com ✅")
         return embed
 
+    def _pay_receiver_limit_text(self, target: discord.Member, net_amount: int) -> str:
+        return (
+            f"{target.mention} não pode receber esse pagamento agora. "
+            f"Com {self._chip_text(net_amount, kind='gain')} o saldo normal passaria de "
+            f"**{CHIPS_PAY_RECEIVER_MAX_BALANCE} fichas normais**."
+        )
+
     async def _send_pay_usage(self, message: discord.Message) -> bool:
         await message.channel.send(
             embed=self._make_embed(
@@ -80,7 +91,13 @@ class GincanaPaymentMixin:
         payer_chips = self.db.get_user_chips(guild.id, message.author.id, default=CHIPS_INITIAL)
         target_chips = self.db.get_user_chips(guild.id, target.id, default=CHIPS_INITIAL)
         if payer_chips < CHIPS_PAY_MIN_BALANCE:
-            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"Você precisa ter pelo menos **{CHIPS_PAY_MIN_BALANCE} fichas** para fazer transferências.", ok=False))
+            await message.channel.send(
+                embed=self._make_embed(
+                    "💸 Pagamento bloqueado",
+                    f"Você precisa ter pelo menos **{CHIPS_PAY_MIN_BALANCE} fichas normais** para fazer transferências.",
+                    ok=False,
+                )
+            )
             self._payment_sessions.pop((guild.id, message.author.id), None)
             return True
         if payer_chips < 0:
@@ -93,6 +110,10 @@ class GincanaPaymentMixin:
             return True
         if payer_chips < total:
             await message.channel.send(embed=self._make_embed("💸 Saldo insuficiente", "Esse pagamento usa só fichas normais. Fichas bônus não entram no pay.", ok=False))
+            self._payment_sessions.pop((guild.id, message.author.id), None)
+            return True
+        if target_chips + net_amount > CHIPS_PAY_RECEIVER_MAX_BALANCE:
+            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", self._pay_receiver_limit_text(target, net_amount), ok=False))
             self._payment_sessions.pop((guild.id, message.author.id), None)
             return True
 
@@ -232,7 +253,7 @@ class GincanaPaymentMixin:
         payer_chips = self.db.get_user_chips(guild.id, payer.id, default=CHIPS_INITIAL)
         target_chips = self.db.get_user_chips(guild.id, target.id, default=CHIPS_INITIAL)
         if payer_chips < CHIPS_PAY_MIN_BALANCE:
-            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} precisa ter pelo menos **{CHIPS_PAY_MIN_BALANCE} fichas** para fazer transferências.")
+            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} precisa ter pelo menos **{CHIPS_PAY_MIN_BALANCE} fichas normais** para fazer transferências.")
             return
         if payer_chips < 0:
             await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} está negativado e não pode fazer transferências.")
@@ -242,6 +263,9 @@ class GincanaPaymentMixin:
             return
         if payer_chips < total:
             await self._expire_payment_session(session_key, title="💸 Saldo insuficiente", reason="Esse pagamento usa só fichas normais. Fichas bônus não entram no pay.")
+            return
+        if target_chips + net_amount > CHIPS_PAY_RECEIVER_MAX_BALANCE:
+            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=self._pay_receiver_limit_text(target, net_amount))
             return
 
         await self._transfer_user_chips(guild.id, payer.id, target.id, total=total, net_amount=net_amount)

@@ -1,17 +1,306 @@
 import random
+import re
 import time
+
 import discord
 from discord import app_commands
 from discord.ext import commands as dcommands
 
 from .cog import GincanaCore
-from .constants import CHIPS_DEFAULT, CHIPS_INITIAL, _guild_scoped
+from .constants import (
+    CHIPS_DEFAULT,
+    CHIPS_INITIAL,
+    CHIPS_MENDIGAR_COOLDOWN_SECONDS,
+    CHIPS_MENDIGAR_TIMEOUT_SECONDS,
+    CHIPS_PAY_MIN_BALANCE,
+    CHIPS_PAY_RECEIVER_MAX_BALANCE,
+    _guild_scoped,
+)
+
+
+class _MendigarRequestView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        cog: "GincanaCog",
+        *,
+        guild_id: int,
+        author_id: int,
+        author_mention: str,
+        amount: int,
+        target_id: int | None,
+        target_mention: str | None,
+        timeout: float = CHIPS_MENDIGAR_TIMEOUT_SECONDS,
+    ):
+        super().__init__(timeout=float(timeout))
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.author_id = int(author_id)
+        self.author_mention = str(author_mention)
+        self.amount = int(amount)
+        self.target_id = int(target_id) if target_id else None
+        self.target_mention = str(target_mention) if target_mention else None
+        self.fulfilled = False
+        self.message: discord.Message | None = None
+
+        donate_button = discord.ui.Button(
+            label=f"Dar {self.amount} fichas",
+            emoji="💸",
+            style=discord.ButtonStyle.success,
+        )
+        donate_button.callback = self._handle_donate
+        row = discord.ui.ActionRow(donate_button)
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay("\n".join(self._build_header_lines())),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("\n".join(self._build_info_lines())),
+                row,
+                accent_color=discord.Color.orange(),
+            )
+        )
+
+    def _build_header_lines(self) -> list[str]:
+        if self.target_mention:
+            return [
+                "# 🥺 Mendigar",
+                f"{self.target_mention}, {self.author_mention} está mendigando {self.cog._chip_amount(self.amount)}, deseja dar esmola pra esse coitado?",
+            ]
+        return [
+            "# 🥺 Mendigar",
+            f"Este pobre usuário necessitado está pedindo uma esmola de {self.cog._chip_amount(self.amount)}.",
+        ]
+
+    def _build_info_lines(self) -> list[str]:
+        lines = [f"**Pedinte:** {self.author_mention}"]
+        if self.target_mention:
+            lines.append(f"**Convocado para ajudar:** {self.target_mention}")
+            lines.append("Somente a pessoa marcada pode clicar no botão abaixo.")
+        else:
+            lines.append("Qualquer alma bondosa com fichas normais suficientes pode ajudar no botão abaixo.")
+        lines.append(f"A esmola expira em **{int(CHIPS_MENDIGAR_TIMEOUT_SECONDS // 60)} minutos**.")
+        return lines
+
+    async def _handle_donate(self, interaction: discord.Interaction):
+        if self.fulfilled:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice("💸 Esmola encerrada", ["Esse pedido já foi atendido."], ok=False),
+                ephemeral=True,
+            )
+            return
+        if interaction.guild is None or int(interaction.guild.id) != self.guild_id:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice("💸 Esmola", ["Esse pedido só pode ser usado no servidor original."], ok=False),
+                ephemeral=True,
+            )
+            return
+        donor = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+        recipient = interaction.guild.get_member(self.author_id)
+        if donor is None or recipient is None:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice("💸 Esmola", ["Não consegui localizar todo mundo para concluir essa esmola."], ok=False),
+                ephemeral=True,
+            )
+            return
+        if donor.bot:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice("💸 Esmola", ["Bots não podem dar esmola."], ok=False),
+                ephemeral=True,
+            )
+            return
+        if donor.id == recipient.id:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice("💸 Esmola", ["Você não pode dar esmola para si mesmo."], ok=False),
+                ephemeral=True,
+            )
+            return
+        if self.target_id and int(donor.id) != int(self.target_id):
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice("💸 Esmola reservada", ["Essa esmola foi direcionada para outra pessoa decidir."], ok=False),
+                ephemeral=True,
+            )
+            return
+
+        await self.cog._maybe_execute_due_chip_season_reset(self.guild_id)
+        donor_chips = int(self.cog.db.get_user_chips(self.guild_id, donor.id, default=CHIPS_INITIAL) or 0)
+        recipient_chips = int(self.cog.db.get_user_chips(self.guild_id, recipient.id, default=CHIPS_INITIAL) or 0)
+        if donor_chips < CHIPS_PAY_MIN_BALANCE:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice(
+                    "💸 Esmola bloqueada",
+                    [f"Você precisa ter pelo menos **{CHIPS_PAY_MIN_BALANCE} fichas normais** para dar esmola."],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
+        if donor_chips < self.amount:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice(
+                    "💸 Esmola bloqueada",
+                    ["Você não tem fichas normais suficientes para cobrir essa esmola.", "Fichas bônus não entram nessa conta."],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
+        if recipient_chips + self.amount > CHIPS_PAY_RECEIVER_MAX_BALANCE:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice(
+                    "💸 Esmola bloqueada",
+                    [f"{recipient.mention} passaria de **{CHIPS_PAY_RECEIVER_MAX_BALANCE} fichas normais** com essa esmola."],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await self.cog._transfer_user_chips(self.guild_id, donor.id, recipient.id, total=self.amount, net_amount=self.amount)
+        self.fulfilled = True
+        self.stop()
+        result = discord.ui.LayoutView(timeout=None)
+        result.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(
+                    "\n".join(
+                        [
+                            "# 💸 Esmola entregue",
+                            f"{donor.mention} deu {self.cog._chip_amount(self.amount)} para {recipient.mention}.",
+                            f"Saldo de {recipient.mention}: {self.cog._format_compact_chip_balance(self.guild_id, recipient.id)}",
+                        ]
+                    )
+                ),
+                accent_color=discord.Color.dark_green(),
+            )
+        )
+        await interaction.response.edit_message(view=result)
+
+    async def on_timeout(self):
+        if self.fulfilled or self.message is None:
+            return
+        try:
+            await self.message.edit(
+                view=self.cog._make_v2_notice(
+                    "💸 Mendigar",
+                    ["O pedido de esmola esfriou e expirou sem ninguém ajudar."],
+                    ok=False,
+                    accent_color=discord.Color.red(),
+                )
+            )
+        except Exception:
+            pass
 
 
 class GincanaCog(dcommands.Cog, GincanaCore):
     def __init__(self, bot: dcommands.Bot, db):
         dcommands.Cog.__init__(self)
         GincanaCore.__init__(self, bot, db)
+
+    def _format_wait_compact(self, seconds: float) -> str:
+        remaining = max(0, int(seconds))
+        hours = remaining // 3600
+        minutes = (remaining % 3600) // 60
+        if hours > 0:
+            return f"{hours}h {minutes:02d}min"
+        return f"{minutes}min"
+
+    async def _start_mendigar_request(self, message: discord.Message, *, amount: int, target: discord.Member | None) -> bool:
+        guild = message.guild
+        if guild is None:
+            return True
+        await self._maybe_execute_due_chip_season_reset(guild.id)
+        if amount <= 0:
+            await message.channel.send(view=self._make_v2_notice("🥺 Mendigar", ["Use um valor maior que zero."], ok=False))
+            return True
+        current_balance = int(self.db.get_user_chips(guild.id, message.author.id, default=CHIPS_INITIAL) or 0)
+        if current_balance + amount > CHIPS_PAY_RECEIVER_MAX_BALANCE:
+            await message.channel.send(
+                view=self._make_v2_notice(
+                    "🥺 Mendigar",
+                    [f"Esse pedido deixaria você acima de **{CHIPS_PAY_RECEIVER_MAX_BALANCE} fichas normais**. Ajuste o valor e tente de novo."],
+                    ok=False,
+                )
+            )
+            return True
+
+        user_doc = self.db._get_user_doc(guild.id, message.author.id)
+        now = time.time()
+        last_used = float(user_doc.get("last_mendigar_at", 0) or 0)
+        remaining = (last_used + CHIPS_MENDIGAR_COOLDOWN_SECONDS) - now
+        if remaining > 0:
+            await message.channel.send(
+                view=self._make_v2_notice(
+                    "🥺 Mendigar",
+                    ["Você já pediu esmola demais por agora.", f"Tente novamente em **{self._format_wait_compact(remaining)}**."],
+                    ok=False,
+                )
+            )
+            return True
+
+        if target is not None:
+            if target.bot:
+                await message.channel.send(view=self._make_v2_notice("🥺 Mendigar", ["Bots não entram nesse esquema de esmola."], ok=False))
+                return True
+            if target.id == message.author.id:
+                await message.channel.send(view=self._make_v2_notice("🥺 Mendigar", ["Pedir esmola para si mesmo já é sacanagem demais."], ok=False))
+                return True
+
+        user_doc["last_mendigar_at"] = float(now)
+        await self.db._save_user_doc(guild.id, message.author.id, user_doc)
+
+        view = _MendigarRequestView(
+            self,
+            guild_id=guild.id,
+            author_id=message.author.id,
+            author_mention=message.author.mention,
+            amount=amount,
+            target_id=getattr(target, "id", None),
+            target_mention=getattr(target, "mention", None),
+        )
+        sent = await message.channel.send(view=view)
+        view.message = sent
+        return True
+
+    async def _handle_mendigar_trigger(self, message: discord.Message) -> bool:
+        content = str(message.content or "").strip()
+        if content.casefold().startswith("_"):
+            return False
+        if not re.match(r"^\s*mendigar\b", content, re.IGNORECASE):
+            return False
+        if message.guild is None:
+            return True
+
+        match = re.fullmatch(r"\s*mendigar\s+(\d+)(?:\s+<@!?(\d+)>)?\s*", content, re.IGNORECASE)
+        if match is None:
+            await message.channel.send(
+                view=self._make_v2_notice(
+                    "🥺 Mendigar",
+                    [
+                        "Use `mendigar 40` para pedir uma esmola geral.",
+                        "Use `mendigar 40 @usuário` para pedir esmola a alguém específico.",
+                    ],
+                    ok=False,
+                )
+            )
+            return True
+
+        amount = int(match.group(1) or 0)
+        target_id_raw = match.group(2)
+        target: discord.Member | None = None
+        if target_id_raw:
+            target_id = int(target_id_raw)
+            mentioned_members = [member for member in getattr(message, "mentions", []) if isinstance(member, discord.Member)]
+            target = next((member for member in mentioned_members if int(member.id) == target_id), None)
+            if target is None:
+                target = message.guild.get_member(target_id)
+            if target is None:
+                await message.channel.send(view=self._make_v2_notice("🥺 Mendigar", ["Não encontrei essa pessoa no servidor para pedir esmola."], ok=False))
+                return True
+        elif getattr(message, "mentions", None):
+            await message.channel.send(view=self._make_v2_notice("🥺 Mendigar", ["Use no formato `mendigar valor @usuário`."], ok=False))
+            return True
+
+        return await self._start_mendigar_request(message, amount=amount, target=target)
 
     @_guild_scoped()
     @app_commands.command(name="gincana", description="Gerencia as roles e modos da gincana")
@@ -40,7 +329,6 @@ class GincanaCog(dcommands.Cog, GincanaCore):
     async def gincana_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         await self._handle_gincana_error(interaction, error)
 
-
     @dcommands.command(name="ficha", aliases=["fichas"])
     async def ficha(self, ctx: dcommands.Context):
         if ctx.guild is None:
@@ -48,7 +336,6 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return
         view = self._make_chip_balance_view(ctx.author)
         await ctx.reply(view=view, mention_author=False)
-
 
     @dcommands.command(name="daily", aliases=["bonus", "login"])
     async def daily(self, ctx: dcommands.Context):
@@ -105,7 +392,6 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         embed = await self._make_chip_leaderboard_embed_async(ctx.guild, ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
 
-
     @dcommands.command(name="poker")
     async def poker_command(self, ctx: dcommands.Context, opponent: discord.Member | None = None):
         if ctx.guild is None:
@@ -156,6 +442,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         handled = await self._handle_truco_trigger(fake)
         if not handled:
             await ctx.reply(embed=self._make_embed("🃏 Truco 2v2", "Não foi possível abrir o lobby agora.", ok=False), mention_author=False)
+
     async def _run_robbery(self, channel: discord.abc.Messageable, guild: discord.Guild, author: discord.Member, target: discord.Member):
         if target.bot:
             await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você tentou roubar um bot. Isso foi longe demais."], ok=False))
@@ -166,15 +453,12 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if int(self.db.get_user_chips(guild.id, author.id, default=CHIPS_INITIAL) or 0) < 0:
             await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já está devendo (coitado). Quite a dívida antes de tentar roubar alguém."], ok=False))
             return True
-        # cooldown
         adoc = self.db._get_user_doc(guild.id, author.id)
         now = time.time()
         last = float(adoc.get('last_robbery_at', 0) or 0)
         remaining = max(0, int((last + 21600) - now))
         if remaining > 0:
-            h = remaining // 3600
-            m = (remaining % 3600) // 60
-            wait = f"{h}h {m}min" if h else f"{m}min"
+            wait = self._format_wait_compact(remaining)
             await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já aprontou demais por agora.", f"Tente de novo em **{wait}**."], ok=False))
             return True
         target_chips = int(self.db.get_user_chips(guild.id, target.id, default=CHIPS_INITIAL) or 0)
@@ -188,7 +472,6 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             else:
                 await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário é muito **pobre** pra ser roubado."], ok=False))
             return True
-        # consume cooldown on attempt
         adoc['last_robbery_at'] = float(now)
         await self.db._save_user_doc(guild.id, author.id, adoc)
         success = random.random() < 0.40
@@ -234,7 +517,12 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 f"• `{ctx.clean_prefix}ficha` — mostra seu saldo e seus destaques\n"
                 f"• `{ctx.clean_prefix}daily` — resgata o bônus diário\n"
-                "• `recarga` — entrega 100 fichas bônus quando seu saldo total fica abaixo de 15\n• `pay @usuário valor` — transfere só fichas normais\n• fichas bônus saem primeiro nas apostas\n• ganhos quitam a dívida antes de voltar ao saldo normal\n"
+                "• `recarga` — entrega 100 fichas bônus quando seu saldo total fica abaixo de 15\n"
+                "• `pay @usuário valor` — transfere só fichas normais\n"
+                "• `mendigar valor` — pede uma esmola geral\n"
+                "• `mendigar valor @usuário` — pede esmola para alguém específico\n"
+                "• fichas bônus saem primeiro nas apostas\n"
+                "• ganhos quitam a dívida antes de voltar ao saldo normal\n"
                 f"• `{ctx.clean_prefix}rank` — ranking dos maiores saldos\n"
                 "\n"
                 "🎮 **Jogos**\n"
