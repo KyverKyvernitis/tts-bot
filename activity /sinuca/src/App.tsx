@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { useGameController } from "./controllers/useGameController";
 import { useRemoteAimController } from "./controllers/useRemoteAimController";
 import {
@@ -42,7 +42,15 @@ import { sendSubscribeRoomMessage } from "./realtime/roomRealtime";
 import { type IncomingMessage, type OAuthExchangeResult } from "./realtime/messages";
 import { resolveSocketUrl, sendSocketMessage } from "./realtime/socketClient";
 import { exchangeDiscordTokenRequest } from "./transport/sessionApi";
-import { cleanPlayerName, formatRoomCount, formatStatus, resolvePlayerAvatar } from "./utils/roomPresentation";
+import { formatStatus } from "./utils/roomPresentation";
+import { useLobbyHeroContent } from "./hooks/useLobbyHeroContent";
+import ChipGateDialog from "./screens/lobby/ChipGateDialog";
+import CreateRoomScreen from "./screens/lobby/CreateRoomScreen";
+import HomeLobbyScreen from "./screens/lobby/HomeLobbyScreen";
+import LobbyHero from "./screens/lobby/LobbyHero";
+import RoomListScreen from "./screens/lobby/RoomListScreen";
+import RoomLobbyScreen from "./screens/lobby/RoomLobbyScreen";
+import TransientNotice from "./screens/lobby/TransientNotice";
 
 const POPUP_DEBT_SOUND_PATH = "/audio/ui/popup_debt.ogg";
 const POPUP_ERROR_SOUND_PATH = "/audio/ui/popup_error.ogg";
@@ -339,8 +347,8 @@ export default function App() {
   const [roomExitBusy, setRoomExitBusy] = useState(false);
   const [shotPipelineDebug, setShotPipelineDebug] = useState<ShotPipelineDebugState>(initialShotPipelineDebug);
   const socketRef = useRef<WebSocket | null>(null);
-  const roomEntryMenuRef = useRef<HTMLDivElement | null>(null);
-  const createEntryMenuRef = useRef<HTMLDivElement | null>(null);
+  const roomEntryMenuRef = useRef<HTMLDivElement>(null);
+  const createEntryMenuRef = useRef<HTMLDivElement>(null);
   const lastInitKeyRef = useRef<string | null>(null);
   const oauthWaiterRef = useRef<((payload: { ok: boolean; accessToken: string | null; error: string | null; detail: string | null }) => void) | null>(null);
   const balanceReceiptRef = useRef<number>(0);
@@ -2343,59 +2351,146 @@ export default function App() {
 
   const shouldShowBalanceDebug = Boolean(import.meta.env.DEV) && isServer && (!balanceLoaded || balance.chips === 0);
 
-  const heroTitle = useMemo(() => {
-    if (screen === "create") return "Criar mesa";
-    if (screen === "list") return "Mesas abertas";
-    if (screen === "room") {
-      if (!roomOpponentPlayer) return "Mesa aberta";
-      if (isRoomHost) return canHostStart ? "Mesa pronta" : "Mesa aberta";
-      return currentPlayer?.ready ? "Pronto" : "Mesa encontrada";
-    }
-    if (screen === "game") return "Mesa em jogo";
-    return "Sinuca de Femboy";
-  }, [canHostStart, currentPlayer?.ready, isRoomHost, roomOpponentPlayer, screen]);
+  const heroContent = useLobbyHeroContent({
+    screen,
+    room,
+    isServer,
+    isRoomHost,
+    canHostStart,
+    roomOpponentPlayer,
+    currentPlayerReady: Boolean(currentPlayer?.ready),
+    createStake,
+    formatStakeOptionLabel,
+  });
 
-  const heroSubtitle = useMemo(() => {
-    if (screen === "create") return "Abra a mesa e ajuste a entrada.";
-    if (screen === "list") return "Entre em uma mesa aberta.";
-    if (screen === "room") {
-      if (!room) return "Acompanhe a mesa.";
-      if (isRoomHost) {
-        if (!roomOpponentPlayer) return "Aguardando jogador.";
-        return canHostStart ? "Pronta para iniciar." : "Esperando pronto.";
+  const heroEntryMenu = heroContent.entryEditable
+    ? screen === "create"
+      ? {
+          ref: createEntryMenuRef,
+          open: createEntryMenuOpen,
+          onToggle: () => {
+            setCreateEntryMenuOpen((current) => !current);
+            setRoomEntryMenuOpen(false);
+          },
+          options: createStakeOptions.map((stake) => ({
+            key: `create-${stake}`,
+            label: formatStakeOptionLabel(stake),
+            active: createStake === stake,
+            onSelect: () => {
+              setCreateEntryMenuOpen(false);
+              if (createStake === stake) return;
+              setCreateStake(stake);
+              setCreateTableType(stake === 0 ? "casual" : "stake");
+            },
+          })),
+        }
+      : screen === "room" && room && isRoomHost
+        ? {
+            ref: roomEntryMenuRef,
+            open: roomEntryMenuOpen,
+            onToggle: () => {
+              setRoomEntryMenuOpen((current) => !current);
+              setCreateEntryMenuOpen(false);
+            },
+            options: roomStakeOptions.map((stake) => {
+              const active = stake === 0
+                ? room.tableType !== "stake"
+                : room.tableType === "stake" && room.stakeChips === stake;
+              return {
+                key: `room-${stake}`,
+                label: formatStakeOptionLabel(stake),
+                active,
+                onSelect: () => {
+                  setRoomEntryMenuOpen(false);
+                  if (active) return;
+                  void updateRoomStakeOverHttp(room.roomId, stake, "http_primary_stake");
+                },
+              };
+            }),
+          }
+        : null
+    : null;
+
+  const handleOpenCreateRoom = () => {
+    if (createRoomBusy) return;
+    if (!initReadyForServerActions) {
+      if (isServer) void fetchBalanceOverHttp("create_gate_retry");
+      setErrorMessage(isServer ? "aguarde as fichas carregarem para abrir a sala" : "aguarde a activity terminar de carregar");
+      return;
+    }
+    const nextStake = isServer ? 25 : 0;
+    const nextTableType: TableType = isServer ? "stake" : "casual";
+    resetGameRuntimeState(currentRoomRef.current?.roomId, { clearGame: true, reason: 'home_click_create_reset' });
+    setRoom(null);
+    setCreateDraftRoomId(null);
+    setLocallyOwnedRoomId(null);
+    setCreateTableType(nextTableType);
+    setCreateStake(nextStake);
+    setCreateEntryMenuOpen(false);
+    setRoomEntryMenuOpen(false);
+    setCreateRoomBusy(true);
+    setErrorMessage(null);
+    void (async () => {
+      try {
+        const nextRoom = await createRoomOverHttp("home_click_create", { stake: nextStake, tableType: nextTableType });
+        if (nextRoom) {
+          setRoom(nextRoom);
+          setScreen("room");
+        } else {
+          setErrorMessage("não foi possível abrir a sala agora");
+        }
+      } finally {
+        setCreateRoomBusy(false);
       }
-      return currentPlayer?.ready ? "Aguardando início." : "Marque pronto.";
-    }
-    if (screen === "game") {
-      if (!game) return "Carregando a mesa.";
-      return game.turnUserId === state.currentUser.userId ? "Sua vez de bater." : "Aguardando a jogada do adversário.";
-    }
-    return "Crie ou entre em uma mesa.";
-  }, [canHostStart, currentPlayer?.ready, isRoomHost, room, roomOpponentPlayer, screen]);
+    })();
+  };
 
-  const heroEyebrow = useMemo(() => {
-    if (screen === "create") return "Mesa nova";
-    if (screen === "list") return "Salas";
-    if (screen === "room") return "Sala";
-    if (screen === "game") return "Partida";
-    return "Lobby";
-  }, [screen]);
+  const handleOpenRoomList = () => {
+    setScreen("list");
+    void requestRooms();
+  };
 
-  const heroSecondaryLabel = useMemo(() => {
-    if (!isServer) return null;
-    if (screen === "create") {
-      return { label: "Entrada", value: formatStakeOptionLabel(createStake) };
+  const handleCloseCreateScreen = () => {
+    const roomId = createDraftRoomIdRef.current;
+    if (roomId) {
+      void leaveRoomOverHttp(roomId, "http_primary_close_create", { closeRoom: true });
     }
-    if (screen === "room" && room) {
-      return { label: "Entrada", value: formatStakeOptionLabel(room.tableType === "stake" ? (room.stakeChips ?? 0) : 0) };
-    }
-    if (screen === "game" && room) {
-      return { label: "Entrada", value: formatStakeOptionLabel(room.tableType === "stake" ? (room.stakeChips ?? 0) : 0) };
-    }
-    return null;
-  }, [createStake, isServer, room, screen]);
+    resetGameRuntimeState(roomId, { clearGame: true, reason: 'close_create_room' });
+    setCreateDraftRoomId(null);
+    setLocallyOwnedRoomId(null);
+    setRoom(null);
+    setScreen("home");
+    void requestRooms();
+  };
 
-  const heroEntryEditable = Boolean(isServer && heroSecondaryLabel && (screen === "create" || (screen === "room" && room && isRoomHost)));
+  const handleOpenCreatePreviewRoom = () => {
+    if (!createPreviewRoom) return;
+    setRoom(createPreviewRoom);
+    setScreen("room");
+  };
+
+  const handleJoinRoomFromList = (roomId: string) => {
+    void joinRoomOverHttp(roomId, "http_primary_join");
+  };
+
+  const handleStartRoomGame = () => {
+    if (!room || !canHostStart || gameStartBusy) return;
+    setGameStartBusy(true);
+    setErrorMessage(null);
+    void (async () => {
+      try {
+        await startGameOverHttp(room.roomId, "http_primary_game_start", isRoomHost ? room.hostUserId : null);
+      } finally {
+        setGameStartBusy(false);
+      }
+    })();
+  };
+
+  const handleToggleRoomReady = () => {
+    if (!room) return;
+    const nextReady = !currentPlayer?.ready;
+    void setReadyOverHttp(room.roomId, nextReady, "http_primary_ready");
+  };
 
   const { gameLoadingTimedOut, forceReturnToLobbyFromLoading, loadingOverlayDebug } = useGameController({
     bootstrapped,
@@ -2441,451 +2536,89 @@ export default function App() {
       style={{ backgroundImage: `linear-gradient(180deg, rgba(4, 10, 17, 0.12), rgba(4, 10, 17, 0.46)), url(${lobbyBackground})` }}
       onClickCapture={handleShellClickCapture}
     >
-      {chipGateDialog ? (
-        <div className="activity-confirm" role="dialog" aria-modal="true" aria-live="polite">
-          <div className="activity-confirm__backdrop" onClick={() => { if (!chipGateBusy) setChipGateDialog(null); }} />
-          <div className={`activity-confirm__panel activity-confirm__panel--${chipGateDialog.kind}`}>
-            <div className="activity-confirm__panel-bg" aria-hidden="true" />
-            <div className="activity-confirm__content">
-              <div className="activity-confirm__title">{chipGateDialog.title}</div>
-              <div className="activity-confirm__body">
-                {chipGateDialog.kind === "negative" ? "Se continuar, seu saldo ficará em " : "Seu saldo ficará em "}
-                <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)} fichas</span>
-                .
-              </div>
-              <div className="activity-confirm__actions">
-                <button type="button" className="activity-confirm__button activity-confirm__button--ghost" disabled={chipGateBusy} onClick={() => setChipGateDialog(null)}>Melhor não...</button>
-                <button type="button" className="activity-confirm__button activity-confirm__button--danger" disabled={chipGateBusy} onClick={() => { void confirmChipGateDialog(); }}>
-                  <span>Sim (ficar com </span>
-                  <span className="activity-confirm__debt-value">-{Math.abs(chipGateDialog.resultingChips)}</span>
-                  <span> fichas)</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {transientNotice ? (
-        <div className="activity-notice activity-notice--visible" role="status" aria-live="polite">
-          <div className="activity-notice__panel">{transientNotice}</div>
-        </div>
-      ) : null}
-      {screen !== "game" ? (
-      <header className={`hero-card hero-card--compact hero-card--landscape ${(createEntryMenuOpen || roomEntryMenuOpen) ? "hero-card--menu-open" : ""}`}>
-        <div className="hero-card__copy">
-          <span className="hero-card__eyebrow">{heroEyebrow}</span>
-          <h1>{heroTitle}</h1>
-          <p>{heroSubtitle}</p>
-        </div>
-        {isServer ? (
-          <div className="hero-card__meta hero-card__meta--hud">
-            <div className="hero-stat hero-stat--chips">
-              <span>Fichas</span>
-              <strong>{balanceLoaded ? balance.chips : "..."}</strong>
-            </div>
-            {balanceLoaded && balance.bonusChips > 0 ? (
-              <div className="hero-stat hero-stat--bonus">
-                <span>Bônus</span>
-                <strong>{balance.bonusChips}</strong>
-              </div>
-            ) : null}
-            {heroSecondaryLabel ? (
-              heroEntryEditable ? (
-                <div
-                  ref={screen === "create" ? createEntryMenuRef : roomEntryMenuRef}
-                  className={`entry-selector entry-selector--hero entry-selector--hero-compact ${screen === "create" ? (createEntryMenuOpen ? "entry-selector--open" : "") : (roomEntryMenuOpen ? "entry-selector--open" : "")}`}
-                >
-                  <button
-                    className="entry-selector__trigger entry-selector__trigger--hero"
-                    type="button"
-                    onClick={() => {
-                      if (screen === "create") {
-                        setCreateEntryMenuOpen((current) => !current);
-                        setRoomEntryMenuOpen(false);
-                        return;
-                      }
-                      setRoomEntryMenuOpen((current) => !current);
-                      setCreateEntryMenuOpen(false);
-                    }}
-                  >
-                    <span className="entry-selector__trigger-copy">
-                      <span className="entry-selector__label">{heroSecondaryLabel.label}</span>
-                      <strong>{heroSecondaryLabel.value}</strong>
-                    </span>
-                    <span className={`entry-selector__chevron ${(screen === "create" ? createEntryMenuOpen : roomEntryMenuOpen) ? "entry-selector__chevron--open" : ""}`}>v</span>
-                  </button>
-                  <div className={`entry-selector__menu entry-selector__menu--hero ${(screen === "create" ? createEntryMenuOpen : roomEntryMenuOpen) ? "entry-selector__menu--open" : ""}`}>
-                    {(screen === "create" ? createStakeOptions : roomStakeOptions).map((stake) => {
-                      const active = screen === "create"
-                        ? createStake === stake
-                        : stake === 0
-                          ? room?.tableType !== "stake"
-                          : room?.tableType === "stake" && room?.stakeChips === stake;
-                      return (
-                        <button
-                          key={stake}
-                          type="button"
-                          className={`entry-selector__option ${active ? "entry-selector__option--active" : ""}`}
-                          onClick={() => {
-                            if (screen === "create") {
-                              setCreateEntryMenuOpen(false);
-                              if (active) return;
-                              setCreateStake(stake);
-                              setCreateTableType(stake === 0 ? "casual" : "stake");
-                              return;
-                            }
-                            setRoomEntryMenuOpen(false);
-                            if (!room || active) return;
-                            void updateRoomStakeOverHttp(room.roomId, stake, "http_primary_stake");
-                          }}
-                        >
-                          {formatStakeOptionLabel(stake)}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : (
-                <div className="hero-stat hero-stat--entry">
-                  <span>{heroSecondaryLabel.label}</span>
-                  <strong>{heroSecondaryLabel.value}</strong>
-                </div>
-              )
-            ) : null}
-          </div>
-        ) : null}
-      </header>
-      ) : null}
+      <ChipGateDialog
+        dialog={chipGateDialog ? { kind: chipGateDialog.kind, title: chipGateDialog.title, resultingChips: chipGateDialog.resultingChips } : null}
+        busy={chipGateBusy}
+        onCancel={() => setChipGateDialog(null)}
+        onConfirm={() => { void confirmChipGateDialog(); }}
+      />
+      <TransientNotice message={transientNotice} />
+      <LobbyHero
+        visible={screen !== "game"}
+        menuOpen={createEntryMenuOpen || roomEntryMenuOpen}
+        eyebrow={heroContent.eyebrow}
+        title={heroContent.title}
+        subtitle={heroContent.subtitle}
+        isServer={isServer}
+        chips={balanceLoaded ? balance.chips : "..."}
+        bonusChips={balanceLoaded ? balance.bonusChips : 0}
+        secondaryLabel={heroContent.secondaryLabel}
+        entryMenu={heroEntryMenu}
+      />
 
       {screen === "home" ? (
-        <section className="home-lobby home-lobby--landscape home-lobby--streamlined">
-          {!resolvedUser ? (
-            <div className="menu-buttons menu-buttons--single menu-buttons--compact menu-buttons--hero menu-buttons--hero-late">
-              <button
-                className="menu-button menu-button--authorize"
-                type="button"
-                disabled={authBusy}
-                aria-busy={authBusy}
-                onClick={() => {
-                  void handleAuthorize();
-                }}
-              >
-                <span className="menu-button__eyebrow">Conta Discord</span>
-                <strong>{authBusy ? "Autorizando conta..." : "Autorizar conta"}</strong>
-                <small>{authBusy ? "Confirme a janela de autorização do Discord." : "Autorize para criar mesa, entrar e usar fichas."}</small>
-              </button>
-            </div>
-          ) : (
-            <div className="menu-buttons menu-buttons--home menu-buttons--compact menu-buttons--hero menu-buttons--hero-late">
-              <button
-                className="menu-button menu-button--create"
-                type="button"
-                disabled={createRoomBusy || !initReadyForServerActions}
-                onClick={() => {
-                  if (createRoomBusy) return;
-                  if (!initReadyForServerActions) {
-                    if (isServer) void fetchBalanceOverHttp("create_gate_retry");
-                    setErrorMessage(isServer ? "aguarde as fichas carregarem para abrir a sala" : "aguarde a activity terminar de carregar");
-                    return;
-                  }
-                  const nextStake = isServer ? 25 : 0;
-                  const nextTableType: TableType = isServer ? "stake" : "casual";
-                  resetGameRuntimeState(currentRoomRef.current?.roomId, { clearGame: true, reason: 'home_click_create_reset' });
-                  setRoom(null);
-                  setCreateDraftRoomId(null);
-                  setLocallyOwnedRoomId(null);
-                  setCreateTableType(nextTableType);
-                  setCreateStake(nextStake);
-                  setCreateEntryMenuOpen(false);
-                  setRoomEntryMenuOpen(false);
-                  setCreateRoomBusy(true);
-                  setErrorMessage(null);
-                  void (async () => {
-                    try {
-                      const nextRoom = await createRoomOverHttp("home_click_create", { stake: nextStake, tableType: nextTableType });
-                      if (nextRoom) {
-                        setRoom(nextRoom);
-                        setScreen("room");
-                      } else {
-                        setErrorMessage("não foi possível abrir a sala agora");
-                      }
-                    } finally {
-                      setCreateRoomBusy(false);
-                    }
-                  })();
-                }}
-              >
-                <span className="menu-button__eyebrow">Mesa nova</span>
-                <strong>{createRoomBusy ? "Abrindo mesa..." : "Criar mesa"}</strong>
-                <small>{createRoomBusy ? "Entrando na sala..." : (!initReadyForServerActions && isServer ? "Carregando fichas..." : "Abra uma mesa.")}</small>
-              </button>
-
-              <button
-                className="menu-button menu-button--join"
-                type="button"
-                onClick={() => {
-                  setScreen("list");
-                  void requestRooms();
-                }}
-              >
-                <span className="menu-button__eyebrow">Mesas abertas</span>
-                <strong>Entrar</strong>
-                <small>Veja as mesas abertas.</small>
-              </button>
-            </div>
-          )}
-        </section>
+        <HomeLobbyScreen
+          resolvedUser={resolvedUser}
+          authBusy={authBusy}
+          createRoomBusy={createRoomBusy}
+          initReadyForServerActions={initReadyForServerActions}
+          isServer={isServer}
+          onAuthorize={() => { void handleAuthorize(); }}
+          onCreateRoom={handleOpenCreateRoom}
+          onOpenRoomList={handleOpenRoomList}
+        />
       ) : null}
 
-            {screen === "create" ? (
-        <section className="lobby-panel lobby-panel--compact lobby-panel--create">
-          <div className="list-topbar list-topbar--create list-topbar--compact-create list-topbar--single">
-            <button className="chip-button chip-button--back" type="button" onClick={() => {
-              const roomId = createDraftRoomIdRef.current;
-              if (roomId) {
-                void leaveRoomOverHttp(roomId, "http_primary_close_create", { closeRoom: true });
-              }
-              resetGameRuntimeState(roomId, { clearGame: true, reason: 'close_create_room' });
-              setCreateDraftRoomId(null);
-              setLocallyOwnedRoomId(null);
-              setRoom(null);
-              setScreen("home");
-              void requestRooms();
-            }}>Fechar sala</button>
-          </div>
-
-          <div className="create-layout create-layout--final">
-            <div className="create-preview-card create-preview-card--final create-preview-card--single">
-              <div className="create-preview-shell create-preview-shell--final create-preview-shell--create-compact">
-                <div className="participant-slot participant-slot--filled participant-slot--compact participant-slot--create-main">
-                  <div className="participant-slot__avatar-wrap">
-                    <img
-                      className="participant-slot__avatar"
-                      src={resolvePlayerAvatar(createPreviewHostPlayer ?? { userId: state.currentUser.userId, avatarUrl: state.currentUser.avatarUrl ?? null })}
-                      alt={(createPreviewHostPlayer?.displayName ?? state.currentUser.displayName)}
-                    />
-                  </div>
-                  <span className="participant-slot__name">{cleanPlayerName({ displayName: createPreviewHostPlayer?.displayName ?? state.currentUser.displayName })}</span>
-                  <small className="participant-slot__role">você</small>
-                </div>
-
-                {createPreviewOpponentPlayer ? (
-                  <div className="participant-slot participant-slot--filled participant-slot--compact participant-slot--create-main">
-                    <div className="participant-slot__avatar-wrap">
-                      <img className="participant-slot__avatar" src={resolvePlayerAvatar(createPreviewOpponentPlayer)} alt={createPreviewOpponentPlayer.displayName} />
-                    </div>
-                    <span className="participant-slot__name">{cleanPlayerName(createPreviewOpponentPlayer)}</span>
-                    <small className="participant-slot__role">jogador</small>
-                  </div>
-                ) : (
-                  <div className="participant-slot participant-slot--ghost participant-slot--compact participant-slot--create-main">
-                    <div className="participant-slot__avatar-wrap participant-slot__avatar-wrap--ghost">
-                      <div className="participant-slot__unknown">?</div>
-                    </div>
-                    <span className="participant-slot__name">Aguardando adversário</span>
-                    <small className="participant-slot__role">vaga aberta</small>
-                  </div>
-                )}
-              </div>
-
-              <div className="create-preview-footer create-preview-footer--solo">
-                {!resolvedUser ? (
-                  <button className="primary-button create-submit create-submit--compact" type="button" disabled={authBusy} onClick={() => { void handleAuthorize(); }}>
-                    {authBusy ? "Autorizando..." : "Autorizar conta"}
-                  </button>
-                ) : (
-                  <button
-                    className="primary-button create-submit create-submit--compact"
-                    type="button"
-                    disabled={!createPreviewRoom || (isServer && createStake > 0 && balanceLoaded && !canAffordSelectedStake)}
-                    onClick={() => {
-                      if (!createPreviewRoom) return;
-                      setRoom(createPreviewRoom);
-                      setScreen("room");
-                    }}
-                  >
-                    {createPreviewRoom ? "Abrir mesa" : "Abrindo mesa..."}
-                  </button>
-                )}
-              </div>
-
-              {isServer && createStake > 0 && !balanceLoaded ? (
-                <p className="plain-copy create-preview-note">Carregando fichas...</p>
-              ) : null}
-              {isServer && createStake > 0 && balanceLoaded && !canAffordSelectedStake ? (
-                <p className="error-copy create-preview-note">Você não tem fichas suficientes para essa entrada.</p>
-              ) : null}
-            </div>
-          </div>
-        </section>
+      {screen === "create" ? (
+        <CreateRoomScreen
+          currentUser={state.currentUser}
+          createPreviewHostPlayer={createPreviewHostPlayer}
+          createPreviewOpponentPlayer={createPreviewOpponentPlayer}
+          createPreviewRoom={createPreviewRoom}
+          resolvedUser={resolvedUser}
+          authBusy={authBusy}
+          isServer={isServer}
+          createStake={createStake}
+          balanceLoaded={balanceLoaded}
+          canAffordSelectedStake={canAffordSelectedStake}
+          onAuthorize={() => { void handleAuthorize(); }}
+          onOpenRoom={handleOpenCreatePreviewRoom}
+          onClose={handleCloseCreateScreen}
+        />
       ) : null}
 
       {screen === "list" ? (
-        <section className="lobby-panel lobby-panel--compact lobby-panel--list">
-          <div className="list-topbar">
-            <button className="chip-button chip-button--back" type="button" onClick={() => setScreen("home")}>Voltar</button>
-            <div className="list-topbar__count">{formatRoomCount(rooms.length)}</div>
-          </div>
-
-          <div className="room-list-stack room-list-stack--immersive">
-            {rooms.length === 0 ? (
-              <div className="empty-card empty-card--soft empty-card--home empty-card--list">
-                <strong>Nenhuma mesa aberta</strong>
-                <span>Crie uma para começar.</span>
-              </div>
-            ) : (
-              rooms.map((entry) => {
-                const host = entry.players.find((player) => player.userId === entry.hostUserId) ?? entry.players[0];
-                const opponent = entry.players.find((player) => player.userId !== entry.hostUserId) ?? null;
-                return (
-                  <article key={entry.roomId} className="room-entry-card room-entry-card--soft room-entry-card--showdown">
-                    <div className="room-entry-card__showdown">
-                      <div className="participant-slot participant-slot--filled participant-slot--list-card">
-                        <div className="participant-slot__avatar-wrap">
-                          <img className="participant-slot__avatar" src={resolvePlayerAvatar(host)} alt={host.displayName} />
-                        </div>
-                        <span className="participant-slot__name">{cleanPlayerName(host)}</span>
-                        <small className="participant-slot__role">anfitrião</small>
-                      </div>
-
-                      <div className="participant-slot__versus participant-slot__versus--list">vs.</div>
-
-                      {opponent ? (
-                        <div className="participant-slot participant-slot--filled participant-slot--list-card">
-                          <div className="participant-slot__avatar-wrap">
-                            <img className="participant-slot__avatar" src={resolvePlayerAvatar(opponent)} alt={opponent.displayName} />
-                          </div>
-                          <span className="participant-slot__name">{cleanPlayerName(opponent)}</span>
-                          <small className="participant-slot__role">adversário</small>
-                        </div>
-                      ) : (
-                        <div className="participant-slot participant-slot--ghost participant-slot--list-card">
-                          <div className="participant-slot__avatar-wrap participant-slot__avatar-wrap--ghost">
-                            <div className="participant-slot__unknown">?</div>
-                          </div>
-                          <span className="participant-slot__name">Aguardando jogador</span>
-                          <small className="participant-slot__role">vaga aberta</small>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="room-entry-card__footer room-entry-card__footer--compact">
-                      <div className="room-entry-card__meta room-entry-card__meta--chips">
-                        <span className="room-inline-chip">{entry.players.length}/2</span>
-                        <span className="room-inline-chip">{formatStakeOptionLabel(entry.tableType === "stake" ? (entry.stakeChips ?? 0) : 0)}</span>
-                        <span className={`status-badge status-badge--${entry.status} room-inline-chip room-inline-chip--status`}>{formatStatus(entry)}</span>
-                      </div>
-
-                      <button
-                        className="primary-button room-entry-card__join"
-                        type="button"
-                        disabled={authBusy || entry.players.length >= 2}
-                        onClick={() => {
-                          if (!resolvedUser) {
-                            void handleAuthorize();
-                            return;
-                          }
-                          void joinRoomOverHttp(entry.roomId, "http_primary_join");
-                        }}
-                      >
-                        {!resolvedUser ? (authBusy ? "Autorizando..." : "Autorizar") : entry.players.length >= 2 ? "Mesa cheia" : "Entrar"}
-                      </button>
-                    </div>
-                  </article>
-                );
-              })
-            )}
-          </div>
-        </section>
+        <RoomListScreen
+          rooms={rooms}
+          authBusy={authBusy}
+          resolvedUser={resolvedUser}
+          onBack={() => setScreen("home")}
+          onAuthorize={() => { void handleAuthorize(); }}
+          onJoinRoom={handleJoinRoomFromList}
+          formatStakeOptionLabel={formatStakeOptionLabel}
+          formatStatusLabel={formatStatus}
+        />
       ) : null}
 
       {screen === "room" && room ? (
-        <section className="lobby-panel lobby-panel--compact lobby-panel--room-stage">
-          <div className="list-topbar list-topbar--room-stage list-topbar--room-stage-compact">
-            <button className="chip-button chip-button--back" type="button" disabled={roomExitBusy} onClick={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room" : "http_primary_leave_room_top"); }}>{roomExitBusy ? (isRoomHost ? "Fechando..." : "Saindo...") : (isRoomHost ? "Fechar sala" : "Sair")}</button>
-            <div className="room-stage__top-meta">
-              <span className="room-stage__top-chip">{room.players.length}/2</span>
-              <span className={`room-ready-badge ${canHostStart ? "room-ready-badge--ready" : ""}`}>{roomTopStatus}</span>
-            </div>
-          </div>
-
-          <div className="room-stage room-stage--final room-stage--compact room-stage--single">
-            <div className="create-preview-card room-stage__preview room-stage__preview--compact">
-              <div className="create-preview-shell create-preview-shell--room room-stage__players">
-                <div className="participant-slot participant-slot--filled participant-slot--room-main participant-slot--room-host">
-                  <div className="participant-slot__avatar-wrap">
-                    <img className="participant-slot__avatar" src={resolvePlayerAvatar(roomHostPlayer ?? room.players[0])} alt={room.hostDisplayName} />
-                  </div>
-                  <span className="participant-slot__name">{cleanPlayerName(roomHostPlayer ?? room.players[0])}</span>
-                  <small className="participant-slot__role">anfitrião</small>
-                  <span className={`room-ready-badge ${canHostStart ? "room-ready-badge--ready" : ""}`}>
-                    {canHostStart ? "pode iniciar" : roomOpponentPlayer ? "aguardando" : "vaga aberta"}
-                  </span>
-                </div>
-
-                {roomOpponentPlayer ? (
-                  <div className="participant-slot participant-slot--filled participant-slot--room-main participant-slot--room-opponent">
-                    <div className="participant-slot__avatar-wrap">
-                      <img className="participant-slot__avatar" src={resolvePlayerAvatar(roomOpponentPlayer)} alt={roomOpponentPlayer.displayName} />
-                    </div>
-                    <span className="participant-slot__name">{cleanPlayerName(roomOpponentPlayer)}</span>
-                    <small className="participant-slot__role">adversário</small>
-                    <span className={`room-ready-badge ${roomOpponentPlayer.ready ? "room-ready-badge--ready" : ""}`}>
-                      {roomOpponentPlayer.ready ? "pronto" : "aguardando"}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="participant-slot participant-slot--ghost participant-slot--room-main participant-slot--room-opponent participant-slot--room-open">
-                    <div className="participant-slot__avatar-wrap participant-slot__avatar-wrap--ghost">
-                      <div className="participant-slot__unknown">?</div>
-                    </div>
-                    <span className="participant-slot__name">Aguardando adversário</span>
-                    <small className="participant-slot__role">vaga aberta</small>
-                    <span className="room-ready-badge">aguardando</span>
-                  </div>
-                )}
-              </div>
-
-              <div className="room-stage__footer room-stage__footer--tight">
-                <div className={`room-stage__actions room-stage__actions--single ${isRoomHost ? "room-stage__actions--host" : "room-stage__actions--guest"}`}>
-                  {isRoomHost ? (
-                    <button
-                      className={`primary-button room-stage__ready ${!canHostStart ? "primary-button--muted" : ""}`}
-                      type="button"
-                      disabled={!canHostStart || gameStartBusy}
-                      onClick={async () => {
-                        if (!canHostStart || gameStartBusy) return;
-                        setGameStartBusy(true);
-                        setErrorMessage(null);
-                        try {
-                          await startGameOverHttp(room.roomId, "http_primary_game_start", isRoomHost ? room.hostUserId : null);
-                        } finally {
-                          setGameStartBusy(false);
-                        }
-                      }}
-                    >
-                      {gameStartBusy ? "Abrindo mesa..." : "Iniciar partida"}
-                    </button>
-                  ) : (
-                    <button
-                      className={`primary-button room-stage__ready ${currentPlayer?.ready ? "primary-button--muted" : ""}`}
-                      type="button"
-                      onClick={() => {
-                        const nextReady = !currentPlayer?.ready;
-                        void setReadyOverHttp(room.roomId, nextReady, "http_primary_ready");
-                      }}
-                    >
-                      {currentPlayer?.ready ? "Cancelar pronto" : "Marcar pronto"}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {authState === "needs_consent" && !resolvedUser ? <p className="plain-copy">Autorize sua conta para usar fichas, criar mesa e entrar em partida.</p> : null}
-              {errorMessage && connectionState !== "offline" ? <p className="error-copy">{errorMessage}</p> : null}
-            </div>
-          </div>
-        </section>
+        <RoomLobbyScreen
+          room={room}
+          isRoomHost={isRoomHost}
+          roomExitBusy={roomExitBusy}
+          canHostStart={canHostStart}
+          roomTopStatus={roomTopStatus}
+          roomHostPlayer={roomHostPlayer}
+          roomOpponentPlayer={roomOpponentPlayer}
+          currentPlayer={currentPlayer}
+          gameStartBusy={gameStartBusy}
+          authState={authState}
+          resolvedUser={resolvedUser}
+          errorMessage={errorMessage}
+          connectionState={connectionState}
+          onExit={() => { void exitCurrentRoom(isRoomHost ? "http_primary_close_room" : "http_primary_leave_room_top"); }}
+          onStartGame={handleStartRoomGame}
+          onToggleReady={handleToggleRoomReady}
+        />
       ) : null}
 
       {screen === "game" && room ? (
