@@ -434,25 +434,40 @@ class GincanaRoletaMixin:
                 pass
 
         async def _deliver_game_result(self, source_message: discord.Message, target_message: discord.Message | None, *, embed: discord.Embed, view: discord.ui.View | None = None) -> discord.Message | None:
-            # Publica primeiro o resultado final como uma mensagem completa nova.
-            # Isso evita deixar a roleta/cartas presas em "Girando..." se a edição
-            # final da mensagem animada falhar ou for aplicada de forma inconsistente.
-            sent = await self._send_game_message(source_message.channel, embed=embed, view=view, final=True)
-            if sent is not None:
-                if isinstance(view, _GameReplayView):
-                    view.message = sent
-                if target_message is not None and getattr(target_message, 'id', None) != getattr(sent, 'id', None):
-                    await self._delete_game_message(target_message)
-                elif target_message is not None and getattr(target_message, 'id', None) == getattr(source_message, 'id', None):
-                    await self._delete_game_message(target_message)
-                return sent
-            if target_message is not None:
-                ok = await self._edit_game_message(target_message, embed=embed, view=view, final=True)
-                if ok:
-                    if isinstance(view, _GameReplayView):
-                        view.message = target_message
-                    return target_message
-            return target_message
+            target = target_message or source_message
+            if target is None:
+                return None
+
+            disabled_view = view
+            if isinstance(disabled_view, _GameReplayView):
+                disabled_view.set_enabled(False)
+                disabled_view.message = target
+
+            start = time.monotonic()
+            grace_deadline = start + 2.0
+            final_rendered = False
+            while not final_rendered:
+                final_rendered = await self._edit_game_message(target, embed=embed, view=disabled_view, final=False)
+                if final_rendered:
+                    remaining = grace_deadline - time.monotonic()
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                    break
+                await asyncio.sleep(0.25)
+
+            if not final_rendered:
+                return target
+
+            if isinstance(view, _GameReplayView):
+                view.set_enabled(True)
+                view.message = target
+                while True:
+                    enabled_ok = await self._edit_game_message(target, embed=embed, view=view, final=False)
+                    if enabled_ok:
+                        return target
+                    await asyncio.sleep(0.25)
+
+            return target
 
         def _roleta_trigger_cooldown_remaining(self, guild_id: int, user_id: int) -> float:
             self._ensure_game_animation_runtime()
