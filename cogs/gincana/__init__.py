@@ -61,11 +61,6 @@ class _MendigarRequestView(discord.ui.LayoutView):
         )
 
     def _build_header_lines(self) -> list[str]:
-        if self.target_mention:
-            return [
-                "# 🥺 Esmola",
-                f"{self.target_mention}, {self.author_mention} está pedindo uma esmola de {self.cog._chip_amount(self.amount)}. Deseja ajudar esse coitado?",
-            ]
         return [
             "# 🥺 Esmola",
             f"Este pobre usuário necessitado está pedindo uma esmola de {self.cog._chip_amount(self.amount)}.",
@@ -75,7 +70,6 @@ class _MendigarRequestView(discord.ui.LayoutView):
         lines = [f"**Pedinte:** {self.author_mention}"]
         if self.target_mention:
             lines.append(f"**Convocado para ajudar:** {self.target_mention}")
-            lines.append("Somente a pessoa marcada pode clicar no botão abaixo.")
         else:
             lines.append("Qualquer alma bondosa com fichas normais suficientes pode ajudar no botão abaixo.")
         lines.append(f"A esmola expira em **{int(CHIPS_MENDIGAR_TIMEOUT_SECONDS // 60)} minutos**.")
@@ -122,6 +116,19 @@ class _MendigarRequestView(discord.ui.LayoutView):
             return
 
         await self.cog._maybe_execute_due_chip_season_reset(self.guild_id)
+        donor_doc = self.cog.db._get_user_doc(self.guild_id, donor.id)
+        last_donation = float(donor_doc.get("last_esmola_at", 0) or 0)
+        remaining = (last_donation + CHIPS_MENDIGAR_COOLDOWN_SECONDS) - time.time()
+        if remaining > 0:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice(
+                    "💸 Esmola bloqueada",
+                    ["Você já ajudou alguém com esmola recentemente.", f"Tente novamente em **{self.cog._format_wait_compact(remaining)}**."],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
         donor_chips = int(self.cog.db.get_user_chips(self.guild_id, donor.id, default=CHIPS_INITIAL) or 0)
         recipient_chips = int(self.cog.db.get_user_chips(self.guild_id, recipient.id, default=CHIPS_INITIAL) or 0)
         if donor_chips < CHIPS_PAY_MIN_BALANCE:
@@ -166,9 +173,12 @@ class _MendigarRequestView(discord.ui.LayoutView):
             return
 
         await self.cog._transfer_user_chips(self.guild_id, donor.id, recipient.id, total=self.amount, net_amount=self.amount)
+        now_ts = float(time.time())
         requester_doc = self.cog.db._get_user_doc(self.guild_id, recipient.id)
-        requester_doc["last_mendigar_at"] = float(time.time())
+        requester_doc["last_mendigar_at"] = now_ts
         await self.cog.db._save_user_doc(self.guild_id, recipient.id, requester_doc)
+        donor_doc["last_esmola_at"] = now_ts
+        await self.cog.db._save_user_doc(self.guild_id, donor.id, donor_doc)
         self.fulfilled = True
         self.stop()
         result = discord.ui.LayoutView(timeout=None)
@@ -195,7 +205,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
             await self.message.edit(
                 view=self.cog._make_v2_notice(
                     "💸 Esmola",
-                    ["O pedido de esmola esfriou e expirou sem ninguém ajudar."],
+                    ["Ninguém ajudou essa pobre alma, o pedido de esmola expirou."],
                     ok=False,
                     accent_color=discord.Color.red(),
                 )
