@@ -845,6 +845,7 @@ export function registerActivityRoutes({ app, runtime, balanceService, exchangeD
   registerPostOnly(app, GAME_ROUTE_PATHS.start, handleStartGameHttp);
   registerPostOnly(app, GAME_ROUTE_PATHS.aimAction, handleSyncAimHttp);
   registerGetPost(app, GAME_ROUTE_PATHS.shootAction, handleShootGameHttp);
+  registerGetPost(app, GAME_ROUTE_PATHS.rematchReady, handleRematchReadyHttp);
   registerGetPost(app, GAME_ROUTE_PATHS.debug, handleUiDebugHttp);
   registerGetPost(app, BALANCE_ROUTE_PATHS, handleBalance);
 }

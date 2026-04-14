@@ -21,6 +21,7 @@ export const GAME_ROUTE_PATHS = {
   gameByRoom: ["/games/:roomId", "/api/games/:roomId"] as const,
   legacyGameByRoom: ["/game/:roomId", "/api/game/:roomId"] as const,
   start: ["/games/start", "/api/games/start"] as const,
+  rematchReady: ["/games/rematch-ready", "/api/games/rematch-ready"] as const,
   debug: ["/games/debug", "/api/games/debug"] as const,
 } as const;
 

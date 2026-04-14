@@ -133,12 +133,6 @@ function resolveActionVariants(path: string, payload: Record<string, unknown>) {
   const apiVariants = buildApiActionVariants(normalizedPath, payload);
   const legacyVariants = legacyAction ? buildLegacyActionVariants(legacyAction, payload) : [];
 
-  if (normalizedPath === "/games/shoot" || normalizedPath === "/games/debug") {
-    return dedupeVariants([...legacyVariants, ...apiVariants]);
-  }
-  if (normalizedPath.startsWith("/games/")) {
-    return dedupeVariants([...apiVariants, ...legacyVariants]);
-  }
   return dedupeVariants([...apiVariants, ...legacyVariants]);
 }
 
@@ -157,14 +151,6 @@ export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promi
   const attempts: string[] = [];
   const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
 
-  for (const baseUrl of resolveApiCandidates('/balance')) {
-    const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-    url.searchParams.set('action', 'game_get');
-    url.searchParams.set('roomId', roomId);
-    if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
-    requestVariants.push({ label: `BALANCE_GAME_GET:${baseUrl}`, url: url.toString(), init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' } });
-  }
-
   for (const baseUrl of resolveStrictApiCandidates(`/rooms/${encodeURIComponent(roomId)}/game`)) {
     const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
     if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
@@ -175,6 +161,14 @@ export async function fetchGameStateRequest(roomId: string, sinceSeq = 0): Promi
     const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
     if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
     requestVariants.push({ label: `STRICT_GAMES:${baseUrl}`, url: url.toString(), init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' } });
+  }
+
+  for (const baseUrl of resolveApiCandidates('/balance')) {
+    const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    url.searchParams.set('action', 'game_get');
+    url.searchParams.set('roomId', roomId);
+    if (sinceSeq > 0) url.searchParams.set('sinceSeq', String(sinceSeq));
+    requestVariants.push({ label: `BALANCE_GAME_GET:${baseUrl}`, url: url.toString(), init: { method: 'GET', credentials: 'same-origin', cache: 'no-store' } });
   }
 
   for (const variant of dedupeVariants(requestVariants)) {

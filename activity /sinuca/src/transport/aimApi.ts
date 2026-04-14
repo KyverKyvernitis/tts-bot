@@ -130,28 +130,6 @@ export async function syncAimStateRequest(payload: AimSyncInput): Promise<HttpTr
   const bodyForm = buildQueryStringFromPayload(payload);
   const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
 
-  for (const baseUrl of resolveApiCandidates("/balance")) {
-    requestVariants.push({
-      label: `BALANCE_POST_FORM:${baseUrl}`,
-      url: baseUrl,
-      init: {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-        credentials: "same-origin",
-        body: buildQueryStringFromPayload({ action: "game_aim_sync", ...payload }),
-        keepalive: true,
-      },
-    });
-    const queryUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-    const params = new URLSearchParams(buildQueryStringFromPayload({ action: "game_aim_sync", ...payload }));
-    params.forEach((value, key) => queryUrl.searchParams.set(key, value));
-    requestVariants.push({
-      label: `BALANCE_GET_QUERY:${baseUrl}`,
-      url: queryUrl.toString(),
-      init: { method: "GET", credentials: "same-origin", cache: "no-store", keepalive: true },
-    });
-  }
-
   for (const baseUrl of resolveStrictApiCandidates("/games/aim")) {
     requestVariants.push({
       label: `API_POST_JSON:${baseUrl}`,
@@ -174,6 +152,28 @@ export async function syncAimStateRequest(payload: AimSyncInput): Promise<HttpTr
         body: bodyForm,
         keepalive: true,
       },
+    });
+  }
+
+  for (const baseUrl of resolveApiCandidates("/balance")) {
+    requestVariants.push({
+      label: `BALANCE_POST_FORM:${baseUrl}`,
+      url: baseUrl,
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        credentials: "same-origin",
+        body: buildQueryStringFromPayload({ action: "game_aim_sync", ...payload }),
+        keepalive: true,
+      },
+    });
+    const queryUrl = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    const params = new URLSearchParams(buildQueryStringFromPayload({ action: "game_aim_sync", ...payload }));
+    params.forEach((value, key) => queryUrl.searchParams.set(key, value));
+    requestVariants.push({
+      label: `BALANCE_GET_QUERY:${baseUrl}`,
+      url: queryUrl.toString(),
+      init: { method: "GET", credentials: "same-origin", cache: "no-store", keepalive: true },
     });
   }
 
@@ -214,21 +214,21 @@ export async function fetchAimStateRequest(roomId: string): Promise<HttpTranspor
   const attempts: string[] = [];
   const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
 
+  for (const baseUrl of resolveStrictApiCandidates(`/games/${encodeURIComponent(roomId)}/aim`)) {
+    const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    requestVariants.push({
+      label: `API_GET:${baseUrl}`,
+      url: url.toString(),
+      init: { method: "GET", credentials: "same-origin", cache: "no-store" },
+    });
+  }
+
   for (const baseUrl of resolveApiCandidates("/balance")) {
     const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
     url.searchParams.set("action", "game_aim_get");
     url.searchParams.set("roomId", roomId);
     requestVariants.push({
       label: `BALANCE_GET_QUERY:${baseUrl}`,
-      url: url.toString(),
-      init: { method: "GET", credentials: "same-origin", cache: "no-store" },
-    });
-  }
-
-  for (const baseUrl of resolveStrictApiCandidates(`/games/${encodeURIComponent(roomId)}/aim`)) {
-    const url = appendNoStoreNonce(baseUrl, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-    requestVariants.push({
-      label: `API_GET:${baseUrl}`,
       url: url.toString(),
       init: { method: "GET", credentials: "same-origin", cache: "no-store" },
     });
