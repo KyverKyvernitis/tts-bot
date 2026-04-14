@@ -2532,7 +2532,7 @@ export default function App() {
 
   return (
     <main
-      className={`app-shell ${screen === "game" ? "app-shell--game" : ""}`}
+      className={`app-shell app-shell--screen-${screen} ${screen === "game" ? "app-shell--game" : ""}`}
       style={{ backgroundImage: `linear-gradient(180deg, rgba(4, 10, 17, 0.12), rgba(4, 10, 17, 0.46)), url(${lobbyBackground})` }}
       onClickCapture={handleShellClickCapture}
     >
@@ -2546,6 +2546,7 @@ export default function App() {
       <LobbyHero
         visible={screen !== "game"}
         menuOpen={createEntryMenuOpen || roomEntryMenuOpen}
+        screen={screen}
         eyebrow={heroContent.eyebrow}
         title={heroContent.title}
         subtitle={heroContent.subtitle}
@@ -2595,6 +2596,10 @@ export default function App() {
           onBack={() => setScreen("home")}
           onAuthorize={() => { void handleAuthorize(); }}
           onJoinRoom={handleJoinRoomFromList}
+          onBetPlaceholder={(betRoom, targetUserId, amount) => {
+            const targetPlayer = betRoom.players.find((player) => player.userId === targetUserId) ?? null;
+            showTransientNotice(`Bet de ${amount} em ${targetPlayer ? targetPlayer.displayName : "jogador"} preparado. O modo espectador entra depois.`);
+          }}
           formatStakeOptionLabel={formatStakeOptionLabel}
           formatStatusLabel={formatStatus}
         />

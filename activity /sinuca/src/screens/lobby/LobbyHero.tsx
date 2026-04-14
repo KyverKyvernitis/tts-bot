@@ -22,6 +22,7 @@ export type HeroEntryMenu = {
 type LobbyHeroProps = {
   visible: boolean;
   menuOpen: boolean;
+  screen: "home" | "create" | "list" | "room" | "game";
   eyebrow: string;
   title: string;
   subtitle: string;
@@ -35,6 +36,7 @@ type LobbyHeroProps = {
 export default function LobbyHero({
   visible,
   menuOpen,
+  screen,
   eyebrow,
   title,
   subtitle,
@@ -46,8 +48,10 @@ export default function LobbyHero({
 }: LobbyHeroProps) {
   if (!visible) return null;
 
+  const compact = screen !== "home";
+
   return (
-    <header className={`hero-card hero-card--compact hero-card--landscape ${menuOpen ? "hero-card--menu-open" : ""}`}>
+    <header className={`hero-card hero-card--compact hero-card--landscape ${compact ? "hero-card--subpage" : "hero-card--home"} ${menuOpen ? "hero-card--menu-open" : ""}`}>
       <div className="hero-card__copy">
         <span className="hero-card__eyebrow">{eyebrow}</span>
         <h1>{title}</h1>
