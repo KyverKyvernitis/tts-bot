@@ -1,0 +1,59 @@
+@import url("https://fonts.googleapis.com/css2?family=Audiowide&family=Rajdhani:wght@500;600;700&display=swap");
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:root {
+  --font-body: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Audiowide", var(--font-body);
+  --font-ui: "Rajdhani", var(--font-body);
+
+  --color-bg-app: #06111c;
+  --color-text-primary: #eef6f0;
+  --color-text-muted: rgba(237, 245, 252, 0.9);
+  --color-border-soft: rgba(232, 242, 255, 0.12);
+  --color-surface-panel: rgba(5, 15, 24, 0.16);
+  --color-focus-ring: rgba(196, 231, 255, 0.52);
+
+  --radius-shell: 30px;
+  --radius-panel: 26px;
+  --radius-pill: 999px;
+
+  --shadow-shell: 0 18px 60px rgba(0, 0, 0, 0.24);
+  --shadow-panel: 0 10px 26px rgba(0, 0, 0, 0.08);
+  --backdrop-blur-soft: blur(6px);
+
+  font-family: var(--font-body);
+  color: var(--color-text-primary);
+  background: var(--color-bg-app);
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--color-bg-app);
+}
+
+body {
+  overscroll-behavior: none;
+}
+
+button {
+  font: inherit;
+  -webkit-tap-highlight-color: transparent;
+  appearance: none;
+}
+
+button:focus,
+button:active {
+  outline: none;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
