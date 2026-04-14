@@ -2805,3 +2805,411 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* === phase 4b viewport-fit compact correction === */
+.hero-card--home {
+  min-height: 136px;
+  padding: 12px 16px;
+}
+
+.hero-card--subpage {
+  min-height: 94px;
+  padding: 8px 12px;
+  gap: 10px;
+}
+
+.hero-card--subpage .hero-card__copy {
+  max-width: 500px;
+}
+
+.hero-card--subpage h1 {
+  font-size: clamp(1.56rem, 2vw, 2.1rem);
+  line-height: 0.98;
+}
+
+.hero-card--subpage p {
+  margin-top: 3px;
+  font-size: 0.84rem;
+  line-height: 1.16;
+  max-width: 30rem;
+}
+
+.hero-card__meta--hud {
+  --hud-pill-width: 104px;
+  gap: 8px;
+}
+
+.hero-stat,
+.entry-selector--hero {
+  min-height: 62px;
+}
+
+.hero-stat {
+  width: var(--hud-pill-width, 104px);
+  min-width: var(--hud-pill-width, 104px);
+  padding: 8px 10px;
+  border-radius: 15px;
+}
+
+.hero-stat span {
+  font-size: 9px;
+  margin-bottom: 3px;
+}
+
+.hero-stat strong {
+  font-size: 0.96rem;
+}
+
+.home-lobby {
+  min-height: 0;
+}
+
+.home-lobby--streamlined {
+  min-height: 0;
+  align-items: end;
+}
+
+.menu-buttons--hero-late {
+  margin-top: auto;
+}
+
+.menu-button {
+  min-height: 70px;
+  padding: 14px 18px;
+  border-radius: 22px;
+}
+
+.menu-button strong {
+  font-size: clamp(1.52rem, 1.9vw, 2.15rem);
+}
+
+.menu-button small {
+  margin-top: 4px;
+  font-size: 0.9rem;
+}
+
+.lobby-panel--compact-stage,
+.lobby-panel--list-compact {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 10px 12px 12px;
+}
+
+.list-topbar--list-compact,
+.list-topbar--compact-room-stage,
+.list-topbar--compact-create {
+  margin-bottom: 8px;
+  min-height: 38px;
+}
+
+.chip-button--back {
+  min-height: 36px;
+  padding: 6px 13px;
+}
+
+.list-topbar__count {
+  font-size: clamp(1.05rem, 1.6vw, 1.35rem);
+}
+
+.create-layout--final,
+.room-stage--final {
+  height: 100%;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.create-preview-card--single,
+.room-stage__preview--compact-stage {
+  min-height: 0;
+  height: 100%;
+}
+
+.create-preview-card--compact-stage,
+.room-stage__preview--compact-stage {
+  padding: 10px;
+  gap: 8px;
+}
+
+.compact-stage-head {
+  padding-bottom: 6px;
+  gap: 8px;
+}
+
+.compact-stage-head__eyebrow {
+  margin-bottom: 3px;
+}
+
+.compact-stage-head__title {
+  font-size: 1rem;
+}
+
+.compact-stage-head__chips {
+  gap: 4px;
+}
+
+.create-preview-shell--compact-stage,
+.room-stage__players--compact-stage {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.participant-slot--create-main,
+.participant-slot--compact-stage {
+  min-height: 72px;
+  padding: 8px 10px;
+  border-radius: 18px;
+}
+
+.participant-slot--create-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  justify-items: start;
+  text-align: left;
+  gap: 8px;
+}
+
+.participant-slot--room-main {
+  min-height: 72px;
+  padding: 8px 10px;
+  border-radius: 18px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  justify-items: start;
+  text-align: left;
+  gap: 8px;
+}
+
+.participant-slot--compact-stage .participant-slot__avatar-wrap,
+.participant-slot--create-main .participant-slot__avatar-wrap,
+.participant-slot--room-main .participant-slot__avatar-wrap {
+  width: 46px;
+  height: 46px;
+}
+
+.participant-slot--compact-stage .participant-slot__copy,
+.participant-slot--create-main .participant-slot__copy,
+.participant-slot--room-main .participant-slot__copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  justify-items: start;
+}
+
+.participant-slot--compact-stage .participant-slot__name,
+.participant-slot--create-main .participant-slot__name,
+.participant-slot--room-main .participant-slot__name {
+  font-size: 0.92rem;
+  max-width: 100%;
+}
+
+.participant-slot--compact-stage .participant-slot__role,
+.participant-slot--create-main .participant-slot__role,
+.participant-slot--room-main .participant-slot__role {
+  font-size: 0.63rem;
+}
+
+.room-stage__preview--compact-stage .room-ready-badge {
+  justify-self: end;
+}
+
+.room-stage__footer--compact-stage,
+.create-preview-footer--compact-stage {
+  padding-top: 6px;
+  margin-top: auto;
+}
+
+.create-submit--compact,
+.room-stage__ready {
+  min-height: 40px;
+}
+
+.room-stage__top-meta {
+  gap: 6px;
+}
+
+.room-stage__top-chip,
+.room-inline-chip {
+  min-height: 26px;
+  padding: 0 9px;
+  font-size: 9px;
+}
+
+.room-ready-badge {
+  min-height: 22px;
+  padding: 4px 8px;
+  font-size: 8px;
+}
+
+.room-list-stack--compact-view {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+  gap: 8px;
+  align-content: start;
+}
+
+.empty-card--compact-list {
+  min-height: 84px;
+  padding: 14px 16px;
+}
+
+.room-entry-card--compact-view {
+  padding: 8px 10px;
+  border-radius: 20px;
+}
+
+.room-entry-card__compact-grid {
+  grid-template-columns: minmax(0, 1fr) 128px;
+  gap: 8px;
+}
+
+.room-entry-card__showdown--compact-view {
+  grid-template-columns: minmax(0, 1fr) 42px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.participant-slot--list-inline {
+  min-height: 70px;
+  padding: 8px 10px;
+  border-radius: 18px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  justify-items: start;
+  text-align: left;
+  gap: 6px 8px;
+}
+
+.participant-slot--list-inline .participant-slot__avatar-wrap {
+  width: 44px;
+  height: 44px;
+  grid-row: 1 / span 2;
+  grid-column: 1;
+}
+
+.participant-slot--list-inline .participant-slot__name {
+  grid-column: 2;
+  align-self: end;
+  font-size: 0.9rem;
+  max-width: 100%;
+}
+
+.participant-slot--list-inline .participant-slot__role {
+  grid-column: 2;
+  align-self: start;
+  font-size: 0.62rem;
+}
+
+.participant-slot__versus--list {
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+}
+
+.room-entry-card__footer--compact-view {
+  min-width: 128px;
+  gap: 8px;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.room-entry-card__meta--compact-cluster {
+  justify-content: flex-start;
+  gap: 4px;
+}
+
+.room-entry-card__join--compact {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+}
+
+.activity-confirm__panel--bet {
+  width: min(92vw, 480px);
+}
+
+.activity-bet__players {
+  gap: 8px;
+}
+
+.activity-bet__player {
+  padding: 10px;
+  border-radius: 16px;
+}
+
+.activity-bet__player-avatar-wrap {
+  width: 46px;
+  height: 46px;
+}
+
+.activity-bet__amount-block {
+  margin-top: 12px;
+}
+
+.activity-bet__actions {
+  margin-top: 14px;
+}
+
+@media (max-width: 1100px) {
+  .hero-card--home {
+    min-height: 128px;
+  }
+
+  .hero-card--subpage {
+    min-height: 88px;
+  }
+
+  .hero-card__meta--hud {
+    --hud-pill-width: 96px;
+  }
+}
+
+@media (max-width: 920px) {
+  .app-shell {
+    width: calc(100vw - 8px);
+    height: calc(100vh - 8px);
+    min-height: calc(100vh - 8px);
+    max-height: calc(100vh - 8px);
+    margin: 4px auto;
+    padding: 10px;
+  }
+
+  .hero-card--home,
+  .hero-card--subpage {
+    min-height: auto;
+  }
+
+  .hero-card__meta--hud {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .create-preview-shell--compact-stage,
+  .room-stage__players--compact-stage,
+  .room-entry-card__showdown--compact-view,
+  .activity-bet__players {
+    grid-template-columns: 1fr;
+  }
+
+  .room-entry-card__compact-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .room-entry-card__footer--compact-view {
+    min-width: 0;
+  }
+
+  .participant-slot--room-main {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .room-stage__preview--compact-stage .room-ready-badge {
+    justify-self: start;
+  }
+}

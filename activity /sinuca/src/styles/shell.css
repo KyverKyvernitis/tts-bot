@@ -1,18 +1,28 @@
 .app-shell {
-  width: min(1360px, calc(100vw - 18px));
-  min-height: calc(100vh - 12px);
-  margin: 6px auto;
-  padding: 18px;
+  width: min(1360px, calc(100vw - 12px));
+  height: calc(100vh - 10px);
+  min-height: calc(100vh - 10px);
+  max-height: calc(100vh - 10px);
+  margin: 5px auto;
+  padding: 12px;
   border-radius: var(--radius-shell);
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
   background-attachment: fixed;
   display: grid;
-  gap: 12px;
+  gap: 10px;
   position: relative;
   overflow: hidden;
   box-shadow: var(--shadow-shell);
+}
+
+.app-shell--screen-home,
+.app-shell--screen-create,
+.app-shell--screen-list,
+.app-shell--screen-room {
+  grid-template-rows: auto minmax(0, 1fr);
+  align-items: stretch;
 }
 
 .app-shell::before {
