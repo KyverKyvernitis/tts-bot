@@ -425,18 +425,33 @@ class GincanaRoletaMixin:
                     return None
             return None
 
+        async def _delete_game_message(self, message: discord.Message | None):
+            if message is None:
+                return
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
         async def _deliver_game_result(self, source_message: discord.Message, target_message: discord.Message | None, *, embed: discord.Embed, view: discord.ui.View | None = None) -> discord.Message | None:
+            # Publica primeiro o resultado final como uma mensagem completa nova.
+            # Isso evita deixar a roleta/cartas presas em "Girando..." se a edição
+            # final da mensagem animada falhar ou for aplicada de forma inconsistente.
+            sent = await self._send_game_message(source_message.channel, embed=embed, view=view, final=True)
+            if sent is not None:
+                if isinstance(view, _GameReplayView):
+                    view.message = sent
+                if target_message is not None and getattr(target_message, 'id', None) != getattr(sent, 'id', None):
+                    await self._delete_game_message(target_message)
+                elif target_message is not None and getattr(target_message, 'id', None) == getattr(source_message, 'id', None):
+                    await self._delete_game_message(target_message)
+                return sent
             if target_message is not None:
                 ok = await self._edit_game_message(target_message, embed=embed, view=view, final=True)
                 if ok:
                     if isinstance(view, _GameReplayView):
                         view.message = target_message
                     return target_message
-            sent = await self._send_game_message(source_message.channel, embed=embed, view=view, final=True)
-            if sent is not None:
-                if isinstance(view, _GameReplayView):
-                    view.message = sent
-                return sent
             return target_message
 
         def _roleta_trigger_cooldown_remaining(self, guild_id: int, user_id: int) -> float:
