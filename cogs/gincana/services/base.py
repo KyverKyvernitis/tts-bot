@@ -4,7 +4,17 @@ import discord
 from discord.ext import commands
 
 from config import OFF_COLOR, ON_COLOR
-from ..constants import CHIPS_DEFAULT, CHIPS_INITIAL, CHIPS_RECHARGE_THRESHOLD, CHIPS_RESET_HOURS, CHIPS_RESET_SECONDS, ROLETA_COST
+from ..constants import (
+    CHIPS_DEFAULT,
+    CHIPS_INITIAL,
+    CHIPS_RECHARGE_THRESHOLD,
+    CHIPS_RESET_HOURS,
+    CHIPS_RESET_SECONDS,
+    CHIPS_SEASON_RESET_HOURS,
+    CHIPS_SEASON_RESET_SECONDS,
+    CHIPS_SEASON_RESET_THRESHOLD,
+    ROLETA_COST,
+)
 from db import SettingsDB
 
 
@@ -768,6 +778,60 @@ class GincanaBase:
         embed.description = f"{self._format_primary_chip_balance(guild_id, member.id)}\n📈 **Taxa de vitórias**: **{rate}**"
         return embed
 
+    async def _maybe_execute_due_chip_season_reset(self, guild_id: int) -> dict | None:
+        state = self.db.get_chip_season_state(guild_id)
+        reset_at = float(state.get("reset_at", 0.0) or 0.0)
+        if not bool(state.get("active", False)) or reset_at <= 0:
+            return None
+        now = __import__("time").time()
+        if reset_at > now:
+            return None
+        acquired = await self.db.try_acquire_chip_season_reset_lock(guild_id, now=now)
+        if not acquired:
+            return None
+        affected_users = await self.db.reset_guild_chip_economy(guild_id, chips=CHIPS_DEFAULT)
+        season = await self.db.complete_chip_season_reset(guild_id, executed_at=now)
+        return {"affected_users": int(affected_users), "season": int(season), "executed_at": float(now)}
+
+    async def _prepare_chip_leaderboard_state(self, guild: discord.Guild, requester: discord.Member | None = None) -> dict:
+        await self._maybe_execute_due_chip_season_reset(guild.id)
+        rows = self.db.get_chip_leaderboard(guild.id, limit=10)
+        top_chips = 0
+        if rows:
+            try:
+                top_chips = int(rows[0].get("chips", 0) or 0)
+            except Exception:
+                top_chips = 0
+        if top_chips > CHIPS_SEASON_RESET_THRESHOLD:
+            requester_id = int(getattr(requester, "id", 0) or 0)
+            await self.db.schedule_chip_season_reset(
+                guild.id,
+                reset_at=__import__("time").time() + float(CHIPS_SEASON_RESET_SECONDS),
+                triggered_by=requester_id,
+            )
+        return self.db.get_chip_season_state(guild.id)
+
+    def _build_chip_rank_footer(self, guild_id: int) -> str:
+        state = self.db.get_chip_season_state(guild_id)
+        season = max(1, int(state.get("season", 1) or 1))
+        season_line = f"Temporada {season}"
+        reset_at = float(state.get("reset_at", 0.0) or 0.0)
+        if bool(state.get("active", False)) and reset_at > 0:
+            remaining = max(0.0, reset_at - __import__("time").time())
+            if remaining > 0:
+                season_line += f" • Reset em {self._format_chip_reset_remaining(remaining)}"
+        explain = (
+            f"Líder acima de {CHIPS_SEASON_RESET_THRESHOLD} fichas inicia reset em "
+            f"{CHIPS_SEASON_RESET_HOURS}h • saldo {CHIPS_DEFAULT}, bônus 0 e estatísticas zeradas."
+        )
+        return f"{season_line}\n{explain}"
+
+    async def _make_chip_leaderboard_embed_async(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
+        await self._prepare_chip_leaderboard_state(guild, requester)
+        embed = self._make_chip_leaderboard_embed(guild, requester)
+        embed.set_footer(text=self._build_chip_rank_footer(guild.id))
+        return embed
+
     def _make_chip_leaderboard_embed(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
         rows = self.db.get_chip_leaderboard(guild.id, limit=10)
         embed = discord.Embed(
@@ -793,7 +857,7 @@ class GincanaBase:
                 ranking_lines.append(f"{prefix} **{name}** — {balance_text}")
             embed.add_field(name="Top 10", value="\n".join(ranking_lines), inline=False)
 
-        embed.set_footer(text="Use _ficha para ver seu perfil")
+        embed.set_footer(text=self._build_chip_rank_footer(guild.id))
         return embed
 
     def _format_chip_reset_remaining(self, remaining_seconds: float) -> str:

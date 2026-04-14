@@ -4,7 +4,7 @@ import time
 
 import discord
 
-from ..constants import CHIPS_INITIAL
+from ..constants import CHIPS_INITIAL, CHIPS_PAY_MIN_BALANCE
 
 
 class GincanaPaymentMixin:
@@ -76,8 +76,13 @@ class GincanaPaymentMixin:
             return True
 
         total = amount
+        await self._maybe_execute_due_chip_season_reset(guild.id)
         payer_chips = self.db.get_user_chips(guild.id, message.author.id, default=CHIPS_INITIAL)
         target_chips = self.db.get_user_chips(guild.id, target.id, default=CHIPS_INITIAL)
+        if payer_chips < CHIPS_PAY_MIN_BALANCE:
+            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"Você precisa ter pelo menos **{CHIPS_PAY_MIN_BALANCE} fichas** para fazer transferências.", ok=False))
+            self._payment_sessions.pop((guild.id, message.author.id), None)
+            return True
         if payer_chips < 0:
             await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"Você está negativado em **{payer_chips}** {self._CHIP_LOSS_EMOJI} e não pode fazer transferências enquanto estiver no vermelho.", ok=False))
             self._payment_sessions.pop((guild.id, message.author.id), None)
@@ -219,12 +224,16 @@ class GincanaPaymentMixin:
             await self._expire_payment_session(session_key, reason="Pagamento cancelado porque um dos usuários não está mais disponível.")
             return
 
+        await self._maybe_execute_due_chip_season_reset(guild.id)
         amount = int(session.get("amount") or 0)
         fee = int(session.get("fee") or 0)
         net_amount = int(session.get("net_amount") or 0)
         total = int(session.get("total") or 0)
         payer_chips = self.db.get_user_chips(guild.id, payer.id, default=CHIPS_INITIAL)
         target_chips = self.db.get_user_chips(guild.id, target.id, default=CHIPS_INITIAL)
+        if payer_chips < CHIPS_PAY_MIN_BALANCE:
+            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} precisa ter pelo menos **{CHIPS_PAY_MIN_BALANCE} fichas** para fazer transferências.")
+            return
         if payer_chips < 0:
             await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} está negativado e não pode fazer transferências.")
             return

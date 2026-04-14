@@ -1247,3 +1247,120 @@ SettingsDB.set_user_chips = _settingsdb_set_user_chips
 SettingsDB.add_user_chips = _settingsdb_add_user_chips
 SettingsDB.claim_daily_bonus = claim_daily_bonus
 SettingsDB.get_chip_leaderboard = _settingsdb_get_chip_leaderboard
+
+
+# ---- chip season / global reset helpers ----
+def _settingsdb_get_chip_season_state(self, guild_id: int) -> Dict[str, Any]:
+    doc = self._get_guild_doc(guild_id)
+    try:
+        season = max(1, int(doc.get("chip_season", 1) or 1))
+    except Exception:
+        season = 1
+    try:
+        reset_at = float(doc.get("chip_season_reset_at", 0) or 0)
+    except Exception:
+        reset_at = 0.0
+    try:
+        triggered_at = float(doc.get("chip_season_reset_triggered_at", 0) or 0)
+    except Exception:
+        triggered_at = 0.0
+    try:
+        triggered_by = int(doc.get("chip_season_reset_triggered_by", 0) or 0)
+    except Exception:
+        triggered_by = 0
+    try:
+        last_reset_at = float(doc.get("chip_season_last_reset_at", 0) or 0)
+    except Exception:
+        last_reset_at = 0.0
+    active = bool(doc.get("chip_season_reset_active", False) and reset_at > 0)
+    executing = bool(doc.get("chip_season_reset_executing", False))
+    return {
+        "season": season,
+        "active": active,
+        "executing": executing,
+        "reset_at": reset_at,
+        "triggered_at": triggered_at,
+        "triggered_by": triggered_by,
+        "last_reset_at": last_reset_at,
+    }
+
+async def _settingsdb_schedule_chip_season_reset(self, guild_id: int, *, reset_at: float, triggered_by: int = 0) -> tuple[bool, Dict[str, Any]]:
+    state = self.get_chip_season_state(guild_id)
+    if bool(state.get("active", False)) and float(state.get("reset_at", 0.0) or 0.0) > time.time():
+        return False, state
+    doc = self._get_guild_doc(guild_id)
+    doc["chip_season"] = max(1, int(doc.get("chip_season", 1) or 1))
+    doc["chip_season_reset_active"] = True
+    doc["chip_season_reset_executing"] = False
+    doc["chip_season_reset_at"] = float(reset_at or 0)
+    doc["chip_season_reset_triggered_at"] = float(time.time())
+    doc["chip_season_reset_triggered_by"] = int(triggered_by or 0)
+    await self._save_guild_doc(guild_id, doc)
+    return True, self.get_chip_season_state(guild_id)
+
+async def _settingsdb_try_acquire_chip_season_reset_lock(self, guild_id: int, *, now: float | None = None) -> bool:
+    now_ts = float(now or time.time())
+    result = await self.coll.update_one(
+        {
+            "type": "guild",
+            "guild_id": guild_id,
+            "chip_season_reset_active": True,
+            "chip_season_reset_executing": {"$ne": True},
+            "chip_season_reset_at": {"$lte": now_ts},
+        },
+        {"$set": {"chip_season_reset_executing": True}},
+        upsert=False,
+    )
+    if getattr(result, "modified_count", 0):
+        doc = self._get_guild_doc(guild_id)
+        doc["chip_season_reset_executing"] = True
+        self.guild_cache[guild_id] = doc
+        return True
+    return False
+
+async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: int = 100) -> int:
+    target_chips = int(chips)
+    update_payload = {
+        "$set": {
+            "chips": target_chips,
+            "bonus_chips": 0,
+            "weekly_points": 0,
+            "weekly_points_week": "",
+            "game_stats": {},
+        }
+    }
+    await self.coll.update_many({"type": "user", "guild_id": guild_id}, update_payload)
+    affected = 0
+    for key, doc in list(self.user_cache.items()):
+        gid, _uid = key
+        if int(gid) != int(guild_id):
+            continue
+        updated = dict(doc)
+        updated["chips"] = target_chips
+        updated["bonus_chips"] = 0
+        updated["weekly_points"] = 0
+        updated["weekly_points_week"] = ""
+        updated["game_stats"] = {}
+        self.user_cache[key] = updated
+        affected += 1
+    return affected
+
+async def _settingsdb_complete_chip_season_reset(self, guild_id: int, *, executed_at: float | None = None) -> int:
+    executed = float(executed_at or time.time())
+    doc = self._get_guild_doc(guild_id)
+    next_season = max(1, int(doc.get("chip_season", 1) or 1)) + 1
+    doc["chip_season"] = next_season
+    doc["chip_season_reset_active"] = False
+    doc["chip_season_reset_executing"] = False
+    doc["chip_season_reset_at"] = 0.0
+    doc["chip_season_reset_triggered_at"] = 0.0
+    doc["chip_season_reset_triggered_by"] = 0
+    doc["chip_season_last_reset_at"] = executed
+    await self._save_guild_doc(guild_id, doc)
+    return int(next_season)
+
+SettingsDB.get_chip_season_state = _settingsdb_get_chip_season_state
+SettingsDB.schedule_chip_season_reset = _settingsdb_schedule_chip_season_reset
+SettingsDB.try_acquire_chip_season_reset_lock = _settingsdb_try_acquire_chip_season_reset_lock
+SettingsDB.reset_guild_chip_economy = _settingsdb_reset_guild_chip_economy
+SettingsDB.complete_chip_season_reset = _settingsdb_complete_chip_season_reset

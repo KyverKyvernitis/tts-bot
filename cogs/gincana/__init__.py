@@ -102,7 +102,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return
-        embed = self._make_chip_leaderboard_embed(ctx.guild, ctx.author)
+        embed = await self._make_chip_leaderboard_embed_async(ctx.guild, ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
 
 
