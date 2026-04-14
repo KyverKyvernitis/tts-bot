@@ -100,12 +100,24 @@ class GincanaPaymentMixin:
             )
             self._payment_sessions.pop((guild.id, message.author.id), None)
             return True
-        if payer_chips < 0:
-            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"Você está negativado em **{payer_chips}** {self._CHIP_LOSS_EMOJI} e não pode fazer transferências enquanto estiver no vermelho.", ok=False))
+        if not self._user_has_played_any_game(guild.id, message.author.id):
+            await message.channel.send(
+                embed=self._make_embed(
+                    "💸 Pagamento bloqueado",
+                    "Você precisa participar de pelo menos **1 jogo** antes de enviar pagamentos.",
+                    ok=False,
+                )
+            )
             self._payment_sessions.pop((guild.id, message.author.id), None)
             return True
-        if target_chips < 0:
-            await message.channel.send(embed=self._make_embed("💸 Pagamento bloqueado", f"{target.mention} está negativado e não pode receber transferências agora.", ok=False))
+        if not self._user_has_played_any_game(guild.id, target.id):
+            await message.channel.send(
+                embed=self._make_embed(
+                    "💸 Pagamento bloqueado",
+                    f"{target.mention} precisa participar de pelo menos **1 jogo** antes de receber pagamentos.",
+                    ok=False,
+                )
+            )
             self._payment_sessions.pop((guild.id, message.author.id), None)
             return True
         if payer_chips < total:
@@ -255,11 +267,11 @@ class GincanaPaymentMixin:
         if payer_chips < CHIPS_PAY_MIN_BALANCE:
             await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} precisa ter pelo menos **{CHIPS_PAY_MIN_BALANCE} fichas normais** para fazer transferências.")
             return
-        if payer_chips < 0:
-            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} está negativado e não pode fazer transferências.")
+        if not self._user_has_played_any_game(guild.id, payer.id):
+            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} precisa participar de pelo menos **1 jogo** antes de enviar pagamentos.")
             return
-        if target_chips < 0:
-            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{target.mention} está negativado e não pode receber transferências agora.")
+        if not self._user_has_played_any_game(guild.id, target.id):
+            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{target.mention} precisa participar de pelo menos **1 jogo** antes de receber pagamentos.")
             return
         if payer_chips < total:
             await self._expire_payment_session(session_key, title="💸 Saldo insuficiente", reason="Esse pagamento usa só fichas normais. Fichas bônus não entram no pay.")

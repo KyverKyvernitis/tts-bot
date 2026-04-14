@@ -718,6 +718,13 @@ class GincanaBase:
         remaining = spend - use_bonus
         return chips - remaining, bonus - use_bonus
 
+    def _user_has_played_any_game(self, guild_id: int, user_id: int) -> bool:
+        stats = self.db.get_user_game_stats(guild_id, user_id)
+        try:
+            return int(stats.get("games_played", 0) or 0) > 0
+        except Exception:
+            return False
+
     def _chip_rank_position_text(self, guild: discord.Guild, user_id: int) -> str | None:
         rows = self.db.get_chip_leaderboard(guild.id, limit=1000000)
         for index, row in enumerate(rows, start=1):
@@ -820,11 +827,12 @@ class GincanaBase:
             remaining = max(0.0, reset_at - __import__("time").time())
             if remaining > 0:
                 season_line += f" • Reset em {self._format_chip_reset_remaining(remaining)}"
-        explain = (
-            f"Líder acima de {CHIPS_SEASON_RESET_THRESHOLD} fichas normais inicia reset em "
-            f"{CHIPS_SEASON_RESET_HOURS}h • saldo {CHIPS_DEFAULT}, bônus 0 e estatísticas zeradas."
-        )
-        return f"{season_line}\n{explain}"
+            explain = (
+                f"Líder acima de {CHIPS_SEASON_RESET_THRESHOLD} fichas normais inicia reset em "
+                f"{CHIPS_SEASON_RESET_HOURS}h • saldo {CHIPS_DEFAULT}, bônus 0 e estatísticas zeradas."
+            )
+            return f"{season_line}\n{explain}"
+        return season_line
 
     async def _make_chip_leaderboard_embed_async(self, guild: discord.Guild, requester: discord.Member | None = None) -> discord.Embed:
         await self._prepare_chip_leaderboard_state(guild, requester)

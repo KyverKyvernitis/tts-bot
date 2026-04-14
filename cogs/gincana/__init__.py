@@ -63,11 +63,11 @@ class _MendigarRequestView(discord.ui.LayoutView):
     def _build_header_lines(self) -> list[str]:
         if self.target_mention:
             return [
-                "# 🥺 Mendigar",
-                f"{self.target_mention}, {self.author_mention} está mendigando {self.cog._chip_amount(self.amount)}, deseja dar esmola pra esse coitado?",
+                "# 🥺 Esmola",
+                f"{self.target_mention}, {self.author_mention} está pedindo uma esmola de {self.cog._chip_amount(self.amount)}. Deseja ajudar esse coitado?",
             ]
         return [
-            "# 🥺 Mendigar",
+            "# 🥺 Esmola",
             f"Este pobre usuário necessitado está pedindo uma esmola de {self.cog._chip_amount(self.amount)}.",
         ]
 
@@ -134,6 +134,16 @@ class _MendigarRequestView(discord.ui.LayoutView):
                 ephemeral=True,
             )
             return
+        if not self.cog._user_has_played_any_game(self.guild_id, donor.id):
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice(
+                    "💸 Esmola bloqueada",
+                    ["Você precisa participar de pelo menos **1 jogo** antes de dar esmola."],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
         if donor_chips < self.amount:
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice(
@@ -156,6 +166,9 @@ class _MendigarRequestView(discord.ui.LayoutView):
             return
 
         await self.cog._transfer_user_chips(self.guild_id, donor.id, recipient.id, total=self.amount, net_amount=self.amount)
+        requester_doc = self.cog.db._get_user_doc(self.guild_id, recipient.id)
+        requester_doc["last_mendigar_at"] = float(time.time())
+        await self.cog.db._save_user_doc(self.guild_id, recipient.id, requester_doc)
         self.fulfilled = True
         self.stop()
         result = discord.ui.LayoutView(timeout=None)
@@ -181,7 +194,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
         try:
             await self.message.edit(
                 view=self.cog._make_v2_notice(
-                    "💸 Mendigar",
+                    "💸 Esmola",
                     ["O pedido de esmola esfriou e expirou sem ninguém ajudar."],
                     ok=False,
                     accent_color=discord.Color.red(),
@@ -210,13 +223,13 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return True
         await self._maybe_execute_due_chip_season_reset(guild.id)
         if amount <= 0:
-            await message.channel.send(view=self._make_v2_notice("🥺 Mendigar", ["Use um valor maior que zero."], ok=False))
+            await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Use um valor maior que zero."], ok=False))
             return True
         current_balance = int(self.db.get_user_chips(guild.id, message.author.id, default=CHIPS_INITIAL) or 0)
         if current_balance + amount > CHIPS_PAY_RECEIVER_MAX_BALANCE:
             await message.channel.send(
                 view=self._make_v2_notice(
-                    "🥺 Mendigar",
+                    "🥺 Esmola",
                     [f"Esse pedido deixaria você acima de **{CHIPS_PAY_RECEIVER_MAX_BALANCE} fichas normais**. Ajuste o valor e tente de novo."],
                     ok=False,
                 )
@@ -230,7 +243,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if remaining > 0:
             await message.channel.send(
                 view=self._make_v2_notice(
-                    "🥺 Mendigar",
+                    "🥺 Esmola",
                     ["Você já pediu esmola demais por agora.", f"Tente novamente em **{self._format_wait_compact(remaining)}**."],
                     ok=False,
                 )
@@ -239,14 +252,11 @@ class GincanaCog(dcommands.Cog, GincanaCore):
 
         if target is not None:
             if target.bot:
-                await message.channel.send(view=self._make_v2_notice("🥺 Mendigar", ["Bots não entram nesse esquema de esmola."], ok=False))
+                await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Bots não entram nesse esquema de esmola."], ok=False))
                 return True
             if target.id == message.author.id:
-                await message.channel.send(view=self._make_v2_notice("🥺 Mendigar", ["Pedir esmola para si mesmo já é sacanagem demais."], ok=False))
+                await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Pedir esmola para si mesmo já é sacanagem demais."], ok=False))
                 return True
-
-        user_doc["last_mendigar_at"] = float(now)
-        await self.db._save_user_doc(guild.id, message.author.id, user_doc)
 
         view = _MendigarRequestView(
             self,
@@ -274,7 +284,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if match is None:
             await message.channel.send(
                 view=self._make_v2_notice(
-                    "🥺 Mendigar",
+                    "🥺 Esmola",
                     [
                         "Use `mendigar 40` para pedir uma esmola geral.",
                         "Use `mendigar 40 @usuário` para pedir esmola a alguém específico.",
@@ -294,10 +304,10 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             if target is None:
                 target = message.guild.get_member(target_id)
             if target is None:
-                await message.channel.send(view=self._make_v2_notice("🥺 Mendigar", ["Não encontrei essa pessoa no servidor para pedir esmola."], ok=False))
+                await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Não encontrei essa pessoa no servidor para pedir esmola."], ok=False))
                 return True
         elif getattr(message, "mentions", None):
-            await message.channel.send(view=self._make_v2_notice("🥺 Mendigar", ["Use no formato `mendigar valor @usuário`."], ok=False))
+            await message.channel.send(view=self._make_v2_notice("🥺 Esmola", ["Use no formato `mendigar valor @usuário`."], ok=False))
             return True
 
         return await self._start_mendigar_request(message, amount=amount, target=target)
