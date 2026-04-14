@@ -37,22 +37,23 @@ CARTA_SPIN_LIMIT = 5
 CARTA_WINDOW_SECONDS = ROLETA_WINDOW_SECONDS
 CARTA_DAILY_EXTRA_CAP = ROLETA_DAILY_EXTRA_CAP
 ROLETA_TRIGGER_COOLDOWN_SECONDS = 20.0
-ROLETA_REPLAY_WINDOW_SECONDS = 30.0
+ROLETA_REPLAY_WINDOW_SECONDS = 20.0
 GAME_ANIMATION_LIMIT_PER_GUILD = 2
 
 
-class _RoletaReplayView(discord.ui.View):
-    def __init__(self, cog, *, owner_id: int, enabled: bool):
+class _GameReplayView(discord.ui.View):
+    def __init__(self, cog, *, owner_id: int, kind: str, enabled: bool):
         super().__init__(timeout=ROLETA_REPLAY_WINDOW_SECONDS if enabled else None)
         self.cog = cog
         self.owner_id = int(owner_id)
+        self.kind = str(kind)
         self.message: discord.Message | None = None
         self.replay_button = discord.ui.Button(emoji="🔄", style=discord.ButtonStyle.secondary, disabled=not enabled)
         self.replay_button.callback = self._handle_replay
         self.add_item(self.replay_button)
 
     async def _handle_replay(self, interaction: discord.Interaction):
-        await self.cog._handle_roleta_replay_button(interaction, self)
+        await self.cog._handle_game_replay_button(interaction, self)
 
     def set_enabled(self, enabled: bool):
         self.replay_button.disabled = not enabled
@@ -60,9 +61,8 @@ class _RoletaReplayView(discord.ui.View):
 
     async def on_timeout(self):
         try:
-            self.set_enabled(False)
             if self.message is not None:
-                await self.message.edit(view=self)
+                await self.message.edit(view=None)
         except Exception:
             pass
 
@@ -110,14 +110,20 @@ class GincanaRoletaMixin:
                 "└───────────┘",
             ]
             return "```text\n" + "\n".join(lines) + "\n```"
-        def _make_roleta_spin_embed(self, board: str, *, footer_text: str | None = None) -> discord.Embed:
+        def _build_game_flow_description(self, *, entry_cost: int, jackpot: int, balance_text: str, board: str, summary: str | None = None) -> str:
+            lines = [
+                f"Entrada: **{entry_cost} {self._CHIP_LOSS_EMOJI}**",
+                f"Jackpot: **{jackpot} {self._CHIP_GAIN_EMOJI}**",
+                f"Saldo atual: {balance_text}",
+            ]
+            if summary:
+                lines.extend(["", summary])
+            lines.extend(["", board])
+            return "\n".join(lines)
+        def _make_roleta_spin_embed(self, board: str, *, balance_text: str, footer_text: str | None = None) -> discord.Embed:
             embed = discord.Embed(
                 title="🎰 Girando...",
-                description=(
-                    f"Entrada: {self._chip_amount(ROLETA_COST)}\n"
-                    f"Jackpot: {self._chip_amount(ROLETA_JACKPOT_CHIPS)}\n\n"
-                    f"{board}"
-                ),
+                description=self._build_game_flow_description(entry_cost=ROLETA_COST, jackpot=ROLETA_JACKPOT_CHIPS, balance_text=balance_text, board=board),
                 color=discord.Color.blurple(),
             )
             if footer_text:
@@ -126,11 +132,11 @@ class GincanaRoletaMixin:
                 except Exception:
                     pass
             return embed
-        def _make_roleta_result_embed(self, title: str, summary: str, board: str, *, success: bool, near: bool = False, footer_text: str | None = None) -> discord.Embed:
+        def _make_roleta_result_embed(self, title: str, summary: str, board: str, *, balance_text: str, success: bool, near: bool = False, footer_text: str | None = None) -> discord.Embed:
             color = discord.Color.blurple() if success or near else discord.Color(OFF_COLOR)
             embed = discord.Embed(
                 title=title,
-                description=f"{summary}\n\n{board}",
+                description=self._build_game_flow_description(entry_cost=ROLETA_COST, jackpot=ROLETA_JACKPOT_CHIPS, balance_text=balance_text, board=board, summary=summary),
                 color=color,
             )
             if footer_text:
@@ -374,7 +380,7 @@ class GincanaRoletaMixin:
             return "rate limit" in str(exc).casefold()
 
         async def _edit_game_message(self, message: discord.Message, *, embed: discord.Embed, view: discord.ui.View | None = None, final: bool = False) -> bool:
-            attempts = 6 if final else 1
+            attempts = 8 if final else 1
             delay = 0.75
             for _ in range(attempts):
                 try:
@@ -393,23 +399,45 @@ class GincanaRoletaMixin:
                         await asyncio.sleep(max(0.4, min(sleep_for, 5.0)))
                         delay = min(delay * 1.6, 5.0)
                         continue
+                    if final:
+                        await asyncio.sleep(max(0.35, min(delay, 2.0)))
+                        delay = min(delay * 1.4, 2.5)
+                        continue
                     return False
             return False
+
+        async def _send_game_message(self, channel: discord.abc.Messageable, *, embed: discord.Embed, view: discord.ui.View | None = None, final: bool = False) -> discord.Message | None:
+            attempts = 8 if final else 2
+            delay = 0.75
+            for _ in range(attempts):
+                try:
+                    return await channel.send(embed=embed, view=view)
+                except Exception as exc:
+                    if self._is_edit_rate_limited(exc) or final:
+                        retry_after = getattr(exc, "retry_after", None)
+                        try:
+                            sleep_for = float(retry_after) if retry_after is not None else delay
+                        except Exception:
+                            sleep_for = delay
+                        await asyncio.sleep(max(0.4, min(sleep_for, 5.0)))
+                        delay = min(delay * 1.6, 5.0)
+                        continue
+                    return None
+            return None
 
         async def _deliver_game_result(self, source_message: discord.Message, target_message: discord.Message | None, *, embed: discord.Embed, view: discord.ui.View | None = None) -> discord.Message | None:
             if target_message is not None:
                 ok = await self._edit_game_message(target_message, embed=embed, view=view, final=True)
                 if ok:
-                    if isinstance(view, _RoletaReplayView):
+                    if isinstance(view, _GameReplayView):
                         view.message = target_message
                     return target_message
-            try:
-                sent = await source_message.channel.send(embed=embed, view=view)
-                if isinstance(view, _RoletaReplayView):
+            sent = await self._send_game_message(source_message.channel, embed=embed, view=view, final=True)
+            if sent is not None:
+                if isinstance(view, _GameReplayView):
                     view.message = sent
                 return sent
-            except Exception:
-                return target_message
+            return target_message
 
         def _roleta_trigger_cooldown_remaining(self, guild_id: int, user_id: int) -> float:
             self._ensure_game_animation_runtime()
@@ -426,21 +454,25 @@ class GincanaRoletaMixin:
             except Exception:
                 pass
 
-        async def _handle_roleta_replay_button(self, interaction: discord.Interaction, view: _RoletaReplayView):
+        async def _send_replay_owner_error(self, interaction: discord.Interaction, kind: str):
+            text = "Essa roleta não é sua." if kind == "roleta" else "Essas cartas não são suas."
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(text, ephemeral=True)
+                else:
+                    await interaction.response.send_message(text, ephemeral=True)
+            except Exception:
+                pass
+
+        async def _handle_game_replay_button(self, interaction: discord.Interaction, view: _GameReplayView):
             if int(interaction.user.id) != view.owner_id:
-                try:
-                    if interaction.response.is_done():
-                        await interaction.followup.send("Essa roleta não é sua.", ephemeral=True)
-                    else:
-                        await interaction.response.send_message("Essa roleta não é sua.", ephemeral=True)
-                except Exception:
-                    pass
+                await self._send_replay_owner_error(interaction, view.kind)
                 return
             guild = interaction.guild
             message = interaction.message
             if guild is None or message is None:
                 return
-            session_id = self._next_game_animation_session_id(guild_id=guild.id, kind="roleta", owner_id=interaction.user.id)
+            session_id = self._next_game_animation_session_id(guild_id=guild.id, kind=view.kind, owner_id=interaction.user.id)
             if not await self._try_acquire_game_animation_slot(guild.id, session_id):
                 try:
                     if interaction.response.is_done():
@@ -452,53 +484,96 @@ class GincanaRoletaMixin:
                 return
             try:
                 is_staff = isinstance(interaction.user, discord.Member) and self._is_staff_member(interaction.user)
-                roleta_state = await self._sync_roleta_spin_window(guild.id, interaction.user.id)
-                if int(roleta_state.get("available", 0) or 0) <= 0 and not is_staff:
-                    wait_text = self._format_roleta_reset_time(float(roleta_state.get("reset_in", 0.0) or 0.0))
-                    embed = self._make_embed("🎰 Sem giros por agora", f"Seus {ROLETA_SPIN_LIMIT} giros acabaram. Reset em **{wait_text}**.", ok=False)
-                    if interaction.response.is_done():
-                        await interaction.followup.send(embed=embed, ephemeral=True)
-                    else:
-                        await interaction.response.send_message(embed=embed, ephemeral=True)
-                    return
-                needs_negative_confirm = self._needs_negative_confirmation(guild.id, interaction.user.id, ROLETA_COST)
-                if needs_negative_confirm:
-                    confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, interaction.user.id, ROLETA_COST, title="🎰 Confirmar aposta")
-                    if not confirmed:
+                if view.kind == "roleta":
+                    state = await self._sync_roleta_spin_window(guild.id, interaction.user.id)
+                    if int(state.get("available", 0) or 0) <= 0 and not is_staff:
+                        wait_text = self._format_roleta_reset_time(float(state.get("reset_in", 0.0) or 0.0))
+                        embed = self._make_embed("🎰 Sem giros por agora", f"Seus {ROLETA_SPIN_LIMIT} giros acabaram. Reset em **{wait_text}**.", ok=False)
+                        if interaction.response.is_done():
+                            await interaction.followup.send(embed=embed, ephemeral=True)
+                        else:
+                            await interaction.response.send_message(embed=embed, ephemeral=True)
                         return
-                if int(roleta_state.get("available", 0) or 0) > 0:
-                    roleta_state = await self._consume_roleta_spin(guild.id, interaction.user.id)
-                roleta_footer = self._roleta_footer_text(state=roleta_state, is_staff=is_staff)
-                paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, ROLETA_COST)
-                if needs_negative_confirm:
-                    chip_note = None
-                if not paid:
-                    embed = self._make_embed("🎰 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False)
-                    if interaction.response.is_done():
-                        await interaction.followup.send(embed=embed, ephemeral=True)
-                    else:
-                        await interaction.response.send_message(embed=embed, ephemeral=True)
-                    return
-                view.set_enabled(False)
-                view.stop()
-                try:
-                    if interaction.response.is_done():
-                        await message.edit(view=view)
-                    else:
-                        await interaction.response.edit_message(view=view)
-                except Exception:
+                    needs_negative_confirm = self._needs_negative_confirmation(guild.id, interaction.user.id, ROLETA_COST)
+                    if needs_negative_confirm:
+                        confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, interaction.user.id, ROLETA_COST, title="🎰 Confirmar aposta")
+                        if not confirmed:
+                            return
+                    if int(state.get("available", 0) or 0) > 0:
+                        state = await self._consume_roleta_spin(guild.id, interaction.user.id)
+                    footer = self._roleta_footer_text(state=state, is_staff=is_staff)
+                    paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, ROLETA_COST)
+                    if needs_negative_confirm:
+                        chip_note = None
+                    if not paid:
+                        embed = self._make_embed("🎰 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False)
+                        if interaction.response.is_done():
+                            await interaction.followup.send(embed=embed, ephemeral=True)
+                        else:
+                            await interaction.response.send_message(embed=embed, ephemeral=True)
+                        return
+                    view.set_enabled(False)
+                    view.stop()
                     try:
-                        if not interaction.response.is_done():
-                            await interaction.response.defer()
+                        if interaction.response.is_done():
+                            await message.edit(view=view)
+                        else:
+                            await interaction.response.edit_message(view=view)
                     except Exception:
-                        pass
-                author_voice = getattr(interaction.user, "voice", None)
-                voice_channel = getattr(author_voice, "channel", None)
-                targets = self._resolve_targets(guild, voice_channel) if isinstance(voice_channel, discord.VoiceChannel) else []
-                await self._execute_roleta_round(source_message=message, guild=guild, actor=interaction.user, roleta_footer=roleta_footer, chip_note=chip_note, voice_channel=voice_channel, targets=targets, session_id=session_id, spin_message=message, use_source_reactions=False)
+                        try:
+                            if not interaction.response.is_done():
+                                await interaction.response.defer()
+                        except Exception:
+                            pass
+                    author_voice = getattr(interaction.user, "voice", None)
+                    voice_channel = getattr(author_voice, "channel", None)
+                    targets = self._resolve_targets(guild, voice_channel) if isinstance(voice_channel, discord.VoiceChannel) else []
+                    await self._execute_roleta_round(source_message=message, guild=guild, actor=interaction.user, roleta_footer=footer, chip_note=chip_note, voice_channel=voice_channel, targets=targets, session_id=session_id, spin_message=message, use_source_reactions=False)
+                else:
+                    state = await self._sync_carta_spin_window(guild.id, interaction.user.id)
+                    if int(state.get("available", 0) or 0) <= 0 and not is_staff:
+                        wait_text = self._format_roleta_reset_time(float(state.get("reset_in", 0.0) or 0.0))
+                        embed = self._make_embed("🎴 Sem giros por agora", f"Seus {CARTA_SPIN_LIMIT} giros de cartas acabaram. Reset em **{wait_text}**.", ok=False)
+                        if interaction.response.is_done():
+                            await interaction.followup.send(embed=embed, ephemeral=True)
+                        else:
+                            await interaction.response.send_message(embed=embed, ephemeral=True)
+                        return
+                    needs_negative_confirm = self._needs_negative_confirmation(guild.id, interaction.user.id, CARTA_COST)
+                    if needs_negative_confirm:
+                        confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, interaction.user.id, CARTA_COST, title="🎴 Confirmar aposta")
+                        if not confirmed:
+                            return
+                    if int(state.get("available", 0) or 0) > 0:
+                        state = await self._consume_carta_spin(guild.id, interaction.user.id)
+                    footer = self._carta_footer_text(state=state, is_staff=is_staff)
+                    paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, CARTA_COST)
+                    if needs_negative_confirm:
+                        chip_note = None
+                    if not paid:
+                        embed = self._make_embed("🎴 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False)
+                        if interaction.response.is_done():
+                            await interaction.followup.send(embed=embed, ephemeral=True)
+                        else:
+                            await interaction.response.send_message(embed=embed, ephemeral=True)
+                        return
+                    view.set_enabled(False)
+                    view.stop()
+                    try:
+                        if interaction.response.is_done():
+                            await message.edit(view=view)
+                        else:
+                            await interaction.response.edit_message(view=view)
+                    except Exception:
+                        try:
+                            if not interaction.response.is_done():
+                                await interaction.response.defer()
+                        except Exception:
+                            pass
+                    await self._execute_carta_round(source_message=message, guild=guild, actor=interaction.user, carta_footer=footer, chip_note=chip_note, session_id=session_id, spin_message=message)
             finally:
                 await self._release_game_animation_slot(guild.id, session_id)
-        async def _animate_roleta_spin(self, message: discord.Message, *, target_middle: list[int], footer_text: str | None = None, spin_message: discord.Message | None = None, owner_id: int | None = None, guild_id: int | None = None, session_id: str | None = None) -> tuple[discord.Message | None, list[list[int]] | None]:
+        async def _animate_roleta_spin(self, message: discord.Message, *, target_middle: list[int], balance_text: str, footer_text: str | None = None, spin_message: discord.Message | None = None, owner_id: int | None = None, guild_id: int | None = None, session_id: str | None = None) -> tuple[discord.Message | None, list[list[int]] | None]:
             columns = [self._build_roleta_column() for _ in range(3)]
             for idx in range(3):
                 if columns[idx][1] == target_middle[idx]:
@@ -506,15 +581,17 @@ class GincanaRoletaMixin:
                     while reroll[1] == target_middle[idx]:
                         reroll = self._build_roleta_column()
                     columns[idx] = reroll
-            disabled_view = _RoletaReplayView(self, owner_id=owner_id or getattr(message.author, "id", 0), enabled=False) if owner_id else None
-            opening_embed = self._make_roleta_spin_embed(self._render_roleta_board(columns), footer_text=footer_text)
+            disabled_view = _GameReplayView(self, owner_id=owner_id or getattr(message.author, "id", 0), kind="roleta", enabled=False) if owner_id else None
+            opening_embed = self._make_roleta_spin_embed(self._render_roleta_board(columns), balance_text=balance_text, footer_text=footer_text)
             try:
                 if spin_message is None:
-                    spin_message = await message.channel.send(embed=opening_embed, view=disabled_view)
+                    spin_message = await self._send_game_message(message.channel, embed=opening_embed, view=disabled_view, final=False)
                 else:
                     updated = await self._edit_game_message(spin_message, embed=opening_embed, view=disabled_view, final=False)
                     if not updated:
-                        spin_message = await message.channel.send(embed=opening_embed, view=disabled_view)
+                        spin_message = await self._send_game_message(message.channel, embed=opening_embed, view=disabled_view, final=False)
+                if spin_message is None:
+                    return None, None
                 if disabled_view is not None and spin_message is not None:
                     disabled_view.message = spin_message
             except Exception:
@@ -566,7 +643,7 @@ class GincanaRoletaMixin:
                                 self._spin_roleta_column(columns[column_index])
                         board = self._render_roleta_board(columns)
                     previous_board = board
-                    await self._edit_game_message(spin_message, embed=self._make_roleta_spin_embed(board, footer_text=footer_text), view=disabled_view, final=False)
+                    await self._edit_game_message(spin_message, embed=self._make_roleta_spin_embed(board, balance_text=balance_text, footer_text=footer_text), view=disabled_view, final=False)
                 finally:
                     if has_turn and guild_id is not None and session_id is not None:
                         await self._advance_game_animation_turn(guild_id, session_id)
@@ -752,14 +829,10 @@ class GincanaRoletaMixin:
             final_top = self._random_carta_symbol(exclude={target_middle, first_top})
             return [first_top, target_middle, final_top]
 
-        def _make_carta_spin_embed(self, board: str, *, footer_text: str | None = None) -> discord.Embed:
+        def _make_carta_spin_embed(self, board: str, *, balance_text: str, footer_text: str | None = None) -> discord.Embed:
             embed = discord.Embed(
                 title="🎴 Cartas embaralhando...",
-                description=(
-                    f"Entrada: {self._chip_amount(CARTA_COST)}\n"
-                    f"Jackpot: {self._chip_amount(CARTA_JACKPOT_CHIPS)}\n\n"
-                    f"{board}"
-                ),
+                description=self._build_game_flow_description(entry_cost=CARTA_COST, jackpot=CARTA_JACKPOT_CHIPS, balance_text=balance_text, board=board),
                 color=discord.Color.from_rgb(111, 88, 242),
             )
             if footer_text:
@@ -769,11 +842,11 @@ class GincanaRoletaMixin:
                     pass
             return embed
 
-        def _make_carta_result_embed(self, title: str, summary: str, board: str, *, success: bool, premium: bool = False, footer_text: str | None = None) -> discord.Embed:
+        def _make_carta_result_embed(self, title: str, summary: str, board: str, *, balance_text: str, success: bool, premium: bool = False, footer_text: str | None = None) -> discord.Embed:
             color = discord.Color.from_rgb(255, 201, 74) if premium else (discord.Color.from_rgb(88, 179, 104) if success else discord.Color(OFF_COLOR))
             embed = discord.Embed(
                 title=title,
-                description=f"{summary}\n\n{board}",
+                description=self._build_game_flow_description(entry_cost=CARTA_COST, jackpot=CARTA_JACKPOT_CHIPS, balance_text=balance_text, board=board, summary=summary),
                 color=color,
             )
             if footer_text:
@@ -846,7 +919,7 @@ class GincanaRoletaMixin:
                 return "partial", 18, "Quase bateu a mão mais rara."
             return "loss", 0, "Essa mão não rendeu nada."
 
-        async def _animate_carta_spin(self, message: discord.Message, *, target_middle: list[object], footer_text: str | None = None, guild_id: int | None = None, session_id: str | None = None) -> tuple[discord.Message | None, list[list[object]] | None]:
+        async def _animate_carta_spin(self, message: discord.Message, *, target_middle: list[object], balance_text: str, footer_text: str | None = None, spin_message: discord.Message | None = None, owner_id: int | None = None, guild_id: int | None = None, session_id: str | None = None) -> tuple[discord.Message | None, list[list[object]] | None]:
             columns = [self._build_carta_column() for _ in range(3)]
             for idx in range(3):
                 if columns[idx][1] == target_middle[idx]:
@@ -854,10 +927,21 @@ class GincanaRoletaMixin:
                     while reroll[1] == target_middle[idx]:
                         reroll = self._build_carta_column()
                     columns[idx] = reroll
+            disabled_view = _GameReplayView(self, owner_id=owner_id or getattr(message.author, "id", 0), kind="cartas", enabled=False) if owner_id else None
             try:
-                spin_message = await message.channel.send(embed=self._make_carta_spin_embed(self._render_carta_board(columns), footer_text=footer_text))
+                opening_embed = self._make_carta_spin_embed(self._render_carta_board(columns), balance_text=balance_text, footer_text=footer_text)
+                if spin_message is None:
+                    spin_message = await self._send_game_message(message.channel, embed=opening_embed, view=disabled_view, final=False)
+                else:
+                    updated = await self._edit_game_message(spin_message, embed=opening_embed, view=disabled_view, final=False)
+                    if not updated:
+                        spin_message = await self._send_game_message(message.channel, embed=opening_embed, view=disabled_view, final=False)
+                if spin_message is None:
+                    return None, None
+                if disabled_view is not None and spin_message is not None:
+                    disabled_view.message = spin_message
             except Exception:
-                return None, None
+                return spin_message, None
             target_duration = 4.6
             intervals = [0.18, 0.21, 0.25, 0.30, 0.36, 0.44, 0.55, 0.70, 0.90, 1.05]
             scale = target_duration / sum(intervals)
@@ -903,7 +987,7 @@ class GincanaRoletaMixin:
                                 self._spin_carta_column(columns[column_index])
                         board = self._render_carta_board(columns)
                     previous_board = board
-                    await self._edit_game_message(spin_message, embed=self._make_carta_spin_embed(board, footer_text=footer_text), final=False)
+                    await self._edit_game_message(spin_message, embed=self._make_carta_spin_embed(board, balance_text=balance_text, footer_text=footer_text), view=disabled_view, final=False)
                 finally:
                     if has_turn and guild_id is not None and session_id is not None:
                         await self._advance_game_animation_turn(guild_id, session_id)
@@ -922,7 +1006,8 @@ class GincanaRoletaMixin:
                 success = random.randint(1, 10) == 1
                 await self.db.add_user_game_stat(guild.id, actor.id, "roleta_spins", 1)
                 target_middle = self._roll_roleta_target_middle(success=success)
-                spin_message, final_columns = await self._animate_roleta_spin(source_message, target_middle=target_middle, footer_text=roleta_footer, spin_message=spin_message, owner_id=actor.id, guild_id=guild.id, session_id=session_id)
+                spin_balance_text = self._format_compact_chip_balance(guild.id, actor.id)
+                spin_message, final_columns = await self._animate_roleta_spin(source_message, target_middle=target_middle, balance_text=spin_balance_text, footer_text=roleta_footer, spin_message=spin_message, owner_id=actor.id, guild_id=guild.id, session_id=session_id)
                 if final_columns is None:
                     final_columns = [self._build_roleta_column(target_middle[0]), self._build_roleta_column(target_middle[1]), self._build_roleta_column(target_middle[2])]
                 try:
@@ -950,7 +1035,7 @@ class GincanaRoletaMixin:
                         summary = f"Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
-                        embed = self._make_roleta_result_embed("💥🎰 JACKPOT!!", summary, board, success=True, footer_text=roleta_footer)
+                        embed = self._make_roleta_result_embed("💥🎰 JACKPOT!!", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=True, footer_text=roleta_footer)
                     elif result_kind == "joker_premium":
                         await self._record_game_played(guild.id, actor.id, weekly_points=6)
                         await self._change_user_chips(guild.id, actor.id, result_amount)
@@ -958,7 +1043,7 @@ class GincanaRoletaMixin:
                         summary = f"Teve símbolo coringa e rendeu {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
-                        embed = self._make_roleta_result_embed("🎰 Coringa premiado", summary, board, success=False, near=True, footer_text=roleta_footer)
+                        embed = self._make_roleta_result_embed("🎰 Coringa premiado", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer)
                     elif result_kind == "partial":
                         await self._record_game_played(guild.id, actor.id, weekly_points=4)
                         await self._change_user_chips(guild.id, actor.id, result_amount)
@@ -966,20 +1051,20 @@ class GincanaRoletaMixin:
                         summary = f"Esse giro rendeu {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
-                        embed = self._make_roleta_result_embed("🎰 Giro parcial", summary, board, success=False, near=True, footer_text=roleta_footer)
+                        embed = self._make_roleta_result_embed("🎰 Giro parcial", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer)
                     elif result_kind == "return":
                         await self._record_game_played(guild.id, actor.id, weekly_points=3)
                         await self._change_user_chips(guild.id, actor.id, result_amount)
                         summary = f"Você recuperou {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
-                        embed = self._make_roleta_result_embed("🎰 Giro de retorno", summary, board, success=False, near=True, footer_text=roleta_footer)
+                        embed = self._make_roleta_result_embed("🎰 Giro de retorno", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer)
                     else:
                         await self._record_game_played(guild.id, actor.id, weekly_points=2)
                         summary = f"Você perdeu {self._chip_amount(ROLETA_COST)}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
-                        embed = self._make_roleta_result_embed("🎰 Não foi dessa vez...", summary, board, success=False, footer_text=roleta_footer)
+                        embed = self._make_roleta_result_embed("🎰 Não foi dessa vez...", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, footer_text=roleta_footer)
                 except Exception:
                     fallback_title = "💥🎰 JACKPOT!!" if success else "🎰 Não foi dessa vez..."
                     fallback_text = f"Você ganhou {self._chip_amount(ROLETA_JACKPOT_CHIPS)}." if success else f"Você perdeu {self._chip_amount(ROLETA_COST)}."
@@ -990,7 +1075,7 @@ class GincanaRoletaMixin:
                         embed.set_footer(text=roleta_footer)
                     except Exception:
                         pass
-                replay_view = _RoletaReplayView(self, owner_id=actor.id, enabled=True)
+                replay_view = _GameReplayView(self, owner_id=actor.id, kind="roleta", enabled=True)
                 await self._deliver_game_result(source_message, spin_message, embed=embed, view=replay_view)
                 return True
             finally:
@@ -1001,7 +1086,7 @@ class GincanaRoletaMixin:
                     else:
                         await self._set_roleta_reaction(source_message, lose_emoji, keep=True)
 
-        async def _execute_carta_round(self, *, source_message: discord.Message, guild: discord.Guild, actor: discord.abc.User, carta_footer: str, chip_note: str | None, session_id: str) -> bool:
+        async def _execute_carta_round(self, *, source_message: discord.Message, guild: discord.Guild, actor: discord.abc.User, carta_footer: str, chip_note: str | None, session_id: str, spin_message: discord.Message | None = None) -> bool:
             spinning_emoji = "🎴"
             jackpot_emoji = "<:emoji_64:1485043651292827788>"
             lose_emoji = "<:emoji_65:1485043671077228786>"
@@ -1009,7 +1094,8 @@ class GincanaRoletaMixin:
             try:
                 await self._set_roleta_reaction(source_message, spinning_emoji, keep=True)
                 target_middle = self._roll_carta_target_middle()
-                spin_message, final_columns = await self._animate_carta_spin(source_message, target_middle=target_middle, footer_text=carta_footer, guild_id=guild.id, session_id=session_id)
+                spin_balance_text = self._format_compact_chip_balance(guild.id, actor.id)
+                spin_message, final_columns = await self._animate_carta_spin(source_message, target_middle=target_middle, balance_text=spin_balance_text, footer_text=carta_footer, spin_message=spin_message, owner_id=actor.id, guild_id=guild.id, session_id=session_id)
                 if final_columns is None:
                     final_columns = [self._build_carta_column(target_middle[0]), self._build_carta_column(target_middle[1]), self._build_carta_column(target_middle[2])]
                 board = self._render_carta_board(final_columns)
@@ -1028,7 +1114,7 @@ class GincanaRoletaMixin:
                         summary = f"{summary}\n*{streak_line}*"
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
-                    embed = self._make_carta_result_embed("🎴 JACKPOT!!", summary, board, success=True, premium=True, footer_text=carta_footer)
+                    embed = self._make_carta_result_embed("🎴 JACKPOT!!", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=True, premium=True, footer_text=carta_footer)
                     result_reaction = jackpot_emoji
                 elif result_kind in {"rare", "premium", "partial", "return"}:
                     weekly_map = {"rare": 8, "premium": 7, "partial": 4, "return": 2}
@@ -1044,7 +1130,7 @@ class GincanaRoletaMixin:
                     if chip_note:
                         line = f"{chip_note}\n{line}"
                     titles = {"rare": "🎴 Mão rara", "premium": "🎴 Coringa premiado", "partial": "🎴 Boa mão", "return": "🎴 Giro de retorno"}
-                    embed = self._make_carta_result_embed(titles.get(result_kind, "🎴 Boa mão"), line, board, success=True, premium=result_kind in {"rare", "premium"}, footer_text=carta_footer)
+                    embed = self._make_carta_result_embed(titles.get(result_kind, "🎴 Boa mão"), line, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=True, premium=result_kind in {"rare", "premium"}, footer_text=carta_footer)
                     if result_kind in {"return", "premium"}:
                         result_reaction = "🃏"
                     elif result_kind == "rare":
@@ -1056,9 +1142,10 @@ class GincanaRoletaMixin:
                     summary = f"{flavor}\nVocê perdeu {self._chip_text(CARTA_COST, kind='loss')}."
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
-                    embed = self._make_carta_result_embed("🎴 Não foi dessa vez...", summary, board, success=False, premium=False, footer_text=carta_footer)
+                    embed = self._make_carta_result_embed("🎴 Não foi dessa vez...", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, premium=False, footer_text=carta_footer)
                     result_reaction = lose_emoji
-                await self._deliver_game_result(source_message, spin_message, embed=embed)
+                replay_view = _GameReplayView(self, owner_id=actor.id, kind="cartas", enabled=True)
+                await self._deliver_game_result(source_message, spin_message, embed=embed, view=replay_view)
                 return True
             finally:
                 await self._clear_roleta_reaction(source_message, spinning_emoji)
