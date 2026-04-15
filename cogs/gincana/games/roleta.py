@@ -583,7 +583,11 @@ class GincanaRoletaMixin:
                     footer = self._roleta_footer_text(state=state, is_staff=is_staff)
                     if free_spin:
                         await self._consume_race_free_spin(guild.id, interaction.user.id, kind="roleta")
-                        paid, _balance, chip_note = True, self.db.get_user_chips(guild.id, interaction.user.id, default=100), "Seu daily de Sortudo bancou esse giro sem cobrar fichas."
+                        marker = self._race_effect_marker(guild.id, interaction.user.id, "daily")
+                        chip_note = "Seu daily de Sortudo bancou esse giro sem cobrar fichas."
+                        if marker:
+                            chip_note = f"{marker}\n{chip_note}"
+                        paid, _balance = True, self.db.get_user_chips(guild.id, interaction.user.id, default=100)
                     else:
                         paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, entry_cost)
                     if needs_negative_confirm:
@@ -641,7 +645,11 @@ class GincanaRoletaMixin:
                     footer = self._carta_footer_text(state=state, is_staff=is_staff)
                     if free_spin:
                         await self._consume_race_free_spin(guild.id, interaction.user.id, kind="carta")
-                        paid, _balance, chip_note = True, self.db.get_user_chips(guild.id, interaction.user.id, default=100), "Seu daily de Sortudo bancou essa mão sem cobrar fichas."
+                        marker = self._race_effect_marker(guild.id, interaction.user.id, "daily")
+                        chip_note = "Seu daily de Sortudo bancou essa mão sem cobrar fichas."
+                        if marker:
+                            chip_note = f"{marker}\n{chip_note}"
+                        paid, _balance = True, self.db.get_user_chips(guild.id, interaction.user.id, default=100)
                     else:
                         paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, entry_cost)
                     if needs_negative_confirm:
@@ -1317,7 +1325,11 @@ class GincanaRoletaMixin:
                 carta_footer = self._carta_footer_text(state=carta_state, is_staff=is_staff)
                 if free_spin:
                     await self._consume_race_free_spin(guild.id, message.author.id, kind="carta")
-                    paid, _balance, chip_note = True, self.db.get_user_chips(guild.id, message.author.id, default=100), "Seu daily de Sortudo bancou essa mão sem cobrar fichas."
+                    marker = self._race_effect_marker(guild.id, message.author.id, "daily")
+                    chip_note = "Seu daily de Sortudo bancou essa mão sem cobrar fichas."
+                    if marker:
+                        chip_note = f"{marker}\n{chip_note}"
+                    paid, _balance = True, self.db.get_user_chips(guild.id, message.author.id, default=100)
                 else:
                     paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, entry_cost)
                 if needs_negative_confirm:
@@ -1394,7 +1406,11 @@ class GincanaRoletaMixin:
                 roleta_footer = self._roleta_footer_text(state=roleta_state, is_staff=is_staff)
                 if free_spin:
                     await self._consume_race_free_spin(guild.id, message.author.id, kind="roleta")
-                    paid, _balance, chip_note = True, self.db.get_user_chips(guild.id, message.author.id, default=100), "Seu daily de Sortudo bancou esse giro sem cobrar fichas."
+                    marker = self._race_effect_marker(guild.id, message.author.id, "daily")
+                    chip_note = "Seu daily de Sortudo bancou esse giro sem cobrar fichas."
+                    if marker:
+                        chip_note = f"{marker}\n{chip_note}"
+                    paid, _balance = True, self.db.get_user_chips(guild.id, message.author.id, default=100)
                 else:
                     paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, entry_cost)
                 if needs_negative_confirm:

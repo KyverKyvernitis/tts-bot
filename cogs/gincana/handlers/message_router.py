@@ -85,9 +85,10 @@ class GincanaMessageRouterMixin:
         race_spin_text = "Sua raça não alterou o daily desta vez."
         if self._race_is(message.guild.id, message.author.id, "sortudo"):
             extra_parts = []
-            extra_parts.append("+1 giro de roleta grátis" if race_free.get("roleta") else "seu giro grátis de roleta já estava guardado")
-            extra_parts.append("+1 giro de cartas grátis" if race_free.get("carta") else "seu giro grátis de cartas já estava guardado")
-            race_spin_text = "Bônus da raça Sortudo: " + " • ".join(extra_parts)
+            extra_parts.append("+1 giro grátis de roleta" if race_free.get("roleta") else "o giro grátis de roleta já estava guardado")
+            extra_parts.append("+1 giro grátis de cartas" if race_free.get("carta") else "o giro grátis de cartas já estava guardado")
+            marker = self._race_effect_marker(message.guild.id, message.author.id, "daily")
+            race_spin_text = (marker + "\n" if marker else "") + " • ".join(extra_parts)
         embed = discord.Embed(
             title="🎁 Bônus diário resgatado",
             description=(

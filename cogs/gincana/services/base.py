@@ -20,6 +20,8 @@ from ..constants import (
     RACE_SPECIAL_DEFAULT_CHANCE,
     RACE_SPECIAL_SORTUDO_CHANCE,
     ROLETA_APOSTADOR_COST,
+    ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS,
+    ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS,
     ROLETA_COST,
     TRUCO_GOLDEN_BONUS_EXTRA,
 )
@@ -87,6 +89,7 @@ class GincanaBase:
         self._poker_games: dict[int, object] = {}
         self._payment_sessions: dict[tuple[int, int], dict] = {}
         self._race_sessions: dict[int, dict] = {}
+        self._race_panel_messages: dict[tuple[int, int], tuple[int, int]] = {}
         self._truco_games: dict[int, object] = {}
 
     def _strip_gincana_suffix(self, name: str) -> str:
@@ -741,47 +744,116 @@ class GincanaBase:
         except Exception:
             return False
 
+    def _format_percent_text(self, value: float) -> str:
+        try:
+            number = float(value) * 100.0 if float(value) <= 1.0 else float(value)
+        except Exception:
+            number = 0.0
+        text = f"{number:.2f}".rstrip("0").rstrip(".")
+        return text.replace(".", ",") + "%"
+
     def _race_catalog(self) -> dict[str, dict[str, object]]:
+        apostador_return_chance = (1.0 - 0.15) * 0.25
         return {
             "preto": {
                 "name": "Preto",
                 "emoji": "🕶️",
-                "lines": [
-                    "Roubar: **2 usos / 4h**",
-                    "Esmola: **2 usos / 3h**",
-                    f"Falha no roubo: **5 {self._CHIP_LOSS_EMOJI}**",
-                    f"Roubo máx.: **40 {self._CHIP_EMOJI}**",
+                "effects": [
+                    {"key": "mao_negra", "title": "Mão Negra", "desc": "2 Usos a Cada 4h"},
+                    {"key": "labia", "title": "Lábia", "desc": "2 Usos a Cada 3h"},
+                    {"key": "sangue_frio", "title": "Sangue Frio", "desc": f"Falha em Roubar: 5 {self._CHIP_LOSS_EMOJI}"},
+                    {"key": "mao_grande", "title": "Mão Grande", "desc": f"Roubo Máximo: 40 {self._CHIP_EMOJI}"},
                 ],
             },
             "apostador": {
                 "name": "Apostador",
                 "emoji": "🎰",
-                "lines": [
-                    f"Roleta: **25 {self._CHIP_LOSS_EMOJI}**",
-                    f"999: **100 {self._CHIP_GAIN_EMOJI}** • 777: **200 {self._CHIP_GAIN_EMOJI}**",
-                    f"666: devolve a entrada",
-                    "Roleta agressiva",
+                "effects": [
+                    {"key": "jackpot", "title": "Jackpot", "desc": f"999: {self._format_percent_text(0.10)} • 100 {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "all_in", "title": "All-in", "desc": f"777: {self._format_percent_text(0.05)} • 200 {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "666", "title": "666", "desc": f"666: {self._format_percent_text(apostador_return_chance)} • Devolve 25 {self._CHIP_LOSS_EMOJI}"},
+                    {"key": "mesa_alta", "title": "Mesa Alta", "desc": f"Entrada: 25 {self._CHIP_LOSS_EMOJI}"},
                 ],
             },
             "sortudo": {
                 "name": "Sortudo",
                 "emoji": "🍀",
-                "lines": [
-                    "Buckshot dourado / Truco dourado: **40%**",
-                    f"Truco dourado: **+20 {self._CHIP_BONUS_EMOJI}**",
-                    "Daily: **+1** roleta • **+1** cartas",
+                "effects": [
+                    {"key": "midas", "title": "Midas", "desc": f"Buckshot Dourado: {self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)} • Truco Dourado: {self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)}"},
+                    {"key": "premio_extra", "title": "Prêmio Extra", "desc": f"Truco Dourado: +20 {self._CHIP_BONUS_EMOJI}"},
+                    {"key": "daily", "title": "Daily", "desc": "Todo Daily: +1 Giro Grátis de Roleta • +1 de Cartas"},
                 ],
             },
             "coringa": {
                 "name": "Coringa",
                 "emoji": "🃏",
-                "lines": [
-                    "Chance de recuperar **50%** da entrada",
-                    "Roubar falho: pode ignorar a perda",
-                    "Azar mais leve em roleta e cartas",
+                "effects": [
+                    {"key": "as", "title": "Às", "desc": f"Na Roleta: {self._format_percent_text(0.35)} de Recuperar 50% da Entrada"},
+                    {"key": "trapaceiro", "title": "Trapaceiro", "desc": f"Ao Falhar em Roubar: {self._format_percent_text(0.25)} de Não Perder Nada"},
+                    {"key": "redencao", "title": "Redenção", "desc": f"Nas Cartas: {self._format_percent_text(0.35)} de Recuperar 50% da Entrada"},
                 ],
             },
         }
+
+    def _get_race_effects(self, race_key: str) -> list[dict[str, str]]:
+        info = self._get_race_info_by_key(race_key) or {}
+        effects = []
+        for effect in list(info.get("effects") or []):
+            if isinstance(effect, dict):
+                key = str(effect.get("key") or "").strip().lower()
+                title = str(effect.get("title") or "").strip()
+                desc = str(effect.get("desc") or "").strip()
+                if key and title and desc:
+                    effects.append({"key": key, "title": title, "desc": desc})
+        return effects
+
+    def _get_race_effect_title(self, race_key: str, effect_key: str) -> str:
+        target = str(effect_key or "").strip().lower()
+        for effect in self._get_race_effects(race_key):
+            if effect.get("key") == target:
+                return str(effect.get("title") or "")
+        return ""
+
+    def _race_effect_marker(self, guild_id: int, user_id: int, effect_key: str) -> str:
+        title = self._get_race_effect_title(self._get_user_race_key(guild_id, user_id), effect_key)
+        return f"**{title}**" if title else ""
+
+    def _remember_race_panel_message(self, guild_id: int, user_id: int, message: discord.Message | None):
+        if message is None:
+            return
+        self._race_panel_messages[(int(guild_id), int(user_id))] = (int(message.channel.id), int(message.id))
+
+    def _forget_race_panel_message(self, guild_id: int, user_id: int, *, message_id: int | None = None):
+        key = (int(guild_id), int(user_id))
+        current = self._race_panel_messages.get(key)
+        if not current:
+            return
+        if message_id is None or int(current[1]) == int(message_id):
+            self._race_panel_messages.pop(key, None)
+
+    async def _delete_previous_race_panel_message(self, guild_id: int, user_id: int, channel: discord.abc.Messageable | None = None):
+        key = (int(guild_id), int(user_id))
+        stored = self._race_panel_messages.pop(key, None)
+        if not stored:
+            return
+        channel_id, message_id = stored
+        target_message = None
+        try:
+            if channel is not None and int(getattr(channel, "id", 0) or 0) == int(channel_id) and hasattr(channel, "fetch_message"):
+                target_message = await channel.fetch_message(int(message_id))
+            else:
+                fetched_channel = self.bot.get_channel(int(channel_id))
+                if fetched_channel is None:
+                    try:
+                        fetched_channel = await self.bot.fetch_channel(int(channel_id))
+                    except Exception:
+                        fetched_channel = None
+                if fetched_channel is not None and hasattr(fetched_channel, "fetch_message"):
+                    target_message = await fetched_channel.fetch_message(int(message_id))
+            if target_message is not None:
+                await target_message.delete()
+        except Exception:
+            pass
 
     def _get_user_race_key(self, guild_id: int, user_id: int) -> str:
         try:

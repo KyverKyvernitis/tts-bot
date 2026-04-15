@@ -74,6 +74,9 @@ class _MendigarRequestView(discord.ui.LayoutView):
             lines.append(f"**Convocado para ajudar:** {self.target_mention}")
         else:
             lines.append("Qualquer alma bondosa com fichas normais suficientes pode ajudar no botão abaixo.")
+        marker = self.cog._race_effect_marker(self.guild_id, self.author_id, "labia")
+        if marker:
+            lines.append(marker)
         lines.append(f"A esmola expira em **{int(CHIPS_MENDIGAR_TIMEOUT_SECONDS // 60)} minutos**.")
         return lines
 
@@ -234,10 +237,11 @@ class _MendigarRequestView(discord.ui.LayoutView):
 
 class _RacePanelView(discord.ui.LayoutView):
     def __init__(self, cog: "GincanaCog", *, guild_id: int, user_id: int):
-        super().__init__(timeout=180.0)
+        super().__init__(timeout=600.0)
         self.cog = cog
         self.guild_id = int(guild_id)
         self.user_id = int(user_id)
+        self.message: discord.Message | None = None
         self._build_layout()
 
     def _body_lines(self) -> list[str]:
@@ -248,8 +252,9 @@ class _RacePanelView(discord.ui.LayoutView):
         active = self.cog._is_user_race_active(self.guild_id, self.user_id)
         state_text = "Ativa" if active else "Desativada"
         lines = [f"# {emoji} Race", f"**{race_name}**", f"**Estado:** {state_text}", "", "## Efeitos"]
-        lines.extend(f"• {line}" for line in list(info.get("lines") or []) if str(line).strip())
-        lines.extend(["", f"**Troca:** {self.cog._chip_amount(RACE_REROLL_COST)}"])
+        for effect in self.cog._get_race_effects(race_key):
+            lines.append(f"• **{effect.get('title')}**: {effect.get('desc')}")
+        lines.extend(["", f"**Troca:** {RACE_REROLL_COST} {self.cog._CHIP_EMOJI}"])
         return lines
 
     def _build_layout(self):
@@ -286,7 +291,7 @@ class _RacePanelView(discord.ui.LayoutView):
         current = self.cog._get_user_race_key(self.guild_id, self.user_id)
         normal_chips = int(self.cog.db.get_user_chips(self.guild_id, self.user_id, default=CHIPS_INITIAL) or 0)
         if normal_chips < RACE_REROLL_COST:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Race", [f"Você precisa de {self.cog._chip_amount(RACE_REROLL_COST)} para trocar."], ok=False), ephemeral=True)
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Race", [f"Você precisa de {RACE_REROLL_COST} {self.cog._CHIP_EMOJI} para trocar."], ok=False), ephemeral=True)
             return
         await self.cog._change_user_chips(self.guild_id, self.user_id, -RACE_REROLL_COST, mark_activity=True)
         race_key = await self.cog._roll_user_race(self.guild_id, self.user_id, exclude_current=bool(current))
@@ -310,6 +315,16 @@ class _RacePanelView(discord.ui.LayoutView):
         self._build_layout()
         await interaction.response.edit_message(view=self)
 
+    async def on_timeout(self):
+        self.stop()
+        self.cog._forget_race_panel_message(self.guild_id, self.user_id, message_id=getattr(self.message, "id", None))
+        if self.message is None:
+            return
+        try:
+            await self.message.delete()
+        except Exception:
+            pass
+
 
 class GincanaCog(dcommands.Cog, GincanaCore):
     def __init__(self, bot: dcommands.Bot, db):
@@ -329,7 +344,8 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         emoji = str(info.get("emoji") or "🍀")
         race_name = str(info.get("name") or "Sem raça")
         lines = [f"# {emoji} Race", f"**{race_name}**", "Raça definida.", "", "## Efeitos"]
-        lines.extend(f"• {line}" for line in list(info.get("lines") or []) if str(line).strip())
+        for effect in self._get_race_effects(race_key):
+            lines.append(f"• **{effect.get('title')}**: {effect.get('desc')}")
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.green()))
         return view
@@ -464,8 +480,11 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             except Exception:
                 await message.channel.send(view=reveal)
             return True
+        await self._delete_previous_race_panel_message(message.guild.id, message.author.id, channel=message.channel)
         view = _RacePanelView(self, guild_id=message.guild.id, user_id=message.author.id)
-        await message.channel.send(view=view)
+        sent = await message.channel.send(view=view)
+        view.message = sent
+        self._remember_race_panel_message(message.guild.id, message.author.id, sent)
         return True
 
     @_guild_scoped()
@@ -521,9 +540,10 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         race_spin_text = "Sua raça não alterou o daily desta vez."
         if self._race_is(ctx.guild.id, ctx.author.id, "sortudo"):
             extra_parts = []
-            extra_parts.append("+1 giro de roleta grátis" if race_free.get("roleta") else "seu giro grátis de roleta já estava guardado")
-            extra_parts.append("+1 giro de cartas grátis" if race_free.get("carta") else "seu giro grátis de cartas já estava guardado")
-            race_spin_text = "Bônus da raça Sortudo: " + " • ".join(extra_parts)
+            extra_parts.append("+1 giro grátis de roleta" if race_free.get("roleta") else "o giro grátis de roleta já estava guardado")
+            extra_parts.append("+1 giro grátis de cartas" if race_free.get("carta") else "o giro grátis de cartas já estava guardado")
+            marker = self._race_effect_marker(ctx.guild.id, ctx.author.id, "daily")
+            race_spin_text = (marker + "\n" if marker else "") + " • ".join(extra_parts)
         embed = discord.Embed(
             title="🎁 Bônus diário resgatado",
             description=(
@@ -669,7 +689,15 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 f"O golpe encaixou. Você levou {self._chip_text(amount, kind='gain')} de {target.mention}.",
                 f"Você passou a mão em {self._chip_text(amount, kind='gain')} de {target.mention}."
             ])
-            await channel.send(view=self._make_v2_notice("🕵️ Roubo", [flavor], ok=True, accent_color=discord.Color.dark_green()))
+            effect_lines = []
+            marker = self._race_effect_marker(guild.id, author.id, "mao_negra")
+            if marker:
+                effect_lines.append(marker)
+            if amount > 30:
+                marker = self._race_effect_marker(guild.id, author.id, "mao_grande")
+                if marker:
+                    effect_lines.append(marker)
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", [flavor, *effect_lines], ok=True, accent_color=discord.Color.dark_green()))
             return True
         penalty = 5 if self._race_is(guild.id, author.id, "preto") else 10
         if self._coringa_avoids_robbery_penalty(guild.id, author.id):
@@ -680,6 +708,12 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             f"Você tentou roubar {target.mention}, mas foi pego no flagra.",
             (f"Você perdeu {self._chip_text(penalty, kind='loss')}." if penalty > 0 else "Mas o efeito Coringa te salvou dessa perda.")
         ]
+        marker = self._race_effect_marker(guild.id, author.id, "sangue_frio")
+        if penalty == 5 and marker:
+            lines.append(marker)
+        marker = self._race_effect_marker(guild.id, author.id, "trapaceiro")
+        if penalty == 0 and marker:
+            lines.append(marker)
         await channel.send(view=self._make_v2_notice("🕵️ Deu ruim", lines, ok=False, accent_color=discord.Color.red()))
         return True
 

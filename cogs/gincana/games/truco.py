@@ -473,6 +473,9 @@ class GincanaTrucoMixin:
         ]
         if self._truco_is_golden(game):
             lines.append("Modo dourado ativo para esta mesa.")
+        marker = str(getattr(game, "race_effect_marker", "") or "").strip()
+        if marker:
+            lines.append(marker)
         else:
             lines.append("Aceite para começar o jogo.")
         return lines
@@ -925,6 +928,7 @@ class GincanaTrucoMixin:
         if not await self._truco_require_dm_for_players([challenger.id, opponent.id], channel=message.channel, guild=guild):
             return True
         game = self._truco_make_game(guild.id, message.channel.id, "1v1", [challenger.id, opponent.id], [(challenger.id,), (opponent.id,)], variant=self._roll_truco_variant_for_user(guild.id, challenger.id))
+        game.race_effect_marker = self._race_effect_marker(guild.id, challenger.id, "midas") if self._truco_is_golden(game) and self._race_is(guild.id, challenger.id, "sortudo") else ""
         self._truco_games[guild.id] = game
         embed = discord.Embed(
             title="🃏 Truco",
@@ -952,6 +956,7 @@ class GincanaTrucoMixin:
             await message.channel.send(embed=self._make_embed("🃏 Truco ocupado", "Já existe um truco em andamento neste servidor.", ok=False))
             return True
         lobby = TrucoLobby(guild_id=guild.id, channel_id=message.channel.id, creator_id=message.author.id, variant=self._roll_truco_variant_for_user(guild.id, message.author.id))
+        lobby.race_effect_marker = self._race_effect_marker(guild.id, message.author.id, "midas") if self._truco_is_golden(lobby) and self._race_is(guild.id, message.author.id, "sortudo") else ""
         lobby.team_a = [message.author.id]
         self._truco_lobbies[guild.id] = lobby
         view = Truco2v2LobbyView(self, lobby, guild)
@@ -1072,7 +1077,8 @@ class GincanaTrucoMixin:
                 await interaction.response.send_message(f"Não foi possível cobrar a entrada de {self._truco_member_mention(guild, uid)}.", ephemeral=True)
                 return
         order = [lobby.team_a[0], lobby.team_b[0], lobby.team_a[1], lobby.team_b[1]]
-        game = self._truco_make_game(guild.id, lobby.channel_id, "2v2", order, [tuple(lobby.team_a), tuple(lobby.team_b)])
+        game = self._truco_make_game(guild.id, lobby.channel_id, "2v2", order, [tuple(lobby.team_a), tuple(lobby.team_b)], variant=lobby.variant)
+        game.race_effect_marker = str(getattr(lobby, "race_effect_marker", "") or "")
         self._truco_games[guild.id] = game
         self._truco_lobbies.pop(guild.id, None)
         lobby.started = True
