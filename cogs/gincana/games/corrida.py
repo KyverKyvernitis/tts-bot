@@ -5,7 +5,7 @@ import time
 import discord
 
 
-CORRIDA_STAKE = 20
+CORRIDA_STAKE = 40
 _CORRIDA_TRACK_LENGTH = 18
 _CORRIDA_UPDATES = 10
 _CORRIDA_UPDATE_SECONDS = 2.0
@@ -312,6 +312,8 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             if roll < 0.82:
                 return "medio"
             return "pequeno"
+        if random.random() < 0.65:
+            return None
         if roll < 0.60:
             return "grande"
         if roll < 0.95:
@@ -356,6 +358,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             tier = self._random_impulse_tier(hits)
             entry["hits"] = hits
             entry["tier"] = tier
+            entry["failed_trigger"] = bool(hits >= _RACE_IMPULSE_STAGE_COUNT and not tier)
             if not tier:
                 continue
             bonus = self._tier_bonus(tier, self.stage_name)

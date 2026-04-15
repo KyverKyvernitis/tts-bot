@@ -1296,7 +1296,7 @@ class GincanaRoletaMixin:
             cooldown_remaining = self._roleta_trigger_cooldown_remaining(guild.id, message.author.id)
             if cooldown_remaining > 0:
                 try:
-                    await message.channel.send(embed=self._make_embed("🎰 Aguarde um pouco", f"Espere **{int(cooldown_remaining) + 1}s** para usar a roleta novamente.", ok=False))
+                    await message.channel.send(embed=self._make_embed("🎰 Aguarde um pouco", f"Espere **{int(cooldown_remaining) + 1}s** para usar a roleta novamente. Se o botão **🔄** da sua última roleta ainda estiver ativo, você pode usá-lo.", ok=False))
                 except Exception:
                     pass
                 return True
