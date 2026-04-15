@@ -87,7 +87,7 @@ class GincanaMessageRouterMixin:
             extra_parts = []
             extra_parts.append("+1 giro grátis de roleta" if race_free.get("roleta") else "o giro grátis de roleta já estava guardado")
             extra_parts.append("+1 giro grátis de cartas" if race_free.get("carta") else "o giro grátis de cartas já estava guardado")
-            marker = self._race_effect_marker(message.guild.id, message.author.id, "daily")
+            marker = self._race_effect_message(message.guild.id, message.author.id, "daily", "seu daily liberou giros grátis de roleta e cartas.")
             race_spin_text = (marker + "\n" if marker else "") + " • ".join(extra_parts)
         embed = discord.Embed(
             title="🎁 Bônus diário resgatado",

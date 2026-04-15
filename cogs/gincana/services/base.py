@@ -43,7 +43,18 @@ class _NegativeDebtConfirmView(discord.ui.View):
         self.confirmed = True
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(view=self)
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        try:
+            if self.message is not None:
+                await self.message.edit(view=self)
+        except Exception:
+            try:
+                await interaction.edit_original_response(view=self)
+            except Exception:
+                pass
         self.stop()
 
     @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
@@ -54,7 +65,20 @@ class _NegativeDebtConfirmView(discord.ui.View):
         self.confirmed = False
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(content="Entrada cancelada.", view=None)
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        try:
+            if self.message is not None:
+                await self.message.edit(content="Entrada cancelada.", view=None)
+            else:
+                await interaction.edit_original_response(content="Entrada cancelada.", view=None)
+        except Exception:
+            try:
+                await interaction.edit_original_response(content="Entrada cancelada.", view=None)
+            except Exception:
+                pass
         self.stop()
 
     async def on_timeout(self):
@@ -768,10 +792,10 @@ class GincanaBase:
                 "name": "Apostador",
                 "emoji": "🎰",
                 "effects": [
-                    {"key": "jackpot", "title": "999 Jackpot", "desc": f"999: **{self._format_percent_text(0.10)}** • **100** {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "all_in", "title": "All-in", "desc": f"777: **{self._format_percent_text(0.05)}** • **200** {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "666", "title": "Besta", "desc": f"666: **{self._format_percent_text(0.25)}** • O custo da roleta é estornado"},
-                    {"key": "mesa_alta", "title": "Mesa Alta", "desc": f"Entrada: **25** {self._CHIP_LOSS_EMOJI}"},
+                    {"key": "jackpot", "title": "999 Jackpot", "desc": f"**{self._format_percent_text(0.15)}** • **100** {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "all_in", "title": "999 All-in", "desc": f"**{self._format_percent_text(0.05)}** • **200** {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "666", "title": "666 Besta", "desc": f"**{self._format_percent_text(0.25)}** • O custo da roleta é estornado"},
+                    {"key": "mesa_alta", "title": "Mesa Alta", "desc": f"Entrada da roleta agora é de **25** {self._CHIP_LOSS_EMOJI}"},
                 ],
             },
             "sortudo": {
@@ -813,9 +837,42 @@ class GincanaBase:
                 return str(effect.get("title") or "")
         return ""
 
-    def _race_effect_marker(self, guild_id: int, user_id: int, effect_key: str) -> str:
+    def _race_effect_message(self, guild_id: int, user_id: int, effect_key: str, detail: str | None = None) -> str:
         title = self._get_race_effect_title(self._get_user_race_key(guild_id, user_id), effect_key)
-        return f"**{title}**" if title else ""
+        if not title:
+            return ""
+        detail_map = {
+            "labia": "seu uso extra de mendigar foi aplicado.",
+            "daily": "os extras do daily foram liberados.",
+            "mao_negra": "você usou o limite ampliado de roubo.",
+            "mao_grande": "o roubo máximo foi ampliado.",
+            "sangue_frio": "a perda ao falhar foi reduzida.",
+            "trapaceiro": "você se safou da perda no roubo.",
+            "jackpot": "o prêmio especial de **100** foi ativado.",
+            "all_in": "o prêmio especial de **200** foi ativado.",
+            "666": "o custo da roleta foi estornado.",
+            "midas": "a versão dourada foi ativada.",
+            "premio_extra": f"o prêmio bônus de **20** {self._CHIP_BONUS_EMOJI} foi aplicado.",
+            "as": "você recuperou **50%** da entrada.",
+            "redencao": "você recuperou **50%** da entrada.",
+        }
+        suffix = str(detail or detail_map.get(str(effect_key or "").strip().lower(), "")).strip()
+        return f"Efeito **{title}** foi usado, {suffix}" if suffix else f"Efeito **{title}** foi usado."
+
+    def _race_effect_marker(self, guild_id: int, user_id: int, effect_key: str) -> str:
+        return self._race_effect_message(guild_id, user_id, effect_key)
+
+    def _format_race_identity(self, guild_id: int, user_id: int) -> str:
+        info = self._get_user_race_info(guild_id, user_id) or {}
+        if not info:
+            return ""
+        emoji = str(info.get("emoji") or "").strip()
+        name = str(info.get("name") or "").strip()
+        active = self._is_user_race_active(guild_id, user_id)
+        label = f"{emoji}{name}" if emoji else name
+        if label and not active:
+            label += " (desativada)"
+        return label
 
     def _remember_race_panel_message(self, guild_id: int, user_id: int, message: discord.Message | None):
         if message is None:
@@ -1053,15 +1110,21 @@ class GincanaBase:
         summary_lines = self._build_chip_game_stat_lines(stats)
         summary_lines.append(f"📈 **Taxa**: **{rate}**")
 
+        primary_balance = self._format_primary_chip_balance(guild_id, member.id)
+        race_identity = self._format_race_identity(guild_id, member.id)
+        if race_identity:
+            primary_balance = f"{primary_balance} • **Raça:** {race_identity}"
         balance_lines = [
             f"# {self._CHIP_EMOJI} Fichas",
-            self._format_primary_chip_balance(guild_id, member.id),
+            primary_balance,
         ]
         rank_text = self._chip_rank_position_text(member.guild, member.id)
         if rank_text:
             balance_lines.append(rank_text)
         balance_lines.append(f"🎁 **Diário**: {self._daily_bonus_text(guild_id, member.id)}")
         balance_lines.append(f"⏳ **Recarga**: {self._chip_recharge_compact_text(guild_id, member.id)}")
+        if not race_identity:
+            balance_lines.append("**🧬 Raça:** Use **race** pra definir sua raça")
         if chips < 0:
             balance_lines.append("Ganhos futuros quitam a dívida primeiro.")
 

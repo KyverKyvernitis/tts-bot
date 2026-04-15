@@ -130,7 +130,7 @@ class GincanaRoletaMixin:
                 roll = random.random()
                 if roll < 0.05:
                     return {"target_middle": [7, 7, 7], "forced_kind": "jackpot_mega", "forced_amount": ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS}
-                if roll < 0.15:
+                if roll < 0.20:
                     return {"target_middle": [9, 9, 9], "forced_kind": "jackpot", "forced_amount": ROLETA_APOSTADOR_STANDARD_JACKPOT_CHIPS}
                 if random.random() < 0.25:
                     return {"target_middle": [6, 6, 6], "forced_kind": "return", "forced_amount": ROLETA_APOSTADOR_COST}
@@ -583,10 +583,8 @@ class GincanaRoletaMixin:
                     footer = self._roleta_footer_text(state=state, is_staff=is_staff)
                     if free_spin:
                         await self._consume_race_free_spin(guild.id, interaction.user.id, kind="roleta")
-                        marker = self._race_effect_marker(guild.id, interaction.user.id, "daily")
-                        chip_note = "Seu daily de Sortudo bancou esse giro sem cobrar fichas."
-                        if marker:
-                            chip_note = f"{marker}\n{chip_note}"
+                        marker = self._race_effect_message(guild.id, interaction.user.id, "daily", "seu daily bancou esse giro sem cobrar fichas.")
+                        chip_note = marker or "Seu daily de Sortudo bancou esse giro sem cobrar fichas."
                         paid, _balance = True, self.db.get_user_chips(guild.id, interaction.user.id, default=100)
                     else:
                         paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, entry_cost)
@@ -645,10 +643,8 @@ class GincanaRoletaMixin:
                     footer = self._carta_footer_text(state=state, is_staff=is_staff)
                     if free_spin:
                         await self._consume_race_free_spin(guild.id, interaction.user.id, kind="carta")
-                        marker = self._race_effect_marker(guild.id, interaction.user.id, "daily")
-                        chip_note = "Seu daily de Sortudo bancou essa mão sem cobrar fichas."
-                        if marker:
-                            chip_note = f"{marker}\n{chip_note}"
+                        marker = self._race_effect_message(guild.id, interaction.user.id, "daily", "seu daily bancou essa mão sem cobrar fichas.")
+                        chip_note = marker or "Seu daily de Sortudo bancou essa mão sem cobrar fichas."
                         paid, _balance = True, self.db.get_user_chips(guild.id, interaction.user.id, default=100)
                     else:
                         paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, entry_cost)
@@ -1154,6 +1150,11 @@ class GincanaRoletaMixin:
                         await self.db.add_user_game_stat(guild.id, actor.id, "roleta_jackpots", 1)
                         await self._grant_weekly_points(guild.id, actor.id, 20)
                         summary = f"Você ganhou {self._chip_amount(result_amount)}."
+                        effect_note = ""
+                        if self._race_is(guild.id, actor.id, "apostador"):
+                            effect_note = self._race_effect_message(guild.id, actor.id, "all_in" if result_kind == "jackpot_mega" else "jackpot")
+                        if effect_note:
+                            summary = f"{effect_note}\n{summary}"
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed("💥🎰 JACKPOT 777!!" if result_kind == "jackpot_mega" else ("💥🎰 JACKPOT 999!!" if self._race_is(guild.id, actor.id, "apostador") else "💥🎰 JACKPOT!!"), summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
@@ -1177,6 +1178,9 @@ class GincanaRoletaMixin:
                         await self._record_game_played(guild.id, actor.id, weekly_points=3)
                         await self._change_user_chips(guild.id, actor.id, result_amount)
                         summary = f"Você recuperou {self._chip_text(result_amount, kind='gain')}."
+                        effect_note = self._race_effect_message(guild.id, actor.id, "666") if self._race_is(guild.id, actor.id, "apostador") else ""
+                        if effect_note:
+                            summary = f"{effect_note}\n{summary}"
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed("🎰 Giro de retorno", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
@@ -1185,7 +1189,8 @@ class GincanaRoletaMixin:
                         refund = await self._maybe_apply_coringa_cashback(guild.id, actor.id, entry_cost)
                         summary = f"Você perdeu {self._chip_amount(entry_cost)}."
                         if refund > 0:
-                            summary += f"\nO efeito Coringa devolveu {self._chip_text(refund, kind='gain')}."
+                            effect_note = self._race_effect_message(guild.id, actor.id, "as", f"você recuperou {self._chip_text(refund, kind='gain')}.")
+                            summary += f"\n{effect_note or ('O efeito Coringa devolveu ' + self._chip_text(refund, kind='gain') + '.')}"
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed("🎰 Não foi dessa vez...", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
@@ -1249,6 +1254,10 @@ class GincanaRoletaMixin:
                     line = f"{flavor}\nEssa mão rendeu {self._chip_text(result_amount, kind='gain')}."
                     if result_kind == "return":
                         line = f"{flavor}\nVocê recuperou {self._chip_text(result_amount, kind='gain')}."
+                        if self._race_is(guild.id, actor.id, "apostador"):
+                            effect_note = self._race_effect_message(guild.id, actor.id, "666")
+                            if effect_note:
+                                line = f"{effect_note}\n{line}"
                     elif streak_line:
                         line = f"{line}\n*{streak_line}*"
                     if chip_note:
@@ -1266,7 +1275,8 @@ class GincanaRoletaMixin:
                     refund = await self._maybe_apply_coringa_cashback(guild.id, actor.id, entry_cost)
                     summary = f"{flavor}\nVocê perdeu {self._chip_text(entry_cost, kind='loss')}."
                     if refund > 0:
-                        summary += f"\nO efeito Coringa devolveu {self._chip_text(refund, kind='gain')}."
+                        effect_note = self._race_effect_message(guild.id, actor.id, "redencao", f"você recuperou {self._chip_text(refund, kind='gain')}.")
+                        summary += f"\n{effect_note or ('O efeito Coringa devolveu ' + self._chip_text(refund, kind='gain') + '.')}"
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
                     embed = self._make_carta_result_embed("🎴 Não foi dessa vez...", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, premium=False, footer_text=carta_footer, entry_cost=entry_cost, jackpot=CARTA_JACKPOT_CHIPS)
@@ -1325,10 +1335,8 @@ class GincanaRoletaMixin:
                 carta_footer = self._carta_footer_text(state=carta_state, is_staff=is_staff)
                 if free_spin:
                     await self._consume_race_free_spin(guild.id, message.author.id, kind="carta")
-                    marker = self._race_effect_marker(guild.id, message.author.id, "daily")
-                    chip_note = "Seu daily de Sortudo bancou essa mão sem cobrar fichas."
-                    if marker:
-                        chip_note = f"{marker}\n{chip_note}"
+                    marker = self._race_effect_message(guild.id, message.author.id, "daily", "seu daily bancou essa mão sem cobrar fichas.")
+                    chip_note = marker or "Seu daily de Sortudo bancou essa mão sem cobrar fichas."
                     paid, _balance = True, self.db.get_user_chips(guild.id, message.author.id, default=100)
                 else:
                     paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, entry_cost)
@@ -1406,10 +1414,8 @@ class GincanaRoletaMixin:
                 roleta_footer = self._roleta_footer_text(state=roleta_state, is_staff=is_staff)
                 if free_spin:
                     await self._consume_race_free_spin(guild.id, message.author.id, kind="roleta")
-                    marker = self._race_effect_marker(guild.id, message.author.id, "daily")
-                    chip_note = "Seu daily de Sortudo bancou esse giro sem cobrar fichas."
-                    if marker:
-                        chip_note = f"{marker}\n{chip_note}"
+                    marker = self._race_effect_message(guild.id, message.author.id, "daily", "seu daily bancou esse giro sem cobrar fichas.")
+                    chip_note = marker or "Seu daily de Sortudo bancou esse giro sem cobrar fichas."
                     paid, _balance = True, self.db.get_user_chips(guild.id, message.author.id, default=100)
                 else:
                     paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, entry_cost)

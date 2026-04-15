@@ -74,7 +74,7 @@ class _MendigarRequestView(discord.ui.LayoutView):
             lines.append(f"**Convocado para ajudar:** {self.target_mention}")
         else:
             lines.append("Qualquer alma bondosa com fichas normais suficientes pode ajudar no botão abaixo.")
-        marker = self.cog._race_effect_marker(self.guild_id, self.author_id, "labia")
+        marker = self.cog._race_effect_message(self.guild_id, self.author_id, "labia")
         if marker:
             lines.append(marker)
         lines.append(f"A esmola expira em **{int(CHIPS_MENDIGAR_TIMEOUT_SECONDS // 60)} minutos**.")
@@ -552,7 +552,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             extra_parts = []
             extra_parts.append("+1 giro grátis de roleta" if race_free.get("roleta") else "o giro grátis de roleta já estava guardado")
             extra_parts.append("+1 giro grátis de cartas" if race_free.get("carta") else "o giro grátis de cartas já estava guardado")
-            marker = self._race_effect_marker(ctx.guild.id, ctx.author.id, "daily")
+            marker = self._race_effect_message(ctx.guild.id, ctx.author.id, "daily", "seu daily liberou giros grátis de roleta e cartas.")
             race_spin_text = (marker + "\n" if marker else "") + " • ".join(extra_parts)
         embed = discord.Embed(
             title="🎁 Bônus diário resgatado",
@@ -700,11 +700,11 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 f"Você passou a mão em {self._chip_text(amount, kind='gain')} de {target.mention}."
             ])
             effect_lines = []
-            marker = self._race_effect_marker(guild.id, author.id, "mao_negra")
+            marker = self._race_effect_message(guild.id, author.id, "mao_negra")
             if marker:
                 effect_lines.append(marker)
             if amount > 30:
-                marker = self._race_effect_marker(guild.id, author.id, "mao_grande")
+                marker = self._race_effect_message(guild.id, author.id, "mao_grande")
                 if marker:
                     effect_lines.append(marker)
             await channel.send(view=self._make_v2_notice("🕵️ Roubo", [flavor, *effect_lines], ok=True, accent_color=discord.Color.dark_green()))
@@ -718,10 +718,10 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             f"Você tentou roubar {target.mention}, mas foi pego no flagra.",
             (f"Você perdeu {self._chip_text(penalty, kind='loss')}." if penalty > 0 else "Mas o efeito Coringa te salvou dessa perda.")
         ]
-        marker = self._race_effect_marker(guild.id, author.id, "sangue_frio")
+        marker = self._race_effect_message(guild.id, author.id, "sangue_frio")
         if penalty == 5 and marker:
             lines.append(marker)
-        marker = self._race_effect_marker(guild.id, author.id, "trapaceiro")
+        marker = self._race_effect_message(guild.id, author.id, "trapaceiro")
         if penalty == 0 and marker:
             lines.append(marker)
         await channel.send(view=self._make_v2_notice("🕵️ Deu ruim", lines, ok=False, accent_color=discord.Color.red()))
