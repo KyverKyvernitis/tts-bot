@@ -294,12 +294,22 @@ class _RacePanelView(discord.ui.LayoutView):
             await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Race", [f"Você precisa de {RACE_REROLL_COST} {self.cog._CHIP_EMOJI} para trocar."], ok=False), ephemeral=True)
             return
         await self.cog._change_user_chips(self.guild_id, self.user_id, -RACE_REROLL_COST, mark_activity=True)
-        race_key = await self.cog._roll_user_race(self.guild_id, self.user_id, exclude_current=bool(current))
+        await self.cog._roll_user_race(self.guild_id, self.user_id, exclude_current=bool(current))
+        spinner_texts = ("Sorteando sua nova raça.", "Sorteando sua nova raça..", "Sorteando sua nova raça...", "Definindo sua nova raça...")
+        await interaction.response.edit_message(view=self.cog._make_race_spinner_view(spinner_texts[0]))
+        target_message = interaction.message
+        for text_line in spinner_texts[1:]:
+            await asyncio.sleep(0.35)
+            try:
+                await target_message.edit(view=self.cog._make_race_spinner_view(text_line))
+            except Exception:
+                pass
+        await asyncio.sleep(0.35)
         self._build_layout()
-        race_name = self.cog._get_race_name(race_key)
-        await interaction.response.edit_message(view=self)
+        self.message = target_message
+        self.cog._remember_race_panel_message(self.guild_id, self.user_id, target_message)
         try:
-            await interaction.followup.send(view=self.cog._make_v2_notice("🍀 Race", [f"Nova raça: **{race_name}**."], ok=True, accent_color=discord.Color.green()), ephemeral=True)
+            await target_message.edit(view=self)
         except Exception:
             pass
 

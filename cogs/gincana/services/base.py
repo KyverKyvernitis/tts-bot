@@ -753,44 +753,43 @@ class GincanaBase:
         return text.replace(".", ",") + "%"
 
     def _race_catalog(self) -> dict[str, dict[str, object]]:
-        apostador_return_chance = (1.0 - 0.15) * 0.25
         return {
             "preto": {
                 "name": "Preto",
-                "emoji": "🕶️",
+                "emoji": "🥷🏿",
                 "effects": [
-                    {"key": "mao_negra", "title": "Mão Negra", "desc": "2 Usos a Cada 4h"},
-                    {"key": "labia", "title": "Lábia", "desc": "2 Usos a Cada 3h"},
-                    {"key": "sangue_frio", "title": "Sangue Frio", "desc": f"Falha em Roubar: 5 {self._CHIP_LOSS_EMOJI}"},
-                    {"key": "mao_grande", "title": "Mão Grande", "desc": f"Roubo Máximo: 40 {self._CHIP_EMOJI}"},
+                    {"key": "mao_negra", "title": "Mão Negra", "desc": "Você pode roubar **2** vezes a cada **4h**"},
+                    {"key": "labia", "title": "Lábia", "desc": "Você pode mendigar **2** vezes a cada **3h**"},
+                    {"key": "sangue_frio", "title": "Sangue Frio", "desc": f"Ao falhar em roubar: **5** {self._CHIP_LOSS_EMOJI}"},
+                    {"key": "mao_grande", "title": "Mão Grande", "desc": f"Roubo máximo: **40** {self._CHIP_EMOJI}"},
                 ],
             },
             "apostador": {
                 "name": "Apostador",
                 "emoji": "🎰",
                 "effects": [
-                    {"key": "jackpot", "title": "Jackpot", "desc": f"999: {self._format_percent_text(0.10)} • 100 {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "all_in", "title": "All-in", "desc": f"777: {self._format_percent_text(0.05)} • 200 {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "666", "title": "666", "desc": f"666: {self._format_percent_text(apostador_return_chance)} • Devolve 25 {self._CHIP_LOSS_EMOJI}"},
-                    {"key": "mesa_alta", "title": "Mesa Alta", "desc": f"Entrada: 25 {self._CHIP_LOSS_EMOJI}"},
+                    {"key": "jackpot", "title": "999 Jackpot", "desc": f"999: **{self._format_percent_text(0.10)}** • **100** {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "all_in", "title": "All-in", "desc": f"777: **{self._format_percent_text(0.05)}** • **200** {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "666", "title": "Besta", "desc": f"666: **{self._format_percent_text(0.25)}** • O custo da roleta é estornado"},
+                    {"key": "mesa_alta", "title": "Mesa Alta", "desc": f"Entrada: **25** {self._CHIP_LOSS_EMOJI}"},
                 ],
             },
             "sortudo": {
                 "name": "Sortudo",
                 "emoji": "🍀",
                 "effects": [
-                    {"key": "midas", "title": "Midas", "desc": f"Buckshot Dourado: {self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)} • Truco Dourado: {self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)}"},
-                    {"key": "premio_extra", "title": "Prêmio Extra", "desc": f"Truco Dourado: +20 {self._CHIP_BONUS_EMOJI}"},
-                    {"key": "daily", "title": "Daily", "desc": "Todo Daily: +1 Giro Grátis de Roleta • +1 de Cartas"},
+                    {"key": "midas", "title": "Midas", "desc": f"Buckshot dourado: **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)}** • Truco dourado: **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)}**"},
+                    {"key": "premio_extra", "title": "Prêmio Extra", "desc": f"Truco dourado: **+20** {self._CHIP_BONUS_EMOJI}"},
+                    {"key": "daily", "title": "Benção", "desc": "Todo daily libera **+1** giro grátis de roleta e **+1** de cartas"},
                 ],
             },
             "coringa": {
                 "name": "Coringa",
                 "emoji": "🃏",
                 "effects": [
-                    {"key": "as", "title": "Às", "desc": f"Na Roleta: {self._format_percent_text(0.35)} de Recuperar 50% da Entrada"},
-                    {"key": "trapaceiro", "title": "Trapaceiro", "desc": f"Ao Falhar em Roubar: {self._format_percent_text(0.25)} de Não Perder Nada"},
-                    {"key": "redencao", "title": "Redenção", "desc": f"Nas Cartas: {self._format_percent_text(0.35)} de Recuperar 50% da Entrada"},
+                    {"key": "as", "title": "Às", "desc": f"Na roleta: **{self._format_percent_text(0.35)}** de recuperar **50%** da entrada"},
+                    {"key": "trapaceiro", "title": "Trapaceiro", "desc": f"Ao falhar em roubar: **{self._format_percent_text(0.25)}** de não perder nada"},
+                    {"key": "redencao", "title": "Redenção", "desc": f"Nas cartas: **{self._format_percent_text(0.35)}** de recuperar **50%** da entrada"},
                 ],
             },
         }
