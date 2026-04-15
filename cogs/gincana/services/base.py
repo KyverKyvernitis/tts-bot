@@ -293,6 +293,7 @@ class GincanaBase:
         doc["last_chip_reset_at"] = 0.0
         doc["chip_recharge_manual_initialized"] = False
         doc.pop("race_key", None)
+        doc.pop("race_active", None)
         for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses"):
             doc.pop(field, None)
         await self.db._save_user_doc(guild_id, user_id, doc)
@@ -311,6 +312,7 @@ class GincanaBase:
         doc["game_stats"] = {}
         doc["has_chip_activity"] = False
         doc.pop("race_key", None)
+        doc.pop("race_active", None)
         for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses"):
             doc.pop(field, None)
         await self.db._save_user_doc(guild_id, user_id, doc)
@@ -745,38 +747,38 @@ class GincanaBase:
                 "name": "Preto",
                 "emoji": "🕶️",
                 "lines": [
-                    "2 roubos a cada 4 horas em vez de 1 a cada 6 horas.",
-                    "2 pedidos de esmola bem-sucedidos a cada 3 horas.",
-                    "Falha no roubo perde só 5 fichas.",
-                    "Roubo máximo sobe para 40 fichas.",
+                    "Roubar: **2 usos / 4h**",
+                    "Esmola: **2 usos / 3h**",
+                    f"Falha no roubo: **5 {self._CHIP_LOSS_EMOJI}**",
+                    f"Roubo máx.: **40 {self._CHIP_EMOJI}**",
                 ],
             },
             "apostador": {
                 "name": "Apostador",
                 "emoji": "🎰",
                 "lines": [
-                    "Roleta especial com entrada de 25 fichas.",
-                    "999 paga 100 fichas • 777 paga 200 fichas.",
-                    "666 pode devolver a entrada.",
-                    "A sorte da roleta fica bem mais agressiva.",
+                    f"Roleta: **25 {self._CHIP_LOSS_EMOJI}**",
+                    f"999: **100 {self._CHIP_GAIN_EMOJI}** • 777: **200 {self._CHIP_GAIN_EMOJI}**",
+                    f"666: devolve a entrada",
+                    "Roleta agressiva",
                 ],
             },
             "sortudo": {
                 "name": "Sortudo",
                 "emoji": "🍀",
                 "lines": [
-                    "Buckshot dourado e Truco dourado aparecem com 40% de chance.",
-                    "Truco dourado dá +20 fichas bônus extras para cada vencedor.",
-                    "Daily libera 1 giro de roleta grátis e 1 de cartas grátis.",
+                    "Buckshot dourado / Truco dourado: **40%**",
+                    f"Truco dourado: **+20 {self._CHIP_BONUS_EMOJI}**",
+                    "Daily: **+1** roleta • **+1** cartas",
                 ],
             },
             "coringa": {
                 "name": "Coringa",
                 "emoji": "🃏",
                 "lines": [
-                    "Ao falhar em jogos com entrada, pode recuperar metade da aposta.",
-                    "Ao falhar no roubo, às vezes não perde nada.",
-                    "A raça amortece o azar e reduz o prejuízo.",
+                    "Chance de recuperar **50%** da entrada",
+                    "Roubar falho: pode ignorar a perda",
+                    "Azar mais leve em roleta e cartas",
                 ],
             },
         }
@@ -787,6 +789,15 @@ class GincanaBase:
         except Exception:
             raw = ""
         return raw if raw in self._race_catalog() else ""
+
+    def _is_user_race_active(self, guild_id: int, user_id: int) -> bool:
+        race_key = self._get_user_race_key(guild_id, user_id)
+        if not race_key:
+            return False
+        try:
+            return bool((self.db._get_user_doc(guild_id, user_id) or {}).get("race_active", True))
+        except Exception:
+            return True
 
     def _get_user_race_info(self, guild_id: int, user_id: int) -> dict[str, object] | None:
         key = self._get_user_race_key(guild_id, user_id)
@@ -807,8 +818,10 @@ class GincanaBase:
         key = str(race_key or "").strip().lower()
         if key and key in self._race_catalog():
             doc["race_key"] = key
+            doc["race_active"] = True
         else:
             doc.pop("race_key", None)
+            doc.pop("race_active", None)
         if reset_state:
             for field in (
                 "race_free_roleta_spins",
@@ -819,6 +832,14 @@ class GincanaBase:
                 "race_mendigar_uses",
             ):
                 doc.pop(field, None)
+        await self.db._save_user_doc(guild_id, user_id, doc)
+
+    async def _set_user_race_active(self, guild_id: int, user_id: int, active: bool):
+        doc = self.db._get_user_doc(guild_id, user_id)
+        if not self._get_user_race_key(guild_id, user_id):
+            doc.pop("race_active", None)
+        else:
+            doc["race_active"] = bool(active)
         await self.db._save_user_doc(guild_id, user_id, doc)
 
     async def _clear_user_race(self, guild_id: int, user_id: int):
@@ -834,7 +855,7 @@ class GincanaBase:
         return chosen
 
     def _race_is(self, guild_id: int, user_id: int, race_key: str) -> bool:
-        return self._get_user_race_key(guild_id, user_id) == str(race_key or "").strip().lower()
+        return self._get_user_race_key(guild_id, user_id) == str(race_key or "").strip().lower() and self._is_user_race_active(guild_id, user_id)
 
     def _roleta_cost_for_user(self, guild_id: int, user_id: int) -> int:
         return ROLETA_APOSTADOR_COST if self._race_is(guild_id, user_id, "apostador") else ROLETA_COST

@@ -1,3 +1,4 @@
+import asyncio
 import random
 import re
 import time
@@ -232,73 +233,82 @@ class _MendigarRequestView(discord.ui.LayoutView):
 
 
 class _RacePanelView(discord.ui.LayoutView):
-    def __init__(self, cog: "GincanaCog", *, guild_id: int, user_id: int, just_assigned: bool = False):
+    def __init__(self, cog: "GincanaCog", *, guild_id: int, user_id: int):
         super().__init__(timeout=180.0)
         self.cog = cog
         self.guild_id = int(guild_id)
         self.user_id = int(user_id)
-        self.just_assigned = bool(just_assigned)
         self._build_layout()
+
+    def _body_lines(self) -> list[str]:
+        race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
+        info = self.cog._get_race_info_by_key(race_key) or {}
+        emoji = str(info.get("emoji") or "🍀")
+        race_name = str(info.get("name") or "Sem raça")
+        active = self.cog._is_user_race_active(self.guild_id, self.user_id)
+        state_text = "Ativa" if active else "Desativada"
+        lines = [f"# {emoji} Race", f"**{race_name}**", f"**Estado:** {state_text}", "", "## Efeitos"]
+        lines.extend(f"• {line}" for line in list(info.get("lines") or []) if str(line).strip())
+        lines.extend(["", f"**Troca:** {self.cog._chip_amount(RACE_REROLL_COST)}"])
+        return lines
 
     def _build_layout(self):
         self.clear_items()
-        race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
-        info = self.cog._get_race_info_by_key(race_key) or {}
-        race_name = str(info.get("name") or "Sem raça")
-        emoji = str(info.get("emoji") or "🧬")
-        lines = [f"# {emoji} Race", f"**Raça atual:** {race_name}"]
-        if self.just_assigned:
-            lines.append("Sua raça foi definida aleatoriamente agora.")
-        lines.append("")
-        lines.append("## Efeitos")
-        race_lines = [f"• {line}" for line in list(info.get("lines") or [])]
-        if race_lines:
-            lines.extend(race_lines)
-        else:
-            lines.append("• Use o botão abaixo para descobrir sua raça.")
-        lines.extend([
-            "",
-            f"**Trocar raça:** {self.cog._chip_amount(RACE_REROLL_COST)} em fichas normais",
-            "A raça some no fim da temporada e em resets globais/administrativos.",
-        ])
-        reroll = discord.ui.Button(label="Trocar raça", emoji="🎲", style=discord.ButtonStyle.primary)
+        reroll = discord.ui.Button(label="Trocar raça", emoji="🎲", style=discord.ButtonStyle.secondary)
         reroll.callback = self._reroll
-        close = discord.ui.Button(label="Fechar", style=discord.ButtonStyle.secondary)
-        close.callback = self._close
-        row = discord.ui.ActionRow(reroll, close)
-        self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), row, accent_color=discord.Color.blurple()))
+        row_children = [reroll]
+        if self.cog._is_user_race_active(self.guild_id, self.user_id):
+            toggle = discord.ui.Button(label="Desativar raça", style=discord.ButtonStyle.secondary)
+            toggle.callback = self._toggle_race
+        else:
+            toggle = discord.ui.Button(label="Ativar raça", style=discord.ButtonStyle.success)
+            toggle.callback = self._toggle_race
+        row_children.append(toggle)
+        row = discord.ui.ActionRow(*row_children)
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay("\n".join(self._body_lines())),
+                row,
+                accent_color=discord.Color.green(),
+            )
+        )
 
+    async def _ensure_owner(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None or int(interaction.guild.id) != self.guild_id or int(interaction.user.id) != self.user_id:
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Race", ["Esse painel pertence a outra pessoa."], ok=False), ephemeral=True)
+            return False
+        return True
 
     async def _reroll(self, interaction: discord.Interaction):
-        if interaction.guild is None or int(interaction.guild.id) != self.guild_id or int(interaction.user.id) != self.user_id:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🧬 Race", ["Esse painel pertence a outra pessoa."], ok=False), ephemeral=True)
+        if not await self._ensure_owner(interaction):
             return
         await self.cog._maybe_execute_due_chip_season_reset(self.guild_id)
         current = self.cog._get_user_race_key(self.guild_id, self.user_id)
         normal_chips = int(self.cog.db.get_user_chips(self.guild_id, self.user_id, default=CHIPS_INITIAL) or 0)
         if normal_chips < RACE_REROLL_COST:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🧬 Race", [f"Você precisa de pelo menos {self.cog._chip_amount(RACE_REROLL_COST)} em fichas normais para trocar de raça."], ok=False), ephemeral=True)
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Race", [f"Você precisa de {self.cog._chip_amount(RACE_REROLL_COST)} para trocar."], ok=False), ephemeral=True)
             return
         await self.cog._change_user_chips(self.guild_id, self.user_id, -RACE_REROLL_COST, mark_activity=True)
         race_key = await self.cog._roll_user_race(self.guild_id, self.user_id, exclude_current=bool(current))
-        self.just_assigned = False
         self._build_layout()
         race_name = self.cog._get_race_name(race_key)
+        await interaction.response.edit_message(view=self)
         try:
-            await interaction.response.edit_message(view=self)
-        except Exception:
-            await interaction.message.edit(view=self)
-        try:
-            await interaction.followup.send(view=self.cog._make_v2_notice("🧬 Race", [f"Sua nova raça é **{race_name}**."], ok=True), ephemeral=True)
+            await interaction.followup.send(view=self.cog._make_v2_notice("🍀 Race", [f"Nova raça: **{race_name}**."], ok=True, accent_color=discord.Color.green()), ephemeral=True)
         except Exception:
             pass
 
-    async def _close(self, interaction: discord.Interaction):
-        if int(interaction.user.id) != self.user_id:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🧬 Race", ["Esse painel pertence a outra pessoa."], ok=False), ephemeral=True)
+    async def _toggle_race(self, interaction: discord.Interaction):
+        if not await self._ensure_owner(interaction):
             return
-        await interaction.response.edit_message(view=self.cog._make_v2_notice("🧬 Race", ["Painel fechado."], ok=True))
-        self.stop()
+        race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
+        if not race_key:
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Race", ["Você ainda não tem uma raça definida."], ok=False), ephemeral=True)
+            return
+        now_active = self.cog._is_user_race_active(self.guild_id, self.user_id)
+        await self.cog._set_user_race_active(self.guild_id, self.user_id, not now_active)
+        self._build_layout()
+        await interaction.response.edit_message(view=self)
 
 
 class GincanaCog(dcommands.Cog, GincanaCore):
@@ -313,6 +323,26 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if hours > 0:
             return f"{hours}h {minutes:02d}min"
         return f"{minutes}min"
+
+    def _make_race_reveal_view(self, guild_id: int, user_id: int, race_key: str) -> discord.ui.LayoutView:
+        info = self._get_race_info_by_key(race_key) or {}
+        emoji = str(info.get("emoji") or "🍀")
+        race_name = str(info.get("name") or "Sem raça")
+        lines = [f"# {emoji} Race", f"**{race_name}**", "Raça definida.", "", "## Efeitos"]
+        lines.extend(f"• {line}" for line in list(info.get("lines") or []) if str(line).strip())
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.green()))
+        return view
+
+    def _make_race_spinner_view(self, text_line: str) -> discord.ui.LayoutView:
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay("\n".join(["# 🍀 Race", str(text_line)])),
+                accent_color=discord.Color.green(),
+            )
+        )
+        return view
 
     async def _start_mendigar_request(self, message: discord.Message, *, amount: int, target: discord.Member | None) -> bool:
         guild = message.guild
@@ -418,11 +448,23 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return True
         await self._maybe_execute_due_chip_season_reset(message.guild.id)
         race_key = self._get_user_race_key(message.guild.id, message.author.id)
-        just_assigned = False
         if not race_key:
             race_key = await self._roll_user_race(message.guild.id, message.author.id)
-            just_assigned = True
-        view = _RacePanelView(self, guild_id=message.guild.id, user_id=message.author.id, just_assigned=just_assigned)
+            reveal = self._make_race_reveal_view(message.guild.id, message.author.id, race_key)
+            spinner = await message.channel.send(view=self._make_race_spinner_view("Sorteando sua raça."))
+            for text_line in ("Sorteando sua raça..", "Sorteando sua raça...", "Definindo sua raça..."):
+                await asyncio.sleep(0.35)
+                try:
+                    await spinner.edit(view=self._make_race_spinner_view(text_line))
+                except Exception:
+                    pass
+            await asyncio.sleep(0.35)
+            try:
+                await spinner.edit(view=reveal)
+            except Exception:
+                await message.channel.send(view=reveal)
+            return True
+        view = _RacePanelView(self, guild_id=message.guild.id, user_id=message.author.id)
         await message.channel.send(view=view)
         return True
 
