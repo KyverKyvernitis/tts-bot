@@ -251,7 +251,7 @@ class _RacePanelView(discord.ui.LayoutView):
         race_name = str(info.get("name") or "Sem raça")
         active = self.cog._is_user_race_active(self.guild_id, self.user_id)
         state_text = "Ativa" if active else "Desativada"
-        lines = [f"# {emoji} Race", f"**{race_name}**", f"**Estado:** {state_text}", "", "## Efeitos"]
+        lines = [f"# {emoji} Raça", f"**{race_name}**", f"**Estado:** {state_text}", "", "## Efeitos"]
         for effect in self.cog._get_race_effects(race_key):
             lines.append(f"• **{effect.get('title')}**: {effect.get('desc')}")
         lines.extend(["", f"**Troca:** {RACE_REROLL_COST} {self.cog._CHIP_EMOJI}"])
@@ -280,7 +280,7 @@ class _RacePanelView(discord.ui.LayoutView):
 
     async def _ensure_owner(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None or int(interaction.guild.id) != self.guild_id or int(interaction.user.id) != self.user_id:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Race", ["Esse painel pertence a outra pessoa."], ok=False), ephemeral=True)
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", ["Esse painel pertence a outra pessoa."], ok=False), ephemeral=True)
             return False
         return True
 
@@ -291,7 +291,7 @@ class _RacePanelView(discord.ui.LayoutView):
         current = self.cog._get_user_race_key(self.guild_id, self.user_id)
         normal_chips = int(self.cog.db.get_user_chips(self.guild_id, self.user_id, default=CHIPS_INITIAL) or 0)
         if normal_chips < RACE_REROLL_COST:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Race", [f"Você precisa de {RACE_REROLL_COST} {self.cog._CHIP_EMOJI} para trocar."], ok=False), ephemeral=True)
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", [f"Você precisa de {RACE_REROLL_COST} {self.cog._CHIP_EMOJI} para trocar."], ok=False), ephemeral=True)
             return
         await self.cog._change_user_chips(self.guild_id, self.user_id, -RACE_REROLL_COST, mark_activity=True)
         await self.cog._roll_user_race(self.guild_id, self.user_id, exclude_current=bool(current))
@@ -318,7 +318,7 @@ class _RacePanelView(discord.ui.LayoutView):
             return
         race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
         if not race_key:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Race", ["Você ainda não tem uma raça definida."], ok=False), ephemeral=True)
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", ["Você ainda não tem uma raça definida."], ok=False), ephemeral=True)
             return
         now_active = self.cog._is_user_race_active(self.guild_id, self.user_id)
         await self.cog._set_user_race_active(self.guild_id, self.user_id, not now_active)
@@ -353,7 +353,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         info = self._get_race_info_by_key(race_key) or {}
         emoji = str(info.get("emoji") or "🍀")
         race_name = str(info.get("name") or "Sem raça")
-        lines = [f"# {emoji} Race", f"**{race_name}**", "Raça definida.", "", "## Efeitos"]
+        lines = [f"# {emoji} Raça", f"**{race_name}**", "Raça definida.", "", "## Efeitos"]
         for effect in self._get_race_effects(race_key):
             lines.append(f"• **{effect.get('title')}**: {effect.get('desc')}")
         view = discord.ui.LayoutView(timeout=None)
@@ -364,7 +364,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(
             discord.ui.Container(
-                discord.ui.TextDisplay("\n".join(["# 🍀 Race", str(text_line)])),
+                discord.ui.TextDisplay("\n".join(["# 🍀 Raça", str(text_line)])),
                 accent_color=discord.Color.green(),
             )
         )

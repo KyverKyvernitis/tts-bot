@@ -793,7 +793,7 @@ class GincanaBase:
                 "emoji": "🎰",
                 "effects": [
                     {"key": "jackpot", "title": "999 Jackpot", "desc": f"**{self._format_percent_text(0.15)}** • **100** {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "all_in", "title": "999 All-in", "desc": f"**{self._format_percent_text(0.05)}** • **200** {self._CHIP_GAIN_EMOJI}"},
+                    {"key": "all_in", "title": "777 All-in", "desc": f"**{self._format_percent_text(0.05)}** • **200** {self._CHIP_GAIN_EMOJI}"},
                     {"key": "666", "title": "666 Besta", "desc": f"**{self._format_percent_text(0.25)}** • O custo da roleta é estornado"},
                     {"key": "mesa_alta", "title": "Mesa Alta", "desc": f"Entrada da roleta agora é de **25** {self._CHIP_LOSS_EMOJI}"},
                 ],
