@@ -811,9 +811,9 @@ class GincanaBase:
                 "name": "Coringa",
                 "emoji": "🃏",
                 "effects": [
-                    {"key": "as", "title": "Às", "desc": f"Na roleta: **{self._format_percent_text(0.35)}** de recuperar **50%** da entrada"},
-                    {"key": "trapaceiro", "title": "Trapaceiro", "desc": f"Ao falhar em roubar: **{self._format_percent_text(0.25)}** de não perder nada"},
-                    {"key": "redencao", "title": "Redenção", "desc": f"Nas cartas: **{self._format_percent_text(0.35)}** de recuperar **50%** da entrada"},
+                    {"key": "as", "title": "Às", "desc": f"Em jogos de lobby: **{self._format_percent_text(0.35)}** de chance de recuperar **50%** da entrada"},
+                    {"key": "trapaceiro", "title": "Trapaceiro", "desc": f"Ao falhar em roubar: **{self._format_percent_text(0.25)}** de chance de não perder nada"},
+                    {"key": "redencao", "title": "Redenção", "desc": f"Em roleta e cartas: **{self._format_percent_text(0.5)}** de chance de recuperar **50%** do custo do giro"},
                 ],
             },
         }
@@ -853,8 +853,8 @@ class GincanaBase:
             "666": "o custo da roleta foi estornado.",
             "midas": "a versão dourada foi ativada.",
             "premio_extra": f"o prêmio bônus de **20** {self._CHIP_BONUS_EMOJI} foi aplicado.",
-            "as": "você recuperou **50%** da entrada.",
-            "redencao": "você recuperou **50%** da entrada.",
+            "as": "você recuperou **50%** da entrada do lobby.",
+            "redencao": "você recuperou **50%** do custo do giro.",
         }
         suffix = str(detail or detail_map.get(str(effect_key or "").strip().lower(), "")).strip()
         return f"Efeito **{title}** foi usado, {suffix}" if suffix else f"Efeito **{title}** foi usado."
@@ -1087,6 +1087,9 @@ class GincanaBase:
         refund = max(1, int(round(int(entry_cost) * 0.5)))
         await self._change_user_chips(guild_id, user_id, refund, mark_activity=True)
         return refund
+
+    async def _maybe_apply_coringa_lobby_refund(self, guild_id: int, user_id: int, entry_cost: int) -> int:
+        return await self._maybe_apply_coringa_cashback(guild_id, user_id, entry_cost, chance=0.35)
 
     def _coringa_avoids_robbery_penalty(self, guild_id: int, user_id: int) -> bool:
         return self._race_is(guild_id, user_id, "coringa") and random.random() < 0.25

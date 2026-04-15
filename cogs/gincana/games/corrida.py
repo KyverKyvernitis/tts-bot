@@ -1272,8 +1272,12 @@ class GincanaCorridaMixin:
         if final_groups:
             for winner in final_groups[0]:
                 losing_ids.discard(winner.id)
+        coringa_refunds: list[tuple[int, int]] = []
         for user_id in losing_ids:
             await self.db.add_user_game_stat(guild.id, int(user_id), "corrida_losses", 1)
+            refund = await self._maybe_apply_coringa_lobby_refund(guild.id, int(user_id), CORRIDA_STAKE)
+            if refund > 0:
+                coringa_refunds.append((int(user_id), int(refund)))
         for user_id, amount in rewards.items():
             if amount > 0:
                 await self._change_user_chips(guild.id, user_id, amount)
@@ -1282,8 +1286,18 @@ class GincanaCorridaMixin:
             if amount > 0:
                 await self._change_user_bonus_chips(guild.id, user_id, amount)
 
+        if coringa_refunds:
+            if len(coringa_refunds) == 1:
+                refund_user = guild.get_member(coringa_refunds[0][0])
+                refund_note = self._race_effect_message(guild.id, coringa_refunds[0][0], 'as', f"{(refund_user.mention if refund_user else 'Um jogador')} recuperou {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada.")
+                if refund_note:
+                    result_lines.append(refund_note)
+            else:
+                refund_note = f"Efeito **Às** foi usado, **{len(coringa_refunds)}** jogadores recuperaram {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada."
+                result_lines.append(refund_note)
+
         session["starting"] = False
-        session["result_lines"] = result_lines[:3]
+        session["result_lines"] = result_lines[:4]
         message = session.get("message")
         if message is not None:
             try:

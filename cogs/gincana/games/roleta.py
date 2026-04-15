@@ -1186,10 +1186,10 @@ class GincanaRoletaMixin:
                         embed = self._make_roleta_result_embed("🎰 Giro de retorno", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
                     else:
                         await self._record_game_played(guild.id, actor.id, weekly_points=2)
-                        refund = await self._maybe_apply_coringa_cashback(guild.id, actor.id, entry_cost)
+                        refund = await self._maybe_apply_coringa_cashback(guild.id, actor.id, entry_cost, chance=0.5)
                         summary = f"Você perdeu {self._chip_amount(entry_cost)}."
                         if refund > 0:
-                            effect_note = self._race_effect_message(guild.id, actor.id, "as", f"você recuperou {self._chip_text(refund, kind='gain')}.")
+                            effect_note = self._race_effect_message(guild.id, actor.id, "redencao", f"você recuperou {self._chip_text(refund, kind='gain')} do custo do giro.")
                             summary += f"\n{effect_note or ('O efeito Coringa devolveu ' + self._chip_text(refund, kind='gain') + '.')}"
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
@@ -1272,10 +1272,10 @@ class GincanaRoletaMixin:
                         result_reaction = "🍀"
                 else:
                     await self._record_game_played(guild.id, actor.id, weekly_points=2)
-                    refund = await self._maybe_apply_coringa_cashback(guild.id, actor.id, entry_cost)
+                    refund = await self._maybe_apply_coringa_cashback(guild.id, actor.id, entry_cost, chance=0.5)
                     summary = f"{flavor}\nVocê perdeu {self._chip_text(entry_cost, kind='loss')}."
                     if refund > 0:
-                        effect_note = self._race_effect_message(guild.id, actor.id, "redencao", f"você recuperou {self._chip_text(refund, kind='gain')}.")
+                        effect_note = self._race_effect_message(guild.id, actor.id, "redencao", f"você recuperou {self._chip_text(refund, kind='gain')} do custo do giro.")
                         summary += f"\n{effect_note or ('O efeito Coringa devolveu ' + self._chip_text(refund, kind='gain') + '.')}"
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"

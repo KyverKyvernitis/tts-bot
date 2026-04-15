@@ -897,6 +897,14 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             for user_id, amount in bonus_rewards.items():
                 if amount > 0:
                     await self._change_user_bonus_chips(guild.id, user_id, amount)
+        coringa_refunds: list[tuple[int, int]] = []
+        for member in participants:
+            if int(rewards.get(member.id, 0) or 0) > 0:
+                continue
+            refund = await self._maybe_apply_coringa_lobby_refund(guild.id, member.id, ALVO_STAKE)
+            if refund > 0:
+                coringa_refunds.append((member.id, int(refund)))
+
         closing_parts = []
         if winner_mentions and len(winner_mentions) > 1:
             closing_parts.append(f"🔥 {', '.join(winner_mentions)} dividiram a ponta.")
@@ -909,6 +917,14 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                     closing_parts.append(line)
         if bonus_line:
             closing_parts.append(bonus_line)
+        if coringa_refunds:
+            if len(coringa_refunds) == 1:
+                refund_member = guild.get_member(coringa_refunds[0][0])
+                refund_note = self._race_effect_message(guild.id, coringa_refunds[0][0], 'as', f"{(refund_member.mention if refund_member else 'Um jogador')} recuperou {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada.")
+                if refund_note:
+                    closing_parts.append(refund_note)
+            else:
+                closing_parts.append(f"Efeito **Às** foi usado, **{len(coringa_refunds)}** jogadores recuperaram {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada.")
         session['summary_line'] = f"<:boom:1485862099308804107> Os tiros foram disparados. Pote base: {self._chip_amount(prize_total)}"
         if bonus_chips > 0:
             session['summary_line'] += f" • Bônus: {self._bonus_chip_amount(bonus_chips)}"

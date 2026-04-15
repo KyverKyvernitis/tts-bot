@@ -678,7 +678,12 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             if is_golden:
                 await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_golden_eliminations', 1)
             await self._record_game_played(guild.id, chosen.id, weekly_points=3)
+            refund = await self._maybe_apply_coringa_lobby_refund(guild.id, chosen.id, stake)
             lines.append(f"{'<a:uzi:1487936659692458054>💥' if is_golden else '<:gunforward:1484655577836683434>💥'} O disparo aconteceu. {chosen.mention} foi eliminado.")
+            if refund > 0:
+                effect_note = self._race_effect_message(guild.id, chosen.id, 'as', f"{chosen.mention} recuperou {self._chip_text(refund, kind='gain')} da entrada.")
+                if effect_note:
+                    lines.append(effect_note)
             if winners:
                 winner_count = len(winners)
                 max_normal_gain = base_each + (1 if base_remainder > 0 else 0)
