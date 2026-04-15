@@ -30,6 +30,7 @@ class TrucoLobby:
     guild_id: int
     channel_id: int
     creator_id: int
+    variant: str = "normal"
     team_a: list[int] = field(default_factory=list)
     team_b: list[int] = field(default_factory=list)
     message: discord.Message | None = None
@@ -43,6 +44,7 @@ class TrucoGame:
     mode: str
     players_order: list[int]
     teams: list[tuple[int, ...]]
+    variant: str = "normal"
     level: int = 1
     status: str = "invite"
     status_text: str = "Esperando a resposta do desafio."
@@ -131,11 +133,12 @@ class Truco2v2LobbyView(discord.ui.LayoutView):
         a_mentions = [self.guild.get_member(uid).mention for uid in self.lobby.team_a if self.guild.get_member(uid)]
         b_mentions = [self.guild.get_member(uid).mention for uid in self.lobby.team_b if self.guild.get_member(uid)]
         creator = self.guild.get_member(self.lobby.creator_id)
+        reward_bonus = self.cog._truco_bonus_reward_value(self.lobby)
         header = [
-            "# 🃏 Truco 2v2",
+            f"# {self.cog._truco_title_text(self.lobby)} 2v2",
             f"**Entrada:** {self.cog._chip_amount(TRUCO_ENTRY)} cada",
             f"**Pote inicial:** {self.cog._chip_amount(40)}",
-            "**Bônus dos vencedores:** +10 fichas bônus cada",
+            f"**Bônus dos vencedores:** +{reward_bonus} fichas bônus cada",
         ]
         if creator:
             header.append(f"**Criador:** {creator.mention}")
@@ -322,6 +325,21 @@ class GincanaTrucoMixin:
         if not hasattr(self, "_truco_lobbies"):
             self._truco_lobbies = {}
 
+    def _truco_variant(self, game_or_lobby) -> str:
+        return str(getattr(game_or_lobby, "variant", "normal") or "normal").lower()
+
+    def _truco_is_golden(self, game_or_lobby) -> bool:
+        return self._truco_variant(game_or_lobby) == "golden"
+
+    def _truco_title_text(self, game_or_lobby) -> str:
+        return "✨ Truco dourado" if self._truco_is_golden(game_or_lobby) else "🃏 Truco"
+
+    def _truco_bonus_reward_value(self, game_or_lobby) -> int:
+        return self._truco_bonus_reward_for_variant(self._truco_variant(game_or_lobby))
+
+    def _roll_truco_variant_for_user(self, guild_id: int, user_id: int) -> str:
+        return "golden" if random.random() < self._special_variant_chance_for_user(guild_id, user_id) else "normal"
+
     def _truco_create_deck(self):
         deck = [(rank, suit) for rank in _TRUCO_RANKS for suit in _TRUCO_SUITS]
         random.shuffle(deck)
@@ -425,13 +443,14 @@ class GincanaTrucoMixin:
         idx = players_order.index(starter_id)
         return list(players_order[idx:]) + list(players_order[:idx])
 
-    def _truco_make_game(self, guild_id: int, channel_id: int, mode: str, players_order: list[int], teams: list[tuple[int, ...]]) -> TrucoGame:
+    def _truco_make_game(self, guild_id: int, channel_id: int, mode: str, players_order: list[int], teams: list[tuple[int, ...]], *, variant: str = "normal") -> TrucoGame:
         game = TrucoGame(
             guild_id=guild_id,
             channel_id=channel_id,
             mode=mode,
             players_order=list(players_order),
             teams=[tuple(team) for team in teams],
+            variant=str(variant or "normal"),
             level=1,
             status="invite" if mode == "1v1" else "lobby_starting",
             hand_starter_id=players_order[0],
@@ -443,16 +462,24 @@ class GincanaTrucoMixin:
 
     def _truco_challenge_lines(self, game: TrucoGame) -> list[str]:
         guild = self.bot.get_guild(game.guild_id)
-        return [
-            "# 🃏 Truco",
+        title = self._truco_title_text(game)
+        reward_bonus = self._truco_bonus_reward_value(game)
+        lines = [
+            f"# {title}",
             f"{self._truco_member_mention(guild, game.players_order[0])} desafiou {self._truco_member_mention(guild, game.players_order[1])}.",
             f"**Entrada:** {self._chip_amount(TRUCO_ENTRY)} cada",
             f"**Pote inicial:** {self._chip_amount(game.pot)}",
-            "Aceite para começar o jogo.",
+            f"**Bônus dos vencedores:** +{reward_bonus} {self._CHIP_BONUS_EMOJI} cada",
         ]
+        if self._truco_is_golden(game):
+            lines.append("Modo dourado ativo para esta mesa.")
+        else:
+            lines.append("Aceite para começar o jogo.")
+        return lines
 
     def _truco_status_lines(self, game: TrucoGame, *, title: str = "🃏 Truco") -> dict[str, list[str]]:
         guild = self.bot.get_guild(game.guild_id)
+        title = self._truco_title_text(game)
         if game.mode == "2v2":
             duel = [title, f"{self._truco_team_mentions(game, guild, 0)}", "vs", f"{self._truco_team_mentions(game, guild, 1)}"]
         else:
@@ -557,7 +584,7 @@ class GincanaTrucoMixin:
             contrib = int(game.contribution.get(pid, TRUCO_ENTRY))
             if won:
                 share = int(game.pot / max(1, len(game.teams[game.winner_team or 0])))
-                result_lines = ["## Resultado", f"Você ganhou **{share}** {self._CHIP_GAIN_EMOJI} e **+{TRUCO_BONUS_REWARD}** {self._CHIP_BONUS_EMOJI}.", f"Total: **{current_chips}** {self._CHIP_EMOJI} • **{current_bonus}** {self._CHIP_BONUS_EMOJI}."]
+                result_lines = ["## Resultado", f"Você ganhou **{share}** {self._CHIP_GAIN_EMOJI} e **+{self._truco_bonus_reward_value(game)}** {self._CHIP_BONUS_EMOJI}.", f"Total: **{current_chips}** {self._CHIP_EMOJI} • **{current_bonus}** {self._CHIP_BONUS_EMOJI}."]
             else:
                 result_lines = ["## Resultado", f"Você perdeu **{contrib}** {self._CHIP_LOSS_EMOJI}.", f"Total: **{current_chips}** {self._CHIP_EMOJI} • **{current_bonus}** {self._CHIP_BONUS_EMOJI}."]
             status_lines = ["## Status", how_line, final_status]
@@ -819,7 +846,7 @@ class GincanaTrucoMixin:
             await self.db.add_user_game_stat(game.guild_id, uid, "truco_wins", 1)
             await self._record_game_played(game.guild_id, uid, weekly_points=6)
             await self._change_user_chips(game.guild_id, uid, share, mark_activity=True)
-            await self._change_user_bonus_chips(game.guild_id, uid, TRUCO_BONUS_REWARD, mark_activity=True)
+            await self._change_user_bonus_chips(game.guild_id, uid, self._truco_bonus_reward_value(game), mark_activity=True)
         for uid in losers:
             await self.db.add_user_game_stat(game.guild_id, uid, "truco_losses", 1)
             await self._record_game_played(game.guild_id, uid, weekly_points=2)
@@ -897,7 +924,7 @@ class GincanaTrucoMixin:
             return True
         if not await self._truco_require_dm_for_players([challenger.id, opponent.id], channel=message.channel, guild=guild):
             return True
-        game = self._truco_make_game(guild.id, message.channel.id, "1v1", [challenger.id, opponent.id], [(challenger.id,), (opponent.id,)])
+        game = self._truco_make_game(guild.id, message.channel.id, "1v1", [challenger.id, opponent.id], [(challenger.id,), (opponent.id,)], variant=self._roll_truco_variant_for_user(guild.id, challenger.id))
         self._truco_games[guild.id] = game
         embed = discord.Embed(
             title="🃏 Truco",
@@ -924,7 +951,7 @@ class GincanaTrucoMixin:
         if guild.id in self._truco_games or guild.id in self._truco_lobbies:
             await message.channel.send(embed=self._make_embed("🃏 Truco ocupado", "Já existe um truco em andamento neste servidor.", ok=False))
             return True
-        lobby = TrucoLobby(guild_id=guild.id, channel_id=message.channel.id, creator_id=message.author.id)
+        lobby = TrucoLobby(guild_id=guild.id, channel_id=message.channel.id, creator_id=message.author.id, variant=self._roll_truco_variant_for_user(guild.id, message.author.id))
         lobby.team_a = [message.author.id]
         self._truco_lobbies[guild.id] = lobby
         view = Truco2v2LobbyView(self, lobby, guild)

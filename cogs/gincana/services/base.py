@@ -1,4 +1,6 @@
 import asyncio
+import random
+import time
 
 import discord
 from discord.ext import commands
@@ -13,7 +15,13 @@ from ..constants import (
     CHIPS_SEASON_RESET_HOURS,
     CHIPS_SEASON_RESET_SECONDS,
     CHIPS_SEASON_RESET_THRESHOLD,
+    CHIPS_MENDIGAR_COOLDOWN_SECONDS,
+    RACE_REROLL_COST,
+    RACE_SPECIAL_DEFAULT_CHANCE,
+    RACE_SPECIAL_SORTUDO_CHANCE,
+    ROLETA_APOSTADOR_COST,
     ROLETA_COST,
+    TRUCO_GOLDEN_BONUS_EXTRA,
 )
 from db import SettingsDB
 
@@ -284,6 +292,9 @@ class GincanaBase:
         doc = self.db._get_user_doc(guild_id, user_id)
         doc["last_chip_reset_at"] = 0.0
         doc["chip_recharge_manual_initialized"] = False
+        doc.pop("race_key", None)
+        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses"):
+            doc.pop(field, None)
         await self.db._save_user_doc(guild_id, user_id, doc)
         return int(amount)
 
@@ -299,6 +310,9 @@ class GincanaBase:
         doc["weekly_points"] = 0
         doc["game_stats"] = {}
         doc["has_chip_activity"] = False
+        doc.pop("race_key", None)
+        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses"):
+            doc.pop(field, None)
         await self.db._save_user_doc(guild_id, user_id, doc)
         return int(doc["chips"])
 
@@ -724,6 +738,209 @@ class GincanaBase:
             return int(stats.get("games_played", 0) or 0) > 0
         except Exception:
             return False
+
+    def _race_catalog(self) -> dict[str, dict[str, object]]:
+        return {
+            "preto": {
+                "name": "Preto",
+                "emoji": "🕶️",
+                "lines": [
+                    "2 roubos a cada 4 horas em vez de 1 a cada 6 horas.",
+                    "2 pedidos de esmola bem-sucedidos a cada 3 horas.",
+                    "Falha no roubo perde só 5 fichas.",
+                    "Roubo máximo sobe para 40 fichas.",
+                ],
+            },
+            "apostador": {
+                "name": "Apostador",
+                "emoji": "🎰",
+                "lines": [
+                    "Roleta especial com entrada de 25 fichas.",
+                    "999 paga 100 fichas • 777 paga 200 fichas.",
+                    "666 pode devolver a entrada.",
+                    "A sorte da roleta fica bem mais agressiva.",
+                ],
+            },
+            "sortudo": {
+                "name": "Sortudo",
+                "emoji": "🍀",
+                "lines": [
+                    "Buckshot dourado e Truco dourado aparecem com 40% de chance.",
+                    "Truco dourado dá +20 fichas bônus extras para cada vencedor.",
+                    "Daily libera 1 giro de roleta grátis e 1 de cartas grátis.",
+                ],
+            },
+            "coringa": {
+                "name": "Coringa",
+                "emoji": "🃏",
+                "lines": [
+                    "Ao falhar em jogos com entrada, pode recuperar metade da aposta.",
+                    "Ao falhar no roubo, às vezes não perde nada.",
+                    "A raça amortece o azar e reduz o prejuízo.",
+                ],
+            },
+        }
+
+    def _get_user_race_key(self, guild_id: int, user_id: int) -> str:
+        try:
+            raw = str((self.db._get_user_doc(guild_id, user_id) or {}).get("race_key", "") or "").strip().lower()
+        except Exception:
+            raw = ""
+        return raw if raw in self._race_catalog() else ""
+
+    def _get_user_race_info(self, guild_id: int, user_id: int) -> dict[str, object] | None:
+        key = self._get_user_race_key(guild_id, user_id)
+        return self._race_catalog().get(key) if key else None
+
+    def _get_race_info_by_key(self, race_key: str) -> dict[str, object] | None:
+        return self._race_catalog().get(str(race_key or "").strip().lower())
+
+    def _get_race_name(self, race_key: str) -> str:
+        info = self._get_race_info_by_key(race_key)
+        return str(info.get("name")) if info else "Sem raça"
+
+    def _format_user_race(self, guild_id: int, user_id: int) -> str:
+        return self._get_race_name(self._get_user_race_key(guild_id, user_id))
+
+    async def _set_user_race_key(self, guild_id: int, user_id: int, race_key: str | None, *, reset_state: bool = False):
+        doc = self.db._get_user_doc(guild_id, user_id)
+        key = str(race_key or "").strip().lower()
+        if key and key in self._race_catalog():
+            doc["race_key"] = key
+        else:
+            doc.pop("race_key", None)
+        if reset_state:
+            for field in (
+                "race_free_roleta_spins",
+                "race_free_carta_spins",
+                "race_robbery_window_started_at",
+                "race_robbery_uses",
+                "race_mendigar_window_started_at",
+                "race_mendigar_uses",
+            ):
+                doc.pop(field, None)
+        await self.db._save_user_doc(guild_id, user_id, doc)
+
+    async def _clear_user_race(self, guild_id: int, user_id: int):
+        await self._set_user_race_key(guild_id, user_id, None, reset_state=True)
+
+    async def _roll_user_race(self, guild_id: int, user_id: int, *, exclude_current: bool = False) -> str:
+        choices = list(self._race_catalog().keys())
+        current = self._get_user_race_key(guild_id, user_id)
+        if exclude_current and current in choices and len(choices) > 1:
+            choices.remove(current)
+        chosen = random.choice(choices)
+        await self._set_user_race_key(guild_id, user_id, chosen, reset_state=True)
+        return chosen
+
+    def _race_is(self, guild_id: int, user_id: int, race_key: str) -> bool:
+        return self._get_user_race_key(guild_id, user_id) == str(race_key or "").strip().lower()
+
+    def _roleta_cost_for_user(self, guild_id: int, user_id: int) -> int:
+        return ROLETA_APOSTADOR_COST if self._race_is(guild_id, user_id, "apostador") else ROLETA_COST
+
+    def _special_variant_chance_for_user(self, guild_id: int, user_id: int) -> float:
+        return RACE_SPECIAL_SORTUDO_CHANCE if self._race_is(guild_id, user_id, "sortudo") else RACE_SPECIAL_DEFAULT_CHANCE
+
+    def _truco_bonus_reward_for_variant(self, variant: str) -> int:
+        return 10 + TRUCO_GOLDEN_BONUS_EXTRA if str(variant or "normal").lower() == "golden" else 10
+
+    def _limited_action_config(self, guild_id: int, user_id: int, *, action: str) -> tuple[int, float]:
+        action = str(action or "").strip().lower()
+        if action == "robbery":
+            if self._race_is(guild_id, user_id, "preto"):
+                return 2, float(4 * 60 * 60)
+            return 1, float(6 * 60 * 60)
+        if action == "mendigar":
+            if self._race_is(guild_id, user_id, "preto"):
+                return 2, float(CHIPS_MENDIGAR_COOLDOWN_SECONDS)
+            return 1, float(CHIPS_MENDIGAR_COOLDOWN_SECONDS)
+        return 1, 0.0
+
+    def _limited_action_state(self, guild_id: int, user_id: int, *, storage_key: str, limit: int, window_seconds: float) -> dict[str, float | int]:
+        now = time.time()
+        doc = self.db._get_user_doc(guild_id, user_id)
+        try:
+            started_at = float(doc.get(f"{storage_key}_window_started_at", 0) or 0.0)
+        except Exception:
+            started_at = 0.0
+        try:
+            used = max(0, int(doc.get(f"{storage_key}_uses", 0) or 0))
+        except Exception:
+            used = 0
+        window = max(0.0, float(window_seconds or 0.0))
+        if started_at <= 0 or (window > 0 and (started_at + window) <= now):
+            started_at = 0.0
+            used = 0
+        available = max(0, int(limit) - used)
+        remaining = max(0.0, (started_at + window) - now) if available <= 0 and started_at > 0 and window > 0 else 0.0
+        return {
+            "started_at": float(started_at),
+            "used": int(used),
+            "available": int(available),
+            "limit": int(limit),
+            "window_seconds": float(window),
+            "remaining": float(remaining),
+        }
+
+    async def _consume_limited_action(self, guild_id: int, user_id: int, *, storage_key: str, limit: int, window_seconds: float, legacy_field: str | None = None) -> tuple[bool, dict[str, float | int]]:
+        state = self._limited_action_state(guild_id, user_id, storage_key=storage_key, limit=limit, window_seconds=window_seconds)
+        if int(state.get("available", 0) or 0) <= 0:
+            return False, state
+        now = time.time()
+        doc = self.db._get_user_doc(guild_id, user_id)
+        started_at = float(state.get("started_at", 0.0) or 0.0)
+        if started_at <= 0:
+            started_at = now
+        doc[f"{storage_key}_window_started_at"] = float(started_at)
+        doc[f"{storage_key}_uses"] = int(state.get("used", 0) or 0) + 1
+        if legacy_field:
+            doc[str(legacy_field)] = float(now)
+        await self.db._save_user_doc(guild_id, user_id, doc)
+        return True, self._limited_action_state(guild_id, user_id, storage_key=storage_key, limit=limit, window_seconds=window_seconds)
+
+    def _get_race_free_spin_count(self, guild_id: int, user_id: int, *, kind: str) -> int:
+        field = f"race_free_{str(kind)}_spins"
+        try:
+            return max(0, int((self.db._get_user_doc(guild_id, user_id) or {}).get(field, 0) or 0))
+        except Exception:
+            return 0
+
+    async def _grant_race_daily_free_spins(self, guild_id: int, user_id: int) -> dict[str, bool]:
+        result = {"roleta": False, "carta": False}
+        if not self._race_is(guild_id, user_id, "sortudo"):
+            return result
+        doc = self.db._get_user_doc(guild_id, user_id)
+        if int(doc.get("race_free_roleta_spins", 0) or 0) < 1:
+            doc["race_free_roleta_spins"] = 1
+            result["roleta"] = True
+        if int(doc.get("race_free_carta_spins", 0) or 0) < 1:
+            doc["race_free_carta_spins"] = 1
+            result["carta"] = True
+        await self.db._save_user_doc(guild_id, user_id, doc)
+        return result
+
+    async def _consume_race_free_spin(self, guild_id: int, user_id: int, *, kind: str) -> bool:
+        field = f"race_free_{str(kind)}_spins"
+        doc = self.db._get_user_doc(guild_id, user_id)
+        current = max(0, int(doc.get(field, 0) or 0))
+        if current <= 0:
+            return False
+        doc[field] = current - 1
+        await self.db._save_user_doc(guild_id, user_id, doc)
+        return True
+
+    async def _maybe_apply_coringa_cashback(self, guild_id: int, user_id: int, entry_cost: int, *, chance: float = 0.35) -> int:
+        if entry_cost <= 0 or not self._race_is(guild_id, user_id, "coringa"):
+            return 0
+        if random.random() >= float(chance):
+            return 0
+        refund = max(1, int(round(int(entry_cost) * 0.5)))
+        await self._change_user_chips(guild_id, user_id, refund, mark_activity=True)
+        return refund
+
+    def _coringa_avoids_robbery_penalty(self, guild_id: int, user_id: int) -> bool:
+        return self._race_is(guild_id, user_id, "coringa") and random.random() < 0.25
 
     def _chip_rank_position_text(self, guild: discord.Guild, user_id: int) -> str | None:
         rows = self.db.get_chip_leaderboard(guild.id, limit=1000000)

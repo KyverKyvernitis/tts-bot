@@ -743,7 +743,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             return True
         if self._get_buckshot_session(guild.id) is not None:
             return True
-        variant = 'golden' if random.random() < 0.10 else 'normal'
+        variant = 'golden' if random.random() < self._special_variant_chance_for_user(guild.id, message.author.id) else 'normal'
         stake = 30 if variant == 'golden' else BUCKSHOT_STAKE
         needs_negative_confirm = self._needs_negative_confirmation(guild.id, message.author.id, stake)
         if needs_negative_confirm:

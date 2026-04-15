@@ -14,6 +14,7 @@ from .constants import (
     CHIPS_MENDIGAR_TIMEOUT_SECONDS,
     CHIPS_PAY_MIN_BALANCE,
     CHIPS_PAY_RECEIVER_MAX_BALANCE,
+    RACE_REROLL_COST,
     _guild_scoped,
 )
 
@@ -172,11 +173,27 @@ class _MendigarRequestView(discord.ui.LayoutView):
             )
             return
 
+        request_limit, request_window = self.cog._limited_action_config(self.guild_id, recipient.id, action="mendigar")
+        can_request, _request_state = await self.cog._consume_limited_action(
+            self.guild_id,
+            recipient.id,
+            storage_key="race_mendigar",
+            limit=request_limit,
+            window_seconds=request_window,
+            legacy_field="last_mendigar_at",
+        )
+        if not can_request:
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice(
+                    "💸 Esmola bloqueada",
+                    ["Esse pedido já ficou velho demais para valer uma nova esmola agora."],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
+            return
         await self.cog._transfer_user_chips(self.guild_id, donor.id, recipient.id, total=self.amount, net_amount=self.amount)
         now_ts = float(time.time())
-        requester_doc = self.cog.db._get_user_doc(self.guild_id, recipient.id)
-        requester_doc["last_mendigar_at"] = now_ts
-        await self.cog.db._save_user_doc(self.guild_id, recipient.id, requester_doc)
         donor_doc["last_esmola_at"] = now_ts
         await self.cog.db._save_user_doc(self.guild_id, donor.id, donor_doc)
         self.fulfilled = True
@@ -214,6 +231,76 @@ class _MendigarRequestView(discord.ui.LayoutView):
             pass
 
 
+class _RacePanelView(discord.ui.LayoutView):
+    def __init__(self, cog: "GincanaCog", *, guild_id: int, user_id: int, just_assigned: bool = False):
+        super().__init__(timeout=180.0)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.user_id = int(user_id)
+        self.just_assigned = bool(just_assigned)
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        race_key = self.cog._get_user_race_key(self.guild_id, self.user_id)
+        info = self.cog._get_race_info_by_key(race_key) or {}
+        race_name = str(info.get("name") or "Sem raça")
+        emoji = str(info.get("emoji") or "🧬")
+        lines = [f"# {emoji} Race", f"**Raça atual:** {race_name}"]
+        if self.just_assigned:
+            lines.append("Sua raça foi definida aleatoriamente agora.")
+        lines.append("")
+        lines.append("## Efeitos")
+        race_lines = [f"• {line}" for line in list(info.get("lines") or [])]
+        if race_lines:
+            lines.extend(race_lines)
+        else:
+            lines.append("• Use o botão abaixo para descobrir sua raça.")
+        lines.extend([
+            "",
+            f"**Trocar raça:** {self.cog._chip_amount(RACE_REROLL_COST)} em fichas normais",
+            "A raça some no fim da temporada e em resets globais/administrativos.",
+        ])
+        reroll = discord.ui.Button(label="Trocar raça", emoji="🎲", style=discord.ButtonStyle.primary)
+        reroll.callback = self._reroll
+        close = discord.ui.Button(label="Fechar", style=discord.ButtonStyle.secondary)
+        close.callback = self._close
+        row = discord.ui.ActionRow(reroll, close)
+        self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), row, accent_color=discord.Color.blurple()))
+
+
+    async def _reroll(self, interaction: discord.Interaction):
+        if interaction.guild is None or int(interaction.guild.id) != self.guild_id or int(interaction.user.id) != self.user_id:
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🧬 Race", ["Esse painel pertence a outra pessoa."], ok=False), ephemeral=True)
+            return
+        await self.cog._maybe_execute_due_chip_season_reset(self.guild_id)
+        current = self.cog._get_user_race_key(self.guild_id, self.user_id)
+        normal_chips = int(self.cog.db.get_user_chips(self.guild_id, self.user_id, default=CHIPS_INITIAL) or 0)
+        if normal_chips < RACE_REROLL_COST:
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🧬 Race", [f"Você precisa de pelo menos {self.cog._chip_amount(RACE_REROLL_COST)} em fichas normais para trocar de raça."], ok=False), ephemeral=True)
+            return
+        await self.cog._change_user_chips(self.guild_id, self.user_id, -RACE_REROLL_COST, mark_activity=True)
+        race_key = await self.cog._roll_user_race(self.guild_id, self.user_id, exclude_current=bool(current))
+        self.just_assigned = False
+        self._build_layout()
+        race_name = self.cog._get_race_name(race_key)
+        try:
+            await interaction.response.edit_message(view=self)
+        except Exception:
+            await interaction.message.edit(view=self)
+        try:
+            await interaction.followup.send(view=self.cog._make_v2_notice("🧬 Race", [f"Sua nova raça é **{race_name}**."], ok=True), ephemeral=True)
+        except Exception:
+            pass
+
+    async def _close(self, interaction: discord.Interaction):
+        if int(interaction.user.id) != self.user_id:
+            await interaction.response.send_message(view=self.cog._make_v2_notice("🧬 Race", ["Esse painel pertence a outra pessoa."], ok=False), ephemeral=True)
+            return
+        await interaction.response.edit_message(view=self.cog._make_v2_notice("🧬 Race", ["Painel fechado."], ok=True))
+        self.stop()
+
+
 class GincanaCog(dcommands.Cog, GincanaCore):
     def __init__(self, bot: dcommands.Bot, db):
         dcommands.Cog.__init__(self)
@@ -246,11 +333,10 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             )
             return True
 
-        user_doc = self.db._get_user_doc(guild.id, message.author.id)
-        now = time.time()
-        last_used = float(user_doc.get("last_mendigar_at", 0) or 0)
-        remaining = (last_used + CHIPS_MENDIGAR_COOLDOWN_SECONDS) - now
-        if remaining > 0:
+        limit, window_seconds = self._limited_action_config(guild.id, message.author.id, action="mendigar")
+        action_state = self._limited_action_state(guild.id, message.author.id, storage_key="race_mendigar", limit=limit, window_seconds=window_seconds)
+        remaining = float(action_state.get("remaining", 0.0) or 0.0)
+        if int(action_state.get("available", 0) or 0) <= 0 and remaining > 0:
             await message.channel.send(
                 view=self._make_v2_notice(
                     "🥺 Esmola",
@@ -322,6 +408,24 @@ class GincanaCog(dcommands.Cog, GincanaCore):
 
         return await self._start_mendigar_request(message, amount=amount, target=target)
 
+    async def _handle_race_trigger(self, message: discord.Message) -> bool:
+        content = str(message.content or "").strip().casefold()
+        if content.startswith("_"):
+            return False
+        if content != "race":
+            return False
+        if message.guild is None:
+            return True
+        await self._maybe_execute_due_chip_season_reset(message.guild.id)
+        race_key = self._get_user_race_key(message.guild.id, message.author.id)
+        just_assigned = False
+        if not race_key:
+            race_key = await self._roll_user_race(message.guild.id, message.author.id)
+            just_assigned = True
+        view = _RacePanelView(self, guild_id=message.guild.id, user_id=message.author.id, just_assigned=just_assigned)
+        await message.channel.send(view=view)
+        return True
+
     @_guild_scoped()
     @app_commands.command(name="gincana", description="Gerencia as roles e modos da gincana")
     @app_commands.describe(
@@ -369,8 +473,15 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         await self._grant_weekly_points(ctx.guild.id, ctx.author.id, max(3, bonus // 2))
         spin_granted, _spin_state = await self._grant_daily_roleta_spin(ctx.guild.id, ctx.author.id)
         carta_spin_granted, _carta_spin_state = await self._grant_daily_carta_spin(ctx.guild.id, ctx.author.id)
+        race_free = await self._grant_race_daily_free_spins(ctx.guild.id, ctx.author.id)
         spin_text = "Você ganhou **+1 giro de roleta**" if spin_granted else "Seu giro extra da roleta já estava disponível"
         carta_spin_text = "Você ganhou **+1 giro de cartas**" if carta_spin_granted else "Seu giro extra de cartas já estava disponível"
+        race_spin_text = "Sua raça não alterou o daily desta vez."
+        if self._race_is(ctx.guild.id, ctx.author.id, "sortudo"):
+            extra_parts = []
+            extra_parts.append("+1 giro de roleta grátis" if race_free.get("roleta") else "seu giro grátis de roleta já estava guardado")
+            extra_parts.append("+1 giro de cartas grátis" if race_free.get("carta") else "seu giro grátis de cartas já estava guardado")
+            race_spin_text = "Bônus da raça Sortudo: " + " • ".join(extra_parts)
         embed = discord.Embed(
             title="🎁 Bônus diário resgatado",
             description=(
@@ -475,9 +586,10 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return True
         adoc = self.db._get_user_doc(guild.id, author.id)
         now = time.time()
-        last = float(adoc.get('last_robbery_at', 0) or 0)
-        remaining = max(0, int((last + 21600) - now))
-        if remaining > 0:
+        rob_limit, rob_window = self._limited_action_config(guild.id, author.id, action="robbery")
+        rob_state = self._limited_action_state(guild.id, author.id, storage_key="race_robbery", limit=rob_limit, window_seconds=rob_window)
+        remaining = max(0, int(float(rob_state.get("remaining", 0.0) or 0.0)))
+        if int(rob_state.get("available", 0) or 0) <= 0 and remaining > 0:
             wait = self._format_wait_compact(remaining)
             await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já aprontou demais por agora.", f"Tente de novo em **{wait}**."], ok=False))
             return True
@@ -492,11 +604,22 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             else:
                 await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário é muito **pobre** pra ser roubado."], ok=False))
             return True
-        adoc['last_robbery_at'] = float(now)
-        await self.db._save_user_doc(guild.id, author.id, adoc)
+        consumed, _consumed_state = await self._consume_limited_action(
+            guild.id,
+            author.id,
+            storage_key="race_robbery",
+            limit=rob_limit,
+            window_seconds=rob_window,
+            legacy_field="last_robbery_at",
+        )
+        if not consumed:
+            wait = self._format_wait_compact(max(1.0, float(rob_state.get("remaining", 0.0) or 1.0)))
+            await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você já aprontou demais por agora.", f"Tente de novo em **{wait}**."], ok=False))
+            return True
         success = random.random() < 0.40
         if success:
-            amount = random.randint(5, min(30, max(5, target_chips)))
+            max_rob = 40 if self._race_is(guild.id, author.id, "preto") else 30
+            amount = random.randint(5, min(max_rob, max(5, target_chips)))
             await self._change_user_chips(guild.id, target.id, -amount, mark_activity=True)
             await self._change_user_chips(guild.id, author.id, amount, mark_activity=True)
             flavor = random.choice([
@@ -506,11 +629,14 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             ])
             await channel.send(view=self._make_v2_notice("🕵️ Roubo", [flavor], ok=True, accent_color=discord.Color.dark_green()))
             return True
-        penalty = 10
-        await self._change_user_chips(guild.id, author.id, -penalty, mark_activity=True)
+        penalty = 5 if self._race_is(guild.id, author.id, "preto") else 10
+        if self._coringa_avoids_robbery_penalty(guild.id, author.id):
+            penalty = 0
+        if penalty > 0:
+            await self._change_user_chips(guild.id, author.id, -penalty, mark_activity=True)
         lines = [
             f"Você tentou roubar {target.mention}, mas foi pego no flagra.",
-            f"Você perdeu {self._chip_text(penalty, kind='loss')}."
+            (f"Você perdeu {self._chip_text(penalty, kind='loss')}." if penalty > 0 else "Mas o efeito Coringa te salvou dessa perda.")
         ]
         await channel.send(view=self._make_v2_notice("🕵️ Deu ruim", lines, ok=False, accent_color=discord.Color.red()))
         return True

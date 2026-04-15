@@ -1334,6 +1334,13 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
             "last_robbery_at": 0.0,
             "last_mendigar_at": 0.0,
             "last_esmola_at": 0.0,
+            "race_key": "",
+            "race_free_roleta_spins": 0,
+            "race_free_carta_spins": 0,
+            "race_robbery_window_started_at": 0.0,
+            "race_robbery_uses": 0,
+            "race_mendigar_window_started_at": 0.0,
+            "race_mendigar_uses": 0,
         }
     }
     await self.coll.update_many({"type": "user", "guild_id": guild_id}, update_payload)
@@ -1355,6 +1362,13 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
         updated["last_robbery_at"] = 0.0
         updated["last_mendigar_at"] = 0.0
         updated["last_esmola_at"] = 0.0
+        updated["race_key"] = ""
+        updated["race_free_roleta_spins"] = 0
+        updated["race_free_carta_spins"] = 0
+        updated["race_robbery_window_started_at"] = 0.0
+        updated["race_robbery_uses"] = 0
+        updated["race_mendigar_window_started_at"] = 0.0
+        updated["race_mendigar_uses"] = 0
         self.user_cache[key] = updated
         affected += 1
     return affected
