@@ -45,7 +45,7 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
     {"number": 7, "name": "Laranja escuro", "text_hex": "#d98900", "role_hex": "#ff8c00"},
     {"number": 8, "name": "Bege escuro", "text_hex": "#b96d43", "role_hex": "#a0522d"},
     {"number": 9, "name": "Ciano escuro", "text_hex": "#008f98", "role_hex": "#008b8b"},
-    {"number": 10, "name": "Preto", "text_hex": "#000000", "role_hex": "#000000"},
+    {"number": 10, "name": "Preto", "text_hex": "#000000", "role_hex": "#1f1f1f"},
     {"number": 11, "name": "Vermelho", "text_hex": "#ff1b1b", "role_hex": "#ff0000"},
     {"number": 12, "name": "Amarelo", "text_hex": "#ffec1a", "role_hex": "#ffd700"},
     {"number": 13, "name": "Verde", "text_hex": "#11b611", "role_hex": "#00ff00"},
@@ -613,23 +613,10 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             files.append(self.cog._make_block_image(self.guild_id, block_index, filename=f"colors-editor-{block_index}.png"))
         return files
 
-    def _media_gallery_for_message(self, message_index: int) -> discord.ui.MediaGallery | None:
-        if not _message_supports_slots(message_index):
-            return None
-        filename = f"colors-editor-{message_index}.png"
-        return discord.ui.MediaGallery(
-            discord.MediaGalleryItem(
-                f"attachment://{filename}",
-                description=f"Preview ao vivo da faixa {_block_title(message_index)}",
-            )
-        )
-
     def editor_message_payload(self) -> dict[str, Any]:
         return {
             "view": self,
-            "content": None,
-            "embed": None,
-            "embeds": [],
+            "content": "\u200b",
             "attachments": self._editor_preview_files(),
         }
 
@@ -662,7 +649,7 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             "• Só o `_coloredit` usa Components V2.",
             "• As três primeiras mensagens são as faixas 1–10, 11–20 e 21–30.",
             "• Você pode adicionar até 2 mensagens extras de texto, totalizando no máximo 5 mensagens.",
-            "• Cada faixa abaixo mostra um preview ao vivo da imagem real com fundo transparente.",
+            "• Os previews vivos das três faixas ficam anexados nesta própria mensagem do editor.",
             "",
             "**Variáveis aceitas nas respostas**",
             "• " + " • ".join(COLOR_PANEL_VARIABLES[:5]),
@@ -682,7 +669,7 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         ]
         if _message_supports_slots(message_index):
             lines.append(f"**Slots dessa faixa:** {_block_title(message_index)}")
-            lines.append("O preview real da imagem aparece logo abaixo deste bloco.")
+            lines.append("O preview vivo dessa faixa fica anexado nesta própria mensagem do editor.")
         else:
             lines.append("**Tipo:** mensagem extra normal, sem botões de cor.")
         return lines
@@ -734,9 +721,6 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
                 discord.ui.ActionRow(*row_two),
                 accent_color=discord.Colour.green() if self.active_block == message_index else discord.Colour.dark_green(),
             ))
-            gallery = self._media_gallery_for_message(message_index)
-            if gallery is not None:
-                self.add_item(gallery)
         if _message_supports_slots(self.active_block):
             self.add_item(discord.ui.Container(
                 discord.ui.TextDisplay("\n".join(self._slot_editor_lines(self.active_block))),
@@ -1318,9 +1302,13 @@ class ColorRolesCog(commands.Cog):
                 await old_msg.delete()
             except Exception:
                 pass
-        view = _ColorUnifiedEditView(self, guild_id=ctx.guild.id, owner_id=ctx.author.id)
-        payload = view.editor_message_payload()
-        msg = await ctx.send(view=view, files=payload["attachments"])
+        try:
+            view = _ColorUnifiedEditView(self, guild_id=ctx.guild.id, owner_id=ctx.author.id)
+            payload = view.editor_message_payload()
+            msg = await ctx.channel.send(content=payload["content"], view=view, files=payload["attachments"])
+        except Exception as e:
+            await ctx.send(f"não consegui abrir o editor de cores: {e}")
+            return
         view.message = msg
         self._active_edit_messages[key] = int(msg.id)
 

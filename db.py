@@ -1409,7 +1409,7 @@ def _settingsdb_color_roles_defaults() -> dict[str, Any]:
         (7, "Laranja escuro", "#d98900", "#ff8c00"),
         (8, "Bege escuro", "#b96d43", "#a0522d"),
         (9, "Ciano escuro", "#008f98", "#008b8b"),
-        (10, "Preto", "#000000", "#000000"),
+        (10, "Preto", "#000000", "#1f1f1f"),
         (11, "Vermelho", "#ff1b1b", "#ff0000"),
         (12, "Amarelo", "#ffec1a", "#ffd700"),
         (13, "Verde", "#11b611", "#00ff00"),
