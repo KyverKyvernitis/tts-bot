@@ -157,8 +157,7 @@ class _ColorFieldEditModal(discord.ui.Modal):
             footer=str(block_cfg.get("footer") or ""),
         )
         await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
-        self.view_ref._build_layout()
-        await interaction.response.edit_message(view=self.view_ref)
+        await self.view_ref.refresh_editor_message(interaction)
 
 
 class _ColorTemplatesEditModal(discord.ui.Modal):
@@ -180,8 +179,7 @@ class _ColorTemplatesEditModal(discord.ui.Modal):
             remove=str(self.remove_input.value or "").strip(),
             switch=str(self.switch_input.value or "").strip(),
         )
-        self.view_ref._build_layout()
-        await interaction.response.edit_message(view=self.view_ref)
+        await self.view_ref.refresh_editor_message(interaction)
 
 
 class _ColorSlotEditModal(discord.ui.Modal):
@@ -213,8 +211,7 @@ class _ColorSlotEditModal(discord.ui.Modal):
         if guild is not None:
             await self.view_ref.cog._ensure_slot_role(guild, self.slot_number)
         await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
-        self.view_ref._build_layout()
-        await interaction.response.edit_message(view=self.view_ref)
+        await self.view_ref.refresh_editor_message(interaction)
 
 
 class _ColorPickerButton(discord.ui.Button):
@@ -283,8 +280,7 @@ class _OpenBlockEditorButton(discord.ui.Button):
         if not await self.view_ref.ensure_owner(interaction):
             return
         self.view_ref.active_block = self.block_index
-        self.view_ref._build_layout()
-        await interaction.response.edit_message(view=self.view_ref)
+        await self.view_ref.refresh_editor_message(interaction)
 
 
 class _EditTemplatesButton(discord.ui.Button):
@@ -313,8 +309,7 @@ class _BlockSlotSelect(discord.ui.Select):
         if not await self.view_ref.ensure_owner(interaction):
             return
         self.view_ref.selected_slots[self.block_index] = int(self.values[0])
-        self.view_ref._build_layout()
-        await interaction.response.edit_message(view=self.view_ref)
+        await self.view_ref.refresh_editor_message(interaction)
 
 
 class _BlockRoleSelect(discord.ui.RoleSelect):
@@ -343,8 +338,7 @@ class _BlockRoleSelect(discord.ui.RoleSelect):
             role_hex=str(slot.get("role_hex") or "#ffffff"),
         )
         await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
-        self.view_ref._build_layout()
-        await interaction.response.edit_message(view=self.view_ref)
+        await self.view_ref.refresh_editor_message(interaction)
 
 
 class _AutoRoleButton(discord.ui.Button):
@@ -364,8 +358,7 @@ class _AutoRoleButton(discord.ui.Button):
         await self.view_ref.cog._update_slot_config(self.view_ref.guild_id, selected_slot, role_id=0, managed=True)
         await self.view_ref.cog._ensure_slot_role(guild, selected_slot)
         await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
-        self.view_ref._build_layout()
-        await interaction.response.edit_message(view=self.view_ref)
+        await self.view_ref.refresh_editor_message(interaction)
 
 
 class _EditSlotButton(discord.ui.Button):
@@ -398,6 +391,25 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             return False
         return True
 
+    def _editor_preview_files(self) -> list[discord.File]:
+        return [
+            self.cog._make_block_image(self.guild_id, block_index, filename=f"colors-editor-{block_index}.png")
+            for block_index in range(1, COLOR_BLOCK_COUNT + 1)
+        ]
+
+    async def refresh_editor_message(self, interaction: discord.Interaction):
+        self._build_layout()
+        payload = {
+            "view": self,
+            "attachments": self._editor_preview_files(),
+        }
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        target = interaction.message or self.message
+        if target is not None:
+            await target.edit(**payload)
+            self.message = target
+
     def _block_preview_lines(self, block_index: int) -> list[str]:
         cfg = self.cog._get_message_block_config(self.guild_id, block_index)
         start, end = _chunk_block(block_index)
@@ -410,6 +422,7 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             f"**Descrição:** {subtitle}",
             f"**Footer:** {footer}",
             f"**Slots:** {start}–{end}",
+            f"**Preview visual:** anexo `colors-editor-{block_index}.png` desta mensagem",
         ]
 
     def _slot_editor_lines(self, block_index: int) -> list[str]:
@@ -432,6 +445,7 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         header_lines = [
             "# 🎨 Editor do painel de cores",
             "As 3 faixas abaixo atualizam ao vivo o painel oficial quando ele já existir no servidor.",
+            "Os previews visuais das 3 mensagens ficam nos anexos desta própria mensagem do editor.",
             "",
             "**Variáveis disponíveis**",
             "• " + " • ".join(COLOR_PANEL_VARIABLES[:5]),
@@ -560,7 +574,7 @@ class ColorRolesCog(commands.Cog):
         if existing and not bool(slot.get("managed")):
             return existing
         me = guild.me or guild.get_member(self.bot.user.id) if self.bot.user else None
-        if me is None or not guild.me.guild_permissions.manage_roles:
+        if me is None or not me.guild_permissions.manage_roles:
             return existing
         try:
             if existing is None:
@@ -683,7 +697,7 @@ class ColorRolesCog(commands.Cog):
             except Exception:
                 pass
 
-    def _make_block_image(self, guild_id: int, block_index: int) -> discord.File:
+    def _make_block_image(self, guild_id: int, block_index: int, *, filename: str | None = None) -> discord.File:
         if Image is None or ImageDraw is None:
             raise RuntimeError("Pillow não está disponível para gerar as imagens do painel de cores.")
         start, end = _chunk_block(block_index)
@@ -705,23 +719,14 @@ class ColorRolesCog(commands.Cog):
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         buffer.seek(0)
-        return discord.File(buffer, filename=f"colors-{block_index}.png")
+        return discord.File(buffer, filename=filename or f"colors-{block_index}.png")
 
     async def _post_public_panel(self, channel: discord.abc.Messageable, guild: discord.Guild) -> list[int]:
         message_ids: list[int] = []
         for block_index in range(1, COLOR_BLOCK_COUNT + 1):
             view = _ColorPublicPanelView(self, guild.id, block_index)
             file = self._make_block_image(guild.id, block_index)
-            block_cfg = self._get_message_block_config(guild.id, block_index)
-            lines = []
-            if str(block_cfg.get("title") or "").strip():
-                lines.append(f"# {str(block_cfg.get('title')).strip()}")
-            if str(block_cfg.get("subtitle") or "").strip():
-                lines.append(str(block_cfg.get("subtitle")).strip())
-            if str(block_cfg.get("footer") or "").strip():
-                lines.append(str(block_cfg.get("footer")).strip())
-            content = "\n".join(lines) if lines else None
-            message = await channel.send(content=content, file=file, view=view)
+            message = await channel.send(file=file, view=view)
             message_ids.append(int(message.id))
             key = (guild.id, block_index, int(message.id))
             try:
@@ -751,22 +756,8 @@ class ColorRolesCog(commands.Cog):
                 continue
             file = self._make_block_image(guild_id, block_index)
             view = _ColorPublicPanelView(self, guild_id, block_index)
-            block_cfg = self._get_message_block_config(guild_id, block_index)
-            lines = []
-            title = str(block_cfg.get("title") or "").strip()
-            subtitle = str(block_cfg.get("subtitle") or "").strip()
-            footer = str(block_cfg.get("footer") or "").strip()
-            if title:
-                lines.append(f"# {title}")
-            if subtitle:
-                lines.append(subtitle)
-            if footer:
-                if lines:
-                    lines.append("")
-                lines.append(footer)
-            content = "\n".join(lines) if lines else None
             try:
-                await message.edit(content=content, attachments=[file], view=view)
+                await message.edit(content=None, attachments=[file], view=view)
             except Exception:
                 pass
             key = (guild_id, block_index, message_id)
@@ -820,7 +811,7 @@ class ColorRolesCog(commands.Cog):
             except Exception:
                 pass
         view = _ColorUnifiedEditView(self, guild_id=ctx.guild.id, owner_id=ctx.author.id)
-        msg = await ctx.reply(view=view, mention_author=False)
+        msg = await ctx.reply(view=view, files=view._editor_preview_files(), mention_author=False)
         view.message = msg
         self._active_edit_messages[key] = int(msg.id)
 
