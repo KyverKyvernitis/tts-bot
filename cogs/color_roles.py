@@ -412,18 +412,27 @@ class _RemoveLastExtraMessageButton(discord.ui.Button):
         await self.view_ref.cog._rebuild_public_panel(self.view_ref.guild_id)
 
 
-class _FocusBlockButton(discord.ui.Button):
-    def __init__(self, view: "_ColorUnifiedEditView", message_index: int):
-        label = "Abrir faixa" if _message_supports_slots(message_index) else "Abrir mensagem"
-        style = discord.ButtonStyle.primary if view.active_block == message_index else discord.ButtonStyle.secondary
-        super().__init__(label=label, style=style)
+class _MessageSelect(discord.ui.Select):
+    def __init__(self, view: "_ColorUnifiedEditView"):
         self.view_ref = view
-        self.message_index = int(message_index)
+        options: list[discord.SelectOption] = []
+        panel_count = view.cog._get_panel_count(view.guild_id)
+        for message_index in range(1, panel_count + 1):
+            description = f"Faixa {_block_title(message_index)}" if _message_supports_slots(message_index) else "Mensagem extra"
+            options.append(
+                discord.SelectOption(
+                    label=_message_label(message_index)[:100],
+                    value=str(message_index),
+                    description=description[:100],
+                    default=view.active_block == message_index,
+                )
+            )
+        super().__init__(placeholder="Escolha a mensagem para editar", options=options, min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
-        self.view_ref.active_block = self.message_index
+        self.view_ref.active_block = int(self.values[0])
         await self.view_ref.refresh_editor_message(interaction)
 
 
@@ -637,23 +646,11 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
 
     def _header_lines(self) -> list[str]:
         panel_ready = self.cog._panel_exists(self.guild_id)
-        status = (
-            "Painel oficial encontrado. Tudo que você editar aqui já atualiza as mensagens públicas em tempo real."
-            if panel_ready
-            else "Painel oficial ainda não foi postado. Você pode preparar tudo aqui e usar `_color` depois."
-        )
+        status = "Painel oficial online." if panel_ready else "Painel oficial ainda não foi postado."
         return [
             "# 🎨 Editor do painel de cores",
             status,
-            "• `_color` publica mensagens normais com botões numéricos.",
-            "• Só o `_coloredit` usa Components V2.",
-            "• As três primeiras mensagens são as faixas 1–10, 11–20 e 21–30.",
-            "• Você pode adicionar até 2 mensagens extras de texto, totalizando no máximo 5 mensagens.",
-            "• Os previews vivos das três faixas ficam anexados nesta própria mensagem do editor.",
-            "",
-            "**Variáveis aceitas nas respostas**",
-            "• " + " • ".join(COLOR_PANEL_VARIABLES[:5]),
-            "• " + " • ".join(COLOR_PANEL_VARIABLES[5:]),
+            f"Mensagem ativa: {_message_label(self.active_block)}",
         ]
 
     def _block_lines(self, message_index: int) -> list[str]:
@@ -663,81 +660,74 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         footer = str(cfg.get("footer") or "").strip() or "(vazio)"
         lines = [
             f"## {_message_label(message_index)}",
-            f"**Título atual:** {title}",
-            f"**Descrição atual:** {subtitle}",
-            f"**Footer atual:** {footer}",
+            f"**Título:** {title}",
+            f"**Descrição:** {subtitle}",
+            f"**Footer:** {footer}",
         ]
         if _message_supports_slots(message_index):
-            lines.append(f"**Slots dessa faixa:** {_block_title(message_index)}")
-            lines.append("O preview vivo dessa faixa fica anexado nesta própria mensagem do editor.")
+            lines.append(f"**Faixa:** {_block_title(message_index)}")
         else:
-            lines.append("**Tipo:** mensagem extra normal, sem botões de cor.")
+            lines.append("**Tipo:** mensagem extra")
         return lines
 
     def _slot_editor_lines(self, block_index: int) -> list[str]:
         selected_slot = self.selected_slots.get(block_index, _chunk_block(block_index)[0])
         slot = self.cog._get_slot_config(self.guild_id, selected_slot)
         role_id = int(slot.get("role_id") or 0)
-        role_repr = f"<@&{role_id}>" if role_id else "Cargo automático / ainda não vinculado"
+        role_repr = f"<@&{role_id}>" if role_id else "Automático"
         managed_text = "sim" if bool(slot.get("managed", False) or role_id <= 0) else "não"
         return [
-            f"## Editor da faixa {_block_title(block_index)}",
-            f"**Slot selecionado:** {selected_slot}",
-            f"**Nome na imagem:** {slot.get('name')}",
-            f"**Cor do texto:** {slot.get('text_hex')}",
-            f"**Cargo vinculado:** {role_repr}",
+            f"## Faixa {_block_title(block_index)}",
+            f"**Slot:** {selected_slot}",
+            f"**Nome:** {slot.get('name')}",
+            f"**Texto:** {slot.get('text_hex')}",
+            f"**Cargo:** {role_repr}",
             f"**Cor do cargo:** {slot.get('role_hex')}",
-            f"**Gerenciado pelo bot:** {managed_text}",
-            "Use este bloco para mexer no visual, escolher cargo existente ou deixar o bot cuidar do cargo automaticamente.",
+            f"**Automático:** {managed_text}",
         ]
 
     def _build_layout(self):
         self.clear_items()
         panel_count = self.cog._get_panel_count(self.guild_id)
-        top_buttons = [_EditTemplatesButton(self), _AddMessageButton(self)]
+        top_buttons: list[discord.ui.Item[Any]] = [_EditTemplatesButton(self), _AddMessageButton(self)]
         if panel_count > COLOR_BLOCK_COUNT:
             top_buttons.append(_RemoveLastExtraMessageButton(self))
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(self._header_lines())),
+            discord.ui.ActionRow(_MessageSelect(self)),
             discord.ui.ActionRow(*top_buttons),
             accent_color=discord.Colour.green(),
         ))
-        for message_index in range(1, panel_count + 1):
-            row_one = [
-                _EditFieldButton(self, message_index, "title", "Editar título"),
-                _EditFieldButton(self, message_index, "subtitle", "Editar descrição"),
-                _EditFieldButton(self, message_index, "footer", "Editar footer"),
-            ]
-            row_two: list[discord.ui.Item[Any]] = [
-                _FocusBlockButton(self, message_index),
-                _MoveMessageButton(self, message_index, -1),
-                _MoveMessageButton(self, message_index, 1),
-            ]
-            if _message_supports_slots(message_index) or self.cog._message_text_changed_from_preset(self.guild_id, message_index):
-                row_two.append(_MessagePresetButton(self, message_index))
+
+        active = self.active_block
+        row_one = [
+            _EditFieldButton(self, active, "title", "Editar título"),
+            _EditFieldButton(self, active, "subtitle", "Editar descrição"),
+            _EditFieldButton(self, active, "footer", "Editar footer"),
+        ]
+        row_two: list[discord.ui.Item[Any]] = [
+            _MoveMessageButton(self, active, -1),
+            _MoveMessageButton(self, active, 1),
+        ]
+        if _message_supports_slots(active) or self.cog._message_text_changed_from_preset(self.guild_id, active):
+            row_two.append(_MessagePresetButton(self, active))
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(self._block_lines(active))),
+            discord.ui.ActionRow(*row_one),
+            discord.ui.ActionRow(*row_two),
+            accent_color=discord.Colour.green(),
+        ))
+
+        if _message_supports_slots(active):
             self.add_item(discord.ui.Container(
-                discord.ui.TextDisplay("\n".join(self._block_lines(message_index))),
-                discord.ui.ActionRow(*row_one),
-                discord.ui.ActionRow(*row_two),
-                accent_color=discord.Colour.green() if self.active_block == message_index else discord.Colour.dark_green(),
-            ))
-        if _message_supports_slots(self.active_block):
-            self.add_item(discord.ui.Container(
-                discord.ui.TextDisplay("\n".join(self._slot_editor_lines(self.active_block))),
-                discord.ui.ActionRow(_BlockSlotSelect(self, self.active_block)),
-                discord.ui.ActionRow(_BlockRoleSelect(self, self.active_block)),
-                discord.ui.ActionRow(_AutoRoleButton(self, self.active_block), _EditSlotButton(self, self.active_block), _SlotPresetButton(self, self.active_block)),
+                discord.ui.TextDisplay("\n".join(self._slot_editor_lines(active))),
+                discord.ui.ActionRow(_BlockSlotSelect(self, active)),
+                discord.ui.ActionRow(_BlockRoleSelect(self, active)),
+                discord.ui.ActionRow(_AutoRoleButton(self, active), _EditSlotButton(self, active), _SlotPresetButton(self, active)),
                 accent_color=discord.Colour.blurple(),
             ))
-        else:
-            self.add_item(discord.ui.Container(
-                discord.ui.TextDisplay("\n".join([
-                    f"## {_message_label(self.active_block)}",
-                    "Essa mensagem é extra e não usa faixa de cores nem botões numéricos.",
-                    "Use apenas os botões de editar título, descrição e footer para esse bloco.",
-                ])),
-                accent_color=discord.Colour.dark_teal(),
-            ))
+
+
 
 
 class ColorRolesCog(commands.Cog):
@@ -1306,8 +1296,8 @@ class ColorRolesCog(commands.Cog):
             view = _ColorUnifiedEditView(self, guild_id=ctx.guild.id, owner_id=ctx.author.id)
             payload = view.editor_message_payload()
             msg = await ctx.channel.send(content=payload["content"], view=view, files=payload["attachments"])
-        except Exception as e:
-            await ctx.send(f"não consegui abrir o editor de cores: {e}")
+        except Exception:
+            await ctx.send("não consegui abrir o editor de cores.")
             return
         view.message = msg
         self._active_edit_messages[key] = int(msg.id)
