@@ -221,33 +221,44 @@ def _compose_block_text(block_cfg: dict[str, Any]) -> str | None:
     return text or None
 
 
-class _ColorFieldEditModal(discord.ui.Modal):
-    def __init__(self, view: "_ColorUnifiedEditView", message_index: int, field_name: str):
-        labels = {"title": "Título", "subtitle": "Descrição", "footer": "Footer"}
-        super().__init__(title=f"Editar {labels.get(field_name, field_name)} • {_message_label(message_index)}")
+class _ColorContentEditModal(discord.ui.Modal):
+    def __init__(self, view: "_ColorUnifiedEditView", message_index: int):
+        super().__init__(title=f"Editar conteúdo • {_message_label(message_index)}")
         self.view_ref = view
         self.message_index = int(message_index)
-        self.field_name = field_name
         cfg = self.view_ref.cog._get_message_block_config(self.view_ref.guild_id, self.message_index)
-        current = str(cfg.get(field_name) or "")
-        self.input = discord.ui.TextInput(
-            label=labels.get(field_name, field_name),
-            default=current,
+        self.title_input = discord.ui.TextInput(
+            label="Título",
+            default=str(cfg.get("title") or ""),
             required=False,
-            style=discord.TextStyle.paragraph if field_name != "title" else discord.TextStyle.short,
+            style=discord.TextStyle.short,
+            max_length=250,
+        )
+        self.subtitle_input = discord.ui.TextInput(
+            label="Descrição",
+            default=str(cfg.get("subtitle") or ""),
+            required=False,
+            style=discord.TextStyle.paragraph,
             max_length=600,
         )
-        self.add_item(self.input)
+        self.footer_input = discord.ui.TextInput(
+            label="Footer",
+            default=str(cfg.get("footer") or ""),
+            required=False,
+            style=discord.TextStyle.paragraph,
+            max_length=300,
+        )
+        self.add_item(self.title_input)
+        self.add_item(self.subtitle_input)
+        self.add_item(self.footer_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        block_cfg = self.view_ref.cog._get_message_block_config(self.view_ref.guild_id, self.message_index)
-        block_cfg[self.field_name] = str(self.input.value or "").strip()
         await self.view_ref.cog._update_message_block_config(
             self.view_ref.guild_id,
             self.message_index,
-            title=str(block_cfg.get("title") or ""),
-            subtitle=str(block_cfg.get("subtitle") or ""),
-            footer=str(block_cfg.get("footer") or ""),
+            title=str(self.title_input.value or "").strip(),
+            subtitle=str(self.subtitle_input.value or "").strip(),
+            footer=str(self.footer_input.value or "").strip(),
         )
         await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.message_index])
         await self.view_ref.refresh_editor_message(interaction)
@@ -405,17 +416,16 @@ class _ConfirmActionView(discord.ui.View):
         self.stop()
 
 
-class _EditFieldButton(discord.ui.Button):
-    def __init__(self, view: "_ColorUnifiedEditView", message_index: int, field_name: str, label: str):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary)
+class _EditContentButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", message_index: int):
+        super().__init__(label="Editar conteúdo", style=discord.ButtonStyle.secondary)
         self.view_ref = view
         self.message_index = int(message_index)
-        self.field_name = field_name
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
-        await interaction.response.send_modal(_ColorFieldEditModal(self.view_ref, self.message_index, self.field_name))
+        await interaction.response.send_modal(_ColorContentEditModal(self.view_ref, self.message_index))
 
 
 class _EditTemplatesButton(discord.ui.Button):
@@ -440,14 +450,41 @@ class _AddMessageButton(discord.ui.Button):
         if self.view_ref.cog._get_panel_count(self.view_ref.guild_id) >= COLOR_MAX_MESSAGES:
             await interaction.response.send_message("O painel já está no máximo de 5 mensagens.", ephemeral=True)
             return
-        await self.view_ref.cog._add_extra_message(self.view_ref.guild_id)
+        new_count = await self.view_ref.cog._add_extra_message_live(self.view_ref.guild_id)
+        self.view_ref.active_block = int(new_count)
         await self.view_ref.refresh_editor_message(interaction)
-        await self.view_ref.cog._rebuild_public_panel(self.view_ref.guild_id)
 
 
-class _RemoveLastExtraMessageButton(discord.ui.Button):
+class _RemoveMessageModal(discord.ui.Modal):
     def __init__(self, view: "_ColorUnifiedEditView"):
-        super().__init__(label="Remover última extra", style=discord.ButtonStyle.secondary)
+        super().__init__(title="Remover mensagem")
+        self.view_ref = view
+        self.number_input = discord.ui.TextInput(
+            label="Número da mensagem",
+            placeholder="Ex.: 4",
+            required=True,
+            max_length=2,
+        )
+        self.add_item(self.number_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.number_input.value or "").strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("Informe um número válido de mensagem.", ephemeral=True)
+            return
+        message_index = int(raw)
+        panel_count = self.view_ref.cog._get_panel_count(self.view_ref.guild_id)
+        if not (COLOR_BLOCK_COUNT + 1 <= message_index <= panel_count):
+            await interaction.response.send_message("Você só pode remover mensagens extras existentes.", ephemeral=True)
+            return
+        await self.view_ref.cog._remove_extra_message_live(self.view_ref.guild_id, message_index)
+        self.view_ref.active_block = min(self.view_ref.active_block, self.view_ref.cog._get_panel_count(self.view_ref.guild_id))
+        await self.view_ref.refresh_editor_message(interaction)
+
+
+class _RemoveMessageButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView"):
+        super().__init__(label="Remover mensagem", style=discord.ButtonStyle.secondary)
         self.view_ref = view
 
     async def callback(self, interaction: discord.Interaction):
@@ -456,10 +493,7 @@ class _RemoveLastExtraMessageButton(discord.ui.Button):
         if self.view_ref.cog._get_panel_count(self.view_ref.guild_id) <= COLOR_BLOCK_COUNT:
             await interaction.response.send_message("Não há mensagem extra para remover.", ephemeral=True)
             return
-        await self.view_ref.cog._remove_last_extra_message(self.view_ref.guild_id)
-        self.view_ref.active_block = min(self.view_ref.active_block, self.view_ref.cog._get_panel_count(self.view_ref.guild_id))
-        await self.view_ref.refresh_editor_message(interaction)
-        await self.view_ref.cog._rebuild_public_panel(self.view_ref.guild_id)
+        await interaction.response.send_modal(_RemoveMessageModal(self.view_ref))
 
 
 class _MessageSelect(discord.ui.Select):
@@ -510,10 +544,7 @@ class _MoveMessageButton(discord.ui.Button):
 class _MessagePresetButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", message_index: int):
         changed = view.cog._message_text_changed_from_preset(view.guild_id, message_index)
-        if changed:
-            super().__init__(label="Resetar mensagem", style=discord.ButtonStyle.danger)
-        else:
-            super().__init__(label="Limpar mensagem", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Resetar mensagem" if changed else "Limpar mensagem", style=discord.ButtonStyle.danger)
         self.view_ref = view
         self.message_index = int(message_index)
         self.changed = changed
@@ -527,15 +558,21 @@ class _MessagePresetButton(discord.ui.Button):
                 await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.message_index])
                 await self.view_ref.force_refresh_from_background()
 
-            await interaction.response.send_message(
-                "Confirmar reset desta mensagem para o preset dessa posição?",
-                ephemeral=True,
-                view=_ConfirmActionView(self.view_ref.owner_id, action, "Mensagem resetada para o preset."),
-            )
-            return
-        await self.view_ref.cog._clear_message_text(self.view_ref.guild_id, self.message_index)
-        await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.message_index])
-        await self.view_ref.refresh_editor_message(interaction)
+            prompt = "Confirmar reset desta mensagem para o preset dessa posição?"
+            success = "Mensagem resetada para o preset."
+        else:
+            async def action():
+                await self.view_ref.cog._clear_message_text(self.view_ref.guild_id, self.message_index)
+                await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.message_index])
+                await self.view_ref.force_refresh_from_background()
+
+            prompt = "Confirmar limpeza do conteúdo desta mensagem?"
+            success = "Conteúdo da mensagem limpo."
+        await interaction.response.send_message(
+            prompt,
+            ephemeral=True,
+            view=_ConfirmActionView(self.view_ref.owner_id, action, success),
+        )
 
 
 class _BlockSlotSelect(discord.ui.Select):
@@ -751,11 +788,8 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             self.message = target
 
     def _header_lines(self) -> list[str]:
-        panel_ready = self.cog._panel_exists(self.guild_id)
-        status = "Painel oficial online." if panel_ready else "Painel oficial ainda não foi postado."
         return [
             "# 🎨 Editor do painel de cores",
-            status,
             f"Mensagem ativa: {_message_label(self.active_block)}",
         ]
 
@@ -795,26 +829,21 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
     def _build_layout(self):
         self.clear_items()
         panel_count = self.cog._get_panel_count(self.guild_id)
-        top_buttons: list[discord.ui.Item[Any]] = [
-            _ChangeActiveMessageButton(self, -1),
-            _ChangeActiveMessageButton(self, 1),
+        top_controls: list[discord.ui.Item[Any]] = [
             _EditTemplatesButton(self),
             _AddMessageButton(self),
         ]
         if panel_count > COLOR_BLOCK_COUNT:
-            top_buttons.append(_RemoveLastExtraMessageButton(self))
+            top_controls.append(_RemoveMessageButton(self))
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(self._header_lines())),
-            discord.ui.ActionRow(*top_buttons),
+            discord.ui.ActionRow(_MessageSelect(self)),
+            discord.ui.ActionRow(*top_controls),
             accent_color=discord.Colour.green(),
         ))
 
         active = self.active_block
-        row_one = [
-            _EditFieldButton(self, active, "title", "Editar título"),
-            _EditFieldButton(self, active, "subtitle", "Editar descrição"),
-            _EditFieldButton(self, active, "footer", "Editar footer"),
-        ]
+        row_one = [_EditContentButton(self, active)]
         row_two: list[discord.ui.Item[Any]] = [
             _MoveMessageButton(self, active, -1),
             _MoveMessageButton(self, active, 1),
@@ -1082,17 +1111,73 @@ class ColorRolesCog(commands.Cog):
     async def _add_extra_message(self, guild_id: int):
         count = self._get_panel_count(guild_id)
         if count >= COLOR_MAX_MESSAGES:
-            return
-        await self._set_panel_count(guild_id, count + 1)
+            return 0
+        new_count = count + 1
+        await self._set_panel_count(guild_id, new_count)
+        return new_count
 
-    async def _remove_last_extra_message(self, guild_id: int):
-        count = self._get_panel_count(guild_id)
-        if count <= COLOR_BLOCK_COUNT:
-            return
+    async def _add_extra_message_live(self, guild_id: int) -> int:
+        old_count = self._get_panel_count(guild_id)
+        new_count = await self._add_extra_message(guild_id)
+        if not new_count:
+            return old_count
         cfg = self._get_config(guild_id)
-        cfg["messages"][str(count)] = dict(_DEFAULT_MESSAGE)
+        channel_id = int(cfg.get("channel_id") or 0)
+        message_ids = [int(mid) for mid in (cfg.get("message_ids") or []) if mid]
+        if channel_id and len(message_ids) == old_count:
+            channel = self.bot.get_channel(channel_id)
+            guild = self.bot.get_guild(guild_id)
+            if channel is not None and guild is not None:
+                kwargs = self._public_message_kwargs(guild_id, new_count)
+                try:
+                    message = await channel.send(**kwargs)
+                    message_ids.append(int(message.id))
+                    cfg["message_ids"] = message_ids
+                    await self._save_config(guild_id, cfg)
+                except Exception:
+                    pass
+        return self._get_panel_count(guild_id)
+
+    async def _remove_extra_message(self, guild_id: int, message_index: int):
+        count = self._get_panel_count(guild_id)
+        if count <= COLOR_BLOCK_COUNT or not (COLOR_BLOCK_COUNT + 1 <= int(message_index) <= count):
+            return False
+        cfg = self._get_config(guild_id)
+        messages = dict(cfg.get("messages") or {})
+        for idx in range(int(message_index), count):
+            messages[str(idx)] = dict(messages.get(str(idx + 1), _DEFAULT_MESSAGE))
+        messages[str(count)] = dict(_DEFAULT_MESSAGE)
+        cfg["messages"] = messages
         cfg["panel_count"] = count - 1
         await self._save_config(guild_id, cfg)
+        return True
+
+    async def _remove_extra_message_live(self, guild_id: int, message_index: int) -> bool:
+        count = self._get_panel_count(guild_id)
+        if count <= COLOR_BLOCK_COUNT or not (COLOR_BLOCK_COUNT + 1 <= int(message_index) <= count):
+            return False
+        cfg_before = self._get_config(guild_id)
+        channel_id = int(cfg_before.get("channel_id") or 0)
+        message_ids = [int(mid) for mid in (cfg_before.get("message_ids") or []) if mid]
+        removed_message_id = message_ids[int(message_index) - 1] if len(message_ids) >= int(message_index) else 0
+        ok = await self._remove_extra_message(guild_id, message_index)
+        if not ok:
+            return False
+        cfg = self._get_config(guild_id)
+        if removed_message_id and channel_id:
+            channel = self.bot.get_channel(channel_id)
+            if channel is not None:
+                try:
+                    target = await channel.fetch_message(removed_message_id)
+                    await target.delete()
+                except Exception:
+                    pass
+        if len(message_ids) >= int(message_index):
+            del message_ids[int(message_index) - 1]
+            cfg["message_ids"] = message_ids[: self._get_panel_count(guild_id)]
+            await self._save_config(guild_id, cfg)
+        await self._refresh_public_panel_messages(guild_id)
+        return True
 
     def _can_move_message(self, guild_id: int, block_index: int, direction: int) -> bool:
         count = self._get_panel_count(guild_id)
