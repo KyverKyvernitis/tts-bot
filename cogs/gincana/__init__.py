@@ -712,6 +712,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             await channel.send(view=self._make_v2_notice("🕵️ Roubo", [flavor, *effect_lines], ok=True, accent_color=discord.Color.dark_green()))
             return True
         penalty = 5 if self._race_is(guild.id, author.id, "preto") else 10
+        robbery_used_count = int(consumed_state.get("used", 0) or 0)
         if self._coringa_avoids_robbery_penalty(guild.id, author.id):
             penalty = 0
         if penalty > 0:
@@ -720,6 +721,9 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             f"Você tentou roubar {target.mention}, mas foi pego no flagra.",
             (f"Você perdeu {self._chip_text(penalty, kind='loss')}." if penalty > 0 else "Mas o efeito Coringa te salvou dessa perda.")
         ]
+        marker = self._race_effect_message(guild.id, author.id, "mao_negra")
+        if self._race_is(guild.id, author.id, "preto") and robbery_used_count > 1 and marker:
+            lines.append(marker)
         marker = self._race_effect_message(guild.id, author.id, "sangue_frio")
         if penalty == 5 and marker:
             lines.append(marker)
