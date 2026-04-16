@@ -4,7 +4,7 @@ import io
 import re
 import time
 from copy import deepcopy
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import discord
 from discord.ext import commands
@@ -21,6 +21,7 @@ COLOR_PANEL_TIMEOUT = 600.0
 COLOR_COMMAND_COOLDOWN = 20.0
 COLOR_BLOCK_SIZE = 10
 COLOR_BLOCK_COUNT = 3
+COLOR_MAX_MESSAGES = 5
 COLOR_PANEL_VARIABLES = [
     "{membro}",
     "{membro_nome}",
@@ -44,7 +45,7 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
     {"number": 7, "name": "Laranja escuro", "text_hex": "#d98900", "role_hex": "#ff8c00"},
     {"number": 8, "name": "Bege escuro", "text_hex": "#b96d43", "role_hex": "#a0522d"},
     {"number": 9, "name": "Ciano escuro", "text_hex": "#008f98", "role_hex": "#008b8b"},
-    {"number": 10, "name": "Preto escuro", "text_hex": "#4a4a4a", "role_hex": "#1f1f1f"},
+    {"number": 10, "name": "Preto", "text_hex": "#4a4a4a", "role_hex": "#1f1f1f"},
     {"number": 11, "name": "Vermelho", "text_hex": "#ff1b1b", "role_hex": "#ff0000"},
     {"number": 12, "name": "Amarelo", "text_hex": "#ffec1a", "role_hex": "#ffd700"},
     {"number": 13, "name": "Verde", "text_hex": "#11b611", "role_hex": "#00ff00"},
@@ -67,14 +68,13 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
     {"number": 30, "name": "Branco", "text_hex": "#ffffff", "role_hex": "#ffffff"},
 ]
 
+_DEFAULT_MESSAGE = {"title": "", "subtitle": "", "footer": ""}
+
 _DEFAULT_CONFIG: dict[str, Any] = {
     "channel_id": 0,
     "message_ids": [],
-    "messages": {
-        "1": {"title": "", "subtitle": "", "footer": ""},
-        "2": {"title": "", "subtitle": "", "footer": ""},
-        "3": {"title": "", "subtitle": "", "footer": ""},
-    },
+    "panel_count": 3,
+    "messages": {str(index): dict(_DEFAULT_MESSAGE) for index in range(1, COLOR_MAX_MESSAGES + 1)},
     "templates": {
         "apply": "{membro}, a cor {cor_adicionada} foi aplicada.",
         "remove": "{membro}, a cor {cor_removida} foi removida.",
@@ -128,87 +128,92 @@ def _block_title(block_index: int) -> str:
     return f"{start}–{end}"
 
 
-def _attachment_uri(filename: str) -> str:
-    return f"attachment://{filename}"
+def _default_slot_payload(slot_number: int) -> dict[str, Any]:
+    default = next((item for item in DEFAULT_SLOTS if item["number"] == int(slot_number)), None)
+    if default is None:
+        return {
+            "number": int(slot_number),
+            "name": f"Cor {slot_number}",
+            "text_hex": "#ffffff",
+            "role_hex": "#ffffff",
+            "role_id": 0,
+            "role_name": f"Cor {slot_number}",
+            "managed": False,
+        }
+    return {**default, "role_id": 0, "role_name": str(default["name"]), "managed": False}
 
 
-def _build_media_gallery(filename: str):
-    ui = getattr(discord, "ui", None)
-    media_gallery_cls = getattr(ui, "MediaGallery", None) if ui else None
-    if media_gallery_cls is None:
-        return None
-    attachment_uri = _attachment_uri(filename)
-    item_types = [
-        getattr(discord, "MediaGalleryItem", None),
-        getattr(ui, "MediaGalleryItem", None) if ui else None,
-        getattr(discord, "UnfurledMediaItem", None),
-        getattr(ui, "UnfurledMediaItem", None) if ui else None,
-    ]
-    item_types = [item_type for item_type in item_types if item_type is not None]
-    for item_type in item_types:
-        created_item = None
-        for args, kwargs in (
-            ((), {"media": attachment_uri}),
-            ((), {"url": attachment_uri}),
-            ((attachment_uri,), {}),
-        ):
-            try:
-                created_item = item_type(*args, **kwargs)
-                break
-            except Exception:
-                continue
-        if created_item is None:
-            continue
-        for args, kwargs in (
-            ((created_item,), {}),
-            (([created_item],), {}),
-            ((), {"items": [created_item]}),
-        ):
-            try:
-                return media_gallery_cls(*args, **kwargs)
-            except Exception:
-                continue
-    for args, kwargs in (
-        ((attachment_uri,), {}),
-        (([attachment_uri],), {}),
-        ((), {"items": [attachment_uri]}),
-    ):
-        try:
-            return media_gallery_cls(*args, **kwargs)
-        except Exception:
-            continue
-    return None
+def _cleared_slot_payload(slot_number: int) -> dict[str, Any]:
+    name = f"Cor {slot_number}"
+    return {
+        "number": int(slot_number),
+        "name": name,
+        "text_hex": "#ffffff",
+        "role_hex": "#ffffff",
+        "role_id": 0,
+        "role_name": name,
+        "managed": False,
+    }
+
+
+def _message_supports_slots(message_index: int) -> bool:
+    return 1 <= int(message_index) <= COLOR_BLOCK_COUNT
+
+
+def _message_label(message_index: int) -> str:
+    if _message_supports_slots(message_index):
+        return f"Mensagem {message_index} • faixa {_block_title(message_index)}"
+    return f"Mensagem extra {message_index}"
+
+
+def _compose_block_text(block_cfg: dict[str, Any]) -> str | None:
+    lines: list[str] = []
+    title = str(block_cfg.get("title") or "").strip()
+    subtitle = str(block_cfg.get("subtitle") or "").strip()
+    footer = str(block_cfg.get("footer") or "").strip()
+    if title:
+        lines.append(title)
+    if subtitle:
+        if lines:
+            lines.append("")
+        lines.append(subtitle)
+    if footer:
+        if lines:
+            lines.append("")
+        lines.append(footer)
+    text = "\n".join(lines).strip()
+    return text or None
 
 
 class _ColorFieldEditModal(discord.ui.Modal):
-    def __init__(self, view: "_ColorUnifiedEditView", block_index: int, field_name: str):
+    def __init__(self, view: "_ColorUnifiedEditView", message_index: int, field_name: str):
         labels = {"title": "Título", "subtitle": "Descrição", "footer": "Footer"}
-        super().__init__(title=f"Editar {labels.get(field_name, field_name)} {_block_title(block_index)}")
+        super().__init__(title=f"Editar {labels.get(field_name, field_name)} • {_message_label(message_index)}")
         self.view_ref = view
-        self.block_index = int(block_index)
+        self.message_index = int(message_index)
         self.field_name = field_name
-        cfg = self.view_ref.cog._get_message_block_config(self.view_ref.guild_id, self.block_index)
+        cfg = self.view_ref.cog._get_message_block_config(self.view_ref.guild_id, self.message_index)
         current = str(cfg.get(field_name) or "")
         self.input = discord.ui.TextInput(
             label=labels.get(field_name, field_name),
             default=current,
             required=False,
             style=discord.TextStyle.paragraph if field_name != "title" else discord.TextStyle.short,
-            max_length=300,
+            max_length=600,
         )
         self.add_item(self.input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        block_cfg = self.view_ref.cog._get_message_block_config(self.view_ref.guild_id, self.block_index)
+        block_cfg = self.view_ref.cog._get_message_block_config(self.view_ref.guild_id, self.message_index)
         block_cfg[self.field_name] = str(self.input.value or "").strip()
         await self.view_ref.cog._update_message_block_config(
             self.view_ref.guild_id,
-            self.block_index,
+            self.message_index,
             title=str(block_cfg.get("title") or ""),
             subtitle=str(block_cfg.get("subtitle") or ""),
             footer=str(block_cfg.get("footer") or ""),
         )
-        await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
+        await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.message_index])
         await self.view_ref.refresh_editor_message(interaction)
 
 
@@ -217,9 +222,9 @@ class _ColorTemplatesEditModal(discord.ui.Modal):
         super().__init__(title="Editar respostas do painel")
         self.view_ref = view
         cfg = self.view_ref.cog._get_templates(self.view_ref.guild_id)
-        self.apply_input = discord.ui.TextInput(label="Aplicar cor", default=str(cfg.get("apply") or ""), style=discord.TextStyle.paragraph, max_length=200)
-        self.remove_input = discord.ui.TextInput(label="Remover cor", default=str(cfg.get("remove") or ""), style=discord.TextStyle.paragraph, max_length=200)
-        self.switch_input = discord.ui.TextInput(label="Trocar cor", default=str(cfg.get("switch") or ""), style=discord.TextStyle.paragraph, max_length=220)
+        self.apply_input = discord.ui.TextInput(label="Quando aplica cor", default=str(cfg.get("apply") or ""), style=discord.TextStyle.paragraph, max_length=300)
+        self.remove_input = discord.ui.TextInput(label="Quando remove cor", default=str(cfg.get("remove") or ""), style=discord.TextStyle.paragraph, max_length=300)
+        self.switch_input = discord.ui.TextInput(label="Quando troca cor", default=str(cfg.get("switch") or ""), style=discord.TextStyle.paragraph, max_length=300)
         self.add_item(self.apply_input)
         self.add_item(self.remove_input)
         self.add_item(self.switch_input)
@@ -242,7 +247,7 @@ class _ColorSlotEditModal(discord.ui.Modal):
         self.slot_number = int(slot_number)
         slot = self.view_ref.cog._get_slot_config(self.view_ref.guild_id, self.slot_number)
         self.name_input = discord.ui.TextInput(label="Nome da cor", default=str(slot.get("name") or ""), max_length=80)
-        self.text_hex_input = discord.ui.TextInput(label="Hex do texto", default=str(slot.get("text_hex") or ""), max_length=7)
+        self.text_hex_input = discord.ui.TextInput(label="Hex do texto da imagem", default=str(slot.get("text_hex") or ""), max_length=7)
         self.role_name_input = discord.ui.TextInput(label="Nome do cargo do bot", default=str(slot.get("role_name") or slot.get("name") or ""), required=False, max_length=100)
         self.role_hex_input = discord.ui.TextInput(label="Hex do cargo", default=str(slot.get("role_hex") or slot.get("text_hex") or ""), max_length=7)
         self.add_item(self.name_input)
@@ -277,79 +282,165 @@ class _ColorPickerButton(discord.ui.Button):
         await self.cog._handle_public_pick(interaction, self.slot_number)
 
 
-class _ColorPublicPanelView(discord.ui.LayoutView):
+class _ColorPublicPanelView(discord.ui.View):
     def __init__(self, cog: "ColorRolesCog", guild_id: int, block_index: int):
         super().__init__(timeout=None)
         self.cog = cog
         self.guild_id = int(guild_id)
         self.block_index = int(block_index)
-        self._build_layout()
+        if _message_supports_slots(block_index):
+            start, end = _chunk_block(block_index)
+            for slot_number in range(start, end + 1):
+                self.add_item(_ColorPickerButton(self.cog, self.guild_id, slot_number))
 
-    def _build_layout(self):
-        self.clear_items()
-        block_cfg = self.cog._get_message_block_config(self.guild_id, self.block_index)
-        lines: list[str] = []
-        title = str(block_cfg.get("title") or "").strip()
-        subtitle = str(block_cfg.get("subtitle") or "").strip()
-        footer = str(block_cfg.get("footer") or "").strip()
-        if title:
-            lines.append(f"# {title}")
-        if subtitle:
-            lines.append(subtitle)
-        if footer:
-            if lines:
-                lines.append("")
-            lines.append(footer)
-        panel_children = []
-        if lines:
-            panel_children.append(discord.ui.TextDisplay("\n".join(lines)))
-        media_gallery = _build_media_gallery(f"colors-{self.block_index}.png")
-        if media_gallery is not None:
-            panel_children.append(media_gallery)
-        if panel_children:
-            self.add_item(discord.ui.Container(*panel_children, accent_color=discord.Color.dark_gray()))
-        start, end = _chunk_block(self.block_index)
-        buttons = [_ColorPickerButton(self.cog, self.guild_id, slot) for slot in range(start, end + 1)]
-        for idx in range(0, len(buttons), 5):
-            self.add_item(discord.ui.ActionRow(*buttons[idx:idx + 5]))
+
+class _ConfirmActionView(discord.ui.View):
+    def __init__(self, owner_id: int, action: Callable[[], Awaitable[None]], success_text: str):
+        super().__init__(timeout=90)
+        self.owner_id = int(owner_id)
+        self.action = action
+        self.success_text = success_text
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(getattr(interaction.user, "id", 0) or 0) != self.owner_id:
+            await interaction.response.send_message("Só quem abriu o editor pode confirmar essa ação.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.action()
+        await interaction.response.edit_message(content=self.success_text, view=None)
+        self.stop()
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Ação cancelada.", view=None)
+        self.stop()
 
 
 class _EditFieldButton(discord.ui.Button):
-    def __init__(self, view: "_ColorUnifiedEditView", block_index: int, field_name: str, label: str):
+    def __init__(self, view: "_ColorUnifiedEditView", message_index: int, field_name: str, label: str):
         super().__init__(label=label, style=discord.ButtonStyle.secondary)
         self.view_ref = view
-        self.block_index = int(block_index)
+        self.message_index = int(message_index)
         self.field_name = field_name
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
-        await interaction.response.send_modal(_ColorFieldEditModal(self.view_ref, self.block_index, self.field_name))
-
-
-class _OpenBlockEditorButton(discord.ui.Button):
-    def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
-        style = discord.ButtonStyle.primary if view.active_block == block_index else discord.ButtonStyle.secondary
-        super().__init__(label=f"Editar visual/cargos {_block_title(block_index)}", style=style)
-        self.view_ref = view
-        self.block_index = int(block_index)
-
-    async def callback(self, interaction: discord.Interaction):
-        if not await self.view_ref.ensure_owner(interaction):
-            return
-        self.view_ref.active_block = self.block_index
-        await self.view_ref.refresh_editor_message(interaction)
+        await interaction.response.send_modal(_ColorFieldEditModal(self.view_ref, self.message_index, self.field_name))
 
 
 class _EditTemplatesButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView"):
-        super().__init__(label="Editar respostas do painel", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Editar respostas", style=discord.ButtonStyle.secondary)
         self.view_ref = view
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
         await interaction.response.send_modal(_ColorTemplatesEditModal(self.view_ref))
+
+
+class _AddMessageButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView"):
+        super().__init__(label="Adicionar mensagem", style=discord.ButtonStyle.success)
+        self.view_ref = view
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        if self.view_ref.cog._get_panel_count(self.view_ref.guild_id) >= COLOR_MAX_MESSAGES:
+            await interaction.response.send_message("O painel já está no máximo de 5 mensagens.", ephemeral=True)
+            return
+        await self.view_ref.cog._add_extra_message(self.view_ref.guild_id)
+        await self.view_ref.refresh_editor_message(interaction)
+        await self.view_ref.cog._rebuild_public_panel(self.view_ref.guild_id)
+
+
+class _RemoveLastExtraMessageButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView"):
+        super().__init__(label="Remover última extra", style=discord.ButtonStyle.secondary)
+        self.view_ref = view
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        if self.view_ref.cog._get_panel_count(self.view_ref.guild_id) <= COLOR_BLOCK_COUNT:
+            await interaction.response.send_message("Não há mensagem extra para remover.", ephemeral=True)
+            return
+        await self.view_ref.cog._remove_last_extra_message(self.view_ref.guild_id)
+        self.view_ref.active_block = min(self.view_ref.active_block, self.view_ref.cog._get_panel_count(self.view_ref.guild_id))
+        await self.view_ref.refresh_editor_message(interaction)
+        await self.view_ref.cog._rebuild_public_panel(self.view_ref.guild_id)
+
+
+class _FocusBlockButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", message_index: int):
+        label = "Abrir faixa" if _message_supports_slots(message_index) else "Abrir mensagem"
+        style = discord.ButtonStyle.primary if view.active_block == message_index else discord.ButtonStyle.secondary
+        super().__init__(label=label, style=style)
+        self.view_ref = view
+        self.message_index = int(message_index)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        self.view_ref.active_block = self.message_index
+        await self.view_ref.refresh_editor_message(interaction)
+
+
+class _MoveMessageButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", message_index: int, direction: int):
+        label = "↑" if direction < 0 else "↓"
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, emoji="⬆️" if direction < 0 else "⬇️")
+        self.view_ref = view
+        self.message_index = int(message_index)
+        self.direction = -1 if direction < 0 else 1
+        self.disabled = not view.cog._can_move_message(view.guild_id, self.message_index, self.direction)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        if not self.view_ref.cog._can_move_message(self.view_ref.guild_id, self.message_index, self.direction):
+            await interaction.response.send_message("Essa mensagem não pode ser movida nessa direção.", ephemeral=True)
+            return
+        await self.view_ref.cog._swap_messages(self.view_ref.guild_id, self.message_index, self.message_index + self.direction)
+        self.view_ref.active_block = self.message_index + self.direction
+        await self.view_ref.refresh_editor_message(interaction)
+        await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id)
+
+
+class _MessagePresetButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", message_index: int):
+        changed = view.cog._message_text_changed_from_preset(view.guild_id, message_index)
+        if changed:
+            super().__init__(label="Resetar mensagem", style=discord.ButtonStyle.danger)
+        else:
+            super().__init__(label="Limpar mensagem", style=discord.ButtonStyle.secondary)
+        self.view_ref = view
+        self.message_index = int(message_index)
+        self.changed = changed
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        if self.changed:
+            async def action():
+                await self.view_ref.cog._reset_message_text_to_preset(self.view_ref.guild_id, self.message_index)
+                await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.message_index])
+                await self.view_ref.force_refresh_from_background()
+
+            await interaction.response.send_message(
+                "Confirmar reset desta mensagem para o preset dessa posição?",
+                ephemeral=True,
+                view=_ConfirmActionView(self.view_ref.owner_id, action, "Mensagem resetada para o preset."),
+            )
+            return
+        await self.view_ref.cog._clear_message_text(self.view_ref.guild_id, self.message_index)
+        await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.message_index])
+        await self.view_ref.refresh_editor_message(interaction)
 
 
 class _BlockSlotSelect(discord.ui.Select):
@@ -401,7 +492,7 @@ class _BlockRoleSelect(discord.ui.RoleSelect):
 
 class _AutoRoleButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
-        super().__init__(label="Usar cargo automático do bot", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Usar cargo automático", style=discord.ButtonStyle.secondary)
         self.view_ref = view
         self.block_index = int(block_index)
 
@@ -432,6 +523,37 @@ class _EditSlotButton(discord.ui.Button):
         await interaction.response.send_modal(_ColorSlotEditModal(self.view_ref, self.block_index, selected_slot))
 
 
+class _SlotPresetButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
+        changed = view.cog._slot_block_changed_from_preset(view.guild_id, block_index)
+        if changed:
+            super().__init__(label="Resetar preset da faixa", style=discord.ButtonStyle.danger)
+        else:
+            super().__init__(label="Limpar preset da faixa", style=discord.ButtonStyle.secondary)
+        self.view_ref = view
+        self.block_index = int(block_index)
+        self.changed = changed
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        if self.changed:
+            async def action():
+                await self.view_ref.cog._reset_slot_block_to_preset(self.view_ref.guild_id, self.block_index)
+                await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
+                await self.view_ref.force_refresh_from_background()
+
+            await interaction.response.send_message(
+                "Confirmar reset desta faixa para o preset? Isso também zera os vínculos de cargo dessa faixa.",
+                ephemeral=True,
+                view=_ConfirmActionView(self.view_ref.owner_id, action, "Faixa resetada para o preset."),
+            )
+            return
+        await self.view_ref.cog._clear_slot_block(self.view_ref.guild_id, self.block_index)
+        await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
+        await self.view_ref.refresh_editor_message(interaction)
+
+
 class _ColorUnifiedEditView(discord.ui.LayoutView):
     def __init__(self, cog: "ColorRolesCog", *, guild_id: int, owner_id: int):
         super().__init__(timeout=COLOR_PANEL_TIMEOUT)
@@ -450,17 +572,50 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         return True
 
     def _editor_preview_files(self) -> list[discord.File]:
-        return [
-            self.cog._make_block_image(self.guild_id, block_index, filename=f"colors-editor-{block_index}.png")
-            for block_index in range(1, COLOR_BLOCK_COUNT + 1)
-        ]
+        files: list[discord.File] = []
+        for block_index in range(1, min(self.cog._get_panel_count(self.guild_id), COLOR_BLOCK_COUNT) + 1):
+            files.append(self.cog._make_block_image(self.guild_id, block_index, filename=f"colors-editor-{block_index}.png"))
+        return files
+
+    def _editor_preview_embeds(self) -> list[discord.Embed]:
+        embeds: list[discord.Embed] = []
+        panel_count = self.cog._get_panel_count(self.guild_id)
+        for message_index in range(1, panel_count + 1):
+            block_cfg = self.cog._get_message_block_config(self.guild_id, message_index)
+            embed = discord.Embed(
+                title=_message_label(message_index),
+                colour=discord.Colour.green() if self.active_block == message_index else discord.Colour.dark_green(),
+            )
+            embed.add_field(name="Título", value=str(block_cfg.get("title") or "(vazio)"), inline=False)
+            embed.add_field(name="Descrição", value=str(block_cfg.get("subtitle") or "(vazio)"), inline=False)
+            embed.add_field(name="Footer", value=str(block_cfg.get("footer") or "(vazio)"), inline=False)
+            if _message_supports_slots(message_index):
+                slot_state = "preset original" if not self.cog._slot_block_changed_from_preset(self.guild_id, message_index) else "personalizada"
+                embed.add_field(name="Faixa", value=_block_title(message_index), inline=True)
+                embed.add_field(name="Visual / cargos", value=slot_state, inline=True)
+                embed.set_image(url=f"attachment://colors-editor-{message_index}.png")
+            else:
+                embed.add_field(name="Mensagem extra", value="Texto normal sem faixa de cores.", inline=False)
+            if self.active_block == message_index:
+                embed.set_footer(text="Mensagem ativa no editor")
+            embeds.append(embed)
+        return embeds
+
+    def editor_message_payload(self) -> dict[str, Any]:
+        return {
+            "view": self,
+            "embeds": self._editor_preview_embeds(),
+            "attachments": self._editor_preview_files(),
+        }
+
+    async def force_refresh_from_background(self):
+        self._build_layout()
+        if self.message is not None:
+            await self.message.edit(**self.editor_message_payload())
 
     async def refresh_editor_message(self, interaction: discord.Interaction):
         self._build_layout()
-        payload = {
-            "view": self,
-            "attachments": self._editor_preview_files(),
-        }
+        payload = self.editor_message_payload()
         if not interaction.response.is_done():
             await interaction.response.defer()
         target = interaction.message or self.message
@@ -468,82 +623,108 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             await target.edit(**payload)
             self.message = target
 
-    def _block_preview_lines(self, block_index: int) -> list[str]:
-        cfg = self.cog._get_message_block_config(self.guild_id, block_index)
-        start, end = _chunk_block(block_index)
-        title = str(cfg.get("title") or "").strip() or "(vazio)"
-        subtitle = str(cfg.get("subtitle") or "").strip() or "(vazio)"
-        footer = str(cfg.get("footer") or "").strip() or "(vazio)"
+    def _header_lines(self) -> list[str]:
+        panel_ready = self.cog._panel_exists(self.guild_id)
+        status = (
+            "Painel oficial encontrado. Tudo que você editar aqui já atualiza as mensagens públicas em tempo real."
+            if panel_ready
+            else "Painel oficial ainda não foi postado. Você pode preparar tudo aqui e usar `_color` depois."
+        )
         return [
-            f"## Faixa {_block_title(block_index)}",
-            f"**Título atual:** {title}",
-            f"**Descrição atual:** {subtitle}",
-            f"**Footer atual:** {footer}",
-            f"**Slots desta faixa:** {start}–{end}",
-            "A imagem abaixo é o preview real desta mensagem.",
-        ]
-
-    def _slot_editor_lines(self, block_index: int) -> list[str]:
-        selected_slot = self.selected_slots.get(block_index, _chunk_block(block_index)[0])
-        slot = self.cog._get_slot_config(self.guild_id, selected_slot)
-        role_id = int(slot.get("role_id") or 0)
-        role_repr = f"<@&{role_id}>" if role_id else "Cargo criado e atualizado pelo bot"
-        managed_text = "sim" if bool(slot.get("managed", False) or role_id <= 0) else "não"
-        return [
-            f"## Editor da faixa {_block_title(block_index)}",
-            f"**Slot selecionado:** {selected_slot}",
-            f"**Nome exibido na imagem:** {slot.get('name')}",
-            f"**Cor do texto na imagem:** {slot.get('text_hex')}",
-            f"**Cargo vinculado:** {role_repr}",
-            f"**Cor do cargo:** {slot.get('role_hex')}",
-            f"**Gerenciado pelo bot:** {managed_text}",
-            "Escolha um slot para editar o visual da faixa, vincular um cargo existente ou deixar o bot cuidar do cargo automaticamente.",
-        ]
-
-    def _build_layout(self):
-        self.clear_items()
-        cfg = self.cog._get_config(self.guild_id)
-        panel_ready = bool(int(cfg.get("channel_id") or 0) and list(cfg.get("message_ids") or []))
-        panel_status = "Painel oficial encontrado: as mudanças já refletem ao vivo nas mensagens públicas." if panel_ready else "Painel oficial ainda não foi publicado: você já pode configurar tudo aqui e depois usar `_color` para postar as 3 mensagens."
-        header_lines = [
-            "# 🎨 Editor unificado do painel de cores",
-            panel_status,
-            "Cada faixa abaixo mostra o preview real da imagem e os campos de texto da mensagem pública.",
-            "Use o bloco verde no final para editar o visual e os cargos da faixa selecionada.",
+            "# 🎨 Editor do painel de cores",
+            status,
+            "• `_color` publica mensagens normais, sem Components V2.",
+            "• As três primeiras mensagens são as faixas 1–10, 11–20 e 21–30.",
+            "• Você pode adicionar até 2 mensagens extras de texto, totalizando no máximo 5 mensagens.",
+            "• O preview acima mostra a imagem real com fundo transparente.",
             "",
             "**Variáveis aceitas nas respostas**",
             "• " + " • ".join(COLOR_PANEL_VARIABLES[:5]),
             "• " + " • ".join(COLOR_PANEL_VARIABLES[5:]),
         ]
+
+    def _block_lines(self, message_index: int) -> list[str]:
+        cfg = self.cog._get_message_block_config(self.guild_id, message_index)
+        title = str(cfg.get("title") or "").strip() or "(vazio)"
+        subtitle = str(cfg.get("subtitle") or "").strip() or "(vazio)"
+        footer = str(cfg.get("footer") or "").strip() or "(vazio)"
+        lines = [
+            f"## {_message_label(message_index)}",
+            f"**Título atual:** {title}",
+            f"**Descrição atual:** {subtitle}",
+            f"**Footer atual:** {footer}",
+        ]
+        if _message_supports_slots(message_index):
+            lines.append(f"**Slots dessa faixa:** {_block_title(message_index)}")
+            lines.append("O preview real da imagem aparece nos embeds acima.")
+        else:
+            lines.append("**Tipo:** mensagem extra normal, sem botões de cor.")
+        return lines
+
+    def _slot_editor_lines(self, block_index: int) -> list[str]:
+        selected_slot = self.selected_slots.get(block_index, _chunk_block(block_index)[0])
+        slot = self.cog._get_slot_config(self.guild_id, selected_slot)
+        role_id = int(slot.get("role_id") or 0)
+        role_repr = f"<@&{role_id}>" if role_id else "Cargo automático / ainda não vinculado"
+        managed_text = "sim" if bool(slot.get("managed", False) or role_id <= 0) else "não"
+        return [
+            f"## Editor da faixa {_block_title(block_index)}",
+            f"**Slot selecionado:** {selected_slot}",
+            f"**Nome na imagem:** {slot.get('name')}",
+            f"**Cor do texto:** {slot.get('text_hex')}",
+            f"**Cargo vinculado:** {role_repr}",
+            f"**Cor do cargo:** {slot.get('role_hex')}",
+            f"**Gerenciado pelo bot:** {managed_text}",
+            "Use este bloco para mexer no visual, escolher cargo existente ou deixar o bot cuidar do cargo automaticamente.",
+        ]
+
+    def _build_layout(self):
+        self.clear_items()
+        panel_count = self.cog._get_panel_count(self.guild_id)
+        top_buttons = [_EditTemplatesButton(self), _AddMessageButton(self)]
+        if panel_count > COLOR_BLOCK_COUNT:
+            top_buttons.append(_RemoveLastExtraMessageButton(self))
         self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(header_lines)),
-            discord.ui.ActionRow(_EditTemplatesButton(self)),
-            accent_color=discord.Color.green(),
+            discord.ui.TextDisplay("\n".join(self._header_lines())),
+            discord.ui.ActionRow(*top_buttons),
+            accent_color=discord.Colour.green(),
         ))
-        for block_index in range(1, 4):
-            preview_children = [discord.ui.TextDisplay("\n".join(self._block_preview_lines(block_index)))]
-            preview_gallery = _build_media_gallery(f"colors-editor-{block_index}.png")
-            if preview_gallery is not None:
-                preview_children.append(preview_gallery)
-            preview_children.append(discord.ui.ActionRow(
-                _EditFieldButton(self, block_index, "title", "Editar título"),
-                _EditFieldButton(self, block_index, "subtitle", "Editar descrição"),
-                _EditFieldButton(self, block_index, "footer", "Editar footer"),
-                _OpenBlockEditorButton(self, block_index),
+        for message_index in range(1, panel_count + 1):
+            row_one = [
+                _EditFieldButton(self, message_index, "title", "Editar título"),
+                _EditFieldButton(self, message_index, "subtitle", "Editar descrição"),
+                _EditFieldButton(self, message_index, "footer", "Editar footer"),
+            ]
+            row_two: list[discord.ui.Item[Any]] = [
+                _FocusBlockButton(self, message_index),
+                _MoveMessageButton(self, message_index, -1),
+                _MoveMessageButton(self, message_index, 1),
+            ]
+            if _message_supports_slots(message_index) or self.cog._message_text_changed_from_preset(self.guild_id, message_index):
+                row_two.append(_MessagePresetButton(self, message_index))
+            self.add_item(discord.ui.Container(
+                discord.ui.TextDisplay("\n".join(self._block_lines(message_index))),
+                discord.ui.ActionRow(*row_one),
+                discord.ui.ActionRow(*row_two),
+                accent_color=discord.Colour.green() if self.active_block == message_index else discord.Colour.dark_green(),
             ))
-            preview_container = discord.ui.Container(
-                *preview_children,
-                accent_color=discord.Color.green() if self.active_block == block_index else discord.Color.dark_green(),
-            )
-            self.add_item(preview_container)
-        active_block = self.active_block
-        self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(self._slot_editor_lines(active_block))),
-            discord.ui.ActionRow(_BlockSlotSelect(self, active_block)),
-            discord.ui.ActionRow(_BlockRoleSelect(self, active_block)),
-            discord.ui.ActionRow(_AutoRoleButton(self, active_block), _EditSlotButton(self, active_block)),
-            accent_color=discord.Color.brand_green(),
-        ))
+        if _message_supports_slots(self.active_block):
+            self.add_item(discord.ui.Container(
+                discord.ui.TextDisplay("\n".join(self._slot_editor_lines(self.active_block))),
+                discord.ui.ActionRow(_BlockSlotSelect(self, self.active_block)),
+                discord.ui.ActionRow(_BlockRoleSelect(self, self.active_block)),
+                discord.ui.ActionRow(_AutoRoleButton(self, self.active_block), _EditSlotButton(self, self.active_block), _SlotPresetButton(self, self.active_block)),
+                accent_color=discord.Colour.blurple(),
+            ))
+        else:
+            self.add_item(discord.ui.Container(
+                discord.ui.TextDisplay("\n".join([
+                    f"## {_message_label(self.active_block)}",
+                    "Essa mensagem é extra e não usa faixa de cores nem botões numéricos.",
+                    "Use apenas os botões de editar título, descrição e footer para esse bloco.",
+                ])),
+                accent_color=discord.Colour.dark_teal(),
+            ))
 
 
 class ColorRolesCog(commands.Cog):
@@ -564,10 +745,12 @@ class ColorRolesCog(commands.Cog):
         db = self.db
         if db is None or not hasattr(db, "guild_cache"):
             return
-        for gid, doc in list(getattr(db, "guild_cache", {}).items()):
+        for gid in list(getattr(db, "guild_cache", {}).keys()):
             cfg = self._get_config(int(gid))
             message_ids = [int(mid) for mid in (cfg.get("message_ids") or []) if mid]
             for block_index, message_id in enumerate(message_ids, start=1):
+                if not _message_supports_slots(block_index):
+                    continue
                 key = (int(gid), block_index, int(message_id))
                 if key in self._public_views_registered:
                     continue
@@ -578,17 +761,63 @@ class ColorRolesCog(commands.Cog):
                 except Exception:
                     pass
 
+    def _sanitize_config(self, guild_id: int, config: dict[str, Any]) -> dict[str, Any]:
+        base = _deepcopy_default_config()
+        payload = deepcopy(config or {})
+        base["channel_id"] = int(payload.get("channel_id") or 0)
+        base["message_ids"] = [int(mid) for mid in (payload.get("message_ids") or []) if str(mid).isdigit()]
+        raw_count = int(payload.get("panel_count") or COLOR_BLOCK_COUNT)
+        base["panel_count"] = max(COLOR_BLOCK_COUNT, min(COLOR_MAX_MESSAGES, raw_count))
+        raw_messages = payload.get("messages") or {}
+        for key in [str(idx) for idx in range(1, COLOR_MAX_MESSAGES + 1)]:
+            block = raw_messages.get(key) or {}
+            base["messages"][key] = {
+                "title": str(block.get("title") or ""),
+                "subtitle": str(block.get("subtitle") or ""),
+                "footer": str(block.get("footer") or ""),
+            }
+        raw_templates = payload.get("templates") or {}
+        for key in list(base["templates"].keys()):
+            if raw_templates.get(key) is not None:
+                base["templates"][key] = str(raw_templates.get(key))
+        raw_slots = payload.get("slots") or {}
+        for slot_number in range(1, 31):
+            key = str(slot_number)
+            merged = _default_slot_payload(slot_number)
+            merged.update(dict(raw_slots.get(key) or {}))
+            merged["number"] = int(slot_number)
+            merged["role_id"] = int(merged.get("role_id") or 0)
+            merged["managed"] = bool(merged.get("managed", False))
+            merged["name"] = str(merged.get("name") or _default_slot_payload(slot_number)["name"])
+            merged["role_name"] = str(merged.get("role_name") or merged["name"])
+            merged["text_hex"] = _clean_hex(str(merged.get("text_hex") or ""), _default_slot_payload(slot_number)["text_hex"])
+            merged["role_hex"] = _clean_hex(str(merged.get("role_hex") or ""), _default_slot_payload(slot_number)["role_hex"])
+            base["slots"][key] = merged
+        return base
+
     def _get_config(self, guild_id: int) -> dict[str, Any]:
         db = self.db
         if db is None or not hasattr(db, "get_color_roles_config"):
             return _deepcopy_default_config()
-        return db.get_color_roles_config(int(guild_id))
+        return self._sanitize_config(guild_id, db.get_color_roles_config(int(guild_id)))
 
     async def _save_config(self, guild_id: int, config: dict[str, Any]):
         db = self.db
         if db is None or not hasattr(db, "set_color_roles_config"):
             return
-        await db.set_color_roles_config(int(guild_id), config)
+        await db.set_color_roles_config(int(guild_id), self._sanitize_config(guild_id, config))
+
+    def _panel_exists(self, guild_id: int) -> bool:
+        cfg = self._get_config(guild_id)
+        return bool(int(cfg.get("channel_id") or 0) and list(cfg.get("message_ids") or []))
+
+    def _get_panel_count(self, guild_id: int) -> int:
+        return int(self._get_config(guild_id).get("panel_count") or COLOR_BLOCK_COUNT)
+
+    async def _set_panel_count(self, guild_id: int, count: int):
+        cfg = self._get_config(guild_id)
+        cfg["panel_count"] = max(COLOR_BLOCK_COUNT, min(COLOR_MAX_MESSAGES, int(count)))
+        await self._save_config(guild_id, cfg)
 
     def _get_templates(self, guild_id: int) -> dict[str, str]:
         return dict(self._get_config(guild_id).get("templates") or {})
@@ -612,25 +841,120 @@ class ColorRolesCog(commands.Cog):
         cfg["messages"] = messages
         await self._save_config(guild_id, cfg)
 
+    async def _reset_message_text_to_preset(self, guild_id: int, block_index: int):
+        await self._update_message_block_config(guild_id, block_index, title="", subtitle="", footer="")
+
+    async def _clear_message_text(self, guild_id: int, block_index: int):
+        await self._update_message_block_config(guild_id, block_index, title="", subtitle="", footer="")
+
+    def _message_text_changed_from_preset(self, guild_id: int, block_index: int) -> bool:
+        block = self._get_message_block_config(guild_id, block_index)
+        return any(str(block.get(field) or "").strip() for field in ("title", "subtitle", "footer"))
+
     def _get_slot_config(self, guild_id: int, slot_number: int) -> dict[str, Any]:
         cfg = self._get_config(guild_id)
         slot = dict((cfg.get("slots") or {}).get(str(slot_number), {}) or {})
         if not slot:
-            default = next((item for item in DEFAULT_SLOTS if item["number"] == int(slot_number)), None)
-            if default:
-                slot = {**default, "role_id": 0, "role_name": default["name"], "managed": False}
+            slot = _default_slot_payload(slot_number)
         return slot
 
     async def _update_slot_config(self, guild_id: int, slot_number: int, **updates: Any):
         cfg = self._get_config(guild_id)
         slots = dict(cfg.get("slots") or {})
-        slot = dict(slots.get(str(slot_number), {}) or {})
+        slot = dict(slots.get(str(slot_number), {}) or _default_slot_payload(slot_number))
         slot.update(updates)
         slot["number"] = int(slot_number)
         if not slot.get("role_name"):
             slot["role_name"] = str(slot.get("name") or f"Cor {slot_number}")
         slots[str(slot_number)] = slot
         cfg["slots"] = slots
+        await self._save_config(guild_id, cfg)
+
+    def _slot_block_changed_from_preset(self, guild_id: int, block_index: int) -> bool:
+        if not _message_supports_slots(block_index):
+            return False
+        start, end = _chunk_block(block_index)
+        for slot_number in range(start, end + 1):
+            current = self._get_slot_config(guild_id, slot_number)
+            default = _default_slot_payload(slot_number)
+            comparable_current = {
+                "name": str(current.get("name") or ""),
+                "text_hex": _clean_hex(str(current.get("text_hex") or ""), default["text_hex"]),
+                "role_hex": _clean_hex(str(current.get("role_hex") or ""), default["role_hex"]),
+                "role_id": int(current.get("role_id") or 0),
+                "role_name": str(current.get("role_name") or ""),
+                "managed": bool(current.get("managed", False)),
+            }
+            comparable_default = {
+                "name": str(default["name"]),
+                "text_hex": default["text_hex"],
+                "role_hex": default["role_hex"],
+                "role_id": 0,
+                "role_name": str(default["role_name"]),
+                "managed": False,
+            }
+            if comparable_current != comparable_default:
+                return True
+        return False
+
+    async def _reset_slot_block_to_preset(self, guild_id: int, block_index: int):
+        if not _message_supports_slots(block_index):
+            return
+        start, end = _chunk_block(block_index)
+        for slot_number in range(start, end + 1):
+            await self._update_slot_config(guild_id, slot_number, **_default_slot_payload(slot_number))
+
+    async def _clear_slot_block(self, guild_id: int, block_index: int):
+        if not _message_supports_slots(block_index):
+            return
+        start, end = _chunk_block(block_index)
+        for slot_number in range(start, end + 1):
+            await self._update_slot_config(guild_id, slot_number, **_cleared_slot_payload(slot_number))
+
+    async def _add_extra_message(self, guild_id: int):
+        count = self._get_panel_count(guild_id)
+        if count >= COLOR_MAX_MESSAGES:
+            return
+        await self._set_panel_count(guild_id, count + 1)
+
+    async def _remove_last_extra_message(self, guild_id: int):
+        count = self._get_panel_count(guild_id)
+        if count <= COLOR_BLOCK_COUNT:
+            return
+        cfg = self._get_config(guild_id)
+        cfg["messages"][str(count)] = dict(_DEFAULT_MESSAGE)
+        cfg["panel_count"] = count - 1
+        await self._save_config(guild_id, cfg)
+
+    def _can_move_message(self, guild_id: int, block_index: int, direction: int) -> bool:
+        count = self._get_panel_count(guild_id)
+        target = int(block_index) + int(direction)
+        if _message_supports_slots(block_index):
+            return 1 <= target <= min(COLOR_BLOCK_COUNT, count)
+        if block_index > COLOR_BLOCK_COUNT:
+            return COLOR_BLOCK_COUNT + 1 <= target <= count
+        return False
+
+    async def _swap_messages(self, guild_id: int, left: int, right: int):
+        cfg = self._get_config(guild_id)
+        messages = dict(cfg.get("messages") or {})
+        messages[str(left)], messages[str(right)] = dict(messages.get(str(right), _DEFAULT_MESSAGE)), dict(messages.get(str(left), _DEFAULT_MESSAGE))
+        cfg["messages"] = messages
+        if _message_supports_slots(left) and _message_supports_slots(right):
+            slots = dict(cfg.get("slots") or {})
+            left_start, left_end = _chunk_block(left)
+            right_start, right_end = _chunk_block(right)
+            left_payloads = [dict(slots.get(str(number), _default_slot_payload(number))) for number in range(left_start, left_end + 1)]
+            right_payloads = [dict(slots.get(str(number), _default_slot_payload(number))) for number in range(right_start, right_end + 1)]
+            for offset, slot_number in enumerate(range(left_start, left_end + 1)):
+                payload = dict(right_payloads[offset])
+                payload["number"] = slot_number
+                slots[str(slot_number)] = payload
+            for offset, slot_number in enumerate(range(right_start, right_end + 1)):
+                payload = dict(left_payloads[offset])
+                payload["number"] = slot_number
+                slots[str(slot_number)] = payload
+            cfg["slots"] = slots
         await self._save_config(guild_id, cfg)
 
     async def _ensure_slot_role(self, guild: discord.Guild, slot_number: int) -> discord.Role | None:
@@ -641,7 +965,7 @@ class ColorRolesCog(commands.Cog):
         desired_colour = discord.Colour.from_str(_clean_hex(str(slot.get("role_hex") or ""), "#ffffff"))
         if existing and not bool(slot.get("managed")):
             return existing
-        me = guild.me or guild.get_member(self.bot.user.id) if self.bot.user else None
+        me = guild.me or (guild.get_member(self.bot.user.id) if self.bot.user else None)
         if me is None or not me.guild_permissions.manage_roles:
             return existing
         try:
@@ -720,7 +1044,7 @@ class ColorRolesCog(commands.Cog):
         if role_id <= 0 or target_role is None:
             await interaction.response.send_message(str((cfg.get("templates") or {}).get("no_role") or "Essa cor ainda não está configurada."), ephemeral=True)
             return
-        me = guild.me or guild.get_member(self.bot.user.id) if self.bot.user else None
+        me = guild.me or (guild.get_member(self.bot.user.id) if self.bot.user else None)
         if me is None or target_role >= me.top_role:
             text = self._render_template(str((cfg.get("templates") or {}).get("hierarchy") or ""), member=member, slot=slot)
             await interaction.response.send_message(text or "Não consegui aplicar essa cor por causa da hierarquia de cargos.", ephemeral=True)
@@ -768,52 +1092,87 @@ class ColorRolesCog(commands.Cog):
     def _make_block_image(self, guild_id: int, block_index: int, *, filename: str | None = None) -> discord.File:
         if Image is None or ImageDraw is None:
             raise RuntimeError("Pillow não está disponível para gerar as imagens do painel de cores.")
+        if not _message_supports_slots(block_index):
+            raise ValueError("Somente as três primeiras mensagens possuem imagem de faixa.")
         start, end = _chunk_block(block_index)
         cfg = self._get_config(guild_id)
         slots = cfg.get("slots") or {}
         width, height = 900, 330
-        image = Image.new("RGB", (width, height), color="#000000")
+        image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         font = _font(34, bold=True)
         y_positions = [20, 85, 150, 215, 280]
         x_left, x_right = 18, 465
+        shadow = (0, 0, 0, 180)
         for idx, slot_number in enumerate(range(start, end + 1)):
             slot = dict(slots.get(str(slot_number), {}) or {})
-            label = f"{slot_number}. {slot.get('name') or f'Cor {slot_number}'}"
+            name = str(slot.get("name") or f"Cor {slot_number}").strip()
+            label = f"{slot_number}. {name}" if name else f"{slot_number}."
             hex_color = _clean_hex(str(slot.get("text_hex") or "#ffffff"), "#ffffff")
             x = x_left if idx % 2 == 0 else x_right
             y = y_positions[idx // 2]
+            draw.text((x + 2, y + 2), label, font=font, fill=shadow)
             draw.text((x, y), label, font=font, fill=hex_color)
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         buffer.seek(0)
         return discord.File(buffer, filename=filename or f"colors-{block_index}.png")
 
+    def _public_message_kwargs(self, guild_id: int, block_index: int) -> dict[str, Any]:
+        block_cfg = self._get_message_block_config(guild_id, block_index)
+        content = _compose_block_text(block_cfg)
+        payload: dict[str, Any] = {"content": content or ("\u200b" if not _message_supports_slots(block_index) else None)}
+        if _message_supports_slots(block_index):
+            payload["file"] = self._make_block_image(guild_id, block_index)
+            payload["view"] = _ColorPublicPanelView(self, guild_id, block_index)
+        else:
+            payload["view"] = None
+        return payload
+
     async def _post_public_panel(self, channel: discord.abc.Messageable, guild: discord.Guild) -> list[int]:
         message_ids: list[int] = []
-        for block_index in range(1, COLOR_BLOCK_COUNT + 1):
-            view = _ColorPublicPanelView(self, guild.id, block_index)
-            file = self._make_block_image(guild.id, block_index)
-            message = await channel.send(file=file, view=view)
+        panel_count = self._get_panel_count(guild.id)
+        for block_index in range(1, panel_count + 1):
+            kwargs = self._public_message_kwargs(guild.id, block_index)
+            message = await channel.send(**kwargs)
             message_ids.append(int(message.id))
-            key = (guild.id, block_index, int(message.id))
-            try:
-                self.bot.add_view(view, message_id=int(message.id))
-            except Exception:
-                pass
-            self._public_views_registered.add(key)
+            if _message_supports_slots(block_index):
+                key = (guild.id, block_index, int(message.id))
+                try:
+                    self.bot.add_view(kwargs["view"], message_id=int(message.id))
+                except Exception:
+                    pass
+                self._public_views_registered.add(key)
         return message_ids
+
+    async def _rebuild_public_panel(self, guild_id: int):
+        cfg = self._get_config(guild_id)
+        channel_id = int(cfg.get("channel_id") or 0)
+        if not channel_id:
+            return
+        channel = self.bot.get_channel(channel_id)
+        guild = self.bot.get_guild(guild_id)
+        if channel is None or guild is None:
+            return
+        await self._delete_existing_panel_messages(guild_id)
+        message_ids = await self._post_public_panel(channel, guild)
+        cfg["message_ids"] = message_ids
+        await self._save_config(guild_id, cfg)
 
     async def _refresh_public_panel_messages(self, guild_id: int, *, block_indices: list[int] | None = None):
         cfg = self._get_config(guild_id)
         channel_id = int(cfg.get("channel_id") or 0)
         message_ids = [int(mid) for mid in (cfg.get("message_ids") or []) if mid]
+        panel_count = self._get_panel_count(guild_id)
         if not channel_id or not message_ids:
+            return
+        if len(message_ids) != panel_count:
+            await self._rebuild_public_panel(guild_id)
             return
         channel = self.bot.get_channel(channel_id)
         if channel is None:
             return
-        targets = block_indices or list(range(1, min(len(message_ids), COLOR_BLOCK_COUNT) + 1))
+        targets = block_indices or list(range(1, panel_count + 1))
         for block_index in targets:
             if block_index < 1 or block_index > len(message_ids):
                 continue
@@ -822,18 +1181,21 @@ class ColorRolesCog(commands.Cog):
                 message = await channel.fetch_message(message_id)
             except Exception:
                 continue
-            file = self._make_block_image(guild_id, block_index)
-            view = _ColorPublicPanelView(self, guild_id, block_index)
             try:
-                await message.edit(content=None, attachments=[file], view=view)
+                if _message_supports_slots(block_index):
+                    file = self._make_block_image(guild_id, block_index)
+                    view = _ColorPublicPanelView(self, guild_id, block_index)
+                    await message.edit(content=_compose_block_text(self._get_message_block_config(guild_id, block_index)), attachments=[file], view=view)
+                    key = (guild_id, block_index, message_id)
+                    try:
+                        self.bot.add_view(view, message_id=message_id)
+                    except Exception:
+                        pass
+                    self._public_views_registered.add(key)
+                else:
+                    await message.edit(content=_compose_block_text(self._get_message_block_config(guild_id, block_index)) or "\u200b", attachments=[], view=None)
             except Exception:
                 pass
-            key = (guild_id, block_index, message_id)
-            try:
-                self.bot.add_view(view, message_id=message_id)
-            except Exception:
-                pass
-            self._public_views_registered.add(key)
 
     def _is_admin(self, member: discord.Member | None) -> bool:
         return bool(member and member.guild_permissions.administrator)
@@ -862,7 +1224,7 @@ class ColorRolesCog(commands.Cog):
         cfg["channel_id"] = int(ctx.channel.id)
         cfg["message_ids"] = message_ids
         await self._save_config(ctx.guild.id, cfg)
-        await ctx.reply("Painel de cores atualizado neste canal.", mention_author=False)
+        await ctx.reply(f"Painel de cores publicado com {self._get_panel_count(ctx.guild.id)} mensagem(ns).", mention_author=False)
 
     @commands.command(name="coloredit")
     @commands.guild_only()
@@ -879,7 +1241,8 @@ class ColorRolesCog(commands.Cog):
             except Exception:
                 pass
         view = _ColorUnifiedEditView(self, guild_id=ctx.guild.id, owner_id=ctx.author.id)
-        msg = await ctx.reply(view=view, files=view._editor_preview_files(), mention_author=False)
+        payload = view.editor_message_payload()
+        msg = await ctx.reply(view=view, embeds=payload["embeds"], files=payload["attachments"], mention_author=False)
         view.message = msg
         self._active_edit_messages[key] = int(msg.id)
 

@@ -1409,7 +1409,7 @@ def _settingsdb_color_roles_defaults() -> dict[str, Any]:
         (7, "Laranja escuro", "#d98900", "#ff8c00"),
         (8, "Bege escuro", "#b96d43", "#a0522d"),
         (9, "Ciano escuro", "#008f98", "#008b8b"),
-        (10, "Preto escuro", "#4a4a4a", "#1f1f1f"),
+        (10, "Preto", "#4a4a4a", "#1f1f1f"),
         (11, "Vermelho", "#ff1b1b", "#ff0000"),
         (12, "Amarelo", "#ffec1a", "#ffd700"),
         (13, "Verde", "#11b611", "#00ff00"),
@@ -1444,10 +1444,13 @@ def _settingsdb_color_roles_defaults() -> dict[str, Any]:
     return {
         "channel_id": 0,
         "message_ids": [],
+        "panel_count": 3,
         "messages": {
             "1": {"title": "", "subtitle": "", "footer": ""},
             "2": {"title": "", "subtitle": "", "footer": ""},
             "3": {"title": "", "subtitle": "", "footer": ""},
+            "4": {"title": "", "subtitle": "", "footer": ""},
+            "5": {"title": "", "subtitle": "", "footer": ""},
         },
         "templates": {
             "apply": "{membro}, a cor {cor_adicionada} foi aplicada.",
@@ -1467,8 +1470,9 @@ def _settingsdb_get_color_roles_config(self, guild_id: int) -> Dict[str, Any]:
     base = _settingsdb_color_roles_defaults()
     base["channel_id"] = int(raw.get("channel_id", base["channel_id"]) or 0)
     base["message_ids"] = [int(mid) for mid in (raw.get("message_ids") or []) if str(mid).isdigit()]
+    base["panel_count"] = max(3, min(5, int(raw.get("panel_count") or base.get("panel_count") or 3)))
     messages = raw.get("messages") or {}
-    for key in ("1", "2", "3"):
+    for key in ("1", "2", "3", "4", "5"):
         payload = messages.get(key) or {}
         base["messages"][key] = {
             "title": str(payload.get("title") or ""),
