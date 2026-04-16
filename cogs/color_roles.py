@@ -179,14 +179,6 @@ def _is_default_black_slot(slot_number: int, slot: dict[str, Any]) -> bool:
     )
 
 
-def _build_public_embed(block_index: int, *, filename: str | None = None) -> discord.Embed | None:
-    if not _message_supports_slots(block_index):
-        return None
-    embed = discord.Embed()
-    embed.set_image(url=f"attachment://{filename or f'colors-{block_index}.png'}")
-    return embed
-
-
 def _cleared_slot_payload(slot_number: int) -> dict[str, Any]:
     name = f"Cor {slot_number}"
     return {
@@ -621,34 +613,23 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             files.append(self.cog._make_block_image(self.guild_id, block_index, filename=f"colors-editor-{block_index}.png"))
         return files
 
-    def _editor_preview_embeds(self) -> list[discord.Embed]:
-        embeds: list[discord.Embed] = []
-        panel_count = self.cog._get_panel_count(self.guild_id)
-        for message_index in range(1, panel_count + 1):
-            block_cfg = self.cog._get_message_block_config(self.guild_id, message_index)
-            embed = discord.Embed(
-                title=_message_label(message_index),
-                colour=discord.Colour.green() if self.active_block == message_index else discord.Colour.dark_green(),
+    def _media_gallery_for_message(self, message_index: int) -> discord.ui.MediaGallery | None:
+        if not _message_supports_slots(message_index):
+            return None
+        filename = f"colors-editor-{message_index}.png"
+        return discord.ui.MediaGallery(
+            discord.MediaGalleryItem(
+                f"attachment://{filename}",
+                description=f"Preview ao vivo da faixa {_block_title(message_index)}",
             )
-            embed.add_field(name="Título", value=str(block_cfg.get("title") or "(vazio)"), inline=False)
-            embed.add_field(name="Descrição", value=str(block_cfg.get("subtitle") or "(vazio)"), inline=False)
-            embed.add_field(name="Footer", value=str(block_cfg.get("footer") or "(vazio)"), inline=False)
-            if _message_supports_slots(message_index):
-                slot_state = "preset original" if not self.cog._slot_block_changed_from_preset(self.guild_id, message_index) else "personalizada"
-                embed.add_field(name="Faixa", value=_block_title(message_index), inline=True)
-                embed.add_field(name="Visual / cargos", value=slot_state, inline=True)
-                embed.set_image(url=f"attachment://colors-editor-{message_index}.png")
-            else:
-                embed.add_field(name="Mensagem extra", value="Texto normal sem faixa de cores.", inline=False)
-            if self.active_block == message_index:
-                embed.set_footer(text="Mensagem ativa no editor")
-            embeds.append(embed)
-        return embeds
+        )
 
     def editor_message_payload(self) -> dict[str, Any]:
         return {
             "view": self,
-            "embeds": self._editor_preview_embeds(),
+            "content": None,
+            "embed": None,
+            "embeds": [],
             "attachments": self._editor_preview_files(),
         }
 
@@ -677,10 +658,11 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         return [
             "# 🎨 Editor do painel de cores",
             status,
-            "• `_color` publica mensagens normais, sem Components V2.",
+            "• `_color` publica mensagens normais com botões numéricos.",
+            "• Só o `_coloredit` usa Components V2.",
             "• As três primeiras mensagens são as faixas 1–10, 11–20 e 21–30.",
             "• Você pode adicionar até 2 mensagens extras de texto, totalizando no máximo 5 mensagens.",
-            "• O preview acima mostra a imagem real com fundo transparente.",
+            "• Cada faixa abaixo mostra um preview ao vivo da imagem real com fundo transparente.",
             "",
             "**Variáveis aceitas nas respostas**",
             "• " + " • ".join(COLOR_PANEL_VARIABLES[:5]),
@@ -700,7 +682,7 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         ]
         if _message_supports_slots(message_index):
             lines.append(f"**Slots dessa faixa:** {_block_title(message_index)}")
-            lines.append("O preview real da imagem aparece nos embeds acima.")
+            lines.append("O preview real da imagem aparece logo abaixo deste bloco.")
         else:
             lines.append("**Tipo:** mensagem extra normal, sem botões de cor.")
         return lines
@@ -752,6 +734,9 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
                 discord.ui.ActionRow(*row_two),
                 accent_color=discord.Colour.green() if self.active_block == message_index else discord.Colour.dark_green(),
             ))
+            gallery = self._media_gallery_for_message(message_index)
+            if gallery is not None:
+                self.add_item(gallery)
         if _message_supports_slots(self.active_block):
             self.add_item(discord.ui.Container(
                 discord.ui.TextDisplay("\n".join(self._slot_editor_lines(self.active_block))),
@@ -1216,7 +1201,6 @@ class ColorRolesCog(commands.Cog):
         if _message_supports_slots(block_index):
             filename = f"colors-{block_index}.png"
             payload["file"] = self._make_block_image(guild_id, block_index, filename=filename)
-            payload["embed"] = _build_public_embed(block_index, filename=filename)
             payload["view"] = _ColorPublicPanelView(self, guild_id, block_index)
         else:
             payload["view"] = None
@@ -1279,8 +1263,7 @@ class ColorRolesCog(commands.Cog):
                     filename = f"colors-{block_index}.png"
                     file = self._make_block_image(guild_id, block_index, filename=filename)
                     view = _ColorPublicPanelView(self, guild_id, block_index)
-                    embed = _build_public_embed(block_index, filename=filename)
-                    await message.edit(content=_compose_block_text(self._get_message_block_config(guild_id, block_index)), embed=embed, attachments=[file], view=view)
+                    await message.edit(content=_compose_block_text(self._get_message_block_config(guild_id, block_index)), embed=None, embeds=[], attachments=[file], view=view)
                     key = (guild_id, block_index, message_id)
                     try:
                         self.bot.add_view(view, message_id=message_id)
@@ -1337,7 +1320,7 @@ class ColorRolesCog(commands.Cog):
                 pass
         view = _ColorUnifiedEditView(self, guild_id=ctx.guild.id, owner_id=ctx.author.id)
         payload = view.editor_message_payload()
-        msg = await ctx.send(content="🎨 Editor do painel de cores", view=view, embeds=payload["embeds"], files=payload["attachments"])
+        msg = await ctx.send(view=view, files=payload["attachments"])
         view.message = msg
         self._active_edit_messages[key] = int(msg.id)
 
