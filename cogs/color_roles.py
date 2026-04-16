@@ -307,6 +307,56 @@ class _ColorSlotEditModal(discord.ui.Modal):
         await self.view_ref.refresh_editor_message(interaction)
 
 
+class _ColorRoleLinkModal(discord.ui.Modal):
+    def __init__(self, view: "_ColorUnifiedEditView", block_index: int, slot_number: int):
+        super().__init__(title=f"Vincular cargo • slot {slot_number}")
+        self.view_ref = view
+        self.block_index = int(block_index)
+        self.slot_number = int(slot_number)
+        slot = self.view_ref.cog._get_slot_config(self.view_ref.guild_id, self.slot_number)
+        current_role_id = int(slot.get("role_id") or 0)
+        default_value = f"<@&{current_role_id}>" if current_role_id else ""
+        self.role_input = discord.ui.TextInput(
+            label="Cargo existente (menção ou ID)",
+            default=default_value,
+            required=False,
+            max_length=64,
+            placeholder="Ex.: @Cargo ou 1234567890",
+        )
+        self.add_item(self.role_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Isso só funciona dentro de um servidor.", ephemeral=True)
+            return
+        raw = str(self.role_input.value or "").strip()
+        if not raw:
+            await interaction.response.send_message("Informe um cargo existente para vincular ao slot.", ephemeral=True)
+            return
+        match = re.search(r"(\d{6,})", raw)
+        if not match:
+            await interaction.response.send_message("Não consegui identificar o cargo informado.", ephemeral=True)
+            return
+        role = guild.get_role(int(match.group(1)))
+        if role is None:
+            await interaction.response.send_message("Não encontrei esse cargo neste servidor.", ephemeral=True)
+            return
+        slot = self.view_ref.cog._get_slot_config(self.view_ref.guild_id, self.slot_number)
+        await self.view_ref.cog._update_slot_config(
+            self.view_ref.guild_id,
+            self.slot_number,
+            role_id=int(role.id),
+            role_name=str(role.name),
+            managed=False,
+            name=str(slot.get("name") or f"Cor {self.slot_number}"),
+            text_hex=str(slot.get("text_hex") or "#ffffff"),
+            role_hex=str(slot.get("role_hex") or "#ffffff"),
+        )
+        await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
+        await self.view_ref.refresh_editor_message(interaction)
+
+
 class _ColorPickerButton(discord.ui.Button):
     def __init__(self, cog: "ColorRolesCog", guild_id: int, slot_number: int):
         super().__init__(label=str(slot_number), style=discord.ButtonStyle.secondary, custom_id=f"color:pick:{guild_id}:{slot_number}")
@@ -555,6 +605,61 @@ class _AutoRoleButton(discord.ui.Button):
         await self.view_ref.refresh_editor_message(interaction)
 
 
+class _ChangeActiveMessageButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", direction: int):
+        is_prev = direction < 0
+        current = int(view.active_block)
+        panel_count = view.cog._get_panel_count(view.guild_id)
+        target = current - 1 if is_prev else current + 1
+        super().__init__(label="Mensagem anterior" if is_prev else "Próxima mensagem", style=discord.ButtonStyle.secondary)
+        self.view_ref = view
+        self.target = target
+        self.disabled = not (1 <= target <= panel_count)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        if self.disabled:
+            await interaction.response.send_message("Não há outra mensagem nessa direção.", ephemeral=True)
+            return
+        self.view_ref.active_block = self.target
+        await self.view_ref.refresh_editor_message(interaction)
+
+
+class _ChangeActiveSlotButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", block_index: int, direction: int):
+        start, end = _chunk_block(block_index)
+        current = int(view.selected_slots.get(block_index, start))
+        target = current - 1 if direction < 0 else current + 1
+        super().__init__(label="Slot anterior" if direction < 0 else "Próximo slot", style=discord.ButtonStyle.secondary)
+        self.view_ref = view
+        self.block_index = int(block_index)
+        self.target = target
+        self.disabled = not (start <= target <= end)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        if self.disabled:
+            await interaction.response.send_message("Não há outro slot nessa direção.", ephemeral=True)
+            return
+        self.view_ref.selected_slots[self.block_index] = self.target
+        await self.view_ref.refresh_editor_message(interaction)
+
+
+class _LinkExistingRoleButton(discord.ui.Button):
+    def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
+        super().__init__(label="Vincular cargo", style=discord.ButtonStyle.secondary)
+        self.view_ref = view
+        self.block_index = int(block_index)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.view_ref.ensure_owner(interaction):
+            return
+        selected_slot = self.view_ref.selected_slots.get(self.block_index, _chunk_block(self.block_index)[0])
+        await interaction.response.send_modal(_ColorRoleLinkModal(self.view_ref, self.block_index, selected_slot))
+
+
 class _EditSlotButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
         super().__init__(label="Editar slot atual", style=discord.ButtonStyle.secondary)
@@ -694,7 +799,7 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             top_buttons.append(_RemoveLastExtraMessageButton(self))
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(self._header_lines())),
-            discord.ui.ActionRow(_MessageSelect(self)),
+            discord.ui.ActionRow(_ChangeActiveMessageButton(self, -1), _ChangeActiveMessageButton(self, 1)),
             discord.ui.ActionRow(*top_buttons),
             accent_color=discord.Colour.green(),
         ))
@@ -721,9 +826,9 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         if _message_supports_slots(active):
             self.add_item(discord.ui.Container(
                 discord.ui.TextDisplay("\n".join(self._slot_editor_lines(active))),
-                discord.ui.ActionRow(_BlockSlotSelect(self, active)),
-                discord.ui.ActionRow(_BlockRoleSelect(self, active)),
-                discord.ui.ActionRow(_AutoRoleButton(self, active), _EditSlotButton(self, active), _SlotPresetButton(self, active)),
+                discord.ui.ActionRow(_ChangeActiveSlotButton(self, active, -1), _ChangeActiveSlotButton(self, active, 1)),
+                discord.ui.ActionRow(_LinkExistingRoleButton(self, active), _AutoRoleButton(self, active), _EditSlotButton(self, active)),
+                discord.ui.ActionRow(_SlotPresetButton(self, active)),
                 accent_color=discord.Colour.blurple(),
             ))
 
@@ -1296,8 +1401,8 @@ class ColorRolesCog(commands.Cog):
             view = _ColorUnifiedEditView(self, guild_id=ctx.guild.id, owner_id=ctx.author.id)
             payload = view.editor_message_payload()
             msg = await ctx.channel.send(content=payload["content"], view=view, files=payload["attachments"])
-        except Exception:
-            await ctx.send("não consegui abrir o editor de cores.")
+        except Exception as e:
+            await ctx.send(f"não consegui abrir o editor de cores: {e}")
             return
         view.message = msg
         self._active_edit_messages[key] = int(msg.id)
