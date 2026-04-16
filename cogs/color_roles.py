@@ -722,16 +722,17 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         return True
 
     def _editor_preview_files(self) -> list[discord.File]:
-        files: list[discord.File] = []
-        for block_index in range(1, min(self.cog._get_panel_count(self.guild_id), COLOR_BLOCK_COUNT) + 1):
-            files.append(self.cog._make_block_image(self.guild_id, block_index, filename=f"colors-editor-{block_index}.png"))
-        return files
+        active = self.active_block
+        if not _message_supports_slots(active):
+            return []
+        return [self.cog._make_block_image(self.guild_id, active, filename=f"colors-editor-{active}.png")]
 
     def editor_message_payload(self) -> dict[str, Any]:
         return {
             "view": self,
-            "content": "\u200b",
             "attachments": self._editor_preview_files(),
+            "content": None,
+            "embeds": [],
         }
 
     async def force_refresh_from_background(self):
@@ -794,12 +795,16 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
     def _build_layout(self):
         self.clear_items()
         panel_count = self.cog._get_panel_count(self.guild_id)
-        top_buttons: list[discord.ui.Item[Any]] = [_EditTemplatesButton(self), _AddMessageButton(self)]
+        top_buttons: list[discord.ui.Item[Any]] = [
+            _ChangeActiveMessageButton(self, -1),
+            _ChangeActiveMessageButton(self, 1),
+            _EditTemplatesButton(self),
+            _AddMessageButton(self),
+        ]
         if panel_count > COLOR_BLOCK_COUNT:
             top_buttons.append(_RemoveLastExtraMessageButton(self))
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(self._header_lines())),
-            discord.ui.ActionRow(_ChangeActiveMessageButton(self, -1), _ChangeActiveMessageButton(self, 1)),
             discord.ui.ActionRow(*top_buttons),
             accent_color=discord.Colour.green(),
         ))
@@ -816,18 +821,35 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         ]
         if _message_supports_slots(active) or self.cog._message_text_changed_from_preset(self.guild_id, active):
             row_two.append(_MessagePresetButton(self, active))
-        self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(self._block_lines(active))),
+        block_children: list[discord.ui.Item[Any]] = [discord.ui.TextDisplay("\n".join(self._block_lines(active)))]
+        if _message_supports_slots(active):
+            block_children.append(
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(
+                        f"attachment://colors-editor-{active}.png",
+                        description=f"Preview da faixa {_block_title(active)}",
+                    )
+                )
+            )
+        block_children.extend([
             discord.ui.ActionRow(*row_one),
             discord.ui.ActionRow(*row_two),
+        ])
+        self.add_item(discord.ui.Container(
+            *block_children,
             accent_color=discord.Colour.green(),
         ))
 
         if _message_supports_slots(active):
             self.add_item(discord.ui.Container(
                 discord.ui.TextDisplay("\n".join(self._slot_editor_lines(active))),
-                discord.ui.ActionRow(_ChangeActiveSlotButton(self, active, -1), _ChangeActiveSlotButton(self, active, 1)),
-                discord.ui.ActionRow(_LinkExistingRoleButton(self, active), _AutoRoleButton(self, active), _EditSlotButton(self, active)),
+                discord.ui.ActionRow(
+                    _ChangeActiveSlotButton(self, active, -1),
+                    _ChangeActiveSlotButton(self, active, 1),
+                    _LinkExistingRoleButton(self, active),
+                    _AutoRoleButton(self, active),
+                    _EditSlotButton(self, active),
+                ),
                 discord.ui.ActionRow(_SlotPresetButton(self, active)),
                 accent_color=discord.Colour.blurple(),
             ))
@@ -1400,7 +1422,7 @@ class ColorRolesCog(commands.Cog):
         try:
             view = _ColorUnifiedEditView(self, guild_id=ctx.guild.id, owner_id=ctx.author.id)
             payload = view.editor_message_payload()
-            msg = await ctx.channel.send(content=payload["content"], view=view, files=payload["attachments"])
+            msg = await ctx.channel.send(view=view, files=payload["attachments"])
         except Exception as e:
             await ctx.send(f"não consegui abrir o editor de cores: {e}")
             return
