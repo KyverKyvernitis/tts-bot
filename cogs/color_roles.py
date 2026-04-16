@@ -106,6 +106,9 @@ def _font(size: int, *, bold: bool = True):
     if ImageFont is None:
         raise RuntimeError("Pillow não está disponível.")
     candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSansMath-Regular.ttf",
+        "/usr/share/fonts/opentype/stix-word/STIXMath-Regular.otf",
+        "/usr/share/fonts/opentype/asana-math/Asana-Math.otf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/TTF/DejaVuSans.ttf",
     ]
@@ -115,6 +118,44 @@ def _font(size: int, *, bold: bool = True):
         except Exception:
             continue
     return ImageFont.load_default()
+
+
+def _unicode_math_transform(text: str, *, style: str) -> str:
+    value = str(text or "")
+    transformed: list[str] = []
+    for char in value:
+        code = ord(char)
+        if "A" <= char <= "Z":
+            if style == "monospace":
+                transformed.append(chr(0x1D670 + (code - ord("A"))))
+                continue
+            if style == "sans_bold":
+                transformed.append(chr(0x1D5D4 + (code - ord("A"))))
+                continue
+        if "a" <= char <= "z":
+            if style == "monospace":
+                transformed.append(chr(0x1D68A + (code - ord("a"))))
+                continue
+            if style == "sans_bold":
+                transformed.append(chr(0x1D5EE + (code - ord("a"))))
+                continue
+        if "0" <= char <= "9":
+            if style == "monospace":
+                transformed.append(chr(0x1D7F6 + (code - ord("0"))))
+                continue
+            if style == "sans_bold":
+                transformed.append(chr(0x1D7EC + (code - ord("0"))))
+                continue
+        transformed.append(char)
+    return "".join(transformed)
+
+
+def _math_monospace(text: str) -> str:
+    return _unicode_math_transform(text, style="monospace")
+
+
+def _math_sans_bold(text: str) -> str:
+    return _unicode_math_transform(text, style="sans_bold")
 
 
 def _chunk_block(block_index: int) -> tuple[int, int]:
@@ -397,7 +438,7 @@ class _ColorRoleLinkModal(discord.ui.Modal):
 
 class _ColorPickerButton(discord.ui.Button):
     def __init__(self, cog: "ColorRolesCog", guild_id: int, slot_number: int):
-        super().__init__(label=str(slot_number), style=discord.ButtonStyle.secondary, custom_id=f"color:pick:{guild_id}:{slot_number}")
+        super().__init__(label=_math_sans_bold(str(slot_number)), style=discord.ButtonStyle.secondary, custom_id=f"color:pick:{guild_id}:{slot_number}")
         self.cog = cog
         self.guild_id = int(guild_id)
         self.slot_number = int(slot_number)
@@ -1382,7 +1423,9 @@ class ColorRolesCog(commands.Cog):
         for idx, slot_number in enumerate(range(start, end + 1)):
             slot = dict(slots.get(str(slot_number), {}) or {})
             name = str(slot.get("name") or f"Cor {slot_number}").strip()
-            label = f"{slot_number}. {name}" if name else f"{slot_number}."
+            number_label = _math_sans_bold(str(slot_number))
+            name_label = _math_monospace(name) if name else ""
+            label = f"{number_label}. {name_label}" if name_label else f"{number_label}."
             hex_color = _clean_hex(str(slot.get("text_hex") or "#ffffff"), "#ffffff")
             x = x_left if idx % 2 == 0 else x_right
             y = y_positions[idx // 2]
