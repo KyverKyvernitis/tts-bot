@@ -1409,7 +1409,7 @@ def _settingsdb_color_roles_defaults() -> dict[str, Any]:
         (7, "Laranja escuro", "#d98900", "#ff8c00"),
         (8, "Bege escuro", "#b96d43", "#a0522d"),
         (9, "Ciano escuro", "#008f98", "#008b8b"),
-        (10, "Preto", "#4a4a4a", "#1f1f1f"),
+        (10, "Preto", "#000000", "#000000"),
         (11, "Vermelho", "#ff1b1b", "#ff0000"),
         (12, "Amarelo", "#ffec1a", "#ffd700"),
         (13, "Verde", "#11b611", "#00ff00"),
@@ -1453,14 +1453,37 @@ def _settingsdb_color_roles_defaults() -> dict[str, Any]:
             "5": {"title": "", "subtitle": "", "footer": ""},
         },
         "templates": {
-            "apply": "{membro}, a cor {cor_adicionada} foi aplicada.",
-            "remove": "{membro}, a cor {cor_removida} foi removida.",
-            "switch": "{membro}, {cor_removida} foi removida e {cor_adicionada} foi aplicada.",
+            "apply": "cor {cor_adicionada} aplicada.",
+            "remove": "cor {cor_removida} removida.",
+            "switch": "cor alterada: {cor_removida} → {cor_adicionada}.",
             "no_role": "Essa cor ainda não está configurada.",
-            "hierarchy": "Não consegui aplicar {cor_nome} por causa da hierarquia de cargos.",
+            "hierarchy": "não consegui aplicar {cor_nome} por causa da hierarquia de cargos.",
             "missing_panel": "Esse painel de cores não é mais o oficial deste servidor.",
         },
         "slots": slots,
+    }
+
+
+
+
+def _settingsdb_color_roles_legacy_slot_payload(slot_number: int) -> dict[str, Any]:
+    defaults = _settingsdb_color_roles_defaults()
+    slot = dict((defaults.get("slots") or {}).get(str(slot_number), {}) or {})
+    if int(slot_number) != 10:
+        return slot
+    slot["name"] = "Preto escuro"
+    slot["text_hex"] = "#4a4a4a"
+    slot["role_hex"] = "#1f1f1f"
+    slot["role_name"] = "Preto escuro"
+    return slot
+
+
+def _settingsdb_color_roles_legacy_templates() -> dict[str, tuple[str, ...]]:
+    return {
+        "apply": ("{membro}, a cor {cor_adicionada} foi aplicada.",),
+        "remove": ("{membro}, a cor {cor_removida} foi removida.",),
+        "switch": ("{membro}, {cor_removida} foi removida e {cor_adicionada} foi aplicada.",),
+        "hierarchy": ("Não consegui aplicar {cor_nome} por causa da hierarquia de cargos.",),
     }
 
 
@@ -1480,9 +1503,13 @@ def _settingsdb_get_color_roles_config(self, guild_id: int) -> Dict[str, Any]:
             "footer": str(payload.get("footer") or ""),
         }
     templates = raw.get("templates") or {}
+    legacy_templates = _settingsdb_color_roles_legacy_templates()
     for key, value in templates.items():
         if key in base["templates"] and value is not None:
-            base["templates"][key] = str(value)
+            text = str(value)
+            if text in legacy_templates.get(key, ()): 
+                continue
+            base["templates"][key] = text
     slots = raw.get("slots") or {}
     for key, payload in slots.items():
         if key not in base["slots"]:
@@ -1496,6 +1523,38 @@ def _settingsdb_get_color_roles_config(self, guild_id: int) -> Dict[str, Any]:
         merged["role_name"] = str(merged.get("role_name") or merged["name"])
         merged["text_hex"] = str(merged.get("text_hex") or base["slots"][key]["text_hex"])
         merged["role_hex"] = str(merged.get("role_hex") or base["slots"][key]["role_hex"])
+        legacy = _settingsdb_color_roles_legacy_slot_payload(int(key))
+        comparable_current = {
+            "name": str(merged.get("name") or ""),
+            "text_hex": str(merged.get("text_hex") or ""),
+            "role_hex": str(merged.get("role_hex") or ""),
+            "role_id": int(merged.get("role_id") or 0),
+            "role_name": str(merged.get("role_name") or ""),
+            "managed": bool(merged.get("managed", False)),
+        }
+        comparable_legacy = {
+            "name": str(legacy.get("name") or ""),
+            "text_hex": str(legacy.get("text_hex") or ""),
+            "role_hex": str(legacy.get("role_hex") or ""),
+            "role_id": 0,
+            "role_name": str(legacy.get("role_name") or ""),
+            "managed": False,
+        }
+        if comparable_current == comparable_legacy:
+            merged = dict(base["slots"][key])
+        elif int(key) == 10:
+            legacy_name = {"Preto escuro", "Preto"}
+            if (
+                str(merged.get("name") or "") in legacy_name
+                and str(merged.get("text_hex") or "") in {"#4a4a4a", "#000000"}
+                and str(merged.get("role_hex") or "") in {"#1f1f1f", "#000000"}
+                and (bool(merged.get("managed", False)) or int(merged.get("role_id") or 0) == 0)
+            ):
+                merged["name"] = str(base["slots"][key]["name"])
+                merged["text_hex"] = str(base["slots"][key]["text_hex"])
+                merged["role_hex"] = str(base["slots"][key]["role_hex"])
+                if str(merged.get("role_name") or "") in {"", "Preto escuro", "Preto"}:
+                    merged["role_name"] = str(base["slots"][key]["role_name"])
         base["slots"][key] = merged
     return base
 

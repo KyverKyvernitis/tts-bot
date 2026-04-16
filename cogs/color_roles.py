@@ -45,7 +45,7 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
     {"number": 7, "name": "Laranja escuro", "text_hex": "#d98900", "role_hex": "#ff8c00"},
     {"number": 8, "name": "Bege escuro", "text_hex": "#b96d43", "role_hex": "#a0522d"},
     {"number": 9, "name": "Ciano escuro", "text_hex": "#008f98", "role_hex": "#008b8b"},
-    {"number": 10, "name": "Preto", "text_hex": "#4a4a4a", "role_hex": "#1f1f1f"},
+    {"number": 10, "name": "Preto", "text_hex": "#000000", "role_hex": "#000000"},
     {"number": 11, "name": "Vermelho", "text_hex": "#ff1b1b", "role_hex": "#ff0000"},
     {"number": 12, "name": "Amarelo", "text_hex": "#ffec1a", "role_hex": "#ffd700"},
     {"number": 13, "name": "Verde", "text_hex": "#11b611", "role_hex": "#00ff00"},
@@ -76,11 +76,11 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "panel_count": 3,
     "messages": {str(index): dict(_DEFAULT_MESSAGE) for index in range(1, COLOR_MAX_MESSAGES + 1)},
     "templates": {
-        "apply": "{membro}, a cor {cor_adicionada} foi aplicada.",
-        "remove": "{membro}, a cor {cor_removida} foi removida.",
-        "switch": "{membro}, {cor_removida} foi removida e {cor_adicionada} foi aplicada.",
+        "apply": "cor {cor_adicionada} aplicada.",
+        "remove": "cor {cor_removida} removida.",
+        "switch": "cor alterada: {cor_removida} → {cor_adicionada}.",
         "no_role": "Essa cor ainda não está configurada.",
-        "hierarchy": "Não consegui aplicar {cor_nome} por causa da hierarquia de cargos.",
+        "hierarchy": "não consegui aplicar {cor_nome} por causa da hierarquia de cargos.",
         "missing_panel": "Esse painel de cores não é mais o oficial deste servidor.",
     },
     "slots": {str(item["number"]): {**item, "role_id": 0, "role_name": item["name"], "managed": False} for item in DEFAULT_SLOTS},
@@ -141,6 +141,50 @@ def _default_slot_payload(slot_number: int) -> dict[str, Any]:
             "managed": False,
         }
     return {**default, "role_id": 0, "role_name": str(default["name"]), "managed": False}
+
+
+
+
+_LEGACY_TEMPLATE_DEFAULTS: dict[str, tuple[str, ...]] = {
+    "apply": ("{membro}, a cor {cor_adicionada} foi aplicada.",),
+    "remove": ("{membro}, a cor {cor_removida} foi removida.",),
+    "switch": ("{membro}, {cor_removida} foi removida e {cor_adicionada} foi aplicada.",),
+    "hierarchy": ("Não consegui aplicar {cor_nome} por causa da hierarquia de cargos.",),
+}
+
+
+def _legacy_slot_payload(slot_number: int) -> dict[str, Any]:
+    default = _default_slot_payload(slot_number)
+    if int(slot_number) != 10:
+        return default
+    legacy = dict(default)
+    legacy["name"] = "Preto escuro"
+    legacy["text_hex"] = "#4a4a4a"
+    legacy["role_hex"] = "#1f1f1f"
+    legacy["role_name"] = "Preto escuro"
+    return legacy
+
+
+def _normalize_color_name(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_default_black_slot(slot_number: int, slot: dict[str, Any]) -> bool:
+    if int(slot_number) != 10:
+        return False
+    default = _default_slot_payload(10)
+    return (
+        str(slot.get("name") or "") == str(default["name"])
+        and _clean_hex(str(slot.get("text_hex") or ""), default["text_hex"]) == default["text_hex"]
+    )
+
+
+def _build_public_embed(block_index: int, *, filename: str | None = None) -> discord.Embed | None:
+    if not _message_supports_slots(block_index):
+        return None
+    embed = discord.Embed()
+    embed.set_image(url=f"attachment://{filename or f'colors-{block_index}.png'}")
+    return embed
 
 
 def _cleared_slot_payload(slot_number: int) -> dict[str, Any]:
@@ -778,20 +822,58 @@ class ColorRolesCog(commands.Cog):
             }
         raw_templates = payload.get("templates") or {}
         for key in list(base["templates"].keys()):
-            if raw_templates.get(key) is not None:
-                base["templates"][key] = str(raw_templates.get(key))
+            raw_value = raw_templates.get(key)
+            if raw_value is None:
+                continue
+            text = str(raw_value)
+            if text in _LEGACY_TEMPLATE_DEFAULTS.get(key, ()):
+                continue
+            base["templates"][key] = text
         raw_slots = payload.get("slots") or {}
         for slot_number in range(1, 31):
             key = str(slot_number)
-            merged = _default_slot_payload(slot_number)
+            default_slot = _default_slot_payload(slot_number)
+            legacy_slot = _legacy_slot_payload(slot_number)
+            merged = dict(default_slot)
             merged.update(dict(raw_slots.get(key) or {}))
             merged["number"] = int(slot_number)
             merged["role_id"] = int(merged.get("role_id") or 0)
             merged["managed"] = bool(merged.get("managed", False))
-            merged["name"] = str(merged.get("name") or _default_slot_payload(slot_number)["name"])
+            merged["name"] = str(merged.get("name") or default_slot["name"])
             merged["role_name"] = str(merged.get("role_name") or merged["name"])
-            merged["text_hex"] = _clean_hex(str(merged.get("text_hex") or ""), _default_slot_payload(slot_number)["text_hex"])
-            merged["role_hex"] = _clean_hex(str(merged.get("role_hex") or ""), _default_slot_payload(slot_number)["role_hex"])
+            merged["text_hex"] = _clean_hex(str(merged.get("text_hex") or ""), default_slot["text_hex"])
+            merged["role_hex"] = _clean_hex(str(merged.get("role_hex") or ""), default_slot["role_hex"])
+            comparable_current = {
+                "name": str(merged.get("name") or ""),
+                "text_hex": merged["text_hex"],
+                "role_hex": merged["role_hex"],
+                "role_id": int(merged.get("role_id") or 0),
+                "role_name": str(merged.get("role_name") or ""),
+                "managed": bool(merged.get("managed", False)),
+            }
+            comparable_legacy = {
+                "name": str(legacy_slot["name"]),
+                "text_hex": legacy_slot["text_hex"],
+                "role_hex": legacy_slot["role_hex"],
+                "role_id": 0,
+                "role_name": str(legacy_slot["role_name"]),
+                "managed": False,
+            }
+            if comparable_current == comparable_legacy:
+                merged = dict(default_slot)
+            elif slot_number == 10 and int(merged.get("role_id") or 0) >= 0:
+                legacy_name = {"Preto escuro", "Preto"}
+                if (
+                    str(merged.get("name") or "") in legacy_name
+                    and merged["text_hex"] in {"#4a4a4a", "#000000"}
+                    and merged["role_hex"] in {"#1f1f1f", "#000000"}
+                    and (bool(merged.get("managed", False)) or int(merged.get("role_id") or 0) == 0)
+                ):
+                    merged["name"] = default_slot["name"]
+                    merged["text_hex"] = default_slot["text_hex"]
+                    merged["role_hex"] = default_slot["role_hex"]
+                    if str(merged.get("role_name") or "") in {"", "Preto escuro", "Preto"}:
+                        merged["role_name"] = default_slot["role_name"]
             base["slots"][key] = merged
         return base
 
@@ -987,9 +1069,9 @@ class ColorRolesCog(commands.Cog):
             "membro_nome": member.display_name,
             "membro_id": str(member.id),
             "numero": str(slot.get("number") or ""),
-            "cor_nome": str(slot.get("name") or ""),
-            "cor_adicionada": str(added_name or slot.get("name") or ""),
-            "cor_removida": str(removed_name or ""),
+            "cor_nome": _normalize_color_name(str(slot.get("name") or "")),
+            "cor_adicionada": _normalize_color_name(str(added_name or slot.get("name") or "")),
+            "cor_removida": _normalize_color_name(str(removed_name or "")),
             "cargo": role.mention if role else "",
             "cargo_nome": role.name if role else str(slot.get("role_name") or slot.get("name") or ""),
             "servidor": guild.name if guild else "",
@@ -1047,7 +1129,7 @@ class ColorRolesCog(commands.Cog):
         me = guild.me or (guild.get_member(self.bot.user.id) if self.bot.user else None)
         if me is None or target_role >= me.top_role:
             text = self._render_template(str((cfg.get("templates") or {}).get("hierarchy") or ""), member=member, slot=slot)
-            await interaction.response.send_message(text or "Não consegui aplicar essa cor por causa da hierarquia de cargos.", ephemeral=True)
+            await interaction.response.send_message(text or "não consegui aplicar essa cor por causa da hierarquia de cargos.", ephemeral=True)
             return
         current_slot_number, current_slot = self._member_current_color_slot(guild, member)
         roles_to_remove = [guild.get_role(rid) for rid in self._all_color_role_ids(guild.id)]
@@ -1058,14 +1140,15 @@ class ColorRolesCog(commands.Cog):
                     await member.remove_roles(*roles_to_remove, reason="Remoção de cor pelo painel")
                 template = str((cfg.get("templates") or {}).get("remove") or "")
                 text = self._render_template(template, member=member, slot=slot, removed_name=str(slot.get("name") or ""))
-                await interaction.response.send_message(text or "Sua cor foi removida.", ephemeral=True)
+                removed_name = _normalize_color_name(str(slot.get("name") or ""))
+                await interaction.response.send_message(text or f"cor {removed_name} removida.", ephemeral=True)
                 return
             if roles_to_remove:
                 await member.remove_roles(*roles_to_remove, reason="Troca de cor pelo painel")
             await member.add_roles(target_role, reason="Cor escolhida pelo painel")
         except discord.Forbidden:
             text = self._render_template(str((cfg.get("templates") or {}).get("hierarchy") or ""), member=member, slot=slot)
-            await interaction.response.send_message(text or "Não consegui aplicar essa cor por causa da hierarquia de cargos.", ephemeral=True)
+            await interaction.response.send_message(text or "não consegui aplicar essa cor por causa da hierarquia de cargos.", ephemeral=True)
             return
         if current_slot:
             template = str((cfg.get("templates") or {}).get("switch") or "")
@@ -1073,7 +1156,8 @@ class ColorRolesCog(commands.Cog):
         else:
             template = str((cfg.get("templates") or {}).get("apply") or "")
             text = self._render_template(template, member=member, slot=slot, added_name=str(slot.get("name") or ""))
-        await interaction.response.send_message(text or f"A cor {slot.get('name')} foi aplicada.", ephemeral=True)
+        applied_name = _normalize_color_name(str(slot.get("name") or ""))
+        await interaction.response.send_message(text or f"cor {applied_name} aplicada.", ephemeral=True)
 
     async def _delete_existing_panel_messages(self, guild_id: int):
         cfg = self._get_config(guild_id)
@@ -1111,6 +1195,13 @@ class ColorRolesCog(commands.Cog):
             hex_color = _clean_hex(str(slot.get("text_hex") or "#ffffff"), "#ffffff")
             x = x_left if idx % 2 == 0 else x_right
             y = y_positions[idx // 2]
+            if _is_default_black_slot(slot_number, slot):
+                try:
+                    draw.text((x, y), label, font=font, fill=hex_color, stroke_width=3, stroke_fill="#8f8f8f")
+                except TypeError:
+                    draw.text((x + 2, y + 2), label, font=font, fill="#8f8f8f")
+                    draw.text((x, y), label, font=font, fill=hex_color)
+                continue
             draw.text((x + 2, y + 2), label, font=font, fill=shadow)
             draw.text((x, y), label, font=font, fill=hex_color)
         buffer = io.BytesIO()
@@ -1123,7 +1214,9 @@ class ColorRolesCog(commands.Cog):
         content = _compose_block_text(block_cfg)
         payload: dict[str, Any] = {"content": content or ("\u200b" if not _message_supports_slots(block_index) else None)}
         if _message_supports_slots(block_index):
-            payload["file"] = self._make_block_image(guild_id, block_index)
+            filename = f"colors-{block_index}.png"
+            payload["file"] = self._make_block_image(guild_id, block_index, filename=filename)
+            payload["embed"] = _build_public_embed(block_index, filename=filename)
             payload["view"] = _ColorPublicPanelView(self, guild_id, block_index)
         else:
             payload["view"] = None
@@ -1183,9 +1276,11 @@ class ColorRolesCog(commands.Cog):
                 continue
             try:
                 if _message_supports_slots(block_index):
-                    file = self._make_block_image(guild_id, block_index)
+                    filename = f"colors-{block_index}.png"
+                    file = self._make_block_image(guild_id, block_index, filename=filename)
                     view = _ColorPublicPanelView(self, guild_id, block_index)
-                    await message.edit(content=_compose_block_text(self._get_message_block_config(guild_id, block_index)), attachments=[file], view=view)
+                    embed = _build_public_embed(block_index, filename=filename)
+                    await message.edit(content=_compose_block_text(self._get_message_block_config(guild_id, block_index)), embed=embed, attachments=[file], view=view)
                     key = (guild_id, block_index, message_id)
                     try:
                         self.bot.add_view(view, message_id=message_id)
@@ -1212,11 +1307,11 @@ class ColorRolesCog(commands.Cog):
     @commands.guild_only()
     async def color_command(self, ctx: commands.Context):
         if not self._is_admin(getattr(ctx, "author", None)):
-            await ctx.reply("Só administradores podem convocar o painel de cores.", mention_author=False)
+            await ctx.send("Só administradores podem convocar o painel de cores.")
             return
         remaining = await self._consume_color_command_cooldown(ctx.guild.id)
         if remaining > 0:
-            await ctx.reply(f"Espere {remaining:.0f}s para convocar o painel de cores de novo.", mention_author=False)
+            await ctx.send(f"Espere {remaining:.0f}s para convocar o painel de cores de novo.")
             return
         await self._delete_existing_panel_messages(ctx.guild.id)
         message_ids = await self._post_public_panel(ctx.channel, ctx.guild)
@@ -1224,13 +1319,13 @@ class ColorRolesCog(commands.Cog):
         cfg["channel_id"] = int(ctx.channel.id)
         cfg["message_ids"] = message_ids
         await self._save_config(ctx.guild.id, cfg)
-        await ctx.reply(f"Painel de cores publicado com {self._get_panel_count(ctx.guild.id)} mensagem(ns).", mention_author=False)
+        await ctx.send(f"Painel de cores publicado com {self._get_panel_count(ctx.guild.id)} mensagem(ns).")
 
     @commands.command(name="coloredit")
     @commands.guild_only()
     async def coloredit_command(self, ctx: commands.Context):
         if not self._is_admin(getattr(ctx, "author", None)):
-            await ctx.reply("Só administradores podem abrir o editor de cores.", mention_author=False)
+            await ctx.send("Só administradores podem abrir o editor de cores.")
             return
         key = (ctx.guild.id, ctx.author.id)
         old_id = self._active_edit_messages.get(key)
@@ -1242,7 +1337,7 @@ class ColorRolesCog(commands.Cog):
                 pass
         view = _ColorUnifiedEditView(self, guild_id=ctx.guild.id, owner_id=ctx.author.id)
         payload = view.editor_message_payload()
-        msg = await ctx.reply(view=view, embeds=payload["embeds"], files=payload["attachments"], mention_author=False)
+        msg = await ctx.send(content="🎨 Editor do painel de cores", view=view, embeds=payload["embeds"], files=payload["attachments"])
         view.message = msg
         self._active_edit_messages[key] = int(msg.id)
 
