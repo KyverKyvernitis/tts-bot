@@ -324,6 +324,31 @@ class GincanaTrucoMixin:
             self._truco_games = {}
         if not hasattr(self, "_truco_lobbies"):
             self._truco_lobbies = {}
+        if not hasattr(self, "_truco_play_locks"):
+            self._truco_play_locks = {}
+        if not hasattr(self, "_truco_play_inflight"):
+            self._truco_play_inflight = set()
+
+    def _truco_game_runtime_key(self, game: TrucoGame) -> int:
+        return id(game)
+
+    def _truco_get_play_lock(self, game: TrucoGame) -> asyncio.Lock:
+        self._ensure_truco_state()
+        key = self._truco_game_runtime_key(game)
+        lock = self._truco_play_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._truco_play_locks[key] = lock
+        return lock
+
+    def _truco_clear_runtime_guards(self, game: TrucoGame):
+        key = self._truco_game_runtime_key(game)
+        self._truco_play_locks.pop(key, None)
+        inflight = getattr(self, "_truco_play_inflight", None)
+        if inflight is not None:
+            for marker in list(inflight):
+                if marker and marker[0] == key:
+                    inflight.discard(marker)
 
     def _truco_variant(self, game_or_lobby) -> str:
         return str(getattr(game_or_lobby, "variant", "normal") or "normal").lower()
@@ -839,6 +864,7 @@ class GincanaTrucoMixin:
         game.winner_team = winner_team
         game.loser_id = loser_id
         self._truco_games.pop(game.guild_id, None)
+        self._truco_clear_runtime_guards(game)
         winners = list(game.teams[winner_team])
         losers = [uid for idx, team in enumerate(game.teams) if idx != winner_team for uid in team]
         all_players = [uid for team in game.teams for uid in team]
@@ -894,6 +920,7 @@ class GincanaTrucoMixin:
         if game.finished or game.accepted:
             return
         self._truco_games.pop(game.guild_id, None)
+        self._truco_clear_runtime_guards(game)
         game.finished = True
         closed = discord.ui.LayoutView(timeout=None)
         closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco\nO desafio expirou porque não foi aceito a tempo."), accent_color=discord.Color.red()))
@@ -1197,40 +1224,59 @@ class GincanaTrucoMixin:
         if interaction.user.id != player_id:
             await interaction.response.send_message("Esse jogo não é seu.", ephemeral=True)
             return
-        if game.finished or game.status != "active":
-            await interaction.response.send_message("Esse jogo não está pronto para jogada agora.", ephemeral=True)
+
+        game_key = self._truco_game_runtime_key(game)
+        inflight_marker = (game_key, int(player_id))
+        inflight = getattr(self, "_truco_play_inflight", None)
+        if inflight is not None and inflight_marker in inflight:
+            await interaction.response.send_message("Sua jogada já está sendo processada.", ephemeral=True)
             return
-        if player_id != game.turn_id:
-            await interaction.response.send_message("Ainda não é a sua vez.", ephemeral=True)
-            return
-        hand = game.hands.get(player_id, [])
-        if card_index < 0 or card_index >= len(hand):
-            await interaction.response.send_message("Essa carta não está mais disponível.", ephemeral=True)
-            return
-        card = hand.pop(card_index)
-        guild = self.bot.get_guild(game.guild_id)
-        game.status_text = f"{self._truco_member_mention(guild, player_id)} puxou uma carta."
-        game.cards_on_table[player_id] = card
-        if not interaction.response.is_done():
-            await interaction.response.defer()
+
+        lock = self._truco_get_play_lock(game)
+        if inflight is not None:
+            inflight.add(inflight_marker)
         try:
-            if interaction.message is not None:
-                await self._truco_safe_edit(interaction.message, embed=None, view=TrucoHandView(self, game, player_id), content=None)
-        except Exception:
-            pass
-        await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
-        await self._truco_refresh_private_views(game)
-        await asyncio.sleep(0.8)
-        expected = 2 if game.mode == "1v1" else 4
-        if len(game.cards_on_table) < expected:
-            # next in current rotated order not yet played
-            for uid in game.players_order:
-                if uid not in game.cards_on_table:
-                    game.turn_id = uid
-                    break
-            await self._truco_show_turn(game)
-            return
-        await self._truco_resolve_round(game)
+            async with lock:
+                if game.finished or game.status != "active":
+                    await interaction.response.send_message("Esse jogo não está pronto para jogada agora.", ephemeral=True)
+                    return
+                if player_id != game.turn_id:
+                    await interaction.response.send_message("Ainda não é a sua vez.", ephemeral=True)
+                    return
+                if player_id in game.cards_on_table:
+                    await interaction.response.send_message("Você já jogou sua carta nesta rodada.", ephemeral=True)
+                    return
+                hand = game.hands.get(player_id, [])
+                if card_index < 0 or card_index >= len(hand):
+                    await interaction.response.send_message("Essa carta não está mais disponível.", ephemeral=True)
+                    return
+                card = hand.pop(card_index)
+                guild = self.bot.get_guild(game.guild_id)
+                game.status_text = f"{self._truco_member_mention(guild, player_id)} puxou uma carta."
+                game.cards_on_table[player_id] = card
+                if not interaction.response.is_done():
+                    await interaction.response.defer()
+                try:
+                    if interaction.message is not None:
+                        await self._truco_safe_edit(interaction.message, embed=None, view=TrucoHandView(self, game, player_id), content=None)
+                except Exception:
+                    pass
+                await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
+                await self._truco_refresh_private_views(game)
+                await asyncio.sleep(0.8)
+                expected = 2 if game.mode == "1v1" else 4
+                if len(game.cards_on_table) < expected:
+                    # next in current rotated order not yet played
+                    for uid in game.players_order:
+                        if uid not in game.cards_on_table:
+                            game.turn_id = uid
+                            break
+                    await self._truco_show_turn(game)
+                    return
+                await self._truco_resolve_round(game)
+        finally:
+            if inflight is not None:
+                inflight.discard(inflight_marker)
 
     def _truco_requesting_team(self, game: TrucoGame) -> int | None:
         return self._truco_team_index(game, game.pending_raise_by or 0)
