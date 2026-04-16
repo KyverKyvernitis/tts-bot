@@ -676,7 +676,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             else:
                 await channel.send(view=self._make_v2_notice("🕵️ Roubo", [f"Você tentou roubar {target.mention}, mas esse usuário é muito **pobre** pra ser roubado."], ok=False))
             return True
-        consumed, _consumed_state = await self._consume_limited_action(
+        consumed, consumed_state = await self._consume_limited_action(
             guild.id,
             author.id,
             storage_key="race_robbery",
@@ -700,9 +700,11 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 f"Você passou a mão em {self._chip_text(amount, kind='gain')} de {target.mention}."
             ])
             effect_lines = []
-            marker = self._race_effect_message(guild.id, author.id, "mao_negra")
-            if marker:
-                effect_lines.append(marker)
+            robbery_used_count = int(consumed_state.get("used", 0) or 0)
+            if self._race_is(guild.id, author.id, "preto") and robbery_used_count > 1:
+                marker = self._race_effect_message(guild.id, author.id, "mao_negra")
+                if marker:
+                    effect_lines.append(marker)
             if amount > 30:
                 marker = self._race_effect_message(guild.id, author.id, "mao_grande")
                 if marker:
