@@ -541,37 +541,25 @@ class _MoveMessageButton(discord.ui.Button):
         await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id)
 
 
-class _MessagePresetButton(discord.ui.Button):
+class _ClearMessageButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", message_index: int):
-        changed = view.cog._message_text_changed_from_preset(view.guild_id, message_index)
-        super().__init__(label="Resetar mensagem" if changed else "Limpar mensagem", style=discord.ButtonStyle.danger)
+        super().__init__(label="Limpar mensagem", style=discord.ButtonStyle.danger)
         self.view_ref = view
         self.message_index = int(message_index)
-        self.changed = changed
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
-        if self.changed:
-            async def action():
-                await self.view_ref.cog._reset_message_text_to_preset(self.view_ref.guild_id, self.message_index)
-                await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.message_index])
-                await self.view_ref.force_refresh_from_background()
 
-            prompt = "Confirmar reset desta mensagem para o preset dessa posição?"
-            success = "Mensagem resetada para o preset."
-        else:
-            async def action():
-                await self.view_ref.cog._clear_message_text(self.view_ref.guild_id, self.message_index)
-                await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.message_index])
-                await self.view_ref.force_refresh_from_background()
+        async def action():
+            await self.view_ref.cog._clear_message_text(self.view_ref.guild_id, self.message_index)
+            await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.message_index])
+            await self.view_ref.force_refresh_from_background()
 
-            prompt = "Confirmar limpeza do conteúdo desta mensagem?"
-            success = "Conteúdo da mensagem limpo."
         await interaction.response.send_message(
-            prompt,
+            "Confirmar limpeza do conteúdo desta mensagem?",
             ephemeral=True,
-            view=_ConfirmActionView(self.view_ref.owner_id, action, success),
+            view=_ConfirmActionView(self.view_ref.owner_id, action, "Conteúdo da mensagem limpo."),
         )
 
 
@@ -712,33 +700,24 @@ class _EditSlotButton(discord.ui.Button):
 
 class _SlotPresetButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
-        changed = view.cog._slot_block_changed_from_preset(view.guild_id, block_index)
-        if changed:
-            super().__init__(label="Resetar preset da faixa", style=discord.ButtonStyle.danger)
-        else:
-            super().__init__(label="Limpar preset da faixa", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Resetar preset da faixa", style=discord.ButtonStyle.danger)
         self.view_ref = view
         self.block_index = int(block_index)
-        self.changed = changed
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
             return
-        if self.changed:
-            async def action():
-                await self.view_ref.cog._reset_slot_block_to_preset(self.view_ref.guild_id, self.block_index)
-                await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
-                await self.view_ref.force_refresh_from_background()
 
-            await interaction.response.send_message(
-                "Confirmar reset desta faixa para o preset? Isso também zera os vínculos de cargo dessa faixa.",
-                ephemeral=True,
-                view=_ConfirmActionView(self.view_ref.owner_id, action, "Faixa resetada para o preset."),
-            )
-            return
-        await self.view_ref.cog._clear_slot_block(self.view_ref.guild_id, self.block_index)
-        await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
-        await self.view_ref.refresh_editor_message(interaction)
+        async def action():
+            await self.view_ref.cog._reset_slot_block_to_preset(self.view_ref.guild_id, self.block_index)
+            await self.view_ref.cog._refresh_public_panel_messages(self.view_ref.guild_id, block_indices=[self.block_index])
+            await self.view_ref.force_refresh_from_background()
+
+        await interaction.response.send_message(
+            "Confirmar reset desta faixa para o preset? Isso também zera os vínculos de cargo dessa faixa.",
+            ephemeral=True,
+            view=_ConfirmActionView(self.view_ref.owner_id, action, "Faixa resetada para o preset."),
+        )
 
 
 class _ColorUnifiedEditView(discord.ui.LayoutView):
@@ -768,8 +747,6 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         return {
             "view": self,
             "attachments": self._editor_preview_files(),
-            "content": None,
-            "embeds": [],
         }
 
     async def force_refresh_from_background(self):
@@ -845,11 +822,8 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         active = self.active_block
         row_one = [_EditContentButton(self, active)]
         row_two: list[discord.ui.Item[Any]] = [
-            _MoveMessageButton(self, active, -1),
-            _MoveMessageButton(self, active, 1),
+            _ClearMessageButton(self, active),
         ]
-        if _message_supports_slots(active) or self.cog._message_text_changed_from_preset(self.guild_id, active):
-            row_two.append(_MessagePresetButton(self, active))
         block_children: list[discord.ui.Item[Any]] = [discord.ui.TextDisplay("\n".join(self._block_lines(active)))]
         if _message_supports_slots(active):
             block_children.append(
@@ -870,7 +844,7 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         ))
 
         if _message_supports_slots(active):
-            self.add_item(discord.ui.Container(
+            slot_rows: list[discord.ui.Item[Any]] = [
                 discord.ui.TextDisplay("\n".join(self._slot_editor_lines(active))),
                 discord.ui.ActionRow(
                     _ChangeActiveSlotButton(self, active, -1),
@@ -879,7 +853,11 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
                     _AutoRoleButton(self, active),
                     _EditSlotButton(self, active),
                 ),
-                discord.ui.ActionRow(_SlotPresetButton(self, active)),
+            ]
+            if self.cog._slot_block_changed_from_preset(self.guild_id, active):
+                slot_rows.append(discord.ui.ActionRow(_SlotPresetButton(self, active)))
+            self.add_item(discord.ui.Container(
+                *slot_rows,
                 accent_color=discord.Colour.blurple(),
             ))
 
@@ -1097,16 +1075,24 @@ class ColorRolesCog(commands.Cog):
     async def _reset_slot_block_to_preset(self, guild_id: int, block_index: int):
         if not _message_supports_slots(block_index):
             return
+        cfg = self._get_config(guild_id)
+        slots = dict(cfg.get("slots") or {})
         start, end = _chunk_block(block_index)
         for slot_number in range(start, end + 1):
-            await self._update_slot_config(guild_id, slot_number, **_default_slot_payload(slot_number))
+            slots[str(slot_number)] = dict(_default_slot_payload(slot_number))
+        cfg["slots"] = slots
+        await self._save_config(guild_id, cfg)
 
     async def _clear_slot_block(self, guild_id: int, block_index: int):
         if not _message_supports_slots(block_index):
             return
+        cfg = self._get_config(guild_id)
+        slots = dict(cfg.get("slots") or {})
         start, end = _chunk_block(block_index)
         for slot_number in range(start, end + 1):
-            await self._update_slot_config(guild_id, slot_number, **_cleared_slot_payload(slot_number))
+            slots[str(slot_number)] = dict(_cleared_slot_payload(slot_number))
+        cfg["slots"] = slots
+        await self._save_config(guild_id, cfg)
 
     async def _add_extra_message(self, guild_id: int):
         count = self._get_panel_count(guild_id)
