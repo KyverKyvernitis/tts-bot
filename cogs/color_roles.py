@@ -128,6 +128,58 @@ def _block_title(block_index: int) -> str:
     return f"{start}–{end}"
 
 
+def _attachment_uri(filename: str) -> str:
+    return f"attachment://{filename}"
+
+
+def _build_media_gallery(filename: str):
+    ui = getattr(discord, "ui", None)
+    media_gallery_cls = getattr(ui, "MediaGallery", None) if ui else None
+    if media_gallery_cls is None:
+        return None
+    attachment_uri = _attachment_uri(filename)
+    item_types = [
+        getattr(discord, "MediaGalleryItem", None),
+        getattr(ui, "MediaGalleryItem", None) if ui else None,
+        getattr(discord, "UnfurledMediaItem", None),
+        getattr(ui, "UnfurledMediaItem", None) if ui else None,
+    ]
+    item_types = [item_type for item_type in item_types if item_type is not None]
+    for item_type in item_types:
+        created_item = None
+        for args, kwargs in (
+            ((), {"media": attachment_uri}),
+            ((), {"url": attachment_uri}),
+            ((attachment_uri,), {}),
+        ):
+            try:
+                created_item = item_type(*args, **kwargs)
+                break
+            except Exception:
+                continue
+        if created_item is None:
+            continue
+        for args, kwargs in (
+            ((created_item,), {}),
+            (([created_item],), {}),
+            ((), {"items": [created_item]}),
+        ):
+            try:
+                return media_gallery_cls(*args, **kwargs)
+            except Exception:
+                continue
+    for args, kwargs in (
+        ((attachment_uri,), {}),
+        (([attachment_uri],), {}),
+        ((), {"items": [attachment_uri]}),
+    ):
+        try:
+            return media_gallery_cls(*args, **kwargs)
+        except Exception:
+            continue
+    return None
+
+
 class _ColorFieldEditModal(discord.ui.Modal):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int, field_name: str):
         labels = {"title": "Título", "subtitle": "Descrição", "footer": "Footer"}
@@ -248,8 +300,14 @@ class _ColorPublicPanelView(discord.ui.LayoutView):
             if lines:
                 lines.append("")
             lines.append(footer)
+        panel_children = []
         if lines:
-            self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), accent_color=discord.Color.dark_gray()))
+            panel_children.append(discord.ui.TextDisplay("\n".join(lines)))
+        media_gallery = _build_media_gallery(f"colors-{self.block_index}.png")
+        if media_gallery is not None:
+            panel_children.append(media_gallery)
+        if panel_children:
+            self.add_item(discord.ui.Container(*panel_children, accent_color=discord.Color.dark_gray()))
         start, end = _chunk_block(self.block_index)
         buttons = [_ColorPickerButton(self.cog, self.guild_id, slot) for slot in range(start, end + 1)]
         for idx in range(0, len(buttons), 5):
@@ -272,7 +330,7 @@ class _EditFieldButton(discord.ui.Button):
 class _OpenBlockEditorButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
         style = discord.ButtonStyle.primary if view.active_block == block_index else discord.ButtonStyle.secondary
-        super().__init__(label=f"Editar cargos {_block_title(block_index)}", style=style)
+        super().__init__(label=f"Editar visual/cargos {_block_title(block_index)}", style=style)
         self.view_ref = view
         self.block_index = int(block_index)
 
@@ -285,7 +343,7 @@ class _OpenBlockEditorButton(discord.ui.Button):
 
 class _EditTemplatesButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView"):
-        super().__init__(label="Editar respostas", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Editar respostas do painel", style=discord.ButtonStyle.secondary)
         self.view_ref = view
 
     async def callback(self, interaction: discord.Interaction):
@@ -303,7 +361,7 @@ class _BlockSlotSelect(discord.ui.Select):
         for slot_number in range(start, end + 1):
             slot = view.cog._get_slot_config(view.guild_id, slot_number)
             options.append(discord.SelectOption(label=f"{slot_number}. {slot.get('name')}", value=str(slot_number), default=view.selected_slots.get(block_index, start) == slot_number))
-        super().__init__(placeholder="Escolha o slot para editar", options=options, min_values=1, max_values=1)
+        super().__init__(placeholder="Escolha o slot desta faixa", options=options, min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.view_ref.ensure_owner(interaction):
@@ -314,7 +372,7 @@ class _BlockSlotSelect(discord.ui.Select):
 
 class _BlockRoleSelect(discord.ui.RoleSelect):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
-        super().__init__(placeholder="Selecionar cargo existente para este slot", min_values=1, max_values=1)
+        super().__init__(placeholder="Vincular um cargo existente ao slot atual", min_values=1, max_values=1)
         self.view_ref = view
         self.block_index = int(block_index)
 
@@ -343,7 +401,7 @@ class _BlockRoleSelect(discord.ui.RoleSelect):
 
 class _AutoRoleButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
-        super().__init__(label="Usar cargo do bot", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Usar cargo automático do bot", style=discord.ButtonStyle.secondary)
         self.view_ref = view
         self.block_index = int(block_index)
 
@@ -363,7 +421,7 @@ class _AutoRoleButton(discord.ui.Button):
 
 class _EditSlotButton(discord.ui.Button):
     def __init__(self, view: "_ColorUnifiedEditView", block_index: int):
-        super().__init__(label="Editar slot", style=discord.ButtonStyle.secondary)
+        super().__init__(label="Editar slot atual", style=discord.ButtonStyle.secondary)
         self.view_ref = view
         self.block_index = int(block_index)
 
@@ -417,37 +475,43 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         subtitle = str(cfg.get("subtitle") or "").strip() or "(vazio)"
         footer = str(cfg.get("footer") or "").strip() or "(vazio)"
         return [
-            f"## Mensagem {_block_title(block_index)}",
-            f"**Título:** {title}",
-            f"**Descrição:** {subtitle}",
-            f"**Footer:** {footer}",
-            f"**Slots:** {start}–{end}",
-            f"**Preview visual:** anexo `colors-editor-{block_index}.png` desta mensagem",
+            f"## Faixa {_block_title(block_index)}",
+            f"**Título atual:** {title}",
+            f"**Descrição atual:** {subtitle}",
+            f"**Footer atual:** {footer}",
+            f"**Slots desta faixa:** {start}–{end}",
+            "A imagem abaixo é o preview real desta mensagem.",
         ]
 
     def _slot_editor_lines(self, block_index: int) -> list[str]:
         selected_slot = self.selected_slots.get(block_index, _chunk_block(block_index)[0])
         slot = self.cog._get_slot_config(self.guild_id, selected_slot)
         role_id = int(slot.get("role_id") or 0)
-        role_repr = f"<@&{role_id}>" if role_id else "Cargo do bot"
+        role_repr = f"<@&{role_id}>" if role_id else "Cargo criado e atualizado pelo bot"
+        managed_text = "sim" if bool(slot.get("managed", False) or role_id <= 0) else "não"
         return [
-            f"## Componentes {_block_title(block_index)}",
-            f"**Slot:** {selected_slot}",
-            f"**Texto:** {slot.get('name')}",
-            f"**Hex do texto:** {slot.get('text_hex')}",
-            f"**Cargo:** {role_repr}",
-            f"**Hex do cargo:** {slot.get('role_hex')}",
-            "Selecione um slot e vincule um cargo existente ou use um cargo criado pelo bot.",
+            f"## Editor da faixa {_block_title(block_index)}",
+            f"**Slot selecionado:** {selected_slot}",
+            f"**Nome exibido na imagem:** {slot.get('name')}",
+            f"**Cor do texto na imagem:** {slot.get('text_hex')}",
+            f"**Cargo vinculado:** {role_repr}",
+            f"**Cor do cargo:** {slot.get('role_hex')}",
+            f"**Gerenciado pelo bot:** {managed_text}",
+            "Escolha um slot para editar o visual da faixa, vincular um cargo existente ou deixar o bot cuidar do cargo automaticamente.",
         ]
 
     def _build_layout(self):
         self.clear_items()
+        cfg = self.cog._get_config(self.guild_id)
+        panel_ready = bool(int(cfg.get("channel_id") or 0) and list(cfg.get("message_ids") or []))
+        panel_status = "Painel oficial encontrado: as mudanças já refletem ao vivo nas mensagens públicas." if panel_ready else "Painel oficial ainda não foi publicado: você já pode configurar tudo aqui e depois usar `_color` para postar as 3 mensagens."
         header_lines = [
-            "# 🎨 Editor do painel de cores",
-            "As 3 faixas abaixo atualizam ao vivo o painel oficial quando ele já existir no servidor.",
-            "Os previews visuais das 3 mensagens ficam nos anexos desta própria mensagem do editor.",
+            "# 🎨 Editor unificado do painel de cores",
+            panel_status,
+            "Cada faixa abaixo mostra o preview real da imagem e os campos de texto da mensagem pública.",
+            "Use o bloco verde no final para editar o visual e os cargos da faixa selecionada.",
             "",
-            "**Variáveis disponíveis**",
+            "**Variáveis aceitas nas respostas**",
             "• " + " • ".join(COLOR_PANEL_VARIABLES[:5]),
             "• " + " • ".join(COLOR_PANEL_VARIABLES[5:]),
         ]
@@ -457,14 +521,18 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
             accent_color=discord.Color.green(),
         ))
         for block_index in range(1, 4):
+            preview_children = [discord.ui.TextDisplay("\n".join(self._block_preview_lines(block_index)))]
+            preview_gallery = _build_media_gallery(f"colors-editor-{block_index}.png")
+            if preview_gallery is not None:
+                preview_children.append(preview_gallery)
+            preview_children.append(discord.ui.ActionRow(
+                _EditFieldButton(self, block_index, "title", "Editar título"),
+                _EditFieldButton(self, block_index, "subtitle", "Editar descrição"),
+                _EditFieldButton(self, block_index, "footer", "Editar footer"),
+                _OpenBlockEditorButton(self, block_index),
+            ))
             preview_container = discord.ui.Container(
-                discord.ui.TextDisplay("\n".join(self._block_preview_lines(block_index))),
-                discord.ui.ActionRow(
-                    _EditFieldButton(self, block_index, "title", "Editar título"),
-                    _EditFieldButton(self, block_index, "subtitle", "Editar descrição"),
-                    _EditFieldButton(self, block_index, "footer", "Editar footer"),
-                    _OpenBlockEditorButton(self, block_index),
-                ),
+                *preview_children,
                 accent_color=discord.Color.green() if self.active_block == block_index else discord.Color.dark_green(),
             )
             self.add_item(preview_container)
