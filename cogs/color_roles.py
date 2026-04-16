@@ -192,6 +192,33 @@ def _cleared_slot_payload(slot_number: int) -> dict[str, Any]:
     }
 
 
+def _slot_payload_signature(slot: dict[str, Any], *, fallback_slot_number: int) -> dict[str, Any]:
+    default = _default_slot_payload(fallback_slot_number)
+    return {
+        "name": str(slot.get("name") or default["name"]),
+        "text_hex": _clean_hex(str(slot.get("text_hex") or ""), default["text_hex"]),
+        "role_hex": _clean_hex(str(slot.get("role_hex") or ""), default["role_hex"]),
+        "role_id": int(slot.get("role_id") or 0),
+        "role_name": str(slot.get("role_name") or slot.get("name") or default["role_name"]),
+        "managed": bool(slot.get("managed", False)),
+    }
+
+
+def _block_looks_like_default_source(slots: dict[str, Any], block_index: int, source_block_index: int) -> bool:
+    target_start, target_end = _chunk_block(block_index)
+    source_start, source_end = _chunk_block(source_block_index)
+    if (target_end - target_start) != (source_end - source_start):
+        return False
+    for offset, slot_number in enumerate(range(target_start, target_end + 1)):
+        current = dict(slots.get(str(slot_number), {}) or _default_slot_payload(slot_number))
+        source_default = _default_slot_payload(source_start + offset)
+        comparable_current = _slot_payload_signature(current, fallback_slot_number=slot_number)
+        comparable_source = _slot_payload_signature(source_default, fallback_slot_number=source_start + offset)
+        if comparable_current != comparable_source:
+            return False
+    return True
+
+
 def _message_supports_slots(message_index: int) -> bool:
     return 1 <= int(message_index) <= COLOR_BLOCK_COUNT
 
@@ -776,7 +803,6 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
         subtitle = str(cfg.get("subtitle") or "").strip() or "(vazio)"
         footer = str(cfg.get("footer") or "").strip() or "(vazio)"
         lines = [
-            f"## {_message_label(message_index)}",
             f"**Título:** {title}",
             f"**Descrição:** {subtitle}",
             f"**Footer:** {footer}",
@@ -821,9 +847,9 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
 
         active = self.active_block
         row_one = [_EditContentButton(self, active)]
-        row_two: list[discord.ui.Item[Any]] = [
-            _ClearMessageButton(self, active),
-        ]
+        row_two: list[discord.ui.Item[Any]] = []
+        if self.cog._message_text_changed_from_preset(self.guild_id, active):
+            row_two.append(_ClearMessageButton(self, active))
         block_children: list[discord.ui.Item[Any]] = [discord.ui.TextDisplay("\n".join(self._block_lines(active)))]
         if _message_supports_slots(active):
             block_children.append(
@@ -834,10 +860,9 @@ class _ColorUnifiedEditView(discord.ui.LayoutView):
                     )
                 )
             )
-        block_children.extend([
-            discord.ui.ActionRow(*row_one),
-            discord.ui.ActionRow(*row_two),
-        ])
+        block_children.append(discord.ui.ActionRow(*row_one))
+        if row_two:
+            block_children.append(discord.ui.ActionRow(*row_two))
         self.add_item(discord.ui.Container(
             *block_children,
             accent_color=discord.Colour.green(),
@@ -968,6 +993,15 @@ class ColorRolesCog(commands.Cog):
                     if str(merged.get("role_name") or "") in {"", "Preto escuro", "Preto"}:
                         merged["role_name"] = default_slot["role_name"]
             base["slots"][key] = merged
+        if _block_looks_like_default_source(base["slots"], 1, 2) and _block_looks_like_default_source(base["slots"], 2, 1):
+            repaired_slots = dict(base["slots"])
+            first_defaults = [_default_slot_payload(number) for number in range(1, 11)]
+            second_defaults = [_default_slot_payload(number) for number in range(11, 21)]
+            for offset, slot_number in enumerate(range(1, 11)):
+                repaired_slots[str(slot_number)] = dict(first_defaults[offset])
+            for offset, slot_number in enumerate(range(11, 21)):
+                repaired_slots[str(slot_number)] = dict(second_defaults[offset])
+            base["slots"] = repaired_slots
         return base
 
     def _get_config(self, guild_id: int) -> dict[str, Any]:
