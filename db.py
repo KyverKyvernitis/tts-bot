@@ -1394,3 +1394,112 @@ SettingsDB.schedule_chip_season_reset = _settingsdb_schedule_chip_season_reset
 SettingsDB.try_acquire_chip_season_reset_lock = _settingsdb_try_acquire_chip_season_reset_lock
 SettingsDB.reset_guild_chip_economy = _settingsdb_reset_guild_chip_economy
 SettingsDB.complete_chip_season_reset = _settingsdb_complete_chip_season_reset
+
+
+def _settingsdb_color_roles_defaults() -> dict[str, Any]:
+    slots: dict[str, dict[str, Any]] = {}
+    default_slots = [
+        (1, "Vermelho escuro", "#b11212", "#8b0000"),
+        (2, "Amarelo escuro", "#c9a31a", "#b8860b"),
+        (3, "Verde escuro", "#0b5d30", "#006400"),
+        (4, "Azul escuro", "#1737d8", "#00008b"),
+        (5, "Rosa escuro", "#d61ea6", "#c71585"),
+        (6, "Roxo escuro", "#9a0ec7", "#800080"),
+        (7, "Laranja escuro", "#d98900", "#ff8c00"),
+        (8, "Bege escuro", "#b96d43", "#a0522d"),
+        (9, "Ciano escuro", "#008f98", "#008b8b"),
+        (10, "Preto escuro", "#4a4a4a", "#1f1f1f"),
+        (11, "Vermelho", "#ff1b1b", "#ff0000"),
+        (12, "Amarelo", "#ffec1a", "#ffd700"),
+        (13, "Verde", "#11b611", "#00ff00"),
+        (14, "Azul", "#0e2fff", "#1e90ff"),
+        (15, "Rosa", "#ff62c3", "#ff69b4"),
+        (16, "Roxo", "#c020ff", "#9370db"),
+        (17, "Laranja", "#ffad13", "#ffa500"),
+        (18, "Bege", "#d6b694", "#f5deb3"),
+        (19, "Ciano", "#00ecff", "#00ffff"),
+        (20, "Cinza", "#8f8f8f", "#808080"),
+        (21, "Vermelho claro", "#ff8b8b", "#ff7f7f"),
+        (22, "Amarelo claro", "#fff38f", "#fff68f"),
+        (23, "Verde claro", "#9cff9c", "#90ee90"),
+        (24, "Azul claro", "#a6c7ff", "#87cefa"),
+        (25, "Rosa claro", "#ffb6d9", "#ffb6c1"),
+        (26, "Roxo claro", "#d6a5ff", "#d8bfd8"),
+        (27, "Laranja claro", "#ffd199", "#ffcc99"),
+        (28, "Bege claro", "#ffe8d0", "#f5f5dc"),
+        (29, "Ciano claro", "#d6ffff", "#e0ffff"),
+        (30, "Branco", "#ffffff", "#ffffff"),
+    ]
+    for number, name, text_hex, role_hex in default_slots:
+        slots[str(number)] = {
+            "number": number,
+            "name": name,
+            "text_hex": text_hex,
+            "role_hex": role_hex,
+            "role_id": 0,
+            "role_name": name,
+            "managed": False,
+        }
+    return {
+        "channel_id": 0,
+        "message_ids": [],
+        "messages": {
+            "1": {"title": "", "subtitle": "", "footer": ""},
+            "2": {"title": "", "subtitle": "", "footer": ""},
+            "3": {"title": "", "subtitle": "", "footer": ""},
+        },
+        "templates": {
+            "apply": "{membro}, a cor {cor_adicionada} foi aplicada.",
+            "remove": "{membro}, a cor {cor_removida} foi removida.",
+            "switch": "{membro}, {cor_removida} foi removida e {cor_adicionada} foi aplicada.",
+            "no_role": "Essa cor ainda não está configurada.",
+            "hierarchy": "Não consegui aplicar {cor_nome} por causa da hierarquia de cargos.",
+            "missing_panel": "Esse painel de cores não é mais o oficial deste servidor.",
+        },
+        "slots": slots,
+    }
+
+
+def _settingsdb_get_color_roles_config(self, guild_id: int) -> Dict[str, Any]:
+    doc = self._get_guild_doc(guild_id)
+    raw = deepcopy(doc.get("color_roles") or {})
+    base = _settingsdb_color_roles_defaults()
+    base["channel_id"] = int(raw.get("channel_id", base["channel_id"]) or 0)
+    base["message_ids"] = [int(mid) for mid in (raw.get("message_ids") or []) if str(mid).isdigit()]
+    messages = raw.get("messages") or {}
+    for key in ("1", "2", "3"):
+        payload = messages.get(key) or {}
+        base["messages"][key] = {
+            "title": str(payload.get("title") or ""),
+            "subtitle": str(payload.get("subtitle") or ""),
+            "footer": str(payload.get("footer") or ""),
+        }
+    templates = raw.get("templates") or {}
+    for key, value in templates.items():
+        if key in base["templates"] and value is not None:
+            base["templates"][key] = str(value)
+    slots = raw.get("slots") or {}
+    for key, payload in slots.items():
+        if key not in base["slots"]:
+            continue
+        merged = dict(base["slots"][key])
+        merged.update(dict(payload or {}))
+        merged["number"] = int(merged.get("number") or int(key))
+        merged["role_id"] = int(merged.get("role_id") or 0)
+        merged["managed"] = bool(merged.get("managed", False))
+        merged["name"] = str(merged.get("name") or base["slots"][key]["name"])
+        merged["role_name"] = str(merged.get("role_name") or merged["name"])
+        merged["text_hex"] = str(merged.get("text_hex") or base["slots"][key]["text_hex"])
+        merged["role_hex"] = str(merged.get("role_hex") or base["slots"][key]["role_hex"])
+        base["slots"][key] = merged
+    return base
+
+
+async def _settingsdb_set_color_roles_config(self, guild_id: int, config: Dict[str, Any]):
+    doc = self._get_guild_doc(guild_id)
+    doc["color_roles"] = deepcopy(config)
+    await self._save_guild_doc(guild_id, doc)
+
+
+SettingsDB.get_color_roles_config = _settingsdb_get_color_roles_config
+SettingsDB.set_color_roles_config = _settingsdb_set_color_roles_config
