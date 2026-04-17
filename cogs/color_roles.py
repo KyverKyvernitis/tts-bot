@@ -953,11 +953,21 @@ class ColorRolesCog(commands.Cog):
     async def cog_load(self):
         await self._restore_public_panel_views()
 
-    async def _restore_public_panel_views(self):
+    @commands.Cog.listener()
+    async def on_ready(self):
+        await self._restore_public_panel_views()
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        await self._restore_public_panel_views(guild_ids=[int(guild.id)])
+
+    async def _restore_public_panel_views(self, guild_ids: list[int] | None = None):
+        ids: set[int] = set(int(gid) for gid in (guild_ids or []) if gid)
         db = self.db
-        if db is None or not hasattr(db, "guild_cache"):
-            return
-        for gid in list(getattr(db, "guild_cache", {}).keys()):
+        if db is not None and hasattr(db, "guild_cache"):
+            ids.update(int(gid) for gid in getattr(db, "guild_cache", {}).keys())
+        ids.update(int(getattr(guild, "id", 0) or 0) for guild in getattr(self.bot, "guilds", []) if getattr(guild, "id", 0))
+        for gid in sorted(gid for gid in ids if gid):
             cfg = self._get_config(int(gid))
             message_ids = [int(mid) for mid in (cfg.get("message_ids") or []) if mid]
             for block_index, message_id in enumerate(message_ids, start=1):
