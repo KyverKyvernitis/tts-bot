@@ -411,6 +411,95 @@ class SettingsDB:
         await self._save_guild_doc(guild_id, doc)
 
 
+    def get_voice_moderation_settings(self, guild_id: int) -> Dict[str, Any]:
+        g = self.guild_cache.get(guild_id, {})
+        raw = g.get("voice_moderation", {}) or {}
+
+        def _get_int(key: str, default: int, minimum: int, maximum: int) -> int:
+            try:
+                return max(minimum, min(maximum, int(raw.get(key, default) or default)))
+            except Exception:
+                return default
+
+        def _get_float(key: str, default: float, minimum: float, maximum: float) -> float:
+            try:
+                return max(minimum, min(maximum, float(raw.get(key, default) or default)))
+            except Exception:
+                return default
+
+        return {
+            "enabled": bool(raw.get("enabled", False)),
+            "disconnect_enabled": bool(raw.get("disconnect_enabled", True)),
+            "threshold_rms": _get_int("threshold_rms", 4500, 500, 30000),
+            "hits_to_trigger": _get_int("hits_to_trigger", 3, 1, 20),
+            "window_seconds": _get_float("window_seconds", 1.2, 0.2, 10.0),
+            "cooldown_seconds": _get_float("cooldown_seconds", 12.0, 1.0, 600.0),
+        }
+
+    async def update_voice_moderation_settings(
+        self,
+        guild_id: int,
+        *,
+        enabled: Optional[bool] = None,
+        disconnect_enabled: Optional[bool] = None,
+        threshold_rms: Optional[int] = None,
+        hits_to_trigger: Optional[int] = None,
+        window_seconds: Optional[float] = None,
+        cooldown_seconds: Optional[float] = None,
+    ):
+        doc = self._get_guild_doc(guild_id)
+        current = self.get_voice_moderation_settings(guild_id)
+        data = doc.get("voice_moderation", {}) or {}
+
+        if enabled is not None:
+            data["enabled"] = bool(enabled)
+        else:
+            data.setdefault("enabled", bool(current.get("enabled", False)))
+
+        if disconnect_enabled is not None:
+            data["disconnect_enabled"] = bool(disconnect_enabled)
+        else:
+            data.setdefault("disconnect_enabled", bool(current.get("disconnect_enabled", True)))
+
+        if threshold_rms is not None:
+            try:
+                data["threshold_rms"] = max(500, min(30000, int(threshold_rms)))
+            except Exception:
+                data["threshold_rms"] = int(current.get("threshold_rms", 4500) or 4500)
+        else:
+            data.setdefault("threshold_rms", int(current.get("threshold_rms", 4500) or 4500))
+
+        if hits_to_trigger is not None:
+            try:
+                data["hits_to_trigger"] = max(1, min(20, int(hits_to_trigger)))
+            except Exception:
+                data["hits_to_trigger"] = int(current.get("hits_to_trigger", 3) or 3)
+        else:
+            data.setdefault("hits_to_trigger", int(current.get("hits_to_trigger", 3) or 3))
+
+        if window_seconds is not None:
+            try:
+                data["window_seconds"] = max(0.2, min(10.0, float(window_seconds)))
+            except Exception:
+                data["window_seconds"] = float(current.get("window_seconds", 1.2) or 1.2)
+        else:
+            data.setdefault("window_seconds", float(current.get("window_seconds", 1.2) or 1.2))
+
+        if cooldown_seconds is not None:
+            try:
+                data["cooldown_seconds"] = max(1.0, min(600.0, float(cooldown_seconds)))
+            except Exception:
+                data["cooldown_seconds"] = float(current.get("cooldown_seconds", 12.0) or 12.0)
+        else:
+            data.setdefault("cooldown_seconds", float(current.get("cooldown_seconds", 12.0) or 12.0))
+
+        doc["voice_moderation"] = data
+        await self._save_guild_doc(guild_id, doc)
+
+    async def set_voice_moderation_enabled(self, guild_id: int, value: bool):
+        await self.update_voice_moderation_settings(guild_id, enabled=bool(value))
+
+
 
     def _get_user_doc(self, guild_id: int, user_id: int) -> Dict[str, Any]:
         return dict(self.user_cache.get((guild_id, user_id), {"type": "user", "guild_id": guild_id, "user_id": user_id}))

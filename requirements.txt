@@ -6,3 +6,4 @@ gTTS
 psutil
 google-cloud-texttospeech
 pillow
+discord-ext-voice-recv

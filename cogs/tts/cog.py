@@ -172,6 +172,27 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
 
+    async def _voice_should_self_deaf(self, guild_id: int) -> bool:
+        db = self._get_db()
+        if db is None or not hasattr(db, "get_voice_moderation_settings"):
+            return True
+        try:
+            settings = db.get_voice_moderation_settings(guild_id)
+            settings = await self._maybe_await(settings)
+            return not bool((settings or {}).get("enabled", False))
+        except Exception as e:
+            print(f"[tts_voice] erro ao consultar moderação de voz da guild {guild_id}: {e}")
+            return True
+
+    async def _notify_voice_moderation_ready(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
+        cog = self.bot.get_cog("VoiceModeration")
+        if cog is None or not hasattr(cog, "handle_voice_client_ready"):
+            return
+        try:
+            await cog.handle_voice_client_ready(guild, vc or self._get_voice_client_for_guild(guild))
+        except Exception as e:
+            print(f"[tts_voice] erro ao notificar moderação de voz na guild {guild.id}: {e}")
+
     async def _set_user_tts_and_refresh(self, guild_id: int, user_id: int, *, history_entry: str | None = None, **kwargs):
         db = self._get_db()
         if db is None:
@@ -1035,38 +1056,64 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             print(f"[tts_voice] _ensure_connected recebeu canal None | guild={guild.id}")
             return None
 
-        async def _ensure_self_deaf() -> None:
+        async def _desired_self_deaf() -> bool:
+            try:
+                return bool(await self._voice_should_self_deaf(guild.id))
+            except Exception:
+                return True
+
+        async def _ensure_expected_voice_state() -> None:
+            should_self_deaf = await _desired_self_deaf()
             last_error = None
             for _ in range(3):
                 try:
                     me = getattr(guild, "me", None)
                     me_voice = getattr(me, "voice", None)
                     target_channel = getattr(me_voice, "channel", None) or voice_channel
-                    if me_voice and getattr(me_voice, "self_deaf", False):
+                    current_self_deaf = bool(getattr(me_voice, "self_deaf", False)) if me_voice else None
+                    if me_voice and current_self_deaf == should_self_deaf:
                         return
-                    await guild.change_voice_state(channel=target_channel, self_deaf=True)
+                    await guild.change_voice_state(channel=target_channel, self_deaf=should_self_deaf)
                     await asyncio.sleep(0.35)
                     me = getattr(guild, "me", None)
                     me_voice = getattr(me, "voice", None)
-                    if me_voice and getattr(me_voice, "self_deaf", False):
+                    current_self_deaf = bool(getattr(me_voice, "self_deaf", False)) if me_voice else None
+                    if me_voice and current_self_deaf == should_self_deaf:
                         return
                 except Exception as e:
                     last_error = e
                     await asyncio.sleep(0.35)
             if last_error is not None:
-                print(f"[tts_voice] falha ao aplicar self_deaf | guild={guild.id} channel={getattr(voice_channel, 'id', None)} error={last_error}")
+                print(
+                    f"[tts_voice] falha ao aplicar estado de voz | guild={guild.id} channel={getattr(voice_channel, 'id', None)} self_deaf={should_self_deaf} error={last_error}"
+                )
+
+        async def _build_connect_kwargs() -> dict:
+            should_self_deaf = await _desired_self_deaf()
+            kwargs = {"self_deaf": should_self_deaf}
+            if not should_self_deaf:
+                try:
+                    from discord.ext import voice_recv
+
+                    kwargs["cls"] = voice_recv.VoiceRecvClient
+                except Exception:
+                    pass
+            return kwargs
 
         lock = self._get_voice_connect_lock(guild.id)
         async with lock:
             vc = self._get_voice_client_for_guild(guild)
 
             if vc and vc.is_connected() and vc.channel and vc.channel.id == voice_channel.id:
-                await _ensure_self_deaf()
+                await _ensure_expected_voice_state()
+                await self._notify_voice_moderation_ready(guild, vc)
                 return vc
 
             async def _fresh_connect() -> Optional[discord.VoiceClient]:
-                new_vc = await voice_channel.connect(self_deaf=True)
-                await _ensure_self_deaf()
+                connect_kwargs = await _build_connect_kwargs()
+                new_vc = await voice_channel.connect(**connect_kwargs)
+                await _ensure_expected_voice_state()
+                await self._notify_voice_moderation_ready(guild, new_vc)
                 print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
                 return new_vc
 
@@ -1074,7 +1121,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 if vc and vc.is_connected():
                     try:
                         await vc.move_to(voice_channel)
-                        await _ensure_self_deaf()
+                        await _ensure_expected_voice_state()
+                        await self._notify_voice_moderation_ready(guild, vc)
                         print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return vc
                     except Exception as move_err:
@@ -1095,11 +1143,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
                 if "already connected" in msg and current_vc and current_vc.is_connected():
                     if current_vc.channel and current_vc.channel.id == voice_channel.id:
-                        await _ensure_self_deaf()
+                        await _ensure_expected_voice_state()
+                        await self._notify_voice_moderation_ready(guild, current_vc)
                         return current_vc
                     try:
                         await current_vc.move_to(voice_channel)
-                        await _ensure_self_deaf()
+                        await _ensure_expected_voice_state()
+                        await self._notify_voice_moderation_ready(guild, current_vc)
                         print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return current_vc
                     except Exception:
@@ -1241,12 +1291,24 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         me = getattr(guild, "me", None)
-        if me and member.id == me.id and after.channel is not None and not getattr(after, "self_deaf", False):
+        if me and member.id == me.id and after.channel is not None:
+            desired_self_deaf = True
             try:
-                await guild.change_voice_state(channel=after.channel, self_deaf=True)
-                print(f"[tts_voice] self_deaf reaplicado após mudança de canal | guild={guild.id} channel={after.channel.id}")
-            except Exception as e:
-                print(f"[tts_voice] falha ao reaplicar self_deaf no voice_state_update | guild={guild.id} channel={getattr(after.channel, 'id', None)} error={e}")
+                desired_self_deaf = bool(await self._voice_should_self_deaf(guild.id))
+            except Exception:
+                desired_self_deaf = True
+            current_self_deaf = bool(getattr(after, "self_deaf", False))
+            if current_self_deaf != desired_self_deaf:
+                try:
+                    await guild.change_voice_state(channel=after.channel, self_deaf=desired_self_deaf)
+                    print(
+                        f"[tts_voice] estado de voz corrigido após mudança de canal | guild={guild.id} channel={after.channel.id} self_deaf={desired_self_deaf}"
+                    )
+                except Exception as e:
+                    print(
+                        f"[tts_voice] falha ao corrigir estado de voz no voice_state_update | guild={guild.id} channel={getattr(after.channel, 'id', None)} self_deaf={desired_self_deaf} error={e}"
+                    )
+            await self._notify_voice_moderation_ready(guild, vc)
 
         await self._disconnect_if_alone_or_only_bots(guild)
 

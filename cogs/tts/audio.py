@@ -1039,27 +1039,42 @@ class TTSAudioMixin:
         }
 
     async def _ensure_self_deaf_fast(self, guild: discord.Guild, target_channel=None) -> bool:
+        should_self_deaf = True
+        try:
+            if hasattr(self, "_voice_should_self_deaf"):
+                should_self_deaf = bool(await self._maybe_await(self._voice_should_self_deaf(guild.id)))
+        except Exception:
+            should_self_deaf = True
+
         last_error = None
         for _ in range(3):
             try:
                 me = getattr(guild, "me", None)
                 me_voice = getattr(me, "voice", None)
                 target = getattr(me_voice, "channel", None) or target_channel
-                if me_voice and getattr(me_voice, "self_deaf", False):
+                current_self_deaf = bool(getattr(me_voice, "self_deaf", False)) if me_voice else None
+                if me_voice and current_self_deaf == should_self_deaf:
                     return True
                 if target is None:
                     return False
-                await guild.change_voice_state(channel=target, self_deaf=True)
+                await guild.change_voice_state(channel=target, self_deaf=should_self_deaf)
                 await asyncio.sleep(0.35)
                 me = getattr(guild, "me", None)
                 me_voice = getattr(me, "voice", None)
-                if me_voice and getattr(me_voice, "self_deaf", False):
+                current_self_deaf = bool(getattr(me_voice, "self_deaf", False)) if me_voice else None
+                if me_voice and current_self_deaf == should_self_deaf:
                     return True
             except Exception as e:
                 last_error = e
                 await asyncio.sleep(0.35)
         if last_error is not None:
-            logger.warning("[tts_voice] Falha ao reaplicar self_deaf | guild=%s channel=%s erro=%s", guild.id, getattr(target_channel, "id", None), last_error)
+            logger.warning(
+                "[tts_voice] Falha ao reaplicar estado de voz | guild=%s channel=%s self_deaf=%s erro=%s",
+                guild.id,
+                getattr(target_channel, "id", None),
+                should_self_deaf,
+                last_error,
+            )
         return False
 
     async def _disconnect_idle(self, guild: discord.Guild) -> bool:
