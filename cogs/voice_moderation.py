@@ -23,6 +23,12 @@ VOICE_MODERATION_SFX_PATH = Path(__file__).resolve().parents[1] / "assets" / "sf
 VOICE_MODERATION_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "disconnect_enabled": True,
+    "threshold_rms": 700,
+    "hits_to_trigger": 4,
+    "window_seconds": 1.2,
+    "cooldown_seconds": 8.0,
+}
+VOICE_MODERATION_OLD_DEFAULTS: dict[str, Any] = {
     "threshold_rms": 1400,
     "hits_to_trigger": 5,
     "window_seconds": 1.0,
@@ -46,6 +52,7 @@ VOICE_MODERATION_LEGACY_DEFAULTS: dict[str, Any] = {
 class _GuildVoiceModerationRuntime:
     sink: Any | None = None
     settings: dict[str, Any] | None = None
+    last_notice_channel_id: int | None = None
 
 
 class _VoiceModerationStatusView(discord.ui.LayoutView):
@@ -85,7 +92,7 @@ if voice_recv is not None:
                 rms = int(audioop.rms(pcm, 2))
                 peak = int(audioop.max(pcm, 2))
                 avgpp = int(audioop.avgpp(pcm, 2))
-                score = max(rms, int(peak * 0.32), int(avgpp * 0.65))
+                score = max(rms, int(peak * 0.45), int(avgpp * 0.9))
             except Exception:
                 return
             self.cog._register_loud_sample(
@@ -149,6 +156,90 @@ class VoiceModeration(commands.Cog):
                 continue
         return getattr(guild, "voice_client", None)
 
+    def _remember_notice_channel(self, guild_id: int, channel_id: int | None) -> None:
+        runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
+        runtime.last_notice_channel_id = int(channel_id) if channel_id else None
+
+    def _get_tts_last_text_channel_id(self, guild_id: int) -> int | None:
+        cog = self.bot.get_cog("TTSVoice")
+        if cog is None:
+            return None
+        state = getattr(cog, "guild_states", {}).get(int(guild_id))
+        value = getattr(state, "last_text_channel_id", None)
+        return int(value) if value else None
+
+    def _resolve_notice_channel(self, guild: discord.Guild, *, voice_channel=None):
+        runtime = self._runtime.get(int(guild.id))
+        candidates: list[Any] = []
+        if voice_channel is not None:
+            candidates.append(voice_channel)
+        if runtime is not None and runtime.last_notice_channel_id:
+            channel = guild.get_channel(int(runtime.last_notice_channel_id)) or self.bot.get_channel(int(runtime.last_notice_channel_id))
+            if channel is not None:
+                candidates.append(channel)
+        tts_channel_id = self._get_tts_last_text_channel_id(guild.id)
+        if tts_channel_id:
+            channel = guild.get_channel(int(tts_channel_id)) or self.bot.get_channel(int(tts_channel_id))
+            if channel is not None:
+                candidates.append(channel)
+        if getattr(guild, "system_channel", None) is not None:
+            candidates.append(guild.system_channel)
+
+        seen: set[int] = set()
+        for channel in candidates:
+            channel_id = getattr(channel, "id", None)
+            if channel is None or channel_id in seen or not hasattr(channel, "send"):
+                continue
+            seen.add(channel_id)
+            return channel
+        return None
+
+    async def _send_call_notice(
+        self,
+        guild: discord.Guild,
+        *,
+        title: str,
+        lines: list[str],
+        notes: list[str] | None = None,
+        accent: discord.Color | None = None,
+        voice_channel=None,
+    ) -> bool:
+        channel = self._resolve_notice_channel(guild, voice_channel=voice_channel)
+        if channel is None:
+            return False
+        try:
+            await channel.send(view=self._build_panel(title=title, lines=lines, notes=notes or [], accent=accent or discord.Color.blurple()))
+            return True
+        except Exception:
+            return False
+
+    def _schedule_call_notice(
+        self,
+        guild_id: int,
+        *,
+        title: str,
+        lines: list[str],
+        notes: list[str] | None = None,
+        accent: discord.Color | None = None,
+    ) -> None:
+        guild = self.bot.get_guild(int(guild_id))
+        if guild is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._send_call_notice(
+                    guild,
+                    title=title,
+                    lines=lines,
+                    notes=notes or [],
+                    accent=accent or discord.Color.blurple(),
+                    voice_channel=getattr(self._get_voice_client(guild), "channel", None),
+                ),
+                self.bot.loop,
+            )
+        except Exception:
+            pass
+
     def _normalize_settings(self, data: dict[str, Any] | None) -> dict[str, Any]:
         merged = dict(VOICE_MODERATION_DEFAULTS)
         if isinstance(data, dict):
@@ -161,7 +252,11 @@ class VoiceModeration(commands.Cog):
                 and abs(float(merged.get("cooldown_seconds", 0.0) or 0.0) - float(candidate["cooldown_seconds"])) < 1e-9
             )
 
-        if _matches_defaults(VOICE_MODERATION_LEGACY_DEFAULTS) or _matches_defaults(VOICE_MODERATION_PREVIOUS_DEFAULTS):
+        if (
+            _matches_defaults(VOICE_MODERATION_LEGACY_DEFAULTS)
+            or _matches_defaults(VOICE_MODERATION_PREVIOUS_DEFAULTS)
+            or _matches_defaults(VOICE_MODERATION_OLD_DEFAULTS)
+        ):
             merged.update({
                 "threshold_rms": VOICE_MODERATION_DEFAULTS["threshold_rms"],
                 "hits_to_trigger": VOICE_MODERATION_DEFAULTS["hits_to_trigger"],
@@ -312,7 +407,13 @@ class VoiceModeration(commands.Cog):
         if runtime is not None:
             runtime.sink = None
         if exc is not None:
-            print(f"[voice_moderation] escuta finalizada com erro | guild={guild_id} erro={exc}")
+            self._schedule_call_notice(
+                guild_id,
+                title="# 🔊 Moderação de voz",
+                lines=["A escuta do canal foi encerrada com erro."],
+                notes=[f"Detalhe: `{exc}`"],
+                accent=discord.Color.red(),
+            )
 
     async def _play_activation_sfx(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> bool:
         voice_client = vc or self._get_voice_client(guild)
@@ -339,13 +440,13 @@ class VoiceModeration(commands.Cog):
             return
 
         threshold = int(settings.get("threshold_rms", VOICE_MODERATION_DEFAULTS["threshold_rms"]) or VOICE_MODERATION_DEFAULTS["threshold_rms"])
-        severe_threshold = max(threshold + 900, int(threshold * 1.9))
-        extreme_peak = max(18000, int(threshold * 7.5))
-        extreme_rms = max(3200, int(threshold * 2.6))
+        severe_threshold = max(threshold + 250, int(threshold * 1.3))
+        extreme_peak = max(4200, int(threshold * 3.0))
+        extreme_rms = max(1050, int(threshold * 1.75))
         loud_enough = (
             score >= threshold
-            or rms >= max(900, int(threshold * 0.82))
-            or peak >= max(7000, int(threshold * 4.1))
+            or rms >= max(320, int(threshold * 0.55))
+            or peak >= max(2500, int(threshold * 2.1))
         )
         if not loud_enough:
             return
@@ -359,11 +460,11 @@ class VoiceModeration(commands.Cog):
         weight = 1
         severe = False
         extreme = False
-        if score >= severe_threshold or rms >= max(1600, int(threshold * 1.35)) or peak >= max(11000, int(threshold * 5.4)):
+        if score >= severe_threshold or rms >= max(700, int(threshold * 1.05)) or peak >= max(3400, int(threshold * 2.55)):
             weight = 2
             severe = True
-        if score >= max(severe_threshold + 1200, int(threshold * 2.7)) or rms >= extreme_rms or peak >= extreme_peak:
-            weight = 3
+        if score >= max(severe_threshold + 450, int(threshold * 1.75)) or rms >= extreme_rms or peak >= extreme_peak:
+            weight = 4
             severe = True
             extreme = True
 
@@ -402,12 +503,22 @@ class VoiceModeration(commands.Cog):
                     self.bot.loop,
                 )
                 future.add_done_callback(
-                    lambda fut, gid=guild_id, uid=user_id: print(
-                        f"[voice_moderation] erro ao executar desconexão | guild={gid} user={uid} erro={fut.exception()}"
+                    lambda fut, gid=guild_id: self._schedule_call_notice(
+                        gid,
+                        title="# 🔊 Moderação de voz",
+                        lines=["Falhei ao executar a desconexão automática."],
+                        notes=[f"Detalhe: `{fut.exception()}`"],
+                        accent=discord.Color.red(),
                     ) if fut.exception() else None
                 )
             except Exception as e:
-                print(f"[voice_moderation] falha ao agendar desconexão | guild={guild_id} user={user_id} erro={e}")
+                self._schedule_call_notice(
+                    guild_id,
+                    title="# 🔊 Moderação de voz",
+                    lines=["Falhei ao agendar a desconexão automática."],
+                    notes=[f"Detalhe: `{e}`"],
+                    accent=discord.Color.red(),
+                )
 
     async def _disconnect_member_for_volume(self, guild_id: int, user_id: int, score: int) -> None:
         guild = self.bot.get_guild(int(guild_id))
@@ -418,6 +529,9 @@ class VoiceModeration(commands.Cog):
             return
 
         member = guild.get_member(int(user_id))
+        if member is None:
+            with contextlib.suppress(Exception):
+                member = await guild.fetch_member(int(user_id))
         if member is None or member.bot:
             return
         if member.voice is None or member.voice.channel is None:
@@ -429,15 +543,32 @@ class VoiceModeration(commands.Cog):
         if getattr(vc.channel, "id", None) != getattr(member.voice.channel, "id", None):
             return
 
-        me = getattr(guild, "me", None)
-        perms = bool(getattr(getattr(me, "guild_permissions", None), "move_members", False))
+        me = getattr(guild, "me", None) or guild.get_member(getattr(self.bot.user, "id", 0))
+        if me is None:
+            return
+
+        channel_perms = member.voice.channel.permissions_for(me)
+        perms = bool(getattr(getattr(me, "guild_permissions", None), "move_members", False) and getattr(channel_perms, "move_members", False))
         if not perms:
+            await self._send_call_notice(
+                guild,
+                title="# 🔊 Moderação de voz",
+                lines=["Não consigo desconectar ninguém nessa call."],
+                notes=["Está faltando a permissão **Mover membros** para o bot."],
+                accent=discord.Color.red(),
+                voice_channel=member.voice.channel,
+            )
             return
         if hasattr(member, "top_role") and hasattr(me, "top_role"):
             try:
-                if member.top_role >= me.top_role and guild.owner_id != member.id:
-                    print(
-                        f"[voice_moderation] sem hierarquia para desconectar | guild={guild.id} user={user_id} member_role={getattr(member.top_role, 'id', None)} bot_role={getattr(me.top_role, 'id', None)}"
+                if guild.owner_id != member.id and member.top_role >= me.top_role:
+                    await self._send_call_notice(
+                        guild,
+                        title="# 🔊 Moderação de voz",
+                        lines=[f"Não consegui puxar **{discord.utils.escape_markdown(member.display_name)}** da call."],
+                        notes=["A hierarquia do bot está abaixo do cargo dessa pessoa."],
+                        accent=discord.Color.red(),
+                        voice_channel=member.voice.channel,
                     )
                     return
             except Exception:
@@ -445,9 +576,23 @@ class VoiceModeration(commands.Cog):
 
         try:
             await member.move_to(None, reason=f"Moderação de voz: volume acima do limite ({score})")
-            print(f"[voice_moderation] membro desconectado por volume | guild={guild.id} user={user_id} score={score}")
+            await self._send_call_notice(
+                guild,
+                title="# 🔊 Moderação de voz",
+                lines=[f"**{discord.utils.escape_markdown(member.display_name)}** foi desconectado da call por gritar alto demais."],
+                notes=[f"Intensidade detectada: `{score}`"],
+                accent=discord.Color.orange(),
+                voice_channel=getattr(vc, "channel", None),
+            )
         except Exception as e:
-            print(f"[voice_moderation] falha ao desconectar membro por volume | guild={guild.id} user={user_id} erro={e}")
+            await self._send_call_notice(
+                guild,
+                title="# 🔊 Moderação de voz",
+                lines=[f"Falhei ao desconectar **{discord.utils.escape_markdown(member.display_name)}** da call."],
+                notes=[f"Detalhe: `{e}`"],
+                accent=discord.Color.red(),
+                voice_channel=getattr(vc, "channel", None),
+            )
 
     async def handle_voice_client_ready(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
         settings = await self._get_settings(guild.id)
@@ -548,6 +693,7 @@ class VoiceModeration(commands.Cog):
             return
 
         guild = ctx.guild
+        self._remember_notice_channel(guild.id, getattr(ctx.channel, "id", None))
         settings = await self._get_settings(guild.id)
         preferred_channel = getattr(getattr(member, "voice", None), "channel", None)
 
