@@ -350,6 +350,23 @@ class GincanaTrucoMixin:
                 if marker and marker[0] == key:
                     inflight.discard(marker)
 
+    def _truco_release_guild_busy_state(self, guild_id: int, *, game: TrucoGame | None = None, lobby: TrucoLobby | None = None):
+        current_game = self._truco_games.get(guild_id)
+        if current_game is not None and (game is None or current_game is game):
+            self._truco_games.pop(guild_id, None)
+            self._truco_clear_runtime_guards(current_game)
+        current_lobby = self._truco_lobbies.get(guild_id)
+        if current_lobby is not None and (lobby is None or current_lobby is lobby):
+            self._truco_lobbies.pop(guild_id, None)
+
+    def _truco_cleanup_broken_busy_state(self, guild_id: int):
+        game = self._truco_games.get(guild_id)
+        if game is not None and getattr(game, "finished", False):
+            self._truco_release_guild_busy_state(guild_id, game=game)
+        lobby = self._truco_lobbies.get(guild_id)
+        if lobby is not None and getattr(lobby, "started", False):
+            self._truco_release_guild_busy_state(guild_id, lobby=lobby)
+
     def _truco_variant(self, game_or_lobby) -> str:
         return str(getattr(game_or_lobby, "variant", "normal") or "normal").lower()
 
@@ -863,8 +880,7 @@ class GincanaTrucoMixin:
         game.finish_reason = reason
         game.winner_team = winner_team
         game.loser_id = loser_id
-        self._truco_games.pop(game.guild_id, None)
-        self._truco_clear_runtime_guards(game)
+        self._truco_release_guild_busy_state(game.guild_id, game=game)
         winners = list(game.teams[winner_team])
         losers = [uid for idx, team in enumerate(game.teams) if idx != winner_team for uid in team]
         all_players = [uid for team in game.teams for uid in team]
@@ -919,9 +935,8 @@ class GincanaTrucoMixin:
     async def _expire_truco_invite(self, game: TrucoGame):
         if game.finished or game.accepted:
             return
-        self._truco_games.pop(game.guild_id, None)
-        self._truco_clear_runtime_guards(game)
         game.finished = True
+        self._truco_release_guild_busy_state(game.guild_id, game=game)
         closed = discord.ui.LayoutView(timeout=None)
         closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco\nO desafio expirou porque não foi aceito a tempo."), accent_color=discord.Color.red()))
         await self._truco_safe_edit(game.challenge_message, embed=None, view=closed)
@@ -936,6 +951,7 @@ class GincanaTrucoMixin:
             return await self._handle_truco2_trigger(message)
         if not _TRUCO_TRIGGER_RE.match(raw):
             return False
+        self._truco_cleanup_broken_busy_state(guild.id)
         if guild.id in self._truco_games or guild.id in self._truco_lobbies:
             await message.channel.send(embed=self._make_embed("🃏 Truco ocupado", "Já existe um truco em andamento neste servidor.", ok=False))
             return True
@@ -979,6 +995,7 @@ class GincanaTrucoMixin:
         guild = message.guild
         if guild is None:
             return False
+        self._truco_cleanup_broken_busy_state(guild.id)
         if guild.id in self._truco_games or guild.id in self._truco_lobbies:
             await message.channel.send(embed=self._make_embed("🃏 Truco ocupado", "Já existe um truco em andamento neste servidor.", ok=False))
             return True
@@ -987,7 +1004,13 @@ class GincanaTrucoMixin:
         lobby.team_a = [message.author.id]
         self._truco_lobbies[guild.id] = lobby
         view = Truco2v2LobbyView(self, lobby, guild)
-        lobby.message = await message.channel.send(view=view)
+        try:
+            lobby.message = await message.channel.send(view=view)
+        except Exception:
+            lobby.started = True
+            self._truco_release_guild_busy_state(guild.id, lobby=lobby)
+            await message.channel.send(embed=self._make_embed("🃏 Truco 2v2", "Não consegui abrir o lobby do truco agora. Tente novamente.", ok=False))
+            return True
         return True
 
     async def _handle_truco2_lobby_join(self, interaction: discord.Interaction, lobby: TrucoLobby, team_idx: int, view: Truco2v2LobbyView):
@@ -1118,8 +1141,8 @@ class GincanaTrucoMixin:
         if interaction.user.id != game.players_order[1]:
             await interaction.response.send_message("Esse desafio não é seu.", ephemeral=True)
             return
-        self._truco_games.pop(game.guild_id, None)
         game.finished = True
+        self._truco_release_guild_busy_state(game.guild_id, game=game)
         closed = discord.ui.LayoutView(timeout=None)
         closed.add_item(discord.ui.Container(discord.ui.TextDisplay(f"# 🃏 Truco\n{interaction.user.mention} recusou o truco."), accent_color=discord.Color.red()))
         await self._truco_update_interaction_message(interaction, view=closed)
