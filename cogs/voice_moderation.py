@@ -23,10 +23,11 @@ VOICE_MODERATION_SFX_PATH = Path(__file__).resolve().parents[1] / "assets" / "sf
 VOICE_MODERATION_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "disconnect_enabled": True,
-    "threshold_rms": 2600,
-    "hits_to_trigger": 7,
-    "window_seconds": 1.6,
+    "threshold_rms": 1800,
+    "hits_to_trigger": 5,
+    "window_seconds": 1.4,
     "cooldown_seconds": 10.0,
+    "max_intensity": 11752,
 }
 VOICE_MODERATION_OLD_DEFAULTS: dict[str, Any] = {
     "threshold_rms": 1800,
@@ -78,6 +79,137 @@ class _VoiceModerationStatusView(discord.ui.LayoutView):
             items.append(discord.ui.Separator())
             items.append(discord.ui.TextDisplay("\n".join(notes)))
         self.add_item(discord.ui.Container(*items, accent_color=accent or discord.Color.blurple()))
+
+
+class _AdjustMaxIntensityModal(discord.ui.Modal, title="Ajustar intensidade máxima"):
+    def __init__(self, view: "_VoiceModerationCommandView"):
+        super().__init__()
+        self.view = view
+        current = self.view.current_max_intensity()
+        self.max_intensity = discord.ui.TextInput(
+            label="Intensidade máxima",
+            placeholder="Ex.: 11752",
+            default=str(current),
+            min_length=1,
+            max_length=6,
+            required=True,
+        )
+        self.add_item(self.max_intensity)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not self.view.cog._can_manage_mode(getattr(interaction, "user", None)):
+            await interaction.response.send_message(
+                view=self.view.cog._build_notice_panel(
+                    title="# 🔊 Moderação de voz",
+                    lines=["Você precisa de **Administrador** ou **Desconectar membros** para ajustar isso."],
+                    accent=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+        raw = str(self.max_intensity.value or "").strip()
+        try:
+            value = int(raw)
+        except Exception:
+            await interaction.response.send_message(
+                view=self.view.cog._build_notice_panel(
+                    title="# 🔊 Moderação de voz",
+                    lines=["Digite um número válido para a intensidade máxima."],
+                    accent=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+        value = max(3000, min(32768, value))
+        await self.view.cog._update_settings(interaction.guild.id, max_intensity=value)
+        await self.view.refresh(interaction, note=f"Intensidade máxima ajustada para `{value}`.")
+
+
+class _AdjustMaxIntensityButton(discord.ui.Button):
+    def __init__(self, view: "_VoiceModerationCommandView"):
+        super().__init__(label="Ajustar intensidade máxima", style=discord.ButtonStyle.secondary)
+        self.vm_view = view
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.vm_view.cog._can_manage_mode(getattr(interaction, "user", None)):
+            await interaction.response.send_message(
+                view=self.vm_view.cog._build_notice_panel(
+                    title="# 🔊 Moderação de voz",
+                    lines=["Você precisa de **Administrador** ou **Desconectar membros** para usar esse botão."],
+                    accent=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+        self.vm_view.message = interaction.message or self.vm_view.message
+        await interaction.response.send_modal(_AdjustMaxIntensityModal(self.vm_view))
+
+
+class _VoiceModerationCommandView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        cog: "VoiceModeration",
+        guild: discord.Guild,
+        *,
+        title: str,
+        lines: list[str],
+        notes: list[str] | None = None,
+        accent: discord.Color | None = None,
+    ):
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.guild_id = int(guild.id)
+        self.title = title
+        self.lines = list(lines)
+        self.notes = list(notes or [])
+        self.accent = accent or discord.Color.blurple()
+        self.message: discord.Message | None = None
+        self._build_layout()
+
+    def current_max_intensity(self) -> int:
+        for line in self.lines:
+            if "**Intensidade máxima:**" in line:
+                digits = "".join(ch for ch in line if ch.isdigit())
+                if digits:
+                    try:
+                        return int(digits)
+                    except Exception:
+                        break
+        return int(VOICE_MODERATION_DEFAULTS["max_intensity"])
+
+    def _build_layout(self) -> None:
+        self.clear_items()
+        children: list[discord.ui.Item[Any]] = [discord.ui.TextDisplay("\n".join([self.title, *self.lines]))]
+        if self.notes:
+            children.append(discord.ui.Separator())
+            children.append(discord.ui.TextDisplay("\n".join(self.notes)))
+        children.append(discord.ui.ActionRow(_AdjustMaxIntensityButton(self)))
+        self.add_item(discord.ui.Container(*children, accent_color=self.accent))
+
+    async def refresh(self, interaction: discord.Interaction, *, note: str | None = None) -> None:
+        guild = interaction.guild or self.cog.bot.get_guild(self.guild_id)
+        if guild is None:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            return
+        settings = await self.cog._get_settings(guild.id)
+        lines, notes, accent = self.cog._status_snapshot(settings, guild)
+        if note:
+            notes.append(note)
+        self.lines = lines
+        self.notes = notes
+        self.accent = accent
+        self._build_layout()
+        payload = {"view": self}
+        target = interaction.message or self.message
+        if target is None:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            return
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        await target.edit(**payload)
+        self.message = target
 
 
 if voice_recv is not None:
@@ -220,7 +352,7 @@ class VoiceModeration(commands.Cog):
         if channel is None:
             return False
         try:
-            await channel.send(view=self._build_panel(title=title, lines=lines, notes=notes or [], accent=accent or discord.Color.blurple()))
+            await channel.send(view=self._build_notice_panel(title=title, lines=lines, notes=notes or [], accent=accent or discord.Color.blurple()))
             return True
         except Exception:
             return False
@@ -283,6 +415,7 @@ class VoiceModeration(commands.Cog):
             "hits_to_trigger": max(1, min(20, int(merged.get("hits_to_trigger", VOICE_MODERATION_DEFAULTS["hits_to_trigger"]) or VOICE_MODERATION_DEFAULTS["hits_to_trigger"]))),
             "window_seconds": max(0.2, min(10.0, float(merged.get("window_seconds", VOICE_MODERATION_DEFAULTS["window_seconds"]) or VOICE_MODERATION_DEFAULTS["window_seconds"]))),
             "cooldown_seconds": max(1.0, min(600.0, float(merged.get("cooldown_seconds", VOICE_MODERATION_DEFAULTS["cooldown_seconds"]) or VOICE_MODERATION_DEFAULTS["cooldown_seconds"]))),
+            "max_intensity": max(3000, min(32768, int(merged.get("max_intensity", VOICE_MODERATION_DEFAULTS["max_intensity"]) or VOICE_MODERATION_DEFAULTS["max_intensity"]))),
         }
 
     async def _get_settings(self, guild_id: int) -> dict[str, Any]:
@@ -302,6 +435,14 @@ class VoiceModeration(commands.Cog):
         if db is None or not hasattr(db, "set_voice_moderation_enabled"):
             return
         result = db.set_voice_moderation_enabled(guild_id, bool(value))
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def _update_settings(self, guild_id: int, **kwargs: Any) -> None:
+        db = self._get_db()
+        if db is None or not hasattr(db, "update_voice_moderation_settings"):
+            return
+        result = db.update_voice_moderation_settings(guild_id, **kwargs)
         if asyncio.iscoroutine(result):
             await result
 
@@ -521,13 +662,18 @@ class VoiceModeration(commands.Cog):
             return
 
         threshold = int(settings.get("threshold_rms", VOICE_MODERATION_DEFAULTS["threshold_rms"]) or VOICE_MODERATION_DEFAULTS["threshold_rms"])
-        clipped_peak_only = peak >= 32760 and rms < max(3000, int(threshold * 1.45))
-        severe_threshold = max(threshold + 700, int(threshold * 1.45))
-        extreme_rms = max(4200, int(threshold * 1.9))
+        max_intensity = int(settings.get("max_intensity", VOICE_MODERATION_DEFAULTS["max_intensity"]) or VOICE_MODERATION_DEFAULTS["max_intensity"])
+        intensity = max(score, int(rms * 1.18), int(peak * 0.5))
+        clipped_peak_only = peak >= 32760 and rms < max(2400, int(threshold * 1.22))
+        if clipped_peak_only:
+            intensity = max(score, int(rms * 1.18), int(peak * 0.34))
+
+        severe_threshold = max(int(max_intensity * 0.82), threshold + 1100)
+        hard_trigger_threshold = max_intensity
         loud_enough = (
-            score >= threshold
-            or rms >= max(950, int(threshold * 0.72))
-            or (not clipped_peak_only and peak >= max(6000, int(threshold * 2.6)))
+            intensity >= threshold
+            or rms >= max(1150, int(threshold * 0.78))
+            or (not clipped_peak_only and peak >= max(6800, int(threshold * 2.2)))
         )
         if not loud_enough:
             return
@@ -541,10 +687,10 @@ class VoiceModeration(commands.Cog):
         weight = 1
         severe = False
         extreme = False
-        if score >= severe_threshold or rms >= max(2400, int(threshold * 1.12)) or (not clipped_peak_only and peak >= max(9000, int(threshold * 3.1))):
+        if intensity >= severe_threshold or rms >= max(2600, int(threshold * 1.2)):
             weight = 2
             severe = True
-        if score >= max(severe_threshold + 1400, int(threshold * 2.1)) or rms >= extreme_rms:
+        if intensity >= hard_trigger_threshold:
             weight = 4
             severe = True
             extreme = True
@@ -554,7 +700,7 @@ class VoiceModeration(commands.Cog):
             weight = 1
 
         should_disconnect = False
-        chosen_score = max(score, rms)
+        chosen_score = min(max_intensity, max(intensity, rms))
         with self._sample_lock:
             samples = self._loud_hits.get(key)
             if samples is None:
@@ -570,16 +716,16 @@ class VoiceModeration(commands.Cog):
             max_score = max((entry[4] for entry in samples), default=chosen_score)
             last_disconnect = float(self._disconnect_cooldowns.get(key, 0.0) or 0.0)
             if now - last_disconnect >= cooldown_seconds:
-                if extreme_hits >= 1:
+                if extreme_hits >= 1 and total_hits >= max(3, hits_to_trigger - 1):
                     should_disconnect = True
-                elif severe_hits >= 2:
+                elif severe_hits >= 2 and max_score >= int(max_intensity * 0.9):
                     should_disconnect = True
-                elif total_hits >= hits_to_trigger:
+                elif total_hits >= hits_to_trigger and max_score >= hard_trigger_threshold:
                     should_disconnect = True
                 if should_disconnect:
                     self._disconnect_cooldowns[key] = now
                     samples.clear()
-                    chosen_score = max_score
+                    chosen_score = min(max_intensity, max_score)
 
         if should_disconnect:
             try:
@@ -766,6 +912,7 @@ class VoiceModeration(commands.Cog):
             f"**Escuta:** {'ativa' if listening else 'inativa'}",
             f"**Ensurdecido:** {'não' if enabled and connected else ('sim' if self_deaf else 'não')}",
             f"**Sensibilidade:** {self._sensitivity_label(settings)}",
+            f"**Intensidade máxima:** {int(settings.get('max_intensity', VOICE_MODERATION_DEFAULTS['max_intensity']) or VOICE_MODERATION_DEFAULTS['max_intensity'])}",
         ]
 
         notes: list[str] = []
@@ -779,8 +926,11 @@ class VoiceModeration(commands.Cog):
         accent = discord.Color.green() if enabled else discord.Color.red()
         return lines, notes, accent
 
-    def _build_panel(self, *, title: str, lines: list[str], notes: list[str] | None = None, accent: discord.Color | None = None) -> _VoiceModerationStatusView:
+    def _build_notice_panel(self, *, title: str, lines: list[str], notes: list[str] | None = None, accent: discord.Color | None = None) -> _VoiceModerationStatusView:
         return _VoiceModerationStatusView(title=title, lines=lines, notes=notes or [], accent=accent or discord.Color.blurple())
+
+    def _build_command_panel(self, guild: discord.Guild, *, title: str, lines: list[str], notes: list[str] | None = None, accent: discord.Color | None = None) -> _VoiceModerationCommandView:
+        return _VoiceModerationCommandView(self, guild, title=title, lines=lines, notes=notes or [], accent=accent or discord.Color.blurple())
 
     async def _send_panel(
         self,
@@ -791,7 +941,9 @@ class VoiceModeration(commands.Cog):
         notes: list[str] | None = None,
         accent: discord.Color | None = None,
     ) -> None:
-        await ctx.send(view=self._build_panel(title=title, lines=lines, notes=notes, accent=accent))
+        view = self._build_command_panel(ctx.guild, title=title, lines=lines, notes=notes, accent=accent)
+        message = await ctx.send(view=view)
+        view.message = message
 
     @commands.command(name="modvoz", aliases=["voicemod", "voiceguard"])
     @commands.guild_only()

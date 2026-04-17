@@ -434,6 +434,7 @@ class SettingsDB:
             "hits_to_trigger": _get_int("hits_to_trigger", 3, 1, 20),
             "window_seconds": _get_float("window_seconds", 1.2, 0.2, 10.0),
             "cooldown_seconds": _get_float("cooldown_seconds", 12.0, 1.0, 600.0),
+            "max_intensity": _get_int("max_intensity", 11752, 3000, 32768),
         }
 
     async def update_voice_moderation_settings(
@@ -446,6 +447,7 @@ class SettingsDB:
         hits_to_trigger: Optional[int] = None,
         window_seconds: Optional[float] = None,
         cooldown_seconds: Optional[float] = None,
+        max_intensity: Optional[int] = None,
     ):
         doc = self._get_guild_doc(guild_id)
         current = self.get_voice_moderation_settings(guild_id)
@@ -492,6 +494,14 @@ class SettingsDB:
                 data["cooldown_seconds"] = float(current.get("cooldown_seconds", 12.0) or 12.0)
         else:
             data.setdefault("cooldown_seconds", float(current.get("cooldown_seconds", 12.0) or 12.0))
+
+        if max_intensity is not None:
+            try:
+                data["max_intensity"] = max(3000, min(32768, int(max_intensity)))
+            except Exception:
+                data["max_intensity"] = int(current.get("max_intensity", 11752) or 11752)
+        else:
+            data.setdefault("max_intensity", int(current.get("max_intensity", 11752) or 11752))
 
         doc["voice_moderation"] = data
         await self._save_guild_doc(guild_id, doc)
