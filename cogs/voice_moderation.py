@@ -23,15 +23,15 @@ VOICE_MODERATION_SFX_PATH = Path(__file__).resolve().parents[1] / "assets" / "sf
 VOICE_MODERATION_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "disconnect_enabled": True,
+    "threshold_rms": 1800,
+    "hits_to_trigger": 6,
+    "window_seconds": 1.4,
+    "cooldown_seconds": 10.0,
+}
+VOICE_MODERATION_OLD_DEFAULTS: dict[str, Any] = {
     "threshold_rms": 700,
     "hits_to_trigger": 4,
     "window_seconds": 1.2,
-    "cooldown_seconds": 8.0,
-}
-VOICE_MODERATION_OLD_DEFAULTS: dict[str, Any] = {
-    "threshold_rms": 1400,
-    "hits_to_trigger": 5,
-    "window_seconds": 1.0,
     "cooldown_seconds": 8.0,
 }
 VOICE_MODERATION_PREVIOUS_DEFAULTS: dict[str, Any] = {
@@ -53,6 +53,7 @@ class _GuildVoiceModerationRuntime:
     sink: Any | None = None
     settings: dict[str, Any] | None = None
     last_notice_channel_id: int | None = None
+    suppress_after_until: float = 0.0
 
 
 class _VoiceModerationStatusView(discord.ui.LayoutView):
@@ -136,6 +137,10 @@ class VoiceModeration(commands.Cog):
             lock = asyncio.Lock()
             self._guild_locks[int(guild_id)] = lock
         return lock
+
+    def _suppress_after_errors(self, guild_id: int, seconds: float = 2.5) -> None:
+        runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
+        runtime.suppress_after_until = max(float(runtime.suppress_after_until or 0.0), time.monotonic() + max(0.0, float(seconds)))
 
     def _can_manage_mode(self, member: discord.Member | None) -> bool:
         if member is None:
@@ -345,7 +350,7 @@ class VoiceModeration(commands.Cog):
         except Exception:
             return None
 
-    async def _ensure_receive_ready(self, guild: discord.Guild, preferred_channel=None) -> tuple[Optional[discord.VoiceClient], str]:
+    async def _ensure_receive_ready(self, guild: discord.Guild, preferred_channel=None, *, start_listening: bool = True) -> tuple[Optional[discord.VoiceClient], str]:
         lock = self._guild_lock(guild.id)
         async with lock:
             settings = await self._get_settings(guild.id)
@@ -378,6 +383,9 @@ class VoiceModeration(commands.Cog):
             if voice_recv is None or vc is None or not hasattr(vc, "listen"):
                 return vc, "sem_voice_recv"
 
+            if not start_listening:
+                return vc, "pronto"
+
             try:
                 if getattr(vc, "is_listening", lambda: False)():
                     return vc, "escutando"
@@ -396,6 +404,7 @@ class VoiceModeration(commands.Cog):
     async def _stop_listening(self, guild: discord.Guild) -> None:
         vc = self._get_voice_client(guild)
         if vc is not None and hasattr(vc, "stop_listening"):
+            self._suppress_after_errors(guild.id)
             with contextlib.suppress(Exception):
                 vc.stop_listening()
         runtime = self._runtime.get(guild.id)
@@ -409,6 +418,16 @@ class VoiceModeration(commands.Cog):
         if not message:
             return False
         return "corrupted stream" in message or "opus" in message and "corrupt" in message
+
+    def _is_recoverable_listen_error(self, exc: Exception | None) -> bool:
+        if exc is None:
+            return True
+        message = str(exc).strip().lower()
+        if not message:
+            return True
+        if self._is_corrupted_stream_error(exc):
+            return True
+        return "invalid argument" in message or "bad argument" in message
 
     async def _recover_listening_after_error(self, guild_id: int, exc: Exception | None) -> None:
         guild = self.bot.get_guild(int(guild_id))
@@ -425,11 +444,12 @@ class VoiceModeration(commands.Cog):
         vc = self._get_voice_client(guild)
         voice_channel = getattr(vc, "channel", None) if vc is not None else None
         if vc is not None and hasattr(vc, "stop_listening"):
+            self._suppress_after_errors(guild.id)
             with contextlib.suppress(Exception):
                 vc.stop_listening()
 
-        if self._is_corrupted_stream_error(exc):
-            await asyncio.sleep(0.25)
+        if self._is_recoverable_listen_error(exc):
+            await asyncio.sleep(0.35)
             _vc, state = await self._ensure_receive_ready(guild, preferred_channel=voice_channel)
             if state in {"escutando", "sem_voice_recv"}:
                 return
@@ -456,6 +476,10 @@ class VoiceModeration(commands.Cog):
         runtime = self._runtime.get(int(guild_id))
         if runtime is not None:
             runtime.sink = None
+            if float(runtime.suppress_after_until or 0.0) > time.monotonic():
+                return
+        if exc is None:
+            return
         try:
             asyncio.run_coroutine_threadsafe(
                 self._recover_listening_after_error(int(guild_id), exc),
@@ -648,10 +672,23 @@ class VoiceModeration(commands.Cog):
         settings = await self._get_settings(guild.id)
         runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
         runtime.settings = dict(settings)
-        vc, state = await self._ensure_receive_ready(guild, preferred_channel=preferred_channel)
+        vc, state = await self._ensure_receive_ready(guild, preferred_channel=preferred_channel, start_listening=False)
         played = False
         if vc is not None:
             played = await self._play_activation_sfx(guild, vc)
+            if played:
+                for _ in range(50):
+                    try:
+                        if not vc.is_playing() and not vc.is_paused():
+                            break
+                    except Exception:
+                        break
+                    await asyncio.sleep(0.1)
+        vc, listen_state = await self._ensure_receive_ready(guild, preferred_channel=getattr(vc, "channel", None) or preferred_channel, start_listening=True)
+        if listen_state in {"escutando", "sem_voice_recv"}:
+            state = listen_state
+        elif state not in {"falha_conectar", "sem_canal"}:
+            state = listen_state
         return state, played
 
     async def _disable_mode(self, guild: discord.Guild) -> None:
@@ -666,9 +703,9 @@ class VoiceModeration(commands.Cog):
 
     def _sensitivity_label(self, settings: dict[str, Any]) -> str:
         threshold = int(settings.get("threshold_rms", VOICE_MODERATION_DEFAULTS["threshold_rms"]) or VOICE_MODERATION_DEFAULTS["threshold_rms"])
-        if threshold <= 1700:
+        if threshold <= 1300:
             return "alta"
-        if threshold <= 2600:
+        if threshold <= 2300:
             return "média"
         return "baixa"
 
