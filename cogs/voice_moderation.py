@@ -23,6 +23,12 @@ VOICE_MODERATION_SFX_PATH = Path(__file__).resolve().parents[1] / "assets" / "sf
 VOICE_MODERATION_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "disconnect_enabled": True,
+    "threshold_rms": 1400,
+    "hits_to_trigger": 5,
+    "window_seconds": 1.0,
+    "cooldown_seconds": 8.0,
+}
+VOICE_MODERATION_PREVIOUS_DEFAULTS: dict[str, Any] = {
     "threshold_rms": 3000,
     "hits_to_trigger": 6,
     "window_seconds": 0.9,
@@ -147,13 +153,15 @@ class VoiceModeration(commands.Cog):
         merged = dict(VOICE_MODERATION_DEFAULTS)
         if isinstance(data, dict):
             merged.update(data)
-        is_legacy = (
-            int(merged.get("threshold_rms", 0) or 0) == int(VOICE_MODERATION_LEGACY_DEFAULTS["threshold_rms"])
-            and int(merged.get("hits_to_trigger", 0) or 0) == int(VOICE_MODERATION_LEGACY_DEFAULTS["hits_to_trigger"])
-            and abs(float(merged.get("window_seconds", 0.0) or 0.0) - float(VOICE_MODERATION_LEGACY_DEFAULTS["window_seconds"])) < 1e-9
-            and abs(float(merged.get("cooldown_seconds", 0.0) or 0.0) - float(VOICE_MODERATION_LEGACY_DEFAULTS["cooldown_seconds"])) < 1e-9
-        )
-        if is_legacy:
+        def _matches_defaults(candidate: dict[str, Any]) -> bool:
+            return (
+                int(merged.get("threshold_rms", 0) or 0) == int(candidate["threshold_rms"])
+                and int(merged.get("hits_to_trigger", 0) or 0) == int(candidate["hits_to_trigger"])
+                and abs(float(merged.get("window_seconds", 0.0) or 0.0) - float(candidate["window_seconds"])) < 1e-9
+                and abs(float(merged.get("cooldown_seconds", 0.0) or 0.0) - float(candidate["cooldown_seconds"])) < 1e-9
+            )
+
+        if _matches_defaults(VOICE_MODERATION_LEGACY_DEFAULTS) or _matches_defaults(VOICE_MODERATION_PREVIOUS_DEFAULTS):
             merged.update({
                 "threshold_rms": VOICE_MODERATION_DEFAULTS["threshold_rms"],
                 "hits_to_trigger": VOICE_MODERATION_DEFAULTS["hits_to_trigger"],
@@ -329,8 +337,17 @@ class VoiceModeration(commands.Cog):
         settings = getattr(runtime, "settings", None) or {}
         if not settings.get("enabled") or not settings.get("disconnect_enabled", True):
             return
+
         threshold = int(settings.get("threshold_rms", VOICE_MODERATION_DEFAULTS["threshold_rms"]) or VOICE_MODERATION_DEFAULTS["threshold_rms"])
-        if score < threshold:
+        severe_threshold = max(threshold + 900, int(threshold * 1.9))
+        extreme_peak = max(18000, int(threshold * 7.5))
+        extreme_rms = max(3200, int(threshold * 2.6))
+        loud_enough = (
+            score >= threshold
+            or rms >= max(900, int(threshold * 0.82))
+            or peak >= max(7000, int(threshold * 4.1))
+        )
+        if not loud_enough:
             return
 
         now = time.monotonic()
@@ -340,36 +357,57 @@ class VoiceModeration(commands.Cog):
         key = (int(guild_id), int(user_id))
 
         weight = 1
-        if score >= int(threshold * 1.35) or rms >= int(threshold * 1.2) or peak >= 15000:
+        severe = False
+        extreme = False
+        if score >= severe_threshold or rms >= max(1600, int(threshold * 1.35)) or peak >= max(11000, int(threshold * 5.4)):
             weight = 2
-        if score >= int(threshold * 1.7) or peak >= 22000:
+            severe = True
+        if score >= max(severe_threshold + 1200, int(threshold * 2.7)) or rms >= extreme_rms or peak >= extreme_peak:
             weight = 3
+            severe = True
+            extreme = True
 
         should_disconnect = False
+        chosen_score = max(score, rms, peak)
         with self._sample_lock:
             samples = self._loud_hits.get(key)
             if samples is None:
                 samples = deque()
                 self._loud_hits[key] = samples
-            samples.append((now, weight))
+            samples.append((now, weight, 1 if severe else 0, 1 if extreme else 0, chosen_score))
             while samples and now - samples[0][0] > window:
                 samples.popleft()
 
-            total_hits = sum(w for _, w in samples)
+            total_hits = sum(entry[1] for entry in samples)
+            severe_hits = sum(entry[2] for entry in samples)
+            extreme_hits = sum(entry[3] for entry in samples)
+            max_score = max((entry[4] for entry in samples), default=chosen_score)
             last_disconnect = float(self._disconnect_cooldowns.get(key, 0.0) or 0.0)
-            if total_hits >= hits_to_trigger and now - last_disconnect >= cooldown_seconds:
-                self._disconnect_cooldowns[key] = now
-                samples.clear()
-                should_disconnect = True
+            if now - last_disconnect >= cooldown_seconds:
+                if extreme_hits >= 1:
+                    should_disconnect = True
+                elif severe_hits >= 2:
+                    should_disconnect = True
+                elif total_hits >= hits_to_trigger:
+                    should_disconnect = True
+                if should_disconnect:
+                    self._disconnect_cooldowns[key] = now
+                    samples.clear()
+                    chosen_score = max_score
 
         if should_disconnect:
             try:
-                asyncio.run_coroutine_threadsafe(
-                    self._disconnect_member_for_volume(guild_id, user_id, score),
+                future = asyncio.run_coroutine_threadsafe(
+                    self._disconnect_member_for_volume(guild_id, user_id, chosen_score),
                     self.bot.loop,
                 )
-            except Exception:
-                pass
+                future.add_done_callback(
+                    lambda fut, gid=guild_id, uid=user_id: print(
+                        f"[voice_moderation] erro ao executar desconexão | guild={gid} user={uid} erro={fut.exception()}"
+                    ) if fut.exception() else None
+                )
+            except Exception as e:
+                print(f"[voice_moderation] falha ao agendar desconexão | guild={guild_id} user={user_id} erro={e}")
 
     async def _disconnect_member_for_volume(self, guild_id: int, user_id: int, score: int) -> None:
         guild = self.bot.get_guild(int(guild_id))
@@ -392,12 +430,22 @@ class VoiceModeration(commands.Cog):
             return
 
         me = getattr(guild, "me", None)
-        perms = getattr(getattr(me, "guild_permissions", None), "move_members", False)
+        perms = bool(getattr(getattr(me, "guild_permissions", None), "move_members", False))
         if not perms:
             return
+        if hasattr(member, "top_role") and hasattr(me, "top_role"):
+            try:
+                if member.top_role >= me.top_role and guild.owner_id != member.id:
+                    print(
+                        f"[voice_moderation] sem hierarquia para desconectar | guild={guild.id} user={user_id} member_role={getattr(member.top_role, 'id', None)} bot_role={getattr(me.top_role, 'id', None)}"
+                    )
+                    return
+            except Exception:
+                pass
 
         try:
             await member.move_to(None, reason=f"Moderação de voz: volume acima do limite ({score})")
+            print(f"[voice_moderation] membro desconectado por volume | guild={guild.id} user={user_id} score={score}")
         except Exception as e:
             print(f"[voice_moderation] falha ao desconectar membro por volume | guild={guild.id} user={user_id} erro={e}")
 
@@ -439,9 +487,9 @@ class VoiceModeration(commands.Cog):
 
     def _sensitivity_label(self, settings: dict[str, Any]) -> str:
         threshold = int(settings.get("threshold_rms", VOICE_MODERATION_DEFAULTS["threshold_rms"]) or VOICE_MODERATION_DEFAULTS["threshold_rms"])
-        if threshold <= 2800:
+        if threshold <= 1700:
             return "alta"
-        if threshold <= 3600:
+        if threshold <= 2600:
             return "média"
         return "baixa"
 
