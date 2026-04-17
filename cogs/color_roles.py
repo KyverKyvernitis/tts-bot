@@ -1346,16 +1346,52 @@ class ColorRolesCog(commands.Cog):
                 result.append(rid)
         return result
 
+    def _all_color_role_names(self, guild_id: int) -> set[str]:
+        cfg = self._get_config(guild_id)
+        result: set[str] = set()
+        for slot_num_str, raw_slot in (cfg.get("slots") or {}).items():
+            try:
+                slot_number = int(slot_num_str)
+            except Exception:
+                slot_number = 0
+            fallback = _default_slot_payload(slot_number or 1)
+            slot = dict(raw_slot or {})
+            for candidate in (
+                slot.get("role_name"),
+                slot.get("name"),
+                fallback.get("role_name"),
+                fallback.get("name"),
+            ):
+                label = str(candidate or "").strip().casefold()
+                if label:
+                    result.add(label)
+        return result
+
+    def _member_color_roles(self, guild: discord.Guild, member: discord.Member) -> list[discord.Role]:
+        known_ids = set(self._all_color_role_ids(guild.id))
+        known_names = self._all_color_role_names(guild.id)
+        matches: list[discord.Role] = []
+        seen_ids: set[int] = set()
+        for role in member.roles:
+            if role.is_default():
+                continue
+            role_name = str(role.name or "").strip().casefold()
+            if role.id in known_ids or (role_name and role_name in known_names):
+                if role.id not in seen_ids:
+                    matches.append(role)
+                    seen_ids.add(role.id)
+        return matches
+
     def _member_current_color_slot(self, guild: discord.Guild, member: discord.Member) -> tuple[int, dict[str, Any] | None]:
+        member_role_ids = {role.id for role in self._member_color_roles(guild, member)}
         cfg = self._get_config(guild.id)
-        role_ids = {role.id for role in member.roles}
         for slot_num_str, slot in (cfg.get("slots") or {}).items():
             try:
                 rid = int(slot.get("role_id") or 0)
                 slot_num = int(slot_num_str)
             except Exception:
                 continue
-            if rid and rid in role_ids:
+            if rid and rid in member_role_ids:
                 return slot_num, dict(slot)
         return 0, None
 
@@ -1385,10 +1421,15 @@ class ColorRolesCog(commands.Cog):
             await interaction.response.send_message(text or "não consegui aplicar essa cor por causa da hierarquia de cargos.", ephemeral=True)
             return
         current_slot_number, current_slot = self._member_current_color_slot(guild, member)
-        roles_to_remove = [guild.get_role(rid) for rid in self._all_color_role_ids(guild.id)]
-        roles_to_remove = [role for role in roles_to_remove if role and role in member.roles]
+        roles_to_remove = self._member_color_roles(guild, member)
+        has_target_role = any(role.id == target_role.id for role in roles_to_remove)
+        unmanageable_roles = [role for role in roles_to_remove if me is None or role >= me.top_role]
+        if unmanageable_roles:
+            text = self._render_template(str((cfg.get("templates") or {}).get("hierarchy") or ""), member=member, slot=slot)
+            await interaction.response.send_message(text or "não consegui aplicar essa cor por causa da hierarquia de cargos.", ephemeral=True)
+            return
         try:
-            if current_slot_number == int(slot_number):
+            if has_target_role or current_slot_number == int(slot_number):
                 if roles_to_remove:
                     await member.remove_roles(*roles_to_remove, reason="Remoção de cor pelo painel")
                 template = str((cfg.get("templates") or {}).get("remove") or "")
