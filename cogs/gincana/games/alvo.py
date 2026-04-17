@@ -683,6 +683,53 @@ class _TargetStateView(discord.ui.LayoutView):
 
 
 class GincanaAlvoMixin(GincanaAlvoMixin):
+    def _get_target_session(self, guild_id: int) -> dict | None:
+        session = self._target_sessions.get(guild_id)
+        if session and session.get('ended'):
+            self._target_sessions.pop(guild_id, None)
+            return None
+        if session and self._runtime_state_is_stale(session, max_idle=120.0, max_age=300.0):
+            if not session.get('_stale_cleanup_started'):
+                session['_stale_cleanup_started'] = True
+                session['ended'] = True
+                self.bot.loop.create_task(self._cleanup_stale_target_session(guild_id, session))
+            return None
+        if session is not None:
+            self._touch_runtime_state(session, kind='alvo', guild_id=guild_id)
+        return session
+
+    async def _cleanup_stale_target_session(self, guild_id: int, session: dict):
+        if self._target_sessions.get(guild_id) is not session:
+            return
+        await self._safe_cancel_task(session.get('countdown_task'))
+        guild = self.bot.get_guild(guild_id)
+        locked_ids = {int(user_id) for user_id in (session.get('locked_participants', set()) or set())}
+        if guild is not None:
+            for user_id in sorted(locked_ids):
+                try:
+                    await self._change_user_chips(guild.id, int(user_id), ALVO_STAKE)
+                except Exception:
+                    pass
+        lobby_message = session.get('lobby_message') or session.get('message')
+        if guild is not None and lobby_message is not None:
+            try:
+                await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'A rodada foi encerrada automaticamente porque ficou travada por tempo demais. As entradas foram devolvidas.'))
+            except Exception:
+                pass
+        if self._target_sessions.get(guild_id) is session:
+            self._target_sessions.pop(guild_id, None)
+
+    def _target_render_key(self, session: dict, guild: discord.Guild) -> tuple:
+        return (
+            bool(session.get('ended')),
+            bool(session.get('starting')),
+            int(session.get('start_countdown', 0) or 0),
+            tuple(sorted(int(x) for x in (session.get('locked_participants', set()) or set()))),
+            int(session.get('bonus_chips', 0) or 0),
+            tuple(int(member.id) for member in self._get_target_participants(guild, session)),
+            str((session.get('modifier') or {}).get('key') or 'normal'),
+        )
+
     async def _refresh_target_message(self, guild_id: int):
         session = self._get_target_session(guild_id)
         if session is None or session.get('ended'):
@@ -696,10 +743,8 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             return
         if hasattr(view, '_build_layout'):
             view._build_layout()
-        try:
-            await message.edit(view=view)
-        except Exception:
-            pass
+        render_key = self._target_render_key(session, guild)
+        await self._safe_view_edit(message, view, state=session, render_key=render_key)
 
     async def _handle_target_button(self, interaction: discord.Interaction, view: _TargetJoinView):
         guild = interaction.guild
@@ -738,6 +783,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             return
         locked.add(user.id)
         session['bonus_chips'] = self._target_bonus_for_participants(len(locked))
+        self._touch_runtime_state(session, kind='alvo', guild_id=guild.id)
         try: await interaction.response.send_message(chip_note or entry_text, ephemeral=True)
         except Exception: pass
         await self._refresh_target_message(guild.id)
@@ -770,10 +816,9 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             return
         session['starting'] = True
         session['start_countdown'] = 3
-        task = session.get('countdown_task')
-        if task and not task.done():
-            task.cancel()
+        await self._safe_cancel_task(session.get('countdown_task'))
         session['countdown_task'] = self.bot.loop.create_task(self._run_target_start_countdown(guild.id, view))
+        self._touch_runtime_state(session, kind='alvo', guild_id=guild.id)
         try: await interaction.response.send_message('Contagem iniciada.', ephemeral=True)
         except Exception: pass
         await self._refresh_target_message(guild.id)
@@ -784,6 +829,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             if session is None or session.get('ended') or session.get('view') is not view:
                 return
             session['start_countdown'] = remaining
+            self._touch_runtime_state(session, kind='alvo', guild_id=guild_id)
             await self._refresh_target_message(guild_id)
             await asyncio.sleep(1)
         session = self._get_target_session(guild_id)
@@ -797,9 +843,8 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         if session is None or session.get('ended'):
             return False
         session['ended'] = True
-        task = session.get('countdown_task')
-        if task is not None and task is not asyncio.current_task() and not task.done():
-            task.cancel()
+        self._touch_runtime_state(session, kind='alvo', guild_id=guild_id)
+        await self._safe_cancel_task(session.get('countdown_task'))
         self._target_last_used[guild_id] = time.time()
         guild = self.bot.get_guild(guild_id)
         if guild is None:
@@ -949,7 +994,9 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 await message.edit(view=final_view)
             except Exception:
                 pass
-        self._target_sessions.pop(guild_id, None)
+        current = self._target_sessions.get(guild_id)
+        if current is session:
+            self._target_sessions.pop(guild_id, None)
         return True
 
     async def _handle_target_trigger(self, message: discord.Message) -> bool:
@@ -989,7 +1036,9 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             'starting': False,
             'start_countdown': 0,
             'countdown_task': None,
+            '_last_render_key': None,
         }
+        self._touch_runtime_state(session, kind='alvo', guild_id=guild.id)
         self._target_sessions[guild.id] = session
         view = _TargetJoinView(self, guild.id, session, guild, timeout=30.0)
         session['view'] = view

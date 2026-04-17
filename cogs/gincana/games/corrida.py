@@ -444,6 +444,9 @@ class _RaceStateView(discord.ui.LayoutView):
 
 
 class GincanaCorridaMixin:
+    _RACE_STALE_LOBBY_SECONDS = _CORRIDA_LOBBY_SECONDS + 45.0
+    _RACE_STALE_ACTIVE_SECONDS = _CORRIDA_DURATION_SECONDS + 120.0
+
     async def _safe_edit_message_view(self, message: discord.Message | None, view: discord.ui.View | discord.ui.LayoutView) -> str:
         if message is None:
             return "missing"
@@ -455,11 +458,44 @@ class GincanaCorridaMixin:
         except discord.HTTPException:
             return "error"
 
+    async def _cleanup_stale_race_session(self, guild_id: int, session: dict):
+        if session.get("_cleanup_started"):
+            return
+        session["_cleanup_started"] = True
+        self._touch_runtime_state(session, kind='corrida', guild_id=guild_id)
+        try:
+            await self._stop_active_impulse_event(session)
+        except Exception:
+            pass
+        refund_ids = [int(user_id) for user_id in set(session.get("locked_participants", set()) or [])]
+        for user_id in refund_ids:
+            try:
+                await self._change_user_chips(guild_id, int(user_id), CORRIDA_STAKE)
+            except Exception:
+                pass
+        session["ended"] = True
+        session["starting"] = False
+        session["started"] = False
+        guild = self.bot.get_guild(guild_id)
+        if guild is not None:
+            try:
+                await self._close_lobby_message(session, guild, title="🐎 Corrida encerrada", detail="A corrida anterior foi finalizada automaticamente após travar. As entradas foram devolvidas.")
+            except Exception:
+                pass
+        self._race_sessions.pop(guild_id, None)
+
     def _get_race_session(self, guild_id: int) -> dict | None:
         session = self._race_sessions.get(guild_id)
         if session and session.get("ended"):
             self._race_sessions.pop(guild_id, None)
             return None
+        if session is not None:
+            max_idle = self._RACE_STALE_ACTIVE_SECONDS if session.get("started") or session.get("starting") else self._RACE_STALE_LOBBY_SECONDS
+            if self._runtime_state_is_stale(session, max_idle=max_idle, max_age=max_idle * 3):
+                if not session.get("_cleanup_started"):
+                    asyncio.create_task(self._cleanup_stale_race_session(guild_id, session))
+                self._race_sessions.pop(guild_id, None)
+                return None
         return session
 
     def _get_race_voice_channel(self, guild: discord.Guild, session: dict) -> discord.VoiceChannel | None:
@@ -703,6 +739,7 @@ class GincanaCorridaMixin:
                 fresh_session["active_impulse_message"] = None
                 fresh_session["_last_render_key"] = None
                 try:
+                    self._touch_runtime_state(fresh_session, kind='corrida', guild_id=guild.id)
                     await self._refresh_race_message(guild.id)
                 except Exception:
                     pass
@@ -713,6 +750,8 @@ class GincanaCorridaMixin:
 
     async def _refresh_race_message(self, guild_id: int):
         session = self._get_race_session(guild_id)
+        if session is not None:
+            self._touch_runtime_state(session, kind='corrida', guild_id=guild_id)
         if session is None:
             return
         guild = self.bot.get_guild(guild_id)
@@ -880,6 +919,7 @@ class GincanaCorridaMixin:
             session["impulse_status"] = ""
 
     async def _run_race_impulse_event(self, guild: discord.Guild, session: dict, stage_name: str):
+        self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
         if session.get("ended"):
             return []
         channel = guild.get_channel(int(session.get("text_channel_id") or 0))
@@ -913,6 +953,7 @@ class GincanaCorridaMixin:
             event_view.finished = True
             event_view._close_current_step()
             awards = list(event_view._apply_results() or [])
+            self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
             await self._refresh_race_message(guild.id)
             await event_view.refresh_message()
             if event_view.last_best_user_id is not None and event_view.last_best_target_bonus > float((session.get("best_impulse") or {}).get("bonus", 0.0) or 0.0):
@@ -926,6 +967,7 @@ class GincanaCorridaMixin:
                 session["impulse_status"] = ""
                 if not awards and not str(session.get("narration") or "").strip():
                     session["narration"] = ""
+                self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
                 await self._refresh_race_message(guild.id)
             return awards
         except asyncio.CancelledError:
@@ -936,6 +978,7 @@ class GincanaCorridaMixin:
             raise
         except Exception:
             session["impulse_status"] = ""
+            self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
             await self._refresh_race_message(guild.id)
         finally:
             if session.get("active_impulse_message") is event_message:
@@ -947,6 +990,8 @@ class GincanaCorridaMixin:
 
     async def _finish_race_lobby(self, guild_id: int, *, reason: str, source_view: discord.ui.LayoutView | None = None, allow_when_starting: bool = False) -> bool:
         session = self._get_race_session(guild_id)
+        if session is not None:
+            self._touch_runtime_state(session, kind='corrida', guild_id=guild_id)
         if session is None or session.get("ended") or session.get("started"):
             return False
         if session.get("starting") and not allow_when_starting:
@@ -1194,11 +1239,13 @@ class GincanaCorridaMixin:
                         tick_events.append(("lead", leader))
                 session["narration"] = self._pick_race_narration(guild, session, ordered_after, tick_events, tick=tick)
                 session["narration_hold_ticks"] = 0
+            self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
             await self._refresh_race_message(guild.id)
             if int(session.get("narration_hold_ticks", 0) or 0) <= 0 and not session.get("active_impulses"):
                 session["impulse_flash_users"] = set()
                 session["impulse_flash_levels"] = {}
             tick += 1
+            self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
             await asyncio.sleep(_CORRIDA_UPDATE_SECONDS)
 
         await self._stop_active_impulse_event(session)
@@ -1382,6 +1429,7 @@ class GincanaCorridaMixin:
             "_edit_lock": asyncio.Lock(),
             "_last_render_key": None,
         }
+        self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
         self._race_sessions[guild.id] = session
         view = _RaceLobbyView(self, guild.id, session, guild, timeout=_CORRIDA_LOBBY_SECONDS)
         session["view"] = view

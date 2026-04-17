@@ -1,5 +1,6 @@
 import asyncio
 import random
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -55,6 +56,8 @@ class PokerGame:
     action_log: list[str] = field(default_factory=list)
     exchange_counts: dict[int, int] = field(default_factory=dict)
     folded_by: int | None = None
+    last_activity_at: float = field(default_factory=time.monotonic)
+    action_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     @property
     def players(self) -> tuple[int, int]:
@@ -104,26 +107,33 @@ class PokerSelectionView(discord.ui.View):
 
     def _make_toggle_callback(self, index: int):
         async def _callback(interaction: discord.Interaction):
-            await self.cog._handle_poker_toggle(interaction, self.game, self.player_id, index)
+            async with self.game.action_lock:
+                await self.cog._handle_poker_toggle(interaction, self.game, self.player_id, index)
         return _callback
 
     async def _clear_selection(self, interaction: discord.Interaction):
-        await self.cog._handle_poker_clear(interaction, self.game, self.player_id)
+        async with self.game.action_lock:
+            await self.cog._handle_poker_clear(interaction, self.game, self.player_id)
 
     async def _confirm_selection(self, interaction: discord.Interaction):
-        await self.cog._handle_poker_confirm(interaction, self.game, self.player_id)
+        async with self.game.action_lock:
+            await self.cog._handle_poker_confirm(interaction, self.game, self.player_id)
 
     async def _accept_duel(self, interaction: discord.Interaction):
-        await self.cog._handle_poker_accept(interaction, self.game, self.player_id)
+        async with self.game.action_lock:
+            await self.cog._handle_poker_accept(interaction, self.game, self.player_id)
 
     async def _check_call(self, interaction: discord.Interaction):
-        await self.cog._handle_poker_check_call(interaction, self.game, self.player_id)
+        async with self.game.action_lock:
+            await self.cog._handle_poker_check_call(interaction, self.game, self.player_id)
 
     async def _bet_raise(self, interaction: discord.Interaction):
-        await self.cog._handle_poker_bet_raise(interaction, self.game, self.player_id)
+        async with self.game.action_lock:
+            await self.cog._handle_poker_bet_raise(interaction, self.game, self.player_id)
 
     async def _fold(self, interaction: discord.Interaction):
-        await self.cog._handle_poker_fold(interaction, self.game, self.player_id)
+        async with self.game.action_lock:
+            await self.cog._handle_poker_fold(interaction, self.game, self.player_id)
 
     def refresh_buttons(self):
         selected = self.game.selected.get(self.player_id, set())
@@ -163,22 +173,48 @@ class PokerSelectionView(discord.ui.View):
 
     async def on_timeout(self):
         try:
-            if self.game.finished:
-                return
-            if self.game.phase == "invite":
-                await self.cog._cancel_poker_game(self.game, reason="timeout", notice="A partida de poker expirou porque o convite não foi aceito a tempo.")
-                return
-            await self.cog._award_fold_win(
-                self.game,
-                self.game.other_player(self.player_id),
-                self.player_id,
-                reason="abandono",
-            )
+            async with self.game.action_lock:
+                if self.game.finished:
+                    return
+                if self.game.phase == "invite":
+                    await self.cog._cancel_poker_game(self.game, reason="timeout", notice="A partida de poker expirou porque o convite não foi aceito a tempo.")
+                    return
+                await self.cog._award_fold_win(
+                    self.game,
+                    self.game.other_player(self.player_id),
+                    self.player_id,
+                    reason="abandono",
+                )
         except Exception:
             pass
 
 
 class GincanaPokerMixin:
+
+    def _touch_poker_game(self, game: PokerGame) -> float:
+        now = time.monotonic()
+        game.last_activity_at = now
+        return now
+
+    def _poker_game_idle_for(self, game: PokerGame) -> float:
+        last_activity = float(getattr(game, "last_activity_at", 0.0) or 0.0)
+        if last_activity <= 0:
+            return 0.0
+        return max(0.0, time.monotonic() - last_activity)
+
+    def _cleanup_broken_poker_state(self, guild_id: int):
+        game = self._poker_games.get(guild_id)
+        if game is None:
+            return
+        if getattr(game, 'finished', False):
+            self._poker_games.pop(guild_id, None)
+            return
+        if getattr(game, '_stale_cleanup_started', False):
+            return
+        invite_idle_limit = 90.0
+        if str(getattr(game, 'phase', '') or '') == 'invite' and self._poker_game_idle_for(game) > invite_idle_limit:
+            game._stale_cleanup_started = True
+            asyncio.create_task(self._cancel_poker_game(game, reason='stale_invite', notice='A partida anterior de poker expirou por inatividade e foi encerrada automaticamente.'))
 
     def _poker_project_stack_after_buy_in(self, guild_id: int, user_id: int, buy_in: int) -> tuple[int, int, int]:
         chips = int(self.db.get_user_chips(guild_id, user_id, default=100) or 0)
@@ -449,6 +485,7 @@ class GincanaPokerMixin:
                 pass
 
     async def _cancel_poker_game(self, game: PokerGame, *, reason: str, notice: str):
+        self._touch_poker_game(game)
         if game.finished:
             return
         game.finished = True
@@ -508,6 +545,7 @@ class GincanaPokerMixin:
             await self._update_all_poker_dms(game)
 
     async def _award_fold_win(self, game: PokerGame, winner_id: int, loser_id: int, *, reason: str = "desistência"):
+        self._touch_poker_game(game)
         if game.finished:
             return
         game.finished = True
@@ -552,6 +590,7 @@ class GincanaPokerMixin:
                 pass
 
     async def _finish_poker_game(self, game: PokerGame):
+        self._touch_poker_game(game)
         if game.finished:
             return
         game.finished = True
@@ -623,6 +662,7 @@ class GincanaPokerMixin:
                 pass
 
     async def _update_poker_dm(self, game: PokerGame, player_id: int):
+        self._touch_poker_game(game)
         guild = self.bot.get_guild(game.guild_id)
         if guild is None:
             return
@@ -642,6 +682,7 @@ class GincanaPokerMixin:
             pass
 
     async def _update_poker_status(self, game: PokerGame):
+        self._touch_poker_game(game)
         if game.status_message is None or game.finished:
             return
         guild = self.bot.get_guild(game.guild_id)
@@ -691,6 +732,7 @@ class GincanaPokerMixin:
             pass
 
     async def _handle_poker_toggle(self, interaction: discord.Interaction, game: PokerGame, player_id: int, index: int):
+        self._touch_poker_game(game)
         if interaction.user.id != player_id:
             await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
             return
@@ -709,6 +751,7 @@ class GincanaPokerMixin:
         await interaction.response.defer()
 
     async def _handle_poker_clear(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
+        self._touch_poker_game(game)
         if interaction.user.id != player_id:
             await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
             return
@@ -720,6 +763,7 @@ class GincanaPokerMixin:
         await interaction.response.defer()
 
     async def _handle_poker_confirm(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
+        self._touch_poker_game(game)
         if interaction.user.id != player_id:
             await interaction.response.send_message("Essa mão não é sua.", ephemeral=True)
             return
@@ -748,6 +792,7 @@ class GincanaPokerMixin:
             await self._update_all_poker_dms(game)
 
     async def _handle_poker_accept(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
+        self._touch_poker_game(game)
         if interaction.user.id != player_id:
             await interaction.response.send_message("Esse convite não é seu.", ephemeral=True)
             return
@@ -766,6 +811,7 @@ class GincanaPokerMixin:
             await self._update_all_poker_dms(game)
 
     async def _handle_poker_check_call(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
+        self._touch_poker_game(game)
         if interaction.user.id != player_id:
             await interaction.response.send_message("Essa ação não é sua.", ephemeral=True)
             return
@@ -799,6 +845,7 @@ class GincanaPokerMixin:
         await self._finish_betting_round_if_ready(game)
 
     async def _handle_poker_bet_raise(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
+        self._touch_poker_game(game)
         if interaction.user.id != player_id:
             await interaction.response.send_message("Essa ação não é sua.", ephemeral=True)
             return
@@ -830,6 +877,7 @@ class GincanaPokerMixin:
         await interaction.response.defer()
 
     async def _handle_poker_fold(self, interaction: discord.Interaction, game: PokerGame, player_id: int):
+        self._touch_poker_game(game)
         if interaction.user.id != player_id:
             await interaction.response.send_message("Essa ação não é sua.", ephemeral=True)
             return
@@ -843,6 +891,7 @@ class GincanaPokerMixin:
         await self._award_fold_win(game, game.other_player(player_id), player_id)
 
     async def _handle_poker_trigger(self, message: discord.Message) -> bool:
+        self._cleanup_broken_poker_state(message.guild.id if message.guild else 0)
         content = (message.content or "").strip().lower()
         if content != "poker" and not content.startswith("poker "):
             return False

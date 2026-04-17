@@ -446,6 +446,58 @@ class _BuckshotLobbyClosedView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(body)), accent_color=color or discord.Color.blurple()))
 
 class GincanaBuckshotMixin(GincanaBuckshotMixin):
+    def _get_buckshot_session(self, guild_id: int) -> dict | None:
+        session = self._buckshot_sessions.get(guild_id)
+        if not session:
+            return None
+        if session.get('ended'):
+            self._buckshot_sessions.pop(guild_id, None)
+            return None
+        if self._runtime_state_is_stale(session, max_idle=120.0, max_age=300.0):
+            if not session.get('_stale_cleanup_started'):
+                session['_stale_cleanup_started'] = True
+                session['ended'] = True
+                self.bot.loop.create_task(self._cleanup_stale_buckshot_session(guild_id, session))
+            return None
+        self._touch_runtime_state(session, kind='buckshot', guild_id=guild_id)
+        return session
+
+    async def _cleanup_stale_buckshot_session(self, guild_id: int, session: dict):
+        async with self._runtime_lock(session):
+            if self._buckshot_sessions.get(guild_id) is not session:
+                return
+            await self._safe_cancel_task(session.get('countdown_task'))
+            guild = self.bot.get_guild(guild_id)
+            locked_participants = {int(user_id) for user_id in (session.get('locked_participants', set()) or set())}
+            if guild is not None:
+                stake = self._buckshot_stake(session)
+                for user_id in sorted(locked_participants):
+                    try:
+                        await self._buckshot_refund_entry(guild.id, session, int(user_id), stake)
+                    except Exception:
+                        pass
+            lobby_message = session.get('lobby_message') or session.get('message')
+            if lobby_message is not None:
+                try:
+                    await lobby_message.edit(view=_BuckshotLobbyClosedView('✨ Rodada dourada cancelada' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002> Rodada cancelada', [
+                        'A rodada foi encerrada automaticamente porque ficou travada por tempo demais.',
+                        'As entradas foram devolvidas.',
+                    ], color=self._buckshot_color(session)))
+                except Exception:
+                    pass
+            if self._buckshot_sessions.get(guild_id) is session:
+                self._buckshot_sessions.pop(guild_id, None)
+
+    def _buckshot_render_key(self, session: dict, guild: discord.Guild) -> tuple:
+        return (
+            bool(session.get('ended')),
+            bool(session.get('starting')),
+            int(session.get('start_countdown', 0) or 0),
+            tuple(sorted(int(x) for x in (session.get('locked_participants', set()) or set()))),
+            tuple(int(member.id) for member in self._get_buckshot_participants(guild, session)),
+            str(session.get('variant') or 'normal'),
+        )
+
     def _buckshot_is_golden(self, session: dict | None) -> bool:
         return str((session or {}).get('variant') or 'normal').lower() == 'golden'
 
@@ -513,10 +565,8 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             return
         if hasattr(view, '_build_layout'):
             view._build_layout()
-        try:
-            await message.edit(view=view)
-        except Exception:
-            pass
+        render_key = self._buckshot_render_key(session, guild)
+        await self._safe_view_edit(message, view, state=session, render_key=render_key)
 
     async def _handle_buckshot_button(self, interaction: discord.Interaction, view: _BuckshotJoinView):
         guild = interaction.guild
@@ -534,37 +584,44 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             try: await interaction.response.send_message('Bots não podem participar dessa rodada.', ephemeral=True)
             except Exception: pass
             return
-        locked = set(session.get('locked_participants', set()) or set())
-        if member.id in locked:
-            try: await interaction.response.send_message('Você já entrou nessa rodada e sua vaga está travada.', ephemeral=True)
-            except Exception: pass
-            return
-        stake = self._buckshot_stake(session)
-        needs_negative_confirm = self._needs_negative_confirmation(guild.id, member.id, stake)
-        if needs_negative_confirm:
-            confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, member.id, stake, title="💥 Confirmar entrada")
-            if not confirmed:
+        async with self._runtime_lock(session):
+            self._touch_runtime_state(session, kind='buckshot', guild_id=guild.id)
+            if session.get('ended') or session.get('view') is not view:
+                try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
+                except Exception: pass
                 return
-        entry_text = self._entry_consume_text(guild.id, member.id, stake)
-        bonus_before = self._get_user_bonus_chips(guild.id, member.id)
-        paid, _balance, note = await self._try_consume_chips(guild.id, member.id, stake)
-        if needs_negative_confirm:
-            note = None
-        if not paid:
-            try:
-                if interaction.response.is_done():
-                    await interaction.followup.send(note or 'Você não tem saldo suficiente para entrar.', ephemeral=True)
-                else:
-                    await interaction.response.send_message(note or 'Você não tem saldo suficiente para entrar.', ephemeral=True)
-            except Exception:
-                pass
-            return
-        manual = set(session.get('manual_participants', set()) or set())
-        manual.add(member.id)
-        session['manual_participants'] = manual
-        self._buckshot_record_entry_spend(session, member.id, stake, bonus_before=bonus_before)
-        locked.add(member.id)
-        session['locked_participants'] = locked
+            locked = set(session.get('locked_participants', set()) or set())
+            if member.id in locked:
+                try: await interaction.response.send_message('Você já entrou nessa rodada e sua vaga está travada.', ephemeral=True)
+                except Exception: pass
+                return
+            stake = self._buckshot_stake(session)
+            needs_negative_confirm = self._needs_negative_confirmation(guild.id, member.id, stake)
+            if needs_negative_confirm:
+                confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, member.id, stake, title="💥 Confirmar entrada")
+                if not confirmed:
+                    return
+            entry_text = self._entry_consume_text(guild.id, member.id, stake)
+            bonus_before = self._get_user_bonus_chips(guild.id, member.id)
+            paid, _balance, note = await self._try_consume_chips(guild.id, member.id, stake)
+            if needs_negative_confirm:
+                note = None
+            if not paid:
+                try:
+                    if interaction.response.is_done():
+                        await interaction.followup.send(note or 'Você não tem saldo suficiente para entrar.', ephemeral=True)
+                    else:
+                        await interaction.response.send_message(note or 'Você não tem saldo suficiente para entrar.', ephemeral=True)
+                except Exception:
+                    pass
+                return
+            manual = set(session.get('manual_participants', set()) or set())
+            manual.add(member.id)
+            session['manual_participants'] = manual
+            self._buckshot_record_entry_spend(session, member.id, stake, bonus_before=bonus_before)
+            locked.add(member.id)
+            session['locked_participants'] = locked
+            self._touch_runtime_state(session, kind='buckshot', guild_id=guild.id)
         await self._refresh_buckshot_message(guild.id)
         try: await interaction.response.send_message(note or entry_text, ephemeral=True)
         except Exception: pass
@@ -581,26 +638,27 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             try: await interaction.response.send_message('Essa rodada já terminou.', ephemeral=True)
             except Exception: pass
             return
-        if session.get('starting'):
-            try: await interaction.response.send_message('A contagem já começou.', ephemeral=True)
-            except Exception: pass
-            return
-        is_owner = int(session.get('owner_id') or 0) == user.id
-        if not is_owner and not self._is_staff_member(user):
-            try: await interaction.response.send_message('Só o criador da rodada ou a staff pode começar.', ephemeral=True)
-            except Exception: pass
-            return
-        participants = self._get_buckshot_participants(guild, session)
-        if len(participants) < 2:
-            try: await interaction.response.send_message('A rodada precisa de pelo menos 2 participantes.', ephemeral=True)
-            except Exception: pass
-            return
-        session['starting'] = True
-        session['start_countdown'] = 3
-        task = session.get('countdown_task')
-        if task and not task.done():
-            task.cancel()
-        session['countdown_task'] = self.bot.loop.create_task(self._run_buckshot_start_countdown(guild.id, view))
+        async with self._runtime_lock(session):
+            self._touch_runtime_state(session, kind='buckshot', guild_id=guild.id)
+            if session.get('starting'):
+                try: await interaction.response.send_message('A contagem já começou.', ephemeral=True)
+                except Exception: pass
+                return
+            is_owner = int(session.get('owner_id') or 0) == user.id
+            if not is_owner and not self._is_staff_member(user):
+                try: await interaction.response.send_message('Só o criador da rodada ou a staff pode começar.', ephemeral=True)
+                except Exception: pass
+                return
+            participants = self._get_buckshot_participants(guild, session)
+            if len(participants) < 2:
+                try: await interaction.response.send_message('A rodada precisa de pelo menos 2 participantes.', ephemeral=True)
+                except Exception: pass
+                return
+            session['starting'] = True
+            session['start_countdown'] = 3
+            await self._safe_cancel_task(session.get('countdown_task'))
+            session['countdown_task'] = self.bot.loop.create_task(self._run_buckshot_start_countdown(guild.id, view))
+            self._touch_runtime_state(session, kind='buckshot', guild_id=guild.id)
         try: await interaction.response.send_message('Contagem iniciada.', ephemeral=True)
         except Exception: pass
         await self._refresh_buckshot_message(guild.id)
@@ -611,6 +669,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             if session is None or session.get('ended') or session.get('view') is not view:
                 return
             session['start_countdown'] = remaining
+            self._touch_runtime_state(session, kind='buckshot', guild_id=guild_id)
             await self._refresh_buckshot_message(guild_id)
             await asyncio.sleep(1)
         session = self._get_buckshot_session(guild_id)
@@ -623,169 +682,173 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         session = self._buckshot_sessions.get(guild_id)
         if not session or session.get('ended'):
             return False
-        session['ended'] = True
-        self._buckshot_last_used[guild_id] = time.time()
-        task = session.get('countdown_task')
-        if task is not None and task is not asyncio.current_task() and not task.done():
-            task.cancel()
-        guild = self.bot.get_guild(guild_id)
-        if guild is None:
-            self._buckshot_sessions.pop(guild_id, None)
-            return False
-        lobby_message = session.get('lobby_message') or session.get('message')
-        view = session.get('view')
-        if isinstance(view, (discord.ui.View, discord.ui.LayoutView)):
-            try: view.stop()
-            except Exception: pass
-        participants = self._get_buckshot_participants(guild, session)
-        locked_participants = set(session.get('locked_participants', set()) or set())
-        eligible = [member for member in participants if member.id in locked_participants]
-        if len(eligible) < 2:
-            for uid in locked_participants:
-                await self._buckshot_refund_entry(guild.id, session, int(uid), self._buckshot_stake(session))
-            if lobby_message is not None:
+        async with self._runtime_lock(session):
+            if session.get('ended'):
+                return False
+            session['ended'] = True
+            self._touch_runtime_state(session, kind='buckshot', guild_id=guild_id)
+            self._buckshot_last_used[guild_id] = time.time()
+            await self._safe_cancel_task(session.get('countdown_task'))
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                self._buckshot_sessions.pop(guild_id, None)
+                return False
+            lobby_message = session.get('lobby_message') or session.get('message')
+            view = session.get('view')
+            if isinstance(view, (discord.ui.View, discord.ui.LayoutView)):
+                try: view.stop()
+                except Exception: pass
+            participants = self._get_buckshot_participants(guild, session)
+            locked_participants = set(session.get('locked_participants', set()) or set())
+            eligible = [member for member in participants if member.id in locked_participants]
+            if len(eligible) < 2:
+                for uid in locked_participants:
+                    await self._buckshot_refund_entry(guild.id, session, int(uid), self._buckshot_stake(session))
+                if lobby_message is not None:
+                    try:
+                        await lobby_message.edit(view=_BuckshotLobbyClosedView('✨ Rodada dourada cancelada' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002> Rodada cancelada', [
+                            'Não ficaram participantes suficientes.',
+                            'As entradas foram devolvidas.',
+                        ], color=self._buckshot_color(session)))
+                    except Exception:
+                        pass
+                self._buckshot_sessions.pop(guild_id, None)
+                return True
+
+            chosen = random.choice(eligible) if eligible else None
+            if chosen is not None and chosen.voice and chosen.voice.channel:
                 try:
-                    await lobby_message.edit(view=_BuckshotLobbyClosedView('✨ Rodada dourada cancelada' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002> Rodada cancelada', [
-                        'Não ficaram participantes suficientes.',
-                        'As entradas foram devolvidas.',
-                    ], color=self._buckshot_color(session)))
+                    await self._play_buckshot_sfx(guild, chosen.voice.channel)
                 except Exception:
                     pass
-            self._buckshot_sessions.pop(guild_id, None)
-            return True
+                try:
+                    await asyncio.sleep(0.20)
+                except Exception:
+                    pass
+                try:
+                    await chosen.move_to(None, reason='gincana buckshot')
+                except Exception:
+                    pass
 
-        chosen = random.choice(eligible) if eligible else None
-        if chosen is not None and chosen.voice and chosen.voice.channel:
-            try:
-                await self._play_buckshot_sfx(guild, chosen.voice.channel)
-            except Exception:
-                pass
-            try:
-                await asyncio.sleep(0.20)
-            except Exception:
-                pass
-            try:
-                await chosen.move_to(None, reason='gincana buckshot')
-            except Exception:
-                pass
-
-        winners = [member for member in eligible if chosen is not None and member.id != chosen.id]
-        player_count = len(eligible)
-        stake = self._buckshot_stake(session)
-        if self._buckshot_is_golden(session):
-            for participant in eligible:
-                await self.db.add_user_game_stat(guild.id, participant.id, 'buckshot_golden_games', 1)
-        is_golden = self._buckshot_is_golden(session)
-        eliminated_entry_total = stake if chosen is not None else 0
-        bonus_total = 0
-        if player_count >= 5:
-            bonus_total = 10
-        elif player_count >= 3:
-            bonus_total = 5
-        golden_bonus_each = 15 if is_golden else 0
-        lines: list[str] = []
-        if chosen is None:
-            lines.append(('<a:uzi:1487936659692458054>' if is_golden else '<:gunforward:1484655577836683434>') + ' O disparo aconteceu. Ninguém foi eliminado.')
-        else:
-            base_each = 0
-            base_remainder = 0
-            bonus_each = 0
-            bonus_remainder = 0
-            if winners:
-                chosen_spend = self._buckshot_entry_spend(session, chosen.id, stake)
-                eliminated_normal_total = max(0, int(chosen_spend.get('chips', 0) or 0))
-                eliminated_bonus_total = max(0, int(chosen_spend.get('bonus', 0) or 0))
-                base_each = eliminated_normal_total // len(winners) if eliminated_normal_total > 0 else 0
-                base_remainder = eliminated_normal_total % len(winners) if eliminated_normal_total > 0 else 0
-                eliminated_bonus_each = eliminated_bonus_total // len(winners) if eliminated_bonus_total > 0 else 0
-                eliminated_bonus_remainder = eliminated_bonus_total % len(winners) if eliminated_bonus_total > 0 else 0
-                bonus_each = bonus_total // len(winners) if bonus_total > 0 else 0
-                bonus_remainder = bonus_total % len(winners) if bonus_total > 0 else 0
-                for index, winner in enumerate(winners):
-                    own_spend = self._buckshot_entry_spend(session, winner.id, stake)
-                    returned_normal = max(0, int(own_spend.get('chips', 0) or 0))
-                    returned_bonus = max(0, int(own_spend.get('bonus', 0) or 0))
-                    normal_gain = returned_normal + base_each + (1 if index < base_remainder else 0)
-                    bonus_gain = returned_bonus + eliminated_bonus_each + (1 if index < eliminated_bonus_remainder else 0) + bonus_each + (1 if index < bonus_remainder else 0) + golden_bonus_each
-                    if normal_gain > 0:
-                        await self._change_user_chips(guild.id, winner.id, normal_gain)
-                    if bonus_gain > 0:
-                        await self._change_user_bonus_chips(guild.id, winner.id, bonus_gain)
-                    if normal_gain > 0 or bonus_gain > 0:
-                        await self.db.add_user_game_stat(guild.id, winner.id, 'buckshot_survivals', 1)
-                        if is_golden:
-                            await self.db.add_user_game_stat(guild.id, winner.id, 'buckshot_golden_survivals', 1)
-                        await self._record_game_played(guild.id, winner.id, weekly_points=8)
-                        await self._grant_weekly_points(guild.id, winner.id, max(3, (normal_gain + bonus_gain) // 3))
-            await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_eliminations', 1)
-            if is_golden:
-                await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_golden_eliminations', 1)
-            await self._record_game_played(guild.id, chosen.id, weekly_points=3)
-            refund = await self._maybe_apply_coringa_lobby_refund(guild.id, chosen.id, stake)
-            lines.append(f"{'<a:uzi:1487936659692458054>💥' if is_golden else '<:gunforward:1484655577836683434>💥'} O disparo aconteceu. {chosen.mention} foi eliminado.")
-            if refund > 0:
-                effect_note = self._race_effect_message(guild.id, chosen.id, 'as', f"{chosen.mention} recuperou {self._chip_text(refund, kind='gain')} da entrada.")
-                if effect_note:
-                    lines.append(effect_note)
-            if winners:
-                winner_count = len(winners)
-                returned_entry_text = self._chip_amount(stake)
-                if chosen_spend.get('chips', 0) and chosen_spend.get('bonus', 0):
-                    eliminated_entry_text = f"**{chosen_spend['chips']} {self._CHIP_GAIN_EMOJI}** + **{chosen_spend['bonus']} {self._CHIP_BONUS_EMOJI}**"
-                elif chosen_spend.get('bonus', 0):
-                    eliminated_entry_text = f"**{chosen_spend['bonus']} {self._CHIP_BONUS_EMOJI}**"
-                else:
-                    eliminated_entry_text = f"**{chosen_spend['chips']} {self._CHIP_GAIN_EMOJI}**"
-
-                lines.append(f"Cada sobrevivente recebeu a própria entrada de volta: {returned_entry_text}.")
-
-                if eliminated_normal_total > 0 or eliminated_bonus_total > 0:
-                    share_normal_max = base_each + (1 if base_remainder > 0 else 0)
-                    share_normal_min = base_each
-                    share_bonus_max = eliminated_bonus_each + (1 if eliminated_bonus_remainder > 0 else 0)
-                    share_bonus_min = eliminated_bonus_each
-                    share_parts = []
-                    if eliminated_normal_total > 0:
-                        if base_remainder == 0:
-                            share_parts.append(f"**{base_each} {self._CHIP_GAIN_EMOJI}** para cada um")
-                        else:
-                            share_parts.append(f"**{share_normal_max} {self._CHIP_GAIN_EMOJI}** para alguns e **{share_normal_min} {self._CHIP_GAIN_EMOJI}** para os demais")
-                    if eliminated_bonus_total > 0:
-                        if eliminated_bonus_remainder == 0:
-                            share_parts.append(f"**{eliminated_bonus_each} {self._CHIP_BONUS_EMOJI}** para cada um")
-                        else:
-                            share_parts.append(f"**{share_bonus_max} {self._CHIP_BONUS_EMOJI}** para alguns e **{share_bonus_min} {self._CHIP_BONUS_EMOJI}** para os demais")
-                    lines.append(
-                        f"A entrada do eliminado ({eliminated_entry_text}) foi dividida entre **{winner_count}** sobreviventes: " + " • ".join(share_parts) + "."
-                    )
-
-                if bonus_total > 0:
-                    max_bonus_gain = bonus_each + (1 if bonus_remainder > 0 else 0)
-                    min_bonus_gain = bonus_each
-                    if bonus_remainder == 0:
-                        lines.append(
-                            f"Bônus da rodada: **{bonus_each} {self._CHIP_BONUS_EMOJI}** para cada sobrevivente."
-                        )
-                    else:
-                        lines.append(
-                            f"Bônus da rodada: **{max_bonus_gain} {self._CHIP_BONUS_EMOJI}** para alguns e **{min_bonus_gain} {self._CHIP_BONUS_EMOJI}** para os demais."
-                        )
-
-                if eliminated_normal_total <= 0 and eliminated_bonus_total <= 0 and bonus_total <= 0 and golden_bonus_each <= 0:
-                    lines.append("Os sobreviventes não receberam nada.")
-
-                if is_golden and winners:
-                    lines.append(f"Bônus dourado: cada sobrevivente recebeu **+{golden_bonus_each} {self._CHIP_BONUS_EMOJI}**.")
+            winners = [member for member in eligible if chosen is not None and member.id != chosen.id]
+            player_count = len(eligible)
+            stake = self._buckshot_stake(session)
+            if self._buckshot_is_golden(session):
+                for participant in eligible:
+                    await self.db.add_user_game_stat(guild.id, participant.id, 'buckshot_golden_games', 1)
+            is_golden = self._buckshot_is_golden(session)
+            eliminated_entry_total = stake if chosen is not None else 0
+            bonus_total = 0
+            if player_count >= 5:
+                bonus_total = 10
+            elif player_count >= 3:
+                bonus_total = 5
+            golden_bonus_each = 15 if is_golden else 0
+            lines: list[str] = []
+            if chosen is None:
+                lines.append(('<a:uzi:1487936659692458054>' if is_golden else '<:gunforward:1484655577836683434>') + ' O disparo aconteceu. Ninguém foi eliminado.')
             else:
-                lines.append(f"Ninguém sobreviveu para receber a entrada de **{eliminated_entry_total} {self._CHIP_LOSS_EMOJI}**.")
+                base_each = 0
+                base_remainder = 0
+                bonus_each = 0
+                bonus_remainder = 0
+                if winners:
+                    chosen_spend = self._buckshot_entry_spend(session, chosen.id, stake)
+                    eliminated_normal_total = max(0, int(chosen_spend.get('chips', 0) or 0))
+                    eliminated_bonus_total = max(0, int(chosen_spend.get('bonus', 0) or 0))
+                    base_each = eliminated_normal_total // len(winners) if eliminated_normal_total > 0 else 0
+                    base_remainder = eliminated_normal_total % len(winners) if eliminated_normal_total > 0 else 0
+                    eliminated_bonus_each = eliminated_bonus_total // len(winners) if eliminated_bonus_total > 0 else 0
+                    eliminated_bonus_remainder = eliminated_bonus_total % len(winners) if eliminated_bonus_total > 0 else 0
+                    bonus_each = bonus_total // len(winners) if bonus_total > 0 else 0
+                    bonus_remainder = bonus_total % len(winners) if bonus_total > 0 else 0
+                    for index, winner in enumerate(winners):
+                        own_spend = self._buckshot_entry_spend(session, winner.id, stake)
+                        returned_normal = max(0, int(own_spend.get('chips', 0) or 0))
+                        returned_bonus = max(0, int(own_spend.get('bonus', 0) or 0))
+                        normal_gain = returned_normal + base_each + (1 if index < base_remainder else 0)
+                        bonus_gain = returned_bonus + eliminated_bonus_each + (1 if index < eliminated_bonus_remainder else 0) + bonus_each + (1 if index < bonus_remainder else 0) + golden_bonus_each
+                        if normal_gain > 0:
+                            await self._change_user_chips(guild.id, winner.id, normal_gain)
+                        if bonus_gain > 0:
+                            await self._change_user_bonus_chips(guild.id, winner.id, bonus_gain)
+                        if normal_gain > 0 or bonus_gain > 0:
+                            await self.db.add_user_game_stat(guild.id, winner.id, 'buckshot_survivals', 1)
+                            if is_golden:
+                                await self.db.add_user_game_stat(guild.id, winner.id, 'buckshot_golden_survivals', 1)
+                            await self._record_game_played(guild.id, winner.id, weekly_points=8)
+                            await self._grant_weekly_points(guild.id, winner.id, max(3, (normal_gain + bonus_gain) // 3))
+                await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_eliminations', 1)
+                if is_golden:
+                    await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_golden_eliminations', 1)
+                await self._record_game_played(guild.id, chosen.id, weekly_points=3)
+                refund = await self._maybe_apply_coringa_lobby_refund(guild.id, chosen.id, stake)
+                lines.append(f"{'<a:uzi:1487936659692458054>💥' if is_golden else '<:gunforward:1484655577836683434>💥'} O disparo aconteceu. {chosen.mention} foi eliminado.")
+                if refund > 0:
+                    effect_note = self._race_effect_message(guild.id, chosen.id, 'as', f"{chosen.mention} recuperou {self._chip_text(refund, kind='gain')} da entrada.")
+                    if effect_note:
+                        lines.append(effect_note)
+                if winners:
+                    winner_count = len(winners)
+                    returned_entry_text = self._chip_amount(stake)
+                    if chosen_spend.get('chips', 0) and chosen_spend.get('bonus', 0):
+                        eliminated_entry_text = f"**{chosen_spend['chips']} {self._CHIP_GAIN_EMOJI}** + **{chosen_spend['bonus']} {self._CHIP_BONUS_EMOJI}**"
+                    elif chosen_spend.get('bonus', 0):
+                        eliminated_entry_text = f"**{chosen_spend['bonus']} {self._CHIP_BONUS_EMOJI}**"
+                    else:
+                        eliminated_entry_text = f"**{chosen_spend['chips']} {self._CHIP_GAIN_EMOJI}**"
 
-        if lobby_message is not None:
-            try:
-                await lobby_message.edit(view=_BuckshotLobbyClosedView('✨ Resultado do buckshot dourado' if is_golden else '<:gunforward:1484655577836683434> Resultado do buckshot', lines, color=self._buckshot_color(session)))
-            except Exception:
-                pass
-        self._buckshot_sessions.pop(guild_id, None)
-        return True
+                    lines.append(f"Cada sobrevivente recebeu a própria entrada de volta: {returned_entry_text}.")
+
+                    if eliminated_normal_total > 0 or eliminated_bonus_total > 0:
+                        share_normal_max = base_each + (1 if base_remainder > 0 else 0)
+                        share_normal_min = base_each
+                        share_bonus_max = eliminated_bonus_each + (1 if eliminated_bonus_remainder > 0 else 0)
+                        share_bonus_min = eliminated_bonus_each
+                        share_parts = []
+                        if eliminated_normal_total > 0:
+                            if base_remainder == 0:
+                                share_parts.append(f"**{base_each} {self._CHIP_GAIN_EMOJI}** para cada um")
+                            else:
+                                share_parts.append(f"**{share_normal_max} {self._CHIP_GAIN_EMOJI}** para alguns e **{share_normal_min} {self._CHIP_GAIN_EMOJI}** para os demais")
+                        if eliminated_bonus_total > 0:
+                            if eliminated_bonus_remainder == 0:
+                                share_parts.append(f"**{eliminated_bonus_each} {self._CHIP_BONUS_EMOJI}** para cada um")
+                            else:
+                                share_parts.append(f"**{share_bonus_max} {self._CHIP_BONUS_EMOJI}** para alguns e **{share_bonus_min} {self._CHIP_BONUS_EMOJI}** para os demais")
+                        lines.append(
+                            f"A entrada do eliminado ({eliminated_entry_text}) foi dividida entre **{winner_count}** sobreviventes: " + " • ".join(share_parts) + "."
+                        )
+
+                    if bonus_total > 0:
+                        max_bonus_gain = bonus_each + (1 if bonus_remainder > 0 else 0)
+                        min_bonus_gain = bonus_each
+                        if bonus_remainder == 0:
+                            lines.append(
+                                f"Bônus da rodada: **{bonus_each} {self._CHIP_BONUS_EMOJI}** para cada sobrevivente."
+                            )
+                        else:
+                            lines.append(
+                                f"Bônus da rodada: **{max_bonus_gain} {self._CHIP_BONUS_EMOJI}** para alguns e **{min_bonus_gain} {self._CHIP_BONUS_EMOJI}** para os demais."
+                            )
+
+                    if eliminated_normal_total <= 0 and eliminated_bonus_total <= 0 and bonus_total <= 0 and golden_bonus_each <= 0:
+                        lines.append("Os sobreviventes não receberam nada.")
+
+                    if is_golden and winners:
+                        lines.append(f"Bônus dourado: cada sobrevivente recebeu **+{golden_bonus_each} {self._CHIP_BONUS_EMOJI}**.")
+                else:
+                    lines.append(f"Ninguém sobreviveu para receber a entrada de **{eliminated_entry_total} {self._CHIP_LOSS_EMOJI}**.")
+
+            if lobby_message is not None:
+                try:
+                    await lobby_message.edit(view=_BuckshotLobbyClosedView('✨ Resultado do buckshot dourado' if is_golden else '<:gunforward:1484655577836683434> Resultado do buckshot', lines, color=self._buckshot_color(session)))
+                except Exception:
+                    pass
+            current = self._buckshot_sessions.get(guild_id)
+            if current is session:
+                self._buckshot_sessions.pop(guild_id, None)
+            return True
 
     async def _handle_buckshot_trigger(self, message: discord.Message) -> bool:
         guild = message.guild
@@ -839,7 +902,9 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             'start_countdown': 0,
             'countdown_task': None,
             'variant': variant,
+            '_last_render_key': None,
         }
+        self._touch_runtime_state(session, kind='buckshot', guild_id=guild.id)
         self._buckshot_sessions[guild.id] = session
         view = _BuckshotJoinView(self, guild.id, session, guild, timeout=30.0)
         session['view'] = view

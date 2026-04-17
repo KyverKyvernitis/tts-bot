@@ -42,6 +42,7 @@ CARTA_DAILY_EXTRA_CAP = ROLETA_DAILY_EXTRA_CAP
 ROLETA_TRIGGER_COOLDOWN_SECONDS = 20.0
 ROLETA_REPLAY_WINDOW_SECONDS = 20.0
 GAME_ANIMATION_LIMIT_PER_GUILD = 2
+GAME_ANIMATION_STALE_SECONDS = 75.0
 
 
 class _GameReplayView(discord.ui.View):
@@ -344,31 +345,79 @@ class GincanaRoletaMixin:
         def _next_game_animation_session_id(self, *, guild_id: int, kind: str, owner_id: int) -> str:
             return f"{kind}:{guild_id}:{owner_id}:{time.monotonic_ns()}"
 
+        def _touch_game_animation_entry(self, entry: dict[str, object] | None):
+            if entry is None:
+                return
+            now = time.monotonic()
+            entry.setdefault("created_at", now)
+            entry["last_progress_at"] = now
+
+        async def _cleanup_stale_game_animation_slots(self, guild_id: int):
+            state = self._game_animation_state(guild_id)
+            lock: asyncio.Lock = state["lock"]
+            async with lock:
+                order: list[str] = state["order"]
+                entries: dict[str, dict[str, object]] = state["entries"]
+                if not entries:
+                    self._game_animation_states.pop(guild_id, None)
+                    return
+                now = time.monotonic()
+                stale_ids: list[str] = []
+                for queued_session_id, entry in list(entries.items()):
+                    last_progress = float(entry.get("last_progress_at") or entry.get("created_at") or now)
+                    created_at = float(entry.get("created_at") or last_progress)
+                    if (now - last_progress) > GAME_ANIMATION_STALE_SECONDS or (now - created_at) > (GAME_ANIMATION_STALE_SECONDS * 2.0):
+                        stale_ids.append(queued_session_id)
+                if not stale_ids:
+                    return
+                front_removed = False
+                for queued_session_id in stale_ids:
+                    if order and order[0] == queued_session_id:
+                        front_removed = True
+                    while queued_session_id in order:
+                        order.remove(queued_session_id)
+                    entries.pop(queued_session_id, None)
+                if not order:
+                    self._game_animation_states.pop(guild_id, None)
+                    return
+                if front_removed:
+                    nxt = entries.get(order[0])
+                    if nxt is not None:
+                        self._touch_game_animation_entry(nxt)
+                        nxt["event"].set()
+
         async def _try_acquire_game_animation_slot(self, guild_id: int, session_id: str) -> bool:
+            await self._cleanup_stale_game_animation_slots(guild_id)
             state = self._game_animation_state(guild_id)
             lock: asyncio.Lock = state["lock"]
             async with lock:
                 order: list[str] = state["order"]
                 entries: dict[str, dict[str, object]] = state["entries"]
                 if session_id in entries:
+                    self._touch_game_animation_entry(entries.get(session_id))
                     return True
                 if len(order) >= GAME_ANIMATION_LIMIT_PER_GUILD:
                     return False
                 event = asyncio.Event()
-                entries[session_id] = {"event": event}
+                entry = {"event": event}
+                self._touch_game_animation_entry(entry)
+                entries[session_id] = entry
                 order.append(session_id)
                 if len(order) == 1:
                     event.set()
                 return True
 
         async def _wait_for_game_animation_turn(self, guild_id: int, session_id: str) -> bool:
+            await self._cleanup_stale_game_animation_slots(guild_id)
             state = self._game_animation_state(guild_id)
             entry = state["entries"].get(session_id)
             if entry is None:
                 return False
+            self._touch_game_animation_entry(entry)
             event: asyncio.Event = entry["event"]
             await event.wait()
             event.clear()
+            self._touch_game_animation_entry(entry)
             return True
 
         async def _advance_game_animation_turn(self, guild_id: int, session_id: str):
@@ -379,19 +428,24 @@ class GincanaRoletaMixin:
                 entries: dict[str, dict[str, object]] = state["entries"]
                 if session_id not in entries or not order:
                     return
+                current_entry = entries.get(session_id)
+                self._touch_game_animation_entry(current_entry)
                 if order[0] != session_id:
                     current = entries.get(order[0])
                     if current is not None:
+                        self._touch_game_animation_entry(current)
                         current["event"].set()
                     return
                 if len(order) == 1:
                     solo = entries.get(session_id)
                     if solo is not None:
+                        self._touch_game_animation_entry(solo)
                         solo["event"].set()
                     return
                 order.append(order.pop(0))
                 nxt = entries.get(order[0])
                 if nxt is not None:
+                    self._touch_game_animation_entry(nxt)
                     nxt["event"].set()
 
         async def _release_game_animation_slot(self, guild_id: int, session_id: str):
@@ -410,6 +464,7 @@ class GincanaRoletaMixin:
                 if was_front or len(order) == 1:
                     nxt = entries.get(order[0])
                     if nxt is not None:
+                        self._touch_game_animation_entry(nxt)
                         nxt["event"].set()
 
         def _is_edit_rate_limited(self, exc: Exception) -> bool:

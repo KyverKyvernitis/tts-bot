@@ -115,6 +115,104 @@ class GincanaBase:
         self._race_sessions: dict[int, dict] = {}
         self._race_panel_messages: dict[tuple[int, int], tuple[int, int]] = {}
         self._truco_games: dict[int, object] = {}
+        self._gincana_message_edit_locks: dict[int, asyncio.Lock] = {}
+
+
+    def _touch_runtime_state(self, state: dict | None, *, kind: str | None = None, guild_id: int | None = None) -> float:
+        now = time.monotonic()
+        if state is None:
+            return now
+        if not isinstance(state, dict):
+            return now
+        state.setdefault("_created_at", now)
+        state["_heartbeat_at"] = now
+        if kind and not state.get("_runtime_kind"):
+            state["_runtime_kind"] = str(kind)
+        if guild_id is not None and not state.get("_runtime_guild_id"):
+            state["_runtime_guild_id"] = int(guild_id)
+        return now
+
+    def _runtime_state_age(self, state: dict | None) -> float:
+        if not isinstance(state, dict):
+            return 0.0
+        now = time.monotonic()
+        created_at = float(state.get("_created_at") or now)
+        return max(0.0, now - created_at)
+
+    def _runtime_state_idle_for(self, state: dict | None) -> float:
+        if not isinstance(state, dict):
+            return 0.0
+        now = time.monotonic()
+        heartbeat_at = float(state.get("_heartbeat_at") or state.get("_created_at") or now)
+        return max(0.0, now - heartbeat_at)
+
+    def _runtime_state_is_stale(self, state: dict | None, *, max_idle: float, max_age: float | None = None) -> bool:
+        if not isinstance(state, dict):
+            return False
+        if max_idle > 0 and self._runtime_state_idle_for(state) > float(max_idle):
+            return True
+        if max_age is not None and max_age > 0 and self._runtime_state_age(state) > float(max_age):
+            return True
+        return False
+
+    def _runtime_lock(self, state: dict, *, key: str = "_runtime_lock") -> asyncio.Lock:
+        lock = state.get(key)
+        if isinstance(lock, asyncio.Lock):
+            return lock
+        lock = asyncio.Lock()
+        state[key] = lock
+        return lock
+
+    async def _safe_cancel_task(self, task) -> bool:
+        if task is None:
+            return False
+        if task is asyncio.current_task():
+            return False
+        if getattr(task, "done", None) is None or task.done():
+            return False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        return True
+
+    def _message_edit_lock(self, message: discord.Message | None) -> asyncio.Lock:
+        message_id = int(getattr(message, "id", 0) or 0)
+        if message_id <= 0:
+            return asyncio.Lock()
+        lock = self._gincana_message_edit_locks.get(message_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._gincana_message_edit_locks[message_id] = lock
+        return lock
+
+    async def _safe_view_edit(self, message: discord.Message | None, view: discord.ui.View | discord.ui.LayoutView, *, state: dict | None = None, render_key=None) -> str:
+        if message is None:
+            return "missing"
+        if state is not None and render_key is not None and state.get("_last_render_key") == render_key:
+            return "skipped"
+        lock = self._message_edit_lock(message)
+        async with lock:
+            if state is not None and render_key is not None and state.get("_last_render_key") == render_key:
+                return "skipped"
+            try:
+                await message.edit(view=view)
+                if state is not None and render_key is not None:
+                    state["_last_render_key"] = render_key
+                    self._touch_runtime_state(state)
+                return "ok"
+            except discord.NotFound:
+                if state is not None:
+                    state["message"] = None
+                    state["lobby_message"] = None
+                return "missing"
+            except discord.HTTPException:
+                return "error"
+            except Exception:
+                return "error"
 
     def _strip_gincana_suffix(self, name: str) -> str:
         base = str(name or "").rstrip()
