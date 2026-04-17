@@ -102,16 +102,25 @@ def _clean_hex(value: str | None, fallback: str) -> str:
     return raw.lower()
 
 
-def _font(size: int, *, bold: bool = True):
+def _font(size: int, *, bold: bool = True, kind: str = "math"):
     if ImageFont is None:
         raise RuntimeError("Pillow não está disponível.")
-    candidates = [
-        "/usr/share/fonts/truetype/noto/NotoSansMath-Regular.ttf",
-        "/usr/share/fonts/opentype/stix-word/STIXMath-Regular.otf",
-        "/usr/share/fonts/opentype/asana-math/Asana-Math.otf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    ]
+    if kind == "mono":
+        candidates = [
+            "/usr/share/fonts/truetype/noto/NotoSansMono-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf" if bold else "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+    else:
+        candidates = [
+            "/usr/share/fonts/truetype/noto/NotoSansMath-Regular.ttf",
+            "/usr/share/fonts/opentype/stix-word/STIXMath-Regular.otf",
+            "/usr/share/fonts/opentype/asana-math/Asana-Math.otf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        ]
     for path in candidates:
         try:
             return ImageFont.truetype(path, size=size)
@@ -1416,7 +1425,8 @@ class ColorRolesCog(commands.Cog):
         width, height = 900, 330
         image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        font = _font(34, bold=True)
+        number_font = _font(34, bold=True, kind="math")
+        name_font = _font(34, bold=True, kind="mono")
         y_positions = [20, 85, 150, 215, 280]
         x_left, x_right = 18, 465
         shadow = (0, 0, 0, 180)
@@ -1424,20 +1434,40 @@ class ColorRolesCog(commands.Cog):
             slot = dict(slots.get(str(slot_number), {}) or {})
             name = str(slot.get("name") or f"Cor {slot_number}").strip()
             number_label = _math_sans_bold(str(slot_number))
-            name_label = _math_monospace(name) if name else ""
-            label = f"{number_label}. {name_label}" if name_label else f"{number_label}."
+            prefix_label = f"{number_label}."
+            name_label = name
             hex_color = _clean_hex(str(slot.get("text_hex") or "#ffffff"), "#ffffff")
             x = x_left if idx % 2 == 0 else x_right
             y = y_positions[idx // 2]
+
+            def _measure_width(label_text: str, font_obj) -> int:
+                try:
+                    bbox = draw.textbbox((0, 0), label_text, font=font_obj)
+                    return max(0, int(bbox[2] - bbox[0]))
+                except Exception:
+                    return int(draw.textlength(label_text, font=font_obj))
+
+            gap = 12
+            prefix_width = _measure_width(prefix_label, number_font)
+            name_x = x + prefix_width + gap
+
             if _is_default_black_slot(slot_number, slot):
                 try:
-                    draw.text((x, y), label, font=font, fill=hex_color, stroke_width=3, stroke_fill="#8f8f8f")
+                    draw.text((x, y), prefix_label, font=number_font, fill=hex_color, stroke_width=3, stroke_fill="#8f8f8f")
+                    if name_label:
+                        draw.text((name_x, y), name_label, font=name_font, fill=hex_color, stroke_width=3, stroke_fill="#8f8f8f")
                 except TypeError:
-                    draw.text((x + 2, y + 2), label, font=font, fill="#8f8f8f")
-                    draw.text((x, y), label, font=font, fill=hex_color)
+                    draw.text((x + 2, y + 2), prefix_label, font=number_font, fill="#8f8f8f")
+                    draw.text((x, y), prefix_label, font=number_font, fill=hex_color)
+                    if name_label:
+                        draw.text((name_x + 2, y + 2), name_label, font=name_font, fill="#8f8f8f")
+                        draw.text((name_x, y), name_label, font=name_font, fill=hex_color)
                 continue
-            draw.text((x + 2, y + 2), label, font=font, fill=shadow)
-            draw.text((x, y), label, font=font, fill=hex_color)
+            draw.text((x + 2, y + 2), prefix_label, font=number_font, fill=shadow)
+            draw.text((x, y), prefix_label, font=number_font, fill=hex_color)
+            if name_label:
+                draw.text((name_x + 2, y + 2), name_label, font=name_font, fill=shadow)
+                draw.text((name_x, y), name_label, font=name_font, fill=hex_color)
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         buffer.seek(0)
