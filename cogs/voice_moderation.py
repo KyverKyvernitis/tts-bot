@@ -402,18 +402,67 @@ class VoiceModeration(commands.Cog):
         if runtime is not None:
             runtime.sink = None
 
+    def _is_corrupted_stream_error(self, exc: Exception | None) -> bool:
+        if exc is None:
+            return False
+        message = str(exc).strip().lower()
+        if not message:
+            return False
+        return "corrupted stream" in message or "opus" in message and "corrupt" in message
+
+    async def _recover_listening_after_error(self, guild_id: int, exc: Exception | None) -> None:
+        guild = self.bot.get_guild(int(guild_id))
+        if guild is None:
+            return
+
+        runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
+        runtime.sink = None
+        settings = await self._get_settings(guild.id)
+        runtime.settings = dict(settings)
+        if not settings.get("enabled"):
+            return
+
+        vc = self._get_voice_client(guild)
+        voice_channel = getattr(vc, "channel", None) if vc is not None else None
+        if vc is not None and hasattr(vc, "stop_listening"):
+            with contextlib.suppress(Exception):
+                vc.stop_listening()
+
+        if self._is_corrupted_stream_error(exc):
+            await asyncio.sleep(0.25)
+            _vc, state = await self._ensure_receive_ready(guild, preferred_channel=voice_channel)
+            if state in {"escutando", "sem_voice_recv"}:
+                return
+            await self._send_call_notice(
+                guild,
+                title="# 🔊 Moderação de voz",
+                lines=["A escuta caiu e tentei recuperar automaticamente."],
+                notes=[f"Estado atual: `{state}`"],
+                accent=discord.Color.orange(),
+                voice_channel=voice_channel,
+            )
+            return
+
+        await self._send_call_notice(
+            guild,
+            title="# 🔊 Moderação de voz",
+            lines=["A escuta do canal foi encerrada com erro."],
+            notes=[f"Detalhe: `{exc}`"],
+            accent=discord.Color.red(),
+            voice_channel=voice_channel,
+        )
+
     def _on_listen_after(self, guild_id: int, exc: Exception | None) -> None:
         runtime = self._runtime.get(int(guild_id))
         if runtime is not None:
             runtime.sink = None
-        if exc is not None:
-            self._schedule_call_notice(
-                guild_id,
-                title="# 🔊 Moderação de voz",
-                lines=["A escuta do canal foi encerrada com erro."],
-                notes=[f"Detalhe: `{exc}`"],
-                accent=discord.Color.red(),
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._recover_listening_after_error(int(guild_id), exc),
+                self.bot.loop,
             )
+        except Exception:
+            pass
 
     async def _play_activation_sfx(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> bool:
         voice_client = vc or self._get_voice_client(guild)
@@ -559,21 +608,6 @@ class VoiceModeration(commands.Cog):
                 voice_channel=member.voice.channel,
             )
             return
-        if hasattr(member, "top_role") and hasattr(me, "top_role"):
-            try:
-                if guild.owner_id != member.id and member.top_role >= me.top_role:
-                    await self._send_call_notice(
-                        guild,
-                        title="# 🔊 Moderação de voz",
-                        lines=[f"Não consegui puxar **{discord.utils.escape_markdown(member.display_name)}** da call."],
-                        notes=["A hierarquia do bot está abaixo do cargo dessa pessoa."],
-                        accent=discord.Color.red(),
-                        voice_channel=member.voice.channel,
-                    )
-                    return
-            except Exception:
-                pass
-
         try:
             await member.move_to(None, reason=f"Moderação de voz: volume acima do limite ({score})")
             await self._send_call_notice(
