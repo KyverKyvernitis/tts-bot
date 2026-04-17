@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import re
 import time
@@ -19,6 +20,7 @@ except Exception:  # pragma: no cover - runtime guard only
 
 COLOR_PANEL_TIMEOUT = 600.0
 COLOR_COMMAND_COOLDOWN = 20.0
+COLOR_COMMAND_CLEANUP_DELAY = 6.0
 COLOR_BLOCK_SIZE = 10
 COLOR_BLOCK_COUNT = 3
 COLOR_MAX_MESSAGES = 5
@@ -1575,6 +1577,15 @@ class ColorRolesCog(commands.Cog):
         self._color_panel_cd[guild_id] = now
         return 0.0
 
+    async def _delete_message_after(self, message: discord.Message | None, delay: float = COLOR_COMMAND_CLEANUP_DELAY):
+        if message is None:
+            return
+        try:
+            await asyncio.sleep(max(0.0, float(delay)))
+            await message.delete()
+        except Exception:
+            pass
+
     @commands.command(name="color")
     @commands.guild_only()
     async def color_command(self, ctx: commands.Context):
@@ -1591,7 +1602,9 @@ class ColorRolesCog(commands.Cog):
         cfg["channel_id"] = int(ctx.channel.id)
         cfg["message_ids"] = message_ids
         await self._save_config(ctx.guild.id, cfg)
-        await ctx.send(f"Painel de cores publicado com {self._get_panel_count(ctx.guild.id)} mensagem(ns).")
+        confirmation = await ctx.send(f"Painel de cores publicado com {self._get_panel_count(ctx.guild.id)} mensagem(ns).")
+        asyncio.create_task(self._delete_message_after(confirmation))
+        asyncio.create_task(self._delete_message_after(getattr(ctx, "message", None)))
 
     @commands.command(name="coloredit")
     @commands.guild_only()
