@@ -192,6 +192,24 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             await cog.handle_voice_client_ready(guild, vc or self._get_voice_client_for_guild(guild))
         except Exception as e:
             print(f"[tts_voice] erro ao notificar moderação de voz na guild {guild.id}: {e}")
+    async def _notify_voice_moderation_playback_start(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
+        cog = self.bot.get_cog("VoiceModeration")
+        if cog is None or not hasattr(cog, "pause_for_tts_playback"):
+            return
+        try:
+            await cog.pause_for_tts_playback(guild, vc or self._get_voice_client_for_guild(guild))
+        except Exception as e:
+            print(f"[tts_voice] erro ao pausar moderação de voz na guild {guild.id}: {e}")
+
+    async def _notify_voice_moderation_playback_end(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
+        cog = self.bot.get_cog("VoiceModeration")
+        if cog is None or not hasattr(cog, "resume_after_tts_playback"):
+            return
+        try:
+            await cog.resume_after_tts_playback(guild, vc or self._get_voice_client_for_guild(guild))
+        except Exception as e:
+            print(f"[tts_voice] erro ao retomar moderação de voz na guild {guild.id}: {e}")
+
 
     async def _set_user_tts_and_refresh(self, guild_id: int, user_id: int, *, history_entry: str | None = None, **kwargs):
         db = self._get_db()

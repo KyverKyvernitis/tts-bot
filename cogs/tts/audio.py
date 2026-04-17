@@ -1007,6 +1007,7 @@ class TTSAudioMixin:
     async def _play_file(self, vc: discord.VoiceClient, path: str) -> dict[str, float]:
         loop = asyncio.get_running_loop()
         finished = loop.create_future()
+        guild = getattr(vc, "guild", None)
 
         def _after_playback(error: Optional[Exception]) -> None:
             if error:
@@ -1016,27 +1017,36 @@ class TTSAudioMixin:
                 if not finished.done():
                     loop.call_soon_threadsafe(finished.set_result, None)
 
-        source_setup_started_at = time.monotonic()
-        source = discord.FFmpegPCMAudio(
-            path,
-            before_options=TTS_FFMPEG_BEFORE_OPTIONS,
-            options=TTS_FFMPEG_OPTIONS,
-        )
-        source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
+        if guild is not None and hasattr(self, "_notify_voice_moderation_playback_start"):
+            with contextlib.suppress(Exception):
+                await self._maybe_await(self._notify_voice_moderation_playback_start(guild, vc))
 
-        play_call_started_at = time.monotonic()
-        vc.play(source, after=_after_playback)
-        play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
+        try:
+            source_setup_started_at = time.monotonic()
+            source = discord.FFmpegPCMAudio(
+                path,
+                before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+                options=TTS_FFMPEG_OPTIONS,
+            )
+            source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
 
-        playback_started_at = time.monotonic()
-        await finished
-        playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
-        return {
-            "source_setup_ms": source_setup_ms,
-            "play_call_ms": play_call_ms,
-            "playback_ms": playback_duration_ms,
-            "playback_started_at": playback_started_at,
-        }
+            play_call_started_at = time.monotonic()
+            vc.play(source, after=_after_playback)
+            play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
+
+            playback_started_at = time.monotonic()
+            await finished
+            playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
+            return {
+                "source_setup_ms": source_setup_ms,
+                "play_call_ms": play_call_ms,
+                "playback_ms": playback_duration_ms,
+                "playback_started_at": playback_started_at,
+            }
+        finally:
+            if guild is not None and hasattr(self, "_notify_voice_moderation_playback_end"):
+                with contextlib.suppress(Exception):
+                    await self._maybe_await(self._notify_voice_moderation_playback_end(guild, vc))
 
     async def _ensure_self_deaf_fast(self, guild: discord.Guild, target_channel=None) -> bool:
         should_self_deaf = True

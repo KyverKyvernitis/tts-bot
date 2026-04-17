@@ -23,21 +23,27 @@ VOICE_MODERATION_SFX_PATH = Path(__file__).resolve().parents[1] / "assets" / "sf
 VOICE_MODERATION_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "disconnect_enabled": True,
+    "threshold_rms": 2600,
+    "hits_to_trigger": 7,
+    "window_seconds": 1.6,
+    "cooldown_seconds": 10.0,
+}
+VOICE_MODERATION_OLD_DEFAULTS: dict[str, Any] = {
     "threshold_rms": 1800,
     "hits_to_trigger": 6,
     "window_seconds": 1.4,
     "cooldown_seconds": 10.0,
 }
-VOICE_MODERATION_OLD_DEFAULTS: dict[str, Any] = {
-    "threshold_rms": 700,
-    "hits_to_trigger": 4,
-    "window_seconds": 1.2,
-    "cooldown_seconds": 8.0,
-}
 VOICE_MODERATION_PREVIOUS_DEFAULTS: dict[str, Any] = {
     "threshold_rms": 3000,
     "hits_to_trigger": 6,
     "window_seconds": 0.9,
+    "cooldown_seconds": 10.0,
+}
+VOICE_MODERATION_INTERMEDIATE_DEFAULTS: dict[str, Any] = {
+    "threshold_rms": 2600,
+    "hits_to_trigger": 7,
+    "window_seconds": 1.6,
     "cooldown_seconds": 10.0,
 }
 VOICE_MODERATION_LEGACY_DEFAULTS: dict[str, Any] = {
@@ -54,6 +60,7 @@ class _GuildVoiceModerationRuntime:
     settings: dict[str, Any] | None = None
     last_notice_channel_id: int | None = None
     suppress_after_until: float = 0.0
+    tts_pause_depth: int = 0
 
 
 class _VoiceModerationStatusView(discord.ui.LayoutView):
@@ -261,6 +268,7 @@ class VoiceModeration(commands.Cog):
             _matches_defaults(VOICE_MODERATION_LEGACY_DEFAULTS)
             or _matches_defaults(VOICE_MODERATION_PREVIOUS_DEFAULTS)
             or _matches_defaults(VOICE_MODERATION_OLD_DEFAULTS)
+            or _matches_defaults(VOICE_MODERATION_INTERMEDIATE_DEFAULTS)
         ):
             merged.update({
                 "threshold_rms": VOICE_MODERATION_DEFAULTS["threshold_rms"],
@@ -513,13 +521,13 @@ class VoiceModeration(commands.Cog):
             return
 
         threshold = int(settings.get("threshold_rms", VOICE_MODERATION_DEFAULTS["threshold_rms"]) or VOICE_MODERATION_DEFAULTS["threshold_rms"])
-        severe_threshold = max(threshold + 250, int(threshold * 1.3))
-        extreme_peak = max(4200, int(threshold * 3.0))
-        extreme_rms = max(1050, int(threshold * 1.75))
+        clipped_peak_only = peak >= 32760 and rms < max(3000, int(threshold * 1.45))
+        severe_threshold = max(threshold + 700, int(threshold * 1.45))
+        extreme_rms = max(4200, int(threshold * 1.9))
         loud_enough = (
             score >= threshold
-            or rms >= max(320, int(threshold * 0.55))
-            or peak >= max(2500, int(threshold * 2.1))
+            or rms >= max(950, int(threshold * 0.72))
+            or (not clipped_peak_only and peak >= max(6000, int(threshold * 2.6)))
         )
         if not loud_enough:
             return
@@ -533,16 +541,20 @@ class VoiceModeration(commands.Cog):
         weight = 1
         severe = False
         extreme = False
-        if score >= severe_threshold or rms >= max(700, int(threshold * 1.05)) or peak >= max(3400, int(threshold * 2.55)):
+        if score >= severe_threshold or rms >= max(2400, int(threshold * 1.12)) or (not clipped_peak_only and peak >= max(9000, int(threshold * 3.1))):
             weight = 2
             severe = True
-        if score >= max(severe_threshold + 450, int(threshold * 1.75)) or rms >= extreme_rms or peak >= extreme_peak:
+        if score >= max(severe_threshold + 1400, int(threshold * 2.1)) or rms >= extreme_rms:
             weight = 4
             severe = True
             extreme = True
+        if clipped_peak_only:
+            severe = False
+            extreme = False
+            weight = 1
 
         should_disconnect = False
-        chosen_score = max(score, rms, peak)
+        chosen_score = max(score, rms)
         with self._sample_lock:
             samples = self._loud_hits.get(key)
             if samples is None:
@@ -592,6 +604,34 @@ class VoiceModeration(commands.Cog):
                     notes=[f"Detalhe: `{e}`"],
                     accent=discord.Color.red(),
                 )
+
+    async def pause_for_tts_playback(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
+        if guild is None:
+            return
+        lock = self._guild_lock(guild.id)
+        async with lock:
+            runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
+            runtime.tts_pause_depth = int(runtime.tts_pause_depth or 0) + 1
+            if runtime.tts_pause_depth != 1:
+                return
+        await self._stop_listening(guild)
+
+    async def resume_after_tts_playback(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
+        if guild is None:
+            return
+        should_resume = False
+        lock = self._guild_lock(guild.id)
+        async with lock:
+            runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
+            depth = max(0, int(runtime.tts_pause_depth or 0) - 1)
+            runtime.tts_pause_depth = depth
+            if depth == 0:
+                settings = await self._get_settings(guild.id)
+                runtime.settings = dict(settings)
+                should_resume = bool(settings.get("enabled"))
+        if should_resume:
+            await asyncio.sleep(0.15)
+            await self.handle_voice_client_ready(guild, vc or self._get_voice_client(guild))
 
     async def _disconnect_member_for_volume(self, guild_id: int, user_id: int, score: int) -> None:
         guild = self.bot.get_guild(int(guild_id))
@@ -662,6 +702,9 @@ class VoiceModeration(commands.Cog):
                 vc = self._get_voice_client(guild)
             if vc is not None and getattr(vc, "is_connected", lambda: False)() and getattr(vc, "channel", None) is not None:
                 await self._apply_self_deaf(guild, True, channel=vc.channel)
+            return
+
+        if int(getattr(runtime, "tts_pause_depth", 0) or 0) > 0:
             return
 
         target_channel = getattr(vc, "channel", None) if vc is not None else None
