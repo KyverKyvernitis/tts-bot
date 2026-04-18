@@ -620,7 +620,8 @@ class GincanaRoletaMixin:
                             await interaction.response.send_message(embed=embed, ephemeral=True)
                         return
                     entry_cost = self._roleta_cost_for_user(guild.id, interaction.user.id)
-                    free_spin = self._race_is(guild.id, interaction.user.id, "sortudo") and self._get_race_free_spin_count(guild.id, interaction.user.id, kind="roleta") > 0
+                    blessing_state = await self._sync_sortudo_blessings(guild.id, interaction.user.id)
+                    free_spin = self._race_is(guild.id, interaction.user.id, "sortudo") and int(blessing_state.get("charges", 0) or 0) > 0
                     needs_negative_confirm = False if free_spin else self._needs_negative_confirmation(guild.id, interaction.user.id, entry_cost)
                     if needs_negative_confirm:
                         confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, interaction.user.id, entry_cost, title="🎰 Confirmar aposta")
@@ -637,9 +638,8 @@ class GincanaRoletaMixin:
                         return
                     footer = self._roleta_footer_text(state=state, is_staff=is_staff)
                     if free_spin:
-                        await self._consume_race_free_spin(guild.id, interaction.user.id, kind="roleta")
-                        marker = self._race_effect_message(guild.id, interaction.user.id, "daily", "seu daily bancou esse giro sem cobrar fichas.")
-                        chip_note = marker or "Seu daily de Sortudo bancou esse giro sem cobrar fichas."
+                        await self._consume_sortudo_blessing(guild.id, interaction.user.id)
+                        chip_note = self._sortudo_blessing_note(guild.id, interaction.user.id, kind="roleta")
                         paid, _balance = True, self.db.get_user_chips(guild.id, interaction.user.id, default=100)
                     else:
                         paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, entry_cost)
@@ -680,7 +680,8 @@ class GincanaRoletaMixin:
                             await interaction.response.send_message(embed=embed, ephemeral=True)
                         return
                     entry_cost = CARTA_COST
-                    free_spin = self._race_is(guild.id, interaction.user.id, "sortudo") and self._get_race_free_spin_count(guild.id, interaction.user.id, kind="carta") > 0
+                    blessing_state = await self._sync_sortudo_blessings(guild.id, interaction.user.id)
+                    free_spin = self._race_is(guild.id, interaction.user.id, "sortudo") and int(blessing_state.get("charges", 0) or 0) > 0
                     needs_negative_confirm = False if free_spin else self._needs_negative_confirmation(guild.id, interaction.user.id, entry_cost)
                     if needs_negative_confirm:
                         confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, interaction.user.id, entry_cost, title="🎴 Confirmar aposta")
@@ -697,9 +698,8 @@ class GincanaRoletaMixin:
                         return
                     footer = self._carta_footer_text(state=state, is_staff=is_staff)
                     if free_spin:
-                        await self._consume_race_free_spin(guild.id, interaction.user.id, kind="carta")
-                        marker = self._race_effect_message(guild.id, interaction.user.id, "daily", "seu daily bancou essa mão sem cobrar fichas.")
-                        chip_note = marker or "Seu daily de Sortudo bancou essa mão sem cobrar fichas."
+                        await self._consume_sortudo_blessing(guild.id, interaction.user.id)
+                        chip_note = self._sortudo_blessing_note(guild.id, interaction.user.id, kind="carta")
                         paid, _balance = True, self.db.get_user_chips(guild.id, interaction.user.id, default=100)
                     else:
                         paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, entry_cost)
@@ -1366,7 +1366,8 @@ class GincanaRoletaMixin:
                 return True
 
             entry_cost = CARTA_COST
-            free_spin = self._race_is(guild.id, message.author.id, "sortudo") and self._get_race_free_spin_count(guild.id, message.author.id, kind="carta") > 0
+            blessing_state = await self._sync_sortudo_blessings(guild.id, message.author.id)
+            free_spin = self._race_is(guild.id, message.author.id, "sortudo") and int(blessing_state.get("charges", 0) or 0) > 0
             needs_negative_confirm = False if free_spin else self._needs_negative_confirmation(guild.id, message.author.id, entry_cost)
             if needs_negative_confirm:
                 confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, entry_cost, title="🎴 Confirmar aposta")
@@ -1389,9 +1390,8 @@ class GincanaRoletaMixin:
                     return True
                 carta_footer = self._carta_footer_text(state=carta_state, is_staff=is_staff)
                 if free_spin:
-                    await self._consume_race_free_spin(guild.id, message.author.id, kind="carta")
-                    marker = self._race_effect_message(guild.id, message.author.id, "daily", "seu daily bancou essa mão sem cobrar fichas.")
-                    chip_note = marker or "Seu daily de Sortudo bancou essa mão sem cobrar fichas."
+                    await self._consume_sortudo_blessing(guild.id, message.author.id)
+                    chip_note = self._sortudo_blessing_note(guild.id, message.author.id, kind="carta")
                     paid, _balance = True, self.db.get_user_chips(guild.id, message.author.id, default=100)
                 else:
                     paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, entry_cost)
@@ -1445,7 +1445,8 @@ class GincanaRoletaMixin:
             targets = self._resolve_targets(guild, voice_channel) if isinstance(voice_channel, discord.VoiceChannel) else []
 
             entry_cost = self._roleta_cost_for_user(guild.id, message.author.id)
-            free_spin = self._race_is(guild.id, message.author.id, "sortudo") and self._get_race_free_spin_count(guild.id, message.author.id, kind="roleta") > 0
+            blessing_state = await self._sync_sortudo_blessings(guild.id, message.author.id)
+            free_spin = self._race_is(guild.id, message.author.id, "sortudo") and int(blessing_state.get("charges", 0) or 0) > 0
             needs_negative_confirm = False if free_spin else self._needs_negative_confirmation(guild.id, message.author.id, entry_cost)
             if needs_negative_confirm:
                 confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, entry_cost, title="🎰 Confirmar aposta")
@@ -1468,9 +1469,8 @@ class GincanaRoletaMixin:
                     return True
                 roleta_footer = self._roleta_footer_text(state=roleta_state, is_staff=is_staff)
                 if free_spin:
-                    await self._consume_race_free_spin(guild.id, message.author.id, kind="roleta")
-                    marker = self._race_effect_message(guild.id, message.author.id, "daily", "seu daily bancou esse giro sem cobrar fichas.")
-                    chip_note = marker or "Seu daily de Sortudo bancou esse giro sem cobrar fichas."
+                    await self._consume_sortudo_blessing(guild.id, message.author.id)
+                    chip_note = self._sortudo_blessing_note(guild.id, message.author.id, kind="roleta")
                     paid, _balance = True, self.db.get_user_chips(guild.id, message.author.id, default=100)
                 else:
                     paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, entry_cost)

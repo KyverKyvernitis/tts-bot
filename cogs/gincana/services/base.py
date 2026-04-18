@@ -28,6 +28,9 @@ from ..constants import (
 from db import SettingsDB
 
 
+SORTUDO_BLESSING_INTERVAL_SECONDS = 7 * 60 * 60
+
+
 class _NegativeDebtConfirmView(discord.ui.View):
     def __init__(self, *, owner_id: int, timeout: float = 20.0):
         super().__init__(timeout=timeout)
@@ -419,7 +422,7 @@ class GincanaBase:
         doc["chip_recharge_manual_initialized"] = False
         doc.pop("race_key", None)
         doc.pop("race_active", None)
-        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses"):
+        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses"):
             doc.pop(field, None)
         await self.db._save_user_doc(guild_id, user_id, doc)
         return int(amount)
@@ -438,7 +441,7 @@ class GincanaBase:
         doc["has_chip_activity"] = False
         doc.pop("race_key", None)
         doc.pop("race_active", None)
-        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses"):
+        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses"):
             doc.pop(field, None)
         await self.db._save_user_doc(guild_id, user_id, doc)
         return int(doc["chips"])
@@ -902,7 +905,7 @@ class GincanaBase:
                 "effects": [
                     {"key": "midas", "title": "Midas", "desc": f"Buckshot dourado: **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)}** • Truco dourado: **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)}**"},
                     {"key": "premio_extra", "title": "Prêmio Extra", "desc": f"Truco dourado: **+20** {self._CHIP_BONUS_EMOJI}"},
-                    {"key": "daily", "title": "Benção", "desc": "Todo daily libera **+1** giro grátis de roleta e **+1** de cartas"},
+                    {"key": "bencao", "title": "Benção", "desc": "Ganha **1** carga a cada **7h**, acumula até **2**. Roleta e cartas gastam **1**"},
                 ],
             },
             "coringa": {
@@ -941,7 +944,7 @@ class GincanaBase:
             return ""
         detail_map = {
             "labia": "seu uso extra de mendigar foi aplicado.",
-            "daily": "os extras do daily foram liberados.",
+            "bencao": "uma benção foi usada.",
             "mao_negra": "você usou o limite ampliado de roubo.",
             "mao_grande": "o roubo máximo foi ampliado.",
             "sangue_frio": "a perda ao falhar foi reduzida.",
@@ -1052,12 +1055,17 @@ class GincanaBase:
             for field in (
                 "race_free_roleta_spins",
                 "race_free_carta_spins",
+                "race_sortudo_blessing_charges",
+                "race_sortudo_blessing_started_at",
                 "race_robbery_window_started_at",
                 "race_robbery_uses",
                 "race_mendigar_window_started_at",
                 "race_mendigar_uses",
             ):
                 doc.pop(field, None)
+            if key == "sortudo":
+                doc["race_sortudo_blessing_charges"] = 1
+                doc["race_sortudo_blessing_started_at"] = float(time.time())
         await self.db._save_user_doc(guild_id, user_id, doc)
 
     async def _set_user_race_active(self, guild_id: int, user_id: int, active: bool):
@@ -1146,36 +1154,98 @@ class GincanaBase:
         await self.db._save_user_doc(guild_id, user_id, doc)
         return True, self._limited_action_state(guild_id, user_id, storage_key=storage_key, limit=limit, window_seconds=window_seconds)
 
-    def _get_race_free_spin_count(self, guild_id: int, user_id: int, *, kind: str) -> int:
-        field = f"race_free_{str(kind)}_spins"
+    async def _sync_sortudo_blessings(self, guild_id: int, user_id: int) -> dict[str, float | int]:
+        now = float(time.time())
+        doc = self.db._get_user_doc(guild_id, user_id)
+        has_new_fields = "race_sortudo_blessing_charges" in doc or "race_sortudo_blessing_started_at" in doc
+        is_sortudo = self._get_user_race_key(guild_id, user_id) == "sortudo"
+        changed = False
+
+        if not is_sortudo:
+            for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at"):
+                if field in doc:
+                    changed = True
+                    doc.pop(field, None)
+            if changed:
+                await self.db._save_user_doc(guild_id, user_id, doc)
+            return {"charges": 0, "capacity": 2, "started_at": 0.0, "remaining": 0.0}
+
         try:
-            return max(0, int((self.db._get_user_doc(guild_id, user_id) or {}).get(field, 0) or 0))
+            charges = int(doc.get("race_sortudo_blessing_charges", 0) or 0)
         except Exception:
-            return 0
+            charges = 0
+        try:
+            started_at = float(doc.get("race_sortudo_blessing_started_at", 0.0) or 0.0)
+        except Exception:
+            started_at = 0.0
 
-    async def _grant_race_daily_free_spins(self, guild_id: int, user_id: int) -> dict[str, bool]:
-        result = {"roleta": False, "carta": False}
-        if not self._race_is(guild_id, user_id, "sortudo"):
-            return result
-        doc = self.db._get_user_doc(guild_id, user_id)
-        if int(doc.get("race_free_roleta_spins", 0) or 0) < 1:
-            doc["race_free_roleta_spins"] = 1
-            result["roleta"] = True
-        if int(doc.get("race_free_carta_spins", 0) or 0) < 1:
-            doc["race_free_carta_spins"] = 1
-            result["carta"] = True
-        await self.db._save_user_doc(guild_id, user_id, doc)
-        return result
+        charges = max(0, min(2, charges))
+        if not has_new_fields:
+            charges = 1
+            started_at = now
+            changed = True
 
-    async def _consume_race_free_spin(self, guild_id: int, user_id: int, *, kind: str) -> bool:
-        field = f"race_free_{str(kind)}_spins"
-        doc = self.db._get_user_doc(guild_id, user_id)
-        current = max(0, int(doc.get(field, 0) or 0))
-        if current <= 0:
+        if charges >= 2:
+            if started_at != 0.0:
+                started_at = 0.0
+                changed = True
+        else:
+            if started_at <= 0.0:
+                started_at = now
+                changed = True
+            elapsed = max(0.0, now - started_at)
+            gained = int(elapsed // SORTUDO_BLESSING_INTERVAL_SECONDS)
+            if gained > 0:
+                charges = min(2, charges + gained)
+                changed = True
+                if charges >= 2:
+                    started_at = 0.0
+                else:
+                    started_at = float(started_at + (gained * SORTUDO_BLESSING_INTERVAL_SECONDS))
+
+        for field in ("race_free_roleta_spins", "race_free_carta_spins"):
+            if field in doc:
+                changed = True
+                doc.pop(field, None)
+
+        if doc.get("race_sortudo_blessing_charges") != charges:
+            doc["race_sortudo_blessing_charges"] = int(charges)
+            changed = True
+        if float(doc.get("race_sortudo_blessing_started_at", 0.0) or 0.0) != float(started_at):
+            doc["race_sortudo_blessing_started_at"] = float(started_at)
+            changed = True
+
+        if changed:
+            await self.db._save_user_doc(guild_id, user_id, doc)
+
+        remaining = 0.0
+        if charges < 2 and started_at > 0.0:
+            remaining = max(0.0, SORTUDO_BLESSING_INTERVAL_SECONDS - max(0.0, now - started_at))
+        return {"charges": int(charges), "capacity": 2, "started_at": float(started_at), "remaining": float(remaining)}
+
+    async def _consume_sortudo_blessing(self, guild_id: int, user_id: int) -> bool:
+        state = await self._sync_sortudo_blessings(guild_id, user_id)
+        charges = int(state.get("charges", 0) or 0)
+        if charges <= 0:
             return False
-        doc[field] = current - 1
+        now = float(time.time())
+        doc = self.db._get_user_doc(guild_id, user_id)
+        started_at = float(doc.get("race_sortudo_blessing_started_at", 0.0) or 0.0)
+        doc["race_sortudo_blessing_charges"] = charges - 1
+        if charges >= 2 and started_at <= 0.0:
+            doc["race_sortudo_blessing_started_at"] = now
+        elif started_at <= 0.0:
+            doc["race_sortudo_blessing_started_at"] = now
         await self.db._save_user_doc(guild_id, user_id, doc)
         return True
+
+    def _sortudo_blessing_note(self, guild_id: int, user_id: int, *, kind: str) -> str:
+        kind_key = str(kind or "").strip().lower()
+        detail = "uma benção bancou esse giro." if kind_key == "roleta" else "uma benção bancou essa mão."
+        marker = self._race_effect_message(guild_id, user_id, "bencao", detail)
+        if marker:
+            return marker
+        return "Uma benção bancou esse giro." if kind_key == "roleta" else "Uma benção bancou essa mão."
 
     async def _maybe_apply_coringa_cashback(self, guild_id: int, user_id: int, entry_cost: int, *, chance: float = 0.35) -> int:
         if entry_cost <= 0 or not self._race_is(guild_id, user_id, "coringa"):

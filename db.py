@@ -1438,6 +1438,8 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
             "race_active": False,
             "race_free_roleta_spins": 0,
             "race_free_carta_spins": 0,
+            "race_sortudo_blessing_charges": 0,
+            "race_sortudo_blessing_started_at": 0.0,
             "race_robbery_window_started_at": 0.0,
             "race_robbery_uses": 0,
             "race_mendigar_window_started_at": 0.0,
@@ -1467,6 +1469,8 @@ async def _settingsdb_reset_guild_chip_economy(self, guild_id: int, *, chips: in
         updated["race_active"] = False
         updated["race_free_roleta_spins"] = 0
         updated["race_free_carta_spins"] = 0
+        updated["race_sortudo_blessing_charges"] = 0
+        updated["race_sortudo_blessing_started_at"] = 0.0
         updated["race_robbery_window_started_at"] = 0.0
         updated["race_robbery_uses"] = 0
         updated["race_mendigar_window_started_at"] = 0.0

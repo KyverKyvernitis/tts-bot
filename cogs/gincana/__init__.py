@@ -544,16 +544,8 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         await self._grant_weekly_points(ctx.guild.id, ctx.author.id, max(3, bonus // 2))
         spin_granted, _spin_state = await self._grant_daily_roleta_spin(ctx.guild.id, ctx.author.id)
         carta_spin_granted, _carta_spin_state = await self._grant_daily_carta_spin(ctx.guild.id, ctx.author.id)
-        race_free = await self._grant_race_daily_free_spins(ctx.guild.id, ctx.author.id)
         spin_text = "Você ganhou **+1 giro de roleta**" if spin_granted else "Seu giro extra da roleta já estava disponível"
         carta_spin_text = "Você ganhou **+1 giro de cartas**" if carta_spin_granted else "Seu giro extra de cartas já estava disponível"
-        race_spin_text = "Sua raça não alterou o daily desta vez."
-        if self._race_is(ctx.guild.id, ctx.author.id, "sortudo"):
-            extra_parts = []
-            extra_parts.append("+1 giro grátis de roleta" if race_free.get("roleta") else "o giro grátis de roleta já estava guardado")
-            extra_parts.append("+1 giro grátis de cartas" if race_free.get("carta") else "o giro grátis de cartas já estava guardado")
-            marker = self._race_effect_message(ctx.guild.id, ctx.author.id, "daily", "seu daily liberou giros grátis de roleta e cartas.")
-            race_spin_text = (marker + "\n" if marker else "") + " • ".join(extra_parts)
         embed = discord.Embed(
             title="🎁 Bônus diário resgatado",
             description=(
