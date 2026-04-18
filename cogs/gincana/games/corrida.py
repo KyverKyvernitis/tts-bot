@@ -42,6 +42,7 @@ _RACE_IMPULSE_BUTTON_COUNT = 3
 _RACE_IMPULSE_STAGE_COUNT = 3
 _RACE_IMPULSE_EMOJI = "⚡"
 _RACE_IMPULSE_DELETE_DELAY_SECONDS = 1.0
+_RACE_IMPULSE_STEP_NS = int(_RACE_IMPULSE_STEP_SECONDS * 1_000_000_000)
 
 
 def _shared_rank_map(arrival_groups: list[list[int]]) -> dict[int, int]:
@@ -165,9 +166,10 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.active_index: int | None = None
         self.active_started_ns = 0
         self.order = random.sample(range(_RACE_IMPULSE_BUTTON_COUNT), _RACE_IMPULSE_STAGE_COUNT)
+        self.participant_ids = tuple(sorted(int(user_id) for user_id in (self.session.get("locked_participants", set()) or [])))
+        self.participant_id_set = set(self.participant_ids)
         self.results: dict[int, dict] = {}
         self.edit_lock = asyncio.Lock()
-        self.press_lock = asyncio.Lock()
         self._last_render_signature = None
         self._results_applied = False
         self.activated_indices: set[int] = set()
@@ -230,40 +232,48 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             elif edit_state == "missing":
                 self.message = None
 
+    def _make_result_entry(self) -> dict:
+        return {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT}
+
     async def handle_press(self, interaction: discord.Interaction, button_index: int):
-        user = interaction.user
+        press_time_ns = time.perf_counter_ns()
         try:
-            if not interaction.response.is_done():
-                await interaction.response.defer()
-        except Exception:
-            pass
-        async with self.press_lock:
+            user = interaction.user
             if self.finished or self.active_index is None or self.step_index < 0:
                 return
             if interaction.guild is None or user is None:
                 return
             user_id = int(getattr(user, "id", 0) or 0)
-            if user_id <= 0:
-                return
-            if user_id not in {int(x) for x in (self.session.get("locked_participants", set()) or [])}:
+            if user_id <= 0 or user_id not in self.participant_id_set:
                 return
 
-            entry = self.results.setdefault(user_id, {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT})
+            current_step = int(self.step_index)
+            active_index = self.active_index
+            active_started_ns = int(self.active_started_ns)
+            if current_step < 0 or current_step >= _RACE_IMPULSE_STAGE_COUNT or active_index is None or active_started_ns <= 0:
+                return
+
+            entry = self.results.get(user_id)
+            if entry is None:
+                entry = self._make_result_entry()
+                self.results[user_id] = entry
             times = entry["times"]
             success = entry["success"]
-            current_step = int(self.step_index)
-            if current_step < 0 or current_step >= _RACE_IMPULSE_STAGE_COUNT:
-                return
             if times[current_step] is not None:
                 return
-            if button_index != self.active_index:
+            if button_index != active_index:
                 times[current_step] = _RACE_IMPULSE_STEP_SECONDS
                 success[current_step] = False
-                return
-
-            reaction_time = max(0.0, min(_RACE_IMPULSE_STEP_SECONDS, (time.perf_counter_ns() - self.active_started_ns) / 1_000_000_000.0))
-            times[current_step] = reaction_time
-            success[current_step] = True
+            else:
+                reaction_ns = max(0, min(_RACE_IMPULSE_STEP_NS, press_time_ns - active_started_ns))
+                times[current_step] = reaction_ns / 1_000_000_000.0
+                success[current_step] = True
+        finally:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.defer()
+            except Exception:
+                pass
 
     def _activate_step(self, index: int):
         self.step_index = index
@@ -287,8 +297,11 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         current_step = self.step_index
         if current_step < 0:
             return
-        for user_id in set(self.session.get("locked_participants", set()) or []):
-            entry = self.results.setdefault(int(user_id), {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT})
+        for user_id in self.participant_ids:
+            entry = self.results.get(int(user_id))
+            if entry is None:
+                entry = self._make_result_entry()
+                self.results[int(user_id)] = entry
             if entry["times"][current_step] is None:
                 entry["times"][current_step] = _RACE_IMPULSE_STEP_SECONDS
                 entry["success"][current_step] = False
@@ -342,7 +355,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             return list(self.session.get("recent_impulse_awards") or [])
         active_impulses = self.session.setdefault("active_impulses", {})
         state_map = self.session.setdefault("state_map", {})
-        participants = [int(user_id) for user_id in set(self.session.get("locked_participants", set()) or [])]
+        participants = list(self.participant_ids)
 
         awarded: list[tuple[int, str, float, int]] = []
         self.last_best_user_id = None
@@ -934,7 +947,7 @@ class GincanaCorridaMixin:
             event_message = await channel.send(view=event_view)
             session["active_impulse_message"] = event_message
             event_view.message = event_message
-            await event_view.refresh_message()
+            event_view._last_render_signature = event_view._render_signature()
             if event_view.message is None:
                 raise discord.NotFound(response=None, message="Impulse event message disappeared")
             if _RACE_IMPULSE_INITIAL_DELAY > 0:
