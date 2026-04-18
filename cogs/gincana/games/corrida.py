@@ -248,39 +248,44 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         return {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT}
 
     async def handle_press(self, interaction: discord.Interaction, button_index: int):
+        ack_needed = not interaction.response.is_done()
         try:
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.defer()
-            except Exception:
-                pass
-
             user = interaction.user
-            if self.finished or self.active_index is None or self.step_index < 0:
+            current_step = int(self.step_index)
+            active_index = self.active_index
+            finished = bool(self.finished)
+
+            if finished or active_index is None or current_step < 0:
                 return
             if interaction.guild is None or user is None:
                 return
+
             user_id = int(getattr(user, "id", 0) or 0)
             if user_id <= 0 or user_id not in self.participant_id_set:
                 return
-
-            current_step = int(self.step_index)
-            active_index = self.active_index
-            if current_step < 0 or current_step >= _RACE_IMPULSE_STAGE_COUNT or active_index is None:
+            if current_step >= _RACE_IMPULSE_STAGE_COUNT:
                 return
 
             entry = self.results.get(user_id)
             if entry is None:
                 entry = self._make_result_entry()
                 self.results[user_id] = entry
+
             times = entry["times"]
             success = entry["success"]
             if times[current_step] is not None:
                 return
+
             times[current_step] = 0.0
-            success[current_step] = button_index == active_index
+            success[current_step] = int(button_index) == int(active_index)
         except Exception:
             return
+        finally:
+            if ack_needed and not interaction.response.is_done():
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
 
     def _activate_step(self, index: int):
         self.step_index = index
