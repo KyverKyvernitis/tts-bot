@@ -1,6 +1,5 @@
 import asyncio
 import random
-import time
 
 import discord
 
@@ -42,7 +41,6 @@ _RACE_IMPULSE_BUTTON_COUNT = 3
 _RACE_IMPULSE_STAGE_COUNT = 3
 _RACE_IMPULSE_EMOJI = "⚡"
 _RACE_IMPULSE_DELETE_DELAY_SECONDS = 1.0
-_RACE_IMPULSE_STEP_NS = int(_RACE_IMPULSE_STEP_SECONDS * 1_000_000_000)
 
 
 def _shared_rank_map(arrival_groups: list[list[int]]) -> dict[int, int]:
@@ -164,7 +162,6 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.finished = False
         self.step_index = -1
         self.active_index: int | None = None
-        self.active_started_ns = 0
         self.order = random.sample(range(_RACE_IMPULSE_BUTTON_COUNT), _RACE_IMPULSE_STAGE_COUNT)
         self.participant_ids = tuple(sorted(int(user_id) for user_id in (self.session.get("locked_participants", set()) or [])))
         self.participant_id_set = set(self.participant_ids)
@@ -236,7 +233,6 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         return {"times": [None] * _RACE_IMPULSE_STAGE_COUNT, "success": [False] * _RACE_IMPULSE_STAGE_COUNT}
 
     async def handle_press(self, interaction: discord.Interaction, button_index: int):
-        press_time_ns = time.perf_counter_ns()
         try:
             user = interaction.user
             if self.finished or self.active_index is None or self.step_index < 0:
@@ -249,8 +245,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
 
             current_step = int(self.step_index)
             active_index = self.active_index
-            active_started_ns = int(self.active_started_ns)
-            if current_step < 0 or current_step >= _RACE_IMPULSE_STAGE_COUNT or active_index is None or active_started_ns <= 0:
+            if current_step < 0 or current_step >= _RACE_IMPULSE_STAGE_COUNT or active_index is None:
                 return
 
             entry = self.results.get(user_id)
@@ -261,13 +256,8 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             success = entry["success"]
             if times[current_step] is not None:
                 return
-            if button_index != active_index:
-                times[current_step] = _RACE_IMPULSE_STEP_SECONDS
-                success[current_step] = False
-            else:
-                reaction_ns = max(0, min(_RACE_IMPULSE_STEP_NS, press_time_ns - active_started_ns))
-                times[current_step] = reaction_ns / 1_000_000_000.0
-                success[current_step] = True
+            times[current_step] = 0.0
+            success[current_step] = button_index == active_index
         finally:
             try:
                 if not interaction.response.is_done():
@@ -278,7 +268,6 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
     def _activate_step(self, index: int):
         self.step_index = index
         self.active_index = self.order[index]
-        self.active_started_ns = time.perf_counter_ns()
         self.activated_indices.add(int(self.active_index))
         for idx, button in enumerate(self.buttons):
             button.disabled = idx != self.active_index
@@ -293,7 +282,6 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             button.label = _RACE_IMPULSE_EMOJI if button.index in self.activated_indices else str(button.index + 1)
             button.style = discord.ButtonStyle.secondary
         self.active_index = None
-        self.active_started_ns = 0
         current_step = self.step_index
         if current_step < 0:
             return
@@ -313,25 +301,26 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         times = list(entry.get("times") or [])
         return sum(1 for reaction_time in times if reaction_time is not None and float(reaction_time) < _RACE_IMPULSE_STEP_SECONDS)
 
-    def _random_impulse_tier(self, hits: int) -> str | None:
-        roll = random.random()
-        if hits <= 0:
+    def _impulse_award_chance(self, user_id: int, hits: int) -> float:
+        if hits >= _RACE_IMPULSE_STAGE_COUNT:
+            chance = 0.35
+        elif hits == _RACE_IMPULSE_STAGE_COUNT - 1:
+            chance = 0.20
+        else:
+            chance = 0.0
+        if chance > 0.0 and self.cog._race_is(self.guild.id, int(user_id), "sortudo"):
+            chance += 0.20
+        return max(0.0, min(1.0, chance))
+
+    def _random_impulse_tier(self, hits: int, user_id: int) -> str | None:
+        chance = self._impulse_award_chance(user_id, hits)
+        if chance <= 0.0 or random.random() >= chance:
             return None
-        if hits == 1:
-            return "medio" if roll < 0.35 else "pequeno"
-        if hits == 2:
-            if roll < 0.35:
-                return "grande"
-            if roll < 0.82:
-                return "medio"
-            return "pequeno"
-        if random.random() < 0.65:
-            return None
-        if roll < 0.60:
+        if hits >= _RACE_IMPULSE_STAGE_COUNT:
             return "grande"
-        if roll < 0.95:
+        if hits == _RACE_IMPULSE_STAGE_COUNT - 1:
             return "medio"
-        return "pequeno"
+        return None
 
     def _tier_bonus(self, tier: str, stage_name: str) -> float:
         stage_key = stage_name.strip().lower()
@@ -368,10 +357,12 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             if len(times) < _RACE_IMPULSE_STAGE_COUNT:
                 times.extend([None] * (_RACE_IMPULSE_STAGE_COUNT - len(times)))
             hits = self._successful_steps(entry)
-            tier = self._random_impulse_tier(hits)
+            award_chance = self._impulse_award_chance(user_id, hits)
+            tier = self._random_impulse_tier(hits, user_id)
             entry["hits"] = hits
+            entry["award_chance"] = award_chance
             entry["tier"] = tier
-            entry["failed_trigger"] = bool(hits >= _RACE_IMPULSE_STAGE_COUNT and not tier)
+            entry["failed_trigger"] = bool(award_chance > 0.0 and not tier)
             if not tier:
                 continue
             bonus = self._tier_bonus(tier, self.stage_name)
@@ -966,9 +957,6 @@ class GincanaCorridaMixin:
             event_view.finished = True
             event_view._close_current_step()
             awards = list(event_view._apply_results() or [])
-            self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
-            await self._refresh_race_message(guild.id)
-            await event_view.refresh_message()
             if event_view.last_best_user_id is not None and event_view.last_best_target_bonus > float((session.get("best_impulse") or {}).get("bonus", 0.0) or 0.0):
                 session["best_impulse"] = {
                     "user_id": int(event_view.last_best_user_id),
@@ -980,8 +968,9 @@ class GincanaCorridaMixin:
                 session["impulse_status"] = ""
                 if not awards and not str(session.get("narration") or "").strip():
                     session["narration"] = ""
-                self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
-                await self._refresh_race_message(guild.id)
+            self._touch_runtime_state(session, kind='corrida', guild_id=guild.id)
+            await self._refresh_race_message(guild.id)
+            await event_view.refresh_message()
             return awards
         except asyncio.CancelledError:
             event_view.finished = True
