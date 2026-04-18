@@ -261,6 +261,7 @@ class VoiceModeration(commands.Cog):
         self._guild_locks: dict[int, asyncio.Lock] = {}
         self._runtime: dict[int, _GuildVoiceModerationRuntime] = {}
         self._loud_hits: dict[tuple[int, int], deque[tuple[float, int]]] = {}
+        self._over_limit_windows: dict[tuple[int, int], tuple[float, float, int]] = {}
         self._disconnect_cooldowns: dict[tuple[int, int], float] = {}
         self._sample_lock = threading.Lock()
         self._watchdog_task: asyncio.Task | None = None
@@ -359,6 +360,15 @@ class VoiceModeration(commands.Cog):
             except Exception:
                 continue
         return getattr(guild, "voice_client", None)
+
+    @staticmethod
+    def _is_voice_client_busy(vc: discord.VoiceClient | None) -> bool:
+        if vc is None:
+            return False
+        try:
+            return bool(getattr(vc, "is_playing", lambda: False)() or getattr(vc, "is_paused", lambda: False)())
+        except Exception:
+            return False
 
     def _remember_notice_channel(self, guild_id: int, channel_id: int | None) -> None:
         runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
@@ -744,77 +754,51 @@ class VoiceModeration(commands.Cog):
         settings = getattr(runtime, "settings", None) or {}
         if not settings.get("enabled") or not settings.get("disconnect_enabled", True):
             return
+        if int(getattr(runtime, "tts_pause_depth", 0) or 0) > 0:
+            with self._sample_lock:
+                self._over_limit_windows.pop((int(guild_id), int(user_id)), None)
+            return
 
-        threshold = int(settings.get("threshold_rms", VOICE_MODERATION_DEFAULTS["threshold_rms"]) or VOICE_MODERATION_DEFAULTS["threshold_rms"])
         max_intensity = int(settings.get("max_intensity", VOICE_MODERATION_DEFAULTS["max_intensity"]) or VOICE_MODERATION_DEFAULTS["max_intensity"])
-        effective_threshold = min(threshold, max(900, int(max_intensity * 0.60)))
-        intensity = max(score, int(rms * 1.22), int(peak * 0.40), int((rms * 0.85) + (peak * 0.18)))
-        clipped_peak_only = peak >= 32760 and rms < max(2400, int(effective_threshold * 1.22))
-        if clipped_peak_only:
-            intensity = max(score, int(rms * 1.20), int(peak * 0.20))
+        threshold = int(settings.get("threshold_rms", VOICE_MODERATION_DEFAULTS["threshold_rms"]) or VOICE_MODERATION_DEFAULTS["threshold_rms"])
+        cooldown_seconds = float(settings.get("cooldown_seconds", VOICE_MODERATION_DEFAULTS["cooldown_seconds"]) or VOICE_MODERATION_DEFAULTS["cooldown_seconds"])
 
-        severe_threshold = max(int(max_intensity * 0.78), effective_threshold + 260)
-        hard_trigger_threshold = max_intensity
-        loud_enough = (
-            intensity >= effective_threshold
-            or rms >= max(1050, int(effective_threshold * 0.88))
-            or (not clipped_peak_only and peak >= max(6200, int(effective_threshold * 2.0)))
-        )
-        if not loud_enough:
+        clipped_peak_only = peak >= 32760 and rms < max(2200, int(max_intensity * 0.42))
+        intensity = max(score, int(rms * 1.18), int((rms * 0.90) + (peak * 0.12)), rms)
+        if clipped_peak_only:
+            intensity = max(score, int(rms * 1.16), rms)
+        intensity = min(32768, int(intensity))
+
+        if intensity < max(threshold, 900):
+            with self._sample_lock:
+                self._over_limit_windows.pop((int(guild_id), int(user_id)), None)
             return
 
         now = time.monotonic()
-        window = float(settings.get("window_seconds", VOICE_MODERATION_DEFAULTS["window_seconds"]) or VOICE_MODERATION_DEFAULTS["window_seconds"])
-        hits_to_trigger = int(settings.get("hits_to_trigger", VOICE_MODERATION_DEFAULTS["hits_to_trigger"]) or VOICE_MODERATION_DEFAULTS["hits_to_trigger"])
-        if max_intensity <= 3500:
-            hits_to_trigger = max(2, hits_to_trigger - 2)
-        elif max_intensity <= 5000:
-            hits_to_trigger = max(3, hits_to_trigger - 1)
-        cooldown_seconds = float(settings.get("cooldown_seconds", VOICE_MODERATION_DEFAULTS["cooldown_seconds"]) or VOICE_MODERATION_DEFAULTS["cooldown_seconds"])
         key = (int(guild_id), int(user_id))
-
-        weight = 1
-        severe = False
-        extreme = False
-        if intensity >= severe_threshold or rms >= max(2200, int(effective_threshold * 1.15)):
-            weight = 2
-            severe = True
-        if intensity >= int(hard_trigger_threshold * 0.98) and not clipped_peak_only:
-            weight = 3
-            severe = True
-            extreme = True
-        if clipped_peak_only:
-            severe = False
-            extreme = False
-            weight = 1
-
         should_disconnect = False
-        chosen_score = min(max_intensity, max(intensity, rms))
-        with self._sample_lock:
-            samples = self._loud_hits.get(key)
-            if samples is None:
-                samples = deque()
-                self._loud_hits[key] = samples
-            samples.append((now, weight, 1 if severe else 0, 1 if extreme else 0, chosen_score))
-            while samples and now - samples[0][0] > window:
-                samples.popleft()
+        chosen_score = intensity
+        sustain_seconds_required = 2.0
+        sustain_gap_reset = 0.35
 
-            total_hits = sum(entry[1] for entry in samples)
-            severe_hits = sum(entry[2] for entry in samples)
-            extreme_hits = sum(entry[3] for entry in samples)
-            max_score = max((entry[4] for entry in samples), default=chosen_score)
+        with self._sample_lock:
             last_disconnect = float(self._disconnect_cooldowns.get(key, 0.0) or 0.0)
-            if now - last_disconnect >= cooldown_seconds:
-                if extreme_hits >= 1 and total_hits >= max(2, hits_to_trigger - 1):
+            if intensity > max_intensity:
+                start_at, last_seen_at, max_seen = self._over_limit_windows.get(key, (now, now, intensity))
+                if now - float(last_seen_at or now) > sustain_gap_reset:
+                    start_at = now
+                    max_seen = intensity
+                else:
+                    max_seen = max(int(max_seen or intensity), intensity)
+                last_seen_at = now
+                self._over_limit_windows[key] = (start_at, last_seen_at, max_seen)
+                if (now - last_disconnect) >= cooldown_seconds and (last_seen_at - start_at) >= sustain_seconds_required:
                     should_disconnect = True
-                elif severe_hits >= 2 and total_hits >= max(2, hits_to_trigger - 1) and max_score >= severe_threshold:
-                    should_disconnect = True
-                elif total_hits >= hits_to_trigger and max_score >= int(max_intensity * 0.88):
-                    should_disconnect = True
-                if should_disconnect:
+                    chosen_score = min(32768, int(max_seen))
                     self._disconnect_cooldowns[key] = now
-                    samples.clear()
-                    chosen_score = min(max_intensity, max_score)
+                    self._over_limit_windows.pop(key, None)
+            else:
+                self._over_limit_windows.pop(key, None)
 
         if should_disconnect:
             try:
@@ -849,12 +833,15 @@ class VoiceModeration(commands.Cog):
             runtime.tts_pause_depth = int(runtime.tts_pause_depth or 0) + 1
             if runtime.tts_pause_depth != 1:
                 return
-        await self._stop_listening(guild)
+            runtime.sink = None
+            runtime.recover_fail_streak = 0
+        self._suppress_after_errors(guild.id, 8.0)
 
     async def resume_after_tts_playback(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
         if guild is None:
             return
         should_resume = False
+        should_restore_deaf = False
         lock = self._guild_lock(guild.id)
         async with lock:
             runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
@@ -864,9 +851,14 @@ class VoiceModeration(commands.Cog):
                 settings = await self._get_settings(guild.id)
                 runtime.settings = dict(settings)
                 should_resume = bool(settings.get("enabled"))
+                should_restore_deaf = not should_resume
         if should_resume:
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.25)
             await self.handle_voice_client_ready(guild, vc or self._get_voice_client(guild))
+        elif should_restore_deaf:
+            current_vc = vc or self._get_voice_client(guild)
+            if current_vc is not None and getattr(current_vc, "is_connected", lambda: False)() and getattr(current_vc, "channel", None) is not None:
+                await self._apply_self_deaf(guild, True, channel=current_vc.channel)
 
     async def _disconnect_member_for_volume(self, guild_id: int, user_id: int, score: int) -> None:
         guild = self.bot.get_guild(int(guild_id))
@@ -950,9 +942,15 @@ class VoiceModeration(commands.Cog):
         settings = await self._get_settings(guild.id)
         runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
         runtime.settings = dict(settings)
+
+        existing_vc = self._get_voice_client(guild)
+        if self._is_voice_client_busy(existing_vc):
+            self._suppress_after_errors(guild.id, 8.0)
+            return "ocupado_playback", False
+
         vc, state = await self._ensure_receive_ready(guild, preferred_channel=preferred_channel, start_listening=False)
         played = False
-        if vc is not None:
+        if vc is not None and not self._is_voice_client_busy(vc):
             played = await self._play_activation_sfx(guild, vc)
             if played:
                 for _ in range(50):
@@ -974,8 +972,11 @@ class VoiceModeration(commands.Cog):
         runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
         settings = await self._get_settings(guild.id)
         runtime.settings = dict(settings)
-        await self._stop_listening(guild)
         vc = self._get_voice_client(guild)
+        if self._is_voice_client_busy(vc):
+            self._suppress_after_errors(guild.id, 8.0)
+            return
+        await self._stop_listening(guild)
         if vc is not None and getattr(vc, "is_connected", lambda: False)() and getattr(vc, "channel", None) is not None:
             await self._apply_self_deaf(guild, True, channel=vc.channel)
 
