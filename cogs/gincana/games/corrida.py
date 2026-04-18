@@ -60,9 +60,10 @@ class _RaceLobbyView(discord.ui.LayoutView):
         self.guild_id = guild_id
         self.session = session
         self.guild = guild
-        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label=f"🐎 Entrar ({len(cog._get_race_participants(guild, session))})")
+        self.view_token = str(self.session.setdefault("_view_token", f"race:{guild_id}:{random.getrandbits(32):08x}"))
+        self.join_button = discord.ui.Button(style=discord.ButtonStyle.success, label=f"🐎 Entrar ({len(cog._get_race_participants(guild, session))})", custom_id=f"{self.view_token}:join")
         self.join_button.callback = self._join_race
-        self.start_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="Iniciar", emoji="🏁")
+        self.start_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="Iniciar", emoji="🏁", custom_id=f"{self.view_token}:start")
         self.start_button.callback = self._start_race
         self._build_layout()
 
@@ -140,7 +141,7 @@ class _RaceLobbyClosedView(discord.ui.LayoutView):
 
 class _RaceImpulseButton(discord.ui.Button):
     def __init__(self, view: "_RaceImpulseEventView", index: int):
-        super().__init__(style=discord.ButtonStyle.secondary, label=str(index + 1), disabled=True, custom_id=f"race_impulse:{index}")
+        super().__init__(style=discord.ButtonStyle.secondary, label=str(index + 1), disabled=True, custom_id=f"race_impulse:{view.event_token}:{index}")
         self._view = view
         self.index = index
 
@@ -149,12 +150,13 @@ class _RaceImpulseButton(discord.ui.Button):
 
 
 class _RaceImpulseEventView(discord.ui.LayoutView):
-    def __init__(self, cog: "GincanaCorridaMixin", guild: discord.Guild, session: dict, stage_name: str):
+    def __init__(self, cog: "GincanaCorridaMixin", guild: discord.Guild, session: dict, stage_name: str, *, event_token: str):
         super().__init__(timeout=None)
         self.cog = cog
         self.guild = guild
         self.session = session
         self.stage_name = stage_name
+        self.event_token = str(event_token)
         self.last_best_user_id: int | None = None
         self.last_best_target_bonus: float = 0.0
         self.last_best_tier: str | None = None
@@ -247,6 +249,12 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
 
     async def handle_press(self, interaction: discord.Interaction, button_index: int):
         try:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.defer()
+            except Exception:
+                pass
+
             user = interaction.user
             if self.finished or self.active_index is None or self.step_index < 0:
                 return
@@ -271,12 +279,8 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
                 return
             times[current_step] = 0.0
             success[current_step] = button_index == active_index
-        finally:
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.defer()
-            except Exception:
-                pass
+        except Exception:
+            return
 
     def _activate_step(self, index: int):
         self.step_index = index
@@ -633,36 +637,33 @@ class GincanaCorridaMixin:
         lobby_message = session.get("message")
         if lobby_message is None:
             return
+        old_view = session.get("view")
         closed_view = _RaceLobbyClosedView(session, guild, title, detail)
+        session["view"] = closed_view
         edit_state = await self._safe_edit_message_view(lobby_message, closed_view)
         if edit_state == "missing":
             session["message"] = None
+        elif old_view is not None and old_view is not closed_view:
+            self._schedule_race_view_retire(session, old_view, delay=2.0)
 
     async def _handle_race_button(self, interaction: discord.Interaction, view: _RaceLobbyView):
         guild = interaction.guild
         user = interaction.user
         if guild is None or not isinstance(user, discord.Member):
-            try:
-                await interaction.response.send_message("Servidor inválido.", ephemeral=True)
-            except Exception:
-                pass
+            await self._send_component_feedback(interaction, "Servidor inválido.")
             return
 
         session = self._get_race_session(guild.id)
         if session is None or session.get("ended") or session.get("started"):
-            try:
-                await interaction.response.send_message("Essa corrida não está mais aceitando entradas.", ephemeral=True)
-            except Exception:
-                pass
+            await self._send_component_feedback(interaction, "Essa corrida não está mais aceitando entradas.")
             return
 
         locked = session.setdefault("locked_participants", set())
         if user.id in locked:
-            try:
-                await interaction.response.send_message("Você já entrou nessa corrida.", ephemeral=True)
-            except Exception:
-                pass
+            await self._send_component_feedback(interaction, "Você já entrou nessa corrida.")
             return
+
+        await self._safe_defer_component_interaction(interaction)
 
         needs_negative_confirm = self._needs_negative_confirmation(guild.id, user.id, CORRIDA_STAKE)
         if needs_negative_confirm:
@@ -675,23 +676,14 @@ class GincanaCorridaMixin:
         if needs_negative_confirm:
             chip_note = None
         if not paid:
-            try:
-                if interaction.response.is_done():
-                    await interaction.followup.send(chip_note or "Você não tem saldo suficiente para entrar nessa corrida.", ephemeral=True)
-                else:
-                    await interaction.response.send_message(chip_note or "Você não tem saldo suficiente para entrar nessa corrida.", ephemeral=True)
-            except Exception:
-                pass
+            await self._send_component_feedback(interaction, chip_note or "Você não tem saldo suficiente para entrar nessa corrida.")
             return
 
         locked.add(user.id)
         session.setdefault("progress", {})[user.id] = 0.0
         session.setdefault("state_map", {})[user.id] = _HORSE_START
         view.join_button.label = f"🐎 Entrar ({len(self._get_race_participants(guild, session))})"
-        try:
-            await interaction.response.send_message(chip_note or entry_text, ephemeral=True)
-        except Exception:
-            pass
+        await self._send_component_feedback(interaction, chip_note or entry_text)
         await self._refresh_race_message(guild.id)
 
     async def _handle_race_start_button(self, interaction: discord.Interaction, view: _RaceLobbyView):
@@ -796,6 +788,40 @@ class GincanaCorridaMixin:
         task.add_done_callback(_cleanup)
         return task
 
+    async def _safe_defer_component_interaction(self, interaction: discord.Interaction) -> bool:
+        try:
+            if interaction.response.is_done():
+                return True
+            await interaction.response.defer()
+            return True
+        except Exception:
+            return bool(interaction.response.is_done())
+
+    async def _send_component_feedback(self, interaction: discord.Interaction, content: str, *, ephemeral: bool = True) -> bool:
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(content, ephemeral=ephemeral)
+            else:
+                await interaction.response.send_message(content, ephemeral=ephemeral)
+            return True
+        except Exception:
+            return False
+
+    async def _retire_race_view_later(self, session: dict, view: discord.ui.View | discord.ui.LayoutView | None, *, delay: float = 4.0):
+        if view is None or not isinstance(view, (discord.ui.View, discord.ui.LayoutView)):
+            return
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            view.stop()
+        except Exception:
+            pass
+
+    def _schedule_race_view_retire(self, session: dict, view: discord.ui.View | discord.ui.LayoutView | None, *, delay: float = 4.0):
+        if view is None or not isinstance(view, (discord.ui.View, discord.ui.LayoutView)):
+            return None
+        return self._track_race_aux_task(session, asyncio.create_task(self._retire_race_view_later(session, view, delay=delay)))
+
     def _schedule_impulse_message_delete(self, session: dict, message: discord.Message | None, *, immediate: bool = False):
         if message is None:
             return None
@@ -835,14 +861,11 @@ class GincanaCorridaMixin:
                     else:
                         view = _RaceStateView(self, guild, session, finished=bool(session.get("ended")))
                     session["view"] = view
-                    if old_view is not None and old_view is not view and isinstance(old_view, (discord.ui.View, discord.ui.LayoutView)):
-                        try:
-                            old_view.stop()
-                        except Exception:
-                            pass
                     edit_state = await self._safe_edit_message_view(message, view)
                     if edit_state == "ok":
                         session["_last_render_key"] = render_key
+                        if old_view is not None and old_view is not view:
+                            self._schedule_race_view_retire(session, old_view)
                     elif edit_state == "missing":
                         session["message"] = None
                         return
@@ -983,7 +1006,10 @@ class GincanaCorridaMixin:
         if channel is None or not hasattr(channel, "send"):
             return []
 
-        event_view = _RaceImpulseEventView(self, guild, session, stage_name)
+        event_counter = int(session.get("_impulse_event_counter", 0) or 0) + 1
+        session["_impulse_event_counter"] = event_counter
+        event_token = f"{guild.id}:{event_counter}:{random.getrandbits(24):06x}"
+        event_view = _RaceImpulseEventView(self, guild, session, stage_name, event_token=event_token)
         session["impulse_status"] = f"⏸ Evento de impulso ({stage_name.lower()}) em andamento."
         await self._refresh_race_message(guild.id)
         event_message = None
