@@ -72,7 +72,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
         condition_name = str((self.session.get("condition") or {}).get("name") or "Pista seca")
         special_name = str((self.session.get("special") or {}).get("name") or "")
         participants = self.cog._get_race_participants(self.guild, self.session)
-        pot_total = len(self.session.get("locked_participants", set())) * CORRIDA_STAKE
+        pot_total = self.cog._race_pot_total(self.session)
         bonus_pool = int(self.session.get("bonus_pool", 0) or 0)
 
         header_lines = [
@@ -538,6 +538,19 @@ class GincanaCorridaMixin:
             return _RACE_IMPULSE_WINDOWS_FAST
         return _RACE_IMPULSE_WINDOWS_NORMAL
 
+    def _race_pot_total(self, session: dict) -> int:
+        participant_count = len(set(session.get("locked_participants", set()) or []))
+        return max(0, participant_count - 1) * CORRIDA_STAKE
+
+    def _race_lobby_view_matches(self, session: dict, source_view: discord.ui.LayoutView | None) -> bool:
+        if source_view is None:
+            return True
+        current_view = session.get("view")
+        if current_view is source_view:
+            return True
+        if isinstance(current_view, _RaceLobbyView) and isinstance(source_view, _RaceLobbyView):
+            return str(current_view.view_token) == str(source_view.view_token)
+        return False
 
     def _race_placement_emoji(self, index: int) -> str:
         return {1: "🥇", 2: "🥈", 3: "🥉"}.get(index, "🔘")
@@ -606,7 +619,7 @@ class GincanaCorridaMixin:
         return lines
 
     def _make_race_embed(self, guild: discord.Guild, session: dict, *, finished: bool = False) -> discord.Embed:
-        pot_total = len(session.get("locked_participants", set())) * CORRIDA_STAKE
+        pot_total = self._race_pot_total(session)
         bonus_pool = int(session.get("bonus_pool", 0) or 0)
         title = "🐎 Corrida aberta"
         if session.get("started"):
@@ -721,9 +734,7 @@ class GincanaCorridaMixin:
             return
 
         session["starting"] = True
-        try:
-            await interaction.response.defer()
-        except Exception:
+        if not await self._safe_defer_component_interaction(interaction):
             session["starting"] = False
             return
 
@@ -1082,7 +1093,7 @@ class GincanaCorridaMixin:
             return False
         if session.get("starting") and not allow_when_starting:
             return False
-        if source_view is not None and session.get("view") is not source_view:
+        if not self._race_lobby_view_matches(session, source_view):
             return False
         guild = self.bot.get_guild(guild_id)
         if guild is None:
@@ -1344,7 +1355,7 @@ class GincanaCorridaMixin:
             state_map[member.id] = _HORSE_FINISH
 
         session["ended"] = True
-        total_pot = len(locked_ids) * CORRIDA_STAKE
+        total_pot = self._race_pot_total(session)
         bonus_pool = int(session.get("bonus_pool", 0) or 0)
         rewards, placements = self._allocate_race_rewards(final_groups, total_pot)
         bonus_rewards, _bonus_placements = self._allocate_race_rewards(final_groups, bonus_pool) if bonus_pool > 0 else ({}, [])
