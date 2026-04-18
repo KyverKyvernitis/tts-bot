@@ -260,12 +260,22 @@ class VoiceModeration(commands.Cog):
         self._loud_hits: dict[tuple[int, int], deque[tuple[float, int]]] = {}
         self._disconnect_cooldowns: dict[tuple[int, int], float] = {}
         self._sample_lock = threading.Lock()
+        self._watchdog_task: asyncio.Task | None = None
 
     async def cog_load(self):
         for vc in list(getattr(self.bot, "voice_clients", []) or []):
             guild = getattr(vc, "guild", None)
             if guild is not None:
                 asyncio.create_task(self.handle_voice_client_ready(guild, vc))
+        self._watchdog_task = asyncio.create_task(self._listening_watchdog())
+
+    async def cog_unload(self):
+        task = self._watchdog_task
+        self._watchdog_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(Exception):
+                await task
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
@@ -280,6 +290,47 @@ class VoiceModeration(commands.Cog):
     def _suppress_after_errors(self, guild_id: int, seconds: float = 2.5) -> None:
         runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
         runtime.suppress_after_until = max(float(runtime.suppress_after_until or 0.0), time.monotonic() + max(0.0, float(seconds)))
+
+    async def _listening_watchdog(self) -> None:
+        await asyncio.sleep(2.0)
+        while True:
+            try:
+                await self._tick_listening_watchdog()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(3.0)
+
+    async def _tick_listening_watchdog(self) -> None:
+        guild_ids: set[int] = set()
+        guild_ids.update(int(gid) for gid in self._runtime.keys())
+        for guild in list(getattr(self.bot, "guilds", []) or []):
+            guild_ids.add(int(guild.id))
+        for guild_id in guild_ids:
+            guild = self.bot.get_guild(int(guild_id))
+            if guild is None:
+                continue
+            settings = await self._get_settings(guild.id)
+            if not settings.get("enabled"):
+                continue
+            runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
+            runtime.settings = dict(settings)
+            if int(getattr(runtime, "tts_pause_depth", 0) or 0) > 0:
+                continue
+            vc = self._get_voice_client(guild)
+            if vc is None or not getattr(vc, "is_connected", lambda: False)() or getattr(vc, "channel", None) is None:
+                continue
+            try:
+                listening = bool(hasattr(vc, "is_listening") and getattr(vc, "is_listening", lambda: False)())
+            except Exception:
+                listening = False
+            if listening:
+                continue
+            if float(getattr(runtime, "suppress_after_until", 0.0) or 0.0) > time.monotonic():
+                continue
+            await self.handle_voice_client_ready(guild, vc)
+
 
     def _can_manage_mode(self, member: discord.Member | None) -> bool:
         if member is None:
@@ -545,6 +596,13 @@ class VoiceModeration(commands.Cog):
             runtime.sink = sink
             try:
                 vc.listen(sink, after=lambda exc, guild_id=guild.id: self._on_listen_after(guild_id, exc))
+                await asyncio.sleep(0.12)
+                try:
+                    if hasattr(vc, "is_listening") and not getattr(vc, "is_listening", lambda: False)():
+                        runtime.sink = None
+                        return vc, "falha_escuta"
+                except Exception:
+                    pass
                 return vc, "escutando"
             except Exception:
                 runtime.sink = None
@@ -663,17 +721,18 @@ class VoiceModeration(commands.Cog):
 
         threshold = int(settings.get("threshold_rms", VOICE_MODERATION_DEFAULTS["threshold_rms"]) or VOICE_MODERATION_DEFAULTS["threshold_rms"])
         max_intensity = int(settings.get("max_intensity", VOICE_MODERATION_DEFAULTS["max_intensity"]) or VOICE_MODERATION_DEFAULTS["max_intensity"])
-        intensity = max(score, int(rms * 1.18), int(peak * 0.5))
-        clipped_peak_only = peak >= 32760 and rms < max(2400, int(threshold * 1.22))
+        effective_threshold = min(threshold, max(900, int(max_intensity * 0.60)))
+        intensity = max(score, int(rms * 1.22), int(peak * 0.40), int((rms * 0.85) + (peak * 0.18)))
+        clipped_peak_only = peak >= 32760 and rms < max(2400, int(effective_threshold * 1.22))
         if clipped_peak_only:
-            intensity = max(score, int(rms * 1.18), int(peak * 0.34))
+            intensity = max(score, int(rms * 1.20), int(peak * 0.20))
 
-        severe_threshold = max(int(max_intensity * 0.82), threshold + 1100)
+        severe_threshold = max(int(max_intensity * 0.78), effective_threshold + 260)
         hard_trigger_threshold = max_intensity
         loud_enough = (
-            intensity >= threshold
-            or rms >= max(1150, int(threshold * 0.78))
-            or (not clipped_peak_only and peak >= max(6800, int(threshold * 2.2)))
+            intensity >= effective_threshold
+            or rms >= max(1050, int(effective_threshold * 0.88))
+            or (not clipped_peak_only and peak >= max(6200, int(effective_threshold * 2.0)))
         )
         if not loud_enough:
             return
@@ -681,17 +740,21 @@ class VoiceModeration(commands.Cog):
         now = time.monotonic()
         window = float(settings.get("window_seconds", VOICE_MODERATION_DEFAULTS["window_seconds"]) or VOICE_MODERATION_DEFAULTS["window_seconds"])
         hits_to_trigger = int(settings.get("hits_to_trigger", VOICE_MODERATION_DEFAULTS["hits_to_trigger"]) or VOICE_MODERATION_DEFAULTS["hits_to_trigger"])
+        if max_intensity <= 3500:
+            hits_to_trigger = max(2, hits_to_trigger - 2)
+        elif max_intensity <= 5000:
+            hits_to_trigger = max(3, hits_to_trigger - 1)
         cooldown_seconds = float(settings.get("cooldown_seconds", VOICE_MODERATION_DEFAULTS["cooldown_seconds"]) or VOICE_MODERATION_DEFAULTS["cooldown_seconds"])
         key = (int(guild_id), int(user_id))
 
         weight = 1
         severe = False
         extreme = False
-        if intensity >= severe_threshold or rms >= max(2600, int(threshold * 1.2)):
+        if intensity >= severe_threshold or rms >= max(2200, int(effective_threshold * 1.15)):
             weight = 2
             severe = True
-        if intensity >= hard_trigger_threshold:
-            weight = 4
+        if intensity >= int(hard_trigger_threshold * 0.98) and not clipped_peak_only:
+            weight = 3
             severe = True
             extreme = True
         if clipped_peak_only:
@@ -716,11 +779,11 @@ class VoiceModeration(commands.Cog):
             max_score = max((entry[4] for entry in samples), default=chosen_score)
             last_disconnect = float(self._disconnect_cooldowns.get(key, 0.0) or 0.0)
             if now - last_disconnect >= cooldown_seconds:
-                if extreme_hits >= 1 and total_hits >= max(3, hits_to_trigger - 1):
+                if extreme_hits >= 1 and total_hits >= max(2, hits_to_trigger - 1):
                     should_disconnect = True
-                elif severe_hits >= 2 and max_score >= int(max_intensity * 0.9):
+                elif severe_hits >= 2 and total_hits >= max(2, hits_to_trigger - 1) and max_score >= severe_threshold:
                     should_disconnect = True
-                elif total_hits >= hits_to_trigger and max_score >= hard_trigger_threshold:
+                elif total_hits >= hits_to_trigger and max_score >= int(max_intensity * 0.88):
                     should_disconnect = True
                 if should_disconnect:
                     self._disconnect_cooldowns[key] = now
@@ -977,6 +1040,9 @@ class VoiceModeration(commands.Cog):
             return
 
         state, played = await self._enable_mode(guild, preferred_channel=preferred_channel)
+        if state == "falha_escuta":
+            await asyncio.sleep(0.45)
+            await self.handle_voice_client_ready(guild, self._get_voice_client(guild))
         final_settings = await self._get_settings(guild.id)
         lines, notes, accent = self._status_snapshot(final_settings, guild)
         extra: list[str] = []
