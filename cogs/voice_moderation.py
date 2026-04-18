@@ -62,6 +62,9 @@ class _GuildVoiceModerationRuntime:
     last_notice_channel_id: int | None = None
     suppress_after_until: float = 0.0
     tts_pause_depth: int = 0
+    recover_fail_streak: int = 0
+    last_recover_attempt_at: float = 0.0
+    last_nonrecoverable_notice_at: float = 0.0
 
 
 class _VoiceModerationStatusView(discord.ui.LayoutView):
@@ -326,7 +329,13 @@ class VoiceModeration(commands.Cog):
             except Exception:
                 listening = False
             if listening:
+                runtime.recover_fail_streak = 0
                 continue
+            try:
+                if getattr(vc, "is_playing", lambda: False)() or getattr(vc, "is_paused", lambda: False)():
+                    continue
+            except Exception:
+                pass
             if float(getattr(runtime, "suppress_after_until", 0.0) or 0.0) > time.monotonic():
                 continue
             await self.handle_voice_client_ready(guild, vc)
@@ -564,8 +573,14 @@ class VoiceModeration(commands.Cog):
 
             has_receive = voice_recv is not None
             is_receive_client = bool(vc and hasattr(vc, "listen") and hasattr(vc, "is_listening"))
+            try:
+                vc_busy = bool(vc and (getattr(vc, "is_playing", lambda: False)() or getattr(vc, "is_paused", lambda: False)()))
+            except Exception:
+                vc_busy = False
 
             if has_receive and (vc is None or not getattr(vc, "is_connected", lambda: False)() or not is_receive_client):
+                if vc_busy:
+                    return vc, "ocupado_playback"
                 vc = await self._connect_receive_client(guild, target_channel)
                 if vc is None:
                     return None, "falha_conectar"
@@ -581,6 +596,7 @@ class VoiceModeration(commands.Cog):
             await self._apply_self_deaf(guild, False, channel=getattr(vc, "channel", None) or preferred_channel)
 
             if voice_recv is None or vc is None or not hasattr(vc, "listen"):
+                runtime.recover_fail_streak = 0
                 return vc, "sem_voice_recv"
 
             if not start_listening:
@@ -588,7 +604,14 @@ class VoiceModeration(commands.Cog):
 
             try:
                 if getattr(vc, "is_listening", lambda: False)():
+                    runtime.recover_fail_streak = 0
                     return vc, "escutando"
+            except Exception:
+                pass
+
+            try:
+                if getattr(vc, "is_playing", lambda: False)() or getattr(vc, "is_paused", lambda: False)():
+                    return vc, "ocupado_playback"
             except Exception:
                 pass
 
@@ -600,18 +623,21 @@ class VoiceModeration(commands.Cog):
                 try:
                     if hasattr(vc, "is_listening") and not getattr(vc, "is_listening", lambda: False)():
                         runtime.sink = None
+                        runtime.recover_fail_streak = int(runtime.recover_fail_streak or 0) + 1
                         return vc, "falha_escuta"
                 except Exception:
                     pass
+                runtime.recover_fail_streak = 0
                 return vc, "escutando"
             except Exception:
                 runtime.sink = None
+                runtime.recover_fail_streak = int(runtime.recover_fail_streak or 0) + 1
                 return vc, "falha_escuta"
 
     async def _stop_listening(self, guild: discord.Guild) -> None:
         vc = self._get_voice_client(guild)
         if vc is not None and hasattr(vc, "stop_listening"):
-            self._suppress_after_errors(guild.id)
+            self._suppress_after_errors(guild.id, 3.5)
             with contextlib.suppress(Exception):
                 vc.stop_listening()
         runtime = self._runtime.get(guild.id)
@@ -651,25 +677,25 @@ class VoiceModeration(commands.Cog):
         vc = self._get_voice_client(guild)
         voice_channel = getattr(vc, "channel", None) if vc is not None else None
         if vc is not None and hasattr(vc, "stop_listening"):
-            self._suppress_after_errors(guild.id)
+            self._suppress_after_errors(guild.id, 3.0)
             with contextlib.suppress(Exception):
                 vc.stop_listening()
 
         if self._is_recoverable_listen_error(exc):
-            await asyncio.sleep(0.35)
+            runtime.last_recover_attempt_at = time.monotonic()
+            await asyncio.sleep(0.45)
             _vc, state = await self._ensure_receive_ready(guild, preferred_channel=voice_channel)
-            if state in {"escutando", "sem_voice_recv"}:
+            if state in {"escutando", "sem_voice_recv", "ocupado_playback"}:
+                runtime.recover_fail_streak = 0
                 return
-            await self._send_call_notice(
-                guild,
-                title="# 🔊 Moderação de voz",
-                lines=["A escuta caiu e tentei recuperar automaticamente."],
-                notes=[f"Estado atual: `{state}`"],
-                accent=discord.Color.orange(),
-                voice_channel=voice_channel,
-            )
+            runtime.recover_fail_streak = int(runtime.recover_fail_streak or 0) + 1
+            self._suppress_after_errors(guild.id, 4.0)
             return
 
+        now = time.monotonic()
+        if (now - float(runtime.last_nonrecoverable_notice_at or 0.0)) < 12.0:
+            return
+        runtime.last_nonrecoverable_notice_at = now
         await self._send_call_notice(
             guild,
             title="# 🔊 Moderação de voz",
@@ -985,7 +1011,16 @@ class VoiceModeration(commands.Cog):
             elif voice_recv is None:
                 notes.append("A extensão de voice receive não está ativa, então o bot só sai do ensurdecido por enquanto.")
             elif not listening:
-                notes.append("O modo foi ativado, mas a escuta ainda não iniciou direito.")
+                try:
+                    busy = bool(vc and (getattr(vc, "is_playing", lambda: False)() or getattr(vc, "is_paused", lambda: False)()))
+                except Exception:
+                    busy = False
+                if busy:
+                    notes.append("A escuta retoma automaticamente quando o áudio atual terminar.")
+                elif int(getattr(runtime := self._runtime.get(guild.id), "recover_fail_streak", 0) or 0) >= 2:
+                    notes.append("A escuta caiu e o bot está tentando estabilizar automaticamente.")
+                else:
+                    notes.append("O modo foi ativado, mas a escuta ainda não iniciou direito.")
         accent = discord.Color.green() if enabled else discord.Color.red()
         return lines, notes, accent
 
@@ -1052,6 +1087,8 @@ class VoiceModeration(commands.Cog):
             extra.append("O bot saiu do ensurdecido, mas a detecção avançada depende da extensão de voice receive.")
         elif state == "falha_escuta":
             extra.append("O modo foi ativado, mas a escuta ainda não conseguiu iniciar.")
+        elif state == "ocupado_playback":
+            extra.append("O áudio atual termina primeiro; depois a escuta volta sozinha.")
         elif state == "falha_conectar":
             extra.append("Não consegui conectar o bot no canal agora.")
         if played:

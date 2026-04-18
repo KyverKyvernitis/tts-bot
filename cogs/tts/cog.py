@@ -1109,13 +1109,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         async def _build_connect_kwargs() -> dict:
             should_self_deaf = await _desired_self_deaf()
             kwargs = {"self_deaf": should_self_deaf}
-            if not should_self_deaf:
-                try:
-                    from discord.ext import voice_recv
+            try:
+                from discord.ext import voice_recv
 
-                    kwargs["cls"] = voice_recv.VoiceRecvClient
-                except Exception:
-                    pass
+                kwargs["cls"] = voice_recv.VoiceRecvClient
+            except Exception:
+                pass
             return kwargs
 
         lock = self._get_voice_connect_lock(guild.id)
