@@ -338,11 +338,12 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         chance = self._impulse_award_chance(user_id, hits)
         if chance <= 0.0 or random.random() >= chance:
             return None
-        if hits >= _RACE_IMPULSE_STAGE_COUNT:
-            return "grande"
-        if hits == _RACE_IMPULSE_STAGE_COUNT - 1:
+        roll = random.random()
+        if roll < 0.40:
+            return "pequeno"
+        if roll < 0.75:
             return "medio"
-        return None
+        return "grande"
 
     def _tier_bonus(self, tier: str, stage_name: str) -> float:
         stage_key = stage_name.strip().lower()
@@ -383,6 +384,7 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             tier = self._random_impulse_tier(hits, user_id)
             entry["hits"] = hits
             entry["award_chance"] = award_chance
+            entry["sortudo_bonus_applied"] = bool(award_chance > 0.35 and self.cog._race_is(self.guild.id, int(user_id), "sortudo"))
             entry["tier"] = tier
             entry["failed_trigger"] = bool(award_chance > 0.0 and not tier)
             if not tier:
@@ -707,52 +709,35 @@ class GincanaCorridaMixin:
     async def _handle_race_start_button(self, interaction: discord.Interaction, view: _RaceLobbyView):
         guild = interaction.guild
         user = interaction.user
+        if not await self._safe_defer_component_interaction(interaction):
+            return
         if guild is None or not isinstance(user, discord.Member):
-            try:
-                await interaction.response.send_message("Servidor inválido.", ephemeral=True)
-            except Exception:
-                pass
+            await self._send_component_feedback(interaction, "Servidor inválido.")
             return
 
         session = self._get_race_session(guild.id)
         if session is None or session.get("ended") or session.get("started") or session.get("starting"):
-            try:
-                await interaction.response.send_message("Essa corrida já foi iniciada.", ephemeral=True)
-            except Exception:
-                pass
+            await self._send_component_feedback(interaction, "Essa corrida já foi iniciada.")
             return
 
         is_owner = int(session.get("owner_id") or 0) == user.id
         if not is_owner and not self._is_staff_member(user):
-            try:
-                await interaction.response.send_message("Só o criador da corrida ou a staff pode iniciar.", ephemeral=True)
-            except Exception:
-                pass
+            await self._send_component_feedback(interaction, "Só o criador da corrida ou a staff pode iniciar.")
             return
 
         participants = self._get_race_participants(guild, session)
         if len(participants) < 2:
-            try:
-                await interaction.response.send_message("A corrida precisa de pelo menos 2 participantes para começar.", ephemeral=True)
-            except Exception:
-                pass
+            await self._send_component_feedback(interaction, "A corrida precisa de pelo menos 2 participantes para começar.")
             return
 
         session["starting"] = True
-        if not await self._safe_defer_component_interaction(interaction):
-            session["starting"] = False
-            return
-
         try:
             started_ok = await self._finish_race_lobby(guild.id, reason="manual_start", source_view=view, allow_when_starting=True)
             if not started_ok:
                 fresh_session = self._race_sessions.get(guild.id)
                 if fresh_session is not None and not fresh_session.get("ended"):
                     fresh_session["starting"] = False
-                try:
-                    await interaction.followup.send("Não foi possível iniciar a corrida agora.", ephemeral=True)
-                except Exception:
-                    pass
+                await self._send_component_feedback(interaction, "Não foi possível iniciar a corrida agora.")
                 return
         except Exception:
             fresh_session = self._race_sessions.get(guild.id)
@@ -768,10 +753,7 @@ class GincanaCorridaMixin:
                     await self._refresh_race_message(guild.id)
                 except Exception:
                     pass
-            try:
-                await interaction.followup.send("Não foi possível iniciar a corrida agora.", ephemeral=True)
-            except Exception:
-                pass
+            await self._send_component_feedback(interaction, "Não foi possível iniciar a corrida agora.")
 
     def _race_render_key(self, session: dict):
         return (
@@ -881,7 +863,8 @@ class GincanaCorridaMixin:
                     if edit_state == "ok":
                         session["_last_render_key"] = render_key
                         if old_view is not None and old_view is not view:
-                            self._schedule_race_view_retire(session, old_view)
+                            retire_delay = 15.0 if isinstance(old_view, _RaceLobbyView) and not session.get("started") else 4.0
+                            self._schedule_race_view_retire(session, old_view, delay=retire_delay)
                     elif edit_state == "missing":
                         session["message"] = None
                         return
