@@ -65,6 +65,7 @@ class _GuildVoiceModerationRuntime:
     recover_fail_streak: int = 0
     last_recover_attempt_at: float = 0.0
     last_nonrecoverable_notice_at: float = 0.0
+    last_hard_recover_at: float = 0.0
 
 
 class _VoiceModerationStatusView(discord.ui.LayoutView):
@@ -599,13 +600,6 @@ class VoiceModeration(commands.Cog):
             should_force_reconnect = False
             if has_receive and (vc is None or not getattr(vc, "is_connected", lambda: False)() or not is_receive_client):
                 should_force_reconnect = True
-            elif has_receive and start_listening and is_receive_client and not vc_busy:
-                try:
-                    listening_now = bool(getattr(vc, "is_listening", lambda: False)())
-                except Exception:
-                    listening_now = False
-                if not listening_now and int(runtime.recover_fail_streak or 0) >= 2:
-                    should_force_reconnect = True
 
             if should_force_reconnect:
                 if vc_busy:
@@ -698,6 +692,53 @@ class VoiceModeration(commands.Cog):
         if runtime is not None:
             runtime.sink = None
 
+    async def _soft_restart_listening(self, guild: discord.Guild, vc: discord.VoiceClient | None = None, *, preferred_channel=None) -> tuple[Optional[discord.VoiceClient], str]:
+        runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
+        settings = await self._get_settings(guild.id)
+        runtime.settings = dict(settings)
+        if not settings.get("enabled"):
+            return vc, "desativado"
+        current_vc = vc or self._get_voice_client(guild)
+        if current_vc is None or not getattr(current_vc, "is_connected", lambda: False)() or getattr(current_vc, "channel", None) is None:
+            return current_vc, "sem_canal"
+        if not self._is_receive_client(current_vc):
+            return current_vc, "sem_receive"
+        if self._is_voice_client_busy(current_vc):
+            return current_vc, "ocupado_playback"
+
+        self._suppress_after_errors(guild.id, 2.0)
+        with contextlib.suppress(Exception):
+            if hasattr(current_vc, "stop_listening"):
+                current_vc.stop_listening()
+        await asyncio.sleep(0.12)
+
+        sink = _LoudDisconnectSink(self, guild.id)
+        runtime.sink = sink
+        try:
+            current_vc.listen(sink, after=lambda exc, guild_id=guild.id: self._on_listen_after(guild_id, exc))
+            await asyncio.sleep(0.18)
+            if bool(getattr(current_vc, "is_listening", lambda: False)()):
+                runtime.recover_fail_streak = 0
+                runtime.last_recover_attempt_at = 0.0
+                return current_vc, "escutando"
+        except Exception:
+            pass
+        runtime.sink = None
+        runtime.recover_fail_streak = int(runtime.recover_fail_streak or 0) + 1
+        return current_vc, "falha_escuta"
+
+    async def _hard_recover_receive_client(self, guild: discord.Guild, *, preferred_channel=None) -> tuple[Optional[discord.VoiceClient], str]:
+        runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
+        now = time.monotonic()
+        if (now - float(runtime.last_hard_recover_at or 0.0)) < 45.0:
+            return self._get_voice_client(guild), "cooldown_hard_recover"
+        runtime.last_hard_recover_at = now
+        runtime.last_recover_attempt_at = now
+        vc, state = await self._ensure_receive_ready(guild, preferred_channel=preferred_channel, start_listening=True)
+        if state == "escutando":
+            runtime.recover_fail_streak = 0
+        return vc, state
+
     def _is_corrupted_stream_error(self, exc: Exception | None) -> bool:
         if exc is None:
             return False
@@ -738,11 +779,17 @@ class VoiceModeration(commands.Cog):
         if self._is_recoverable_listen_error(exc):
             runtime.last_recover_attempt_at = time.monotonic()
             await asyncio.sleep(0.45)
-            _vc, state = await self._ensure_receive_ready(guild, preferred_channel=voice_channel)
+            _vc, state = await self._soft_restart_listening(guild, vc, preferred_channel=voice_channel)
             if state in {"escutando", "sem_voice_recv", "ocupado_playback"}:
                 runtime.recover_fail_streak = 0
                 return
-            runtime.recover_fail_streak = int(runtime.recover_fail_streak or 0) + 1
+            if int(runtime.recover_fail_streak or 0) >= 4:
+                await asyncio.sleep(0.4)
+                _vc, hard_state = await self._hard_recover_receive_client(guild, preferred_channel=voice_channel)
+                if hard_state in {"escutando", "sem_voice_recv", "ocupado_playback", "cooldown_hard_recover"}:
+                    if hard_state == "escutando":
+                        runtime.recover_fail_streak = 0
+                    return
             self._suppress_after_errors(guild.id, 4.0)
             return
 
