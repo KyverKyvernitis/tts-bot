@@ -235,7 +235,19 @@ if voice_recv is not None:
             return False
 
         def write(self, user, data):
-            if user is None or getattr(user, "bot", False):
+            speaker = user or getattr(data, "source", None)
+            if speaker is None:
+                try:
+                    packet = getattr(data, "packet", None)
+                    ssrc = getattr(packet, "ssrc", None)
+                    vc = self.voice_client
+                    user_id = vc._get_id_from_ssrc(int(ssrc)) if vc is not None and ssrc is not None and hasattr(vc, "_get_id_from_ssrc") else None
+                    guild = getattr(vc, "guild", None)
+                    if guild is not None and user_id:
+                        speaker = guild.get_member(int(user_id))
+                except Exception:
+                    speaker = None
+            if speaker is None or getattr(speaker, "bot", False):
                 return
             pcm = getattr(data, "pcm", None)
             if not pcm:
@@ -255,7 +267,7 @@ if voice_recv is not None:
                 return
             self.cog._register_loud_sample(
                 self.guild_id,
-                int(user.id),
+                int(speaker.id),
                 score=score,
                 rms=rms,
                 peak=peak,
