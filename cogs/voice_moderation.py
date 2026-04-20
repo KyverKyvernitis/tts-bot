@@ -64,6 +64,7 @@ class _GuildVoiceModerationRuntime:
     status_message_id: int | None = None
     suppress_after_until: float = 0.0
     tts_pause_depth: int = 0
+    last_tts_pause_at: float = 0.0
     recover_fail_streak: int = 0
     last_recover_attempt_at: float = 0.0
     last_nonrecoverable_notice_at: float = 0.0
@@ -334,11 +335,20 @@ class VoiceModeration(commands.Cog):
                 continue
             runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
             runtime.settings = dict(settings)
-            if int(getattr(runtime, "tts_pause_depth", 0) or 0) > 0:
-                continue
             vc = self._get_voice_client(guild)
             if vc is None or not getattr(vc, "is_connected", lambda: False)() or getattr(vc, "channel", None) is None:
                 continue
+            pause_depth = int(getattr(runtime, "tts_pause_depth", 0) or 0)
+            if pause_depth > 0:
+                busy = self._is_voice_client_busy(vc)
+                pause_started = float(getattr(runtime, "last_tts_pause_at", 0.0) or 0.0)
+                if busy:
+                    continue
+                if pause_started and (time.monotonic() - pause_started) < 6.0:
+                    continue
+                runtime.tts_pause_depth = 0
+                runtime.last_tts_pause_at = 0.0
+                self._set_listen_error(guild.id, "A pausa da escuta por TTS travou; retomando escuta automaticamente.")
             try:
                 listening = bool(hasattr(vc, "is_listening") and getattr(vc, "is_listening", lambda: False)())
             except Exception:
@@ -1147,6 +1157,7 @@ class VoiceModeration(commands.Cog):
         async with lock:
             runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
             runtime.tts_pause_depth = int(runtime.tts_pause_depth or 0) + 1
+            runtime.last_tts_pause_at = time.monotonic()
             if runtime.tts_pause_depth == 1:
                 runtime.sink = None
                 runtime.recover_fail_streak = 0
@@ -1165,6 +1176,8 @@ class VoiceModeration(commands.Cog):
             runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
             depth = max(0, int(runtime.tts_pause_depth or 0) - 1)
             runtime.tts_pause_depth = depth
+            if depth <= 0:
+                runtime.last_tts_pause_at = 0.0
             if depth == 0:
                 settings = await self._get_settings(guild.id)
                 runtime.settings = dict(settings)
@@ -1352,7 +1365,9 @@ class VoiceModeration(commands.Cog):
                     busy = bool(vc and (getattr(vc, "is_playing", lambda: False)() or getattr(vc, "is_paused", lambda: False)()))
                 except Exception:
                     busy = False
-                if busy:
+                if int(getattr(runtime, "tts_pause_depth", 0) or 0) > 0:
+                    notes.append("A escuta está pausada pelo TTS e volta automaticamente ao fim do áudio.")
+                elif busy:
                     notes.append("A escuta retoma automaticamente quando o áudio atual terminar.")
                 elif int(getattr(runtime, "recover_fail_streak", 0) or 0) >= 2:
                     notes.append("A escuta caiu e o bot está tentando estabilizar automaticamente.")
