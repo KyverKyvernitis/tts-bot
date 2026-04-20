@@ -1202,6 +1202,9 @@ class TTSAudioMixin:
 
         try:
             await vc.disconnect(force=False)
+            if hasattr(self, "_clear_remembered_voice_channel"):
+                with contextlib.suppress(Exception):
+                    await self._maybe_await(self._clear_remembered_voice_channel(guild.id))
             logger.info("[tts_voice] Desconectado por inatividade | guild=%s", guild.id)
             return True
         except Exception as e:

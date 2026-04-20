@@ -85,6 +85,34 @@ class SettingsDB:
         self._invalidate_resolved_tts_cache(guild_id=guild_id)
         await self.coll.update_one({"type": "guild", "guild_id": guild_id}, {"$set": doc}, upsert=True)
 
+    def get_tts_voice_channel_id(self, guild_id: int) -> int:
+        g = self.guild_cache.get(guild_id, {})
+        raw = g.get("tts_voice_channel_id", 0)
+        try:
+            return max(0, int(raw or 0))
+        except Exception:
+            return 0
+
+    def iter_tts_voice_channel_ids(self) -> Dict[int, int]:
+        result: Dict[int, int] = {}
+        for guild_id in list(self.guild_cache.keys()):
+            channel_id = self.get_tts_voice_channel_id(guild_id)
+            if channel_id > 0:
+                result[int(guild_id)] = channel_id
+        return result
+
+    async def set_tts_voice_channel_id(self, guild_id: int, channel_id: int | None):
+        doc = self._get_guild_doc(guild_id)
+        try:
+            parsed = max(0, int(channel_id or 0))
+        except Exception:
+            parsed = 0
+        if parsed > 0:
+            doc["tts_voice_channel_id"] = parsed
+        else:
+            doc.pop("tts_voice_channel_id", None)
+        await self._save_guild_doc(guild_id, doc)
+
     def _invalidate_resolved_tts_cache(self, *, guild_id: int | None = None, user_id: int | None = None):
         if guild_id is None and user_id is None:
             self._resolved_tts_cache.clear()
