@@ -1297,7 +1297,9 @@ class VoiceModeration(commands.Cog):
                 if hard_state in {"escutando", "sem_voice_recv", "ocupado_playback", "cooldown_hard_recover"}:
                     state = hard_state
 
-        should_play_sfx = bool(vc is not None and not self._is_voice_client_busy(vc) and state in {"sem_voice_recv"})
+        # Keep activation feedback available for both receive-capable and fallback states.
+        # This keeps behavior stable across merge scenarios where listen-ready state names differ.
+        should_play_sfx = bool(vc is not None and not self._is_voice_client_busy(vc) and state in {"escutando", "sem_voice_recv"})
         if should_play_sfx:
             played = await self._play_activation_sfx(guild, vc)
             if played:
