@@ -341,10 +341,13 @@ class VoiceModeration(commands.Cog):
             now = time.monotonic()
             if float(getattr(runtime, "suppress_after_until", 0.0) or 0.0) > now:
                 continue
-            if (now - float(getattr(runtime, "last_recover_attempt_at", 0.0) or 0.0)) < 1.5:
+            if (now - float(getattr(runtime, "last_recover_attempt_at", 0.0) or 0.0)) < 5.0:
                 continue
             runtime.last_recover_attempt_at = now
-            await self.handle_voice_client_ready(guild, vc)
+            if self._is_receive_client(vc):
+                await self._soft_restart_listening(guild, vc, preferred_channel=getattr(vc, "channel", None))
+            else:
+                await self.handle_voice_client_ready(guild, vc)
 
 
     def _can_manage_mode(self, member: discord.Member | None) -> bool:
@@ -669,13 +672,10 @@ class VoiceModeration(commands.Cog):
                 if attempt + 1 >= listen_attempts or vc_busy:
                     break
 
-                vc = await self._connect_receive_client(guild, target_channel)
-                if vc is None:
-                    return None, "falha_conectar"
-                is_receive_client = self._is_receive_client(vc)
-                if not is_receive_client:
-                    break
-                await self._apply_self_deaf(guild, False, channel=getattr(vc, "channel", None) or preferred_channel)
+                self._suppress_after_errors(guild.id, 1.5)
+                with contextlib.suppress(Exception):
+                    if hasattr(vc, "stop_listening") and getattr(vc, "is_listening", lambda: False)():
+                        vc.stop_listening()
                 await asyncio.sleep(0.12)
 
             if last_error is not None:
@@ -730,11 +730,25 @@ class VoiceModeration(commands.Cog):
     async def _hard_recover_receive_client(self, guild: discord.Guild, *, preferred_channel=None) -> tuple[Optional[discord.VoiceClient], str]:
         runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
         now = time.monotonic()
-        if (now - float(runtime.last_hard_recover_at or 0.0)) < 45.0:
+        if (now - float(runtime.last_hard_recover_at or 0.0)) < 90.0:
             return self._get_voice_client(guild), "cooldown_hard_recover"
         runtime.last_hard_recover_at = now
         runtime.last_recover_attempt_at = now
-        vc, state = await self._ensure_receive_ready(guild, preferred_channel=preferred_channel, start_listening=True)
+
+        target_channel = preferred_channel
+        current_vc = self._get_voice_client(guild)
+        if target_channel is None and current_vc is not None:
+            target_channel = getattr(current_vc, "channel", None)
+        if target_channel is None:
+            return current_vc, "sem_canal"
+        if self._is_voice_client_busy(current_vc):
+            return current_vc, "ocupado_playback"
+
+        new_vc = await self._connect_receive_client(guild, target_channel)
+        if new_vc is None:
+            return None, "falha_conectar"
+        await self._apply_self_deaf(guild, False, channel=getattr(new_vc, "channel", None) or target_channel)
+        vc, state = await self._ensure_receive_ready(guild, preferred_channel=getattr(new_vc, "channel", None) or target_channel, start_listening=True)
         if state == "escutando":
             runtime.recover_fail_streak = 0
         return vc, state
@@ -783,14 +797,14 @@ class VoiceModeration(commands.Cog):
             if state in {"escutando", "sem_voice_recv", "ocupado_playback"}:
                 runtime.recover_fail_streak = 0
                 return
-            if int(runtime.recover_fail_streak or 0) >= 4:
-                await asyncio.sleep(0.4)
+            if int(runtime.recover_fail_streak or 0) >= 8:
+                await asyncio.sleep(1.2)
                 _vc, hard_state = await self._hard_recover_receive_client(guild, preferred_channel=voice_channel)
                 if hard_state in {"escutando", "sem_voice_recv", "ocupado_playback", "cooldown_hard_recover"}:
                     if hard_state == "escutando":
                         runtime.recover_fail_streak = 0
                     return
-            self._suppress_after_errors(guild.id, 4.0)
+            self._suppress_after_errors(guild.id, 6.0)
             return
 
         now = time.monotonic()
@@ -870,7 +884,7 @@ class VoiceModeration(commands.Cog):
         should_disconnect = False
         chosen_score = intensity
         sustain_seconds_required = 2.0
-        sustain_gap_reset = 0.35
+        sustain_gap_reset = 0.75
 
         with self._sample_lock:
             last_disconnect = float(self._disconnect_cooldowns.get(key, 0.0) or 0.0)
@@ -889,7 +903,11 @@ class VoiceModeration(commands.Cog):
                     self._disconnect_cooldowns[key] = now
                     self._over_limit_windows.pop(key, None)
             else:
-                self._over_limit_windows.pop(key, None)
+                window = self._over_limit_windows.get(key)
+                if window is not None:
+                    _start_at, last_seen_at, _max_seen = window
+                    if now - float(last_seen_at or now) > sustain_gap_reset:
+                        self._over_limit_windows.pop(key, None)
 
         if should_disconnect:
             try:
