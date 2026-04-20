@@ -1214,19 +1214,30 @@ class TTSAudioMixin:
         if target_channel is None:
             return None
 
+        should_use_receive_client = False
+        try:
+            checker = getattr(self, "_should_use_receive_voice_client", None)
+            if checker is not None:
+                should_use_receive_client = bool(await self._maybe_await(checker(guild.id)))
+        except Exception:
+            should_use_receive_client = False
+
         vc = self._get_voice_client_for_guild(guild)
+        is_receive_client = bool(vc is not None and hasattr(vc, "listen") and hasattr(vc, "is_listening"))
         if vc is not None and vc.is_connected():
             if vc.channel is not None and vc.channel.id == item.channel_id:
-                await self._ensure_self_deaf_fast(guild, target_channel)
-                state.last_channel_id = item.channel_id
-                return vc
-            try:
-                await vc.move_to(target_channel)
-                await self._ensure_self_deaf_fast(guild, target_channel)
-                state.last_channel_id = item.channel_id
-                return vc
-            except Exception:
-                pass
+                if not should_use_receive_client or is_receive_client:
+                    await self._ensure_self_deaf_fast(guild, target_channel)
+                    state.last_channel_id = item.channel_id
+                    return vc
+            elif not (should_use_receive_client and not is_receive_client):
+                try:
+                    await vc.move_to(target_channel)
+                    await self._ensure_self_deaf_fast(guild, target_channel)
+                    state.last_channel_id = item.channel_id
+                    return vc
+                except Exception:
+                    pass
 
         vc = await self._maybe_await(self._ensure_connected(guild, target_channel))
         if vc is None:

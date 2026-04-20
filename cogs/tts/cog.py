@@ -172,17 +172,25 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
 
-    async def _voice_should_self_deaf(self, guild_id: int) -> bool:
+    async def _get_voice_moderation_settings(self, guild_id: int) -> dict:
         db = self._get_db()
         if db is None or not hasattr(db, "get_voice_moderation_settings"):
-            return True
+            return {}
         try:
             settings = db.get_voice_moderation_settings(guild_id)
             settings = await self._maybe_await(settings)
-            return not bool((settings or {}).get("enabled", False))
+            return dict(settings or {})
         except Exception as e:
             print(f"[tts_voice] erro ao consultar moderação de voz da guild {guild_id}: {e}")
-            return True
+            return {}
+
+    async def _voice_should_self_deaf(self, guild_id: int) -> bool:
+        settings = await self._get_voice_moderation_settings(guild_id)
+        return not bool(settings.get("enabled", False))
+
+    async def _should_use_receive_voice_client(self, guild_id: int) -> bool:
+        settings = await self._get_voice_moderation_settings(guild_id)
+        return bool(settings.get("enabled", False))
 
     async def _notify_voice_moderation_ready(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
         cog = self.bot.get_cog("VoiceModeration")
@@ -1110,21 +1118,44 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             should_self_deaf = await _desired_self_deaf()
             kwargs = {"self_deaf": should_self_deaf}
             try:
-                from discord.ext import voice_recv
-
-                kwargs["cls"] = voice_recv.VoiceRecvClient
+                use_receive_client = bool(await self._should_use_receive_voice_client(guild.id))
             except Exception:
-                pass
+                use_receive_client = False
+            if use_receive_client:
+                try:
+                    from discord.ext import voice_recv
+
+                    kwargs["cls"] = voice_recv.VoiceRecvClient
+                except Exception:
+                    pass
             return kwargs
 
         lock = self._get_voice_connect_lock(guild.id)
         async with lock:
             vc = self._get_voice_client_for_guild(guild)
+            try:
+                should_use_receive_client = bool(await self._should_use_receive_voice_client(guild.id))
+            except Exception:
+                should_use_receive_client = False
+            is_receive_client = bool(vc and hasattr(vc, "listen") and hasattr(vc, "is_listening"))
 
             if vc and vc.is_connected() and vc.channel and vc.channel.id == voice_channel.id:
-                await _ensure_expected_voice_state()
-                await self._notify_voice_moderation_ready(guild, vc)
-                return vc
+                if not should_use_receive_client or is_receive_client:
+                    await _ensure_expected_voice_state()
+                    await self._notify_voice_moderation_ready(guild, vc)
+                    return vc
+                try:
+                    if vc.is_playing() or vc.is_paused():
+                        await _ensure_expected_voice_state()
+                        await self._notify_voice_moderation_ready(guild, vc)
+                        return vc
+                except Exception:
+                    pass
+                try:
+                    await vc.disconnect(force=True)
+                except Exception:
+                    pass
+                vc = None
 
             async def _fresh_connect() -> Optional[discord.VoiceClient]:
                 connect_kwargs = await _build_connect_kwargs()
@@ -1136,6 +1167,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
             try:
                 if vc and vc.is_connected():
+                    if should_use_receive_client and not is_receive_client:
+                        try:
+                            await vc.disconnect(force=True)
+                        except Exception:
+                            pass
+                        return await _fresh_connect()
                     try:
                         await vc.move_to(voice_channel)
                         await _ensure_expected_voice_state()

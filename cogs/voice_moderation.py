@@ -827,15 +827,18 @@ class VoiceModeration(commands.Cog):
     async def pause_for_tts_playback(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
         if guild is None:
             return
+        should_stop_listening = False
         lock = self._guild_lock(guild.id)
         async with lock:
             runtime = self._runtime.setdefault(guild.id, _GuildVoiceModerationRuntime())
             runtime.tts_pause_depth = int(runtime.tts_pause_depth or 0) + 1
-            if runtime.tts_pause_depth != 1:
-                return
-            runtime.sink = None
-            runtime.recover_fail_streak = 0
+            if runtime.tts_pause_depth == 1:
+                runtime.sink = None
+                runtime.recover_fail_streak = 0
+                should_stop_listening = True
         self._suppress_after_errors(guild.id, 8.0)
+        if should_stop_listening:
+            await self._stop_listening(guild)
 
     async def resume_after_tts_playback(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
         if guild is None:
@@ -852,11 +855,12 @@ class VoiceModeration(commands.Cog):
                 runtime.settings = dict(settings)
                 should_resume = bool(settings.get("enabled"))
                 should_restore_deaf = not should_resume
+        current_vc = self._get_voice_client(guild)
         if should_resume:
             await asyncio.sleep(0.25)
-            await self.handle_voice_client_ready(guild, vc or self._get_voice_client(guild))
+            await self.handle_voice_client_ready(guild, current_vc or vc)
         elif should_restore_deaf:
-            current_vc = vc or self._get_voice_client(guild)
+            current_vc = current_vc or vc
             if current_vc is not None and getattr(current_vc, "is_connected", lambda: False)() and getattr(current_vc, "channel", None) is not None:
                 await self._apply_self_deaf(guild, True, channel=current_vc.channel)
 
