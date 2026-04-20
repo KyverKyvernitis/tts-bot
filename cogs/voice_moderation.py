@@ -1040,7 +1040,17 @@ class VoiceModeration(commands.Cog):
                 except Exception:
                     pass
             else:
-                self._clear_listen_error(int(guild_id))
+                guild = self.bot.get_guild(int(guild_id))
+                vc = self._get_voice_client(guild) if guild is not None else None
+                enabled = bool(getattr(getattr(runtime, "settings", None), "get", lambda *_: False)("enabled")) if runtime is not None else False
+                try:
+                    is_listening_now = bool(vc and hasattr(vc, "is_listening") and getattr(vc, "is_listening", lambda: False)())
+                except Exception:
+                    is_listening_now = False
+                if (not enabled) or is_listening_now:
+                    self._clear_listen_error(int(guild_id))
+                elif not str(getattr(runtime, "last_listen_error", "") or "").strip():
+                    self._set_listen_error(int(guild_id), "A escuta encerrou sem erro explícito e está aguardando recuperação.")
             return
         self._set_listen_error(int(guild_id), f"A escuta caiu com erro: {self._format_exception(exc)}")
         self._schedule_status_refresh(int(guild_id))
