@@ -402,6 +402,48 @@ class VoiceModeration(commands.Cog):
         except Exception:
             return False
 
+    @staticmethod
+    def _is_listening_confirmed(vc: discord.VoiceClient | None, runtime: _GuildVoiceModerationRuntime | None) -> bool:
+        if vc is None:
+            return False
+        try:
+            if bool(getattr(vc, "is_listening", lambda: False)()):
+                return True
+        except Exception:
+            pass
+        if runtime is None:
+            return False
+        last_packet = float(getattr(runtime, "last_listen_packet_at", 0.0) or 0.0)
+        return bool(last_packet and (time.monotonic() - last_packet) <= 1.5)
+
+    async def _wait_listen_ready(
+        self,
+        guild_id: int,
+        vc: discord.VoiceClient | None,
+        runtime: _GuildVoiceModerationRuntime | None,
+        *,
+        expected_sink: Any | None = None,
+        timeout: float = 2.0,
+        poll: float = 0.1,
+    ) -> bool:
+        if vc is None:
+            return False
+        deadline = time.monotonic() + max(0.2, float(timeout))
+        while time.monotonic() < deadline:
+            if runtime is not None and expected_sink is not None and runtime.sink is not expected_sink:
+                return False
+            if self._is_listening_confirmed(vc, runtime):
+                return True
+            await asyncio.sleep(max(0.03, float(poll)))
+
+        if runtime is not None and expected_sink is not None and runtime.sink is expected_sink:
+            try:
+                if bool(getattr(vc, "is_connected", lambda: False)()):
+                    return True
+            except Exception:
+                pass
+        return False
+
     def _remember_notice_channel(self, guild_id: int, channel_id: int | None) -> None:
         runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
         runtime.last_notice_channel_id = int(channel_id) if channel_id else None
@@ -418,6 +460,14 @@ class VoiceModeration(commands.Cog):
         runtime.last_listen_error_at = time.monotonic() if text else 0.0
         if text:
             runtime.listening_armed = False
+
+    @staticmethod
+    def _format_exception(exc: Exception | None) -> str:
+        if exc is None:
+            return "erro desconhecido"
+        name = exc.__class__.__name__
+        details = str(exc).strip()
+        return f"{name}: {details}" if details else name
 
     def _clear_listen_error(self, guild_id: int) -> None:
         runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
@@ -650,8 +700,13 @@ class VoiceModeration(commands.Cog):
             return await target_channel.connect(**connect_kwargs)
         except TypeError:
             connect_kwargs.pop("cls", None)
-            return await target_channel.connect(**connect_kwargs)
-        except Exception:
+            try:
+                return await target_channel.connect(**connect_kwargs)
+            except Exception as exc:
+                self._set_listen_error(guild.id, f"Falha ao conectar cliente de voz: {self._format_exception(exc)}")
+                return None
+        except Exception as exc:
+            self._set_listen_error(guild.id, f"Falha ao conectar cliente de voz: {self._format_exception(exc)}")
             return None
 
     async def _ensure_receive_ready(self, guild: discord.Guild, preferred_channel=None, *, start_listening: bool = True) -> tuple[Optional[discord.VoiceClient], str]:
@@ -743,20 +798,14 @@ class VoiceModeration(commands.Cog):
                     runtime.listening_armed = True
                     runtime.last_listen_start_at = time.monotonic()
                     self._clear_listen_error(guild.id)
-                    await asyncio.sleep(0.35)
-                    try:
-                        if getattr(vc, "is_listening", lambda: False)():
-                            runtime.recover_fail_streak = 0
-                            runtime.last_recover_attempt_at = 0.0
-                            return vc, "escutando"
-                    except Exception:
-                        pass
-                    runtime.recover_fail_streak = 0
-                    runtime.last_recover_attempt_at = 0.0
-                    return vc, "escutando"
+                    if await self._wait_listen_ready(guild.id, vc, runtime, expected_sink=sink, timeout=2.2, poll=0.1):
+                        runtime.recover_fail_streak = 0
+                        runtime.last_recover_attempt_at = 0.0
+                        return vc, "escutando"
+                    last_state_reason = "Falha ao iniciar a escuta: listen() retornou, mas a escuta não ficou estável."
                 except Exception as exc:
                     last_error = exc
-                    last_state_reason = f"Falha ao iniciar a escuta: {exc}"
+                    last_state_reason = f"Falha ao iniciar a escuta: {self._format_exception(exc)}"
 
                 runtime.sink = None
                 runtime.listening_armed = False
@@ -773,9 +822,9 @@ class VoiceModeration(commands.Cog):
 
             if last_error is not None:
                 self._suppress_after_errors(guild.id, 3.0)
-                self._set_listen_error(guild.id, last_state_reason or f"Falha ao iniciar a escuta: {last_error}")
+                self._set_listen_error(guild.id, last_state_reason or f"Falha ao iniciar a escuta: {self._format_exception(last_error)}")
             else:
-                self._set_listen_error(guild.id, "O cliente de voz não confirmou a escuta a tempo.")
+                self._set_listen_error(guild.id, "Falha ao iniciar a escuta: listen() não confirmou estado ativo (is_listening=False).")
             return vc, "falha_escuta"
 
     async def _stop_listening(self, guild: discord.Guild) -> None:
@@ -819,19 +868,13 @@ class VoiceModeration(commands.Cog):
             runtime.listening_armed = True
             runtime.last_listen_start_at = time.monotonic()
             self._clear_listen_error(guild.id)
-            await asyncio.sleep(0.35)
-            try:
-                if bool(getattr(current_vc, "is_listening", lambda: False)()):
-                    runtime.recover_fail_streak = 0
-                    runtime.last_recover_attempt_at = 0.0
-                    return current_vc, "escutando"
-            except Exception:
-                pass
-            runtime.recover_fail_streak = 0
-            runtime.last_recover_attempt_at = 0.0
-            return current_vc, "escutando"
+            if await self._wait_listen_ready(guild.id, current_vc, runtime, expected_sink=sink, timeout=2.2, poll=0.1):
+                runtime.recover_fail_streak = 0
+                runtime.last_recover_attempt_at = 0.0
+                return current_vc, "escutando"
+            self._set_listen_error(guild.id, "Falha ao reiniciar a escuta: listen() não ficou estável.")
         except Exception as exc:
-            self._set_listen_error(guild.id, f"Falha ao reiniciar a escuta: {exc}")
+            self._set_listen_error(guild.id, f"Falha ao reiniciar a escuta: {self._format_exception(exc)}")
         runtime.sink = None
         runtime.listening_armed = False
         runtime.recover_fail_streak = int(runtime.recover_fail_streak or 0) + 1
@@ -899,7 +942,7 @@ class VoiceModeration(commands.Cog):
             return
 
         if exc is not None:
-            self._set_listen_error(guild.id, f"A escuta caiu com erro: {exc}")
+            self._set_listen_error(guild.id, f"A escuta caiu com erro: {self._format_exception(exc)}")
             await self._refresh_status_message(guild)
 
         vc = self._get_voice_client(guild)
@@ -953,7 +996,7 @@ class VoiceModeration(commands.Cog):
             self._clear_listen_error(int(guild_id))
             self._schedule_status_refresh(int(guild_id))
             return
-        self._set_listen_error(int(guild_id), f"A escuta caiu com erro: {exc}")
+        self._set_listen_error(int(guild_id), f"A escuta caiu com erro: {self._format_exception(exc)}")
         self._schedule_status_refresh(int(guild_id))
         try:
             asyncio.run_coroutine_threadsafe(
@@ -1341,7 +1384,9 @@ class VoiceModeration(commands.Cog):
         elif state == "sem_voice_recv":
             extra.append("O bot saiu do ensurdecido, mas a detecção avançada depende da extensão de voice receive.")
         elif state == "falha_escuta":
-            extra.append("O modo foi ativado, mas a escuta ainda não conseguiu iniciar.")
+            runtime = self._runtime.get(guild.id)
+            if not str(getattr(runtime, "last_listen_error", "") or "").strip():
+                extra.append("O modo foi ativado, mas a escuta ainda não conseguiu iniciar.")
         elif state == "ocupado_playback":
             extra.append("O áudio atual termina primeiro; depois a escuta volta sozinha.")
         elif state == "falha_conectar":
