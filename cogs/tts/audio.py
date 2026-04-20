@@ -41,6 +41,7 @@ TTS_GCLOUD_TIMEOUT_SECONDS = max(5.0, float(getattr(config, "TTS_GCLOUD_TIMEOUT_
 TTS_PLAYBACK_TIMEOUT_BASE_SECONDS = max(5.0, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_BASE_SECONDS", 12.0)))
 TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS = max(0.0, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS", 0.08)))
 TTS_PLAYBACK_TIMEOUT_MAX_SECONDS = max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_MAX_SECONDS", 120.0)))
+TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS = max(5.0, float(getattr(config, "TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS", 25.0)))
 TTS_CACHEABLE_TEXT_MAX_LENGTH = max(64, int(getattr(config, "TTS_CACHEABLE_TEXT_MAX_LENGTH", 320)))
 TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH = max(TTS_CACHEABLE_TEXT_MAX_LENGTH, int(getattr(config, "TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH", 1200)))
 TTS_LONG_TEXT_CACHE_MIN_REPEATS = max(1, int(getattr(config, "TTS_LONG_TEXT_CACHE_MIN_REPEATS", 2)))
@@ -96,6 +97,7 @@ class GuildTTSState:
     warmed_until: float = 0.0
     cache_order: OrderedDict[str, float] = field(default_factory=OrderedDict)
     pending_signatures: dict[str, int] = field(default_factory=dict)
+    last_hard_reset_at: float = 0.0
 
 
 class TTSAudioMixin:
@@ -1099,6 +1101,7 @@ class TTSAudioMixin:
             state = self.guild_states.get(guild.id)
             if state is not None:
                 state.last_channel_id = None
+                state.last_hard_reset_at = time.monotonic()
 
         if lock is None:
             await _do_reset()
@@ -1110,6 +1113,7 @@ class TTSAudioMixin:
     async def _play_file_with_recovery(self, guild: discord.Guild, item: QueueItem, vc: discord.VoiceClient, path: str) -> dict[str, float]:
         current_vc = vc
         last_error: Exception | None = None
+        state = self.guild_states.get(guild.id)
         for attempt in range(2):
             try:
                 return await self._play_file(current_vc, path, item=item)
@@ -1124,8 +1128,22 @@ class TTSAudioMixin:
                 )
                 if attempt >= 1:
                     break
-                await self._reset_voice_client(guild, reason=f"playback_failure:{type(exc).__name__}")
-                await asyncio.sleep(0.25)
+
+                last_hard_reset_at = float(getattr(state, "last_hard_reset_at", 0.0) or 0.0) if state is not None else 0.0
+                time_since_reset = time.monotonic() - last_hard_reset_at if last_hard_reset_at > 0.0 else TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS
+                should_suppress_hard_reset = time_since_reset < TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS
+
+                if should_suppress_hard_reset:
+                    logger.warning(
+                        "[tts_voice] Hard reset suprimido para evitar reconexão em loop | guild=%s channel=%s cooldown_restante=%.2fs",
+                        guild.id,
+                        item.channel_id,
+                        max(0.0, TTS_VOICE_HARD_RESET_COOLDOWN_SECONDS - time_since_reset),
+                    )
+                else:
+                    await self._reset_voice_client(guild, reason=f"playback_failure:{type(exc).__name__}")
+                    await asyncio.sleep(0.25)
+
                 current_vc = await self._ensure_connected_fast(guild, item)
                 if current_vc is None:
                     break

@@ -154,6 +154,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._gcloud_voices_cache_lock = asyncio.Lock()
         self._app_command_id_cache: dict[object, tuple[float, dict[str, int]]] = {}
         self._voice_restore_task: asyncio.Task | None = None
+        self._runtime_voice_restore_tasks: dict[int, asyncio.Task] = {}
+        self._runtime_voice_restore_failures: dict[int, int] = {}
+        self._runtime_voice_restore_next_allowed_at: dict[int, float] = {}
+        self._runtime_voice_restore_suppressed_until: dict[int, float] = {}
+        self._expected_voice_channel_ids: dict[int, int] = {}
 
     async def cog_load(self):
         self._prime_tts_runtime()
@@ -314,6 +319,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     await self._recover_stale_voice_client(guild, reason="startup_restore")
                     vc = await self._ensure_connected(guild, channel)
                     if vc is not None and getattr(vc, "is_connected", lambda: False)():
+                        self._remember_expected_voice_channel(guild_id, channel_id)
+                        self._runtime_voice_restore_failures[guild_id] = 0
+                        self._runtime_voice_restore_next_allowed_at[guild_id] = 0.0
                         print(f"[tts_voice] call restaurada após boot | guild={guild_id} channel={channel_id}")
                         continue
                 except Exception as e:
@@ -433,8 +441,145 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             for view in list(active_views):
                 await view.refresh_from_config_change()
 
+    def _cancel_runtime_voice_restore(self, guild_id: int) -> None:
+        task = self._runtime_voice_restore_tasks.pop(int(guild_id), None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _suppress_runtime_voice_restore(self, guild_id: int, *, seconds: float = 15.0) -> None:
+        self._runtime_voice_restore_suppressed_until[int(guild_id)] = time.monotonic() + max(0.0, float(seconds))
+
+    def _runtime_voice_restore_is_suppressed(self, guild_id: int) -> bool:
+        until = float(self._runtime_voice_restore_suppressed_until.get(int(guild_id), 0.0) or 0.0)
+        return until > time.monotonic()
+
+    async def _runtime_should_restore_voice(self, guild_id: int) -> bool:
+        try:
+            auto_leave_enabled = bool(await self._get_guild_toggle_value(
+                guild_id,
+                public_key="auto_leave",
+                raw_key="auto_leave_enabled",
+                default=True,
+            ))
+        except Exception:
+            auto_leave_enabled = True
+        return not auto_leave_enabled
+
+    def _remember_expected_voice_channel(self, guild_id: int, channel_id: int | None) -> None:
+        try:
+            parsed = max(0, int(channel_id or 0))
+        except Exception:
+            parsed = 0
+        if parsed > 0:
+            self._expected_voice_channel_ids[int(guild_id)] = parsed
+        else:
+            self._expected_voice_channel_ids.pop(int(guild_id), None)
+
+    async def _schedule_runtime_voice_restore(
+        self,
+        guild: discord.Guild,
+        *,
+        channel_id: int | None = None,
+        reason: str,
+        initial_delay: float = 4.0,
+    ) -> None:
+        guild_id = int(guild.id)
+        if self.bot.is_closed() or self._runtime_voice_restore_is_suppressed(guild_id):
+            return
+        if not await self._runtime_should_restore_voice(guild_id):
+            return
+
+        target_channel_id = 0
+        try:
+            target_channel_id = max(0, int(channel_id or 0))
+        except Exception:
+            target_channel_id = 0
+        if target_channel_id <= 0:
+            target_channel_id = int(self._expected_voice_channel_ids.get(guild_id, 0) or 0)
+        if target_channel_id <= 0:
+            target_channel_id = await self._get_remembered_voice_channel_id(guild_id)
+        if target_channel_id <= 0:
+            return
+
+        self._expected_voice_channel_ids[guild_id] = target_channel_id
+        current_task = self._runtime_voice_restore_tasks.get(guild_id)
+        if current_task is not None and not current_task.done():
+            return
+
+        async def _runner() -> None:
+            delay = max(1.5, float(initial_delay))
+            attempt = 0
+            try:
+                while not self.bot.is_closed():
+                    if self._runtime_voice_restore_is_suppressed(guild_id):
+                        return
+
+                    now = time.monotonic()
+                    next_allowed_at = float(self._runtime_voice_restore_next_allowed_at.get(guild_id, 0.0) or 0.0)
+                    wait_for = max(delay, max(0.0, next_allowed_at - now))
+                    if wait_for > 0.0:
+                        await asyncio.sleep(wait_for)
+
+                    if self._runtime_voice_restore_is_suppressed(guild_id):
+                        return
+                    if not await self._runtime_should_restore_voice(guild_id):
+                        return
+
+                    current_guild = self.bot.get_guild(guild_id) or guild
+                    if current_guild is None:
+                        return
+
+                    desired_channel_id = int(self._expected_voice_channel_ids.get(guild_id, 0) or 0)
+                    if desired_channel_id <= 0:
+                        desired_channel_id = await self._get_remembered_voice_channel_id(guild_id)
+                    if desired_channel_id <= 0:
+                        return
+
+                    current_vc = self._get_voice_client_for_guild(current_guild)
+                    if current_vc is not None and not self._is_voice_client_stale(current_guild, current_vc):
+                        current_channel = getattr(current_vc, "channel", None)
+                        if getattr(current_channel, "id", None) == desired_channel_id:
+                            self._runtime_voice_restore_failures[guild_id] = 0
+                            self._runtime_voice_restore_next_allowed_at[guild_id] = 0.0
+                            return
+
+                    desired_channel = current_guild.get_channel(desired_channel_id) or self.bot.get_channel(desired_channel_id)
+                    if not isinstance(desired_channel, (discord.VoiceChannel, discord.StageChannel)):
+                        await self._clear_remembered_voice_channel(guild_id)
+                        self._expected_voice_channel_ids.pop(guild_id, None)
+                        return
+
+                    try:
+                        await self._recover_stale_voice_client(current_guild, reason=f"runtime_restore:{reason}:{attempt}")
+                        vc = await self._ensure_connected(current_guild, desired_channel)
+                        if vc is not None and getattr(vc, "is_connected", lambda: False)() and getattr(getattr(vc, "channel", None), "id", None) == desired_channel_id:
+                            self._runtime_voice_restore_failures[guild_id] = 0
+                            self._runtime_voice_restore_next_allowed_at[guild_id] = time.monotonic() + 10.0
+                            print(f"[tts_voice] call restaurada em runtime | guild={guild_id} channel={desired_channel_id} reason={reason}")
+                            return
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        print(f"[tts_voice] falha ao restaurar call em runtime | guild={guild_id} channel={desired_channel_id} reason={reason} error={e}")
+
+                    attempt += 1
+                    self._runtime_voice_restore_failures[guild_id] = attempt
+                    delay = min(45.0, 4.0 + (attempt * 5.0))
+                    self._runtime_voice_restore_next_allowed_at[guild_id] = time.monotonic() + delay
+            finally:
+                task = self._runtime_voice_restore_tasks.get(guild_id)
+                if task is not None and task.done():
+                    self._runtime_voice_restore_tasks.pop(guild_id, None)
+
+        self._runtime_voice_restore_tasks[guild_id] = asyncio.create_task(_runner())
+
     def _cleanup_guild_runtime_state(self, guild_id: int) -> None:
         self._last_announced_author_by_guild.pop(int(guild_id), None)
+        self._cancel_runtime_voice_restore(guild_id)
+        self._runtime_voice_restore_failures.pop(int(guild_id), None)
+        self._runtime_voice_restore_next_allowed_at.pop(int(guild_id), None)
+        self._runtime_voice_restore_suppressed_until.pop(int(guild_id), None)
+        self._expected_voice_channel_ids.pop(int(guild_id), None)
 
     def _guild_announce_author_enabled(self, guild_defaults: dict | None) -> bool:
         return bool((guild_defaults or {}).get("announce_author", False))
@@ -1184,6 +1329,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return False
 
     async def _disconnect_and_clear(self, guild: discord.Guild):
+        self._suppress_runtime_voice_restore(guild.id, seconds=20.0)
+        self._cancel_runtime_voice_restore(guild.id)
+        self._remember_expected_voice_channel(guild.id, None)
         state = self._get_state(guild.id)
         try:
             while not state.queue.empty():
@@ -1304,6 +1452,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 if not should_use_receive_client or is_receive_client:
                     await _ensure_expected_voice_state()
                     await self._set_remembered_voice_channel(guild.id, getattr(voice_channel, "id", None))
+                    self._remember_expected_voice_channel(guild.id, getattr(voice_channel, "id", None))
+                    self._runtime_voice_restore_failures[guild.id] = 0
+                    self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
+                    self._cancel_runtime_voice_restore(guild.id)
                     await self._notify_voice_moderation_ready(guild, vc)
                     return vc
                 try:
@@ -1325,6 +1477,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 new_vc = await voice_channel.connect(**connect_kwargs)
                 await _ensure_expected_voice_state()
                 await self._set_remembered_voice_channel(guild.id, getattr(voice_channel, "id", None))
+                self._remember_expected_voice_channel(guild.id, getattr(voice_channel, "id", None))
+                self._runtime_voice_restore_failures[guild.id] = 0
+                self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
+                self._cancel_runtime_voice_restore(guild.id)
                 await self._notify_voice_moderation_ready(guild, new_vc)
                 print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
                 return new_vc
@@ -1341,6 +1497,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         await vc.move_to(voice_channel)
                         await _ensure_expected_voice_state()
                         await self._set_remembered_voice_channel(guild.id, getattr(voice_channel, "id", None))
+                        self._remember_expected_voice_channel(guild.id, getattr(voice_channel, "id", None))
+                        self._runtime_voice_restore_failures[guild.id] = 0
+                        self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
+                        self._cancel_runtime_voice_restore(guild.id)
                         await self._notify_voice_moderation_ready(guild, vc)
                         print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return vc
@@ -1364,12 +1524,20 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     if current_vc.channel and current_vc.channel.id == voice_channel.id:
                         await _ensure_expected_voice_state()
                         await self._set_remembered_voice_channel(guild.id, getattr(voice_channel, "id", None))
+                        self._remember_expected_voice_channel(guild.id, getattr(voice_channel, "id", None))
+                        self._runtime_voice_restore_failures[guild.id] = 0
+                        self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
+                        self._cancel_runtime_voice_restore(guild.id)
                         await self._notify_voice_moderation_ready(guild, current_vc)
                         return current_vc
                     try:
                         await current_vc.move_to(voice_channel)
                         await _ensure_expected_voice_state()
                         await self._set_remembered_voice_channel(guild.id, getattr(voice_channel, "id", None))
+                        self._remember_expected_voice_channel(guild.id, getattr(voice_channel, "id", None))
+                        self._runtime_voice_restore_failures[guild.id] = 0
+                        self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
+                        self._cancel_runtime_voice_restore(guild.id)
                         await self._notify_voice_moderation_ready(guild, current_vc)
                         print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return current_vc
@@ -1512,6 +1680,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         if me and member.id == me.id:
             if after.channel is not None:
+                self._remember_expected_voice_channel(guild.id, getattr(after.channel, "id", None))
+                self._runtime_voice_restore_failures[guild.id] = 0
+                self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
+                self._cancel_runtime_voice_restore(guild.id)
                 await self._set_remembered_voice_channel(guild.id, getattr(after.channel, "id", None))
                 desired_self_deaf = True
                 try:
@@ -1532,6 +1704,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 await self._notify_voice_moderation_ready(guild, vc)
             elif before.channel is not None:
                 print(f"[tts_voice] bot saiu da call | guild={guild.id} channel={getattr(before.channel, 'id', None)}")
+                self._remember_expected_voice_channel(guild.id, getattr(before.channel, "id", None))
+                await self._set_remembered_voice_channel(guild.id, getattr(before.channel, "id", None))
+                if not self._runtime_voice_restore_is_suppressed(guild.id) and await self._runtime_should_restore_voice(guild.id):
+                    await self._schedule_runtime_voice_restore(
+                        guild,
+                        channel_id=getattr(before.channel, "id", None),
+                        reason="voice_state_disconnect",
+                        initial_delay=4.0,
+                    )
 
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
