@@ -1108,9 +1108,14 @@ class VoiceModeration(commands.Cog):
         if not settings.get("enabled") or not settings.get("disconnect_enabled", True):
             return
         if int(getattr(runtime, "tts_pause_depth", 0) or 0) > 0:
-            with self._sample_lock:
-                self._over_limit_windows.pop((int(guild_id), int(user_id)), None)
-            return
+            guild = self.bot.get_guild(int(guild_id))
+            vc = self._get_voice_client(guild) if guild is not None else None
+            if self._is_voice_client_busy(vc):
+                with self._sample_lock:
+                    self._over_limit_windows.pop((int(guild_id), int(user_id)), None)
+                return
+            runtime.tts_pause_depth = 0
+            runtime.last_tts_pause_at = 0.0
 
         max_intensity = int(settings.get("max_intensity", VOICE_MODERATION_DEFAULTS["max_intensity"]) or VOICE_MODERATION_DEFAULTS["max_intensity"])
         threshold = int(settings.get("threshold_rms", VOICE_MODERATION_DEFAULTS["threshold_rms"]) or VOICE_MODERATION_DEFAULTS["threshold_rms"])
