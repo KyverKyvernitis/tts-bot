@@ -981,11 +981,13 @@ class VoiceModeration(commands.Cog):
             if self._is_corrupted_stream_error(exc):
                 await asyncio.sleep(0.25)
                 _vc, hard_state = await self._hard_recover_receive_client(guild, preferred_channel=voice_channel)
-                if hard_state in {"escutando", "sem_voice_recv", "ocupado_playback", "cooldown_hard_recover"}:
+                if hard_state in {"escutando", "sem_voice_recv", "ocupado_playback"}:
                     if hard_state == "escutando":
                         runtime.recover_fail_streak = 0
                     await self._refresh_status_message(guild)
                     return
+                if hard_state == "cooldown_hard_recover" and exc is not None:
+                    self._set_listen_error(guild.id, f"A escuta caiu com erro: {self._format_exception(exc)}")
             await asyncio.sleep(0.45)
             _vc, state = await self._soft_restart_listening(guild, vc, preferred_channel=voice_channel)
             if state in {"escutando", "sem_voice_recv", "ocupado_playback"}:
