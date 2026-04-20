@@ -36,6 +36,11 @@ TTS_QUEUE_MAXSIZE = max(1, int(getattr(config, "TTS_QUEUE_MAXSIZE", 20)))
 TTS_SYNTH_CONCURRENCY = max(1, int(getattr(config, "TTS_SYNTH_CONCURRENCY", 3)))
 TTS_EDGE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_EDGE_TIMEOUT_SECONDS", 10)))
 TTS_GTTS_CONCURRENCY = max(1, int(getattr(config, "TTS_GTTS_CONCURRENCY", 1)))
+TTS_GTTS_TIMEOUT_SECONDS = max(5.0, float(getattr(config, "TTS_GTTS_TIMEOUT_SECONDS", 20.0)))
+TTS_GCLOUD_TIMEOUT_SECONDS = max(5.0, float(getattr(config, "TTS_GCLOUD_TIMEOUT_SECONDS", 20.0)))
+TTS_PLAYBACK_TIMEOUT_BASE_SECONDS = max(5.0, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_BASE_SECONDS", 12.0)))
+TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS = max(0.0, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS", 0.08)))
+TTS_PLAYBACK_TIMEOUT_MAX_SECONDS = max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_MAX_SECONDS", 120.0)))
 TTS_CACHEABLE_TEXT_MAX_LENGTH = max(64, int(getattr(config, "TTS_CACHEABLE_TEXT_MAX_LENGTH", 320)))
 TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH = max(TTS_CACHEABLE_TEXT_MAX_LENGTH, int(getattr(config, "TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH", 1200)))
 TTS_LONG_TEXT_CACHE_MIN_REPEATS = max(1, int(getattr(config, "TTS_LONG_TEXT_CACHE_MIN_REPEATS", 2)))
@@ -215,6 +220,11 @@ class TTSAudioMixin:
         if abs(numeric - round(numeric)) < 1e-9:
             return str(int(round(numeric)))
         return f"{numeric:.2f}".rstrip("0").rstrip(".")
+
+    def _estimate_playback_timeout(self, item: QueueItem | None = None) -> float:
+        text_len = len((getattr(item, "text", "") or "").strip()) if item is not None else 0
+        timeout = TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + (min(text_len, 1600) * TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS)
+        return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, min(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, timeout))
 
     def _normalize_cache_text(self, text: str) -> str:
         text = " ".join((text or "").strip().split())
@@ -801,8 +811,15 @@ class TTSAudioMixin:
                     tts.write_to_fp(handle)
 
             async with self._get_gtts_semaphore():
-                await asyncio.to_thread(_write_gtts_file, path)
+                await asyncio.wait_for(asyncio.to_thread(_write_gtts_file, path), timeout=TTS_GTTS_TIMEOUT_SECONDS)
             return path
+        except asyncio.TimeoutError as exc:
+            logger.warning("[tts_voice] gTTS travou e foi cancelado | language=%s timeout=%.1fs", language, TTS_GTTS_TIMEOUT_SECONDS)
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            raise RuntimeError(f"gTTS timeout após {TTS_GTTS_TIMEOUT_SECONDS:.1f}s") from exc
         except Exception:
             try:
                 os.remove(path)
@@ -876,7 +893,7 @@ class TTSAudioMixin:
         path = self._make_runtime_temp_file(suffix=".mp3")
 
         try:
-            client = await asyncio.to_thread(self._get_google_tts_client)
+            client = await asyncio.wait_for(asyncio.to_thread(self._get_google_tts_client), timeout=TTS_GCLOUD_TIMEOUT_SECONDS)
             synthesis_input = google_texttospeech.SynthesisInput(text=text)
             voice_kwargs = {"language_code": language}
             if voice_name:
@@ -894,12 +911,19 @@ class TTSAudioMixin:
             )
 
             async with self._get_synth_semaphore():
-                response = await asyncio.to_thread(client.synthesize_speech, request=request)
+                response = await asyncio.wait_for(asyncio.to_thread(client.synthesize_speech, request=request), timeout=TTS_GCLOUD_TIMEOUT_SECONDS)
                 def _write_audio_file(target_path: str, data: bytes) -> None:
                     with open(target_path, 'wb') as handle:
                         handle.write(data)
-                await asyncio.to_thread(_write_audio_file, path, response.audio_content)
+                await asyncio.wait_for(asyncio.to_thread(_write_audio_file, path, response.audio_content), timeout=max(5.0, TTS_GCLOUD_TIMEOUT_SECONDS))
             return path
+        except asyncio.TimeoutError as exc:
+            logger.warning("[tts_voice] Google Cloud TTS travou e foi cancelado | language=%s timeout=%.1fs", language, TTS_GCLOUD_TIMEOUT_SECONDS)
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            raise RuntimeError(f"Google Cloud TTS timeout após {TTS_GCLOUD_TIMEOUT_SECONDS:.1f}s") from exc
         except Exception:
             try:
                 os.remove(path)
@@ -1004,7 +1028,7 @@ class TTSAudioMixin:
             store_in_cache=should_cache_long_text,
         )
 
-    async def _play_file(self, vc: discord.VoiceClient, path: str) -> dict[str, float]:
+    async def _play_file(self, vc: discord.VoiceClient, path: str, *, item: QueueItem | None = None) -> dict[str, float]:
         loop = asyncio.get_running_loop()
         finished = loop.create_future()
         guild = getattr(vc, "guild", None)
@@ -1035,7 +1059,14 @@ class TTSAudioMixin:
             play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
 
             playback_started_at = time.monotonic()
-            await finished
+            playback_timeout = self._estimate_playback_timeout(item)
+            try:
+                await asyncio.wait_for(finished, timeout=playback_timeout)
+            except asyncio.TimeoutError as exc:
+                with contextlib.suppress(Exception):
+                    if vc.is_playing() or vc.is_paused():
+                        vc.stop()
+                raise RuntimeError(f"Playback timeout após {playback_timeout:.1f}s") from exc
             playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
             return {
                 "source_setup_ms": source_setup_ms,
@@ -1047,6 +1078,60 @@ class TTSAudioMixin:
             if guild is not None and hasattr(self, "_notify_voice_moderation_playback_end"):
                 with contextlib.suppress(Exception):
                     await self._maybe_await(self._notify_voice_moderation_playback_end(guild, vc))
+
+    async def _reset_voice_client(self, guild: discord.Guild, *, reason: str = "unknown") -> None:
+        lock_getter = getattr(self, "_get_voice_connect_lock", None)
+        lock = lock_getter(guild.id) if callable(lock_getter) else None
+
+        async def _do_reset() -> None:
+            vc = self._get_voice_client_for_guild(guild)
+            if vc is None:
+                return
+            try:
+                if vc.is_playing() or vc.is_paused():
+                    vc.stop()
+            except Exception:
+                pass
+            try:
+                await vc.disconnect(force=True)
+            except Exception as exc:
+                logger.warning("[tts_voice] Falha ao resetar voice client | guild=%s reason=%s erro=%s", guild.id, reason, exc)
+            state = self.guild_states.get(guild.id)
+            if state is not None:
+                state.last_channel_id = None
+
+        if lock is None:
+            await _do_reset()
+            return
+
+        async with lock:
+            await _do_reset()
+
+    async def _play_file_with_recovery(self, guild: discord.Guild, item: QueueItem, vc: discord.VoiceClient, path: str) -> dict[str, float]:
+        current_vc = vc
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                return await self._play_file(current_vc, path, item=item)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "[tts_voice] Falha no playback, tentando recuperar | guild=%s channel=%s tentativa=%s erro=%s",
+                    guild.id,
+                    item.channel_id,
+                    attempt + 1,
+                    exc,
+                )
+                if attempt >= 1:
+                    break
+                await self._reset_voice_client(guild, reason=f"playback_failure:{type(exc).__name__}")
+                await asyncio.sleep(0.25)
+                current_vc = await self._ensure_connected_fast(guild, item)
+                if current_vc is None:
+                    break
+        if last_error is None:
+            raise RuntimeError("Falha desconhecida no playback do TTS")
+        raise last_error
 
     async def _ensure_self_deaf_fast(self, guild: discord.Guild, target_channel=None) -> bool:
         should_self_deaf = True
@@ -1250,7 +1335,7 @@ class TTSAudioMixin:
                     queue_wait_ms = max(0.0, (dequeue_started_at - float(getattr(item, "enqueued_at_monotonic", dequeue_started_at))) * 1000.0)
 
                     try:
-                        playback_result = await self._play_file(vc, current_path)
+                        playback_result = await self._play_file_with_recovery(guild, item, vc, current_path)
                         playback_started_at = float(playback_result.get("playback_started_at", time.monotonic()) or time.monotonic())
                         source_setup_ms = max(0.0, float(playback_result.get("source_setup_ms", 0.0) or 0.0))
                         play_call_ms = max(0.0, float(playback_result.get("play_call_ms", 0.0) or 0.0))
