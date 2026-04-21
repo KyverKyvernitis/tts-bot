@@ -537,27 +537,37 @@ class VoiceModeration(commands.Cog):
         except Exception:
             pass
 
-        # --- DETECÇÃO DE DAVE (Discord Audio/Video Encryption — E2EE) ---
-        # Se a lib `davey` estiver instalada, o discord.py 2.7+ negocia E2EE
-        # automaticamente com o Discord. Os pacotes RTP chegam com DUAS camadas
-        # de cripto: a de transporte (aead_xchacha20_poly1305_rtpsize, que o
-        # voice_recv decifra) e a E2EE (AES-GCM com chaves MLS, que o
-        # voice_recv 0.5.2a NÃO suporta). Resultado: o voice_recv entrega ao
-        # Opus bytes que ainda estão criptografados pela camada E2EE, e o Opus
-        # rejeita todos como "corrupted stream".
-        #
-        # Não existe fix via monkey-patch — seria reimplementar DAVE/MLS. A
-        # única solução prática hoje é DESINSTALAR `davey`:
-        #   pip uninstall -y davey && systemctl restart tts-bot
+        # --- DETECÇÃO DE INCOMPATIBILIDADE discord.py 2.7+ / DAVE ---
+        # A combinação toxicamente complicada é:
+        #   - discord.py 2.7+ EXIGE `davey` para sequer conectar em voz
+        #     (raise RuntimeError se davey não estiver instalado)
+        #   - MAS se davey estiver instalado, ativa DAVE (E2EE) automaticamente
+        #   - E o voice_recv 0.5.2a NÃO suporta decriptar pacotes E2EE —
+        #     todos os pacotes de voz viram "OpusError: corrupted stream"
+        # Ou seja: no 2.7+ não tem como ter voz recebida funcionando.
+        # Solução: ficar em discord.py 2.6.x (que não exige davey e não ativa DAVE).
         try:
-            import importlib.util as _imputil
-            if _imputil.find_spec("davey") is not None:
-                log.error(
-                    "voicemod: *** ATENÇÃO *** a biblioteca 'davey' está instalada. "
-                    "Isso ativa DAVE (E2EE) no discord.py, e o voice_recv 0.5.2a NÃO "
-                    "suporta decriptar pacotes E2EE — todo áudio recebido vira "
-                    "'corrupted stream'. SOLUÇÃO: `pip uninstall -y davey` e reiniciar."
-                )
+            import discord as _discord
+            dpy_ver = getattr(_discord, "__version__", "0")
+            parts = dpy_ver.split(".")
+            major = int(parts[0]) if parts and parts[0].isdigit() else 0
+            minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            if (major, minor) >= (2, 7):
+                import importlib.util as _imputil
+                has_davey = _imputil.find_spec("davey") is not None
+                if has_davey:
+                    log.error(
+                        "voicemod: *** INCOMPATIBILIDADE *** discord.py %s + davey instalado = "
+                        "DAVE (E2EE) ativo → voice_recv não decripta → corrupted stream em 100%% "
+                        "dos pacotes. Solução: `pip install 'discord.py[voice]<2.7'` "
+                        "(e rode `pip uninstall -y davey` também).", dpy_ver,
+                    )
+                else:
+                    log.error(
+                        "voicemod: *** INCOMPATIBILIDADE *** discord.py %s exige davey para voz "
+                        "funcionar — mas instalar davey ativa DAVE (E2EE) que o voice_recv não "
+                        "suporta. Solução: `pip install 'discord.py[voice]<2.7'`.", dpy_ver,
+                    )
         except Exception:
             pass
 
