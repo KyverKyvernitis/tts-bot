@@ -399,6 +399,12 @@ class VoiceModeration(commands.Cog):
             return
 
         _original_do_run = PacketRouter._do_run
+        # Captura a classe SenderReportPacket para silenciar o ruído "unexpected rtcp"
+        # que polui muito o log.
+        try:
+            from discord.ext.voice_recv.rtp import SenderReportPacket as _SenderReportPacket
+        except Exception:
+            _SenderReportPacket = None  # type: ignore[assignment]
 
         def _patched_do_run(self) -> None:
             # Mantém a mesma semântica do loop original, MAS isola cada iteração.
@@ -411,48 +417,39 @@ class VoiceModeration(commands.Cog):
                     # .items pode ser alterado durante a iteração se outro thread
                     # registrar/desregistrar decoder — copiamos para um snapshot.
                     for decoder in list(self.waiter.items):
+                        # Intercepta o pacote que o decoder vai processar, ANTES do
+                        # pop_data executar o decode. Se o decode falhar, temos o
+                        # payload real em mãos para diagnóstico (diferente de usar
+                        # buf.peek() que só mostra o PRÓXIMO na fila, que em rajada
+                        # nunca tem nada).
+                        captured_packet = None
+                        try:
+                            buf = getattr(decoder, "_buffer", None)
+                            if buf is not None and hasattr(buf, "peek"):
+                                captured_packet = buf.peek()
+                        except Exception:
+                            captured_packet = None
+
                         try:
                             data = decoder.pop_data()
                             if data is not None:
                                 self.sink.write(data.source, data)
                         except _OpusError as exc:
-                            # Isolamento por SSRC: este pacote é descartado, o
-                            # decoder do SSRC é resetado (estado do Opus pode ter
-                            # ficado inconsistente), listener continua vivo.
                             ssrc = getattr(decoder, "ssrc", None)
-                            _contabilizar_opus_error(self, ssrc, exc)
+                            _contabilizar_opus_error(self, ssrc, exc, captured_packet)
                             with contextlib.suppress(Exception):
                                 decoder.reset()
                         except Exception as exc:
-                            # Outros erros de iteração: log, reseta decoder e
-                            # continua. Não é a causa do bug do corrupted-stream
-                            # mas vale cercar para o listener nunca morrer por
-                            # um pacote. Reset também aqui porque o estado do
-                            # decoder pode ter ficado inconsistente.
                             ssrc = getattr(decoder, "ssrc", None)
-                            _contabilizar_opus_error(self, ssrc, exc)
+                            _contabilizar_opus_error(self, ssrc, exc, captured_packet)
                             with contextlib.suppress(Exception):
                                 decoder.reset()
-                            log.debug("voicemod router-patch: erro inesperado em iter decoder ssrc=%s: %s",
+                            log.debug("voicemod router-patch: erro em iter decoder ssrc=%s: %s",
                                       ssrc, exc)
 
-        def _contabilizar_opus_error(router, ssrc, exc) -> None:
-            """Chamado da thread do router — encaminha a contabilização para o
-            runtime do guild certo via o sink atual do router.
-
-            Adicionalmente, amostra 1 em cada 50 erros para logar o payload bruto
-            (tamanho + primeiros bytes em hex). Isso permite diagnosticar POR QUE
-            o Opus está rejeitando o pacote:
-              - payload começa com \\xbe\\xde → extension header NÃO foi removido
-                pelo decryptor (bug voice_recv ou modo de cripto não suportado)
-              - payload vazio ou muito curto (<3B) → decryptor falhou silenciosamente
-              - primeiros bytes aleatórios → criptografia negociou modo que o
-                voice_recv não decripta corretamente (DAVE, etc)
-              - TOC byte válido (0x??, config 0-31) → decode falhou por outra razão
-
-            Controlado por variável de ambiente VOICEMOD_PAYLOAD_DEBUG=1 para não
-            rodar em produção sem necessidade.
-            """
+        def _contabilizar_opus_error(router, ssrc, exc, captured_packet=None) -> None:
+            """Contabiliza o erro no runtime do guild + (se debug ligado) loga
+            o payload real do pacote que falhou."""
             try:
                 sink = getattr(router, "sink", None)
                 if sink is None:
@@ -463,55 +460,83 @@ class VoiceModeration(commands.Cog):
                     return
                 cog._register_opus_decode_error(int(guild_id), exc, ssrc=ssrc)
 
-                # Amostragem de payload para diagnóstico. Habilitado sob demanda.
                 import os as _os
                 if _os.environ.get("VOICEMOD_PAYLOAD_DEBUG") != "1":
                     return
-                # Contador por router (local ao objeto) para amostrar 1 em 50.
+
+                # Amostragem: 1 em cada 50 erros, para evitar spam em rajada.
                 cnt = getattr(router, "_vm_dbg_counter", 0) + 1
                 setattr(router, "_vm_dbg_counter", cnt)
                 if cnt % 50 != 1:
                     return
-                # Tenta pescar o último pacote do decoder para inspecionar
-                try:
-                    decoders = getattr(router, "decoders", {}) or {}
-                    dec = decoders.get(int(ssrc)) if ssrc is not None else None
-                    buf = getattr(dec, "_buffer", None) if dec is not None else None
-                    # O buffer já consumiu o pacote que falhou — tentamos o próximo
-                    pkt = None
-                    if buf is not None and hasattr(buf, "peek"):
-                        with contextlib.suppress(Exception):
-                            pkt = buf.peek()
-                    raw = getattr(pkt, "decrypted_data", None) if pkt is not None else None
-                    if raw is None:
-                        log.warning(
-                            "voicemod payload-dbg: ssrc=%s sem packet peek disponível (erros=%d)",
-                            ssrc, cnt,
-                        )
-                        return
-                    head = bytes(raw[:8]).hex() if raw else "<vazio>"
-                    # Classifica
-                    if not raw:
-                        hint = "PAYLOAD_VAZIO — decryptor retornou nada"
-                    elif raw.startswith(b"\xbe\xde"):
-                        hint = "EXT_HEADER_NAO_REMOVIDO — bug de decrypt (voice_recv/mode incompatível)"
-                    elif len(raw) < 3:
-                        hint = "PAYLOAD_CURTO_DEMAIS"
-                    elif raw == b"\xf8\xff\xfe":
-                        hint = "OPUS_SILENCE — não deveria dar corrupted stream"
+
+                if captured_packet is None:
+                    log.warning("voicemod payload-dbg: ssrc=%s pacote não capturado (erros=%d)",
+                                ssrc, cnt)
+                    return
+
+                raw = getattr(captured_packet, "decrypted_data", None)
+                pkt_class = type(captured_packet).__name__
+                pkt_size = getattr(captured_packet, "sequence", "?")
+
+                if raw is None:
+                    log.warning("voicemod payload-dbg: ssrc=%s class=%s decrypted_data=None (erros=%d)",
+                                ssrc, pkt_class, cnt)
+                    return
+
+                # ------ Classificação do payload ------
+                head = bytes(raw[:12]).hex() if raw else "<vazio>"
+                if not raw:
+                    hint = "PAYLOAD_VAZIO — decryptor retornou bytes nulos"
+                elif raw.startswith(b"\xbe\xde"):
+                    hint = "EXT_HEADER_NAO_REMOVIDO (0xbede) — decrypt não stripou extension"
+                elif len(raw) < 3:
+                    hint = f"PAYLOAD_CURTO ({len(raw)}B) — pequeno demais pra ser Opus"
+                elif raw == b"\xf8\xff\xfe":
+                    hint = "OPUS_SILENCE — não deveria quebrar no decode"
+                else:
+                    # TOC (1º byte Opus): bits 7-3 = config (0-31), bit 2 = stereo, bits 1-0 = frame count code
+                    toc = raw[0]
+                    config = (toc >> 3) & 0x1F
+                    stereo = bool((toc >> 2) & 0x1)
+                    fcc = toc & 0x3
+                    if config > 31:
+                        hint = f"TOC invalido (0x{toc:02x}, config={config}>31)"
                     else:
-                        toc_config = (raw[0] >> 3) & 0x1F
-                        hint = f"TOC_byte=0x{raw[0]:02x} config={toc_config} (válido se 0-31)"
-                    log.warning(
-                        "voicemod payload-dbg: ssrc=%s len=%d head=%s -> %s (erros=%d)",
-                        ssrc, len(raw), head, hint, cnt,
-                    )
-                except Exception as dbg_exc:
-                    log.debug("voicemod payload-dbg falhou: %s", dbg_exc)
+                        hint = f"TOC=0x{toc:02x} (config={config} stereo={stereo} fcc={fcc}) — deveria ser válido"
+
+                log.warning(
+                    "voicemod payload-dbg: ssrc=%s class=%s seq=%s len=%d head=%s -> %s (erros=%d)",
+                    ssrc, pkt_class, pkt_size, len(raw), head, hint, cnt,
+                )
             except Exception:
                 log.exception("voicemod router-patch: falha ao contabilizar opus-error")
 
         PacketRouter._do_run = _patched_do_run
+
+        # --- Silencia o spam "Received unexpected rtcp packet: type=200 SenderReport" ---
+        # Esse log do voice_recv.reader é INFO e polui muito. SR de RTCP é
+        # comportamento NORMAL do Discord (~1Hz). Não vale log nenhum além de DEBUG.
+        try:
+            from discord.ext.voice_recv import reader as _vr_reader
+            _vr_reader_log = getattr(_vr_reader, "log", None)
+            if _vr_reader_log is not None:
+                _orig_info = _vr_reader_log.info
+
+                def _quiet_info(msg, *args, **kwargs):
+                    # Filtra a mensagem específica "Received unexpected rtcp packet"
+                    # Reservando os outros INFOs do reader intactos.
+                    try:
+                        if isinstance(msg, str) and "unexpected rtcp packet" in msg:
+                            return _vr_reader_log.debug(msg, *args, **kwargs)
+                    except Exception:
+                        pass
+                    return _orig_info(msg, *args, **kwargs)
+
+                _vr_reader_log.info = _quiet_info
+        except Exception:
+            pass
+
         cls._ROUTER_PATCH_APPLIED = True
         log.info("voicemod: patch do PacketRouter._do_run aplicado (isolamento de OpusError por pacote)")
 
@@ -1685,6 +1710,27 @@ class VoiceModeration(commands.Cog):
 
         target_channel = getattr(vc, "channel", None) if vc is not None else None
         await self._ensure_receive_ready(guild, preferred_channel=target_channel)
+
+        # --- Diagnóstico: loga modo de cripto + endpoint do VC uma vez por sessão ---
+        # Isso é ESSENCIAL para diagnosticar corrupted-stream em rajada: se o Discord
+        # negociou um modo de cripto que o voice_recv instalado não suporta direito,
+        # os pacotes vêm com payload lixo e o Opus rejeita 100% deles.
+        vc = self._get_voice_client(guild) or vc
+        if vc is not None and not getattr(runtime, "_crypto_logged", False):
+            try:
+                mode = getattr(vc, "mode", None)
+                endpoint = getattr(vc, "endpoint", None)
+                secret_len = len(getattr(vc, "secret_key", b"") or b"")
+                # ssrc próprio do bot e dict de ssrcs→user_id mapeado até agora
+                my_ssrc = getattr(vc, "ssrc", None)
+                ssrc_map = getattr(vc, "_ssrc_to_id", {}) or {}
+                log.info(
+                    "voicemod/guild=%s VC pronto: mode=%s endpoint=%s secret_key_len=%d my_ssrc=%s ssrc_map_size=%d",
+                    guild.id, mode, endpoint, secret_len, my_ssrc, len(ssrc_map),
+                )
+                runtime._crypto_logged = True  # type: ignore[attr-defined]
+            except Exception as exc:
+                log.debug("voicemod/guild=%s: falha ao logar info do VC: %s", guild.id, exc)
 
     async def _enable_mode(self, guild: discord.Guild, preferred_channel=None) -> tuple[str, bool]:
         await self._set_enabled(guild.id, True)
