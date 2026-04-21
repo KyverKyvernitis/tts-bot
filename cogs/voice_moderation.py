@@ -1717,20 +1717,36 @@ class VoiceModeration(commands.Cog):
         # os pacotes vêm com payload lixo e o Opus rejeita 100% deles.
         vc = self._get_voice_client(guild) or vc
         if vc is not None and not getattr(runtime, "_crypto_logged", False):
-            try:
-                mode = getattr(vc, "mode", None)
-                endpoint = getattr(vc, "endpoint", None)
-                secret_len = len(getattr(vc, "secret_key", b"") or b"")
-                # ssrc próprio do bot e dict de ssrcs→user_id mapeado até agora
-                my_ssrc = getattr(vc, "ssrc", None)
-                ssrc_map = getattr(vc, "_ssrc_to_id", {}) or {}
-                log.info(
-                    "voicemod/guild=%s VC pronto: mode=%s endpoint=%s secret_key_len=%d my_ssrc=%s ssrc_map_size=%d",
-                    guild.id, mode, endpoint, secret_len, my_ssrc, len(ssrc_map),
-                )
+            # Log imediato (cedo, provavelmente com valores None/0) + um log
+            # adiado após o handshake completar, com os valores reais.
+            self._log_vc_info(guild, vc, phase="imediato")
+            asyncio.create_task(self._log_vc_info_after_delay(guild, delay=3.5))
+
+    def _log_vc_info(self, guild: discord.Guild, vc, *, phase: str) -> None:
+        try:
+            mode = getattr(vc, "mode", None)
+            endpoint = getattr(vc, "endpoint", None)
+            secret_key = getattr(vc, "secret_key", None) or b""
+            secret_len = len(secret_key) if secret_key else 0
+            my_ssrc = getattr(vc, "ssrc", None)
+            ssrc_map = getattr(vc, "_ssrc_to_id", {}) or {}
+            log.info(
+                "voicemod/guild=%s VC info (%s): mode=%r endpoint=%r secret_key_len=%d my_ssrc=%r ssrc_map=%s",
+                guild.id, phase, mode, endpoint, secret_len, my_ssrc,
+                # Mostra SSRCs mapeados de verdade, não só o tamanho
+                {str(k): v for k, v in list(ssrc_map.items())[:10]},
+            )
+        except Exception as exc:
+            log.debug("voicemod/guild=%s: falha ao logar info do VC: %s", guild.id, exc)
+
+    async def _log_vc_info_after_delay(self, guild: discord.Guild, *, delay: float) -> None:
+        await asyncio.sleep(delay)
+        vc = self._get_voice_client(guild)
+        if vc is not None:
+            self._log_vc_info(guild, vc, phase=f"+{delay:.1f}s")
+            runtime = self._runtime.get(guild.id)
+            if runtime is not None:
                 runtime._crypto_logged = True  # type: ignore[attr-defined]
-            except Exception as exc:
-                log.debug("voicemod/guild=%s: falha ao logar info do VC: %s", guild.id, exc)
 
     async def _enable_mode(self, guild: discord.Guild, preferred_channel=None) -> tuple[str, bool]:
         await self._set_enabled(guild.id, True)

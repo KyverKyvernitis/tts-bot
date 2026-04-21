@@ -31,6 +31,16 @@ logging.getLogger("discord.ext.voice_recv").setLevel(logging.INFO)
 # Descomente a linha abaixo temporariamente para diagnóstico granular de pacotes:
 # logging.getLogger("cogs.voice_moderation").setLevel(logging.DEBUG)
 
+# Quando o debug de payload está ligado, também subimos o nível de logs do
+# voice_recv para DEBUG — pegamos speaking events (que mapeiam SSRC→user) e
+# negociação de modo de cripto. Sem isso fica impossível diagnosticar por que
+# o decrypt está devolvendo lixo binário.
+if os.environ.get("VOICEMOD_PAYLOAD_DEBUG") == "1":
+    logging.getLogger("discord.ext.voice_recv.gateway").setLevel(logging.DEBUG)
+    logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.DEBUG)
+    logging.getLogger("discord.voice_state").setLevel(logging.DEBUG)
+    logging.getLogger("discord.gateway").setLevel(logging.INFO)
+
 import discord
 from discord.ext import commands
 
