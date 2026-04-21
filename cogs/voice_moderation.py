@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import audioop
 import contextlib
+import logging
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,6 +18,21 @@ try:
     from discord.ext import voice_recv
 except Exception:
     voice_recv = None
+
+try:
+    # É o mesmo Decoder que o voice_recv usa internamente. Decodificamos por conta
+    # própria para isolar `OpusError: corrupted stream` por pacote (ver diagnóstico
+    # no topo do arquivo).
+    from discord.opus import Decoder as _OpusDecoder, OpusError as _OpusError
+except Exception:  # pragma: no cover - ambientes sem libopus carregada
+    _OpusDecoder = None  # type: ignore[assignment]
+    _OpusError = Exception  # type: ignore[assignment]
+
+
+log = logging.getLogger(__name__)
+
+# Janela em segundos das métricas de queda/erro mantidas em memória (painel/logs).
+_METRIC_WINDOW_SECONDS = 60.0
 
 
 VOICE_MODERATION_SFX_PATH = Path(__file__).resolve().parents[1] / "assets" / "sfx" / "voice_moderation_on.wav"
@@ -74,6 +90,20 @@ class _GuildVoiceModerationRuntime:
     listening_armed: bool = False
     last_listen_start_at: float = 0.0
     last_listen_packet_at: float = 0.0
+    # ---- instrumentação objetiva -------------------------------------------------
+    # Cada vc.listen() recebe um id incremental. O after= captura esse id, e se
+    # quando disparar o runtime já estiver em outro listen_id, é um callback
+    # atrasado que NÃO deve apagar o estado saudável atual.
+    active_listen_id: int = 0
+    # Timestamps das últimas quedas do listener (após callback com erro) e das
+    # OpusError por-pacote capturadas no sink. Janelas curtas (_METRIC_WINDOW_SECONDS).
+    listen_drop_timeline: deque[float] = field(default_factory=deque)
+    opus_decode_errors_timeline: deque[float] = field(default_factory=deque)
+    # Última exceção técnica crua (classe + mensagem), sem texto de UI.
+    last_technical_reason: str | None = None
+    last_technical_reason_at: float = 0.0
+    # Prevenção de recuperação concorrente (watchdog vs after-callback vs TTS resume).
+    recovery_in_flight: bool = False
 
 
 class _VoiceModerationStatusView(discord.ui.LayoutView):
@@ -226,22 +256,66 @@ class _VoiceModerationCommandView(discord.ui.LayoutView):
 
 if voice_recv is not None:
     class _LoudDisconnectSink(voice_recv.AudioSink):
-        def __init__(self, cog: "VoiceModeration", guild_id: int):
+        """Sink que consome pacotes **Opus brutos** e decodifica por conta própria.
+
+        Por quê? No fluxo padrão (`wants_opus()=False`) o voice_recv decodifica dentro
+        de `PacketRouter._do_run` e uma `OpusError: corrupted stream` num único pacote
+        é capturada no `router.run` como fatal — ele chama `voice_client.stop_listening()`
+        e o listener morre inteiro. Isolando o decode aqui dentro, um pacote ruim vira
+        um drop contabilizado e o listener **permanece ativo**.
+        """
+
+        def __init__(self, cog: "VoiceModeration", guild_id: int, listen_id: int):
             super().__init__()
             self.cog = cog
             self.guild_id = int(guild_id)
+            self.listen_id = int(listen_id)
+            # Um decoder Opus por SSRC (speaker). Resetamos em erro fatal e
+            # destruímos ao final. Acesso dentro do packet-router é serializado
+            # pelo próprio _lock do router, então não precisamos de lock aqui —
+            # mas usamos um para proteger cleanup() concorrente.
+            self._decoders: dict[int, Any] = {}
+            self._decoders_lock = threading.Lock()
 
         def wants_opus(self) -> bool:
-            return False
+            # CHAVE DA CORREÇÃO: recebe opus bruto. voice_recv não tenta decodar
+            # e portanto não pode matar o listener com corrupted-stream.
+            return True
+
+        def _get_decoder(self, ssrc: int):
+            if _OpusDecoder is None:
+                return None
+            decoder = self._decoders.get(int(ssrc))
+            if decoder is None:
+                try:
+                    decoder = _OpusDecoder()
+                except Exception as exc:
+                    # libopus não carregada ou falha de init: desativa decode para esse ssrc
+                    log.warning("voicemod/guild=%s: falha ao criar Decoder opus para ssrc=%s: %s",
+                                self.guild_id, ssrc, exc)
+                    return None
+                self._decoders[int(ssrc)] = decoder
+            return decoder
+
+        def _reset_decoder(self, ssrc: int) -> None:
+            # Recria o decoder desse SSRC — o estado interno pode ter ficado
+            # inconsistente após corrupted-stream. Próximo pacote começa zerado.
+            with self._decoders_lock:
+                self._decoders.pop(int(ssrc), None)
 
         def write(self, user, data):
+            # Ignora chamadas após stop_listening — o runtime pode estar em outro listen.
+            runtime = self.cog._runtime.get(self.guild_id)
+            if runtime is None or int(getattr(runtime, "active_listen_id", 0)) != self.listen_id:
+                return
+
             speaker = user or getattr(data, "source", None)
-            if speaker is None:
+            packet = getattr(data, "packet", None)
+            ssrc = getattr(packet, "ssrc", None)
+            if speaker is None and ssrc is not None:
                 try:
-                    packet = getattr(data, "packet", None)
-                    ssrc = getattr(packet, "ssrc", None)
                     vc = self.voice_client
-                    user_id = vc._get_id_from_ssrc(int(ssrc)) if vc is not None and ssrc is not None and hasattr(vc, "_get_id_from_ssrc") else None
+                    user_id = vc._get_id_from_ssrc(int(ssrc)) if vc is not None and hasattr(vc, "_get_id_from_ssrc") else None
                     guild = getattr(vc, "guild", None)
                     if guild is not None and user_id:
                         speaker = guild.get_member(int(user_id))
@@ -249,10 +323,35 @@ if voice_recv is not None:
                     speaker = None
             if speaker is None or getattr(speaker, "bot", False):
                 return
-            pcm = getattr(data, "pcm", None)
+
+            # Decodifica Opus→PCM isoladamente, engolindo erros por-pacote.
+            opus_bytes = getattr(data, "opus", None)
+            if not opus_bytes and packet is not None:
+                opus_bytes = getattr(packet, "decrypted_data", None)
+            if not opus_bytes or ssrc is None:
+                return
+            decoder = self._get_decoder(int(ssrc))
+            if decoder is None:
+                return
+            try:
+                pcm = decoder.decode(opus_bytes, fec=False)
+            except _OpusError as exc:
+                # ISOLAMENTO DE ERRO POR PACOTE. Não repassa, não derruba listener.
+                self.cog._register_opus_decode_error(self.guild_id, exc, ssrc=int(ssrc))
+                # corrupted stream -> reseta decoder daquele SSRC para evitar cascata
+                msg = str(exc).lower()
+                if "corrupt" in msg or "invalid" in msg:
+                    self._reset_decoder(int(ssrc))
+                return
+            except Exception as exc:
+                self.cog._register_opus_decode_error(self.guild_id, exc, ssrc=int(ssrc))
+                self._reset_decoder(int(ssrc))
+                return
+
             if not pcm:
                 return
-            runtime = self.cog._runtime.setdefault(self.guild_id, _GuildVoiceModerationRuntime())
+
+            # ======== a partir daqui é o mesmo fluxo de medição antigo ========
             runtime.listening_armed = True
             runtime.last_listen_packet_at = time.monotonic()
             if runtime.last_listen_error:
@@ -274,12 +373,15 @@ if voice_recv is not None:
             )
 
         def cleanup(self):
+            with self._decoders_lock:
+                self._decoders.clear()
             return None
 else:
     class _LoudDisconnectSink:  # pragma: no cover - fallback sem dependência opcional
-        def __init__(self, cog: "VoiceModeration", guild_id: int):
+        def __init__(self, cog: "VoiceModeration", guild_id: int, listen_id: int = 0):
             self.cog = cog
             self.guild_id = int(guild_id)
+            self.listen_id = int(listen_id)
 
 
 class VoiceModeration(commands.Cog):
@@ -383,9 +485,16 @@ class VoiceModeration(commands.Cog):
                 runtime.listening_armed = False
             if float(getattr(runtime, "suppress_after_until", 0.0) or 0.0) > now:
                 continue
+            # Evita dar mais um pontapé se o after-callback já iniciou recuperação.
+            if bool(getattr(runtime, "recovery_in_flight", False)):
+                continue
             if (now - float(getattr(runtime, "last_recover_attempt_at", 0.0) or 0.0)) < 5.0:
                 continue
             runtime.last_recover_attempt_at = now
+            log.info(
+                "voicemod/guild=%s watchdog: listener inativo há %.1fs, tentando soft restart",
+                guild.id, now - float(getattr(runtime, "last_listen_start_at", 0.0) or now),
+            )
             if self._is_receive_client(vc):
                 _vc, state = await self._soft_restart_listening(guild, vc, preferred_channel=getattr(vc, "channel", None))
                 if state == "falha_escuta" and int(getattr(runtime, "recover_fail_streak", 0) or 0) >= 2:
@@ -485,6 +594,72 @@ class VoiceModeration(commands.Cog):
         name = exc.__class__.__name__
         details = str(exc).strip()
         return f"{name}: {details}" if details else name
+
+    # ----------------------------------------------------------------- métricas
+    @staticmethod
+    def _prune_timeline(tl: deque[float], now: float, window: float = _METRIC_WINDOW_SECONDS) -> None:
+        cutoff = now - max(1.0, float(window))
+        while tl and tl[0] < cutoff:
+            tl.popleft()
+
+    def _register_opus_decode_error(self, guild_id: int, exc: Exception | None, *, ssrc: int | None = None) -> None:
+        """Chamado da thread do packet-router quando um pacote Opus falha o decode.
+
+        Não derruba o listener — apenas contabiliza. Mantém uma janela curta para
+        o painel mostrar "quedas por minuto" de forma útil.
+        """
+        now = time.monotonic()
+        runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
+        tl = runtime.opus_decode_errors_timeline
+        tl.append(now)
+        self._prune_timeline(tl, now)
+        runtime.last_technical_reason = self._format_exception(exc)
+        runtime.last_technical_reason_at = now
+        # Log rate-limited por nível DEBUG: muitos pacotes ruins em rajada é esperado
+        # em reconexões; não queremos spam em INFO.
+        log.debug(
+            "voicemod/guild=%s ssrc=%s opus-decode-error (%s)",
+            guild_id, ssrc, self._format_exception(exc),
+        )
+
+    def _register_listen_drop(self, guild_id: int, exc: Exception | None) -> None:
+        """Contabiliza uma queda real do listener (after= com erro ou stop silencioso)."""
+        now = time.monotonic()
+        runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
+        tl = runtime.listen_drop_timeline
+        tl.append(now)
+        self._prune_timeline(tl, now)
+        if exc is not None:
+            runtime.last_technical_reason = self._format_exception(exc)
+            runtime.last_technical_reason_at = now
+        log.warning(
+            "voicemod/guild=%s listener-dropped (%s) drops_last_min=%d opus_errs_last_min=%d",
+            guild_id,
+            self._format_exception(exc),
+            len(tl),
+            len(runtime.opus_decode_errors_timeline),
+        )
+
+    def _next_listen_id(self, guild_id: int) -> int:
+        """Gera e registra um listen_id incremental para um novo vc.listen()."""
+        runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
+        runtime.active_listen_id = int(runtime.active_listen_id or 0) + 1
+        return int(runtime.active_listen_id)
+
+    def _vc_state_snapshot(self, vc: discord.VoiceClient | None) -> dict[str, Any]:
+        """Retorna o estado bruto do VoiceClient — usado no painel/logs/notices."""
+        def _call(name: str) -> bool:
+            try:
+                fn = getattr(vc, name, None)
+                return bool(fn()) if callable(fn) else False
+            except Exception:
+                return False
+        return {
+            "is_connected": _call("is_connected"),
+            "is_listening": _call("is_listening"),
+            "is_playing": _call("is_playing"),
+            "is_paused": _call("is_paused"),
+        }
 
     def _clear_listen_error(self, guild_id: int) -> None:
         runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
@@ -808,21 +983,32 @@ class VoiceModeration(commands.Cog):
             last_error: Exception | None = None
             last_state_reason: str | None = None
             for attempt in range(listen_attempts):
-                sink = _LoudDisconnectSink(self, guild.id)
+                # Cada tentativa recebe um listen_id único. O after= carrega esse id
+                # para filtrar callbacks atrasados de sinks antigos.
+                listen_id = self._next_listen_id(guild.id)
+                sink = _LoudDisconnectSink(self, guild.id, listen_id)
                 runtime.sink = sink
                 try:
-                    vc.listen(sink, after=lambda exc, guild_id=guild.id: self._on_listen_after(guild_id, exc))
+                    vc.listen(
+                        sink,
+                        after=lambda exc, gid=guild.id, lid=listen_id: self._on_listen_after(gid, exc, lid),
+                    )
                     runtime.listening_armed = True
                     runtime.last_listen_start_at = time.monotonic()
                     self._clear_listen_error(guild.id)
                     if await self._wait_listen_ready(guild.id, vc, runtime, expected_sink=sink, timeout=2.2, poll=0.1):
                         runtime.recover_fail_streak = 0
                         runtime.last_recover_attempt_at = 0.0
+                        log.info(
+                            "voicemod/guild=%s listen() armado (listen_id=%s canal=%s)",
+                            guild.id, listen_id, getattr(getattr(vc, "channel", None), "id", None),
+                        )
                         return vc, "escutando"
                     last_state_reason = "Falha ao iniciar a escuta: listen() retornou, mas a escuta não ficou estável."
                 except Exception as exc:
                     last_error = exc
                     last_state_reason = f"Falha ao iniciar a escuta: {self._format_exception(exc)}"
+                    log.warning("voicemod/guild=%s listen() raised: %s", guild.id, self._format_exception(exc))
 
                 runtime.sink = None
                 runtime.listening_armed = False
@@ -878,20 +1064,29 @@ class VoiceModeration(commands.Cog):
                 current_vc.stop_listening()
         await asyncio.sleep(0.12)
 
-        sink = _LoudDisconnectSink(self, guild.id)
+        listen_id = self._next_listen_id(guild.id)
+        sink = _LoudDisconnectSink(self, guild.id, listen_id)
         runtime.sink = sink
         try:
-            current_vc.listen(sink, after=lambda exc, guild_id=guild.id: self._on_listen_after(guild_id, exc))
+            current_vc.listen(
+                sink,
+                after=lambda exc, gid=guild.id, lid=listen_id: self._on_listen_after(gid, exc, lid),
+            )
             runtime.listening_armed = True
             runtime.last_listen_start_at = time.monotonic()
             self._clear_listen_error(guild.id)
             if await self._wait_listen_ready(guild.id, current_vc, runtime, expected_sink=sink, timeout=2.2, poll=0.1):
                 runtime.recover_fail_streak = 0
                 runtime.last_recover_attempt_at = 0.0
+                log.info(
+                    "voicemod/guild=%s soft-restart listen() armado (listen_id=%s)",
+                    guild.id, listen_id,
+                )
                 return current_vc, "escutando"
             self._set_listen_error(guild.id, "Falha ao reiniciar a escuta: listen() não ficou estável.")
         except Exception as exc:
             self._set_listen_error(guild.id, f"Falha ao reiniciar a escuta: {self._format_exception(exc)}")
+            log.warning("voicemod/guild=%s soft-restart listen() raised: %s", guild.id, self._format_exception(exc))
         runtime.sink = None
         runtime.listening_armed = False
         runtime.recover_fail_streak = int(runtime.recover_fail_streak or 0) + 1
@@ -951,66 +1146,116 @@ class VoiceModeration(commands.Cog):
             return
 
         runtime = self._runtime.setdefault(int(guild_id), _GuildVoiceModerationRuntime())
-        runtime.sink = None
-        runtime.listening_armed = False
-        settings = await self._get_settings(guild.id)
-        runtime.settings = dict(settings)
-        if not settings.get("enabled"):
+
+        # LOOP GUARD: se já existe uma recuperação rodando, descarta esta.
+        # Watchdog, after-callback e silent-stop podem disparar quase simultaneamente.
+        if bool(getattr(runtime, "recovery_in_flight", False)):
+            log.debug("voicemod/guild=%s recover: já em andamento, ignorando nova tentativa", guild_id)
             return
+        runtime.recovery_in_flight = True
+        try:
+            runtime.sink = None
+            runtime.listening_armed = False
+            settings = await self._get_settings(guild.id)
+            runtime.settings = dict(settings)
+            if not settings.get("enabled"):
+                return
 
-        if exc is not None:
-            self._set_listen_error(guild.id, f"A escuta caiu com erro: {self._format_exception(exc)}")
-            await self._refresh_status_message(guild)
+            if exc is not None:
+                self._set_listen_error(guild.id, f"A escuta caiu com erro: {self._format_exception(exc)}")
+                await self._refresh_status_message(guild)
 
-        vc = self._get_voice_client(guild)
-        voice_channel = getattr(vc, "channel", None) if vc is not None else None
-        if vc is not None and hasattr(vc, "stop_listening"):
-            self._suppress_after_errors(guild.id, 3.0)
-            with contextlib.suppress(Exception):
-                vc.stop_listening()
-
-        if self._is_recoverable_listen_error(exc):
-            runtime.last_recover_attempt_at = time.monotonic()
-            if self._is_corrupted_stream_error(exc):
-                await asyncio.sleep(0.25)
-                _vc, hard_state = await self._hard_recover_receive_client(guild, preferred_channel=voice_channel)
-                if hard_state in {"escutando", "sem_voice_recv", "ocupado_playback"}:
-                    if hard_state == "escutando":
-                        runtime.recover_fail_streak = 0
-                    await self._refresh_status_message(guild)
-                    return
-                if hard_state == "cooldown_hard_recover" and exc is not None:
-                    self._set_listen_error(guild.id, f"A escuta caiu com erro: {self._format_exception(exc)}")
-            await asyncio.sleep(0.45)
-            _vc, state = await self._soft_restart_listening(guild, vc, preferred_channel=voice_channel)
-            if state in {"escutando", "sem_voice_recv", "ocupado_playback"}:
-                runtime.recover_fail_streak = 0
+            # BACKOFF PROGRESSIVO: se cai demais em sequência, para de insistir por
+            # uma janela. Isso evita entrar/sair da call em loop.
+            fail_streak = int(getattr(runtime, "recover_fail_streak", 0) or 0)
+            if fail_streak >= 5:
+                backoff = min(60.0, 5.0 * fail_streak)
+                self._suppress_after_errors(guild.id, backoff)
+                notice_reason = self._format_exception(exc) if exc is not None else "escuta encerrou sem erro"
+                log.warning(
+                    "voicemod/guild=%s recover: backoff %.1fs após %d falhas consecutivas (%s)",
+                    guild_id, backoff, fail_streak, notice_reason,
+                )
+                # Notifica no chat da call apenas uma vez por ciclo de falhas.
+                now = time.monotonic()
+                if (now - float(runtime.last_nonrecoverable_notice_at or 0.0)) >= 30.0:
+                    runtime.last_nonrecoverable_notice_at = now
+                    vc_for_channel = self._get_voice_client(guild)
+                    state = self._vc_state_snapshot(vc_for_channel)
+                    await self._send_call_notice(
+                        guild,
+                        title="# 🔊 Moderação de voz",
+                        lines=["A escuta caiu várias vezes seguidas e vou esperar antes de tentar de novo."],
+                        notes=[
+                            f"Motivo técnico: `{notice_reason}`",
+                            f"Estado do VC: connected={state['is_connected']} listening={state['is_listening']} playing={state['is_playing']}",
+                            f"Backoff: {backoff:.1f}s",
+                        ],
+                        accent=discord.Color.red(),
+                        voice_channel=getattr(vc_for_channel, "channel", None),
+                    )
                 await self._refresh_status_message(guild)
                 return
-            if int(runtime.recover_fail_streak or 0) >= 8:
-                await asyncio.sleep(1.2)
-                _vc, hard_state = await self._hard_recover_receive_client(guild, preferred_channel=voice_channel)
-                if hard_state in {"escutando", "sem_voice_recv", "ocupado_playback", "cooldown_hard_recover"}:
-                    if hard_state == "escutando":
-                        runtime.recover_fail_streak = 0
+
+            vc = self._get_voice_client(guild)
+            voice_channel = getattr(vc, "channel", None) if vc is not None else None
+            if vc is not None and hasattr(vc, "stop_listening"):
+                self._suppress_after_errors(guild.id, 3.0)
+                with contextlib.suppress(Exception):
+                    vc.stop_listening()
+
+            if self._is_recoverable_listen_error(exc):
+                runtime.last_recover_attempt_at = time.monotonic()
+                if self._is_corrupted_stream_error(exc):
+                    # Com wants_opus=True no sink, corrupted-stream do voice_recv
+                    # não deve mais chegar aqui; se chegou, algo muito estranho —
+                    # vale um hard recover para zerar o SSRC/decoders internos.
+                    await asyncio.sleep(0.25)
+                    _vc, hard_state = await self._hard_recover_receive_client(guild, preferred_channel=voice_channel)
+                    if hard_state in {"escutando", "sem_voice_recv", "ocupado_playback"}:
+                        if hard_state == "escutando":
+                            runtime.recover_fail_streak = 0
+                        await self._refresh_status_message(guild)
+                        return
+                    if hard_state == "cooldown_hard_recover" and exc is not None:
+                        self._set_listen_error(guild.id, f"A escuta caiu com erro: {self._format_exception(exc)}")
+                await asyncio.sleep(0.45)
+                _vc, state = await self._soft_restart_listening(guild, vc, preferred_channel=voice_channel)
+                if state in {"escutando", "sem_voice_recv", "ocupado_playback"}:
+                    runtime.recover_fail_streak = 0
                     await self._refresh_status_message(guild)
                     return
-            self._suppress_after_errors(guild.id, 6.0)
-            await self._refresh_status_message(guild)
-            return
+                # Hard recover só depois de algumas falhas do soft — e não imediato.
+                if int(runtime.recover_fail_streak or 0) >= 3:
+                    await asyncio.sleep(1.2)
+                    _vc, hard_state = await self._hard_recover_receive_client(guild, preferred_channel=voice_channel)
+                    if hard_state in {"escutando", "sem_voice_recv", "ocupado_playback", "cooldown_hard_recover"}:
+                        if hard_state == "escutando":
+                            runtime.recover_fail_streak = 0
+                        await self._refresh_status_message(guild)
+                        return
+                self._suppress_after_errors(guild.id, 6.0)
+                await self._refresh_status_message(guild)
+                return
 
-        now = time.monotonic()
-        if (now - float(runtime.last_nonrecoverable_notice_at or 0.0)) < 12.0:
-            return
-        runtime.last_nonrecoverable_notice_at = now
-        await self._send_call_notice(
-            guild,
-            title="# 🔊 Moderação de voz",
-            lines=["A escuta do canal foi encerrada com erro."],
-            notes=[f"Detalhe: `{exc}`"],
-            accent=discord.Color.red(),
-            voice_channel=voice_channel,
-        )
+            now = time.monotonic()
+            if (now - float(runtime.last_nonrecoverable_notice_at or 0.0)) < 12.0:
+                return
+            runtime.last_nonrecoverable_notice_at = now
+            vc_state = self._vc_state_snapshot(vc)
+            await self._send_call_notice(
+                guild,
+                title="# 🔊 Moderação de voz",
+                lines=["A escuta do canal foi encerrada com erro."],
+                notes=[
+                    f"Motivo técnico: `{self._format_exception(exc)}`",
+                    f"Estado do VC: connected={vc_state['is_connected']} listening={vc_state['is_listening']} playing={vc_state['is_playing']}",
+                ],
+                accent=discord.Color.red(),
+                voice_channel=voice_channel,
+            )
+        finally:
+            runtime.recovery_in_flight = False
 
     async def _recover_listening_after_silent_stop(self, guild_id: int) -> None:
         guild = self.bot.get_guild(int(guild_id))
@@ -1035,18 +1280,44 @@ class VoiceModeration(commands.Cog):
         await asyncio.sleep(0.35)
         await self._recover_listening_after_error(guild.id, None)
 
-    def _on_listen_after(self, guild_id: int, exc: Exception | None) -> None:
+    def _on_listen_after(self, guild_id: int, exc: Exception | None, listen_id: int | None = None) -> None:
+        """Callback disparado pelo voice_recv quando a escuta encerra.
+
+        Roda na thread do reader (audioreader-stopper-*). Toda lógica async aqui
+        é agendada via run_coroutine_threadsafe.
+
+        IMPORTANTE: `listen_id` é o id do vc.listen() que disparou este callback.
+        Se enquanto este callback estava enfileirado um NOVO listen() já foi
+        armado (runtime.active_listen_id != listen_id), este callback é de um
+        listener antigo e NÃO deve apagar o estado saudável atual.
+        """
         runtime = self._runtime.get(int(guild_id))
+        current_id = int(getattr(runtime, "active_listen_id", 0)) if runtime is not None else 0
+        # Stale: callback atrasado de um listen() que já foi substituído.
+        if listen_id is not None and int(listen_id) != current_id and current_id > 0:
+            log.debug(
+                "voicemod/guild=%s after= stale ignorado (cb_listen_id=%s current=%s exc=%s)",
+                guild_id, listen_id, current_id, self._format_exception(exc),
+            )
+            # Ainda contabiliza como queda se veio com erro — é um sinal técnico real.
+            if exc is not None:
+                self._register_listen_drop(int(guild_id), exc)
+            return
+
         was_armed = False
         if runtime is not None:
             was_armed = bool(runtime.listening_armed)
             runtime.sink = None
             runtime.listening_armed = False
             if float(runtime.suppress_after_until or 0.0) > time.monotonic():
+                # Encerramento esperado (stop_listening() intencional, ex.: TTS).
+                log.debug("voicemod/guild=%s after= dentro da janela de suppress", guild_id)
                 return
+
         if exc is None:
             self._schedule_status_refresh(int(guild_id))
             if was_armed:
+                log.info("voicemod/guild=%s after= silent stop (listen_id=%s), reagendando", guild_id, listen_id)
                 try:
                     asyncio.run_coroutine_threadsafe(
                         self._recover_listening_after_silent_stop(int(guild_id)),
@@ -1067,6 +1338,9 @@ class VoiceModeration(commands.Cog):
                 elif not str(getattr(runtime, "last_listen_error", "") or "").strip():
                     self._set_listen_error(int(guild_id), "A escuta encerrou sem erro explícito e está aguardando recuperação.")
             return
+
+        # Listener derrubado com erro real — contabiliza na janela de métricas.
+        self._register_listen_drop(int(guild_id), exc)
         self._set_listen_error(int(guild_id), f"A escuta caiu com erro: {self._format_exception(exc)}")
         self._schedule_status_refresh(int(guild_id))
         try:
@@ -1395,6 +1669,39 @@ class VoiceModeration(commands.Cog):
         error_text = str(getattr(runtime, "last_listen_error", "") or "").strip() if runtime is not None else ""
         if error_text:
             notes.append(f"Motivo da última falha: `{error_text}`")
+
+        # ---- bloco de diagnóstico técnico objetivo -------------------------------
+        # Atende o requisito "contador de quedas por minuto, último estado do VC,
+        # tempo desde último pacote, motivo técnico com classe da exceção".
+        if enabled and runtime is not None:
+            now = time.monotonic()
+            self._prune_timeline(runtime.listen_drop_timeline, now)
+            self._prune_timeline(runtime.opus_decode_errors_timeline, now)
+            drops = len(runtime.listen_drop_timeline)
+            opus_errs = len(runtime.opus_decode_errors_timeline)
+
+            last_packet = float(getattr(runtime, "last_listen_packet_at", 0.0) or 0.0)
+            if last_packet:
+                since_packet_s = now - last_packet
+                since_packet_txt = f"{since_packet_s:.1f}s atrás" if since_packet_s < 300 else f"{since_packet_s/60:.1f}min atrás"
+            else:
+                since_packet_txt = "nenhum ainda"
+
+            vc_state = self._vc_state_snapshot(vc)
+            diag_parts = [
+                "**Diagnóstico:**",
+                f"`is_connected={vc_state['is_connected']} "
+                f"is_listening={vc_state['is_listening']} "
+                f"is_playing={vc_state['is_playing']}`",
+                f"Últ. pacote recebido: {since_packet_txt}",
+                f"Quedas no último min: {drops} · Pacotes Opus ruins no último min: {opus_errs}",
+            ]
+            tech = str(getattr(runtime, "last_technical_reason", "") or "").strip()
+            if tech:
+                tech_age = now - float(getattr(runtime, "last_technical_reason_at", 0.0) or now)
+                diag_parts.append(f"Últ. exceção técnica ({tech_age:.0f}s atrás): `{tech}`")
+            notes.append("\n".join(diag_parts))
+
         accent = discord.Color.green() if enabled else discord.Color.red()
         return lines, notes, accent
 
