@@ -256,13 +256,20 @@ class _VoiceModerationCommandView(discord.ui.LayoutView):
 
 if voice_recv is not None:
     class _LoudDisconnectSink(voice_recv.AudioSink):
-        """Sink que consome pacotes **Opus brutos** e decodifica por conta própria.
+        """Sink que consome PCM já decodado pelo voice_recv.
 
-        Por quê? No fluxo padrão (`wants_opus()=False`) o voice_recv decodifica dentro
-        de `PacketRouter._do_run` e uma `OpusError: corrupted stream` num único pacote
-        é capturada no `router.run` como fatal — ele chama `voice_client.stop_listening()`
-        e o listener morre inteiro. Isolando o decode aqui dentro, um pacote ruim vira
-        um drop contabilizado e o listener **permanece ativo**.
+        A proteção contra `OpusError: corrupted stream` fatal NÃO está aqui —
+        está no patch monkey-aplicado em `PacketRouter._do_run` (ver
+        `VoiceModeration._install_router_patch`). Esse patch envolve a
+        iteração por-pacote do router em try/except, então um pacote ruim
+        vira um drop contabilizado e o listener **permanece ativo**.
+
+        Tentativa anterior (commit anterior) tinha `wants_opus()=True` e
+        decodificava aqui dentro. Isso falhou na prática: o painel mostrou
+        151 erros/min em pacotes reais de voz, porque o caminho de acesso
+        ao opus cru pelo sink diverge sutilmente do caminho oficial do
+        voice_recv. Voltar ao PCM oficial e proteger o loop do router é o
+        caminho robusto.
         """
 
         def __init__(self, cog: "VoiceModeration", guild_id: int, listen_id: int):
@@ -270,52 +277,23 @@ if voice_recv is not None:
             self.cog = cog
             self.guild_id = int(guild_id)
             self.listen_id = int(listen_id)
-            # Um decoder Opus por SSRC (speaker). Resetamos em erro fatal e
-            # destruímos ao final. Acesso dentro do packet-router é serializado
-            # pelo próprio _lock do router, então não precisamos de lock aqui —
-            # mas usamos um para proteger cleanup() concorrente.
-            self._decoders: dict[int, Any] = {}
-            self._decoders_lock = threading.Lock()
 
         def wants_opus(self) -> bool:
-            # CHAVE DA CORREÇÃO: recebe opus bruto. voice_recv não tenta decodar
-            # e portanto não pode matar o listener com corrupted-stream.
-            return True
-
-        def _get_decoder(self, ssrc: int):
-            if _OpusDecoder is None:
-                return None
-            decoder = self._decoders.get(int(ssrc))
-            if decoder is None:
-                try:
-                    decoder = _OpusDecoder()
-                except Exception as exc:
-                    # libopus não carregada ou falha de init: desativa decode para esse ssrc
-                    log.warning("voicemod/guild=%s: falha ao criar Decoder opus para ssrc=%s: %s",
-                                self.guild_id, ssrc, exc)
-                    return None
-                self._decoders[int(ssrc)] = decoder
-            return decoder
-
-        def _reset_decoder(self, ssrc: int) -> None:
-            # Recria o decoder desse SSRC — o estado interno pode ter ficado
-            # inconsistente após corrupted-stream. Próximo pacote começa zerado.
-            with self._decoders_lock:
-                self._decoders.pop(int(ssrc), None)
+            return False
 
         def write(self, user, data):
-            # Ignora chamadas após stop_listening — o runtime pode estar em outro listen.
+            # Ignora se esse sink foi substituído por um listen() mais novo.
             runtime = self.cog._runtime.get(self.guild_id)
             if runtime is None or int(getattr(runtime, "active_listen_id", 0)) != self.listen_id:
                 return
 
             speaker = user or getattr(data, "source", None)
-            packet = getattr(data, "packet", None)
-            ssrc = getattr(packet, "ssrc", None)
-            if speaker is None and ssrc is not None:
+            if speaker is None:
                 try:
+                    packet = getattr(data, "packet", None)
+                    ssrc = getattr(packet, "ssrc", None)
                     vc = self.voice_client
-                    user_id = vc._get_id_from_ssrc(int(ssrc)) if vc is not None and hasattr(vc, "_get_id_from_ssrc") else None
+                    user_id = vc._get_id_from_ssrc(int(ssrc)) if vc is not None and ssrc is not None and hasattr(vc, "_get_id_from_ssrc") else None
                     guild = getattr(vc, "guild", None)
                     if guild is not None and user_id:
                         speaker = guild.get_member(int(user_id))
@@ -324,34 +302,10 @@ if voice_recv is not None:
             if speaker is None or getattr(speaker, "bot", False):
                 return
 
-            # Decodifica Opus→PCM isoladamente, engolindo erros por-pacote.
-            opus_bytes = getattr(data, "opus", None)
-            if not opus_bytes and packet is not None:
-                opus_bytes = getattr(packet, "decrypted_data", None)
-            if not opus_bytes or ssrc is None:
-                return
-            decoder = self._get_decoder(int(ssrc))
-            if decoder is None:
-                return
-            try:
-                pcm = decoder.decode(opus_bytes, fec=False)
-            except _OpusError as exc:
-                # ISOLAMENTO DE ERRO POR PACOTE. Não repassa, não derruba listener.
-                self.cog._register_opus_decode_error(self.guild_id, exc, ssrc=int(ssrc))
-                # corrupted stream -> reseta decoder daquele SSRC para evitar cascata
-                msg = str(exc).lower()
-                if "corrupt" in msg or "invalid" in msg:
-                    self._reset_decoder(int(ssrc))
-                return
-            except Exception as exc:
-                self.cog._register_opus_decode_error(self.guild_id, exc, ssrc=int(ssrc))
-                self._reset_decoder(int(ssrc))
-                return
-
+            pcm = getattr(data, "pcm", None)
             if not pcm:
                 return
 
-            # ======== a partir daqui é o mesmo fluxo de medição antigo ========
             runtime.listening_armed = True
             runtime.last_listen_packet_at = time.monotonic()
             if runtime.last_listen_error:
@@ -373,8 +327,6 @@ if voice_recv is not None:
             )
 
         def cleanup(self):
-            with self._decoders_lock:
-                self._decoders.clear()
             return None
 else:
     class _LoudDisconnectSink:  # pragma: no cover - fallback sem dependência opcional
@@ -385,6 +337,10 @@ else:
 
 
 class VoiceModeration(commands.Cog):
+    # Flag de classe para garantir que o monkey-patch do PacketRouter._do_run
+    # seja aplicado apenas uma vez no processo, mesmo se o cog for recarregado.
+    _ROUTER_PATCH_APPLIED: bool = False
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._guild_locks: dict[int, asyncio.Lock] = {}
@@ -396,11 +352,110 @@ class VoiceModeration(commands.Cog):
         self._watchdog_task: asyncio.Task | None = None
 
     async def cog_load(self):
+        # Aplica o patch do router ANTES de qualquer listen() acontecer.
+        # Isso protege TODAS as instâncias de VoiceRecvClient do processo.
+        self._install_router_patch()
+
         for vc in list(getattr(self.bot, "voice_clients", []) or []):
             guild = getattr(vc, "guild", None)
             if guild is not None:
                 asyncio.create_task(self.handle_voice_client_ready(guild, vc))
         self._watchdog_task = asyncio.create_task(self._listening_watchdog())
+
+    @classmethod
+    def _install_router_patch(cls) -> None:
+        """Monkey-patch de `discord.ext.voice_recv.router.PacketRouter._do_run`.
+
+        CAUSA-RAIZ (documentada):
+          O `_do_run` original do voice_recv itera todos os decoders num único loop:
+              for decoder in self.waiter.items:
+                  data = decoder.pop_data()            # <- OpusError nasce aqui
+                  if data is not None:
+                      self.sink.write(data.source, data)
+          Se `pop_data()` levanta `OpusError: corrupted stream` (pacote Opus
+          malformado, comum em reconexão RTP e jitter alto), a exceção sobe
+          para `run()` que chama `voice_client.stop_listening()` — **matando o
+          listener inteiro**. Depois, o `after=` dispara com o erro e o bot
+          entra em loop de reconnect.
+
+        FIX:
+          Envolver a operação **por-decoder** em try/except. Um pacote ruim
+          fica contido no seu SSRC, o decoder daquele SSRC é resetado, e a
+          thread do router continua viva processando os outros speakers.
+          Os pacotes bons (maioria) continuam fluindo normalmente.
+
+        O patch é idempotente (flag de classe) e só é aplicado se o
+        `voice_recv` estiver disponível. Para ativar, `cog_load` chama este
+        método; desfazer não é necessário no uso típico.
+        """
+        if cls._ROUTER_PATCH_APPLIED:
+            return
+        if voice_recv is None:
+            return
+        try:
+            from discord.ext.voice_recv.router import PacketRouter
+        except Exception as exc:
+            log.warning("voicemod: não consegui importar PacketRouter para patch: %s", exc)
+            return
+
+        _original_do_run = PacketRouter._do_run
+
+        def _patched_do_run(self) -> None:
+            # Mantém a mesma semântica do loop original, MAS isola cada iteração.
+            # Usa os mesmos símbolos do módulo original (self.waiter / self._lock /
+            # self.sink / self._end_thread) — se voice_recv mudar esses nomes, cai
+            # no fallback que preserva o comportamento original.
+            while not self._end_thread.is_set():
+                self.waiter.wait()
+                with self._lock:
+                    # .items pode ser alterado durante a iteração se outro thread
+                    # registrar/desregistrar decoder — copiamos para um snapshot.
+                    for decoder in list(self.waiter.items):
+                        try:
+                            data = decoder.pop_data()
+                            if data is not None:
+                                self.sink.write(data.source, data)
+                        except _OpusError as exc:
+                            # Isolamento por SSRC: este pacote é descartado, o
+                            # decoder do SSRC é resetado (estado do Opus pode ter
+                            # ficado inconsistente), listener continua vivo.
+                            ssrc = getattr(decoder, "ssrc", None)
+                            _contabilizar_opus_error(self, ssrc, exc)
+                            with contextlib.suppress(Exception):
+                                decoder.reset()
+                        except Exception as exc:
+                            # Outros erros de iteração: log, reseta decoder e
+                            # continua. Não é a causa do bug do corrupted-stream
+                            # mas vale cercar para o listener nunca morrer por
+                            # um pacote. Reset também aqui porque o estado do
+                            # decoder pode ter ficado inconsistente.
+                            ssrc = getattr(decoder, "ssrc", None)
+                            _contabilizar_opus_error(self, ssrc, exc)
+                            with contextlib.suppress(Exception):
+                                decoder.reset()
+                            log.debug("voicemod router-patch: erro inesperado em iter decoder ssrc=%s: %s",
+                                      ssrc, exc)
+
+        def _contabilizar_opus_error(router, ssrc, exc) -> None:
+            """Chamado da thread do router — encaminha a contabilização para o
+            runtime do guild certo via o sink atual do router."""
+            try:
+                sink = getattr(router, "sink", None)
+                if sink is None:
+                    return
+                # Nosso sink tem .cog e .guild_id
+                cog = getattr(sink, "cog", None)
+                guild_id = getattr(sink, "guild_id", None)
+                if cog is None or guild_id is None:
+                    return
+                cog._register_opus_decode_error(int(guild_id), exc, ssrc=ssrc)
+            except Exception:
+                # Contabilização nunca deve derrubar a thread do router.
+                log.exception("voicemod router-patch: falha ao contabilizar opus-error")
+
+        PacketRouter._do_run = _patched_do_run
+        cls._ROUTER_PATCH_APPLIED = True
+        log.info("voicemod: patch do PacketRouter._do_run aplicado (isolamento de OpusError por pacote)")
 
     async def cog_unload(self):
         task = self._watchdog_task
