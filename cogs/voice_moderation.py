@@ -454,18 +454,11 @@ class VoiceModeration(commands.Cog):
             return False
         deadline = time.monotonic() + max(0.2, float(timeout))
         while time.monotonic() < deadline:
-            if runtime is not None and expected_sink is not None and runtime.sink is not expected_sink:
-                return False
             if self._is_listening_confirmed(vc, runtime):
                 return True
+            # Durante restart, callbacks atrasados de um listener anterior podem
+            # mexer no sink atual; isso não deve derrubar a confirmação imediatamente.
             await asyncio.sleep(max(0.03, float(poll)))
-
-        if runtime is not None and expected_sink is not None and runtime.sink is expected_sink:
-            try:
-                if bool(getattr(vc, "is_connected", lambda: False)()):
-                    return True
-            except Exception:
-                pass
         return False
 
     def _remember_notice_channel(self, guild_id: int, channel_id: int | None) -> None:
