@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import shutil
 import stat
@@ -8,6 +9,27 @@ import threading
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+
+# -----------------------------------------------------------------------------
+# Logging — precisa vir ANTES de qualquer import do discord para capturar os
+# logs de inicialização da biblioteca (gateway/voice/cogs).
+# Nível geral INFO; libs barulhentas (discord.gateway / discord.voice_client)
+# são rebaixadas para WARNING para não poluir. Os logs do cog de moderação
+# (cogs.voice_moderation) ficam em INFO — inclui armar/soft-restart/quedas/
+# patch do router, mas NÃO os opus-decode errors por pacote (que ficam em DEBUG
+# justamente para evitar spam em rajada de reconexão).
+# -----------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logging.getLogger("discord.gateway").setLevel(logging.WARNING)
+logging.getLogger("discord.voice_client").setLevel(logging.WARNING)
+logging.getLogger("discord.player").setLevel(logging.WARNING)
+logging.getLogger("discord.ext.voice_recv").setLevel(logging.INFO)
+# Descomente a linha abaixo temporariamente para diagnóstico granular de pacotes:
+# logging.getLogger("cogs.voice_moderation").setLevel(logging.DEBUG)
 
 import discord
 from discord.ext import commands

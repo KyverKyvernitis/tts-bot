@@ -438,19 +438,77 @@ class VoiceModeration(commands.Cog):
 
         def _contabilizar_opus_error(router, ssrc, exc) -> None:
             """Chamado da thread do router — encaminha a contabilização para o
-            runtime do guild certo via o sink atual do router."""
+            runtime do guild certo via o sink atual do router.
+
+            Adicionalmente, amostra 1 em cada 50 erros para logar o payload bruto
+            (tamanho + primeiros bytes em hex). Isso permite diagnosticar POR QUE
+            o Opus está rejeitando o pacote:
+              - payload começa com \\xbe\\xde → extension header NÃO foi removido
+                pelo decryptor (bug voice_recv ou modo de cripto não suportado)
+              - payload vazio ou muito curto (<3B) → decryptor falhou silenciosamente
+              - primeiros bytes aleatórios → criptografia negociou modo que o
+                voice_recv não decripta corretamente (DAVE, etc)
+              - TOC byte válido (0x??, config 0-31) → decode falhou por outra razão
+
+            Controlado por variável de ambiente VOICEMOD_PAYLOAD_DEBUG=1 para não
+            rodar em produção sem necessidade.
+            """
             try:
                 sink = getattr(router, "sink", None)
                 if sink is None:
                     return
-                # Nosso sink tem .cog e .guild_id
                 cog = getattr(sink, "cog", None)
                 guild_id = getattr(sink, "guild_id", None)
                 if cog is None or guild_id is None:
                     return
                 cog._register_opus_decode_error(int(guild_id), exc, ssrc=ssrc)
+
+                # Amostragem de payload para diagnóstico. Habilitado sob demanda.
+                import os as _os
+                if _os.environ.get("VOICEMOD_PAYLOAD_DEBUG") != "1":
+                    return
+                # Contador por router (local ao objeto) para amostrar 1 em 50.
+                cnt = getattr(router, "_vm_dbg_counter", 0) + 1
+                setattr(router, "_vm_dbg_counter", cnt)
+                if cnt % 50 != 1:
+                    return
+                # Tenta pescar o último pacote do decoder para inspecionar
+                try:
+                    decoders = getattr(router, "decoders", {}) or {}
+                    dec = decoders.get(int(ssrc)) if ssrc is not None else None
+                    buf = getattr(dec, "_buffer", None) if dec is not None else None
+                    # O buffer já consumiu o pacote que falhou — tentamos o próximo
+                    pkt = None
+                    if buf is not None and hasattr(buf, "peek"):
+                        with contextlib.suppress(Exception):
+                            pkt = buf.peek()
+                    raw = getattr(pkt, "decrypted_data", None) if pkt is not None else None
+                    if raw is None:
+                        log.warning(
+                            "voicemod payload-dbg: ssrc=%s sem packet peek disponível (erros=%d)",
+                            ssrc, cnt,
+                        )
+                        return
+                    head = bytes(raw[:8]).hex() if raw else "<vazio>"
+                    # Classifica
+                    if not raw:
+                        hint = "PAYLOAD_VAZIO — decryptor retornou nada"
+                    elif raw.startswith(b"\xbe\xde"):
+                        hint = "EXT_HEADER_NAO_REMOVIDO — bug de decrypt (voice_recv/mode incompatível)"
+                    elif len(raw) < 3:
+                        hint = "PAYLOAD_CURTO_DEMAIS"
+                    elif raw == b"\xf8\xff\xfe":
+                        hint = "OPUS_SILENCE — não deveria dar corrupted stream"
+                    else:
+                        toc_config = (raw[0] >> 3) & 0x1F
+                        hint = f"TOC_byte=0x{raw[0]:02x} config={toc_config} (válido se 0-31)"
+                    log.warning(
+                        "voicemod payload-dbg: ssrc=%s len=%d head=%s -> %s (erros=%d)",
+                        ssrc, len(raw), head, hint, cnt,
+                    )
+                except Exception as dbg_exc:
+                    log.debug("voicemod payload-dbg falhou: %s", dbg_exc)
             except Exception:
-                # Contabilização nunca deve derrubar a thread do router.
                 log.exception("voicemod router-patch: falha ao contabilizar opus-error")
 
         PacketRouter._do_run = _patched_do_run
@@ -1736,9 +1794,22 @@ class VoiceModeration(commands.Cog):
             opus_errs = len(runtime.opus_decode_errors_timeline)
 
             last_packet = float(getattr(runtime, "last_listen_packet_at", 0.0) or 0.0)
+            last_start = float(getattr(runtime, "last_listen_start_at", 0.0) or 0.0)
             if last_packet:
                 since_packet_s = now - last_packet
-                since_packet_txt = f"{since_packet_s:.1f}s atrás" if since_packet_s < 300 else f"{since_packet_s/60:.1f}min atrás"
+                since_packet_txt = (
+                    f"{since_packet_s:.1f}s atrás" if since_packet_s < 300
+                    else f"{since_packet_s/60:.1f}min atrás"
+                )
+            elif last_start and (now - last_start) > 2.0:
+                # Listener armou há algum tempo e NUNCA recebeu pacote bom. É
+                # sinal diferente de "parou de chegar" — ajuda a diagnosticar:
+                # ninguém falou, ou todos os pacotes estão sendo rejeitados.
+                since_start = now - last_start
+                if opus_errs > 0:
+                    since_packet_txt = f"nenhum válido em {since_start:.0f}s (mas chegando e falhando decode)"
+                else:
+                    since_packet_txt = f"nenhum em {since_start:.0f}s (canal silencioso ou sem permissão)"
             else:
                 since_packet_txt = "nenhum ainda"
 
@@ -1751,10 +1822,18 @@ class VoiceModeration(commands.Cog):
                 f"Últ. pacote recebido: {since_packet_txt}",
                 f"Quedas no último min: {drops} · Pacotes Opus ruins no último min: {opus_errs}",
             ]
+            # TTL na exceção técnica — 5min sem erro novo é considerada obsoleta
+            # e não é exibida, para o painel refletir só o estado atual.
             tech = str(getattr(runtime, "last_technical_reason", "") or "").strip()
-            if tech:
-                tech_age = now - float(getattr(runtime, "last_technical_reason_at", 0.0) or now)
+            tech_at = float(getattr(runtime, "last_technical_reason_at", 0.0) or 0.0)
+            if tech and tech_at and (now - tech_at) < 300.0:
+                tech_age = now - tech_at
                 diag_parts.append(f"Últ. exceção técnica ({tech_age:.0f}s atrás): `{tech}`")
+            elif tech and tech_at and (now - tech_at) >= 300.0:
+                # Limpa o resíduo: se há mais de 5min que nada dá errado,
+                # a exceção antiga some do painel.
+                runtime.last_technical_reason = None
+                runtime.last_technical_reason_at = 0.0
             notes.append("\n".join(diag_parts))
 
         accent = discord.Color.green() if enabled else discord.Color.red()
