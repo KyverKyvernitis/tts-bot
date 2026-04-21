@@ -1,11 +1,12 @@
 # discord.py + voice_recv pinados porque o fix do corrupted-stream (em
-# cogs/voice_moderation.py:_install_router_patch) faz monkey-patch nos
-# internals:
-#   - PacketRouter._do_run (isolamento de OpusError por pacote)
-#   - PacketDecryptor._decrypt_rtp_aead_xchacha20_poly1305_rtpsize (fix do
-#     cálculo de offset da extension quando profile != 0xBEDE)
-# Se essas libs mudarem o layout interno, os patches degradam silenciosamente
-# (o try/except preserva o comportamento original, mas o bug volta).
+# cogs/voice_moderation.py:_install_router_patch) faz monkey-patch no
+# PacketRouter._do_run para isolar OpusError por pacote.
+#
+# IMPORTANTE: NÃO instalar `davey`. Se `davey` estiver presente, o discord.py 2.7+
+# ativa DAVE (E2EE) automaticamente, e o voice_recv 0.5.2a NÃO suporta decriptar
+# pacotes E2EE — a moderação de voz não consegue medir volume porque o Opus
+# rejeita todos os pacotes como "corrupted stream". Se precisar desinstalar:
+#   pip uninstall -y davey && systemctl restart tts-bot
 discord.py[voice]>=2.7.1,<2.8
 discord-ext-voice-recv>=0.5.2a,<0.6
 flask

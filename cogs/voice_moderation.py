@@ -537,68 +537,29 @@ class VoiceModeration(commands.Cog):
         except Exception:
             pass
 
-        # --- FIX DA CAUSA-RAIZ DO CORRUPTED STREAM ---------------------------------
-        # Bug no voice_recv 0.5.2a: o método
-        # `PacketDecryptor._decrypt_rtp_aead_xchacha20_poly1305_rtpsize` chama
-        # `packet.update_ext_headers(result)` após o decrypt. Esse método tenta
-        # ler `profile, length = struct.unpack_from('>2sH', data)` e usar `length`
-        # para calcular offset — **mas não valida se `profile == 0xbede`**.
-        # Se um pacote RTP vier com `extended=True` mas a profile não for 0xbede
-        # (ou for lixo após decrypt-with-wrong-state), o `length` é interpretado
-        # como lixo, o offset vira um valor grande e o plaintext é truncado no meio,
-        # entregando bytes que não são Opus válido → OpusError: corrupted stream.
+        # --- DETECÇÃO DE DAVE (Discord Audio/Video Encryption — E2EE) ---
+        # Se a lib `davey` estiver instalada, o discord.py 2.7+ negocia E2EE
+        # automaticamente com o Discord. Os pacotes RTP chegam com DUAS camadas
+        # de cripto: a de transporte (aead_xchacha20_poly1305_rtpsize, que o
+        # voice_recv decifra) e a E2EE (AES-GCM com chaves MLS, que o
+        # voice_recv 0.5.2a NÃO suporta). Resultado: o voice_recv entrega ao
+        # Opus bytes que ainda estão criptografados pela camada E2EE, e o Opus
+        # rejeita todos como "corrupted stream".
         #
-        # Fix: sobrescrever o decrypt para validar a profile mágica antes de
-        # confiar no `update_ext_headers`. Se profile inválida, ignora extension.
+        # Não existe fix via monkey-patch — seria reimplementar DAVE/MLS. A
+        # única solução prática hoje é DESINSTALAR `davey`:
+        #   pip uninstall -y davey && systemctl restart tts-bot
         try:
-            import struct as _struct
-            import nacl.secret as _nacl_secret  # noqa: F401
-            from discord.ext.voice_recv.reader import PacketDecryptor
-
-            _BEDE = b"\xbe\xde"
-
-            def _patched_decrypt_rtp_aead_xchacha20_poly1305_rtpsize(self, packet):
-                packet.adjust_rtpsize()
-                nonce = bytearray(24)
-                nonce[:4] = packet.nonce
-                voice_data = packet.data
-                result = self.box.decrypt(bytes(voice_data), bytes(packet.header), bytes(nonce))
-
-                if packet.extended:
-                    # Validação defensiva ANTES de confiar no length da extension.
-                    # No rtpsize, `update_ext_headers` prepend header[-4:] ao data
-                    # para formar o ext header; vamos espelhar essa lógica mas só
-                    # remover a extension se a profile for realmente 0xBEDE.
-                    try:
-                        ext_candidate = bytes(packet.header[-4:]) + result
-                        if len(ext_candidate) >= 4:
-                            profile = ext_candidate[:2]
-                            length = _struct.unpack_from(">H", ext_candidate, 2)[0]
-                            if profile == _BEDE:
-                                # Extension válida: offset em 32-bit words
-                                # (conforme RFC 5285 / voice_recv original)
-                                total_ext_bytes = 4 + length * 4
-                                # Cuidado: nunca consumir mais bytes do que existem
-                                if total_ext_bytes <= len(ext_candidate):
-                                    # offset no result (que começa 4 bytes depois do ext_candidate)
-                                    effective_offset = total_ext_bytes - 4
-                                    result = result[effective_offset:]
-                                # Se total_ext_bytes > len, a extension é inválida;
-                                # preservamos o result inteiro (opus provavelmente).
-                            # Se profile != 0xBEDE, NÃO removemos nada. O
-                            # voice_recv original removia mesmo assim — era o bug.
-                    except Exception:
-                        # Qualquer falha na inspeção da extension: preserva o result.
-                        pass
-
-                return result
-
-            PacketDecryptor._decrypt_rtp_aead_xchacha20_poly1305_rtpsize = (
-                _patched_decrypt_rtp_aead_xchacha20_poly1305_rtpsize
-            )
-            log.info("voicemod: patch do PacketDecryptor aplicado (fix do rtpsize ext-header)")
-        except Exception as exc:
-            log.warning("voicemod: não consegui patchar PacketDecryptor: %s", exc)
+            import importlib.util as _imputil
+            if _imputil.find_spec("davey") is not None:
+                log.error(
+                    "voicemod: *** ATENÇÃO *** a biblioteca 'davey' está instalada. "
+                    "Isso ativa DAVE (E2EE) no discord.py, e o voice_recv 0.5.2a NÃO "
+                    "suporta decriptar pacotes E2EE — todo áudio recebido vira "
+                    "'corrupted stream'. SOLUÇÃO: `pip uninstall -y davey` e reiniciar."
+                )
+        except Exception:
+            pass
 
         cls._ROUTER_PATCH_APPLIED = True
         log.info("voicemod: patch do PacketRouter._do_run aplicado (isolamento de OpusError por pacote)")
