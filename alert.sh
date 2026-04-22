@@ -28,7 +28,7 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
-PAYLOAD_JSON="$(
+PAYLOAD_JSON="$({
 TYPE="$TYPE" \
 TITLE="$TITLE" \
 BODY="$BODY" \
@@ -39,7 +39,6 @@ python3 - <<'PY'
 import json
 import os
 import re
-import sys
 
 TYPE = os.environ.get("TYPE", "info").strip().lower()
 TITLE = os.environ.get("TITLE", "Sem título").strip()
@@ -73,17 +72,37 @@ LABEL_MAP = {
     "mudanca": "Mudança",
     "arquivos": "Arquivos",
     "arquivos alterados": "Arquivos",
+    "bot": "Bot",
+    "bot health": "Bot",
+    "bot healthcheck": "Bot",
+    "frontend": "Frontend",
+    "backend": "Backend",
     "activity": "Activity",
+    "rollback": "Rollback",
     "duração": "Duração",
     "duracao": "Duração",
     "hora": "Hora",
-    "healthcheck": "Healthcheck",
     "motivo": "Motivo",
     "url": "URL",
     "etapa": "Etapa",
+    "comando": "Comando",
+    "serviço": "Serviço",
+    "servico": "Serviço",
+    "activestate": "Estado ativo",
+    "substate": "Subestado",
+    "result": "Resultado",
+    "execmaincode": "Código",
+    "execmainstatus": "Status",
+    "últimas linhas": "Últimas linhas",
+    "ultimas linhas": "Últimas linhas",
+    "últimas linhas do erro": "Últimas linhas",
+    "ultimas linhas do erro": "Últimas linhas",
 }
 
-INLINE_FIELDS = {"Host", "Branch", "Commit", "Duração"}
+INLINE_FIELDS = {"Host", "Branch", "Commit", "Duração", "Serviço", "Bot", "Activity", "Resultado", "Status", "Código"}
+BULLET_FIELDS = {"Arquivos"}
+CODE_FIELDS = {"Últimas linhas", "Comando"}
+
 
 def trunc(value: str, limit: int) -> str:
     value = (value or "").strip()
@@ -93,8 +112,44 @@ def trunc(value: str, limit: int) -> str:
         return value
     return value[: limit - 1].rstrip() + "…"
 
+
 def normalize_lines(body: str):
     return body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def format_multiline_bullets(value: str) -> str:
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if not lines:
+        return "—"
+    normalized = []
+    for line in lines:
+        if line.startswith("• "):
+            normalized.append(line)
+        elif line.startswith("- "):
+            normalized.append(f"• {line[2:].strip()}")
+        else:
+            normalized.append(f"• {line}")
+    return trunc("\n".join(normalized), 1024)
+
+
+def format_code_block(value: str) -> str:
+    raw = (value or "").strip() or "—"
+    limit = 1012
+    if len(raw) > limit:
+        raw = raw[: limit - 1].rstrip() + "…"
+    return f"```text\n{raw}\n```"
+
+
+def format_field_value(name: str, value: str) -> str:
+    value = (value or "").replace("\t", "  ").strip() or "—"
+    if name in BULLET_FIELDS:
+        return format_multiline_bullets(value)
+    if name in CODE_FIELDS:
+        return format_code_block(value)
+    if "\n" in value and len(value.splitlines()) >= 3:
+        return format_code_block(value)
+    return trunc(value, 1024)
+
 
 def parse_body(body: str):
     lines = normalize_lines(body)
@@ -130,15 +185,19 @@ def parse_body(body: str):
 
             fields.append({
                 "name": trunc(label, 256),
-                "value": trunc(value or "—", 1024),
+                "value": format_field_value(label, value or "—"),
                 "inline": label in INLINE_FIELDS,
             })
             current_idx = len(fields) - 1
         else:
             if current_idx is not None:
                 prev = fields[current_idx]["value"]
-                joined = stripped if prev == "—" else f"{prev}\n{stripped}"
-                fields[current_idx]["value"] = trunc(joined, 1024)
+                if prev.startswith("```text\n") and prev.endswith("\n```"):
+                    prev_plain = prev[len("```text\n"):-len("\n```")]
+                else:
+                    prev_plain = "" if prev == "—" else prev
+                joined = stripped if not prev_plain else f"{prev_plain}\n{stripped}"
+                fields[current_idx]["value"] = format_field_value(fields[current_idx]["name"], joined)
             elif description:
                 description = trunc(f"{description}\n{stripped}", 4096)
             else:
@@ -152,7 +211,8 @@ def parse_body(body: str):
             continue
         cleaned.append(field)
 
-    return description, cleaned, footer
+    return description, cleaned[:25], footer
+
 
 description, fields, footer = parse_body(BODY)
 
@@ -170,7 +230,7 @@ payload = {
             "title": trunc(full_title, 256),
             "description": trunc(description, 4096),
             "color": color,
-            "fields": fields[:25],
+            "fields": fields,
             "footer": {"text": trunc(footer or NOW, 2048)},
             "timestamp": NOW_ISO,
         }
@@ -179,17 +239,17 @@ payload = {
 
 print(json.dumps(payload, ensure_ascii=False))
 PY
-)" || exit 1
+})" || exit 1
 
 TMP_RESP="$(mktemp)"
-HTTP_CODE="$(
+HTTP_CODE="$({
   curl -sS \
     -o "$TMP_RESP" \
     -w '%{http_code}' \
     -H "Content-Type: application/json" \
     -d "$PAYLOAD_JSON" \
     "$ALERT_WEBHOOK_URL"
-)" || {
+})" || {
   rm -f "$TMP_RESP"
   exit 1
 }

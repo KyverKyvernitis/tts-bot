@@ -18,12 +18,12 @@ EXEC_MAIN_STATUS="$(get_prop ExecMainStatus)"
 
 ALERT_TYPE="error"
 ALERT_TITLE="Falha fatal no serviço"
-EXTRA_PREFIX=""
+SUMMARY="O serviço caiu com erro fatal."
 
 if [[ "$FORCE_ALERT" == "1" ]]; then
   ALERT_TYPE="warn"
   ALERT_TITLE="Teste de alerta do serviço"
-  EXTRA_PREFIX="Modo: teste manual\n\n"
+  SUMMARY="Alerta manual para validar o webhook do serviço."
 else
   should_alert=0
 
@@ -42,15 +42,16 @@ fi
 
 LOGS="$(journalctl -u "$UNIT_NAME" -n 25 --no-pager 2>/dev/null | tail -n 20)"
 
-BODY="${EXTRA_PREFIX}Serviço: $DISPLAY_NAME
+BODY="Resumo: $SUMMARY
+Serviço: $DISPLAY_NAME
 Host: $(hostname)
 ActiveState: ${ACTIVE_STATE:-desconhecido}
 SubState: ${SUB_STATE:-desconhecido}
 Result: ${RESULT_STATE:-desconhecido}
 ExecMainCode: ${EXEC_MAIN_CODE:-desconhecido}
 ExecMainStatus: ${EXEC_MAIN_STATUS:-desconhecido}
-
-Últimas linhas do erro:
-$LOGS"
+Últimas linhas:
+$LOGS
+Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
 /home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY"
