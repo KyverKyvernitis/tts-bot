@@ -34,6 +34,16 @@ MAX_PERSONALITY_LENGTH = 2000
 MAX_SYSTEM_EXTRA_LENGTH = 2000  # campo "instruções extras do system prompt"
 MAX_USER_MESSAGE_LENGTH = 1800  # truncamos mensagem do user se maior
 
+# --- Reações visuais durante processamento -----------------------------------
+# Emoji animado custom que o bot coloca na mensagem do usuário enquanto
+# processa, e remove ao responder. Substitua se mudar o emoji no server.
+# Formato: nome:ID (sem < > nem a:). discord.py aceita esse string direto
+# em message.add_reaction quando é custom emoji.
+PROCESSING_REACTION = "areia:1496606578395189473"
+# Fallback se o bot não tiver acesso ao emoji custom (ex: foi removido
+# ou o bot não está no server dono do emoji). Ascii sempre funciona.
+PROCESSING_REACTION_FALLBACK = "⏳"
+
 # -----------------------------------------------------------------------------
 # Parâmetros do modelo
 # -----------------------------------------------------------------------------

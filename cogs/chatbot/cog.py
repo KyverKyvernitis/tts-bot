@@ -301,6 +301,66 @@ class ChatbotCog(commands.Cog):
         return system, messages
 
     # -------------------------------------------------------------------------
+    # Feedback visual: reação durante processamento + quote da mensagem original
+    # -------------------------------------------------------------------------
+
+    async def _add_processing_reaction(self, message: discord.Message) -> Optional[str]:
+        """Adiciona a reação de "processando" na mensagem do usuário.
+
+        Tenta o emoji custom primeiro (PROCESSING_REACTION); se o bot não
+        conseguir usar (não tem acesso, foi deletado, etc), cai pro fallback
+        ascii (⏳). Retorna a string do emoji que foi efetivamente aplicada
+        pra que `_remove_processing_reaction` saiba qual remover — ou None
+        se nenhuma foi aplicada (aí não há nada pra limpar).
+        """
+        for candidate in (C.PROCESSING_REACTION, C.PROCESSING_REACTION_FALLBACK):
+            try:
+                await message.add_reaction(candidate)
+                return candidate
+            except (discord.HTTPException, discord.NotFound, discord.Forbidden):
+                continue
+        return None
+
+    async def _remove_processing_reaction(
+        self, message: discord.Message, emoji_str: Optional[str]
+    ) -> None:
+        """Remove a reação que foi adicionada. Silencioso em qualquer falha
+        (user pode ter deletado a mensagem, bot perdeu permissão, etc)."""
+        if not emoji_str:
+            return
+        try:
+            me = self.bot.user
+            if me is None:
+                return
+            # remove_reaction precisa de objeto User/Member + emoji
+            await message.remove_reaction(emoji_str, me)
+        except (discord.HTTPException, discord.NotFound, discord.Forbidden):
+            pass
+
+    def _format_reply_quote(self, user_name: str, user_content: str) -> str:
+        """Formata o início da resposta como quote markdown, emulando reply
+        sem gerar ping.
+
+        Exemplo de saída:
+            > **Ana:** oi como vai
+            (em seguida, o conteúdo da resposta da IA é anexado pelo chamador)
+
+        Discord renderiza com uma barrinha lateral igual à reply nativa,
+        só que sem a seta clicável e sem notificação.
+        """
+        # Trunca a mensagem original pra 120 chars no quote — pra não gastar
+        # espaço da resposta se o usuário mandou um textão.
+        snippet = (user_content or "").strip().replace("\n", " ")
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "..."
+        # Escapa asteriscos no nome do user (evita bold quebrado se o nome
+        # tiver **). Aspas como fallback não precisa escapar.
+        safe_name = (user_name or "alguém").replace("**", "").strip()
+        if not safe_name:
+            safe_name = "alguém"
+        return f"> **{safe_name}:** {snippet}"
+
+    # -------------------------------------------------------------------------
     # Main listener
     # -------------------------------------------------------------------------
 
@@ -346,10 +406,10 @@ class ChatbotCog(commands.Cog):
 
             # Cooldown primeiro — barato, rejeita spam antes de tocar IA/Mongo.
             if self._is_user_on_cooldown(guild.id, author.id):
-                # Dá uma reação como feedback silencioso ao invés de texto.
-                # Assim não polui canal com "Calma" repetido.
+                # Reação ✋ pra sinalizar "calma, espera" — diferente do
+                # emoji de processing (areia) pra não confundir visualmente.
                 try:
-                    await message.add_reaction("⏳")
+                    await message.add_reaction("✋")
                 except discord.HTTPException:
                     pass
                 return
@@ -417,8 +477,17 @@ class ChatbotCog(commands.Cog):
     ) -> None:
         """Parte 2: chama IA + envia via webhook.
 
-        Já está dentro da fila (queue depth incrementado). Só precisa respeitar
-        o semaphore (concorrência real com provider).
+        Fluxo:
+          1. Reage na msg do user com emoji animado "processando".
+          2. Lê históricos (pessoal + coletivo) em paralelo.
+          3. Monta prompt e chama provider dentro do semaphore.
+          4. Prepende um quote markdown (sem ping) pra emular reply nativo,
+             já que webhook não suporta message_reference.
+          5. Envia via webhook com identidade do profile.
+          6. Remove a reação de processando.
+          7. Persiste histórico em task separada (fire-and-forget).
+
+        Erros em qualquer passo não crasheiam — apenas logam e limpam a reação.
         """
         guild = message.guild
         author = message.author
@@ -433,86 +502,111 @@ class ChatbotCog(commands.Cog):
 
         user_display = str(getattr(author, "display_name", author.name))
 
-        # Busca históricos do Mongo (duas reads em paralelo via gather)
+        # 1. Reação de processando
+        reaction_applied = await self._add_processing_reaction(message)
+
+        # Daqui pra frente, tudo que retorna precisa passar pelo finally
+        # que remove a reação. Usa try/finally explícito em vez de bloco `with`.
         try:
-            user_hist, guild_hist = await asyncio.gather(
-                self._memory.get_user_history(guild.id, author.id),
-                self._memory.get_guild_history(guild.id),
-            )
-        except Exception:
-            log.exception("chatbot: falha ao ler histórico")
-            user_hist = []
-            guild_hist = []
-
-        system, messages = self._build_messages(
-            profile=profile,
-            user_history=user_hist,
-            guild_context=guild_hist,
-            user_name=user_display,
-            user_message=content,
-        )
-
-        # Chamada ao provider (dentro do semaphore = limite real de concorrência)
-        async with self._provider_sem:
+            # 2. Busca históricos do Mongo (duas reads em paralelo via gather)
             try:
-                reply = await self._router.chat(
-                    system=system,
-                    messages=messages,
-                    temperature=profile.temperature,
+                user_hist, guild_hist = await asyncio.gather(
+                    self._memory.get_user_history(guild.id, author.id),
+                    self._memory.get_guild_history(guild.id),
                 )
-            except AllProvidersExhausted:
-                log.warning("chatbot: todos providers exauridos")
+            except Exception:
+                log.exception("chatbot: falha ao ler histórico")
+                user_hist = []
+                guild_hist = []
+
+            system, messages = self._build_messages(
+                profile=profile,
+                user_history=user_hist,
+                guild_context=guild_hist,
+                user_name=user_display,
+                user_message=content,
+            )
+
+            # 3. Chamada ao provider (dentro do semaphore)
+            async with self._provider_sem:
                 try:
-                    await message.reply(
-                        "🤖 Estou com problemas técnicos. Tenta de novo daqui a pouco.",
-                        mention_author=False,
-                        delete_after=15.0,
+                    reply = await self._router.chat(
+                        system=system,
+                        messages=messages,
+                        temperature=profile.temperature,
+                    )
+                except AllProvidersExhausted:
+                    log.warning("chatbot: todos providers exauridos")
+                    try:
+                        await message.reply(
+                            "🤖 Estou com problemas técnicos. Tenta de novo daqui a pouco.",
+                            mention_author=False,
+                            delete_after=15.0,
+                        )
+                    except discord.HTTPException:
+                        pass
+                    return
+                except ProviderError as e:
+                    log.warning("chatbot: ProviderError: %s", e)
+                    return
+                except asyncio.TimeoutError:
+                    log.warning("chatbot: timeout no provider")
+                    return
+                except Exception:
+                    log.exception("chatbot: erro inesperado ao chamar provider")
+                    return
+
+            reply = (reply or "").strip()
+            if not reply:
+                return  # sem resposta útil, fica quieto
+
+            # 4. Quote no início pra emular reply (sem ping). Limite de 2000
+            # chars total do Discord — o quote consome ~150, o resto cabe.
+            quote_line = self._format_reply_quote(user_display, content)
+            # Calcula quanto espaço sobra pra reply. Garante um mínimo de 200
+            # chars pra resposta, senão corta o snippet do quote mais agressivamente.
+            budget = 2000 - len(quote_line) - 2  # -2 pra "\n" de separação + margem
+            if budget < 200:
+                # Edge case: mensagem original era muito longa — quote fica
+                # menor pra caber resposta razoável.
+                quote_line = self._format_reply_quote(user_display, content[:60])
+                budget = 2000 - len(quote_line) - 2
+            if len(reply) > budget:
+                reply = reply[: max(200, budget - 3)] + "..."
+            final_content = f"{quote_line}\n{reply}"
+
+            # 5. Envia via webhook com identidade do profile
+            sent = await self._webhooks.send_as_profile(
+                channel=channel,
+                profile_name=profile.name,
+                avatar_url=profile.avatar_url,
+                content=final_content,
+            )
+            if sent is None:
+                # Fallback: envia como o próprio bot avisando que falhou o webhook.
+                try:
+                    fallback_body = f"**{profile.name}:**\n{final_content}"
+                    await channel.send(
+                        fallback_body[:1990],
+                        allowed_mentions=discord.AllowedMentions.none(),
                     )
                 except discord.HTTPException:
-                    pass
-                return
-            except ProviderError as e:
-                log.warning("chatbot: ProviderError: %s", e)
-                return
-            except asyncio.TimeoutError:
-                log.warning("chatbot: timeout no provider")
-                return
-            except Exception:
-                log.exception("chatbot: erro inesperado ao chamar provider")
-                return
+                    log.warning("chatbot: fallback send também falhou | channel=%s", channel.id)
+                    return
 
-        reply = (reply or "").strip()
-        if not reply:
-            return  # sem resposta útil, fica quieto
-
-        # Envia via webhook com a identidade do profile
-        sent = await self._webhooks.send_as_profile(
-            channel=channel,
-            profile_name=profile.name,
-            avatar_url=profile.avatar_url,
-            content=reply,
-        )
-        if sent is None:
-            # Fallback: envia como o próprio bot avisando que falhou o webhook.
-            try:
-                await channel.send(
-                    f"**{profile.name}:** {reply[:1900]}",
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            except discord.HTTPException:
-                log.warning("chatbot: fallback send também falhou | channel=%s", channel.id)
-                return
-
-        # Persiste histórico (pessoal + coletivo). Fire-and-forget pra não
-        # atrasar a resposta visível.
-        asyncio.create_task(self._persist_turn(
-            guild_id=guild.id,
-            user_id=author.id,
-            user_name=user_display,
-            user_message=content,
-            assistant_message=reply,
-            user_history_size=profile.history_size,
-        ))
+            # 7. Persiste histórico (pessoal + coletivo). Fire-and-forget.
+            # Passamos `reply` SEM o quote — o histórico é semântico, não UI.
+            asyncio.create_task(self._persist_turn(
+                guild_id=guild.id,
+                user_id=author.id,
+                user_name=user_display,
+                user_message=content,
+                assistant_message=reply,
+                user_history_size=profile.history_size,
+            ))
+        finally:
+            # 6. Remove a reação independente de ter dado certo ou não
+            await self._remove_processing_reaction(message, reaction_applied)
 
     async def _persist_turn(
         self,

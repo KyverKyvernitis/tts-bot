@@ -43,9 +43,10 @@ from .lru_cache import LRUCacheTTL
 log = logging.getLogger(__name__)
 
 
-# Nome fixo do webhook gerenciado pelo bot. Escolhemos "ChatbotBridge" sem
-# espaços pra minimizar risco de conflito com webhooks que usuários possam ter.
-_MANAGED_WEBHOOK_NAME = "ChatbotBridge"
+# Nome fixo do webhook gerenciado pelo bot. Minúsculo e curto —
+# vai aparecer como username default do webhook caso algum send falhe
+# em aplicar o override (edge case).
+_MANAGED_WEBHOOK_NAME = "Chatbot"
 
 
 @dataclass
