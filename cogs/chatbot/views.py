@@ -102,9 +102,15 @@ class ProfileCreateModal(discord.ui.Modal, title="Criar profile do chatbot"):
         default=str(C.DEFAULT_HISTORY_SIZE),
     )
 
-    def __init__(self, *, store: ProfileStore, on_complete: Optional[Callable] = None):
+    def __init__(
+        self, *,
+        store: ProfileStore,
+        guild_limit: int = C.MAX_PROFILES_PER_GUILD,
+        on_complete: Optional[Callable] = None,
+    ):
         super().__init__(timeout=600.0)
         self._store = store
+        self._guild_limit = int(guild_limit)
         self._on_complete = on_complete
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -112,6 +118,25 @@ class ProfileCreateModal(discord.ui.Modal, title="Criar profile do chatbot"):
         if guild is None:
             await interaction.response.send_message(
                 "Este comando só funciona dentro de um servidor.", ephemeral=True
+            )
+            return
+
+        # Checa limite aqui (não antes do modal) pra não estourar o timeout
+        # de 3s da interaction em servidores com Mongo mais lento.
+        try:
+            count = await self._store.count_profiles(guild.id)
+        except Exception:
+            log.exception("chatbot: falha ao contar profiles")
+            await interaction.response.send_message(
+                "❌ Erro ao acessar banco. Tenta de novo em alguns segundos.",
+                ephemeral=True,
+            )
+            return
+        if count >= self._guild_limit:
+            await interaction.response.send_message(
+                f"❌ Limite de {self._guild_limit} profiles atingido. "
+                f"Apague algum com `/chatbot apagar` antes de criar outro.",
+                ephemeral=True,
             )
             return
 

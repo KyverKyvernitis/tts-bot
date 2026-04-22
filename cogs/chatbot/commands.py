@@ -59,16 +59,20 @@ async def _profile_autocomplete(
 
     Acessa a instância da cog via interaction.client — precisa que o cog
     esteja carregado com self.bot.get_cog("Chatbot") disponível.
+
+    Qualquer exceção aqui é silenciada — autocomplete nunca pode crashar
+    (o Discord mostra "No options found" em vez de erro pro user).
     """
-    cog = interaction.client.get_cog("Chatbot")
-    if cog is None or interaction.guild is None:
-        return []
-    profiles = getattr(cog, "_profiles", None)
-    if profiles is None:
-        return []
     try:
+        cog = interaction.client.get_cog("Chatbot")
+        if cog is None or interaction.guild is None:
+            return []
+        profiles = getattr(cog, "_profiles", None)
+        if profiles is None:
+            return []
         all_profiles = await profiles.list_profiles(interaction.guild.id)
     except Exception:
+        log.exception("chatbot: falha no autocomplete")
         return []
 
     current_lower = (current or "").lower()
@@ -83,6 +87,42 @@ async def _profile_autocomplete(
         if len(out) >= 25:  # limite do Discord
             break
     return out
+
+
+def _safe_slash(func):
+    """Decorator: captura qualquer exceção em um slash command e responde ao
+    usuário com erro amigável em vez de deixar "aplicativo não respondeu".
+
+    O Discord dá só 3 segundos pra responder uma interaction, e se o comando
+    ainda não chamou `interaction.response.*`, o user vê "aplicativo não
+    respondeu". Com esse wrapper:
+      - Exceção antes de responder → tenta responder com erro.
+      - Exceção depois de responder → tenta followup.
+      - Exceção no followup → só loga. Nada mais a fazer.
+
+    Uso: aplica em cima de `@chatbot.command(...)` nos handlers.
+    """
+    import functools
+
+    @functools.wraps(func)
+    async def wrapper(self, interaction: discord.Interaction, *args, **kwargs):
+        try:
+            return await func(self, interaction, *args, **kwargs)
+        except Exception as exc:
+            log.exception("chatbot: exceção em %s", func.__name__)
+            err_msg = (
+                "❌ Erro interno no comando. Já anotei nos logs, tenta de novo "
+                "em alguns segundos."
+            )
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(err_msg, ephemeral=True)
+                else:
+                    await interaction.followup.send(err_msg, ephemeral=True)
+            except Exception:
+                pass  # último recurso: se nem o aviso de erro funciona, desiste
+
+    return wrapper
 
 
 class ChatbotCommandsMixin:
@@ -123,6 +163,7 @@ class ChatbotCommandsMixin:
     # --- /chatbot criar -------------------------------------------------------
 
     @chatbot.command(name="criar", description="Cria um novo profile de chatbot")
+    @_safe_slash
     async def chatbot_criar(self, interaction: discord.Interaction):
         if not await _staff_check(interaction):
             await interaction.response.send_message(
@@ -143,18 +184,12 @@ class ChatbotCommandsMixin:
             )
             return
 
-        # Checa limite antes de abrir o modal — UX melhor do que deixar criar
-        # e falhar depois.
-        count = await self._profiles.count_profiles(guild.id)
-        if count >= C.MAX_PROFILES_PER_GUILD:
-            await interaction.response.send_message(
-                f"❌ O servidor já atingiu o limite de {C.MAX_PROFILES_PER_GUILD} "
-                f"profiles. Apague algum antes de criar outro com `/chatbot apagar`.",
-                ephemeral=True,
-            )
-            return
-
-        modal = ProfileCreateModal(store=self._profiles)
+        # IMPORTANTE: abrir o modal PRIMEIRO (antes de ir ao Mongo).
+        # Discord dá 3s pra responder a interaction; se formos ao Mongo antes
+        # do send_modal e demorar >3s, aparece "aplicativo não respondeu".
+        # A checagem de limite é feita lá no on_submit do modal (também dentro
+        # do próprio create_profile, defensivamente).
+        modal = ProfileCreateModal(store=self._profiles, guild_limit=C.MAX_PROFILES_PER_GUILD)
         await interaction.response.send_modal(modal)
 
     # --- /chatbot editar <profile> --------------------------------------------
@@ -162,6 +197,7 @@ class ChatbotCommandsMixin:
     @chatbot.command(name="editar", description="Edita um profile existente")
     @app_commands.describe(profile="Profile para editar")
     @app_commands.autocomplete(profile=_profile_autocomplete)
+    @_safe_slash
     async def chatbot_editar(self, interaction: discord.Interaction, profile: str):
         if not await _staff_check(interaction):
             await interaction.response.send_message(
@@ -198,6 +234,7 @@ class ChatbotCommandsMixin:
     @chatbot.command(name="apagar", description="Apaga um profile (não volta)")
     @app_commands.describe(profile="Profile para apagar")
     @app_commands.autocomplete(profile=_profile_autocomplete)
+    @_safe_slash
     async def chatbot_apagar(self, interaction: discord.Interaction, profile: str):
         if not await _staff_check(interaction):
             await interaction.response.send_message(
@@ -253,6 +290,7 @@ class ChatbotCommandsMixin:
     # --- /chatbot listar ------------------------------------------------------
 
     @chatbot.command(name="listar", description="Lista todos os profiles do servidor")
+    @_safe_slash
     async def chatbot_listar(self, interaction: discord.Interaction):
         if not await _staff_check(interaction):
             await interaction.response.send_message(
@@ -303,6 +341,7 @@ class ChatbotCommandsMixin:
     @chatbot.command(name="ativar", description="Escolhe o profile ativo do servidor")
     @app_commands.describe(profile="Profile para ativar (substitui o atual)")
     @app_commands.autocomplete(profile=_profile_autocomplete)
+    @_safe_slash
     async def chatbot_ativar(self, interaction: discord.Interaction, profile: str):
         if not await _staff_check(interaction):
             await interaction.response.send_message(
@@ -342,6 +381,7 @@ class ChatbotCommandsMixin:
     # --- /chatbot desativar ---------------------------------------------------
 
     @chatbot.command(name="desativar", description="Desativa o chatbot (remove profile ativo)")
+    @_safe_slash
     async def chatbot_desativar(self, interaction: discord.Interaction):
         if not await _staff_check(interaction):
             await interaction.response.send_message(
@@ -376,6 +416,7 @@ class ChatbotCommandsMixin:
     # --- /chatbot reset_server ------------------------------------------------
 
     @chatbot.command(name="reset_server", description="Apaga TODA a memória do chatbot neste servidor")
+    @_safe_slash
     async def chatbot_reset_server(self, interaction: discord.Interaction):
         if not await _staff_check(interaction):
             await interaction.response.send_message(
@@ -424,6 +465,7 @@ class ChatbotCommandsMixin:
         name="reset",
         description="Reseta sua memória pessoal com o chatbot",
     )
+    @_safe_slash
     async def reset(self, interaction: discord.Interaction):
         if not self._require_ready(interaction):
             await interaction.response.send_message(
