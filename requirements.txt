@@ -1,21 +1,5 @@
-# IMPORTANTE — PINS CRÍTICOS:
-#
-# discord.py 2.7+ tornou `davey` (DAVE/E2EE) OBRIGATÓRIO:
-#   VoiceClient.__init__ faz `raise RuntimeError('davey library needed...')`
-#   se davey não estiver instalado. Mas se davey ESTÁ instalado, ele ativa DAVE
-#   automaticamente e o voice_recv 0.5.2a não suporta decriptar a camada E2EE
-#   — o resultado é "OpusError: corrupted stream" em 100% dos pacotes de voz.
-#
-# Solução: ficar em discord.py 2.6.x, que:
-#   - tem o modo moderno aead_xchacha20_poly1305_rtpsize (compatível com voice_recv)
-#   - NÃO exige davey → NÃO ativa DAVE → voice_recv decripta corretamente
-#   - suporta voz sem bloqueio
-#
-# voice_recv pinado porque o fix do corrupted-stream (em
-# cogs/voice_moderation.py:_install_router_patch) faz monkey-patch no
-# PacketRouter._do_run para isolar OpusError por pacote.
-discord.py[voice]
-discord-ext-voice-recv>=0.5.2a,<0.6
+discord.py[voice]>=2.7.1,<2.8
+davey
 flask
 motor
 edge-tts
