@@ -11,8 +11,8 @@ Responsabilidades:
 NÃO bloqueia o event loop: todo processamento vai em asyncio.create_task().
 O listener `on_message` retorna em <10ms mesmo quando a IA demora 5s.
 
-Commands (slash) vão em `views.py` e `_commands.py` — iteração 3.
-Aqui no cog.py só o listener + helpers compartilhados.
+Slash commands ficam em `commands.py` como mixin (`ChatbotCommandsMixin`)
+e são herdados por esta classe. Modais ficam em `views.py`.
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ import discord
 from discord.ext import commands
 
 from . import constants as C
+from .commands import ChatbotCommandsMixin
 from .memory import MemoryStore, MemoryEntry
 from .profiles import ProfileStore, ChatbotProfile
 from .providers import (
@@ -41,8 +42,13 @@ from .webhooks import WebhookManager
 log = logging.getLogger(__name__)
 
 
-class ChatbotCog(commands.Cog):
-    """Cog principal do chatbot. Tudo outro depende desta instância."""
+class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
+    """Cog principal do chatbot. Tudo outro depende desta instância.
+
+    Herda de `ChatbotCommandsMixin` que adiciona os slash commands (veja
+    commands.py). O nome "Chatbot" é usado no bot.get_cog() para lookup —
+    os comandos do mixin assumem isso via `interaction.client.get_cog("Chatbot")`.
+    """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -406,10 +412,10 @@ class ChatbotCog(commands.Cog):
 
             # Cooldown primeiro — barato, rejeita spam antes de tocar IA/Mongo.
             if self._is_user_on_cooldown(guild.id, author.id):
-                # Reação ✋ pra sinalizar "calma, espera" — diferente do
-                # emoji de processing (areia) pra não confundir visualmente.
+                # Reação ⌛ sinaliza "calma, espera". Diferente do emoji custom
+                # de "processando" (areia) pra não confundir visualmente.
                 try:
-                    await message.add_reaction("✋")
+                    await message.add_reaction("⌛")
                 except discord.HTTPException:
                     pass
                 return
