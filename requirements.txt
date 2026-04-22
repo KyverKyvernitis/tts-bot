@@ -14,7 +14,7 @@
 # voice_recv pinado porque o fix do corrupted-stream (em
 # cogs/voice_moderation.py:_install_router_patch) faz monkey-patch no
 # PacketRouter._do_run para isolar OpusError por pacote.
-discord.py[voice]>=2.6.0,<2.7
+discord.py[voice]
 discord-ext-voice-recv>=0.5.2a,<0.6
 flask
 motor
