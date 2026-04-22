@@ -335,50 +335,22 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 await asyncio.sleep(8.0 + (attempt * 4.0))
 
     async def _get_voice_moderation_settings(self, guild_id: int) -> dict:
-        db = self._get_db()
-        if db is None or not hasattr(db, "get_voice_moderation_settings"):
-            return {}
-        try:
-            settings = db.get_voice_moderation_settings(guild_id)
-            settings = await self._maybe_await(settings)
-            return dict(settings or {})
-        except Exception as e:
-            print(f"[tts_voice] erro ao consultar moderação de voz da guild {guild_id}: {e}")
-            return {}
+        return {}
 
     async def _voice_should_self_deaf(self, guild_id: int) -> bool:
-        settings = await self._get_voice_moderation_settings(guild_id)
-        return not bool(settings.get("enabled", False))
+        return True
 
     async def _should_use_receive_voice_client(self, guild_id: int) -> bool:
-        settings = await self._get_voice_moderation_settings(guild_id)
-        return bool(settings.get("enabled", False))
+        return False
 
     async def _notify_voice_moderation_ready(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
-        cog = self.bot.get_cog("VoiceModeration")
-        if cog is None or not hasattr(cog, "handle_voice_client_ready"):
-            return
-        try:
-            await cog.handle_voice_client_ready(guild, vc or self._get_voice_client_for_guild(guild))
-        except Exception as e:
-            print(f"[tts_voice] erro ao notificar moderação de voz na guild {guild.id}: {e}")
+        return
+
     async def _notify_voice_moderation_playback_start(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
-        cog = self.bot.get_cog("VoiceModeration")
-        if cog is None or not hasattr(cog, "pause_for_tts_playback"):
-            return
-        try:
-            await cog.pause_for_tts_playback(guild, vc or self._get_voice_client_for_guild(guild))
-        except Exception as e:
-            print(f"[tts_voice] erro ao pausar moderação de voz na guild {guild.id}: {e}")
+        return
 
     async def _notify_voice_moderation_playback_end(self, guild: discord.Guild, vc: discord.VoiceClient | None = None) -> None:
-        cog = self.bot.get_cog("VoiceModeration")
-        if cog is None or not hasattr(cog, "resume_after_tts_playback"):
-            return
-        try:
-            await cog.resume_after_tts_playback(guild, vc or self._get_voice_client_for_guild(guild))
-        except Exception as e:
-            print(f"[tts_voice] erro ao retomar moderação de voz na guild {guild.id}: {e}")
+        return
 
 
     async def _set_user_tts_and_refresh(self, guild_id: int, user_id: int, *, history_entry: str | None = None, **kwargs):
@@ -1448,19 +1420,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         async def _build_connect_kwargs() -> dict:
             should_self_deaf = await _desired_self_deaf()
-            kwargs = {"self_deaf": should_self_deaf}
-            try:
-                use_receive_client = bool(await self._should_use_receive_voice_client(guild.id))
-            except Exception:
-                use_receive_client = False
-            if use_receive_client:
-                try:
-                    from discord.ext import voice_recv
-
-                    kwargs["cls"] = voice_recv.VoiceRecvClient
-                except Exception:
-                    pass
-            return kwargs
+            return {"self_deaf": should_self_deaf}
 
         lock = self._get_voice_connect_lock(guild.id)
         async with lock:
@@ -1468,14 +1428,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             if self._is_voice_client_stale(guild, vc):
                 await self._recover_stale_voice_client(guild, reason="ensure_connected")
                 vc = self._get_voice_client_for_guild(guild)
-            try:
-                should_use_receive_client = bool(await self._should_use_receive_voice_client(guild.id))
-            except Exception:
-                should_use_receive_client = False
             is_receive_client = bool(vc and hasattr(vc, "listen") and hasattr(vc, "is_listening"))
 
             if vc and vc.is_connected() and vc.channel and vc.channel.id == voice_channel.id:
-                if not should_use_receive_client or is_receive_client:
+                if not is_receive_client:
                     await _ensure_expected_voice_state()
                     await self._set_remembered_voice_channel(guild.id, getattr(voice_channel, "id", None))
                     self._remember_expected_voice_channel(guild.id, getattr(voice_channel, "id", None))
@@ -1483,13 +1439,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
                     self._cancel_runtime_voice_restore(guild.id)
                     self._clear_manual_voice_disconnect(guild.id)
-                    await self._notify_voice_moderation_ready(guild, vc)
                     return vc
                 try:
                     if vc.is_playing() or vc.is_paused():
                         await _ensure_expected_voice_state()
                         await self._set_remembered_voice_channel(guild.id, getattr(voice_channel, "id", None))
-                        await self._notify_voice_moderation_ready(guild, vc)
                         return vc
                 except Exception:
                     pass
@@ -1509,13 +1463,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
                 self._cancel_runtime_voice_restore(guild.id)
                 self._clear_manual_voice_disconnect(guild.id)
-                await self._notify_voice_moderation_ready(guild, new_vc)
                 print(f"[tts_voice] Conectado no canal {voice_channel.id} na guild {guild.id}")
                 return new_vc
 
             try:
                 if vc and vc.is_connected():
-                    if should_use_receive_client and not is_receive_client:
+                    if is_receive_client:
                         try:
                             await vc.disconnect(force=True)
                         except Exception:
@@ -1530,7 +1483,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
                         self._cancel_runtime_voice_restore(guild.id)
                         self._clear_manual_voice_disconnect(guild.id)
-                        await self._notify_voice_moderation_ready(guild, vc)
                         print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return vc
                     except Exception as move_err:
@@ -1558,7 +1510,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
                         self._cancel_runtime_voice_restore(guild.id)
                         self._clear_manual_voice_disconnect(guild.id)
-                        await self._notify_voice_moderation_ready(guild, current_vc)
                         return current_vc
                     try:
                         await current_vc.move_to(voice_channel)
@@ -1569,7 +1520,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
                         self._cancel_runtime_voice_restore(guild.id)
                         self._clear_manual_voice_disconnect(guild.id)
-                        await self._notify_voice_moderation_ready(guild, current_vc)
                         print(f"[tts_voice] Movido para canal {voice_channel.id} na guild {guild.id}")
                         return current_vc
                     except Exception:
@@ -1733,7 +1683,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         print(
                             f"[tts_voice] falha ao corrigir estado de voz no voice_state_update | guild={guild.id} channel={getattr(after.channel, 'id', None)} self_deaf={desired_self_deaf} error={e}"
                         )
-                await self._notify_voice_moderation_ready(guild, vc)
             elif before.channel is not None:
                 print(f"[tts_voice] bot saiu da call | guild={guild.id} channel={getattr(before.channel, 'id', None)}")
                 manual_or_intentional = (

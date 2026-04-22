@@ -14,10 +14,7 @@ from pathlib import Path, PurePosixPath
 # Logging — precisa vir ANTES de qualquer import do discord para capturar os
 # logs de inicialização da biblioteca (gateway/voice/cogs).
 # Nível geral INFO; libs barulhentas (discord.gateway / discord.voice_client)
-# são rebaixadas para WARNING para não poluir. Os logs do cog de moderação
-# (cogs.voice_moderation) ficam em INFO — inclui armar/soft-restart/quedas/
-# patch do router, mas NÃO os opus-decode errors por pacote (que ficam em DEBUG
-# justamente para evitar spam em rajada de reconexão).
+# são rebaixadas para WARNING para não poluir.
 # -----------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -27,19 +24,6 @@ logging.basicConfig(
 logging.getLogger("discord.gateway").setLevel(logging.WARNING)
 logging.getLogger("discord.voice_client").setLevel(logging.WARNING)
 logging.getLogger("discord.player").setLevel(logging.WARNING)
-logging.getLogger("discord.ext.voice_recv").setLevel(logging.INFO)
-# Descomente a linha abaixo temporariamente para diagnóstico granular de pacotes:
-# logging.getLogger("cogs.voice_moderation").setLevel(logging.DEBUG)
-
-# Quando o debug de payload está ligado, também subimos o nível de logs do
-# voice_recv para DEBUG — pegamos speaking events (que mapeiam SSRC→user) e
-# negociação de modo de cripto. Sem isso fica impossível diagnosticar por que
-# o decrypt está devolvendo lixo binário.
-if os.environ.get("VOICEMOD_PAYLOAD_DEBUG") == "1":
-    logging.getLogger("discord.ext.voice_recv.gateway").setLevel(logging.DEBUG)
-    logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.DEBUG)
-    logging.getLogger("discord.voice_state").setLevel(logging.DEBUG)
-    logging.getLogger("discord.gateway").setLevel(logging.INFO)
 
 import discord
 from discord.ext import commands
@@ -129,6 +113,8 @@ class BotLocal(commands.Bot):
 
             if entry.endswith(".py"):
                 module_name = entry[:-3]
+                if module_name == "voice_moderation":
+                    continue
                 ext = f"cogs.{module_name}"
                 extensions.append(ext)
                 continue

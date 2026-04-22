@@ -1043,10 +1043,6 @@ class TTSAudioMixin:
                 if not finished.done():
                     loop.call_soon_threadsafe(finished.set_result, None)
 
-        if guild is not None and hasattr(self, "_notify_voice_moderation_playback_start"):
-            with contextlib.suppress(Exception):
-                await self._maybe_await(self._notify_voice_moderation_playback_start(guild, vc))
-
         try:
             source_setup_started_at = time.monotonic()
             source = discord.FFmpegPCMAudio(
@@ -1077,9 +1073,7 @@ class TTSAudioMixin:
                 "playback_started_at": playback_started_at,
             }
         finally:
-            if guild is not None and hasattr(self, "_notify_voice_moderation_playback_end"):
-                with contextlib.suppress(Exception):
-                    await self._maybe_await(self._notify_voice_moderation_playback_end(guild, vc))
+            pass
 
     async def _reset_voice_client(self, guild: discord.Guild, *, reason: str = "unknown") -> None:
         lock_getter = getattr(self, "_get_voice_connect_lock", None)
@@ -1235,23 +1229,18 @@ class TTSAudioMixin:
         if target_channel is None:
             return None
 
-        should_use_receive_client = False
-        try:
-            checker = getattr(self, "_should_use_receive_voice_client", None)
-            if checker is not None:
-                should_use_receive_client = bool(await self._maybe_await(checker(guild.id)))
-        except Exception:
-            should_use_receive_client = False
-
         vc = self._get_voice_client_for_guild(guild)
         is_receive_client = bool(vc is not None and hasattr(vc, "listen") and hasattr(vc, "is_listening"))
         if vc is not None and vc.is_connected():
-            if vc.channel is not None and vc.channel.id == item.channel_id:
-                if not should_use_receive_client or is_receive_client:
-                    await self._ensure_self_deaf_fast(guild, target_channel)
-                    state.last_channel_id = item.channel_id
-                    return vc
-            elif not (should_use_receive_client and not is_receive_client):
+            if is_receive_client:
+                with contextlib.suppress(Exception):
+                    await vc.disconnect(force=True)
+                vc = None
+            elif vc.channel is not None and vc.channel.id == item.channel_id:
+                await self._ensure_self_deaf_fast(guild, target_channel)
+                state.last_channel_id = item.channel_id
+                return vc
+            else:
                 try:
                     await vc.move_to(target_channel)
                     await self._ensure_self_deaf_fast(guild, target_channel)
