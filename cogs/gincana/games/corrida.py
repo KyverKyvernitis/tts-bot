@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import random
 
 import discord
@@ -173,6 +174,12 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self._results_applied = False
         self._pending_render_signature = None
         self.activated_indices: set[int] = set()
+        # Timestamp UTC de quando o step atual começou (setado em _activate_step,
+        # limpo em _close_current_step). Usado no handle_press para detectar e
+        # descartar cliques atrasados: interactions cujo `created_at` é anterior
+        # a esse instante vieram de um step anterior que já foi fechado, e
+        # contabilizá-las no step atual altera o hits count aleatoriamente.
+        self.step_start_time: datetime.datetime | None = None
         self.buttons = [_RaceImpulseButton(self, idx) for idx in range(_RACE_IMPULSE_BUTTON_COUNT)]
         self._rebuild()
 
@@ -254,10 +261,27 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             current_step = int(self.step_index)
             active_index = self.active_index
             finished = bool(self.finished)
+            step_start = self.step_start_time
 
             if finished or active_index is None or current_step < 0:
                 return
             if interaction.guild is None or user is None:
+                return
+
+            # Descarta cliques atrasados. Com STEP_SECONDS curto (1.0s), é comum
+            # que um clique do step N chegue ao bot DEPOIS que _close_current_step
+            # e _activate_step(N+1) já tenham rodado. Sem esse filtro, o clique é
+            # contabilizado no step errado: times[N+1] é preenchido antes do
+            # usuário ver o novo botão acender, o que (a) pode dar um "acerto" ou
+            # "erro" aleatório no step N+1 e (b) bloqueia o clique correto do
+            # usuário no step N+1 via o guard `times[current_step] is not None`.
+            # interaction.created_at é timezone-aware UTC, step_start também.
+            interaction_time = getattr(interaction, "created_at", None)
+            if (
+                step_start is not None
+                and interaction_time is not None
+                and interaction_time < step_start
+            ):
                 return
 
             user_id = int(getattr(user, "id", 0) or 0)
@@ -291,6 +315,9 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
         self.step_index = index
         self.active_index = self.order[index]
         self.activated_indices.add(int(self.active_index))
+        # Marca o instante em que o step começou. Cliques cujo `created_at` seja
+        # anterior a isso são descartados em handle_press como atrasados.
+        self.step_start_time = datetime.datetime.now(datetime.timezone.utc)
         for idx, button in enumerate(self.buttons):
             button.disabled = idx != self.active_index
             button.label = _RACE_IMPULSE_EMOJI if idx in self.activated_indices else str(idx + 1)
@@ -304,6 +331,10 @@ class _RaceImpulseEventView(discord.ui.LayoutView):
             button.label = _RACE_IMPULSE_EMOJI if button.index in self.activated_indices else str(button.index + 1)
             button.style = discord.ButtonStyle.secondary
         self.active_index = None
+        # Limpa o timestamp do step ao fechar. Qualquer clique que chegar entre
+        # _close_current_step e _activate_step do próximo step é bloqueado pelo
+        # check `active_index is None` em handle_press.
+        self.step_start_time = None
         current_step = self.step_index
         if current_step < 0:
             return
