@@ -25,21 +25,19 @@ from .profiles import ChatbotProfile, ProfileStore
 log = logging.getLogger(__name__)
 
 
-# O aviso sobre system prompt é longo e não cabe no label (45 chars). Vai
-# no PLACEHOLDER que o Discord mostra dentro do textarea quando vazio.
+# Placeholders do modal — Discord limita a 100 chars cada.
+# O aviso completo sobre prompt injection fica no HARD_SYSTEM_PREAMBLE (vai
+# pro modelo de IA), aqui só cabe um exemplo curto pra guiar a staff.
 _SYSTEM_PROMPT_PLACEHOLDER = (
-    "⚠️ Atenção: qualquer texto aqui é executado pelo modelo. "
-    "Pessoas no server vão conversar com este profile — cuidado com "
-    "instruções maliciosas. Ex: 'Você é a Lua, calma e poética. "
-    "Fala em frases curtas. Adora astronomia.'"
+    "Ex: Você é a Lua, calma e poética. Fala em frases curtas."
 )
 
 _AVATAR_URL_PLACEHOLDER = (
-    "https://... (link direto de imagem — PNG/JPG/WEBP)"
+    "https://... (link direto PNG/JPG/WEBP)"
 )
 
 _NAME_PLACEHOLDER = (
-    "Nome que aparece no chat (ex: Lua, Bot Assistente, Toguro)"
+    "Ex: Lua, Assistente, Toguro"
 )
 
 
@@ -168,10 +166,13 @@ class ProfileCreateModal(discord.ui.Modal, title="Criar profile do chatbot"):
 
         msg = (
             f"✅ Profile **{discord.utils.escape_markdown(profile.name)}** criado!\n"
-            f"ID: `{profile.profile_id}`\n"
-            f"Use `/chatbot ativar` para selecioná-lo como profile ativo do servidor.\n"
-            f"-# Profiles existentes podem ser editados, mas o limite é "
-            f"{C.MAX_PROFILES_PER_GUILD} por servidor."
+            f"`ID: {profile.profile_id}`\n"
+            f"Use `/chatbot ativar` para ativá-lo como chatbot do servidor.\n\n"
+            f"⚠️ **Sobre o system prompt**: o texto que você escreveu é "
+            f"interpretado pela IA como instruções. Qualquer pessoa do server "
+            f"vai conversar com esse profile. Se escrever algo malicioso, "
+            f"a IA vai seguir. Cuidado ao editar.\n"
+            f"-# Limite: {C.MAX_PROFILES_PER_GUILD} profiles por servidor."
         )
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -275,10 +276,20 @@ class ProfileEditModal(discord.ui.Modal, title="Editar profile do chatbot"):
             )
             return
 
-        await interaction.response.send_message(
-            f"✅ Profile **{discord.utils.escape_markdown(updated.name)}** atualizado.",
-            ephemeral=True,
+        # Aviso sobre system prompt só se realmente mudou (evita poluir
+        # resposta quando a staff só trocou temp/memória).
+        prompt_changed = (
+            (updated.system_prompt or "").strip() != (self._profile.system_prompt or "").strip()
         )
+        msg = f"✅ Profile **{discord.utils.escape_markdown(updated.name)}** atualizado."
+        if prompt_changed:
+            msg += (
+                "\n\n⚠️ **Sobre o system prompt**: o texto que você escreveu é "
+                "interpretado pela IA como instruções. Qualquer pessoa do "
+                "server vai conversar com esse profile. Se escrever algo "
+                "malicioso, a IA vai seguir."
+            )
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 class ConfirmView(discord.ui.View):
