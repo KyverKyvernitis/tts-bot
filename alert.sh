@@ -39,6 +39,7 @@ python3 - <<'PY'
 import json
 import os
 import re
+from collections import OrderedDict
 
 TYPE = os.environ.get("TYPE", "info").strip().lower()
 TITLE = os.environ.get("TITLE", "Sem título").strip()
@@ -46,6 +47,11 @@ BODY = os.environ.get("BODY", "")
 HOSTNAME = os.environ.get("HOSTNAME", "unknown")
 NOW = os.environ.get("NOW", "")
 NOW_ISO = os.environ.get("NOW_ISO", "")
+
+COMPONENTS_V2_FLAG = 1 << 15
+TEXT_DISPLAY = 10
+SEPARATOR = 14
+CONTAINER = 17
 
 COLOR_MAP = {
     "error": 0xED4245,
@@ -72,9 +78,9 @@ LABEL_MAP = {
     "mudanca": "Mudança",
     "arquivos": "Arquivos",
     "arquivos alterados": "Arquivos",
-    "bot": "Bot",
-    "bot health": "Bot",
-    "bot healthcheck": "Bot",
+    "bot": "Bot health",
+    "bot health": "Bot health",
+    "bot healthcheck": "Bot health",
     "frontend": "Frontend",
     "backend": "Backend",
     "activity": "Activity",
@@ -99,9 +105,27 @@ LABEL_MAP = {
     "ultimas linhas do erro": "Últimas linhas",
 }
 
-INLINE_FIELDS = {"Host", "Branch", "Commit", "Duração", "Serviço", "Bot", "Activity", "Resultado", "Status", "Código"}
+HEADER_FIELDS = {
+    "Host",
+    "Branch",
+    "Commit",
+    "Mudança",
+    "Rollback",
+    "Duração",
+    "Serviço",
+    "Resultado",
+    "Código",
+    "Status",
+    "Estado ativo",
+    "Subestado",
+}
+STATUS_FIELDS = {"Bot health", "Frontend", "Backend", "Activity"}
+DETAIL_FIELDS = {"Etapa", "Motivo", "URL"}
 BULLET_FIELDS = {"Arquivos"}
 CODE_FIELDS = {"Últimas linhas", "Comando"}
+MAX_TEXT = 1800
+MAX_TOTAL_TEXT = 3800
+MAX_CODE = 1200
 
 
 def trunc(value: str, limit: int) -> str:
@@ -123,20 +147,15 @@ def format_multiline_bullets(value: str) -> str:
         return "—"
     normalized = []
     for line in lines:
-        if line.startswith("• "):
-            normalized.append(line)
-        elif line.startswith("- "):
-            normalized.append(f"• {line[2:].strip()}")
-        else:
-            normalized.append(f"• {line}")
-    return trunc("\n".join(normalized), 1024)
+        line = re.sub(r"^[•\-]\s*", "", line)
+        normalized.append(f"- `{line}`")
+    return trunc("\n".join(normalized), 1500)
 
 
 def format_code_block(value: str) -> str:
     raw = (value or "").strip() or "—"
-    limit = 1012
-    if len(raw) > limit:
-        raw = raw[: limit - 1].rstrip() + "…"
+    raw = raw.replace("```", "ʼʼʼ")
+    raw = trunc(raw, MAX_CODE)
     return f"```text\n{raw}\n```"
 
 
@@ -146,9 +165,9 @@ def format_field_value(name: str, value: str) -> str:
         return format_multiline_bullets(value)
     if name in CODE_FIELDS:
         return format_code_block(value)
-    if "\n" in value and len(value.splitlines()) >= 3:
+    if "\n" in value and len([line for line in value.splitlines() if line.strip()]) >= 3:
         return format_code_block(value)
-    return trunc(value, 1024)
+    return trunc(value, 1200)
 
 
 def parse_body(body: str):
@@ -163,15 +182,15 @@ def parse_body(body: str):
         if not stripped:
             continue
 
-        m = re.match(r"^([^:]{1,48}):\s*(.*)$", stripped)
-        if m:
-            raw_label = m.group(1).strip()
-            value = m.group(2).rstrip()
+        match = re.match(r"^([^:]{1,48}):\s*(.*)$", stripped)
+        if match:
+            raw_label = match.group(1).strip()
+            value = match.group(2).rstrip()
             key = raw_label.lower()
             label = LABEL_MAP.get(key, raw_label[:48])
 
             if key == "resumo":
-                description = trunc(value, 4096)
+                description = trunc(value, 1200)
                 current_idx = None
                 continue
 
@@ -183,63 +202,183 @@ def parse_body(body: str):
             if key == "host" and not value:
                 value = HOSTNAME
 
-            fields.append({
-                "name": trunc(label, 256),
-                "value": format_field_value(label, value or "—"),
-                "inline": label in INLINE_FIELDS,
-            })
+            fields.append({"name": trunc(label, 80), "value": format_field_value(label, value or "—")})
             current_idx = len(fields) - 1
-        else:
-            if current_idx is not None:
-                prev = fields[current_idx]["value"]
-                if prev.startswith("```text\n") and prev.endswith("\n```"):
-                    prev_plain = prev[len("```text\n"):-len("\n```")]
-                else:
-                    prev_plain = "" if prev == "—" else prev
-                joined = stripped if not prev_plain else f"{prev_plain}\n{stripped}"
-                fields[current_idx]["value"] = format_field_value(fields[current_idx]["name"], joined)
-            elif description:
-                description = trunc(f"{description}\n{stripped}", 4096)
+            continue
+
+        if current_idx is not None:
+            prev = fields[current_idx]["value"]
+            if prev.startswith("```text\n") and prev.endswith("\n```"):
+                prev_plain = prev[len("```text\n"):-len("\n```")]
             else:
-                description = trunc(stripped, 4096)
+                prev_plain = "" if prev == "—" else prev
+            joined = stripped if not prev_plain else f"{prev_plain}\n{stripped}"
+            fields[current_idx]["value"] = format_field_value(fields[current_idx]["name"], joined)
+        elif description:
+            description = trunc(f"{description}\n{stripped}", 1200)
+        else:
+            description = trunc(stripped, 1200)
 
     cleaned = []
     for field in fields:
-        norm_name = field["name"].strip().lower()
-        norm_value = field["value"].strip()
-        if norm_name == "arquivos" and norm_value in {"", "—"}:
+        if field["name"].strip().lower() == "arquivos" and field["value"].strip() in {"", "—"}:
             continue
         cleaned.append(field)
+    return description or "Notificação automática.", cleaned[:25], footer or NOW
 
-    return description, cleaned[:25], footer
+
+def split_text(text: str, limit: int = MAX_TEXT):
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+
+    pieces = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            pieces.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at < limit // 3:
+            split_at = limit
+        pieces.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip("\n")
+    return pieces
+
+
+def make_text(content: str):
+    return {"type": TEXT_DISPLAY, "content": content}
+
+
+def make_separator():
+    return {"type": SEPARATOR, "divider": True, "spacing": 1}
+
+
+def render_field_block(title: str, pairs):
+    if not pairs:
+        return []
+    lines = [f"## {title}"]
+    for name, value in pairs:
+        lines.append(f"- **{name}:** {value}")
+    joined = "\n".join(lines)
+    return [make_text(chunk) for chunk in split_text(joined)]
+
+
+def render_code_block(name: str, value: str):
+    raw = value.strip()
+    block = raw if raw.startswith("```") else format_code_block(raw)
+    return [make_text(chunk) for chunk in split_text(f"## {name}\n{block}")]
+
+
+def append_container(components, color, children):
+    normalized = []
+    for child in children:
+        if not child:
+            continue
+        if child["type"] == TEXT_DISPLAY:
+            content = child.get("content", "").strip()
+            if not content:
+                continue
+            normalized.append({"type": TEXT_DISPLAY, "content": content})
+        else:
+            normalized.append(child)
+    if normalized:
+        components.append({"type": CONTAINER, "accent_color": color, "components": normalized[:10]})
+
+
+def build_containers(title: str, summary: str, fields, footer: str, color: int):
+    field_map = OrderedDict((field["name"], field["value"]) for field in fields)
+
+    header_pairs = [(name, field_map.pop(name)) for name in list(field_map) if name in HEADER_FIELDS]
+    status_pairs = [(name, field_map.pop(name)) for name in list(field_map) if name in STATUS_FIELDS]
+    detail_pairs = [(name, field_map.pop(name)) for name in list(field_map) if name in DETAIL_FIELDS]
+    file_value = field_map.pop("Arquivos", "")
+    command_value = field_map.pop("Comando", "")
+    logs_value = field_map.pop("Últimas linhas", "")
+    other_pairs = list(field_map.items())
+
+    header_meta = []
+    host = next((value for name, value in header_pairs if name == "Host"), None)
+    branch = next((value for name, value in header_pairs if name == "Branch"), None)
+    commit = next((value for name, value in header_pairs if name == "Commit"), None)
+    if host and host != "—":
+        header_meta.append(f"host `{host}`")
+    if branch and branch != "—":
+        header_meta.append(f"branch `{branch}`")
+    if commit and commit != "—":
+        header_meta.append(f"commit `{commit}`")
+    header_meta.append(footer)
+
+    components = []
+    primary_children = [make_text(f"# {title}"), make_text("-# " + " • ".join(part for part in header_meta if part))]
+    if summary and summary != "—":
+        primary_children.append(make_separator())
+        primary_children.extend(make_text(chunk) for chunk in split_text(summary, 1000))
+    if header_pairs:
+        primary_children.append(make_separator())
+        primary_children.extend(render_field_block("Resumo rápido", header_pairs))
+    if status_pairs:
+        primary_children.append(make_separator())
+        primary_children.extend(render_field_block("Status dos serviços", status_pairs))
+    append_container(components, color, primary_children)
+
+    secondary_children = []
+    if detail_pairs:
+        secondary_children.extend(render_field_block("Detalhes", detail_pairs))
+    if other_pairs:
+        if secondary_children:
+            secondary_children.append(make_separator())
+        secondary_children.extend(render_field_block("Informações extras", other_pairs))
+    if file_value and file_value != "—":
+        if secondary_children:
+            secondary_children.append(make_separator())
+        secondary_children.extend(make_text(chunk) for chunk in split_text(f"## Arquivos alterados\n{file_value}"))
+    append_container(components, color, secondary_children)
+
+    log_children = []
+    if command_value and command_value != "—":
+        log_children.extend(render_code_block("Comando", command_value))
+    if logs_value and logs_value != "—":
+        if log_children:
+            log_children.append(make_separator())
+        log_children.extend(render_code_block("Últimas linhas", logs_value))
+    append_container(components, color, log_children)
+
+    total_chars = 0
+    for container in components:
+        for child in container["components"]:
+            if child["type"] != TEXT_DISPLAY:
+                continue
+            remaining = max(400, MAX_TOTAL_TEXT - total_chars)
+            child["content"] = trunc(child["content"], remaining)
+            total_chars += len(child["content"])
+
+    return components[:4]
 
 
 description, fields, footer = parse_body(BODY)
-
-if not description or description == "—":
-    description = "Notificação automática."
-
 emoji = EMOJI_MAP.get(TYPE, "ℹ️")
 color = COLOR_MAP.get(TYPE, COLOR_MAP["info"])
 full_title = TITLE if TITLE.startswith(("❌", "⚠️", "✅", "🔄", "ℹ️")) else f"{emoji} {TITLE}"
 
 payload = {
     "allowed_mentions": {"parse": []},
-    "embeds": [
-        {
-            "title": trunc(full_title, 256),
-            "description": trunc(description, 4096),
-            "color": color,
-            "fields": fields,
-            "footer": {"text": trunc(footer or NOW, 2048)},
-            "timestamp": NOW_ISO,
-        }
-    ],
+    "flags": COMPONENTS_V2_FLAG,
+    "components": build_containers(trunc(full_title, 120), description, fields, trunc(footer, 200), color),
 }
 
 print(json.dumps(payload, ensure_ascii=False))
 PY
 })" || exit 1
+
+WEBHOOK_URL="$ALERT_WEBHOOK_URL"
+case "$WEBHOOK_URL" in
+  *with_components=*) ;;
+  *\?*) WEBHOOK_URL="${WEBHOOK_URL}&with_components=true" ;;
+  *) WEBHOOK_URL="${WEBHOOK_URL}?with_components=true" ;;
+esac
 
 TMP_RESP="$(mktemp)"
 HTTP_CODE="$({
@@ -248,7 +387,7 @@ HTTP_CODE="$({
     -w '%{http_code}' \
     -H "Content-Type: application/json" \
     -d "$PAYLOAD_JSON" \
-    "$ALERT_WEBHOOK_URL"
+    "$WEBHOOK_URL"
 })" || {
   rm -f "$TMP_RESP"
   exit 1
