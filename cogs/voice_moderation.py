@@ -624,6 +624,12 @@ class VoiceModeration(commands.Cog):
             vc = self._get_voice_client(guild)
             if vc is None or not getattr(vc, "is_connected", lambda: False)() or getattr(vc, "channel", None) is None:
                 continue
+            voice_channel = getattr(vc, "channel", None)
+            if not self._voice_channel_has_humans(voice_channel):
+                runtime.recover_fail_streak = 0
+                if bool(getattr(runtime, "listening_armed", False)):
+                    runtime.listening_armed = False
+                continue
             pause_depth = int(getattr(runtime, "tts_pause_depth", 0) or 0)
             if pause_depth > 0:
                 busy = self._is_voice_client_busy(vc)
@@ -668,9 +674,7 @@ class VoiceModeration(commands.Cog):
                 guild.id, now - float(getattr(runtime, "last_listen_start_at", 0.0) or now),
             )
             if self._is_receive_client(vc):
-                _vc, state = await self._soft_restart_listening(guild, vc, preferred_channel=getattr(vc, "channel", None))
-                if state == "falha_escuta" and int(getattr(runtime, "recover_fail_streak", 0) or 0) >= 2:
-                    await self._hard_recover_receive_client(guild, preferred_channel=getattr(vc, "channel", None))
+                await self._soft_restart_listening(guild, vc, preferred_channel=getattr(vc, "channel", None))
             else:
                 await self.handle_voice_client_ready(guild, vc)
 
@@ -693,6 +697,28 @@ class VoiceModeration(commands.Cog):
             except Exception:
                 continue
         return getattr(guild, "voice_client", None)
+
+    @staticmethod
+    def _voice_channel_has_humans(channel) -> bool:
+        if channel is None:
+            return False
+        try:
+            return any(not getattr(member, "bot", False) for member in getattr(channel, "members", []) or [])
+        except Exception:
+            return False
+
+    async def _suppress_tts_runtime_restore(self, guild: discord.Guild, *, channel=None, seconds: float = 30.0) -> None:
+        cog = self.bot.get_cog("TTSVoice")
+        if cog is None or not hasattr(cog, "suppress_runtime_voice_restore"):
+            return
+        try:
+            await cog.suppress_runtime_voice_restore(
+                guild.id,
+                seconds=max(5.0, float(seconds)),
+                expected_channel_id=getattr(channel, "id", None),
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _is_receive_client(vc: discord.VoiceClient | None) -> bool:
@@ -1047,7 +1073,9 @@ class VoiceModeration(commands.Cog):
 
     async def _connect_receive_client(self, guild: discord.Guild, target_channel) -> Optional[discord.VoiceClient]:
         vc = self._get_voice_client(guild)
-        if vc is not None and getattr(vc, "is_connected", lambda: False)():
+        reconnecting_existing = bool(vc is not None and getattr(vc, "is_connected", lambda: False)())
+        if reconnecting_existing:
+            await self._suppress_tts_runtime_restore(guild, channel=getattr(vc, "channel", None) or target_channel, seconds=35.0)
             try:
                 if getattr(vc, "is_playing", lambda: False)():
                     vc.stop()
@@ -1280,10 +1308,15 @@ class VoiceModeration(commands.Cog):
         if target_channel is None:
             self._set_listen_error(guild.id, "Não encontrei um canal de voz para recuperar a escuta.")
             return current_vc, "sem_canal"
+        if not self._voice_channel_has_humans(target_channel):
+            self._set_listen_error(guild.id, "A recuperação pesada da escuta foi ignorada porque não há ninguém na call.")
+            runtime.recover_fail_streak = 0
+            return current_vc, "sem_humanos"
         if self._is_voice_client_busy(current_vc):
             self._set_listen_error(guild.id, "A recuperação da escuta está aguardando o fim do áudio atual.")
             return current_vc, "ocupado_playback"
 
+        await self._suppress_tts_runtime_restore(guild, channel=target_channel, seconds=40.0)
         new_vc = await self._connect_receive_client(guild, target_channel)
         if new_vc is None:
             self._set_listen_error(guild.id, "Falhei ao recriar o cliente de voz da moderação.")
@@ -1371,6 +1404,11 @@ class VoiceModeration(commands.Cog):
 
             vc = self._get_voice_client(guild)
             voice_channel = getattr(vc, "channel", None) if vc is not None else None
+            if voice_channel is not None and not self._voice_channel_has_humans(voice_channel):
+                runtime.recover_fail_streak = 0
+                self._suppress_after_errors(guild.id, 15.0)
+                await self._refresh_status_message(guild)
+                return
             if vc is not None and hasattr(vc, "stop_listening"):
                 self._suppress_after_errors(guild.id, 3.0)
                 with contextlib.suppress(Exception):
@@ -1444,6 +1482,9 @@ class VoiceModeration(commands.Cog):
             return
         vc = self._get_voice_client(guild)
         if vc is None or not getattr(vc, "is_connected", lambda: False)() or getattr(vc, "channel", None) is None:
+            return
+        if not self._voice_channel_has_humans(getattr(vc, "channel", None)):
+            runtime.recover_fail_streak = 0
             return
         if self._is_voice_client_busy(vc):
             return
@@ -2021,9 +2062,27 @@ class VoiceModeration(commands.Cog):
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         guild = member.guild
         me = getattr(guild, "me", None)
-        if me is None or member.id != me.id:
+        if me is None:
             return
+
         settings = await self._get_settings(guild.id)
+        vc = self._get_voice_client(guild)
+
+        if member.id != me.id:
+            if not settings.get("enabled") or getattr(member, "bot", False):
+                return
+            if vc is None or not getattr(vc, "is_connected", lambda: False)() or getattr(vc, "channel", None) is None:
+                return
+            tracked_channel = getattr(vc, "channel", None)
+            tracked_channel_id = getattr(tracked_channel, "id", None)
+            before_id = getattr(before.channel, "id", None)
+            after_id = getattr(after.channel, "id", None)
+            if after_id == tracked_channel_id and before_id != tracked_channel_id:
+                await self.handle_voice_client_ready(guild, vc)
+            elif before_id == tracked_channel_id and after_id != tracked_channel_id and not self._voice_channel_has_humans(tracked_channel):
+                await self._stop_listening(guild)
+            return
+
         if after.channel is None:
             await self._stop_listening(guild)
             return

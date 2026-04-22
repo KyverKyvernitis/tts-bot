@@ -475,6 +475,16 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         else:
             self._expected_voice_channel_ids.pop(int(guild_id), None)
 
+    async def suppress_runtime_voice_restore(self, guild_id: int, *, seconds: float = 20.0, expected_channel_id: int | None = None) -> None:
+        guild_id = int(guild_id)
+        self._suppress_runtime_voice_restore(guild_id, seconds=seconds)
+        self._cancel_runtime_voice_restore(guild_id)
+        if expected_channel_id is not None:
+            self._remember_expected_voice_channel(guild_id, expected_channel_id)
+            with contextlib.suppress(Exception):
+                await self._set_remembered_voice_channel(guild_id, expected_channel_id)
+
+
     async def _schedule_runtime_voice_restore(
         self,
         guild: discord.Guild,
