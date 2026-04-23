@@ -360,3 +360,53 @@ class ConfirmView(discord.ui.View):
     async def on_timeout(self):
         if self.result is None:
             self.result = False
+
+
+class MasterEditModal(discord.ui.Modal, title="Editar prompt mestre global"):
+    """Modal de edição do master prompt (prompt supremo global).
+
+    Uma só TextInput de paragraph mode — caber até 4000 chars. Ao submit,
+    persiste via MasterStore e confirma.
+    """
+
+    # Single field. Declarado no __init__ pra ter default dinâmico.
+
+    def __init__(
+        self,
+        *,
+        master_store,  # .master.MasterStore — não tipado pra evitar import circular
+        current_content: str = "",
+    ):
+        super().__init__(timeout=900.0)
+        self._store = master_store
+
+        self.prompt_input = discord.ui.TextInput(
+            label="Prompt mestre (regras globais)",
+            default=current_content,
+            placeholder="Regras que valem pra TODOS os profiles em TODOS os servers",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=C.MAX_MASTER_PROMPT_LENGTH,
+        )
+        self.add_item(self.prompt_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            cfg = await self._store.update_content(
+                content=str(self.prompt_input.value),
+                editor_user_id=interaction.user.id,
+            )
+        except Exception:
+            log.exception("chatbot: falha ao salvar master prompt")
+            await interaction.response.send_message(
+                "❌ Falha ao salvar. Tenta de novo.", ephemeral=True
+            )
+            return
+
+        char_count = len(cfg.content)
+        await interaction.response.send_message(
+            f"✅ Prompt mestre atualizado ({char_count} chars). "
+            f"Vai valer imediatamente na próxima mensagem processada "
+            f"(cache invalidado).",
+            ephemeral=True,
+        )

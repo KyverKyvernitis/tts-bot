@@ -25,7 +25,7 @@ from discord.ext import commands
 
 from . import constants as C
 from .profiles import ChatbotProfile
-from .views import ConfirmView, ProfileCreateModal, ProfileEditModal
+from .views import ConfirmView, MasterEditModal, ProfileCreateModal, ProfileEditModal
 
 log = logging.getLogger(__name__)
 
@@ -153,6 +153,11 @@ class ChatbotCommandsMixin:
     chatbot_memoria = app_commands.Group(
         name="memoria",
         description="Limpeza e inspeção de memória do chatbot",
+        parent=chatbot,
+    )
+    chatbot_master = app_commands.Group(
+        name="master",
+        description="System prompt global (só config server)",
         parent=chatbot,
     )
 
@@ -495,6 +500,192 @@ class ChatbotCommandsMixin:
         count = await self._memory.clear_all_guild_memory(guild.id)
         await interaction.followup.send(
             f"🧹 Memória do chatbot resetada. ({count} registros removidos)",
+            ephemeral=True,
+        )
+
+    # --- /chatbot master ------------------------------------------------------
+    # Comandos de staff, mas com check adicional: só funcionam se a pessoa
+    # está no config_guild_id atual. Quem controla o master prompt é o dono
+    # do bot, e ele define qual server tem essa "autoridade".
+
+    async def _master_check(
+        self, interaction: discord.Interaction
+    ) -> Optional[object]:
+        """Valida que o comando pode rodar aqui.
+
+        Retorna a MasterConfig atual se tudo ok (e o caller prossegue),
+        ou None se falhou (e já respondeu com erro ao user).
+
+        Checks:
+          1. Cog pronto (master store inicializado)
+          2. Usuário é staff NESTE server
+          3. Este server é o config_guild_id atual
+        """
+        master = getattr(self, "_master", None)
+        if master is None:
+            await interaction.response.send_message(
+                "Chatbot não está pronto.", ephemeral=True
+            )
+            return None
+
+        if not await _staff_check(interaction):
+            await interaction.response.send_message(
+                "Só staff (Manage Server) pode mexer no prompt mestre.",
+                ephemeral=True,
+            )
+            return None
+
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "Só funciona em servidor.", ephemeral=True
+            )
+            return None
+
+        cfg = await master.get()
+        if int(guild.id) != int(cfg.config_guild_id):
+            await interaction.response.send_message(
+                "❌ Este servidor não é o **config server** do bot. "
+                f"O prompt mestre só pode ser editado no servidor de "
+                f"configuração (ID atualmente: `{cfg.config_guild_id}`).\n"
+                f"-# Pra transferir a config pra este server, rode "
+                f"`/chatbot master set_config_server` a partir do server atual.",
+                ephemeral=True,
+            )
+            return None
+
+        return cfg
+
+    @chatbot_master.command(
+        name="ver",
+        description="Mostra o prompt mestre atual (só config server)",
+    )
+    @_safe_slash
+    async def chatbot_master_ver(self, interaction: discord.Interaction):
+        cfg = await self._master_check(interaction)
+        if cfg is None:
+            return
+
+        import datetime as _dt
+        updated_str = "nunca"
+        if cfg.updated_at > 0:
+            updated_str = _dt.datetime.fromtimestamp(
+                cfg.updated_at
+            ).strftime("%Y-%m-%d %H:%M")
+
+        # Se muito longo, usa code block numa mensagem só. Se ultra longo,
+        # anexaria arquivo — mas como limite é 4000 chars e Discord aceita
+        # 2000 na mensagem, talvez precise truncar.
+        content = cfg.content or "(vazio — usando default)"
+        preview = content[:1700]
+        if len(content) > 1700:
+            preview += "\n... (truncado no preview)"
+
+        await interaction.response.send_message(
+            f"**Prompt mestre atual** ({len(content)} chars, "
+            f"última edição: {updated_str}):\n```\n{preview}\n```",
+            ephemeral=True,
+        )
+
+    @chatbot_master.command(
+        name="editar",
+        description="Edita o prompt mestre global (só config server)",
+    )
+    @_safe_slash
+    async def chatbot_master_editar(self, interaction: discord.Interaction):
+        cfg = await self._master_check(interaction)
+        if cfg is None:
+            return
+
+        modal = MasterEditModal(
+            master_store=self._master,
+            current_content=cfg.content,
+        )
+        await interaction.response.send_modal(modal)
+
+    @chatbot_master.command(
+        name="set_config_server",
+        description="Transfere a autoridade do prompt mestre pra ESTE servidor",
+    )
+    @_safe_slash
+    async def chatbot_master_set_config_server(
+        self, interaction: discord.Interaction,
+    ):
+        # IMPORTANTE: este comando faz check invertido. O user precisa estar
+        # NO config_guild_id ATUAL (não no novo) pra poder transferir.
+        # Isso previne hijack: ninguém pode "pegar" o bot criando um server
+        # e rodando o comando lá.
+        master = getattr(self, "_master", None)
+        if master is None:
+            await interaction.response.send_message(
+                "Chatbot não está pronto.", ephemeral=True
+            )
+            return
+
+        if not await _staff_check(interaction):
+            await interaction.response.send_message(
+                "Só staff (Manage Server) pode transferir a config.",
+                ephemeral=True,
+            )
+            return
+
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "Só funciona em servidor.", ephemeral=True
+            )
+            return
+
+        cfg = await master.get()
+
+        # Edge case: se o config_guild_id atual for inválido (ex: server não
+        # existe mais), aceita a transferência de qualquer server com staff.
+        # Permite "recuperação" caso o config original seja perdido.
+        current_config_server = self.bot.get_guild(int(cfg.config_guild_id))
+        if current_config_server is None:
+            # Config server atual é inacessível — libera transferência
+            pass
+        elif int(guild.id) != int(cfg.config_guild_id):
+            await interaction.response.send_message(
+                f"❌ Você precisa estar **no config server atual** pra "
+                f"transferir a autoridade. Config atual: "
+                f"`{cfg.config_guild_id}` (`{current_config_server.name}`).\n"
+                f"-# Rode o comando lá pra mudar a config pra este servidor.",
+                ephemeral=True,
+            )
+            return
+        # Se já é o mesmo, operação é no-op mas avisamos
+        if int(guild.id) == int(cfg.config_guild_id):
+            await interaction.response.send_message(
+                "Este servidor **já é** o config server. Nada a fazer.",
+                ephemeral=True,
+            )
+            return
+
+        # Confirmação: ação destrutiva (perda de autoridade do server antigo)
+        view = ConfirmView(
+            requester_id=interaction.user.id,
+            prompt=(
+                f"⚠️ Transferir autoridade do prompt mestre pra **{guild.name}** "
+                f"(`{guild.id}`)? O server antigo (`{cfg.config_guild_id}`) "
+                f"perderá o acesso ao `/chatbot master`."
+            ),
+            confirm_label="Transferir",
+        )
+        await interaction.response.send_message(
+            view.prompt, view=view, ephemeral=True,
+        )
+        await view.wait()
+        if view.result is not True:
+            return
+
+        new_cfg = await master.set_config_guild(
+            new_guild_id=guild.id,
+            editor_user_id=interaction.user.id,
+        )
+        await interaction.followup.send(
+            f"✅ Config server atualizado pra **{guild.name}** "
+            f"(`{new_cfg.config_guild_id}`).",
             ephemeral=True,
         )
 

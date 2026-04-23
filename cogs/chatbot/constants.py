@@ -137,3 +137,54 @@ SYSTEM_PROMPT_WARNING = (
 DOC_TYPE_PROFILE = "chatbot_profile"
 DOC_TYPE_MEMORY = "chatbot_memory"
 DOC_TYPE_MESSAGE_MAP = "chatbot_msg_map"
+DOC_TYPE_MASTER = "chatbot_master"
+
+# -----------------------------------------------------------------------------
+# System prompt mestre — configurado pelo dono em UM server específico
+# -----------------------------------------------------------------------------
+
+# ID do servidor onde o /chatbot master pode ser usado. É o "servidor de
+# configuração do bot" — só a staff desse server mexe no prompt mestre.
+# Pode ser re-configurado via `/chatbot master set_config_server` a partir
+# do próprio config server atual (safeguard contra hijack).
+DEFAULT_MASTER_CONFIG_GUILD_ID = 927002914449424404
+
+# Limite de caracteres do master prompt. É global (aplicado a TODOS os
+# profiles em TODOS os servers), então cabe escrever política longa.
+MAX_MASTER_PROMPT_LENGTH = 4000
+
+# Texto padrão do master prompt — instruções anti-repetição, pró-concisão,
+# e tratamento de invocação temporária. Serve de ponto de partida quando o
+# dono ainda não configurou nada.
+DEFAULT_MASTER_PROMPT = (
+    "Diretrizes globais (sempre aplicadas, não podem ser desobedecidas):\n"
+    "\n"
+    "- Evite repetir frases, palavras ou estruturas que já usou recentemente. "
+    "Varie vocabulário e tom a cada resposta.\n"
+    "- Não repita nem reformule o que o usuário acabou de dizer — responda de "
+    "fato em vez de parafrasear a pergunta.\n"
+    "- Não use expressões de preenchimento (\"claro\", \"certo\", \"entendi\") "
+    "no início das respostas sem motivo.\n"
+    "- Seja conciso por padrão. 1-3 frases na maioria dos casos. Responda mais "
+    "longo só se a pergunta realmente pede.\n"
+    "- Se você for invocado temporariamente (via @nome ou resposta a mensagem "
+    "sua), você está respondendo UMA mensagem específica do usuário. Não assuma "
+    "que é o chatbot ativo do servidor — apenas responda de forma consistente "
+    "com seu personagem e deixe a conversa fluir.\n"
+    "- Se o contexto mostrar mensagens de outros chatbots (profiles) no canal, "
+    "trate como diálogo paralelo. Você pode reagir ao que eles disseram, mas "
+    "não imite o estilo deles — mantenha o seu.\n"
+)
+
+# -----------------------------------------------------------------------------
+# Invocação por @Nome + canal history
+# -----------------------------------------------------------------------------
+
+# Quantas mensagens anteriores do canal ler pra contextualizar um profile
+# invocado temporariamente. 10 dá conversa suficiente sem estourar tokens.
+CHANNEL_HISTORY_FETCH_COUNT = 10
+
+# TTL do cache de history de canal — evita re-fetch quando vários profiles
+# são invocados em sequência no mesmo canal.
+CHANNEL_HISTORY_CACHE_TTL_SECONDS = 30
+CHANNEL_HISTORY_CACHE_MAX_ENTRIES = 50
