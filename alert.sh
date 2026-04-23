@@ -141,26 +141,64 @@ def normalize_lines(body: str):
     return body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
+def strip_outer_code_fences(value: str) -> str:
+    text = (value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    while True:
+        match = re.match(r"^```[A-Za-z0-9_-]*\n?(.*?)\n?```$", text, flags=re.DOTALL)
+        if not match:
+            return text
+        inner = match.group(1).strip("\n").strip()
+        if inner == text:
+            return text
+        text = inner
+
+
+def strip_lonely_fence_lines(value: str) -> str:
+    cleaned = []
+    for raw in (value or "").splitlines():
+        stripped = raw.strip()
+        if stripped in {"`", "``", "```"}:
+            continue
+        if re.fullmatch(r"```[A-Za-z0-9_-]+", stripped):
+            continue
+        cleaned.append(raw)
+    return "\n".join(cleaned).strip()
+
+
+def clean_field_text(value: str) -> str:
+    text = (value or "").replace("\t", "  ")
+    text = strip_outer_code_fences(text)
+    text = strip_lonely_fence_lines(text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def format_multiline_bullets(value: str) -> str:
-    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    raw = clean_field_text(value)
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
     if not lines:
         return "—"
     normalized = []
     for line in lines:
-        line = re.sub(r"^[•\-]\s*", "", line)
+        line = re.sub(r"^[•\-]\s*", "", line).strip()
+        if line.startswith("`") and line.endswith("`") and len(line) >= 2:
+            line = line[1:-1].strip()
+        line = line.strip("`").strip()
+        if not line or line in {"—", "`", "``", "```"}:
+            continue
         normalized.append(f"- `{line}`")
-    return trunc("\n".join(normalized), 1500)
+    return trunc("\n".join(normalized) if normalized else "—", 1500)
 
 
 def format_code_block(value: str) -> str:
-    raw = (value or "").strip() or "—"
+    raw = clean_field_text(value) or "—"
     raw = raw.replace("```", "ʼʼʼ")
     raw = trunc(raw, MAX_CODE)
     return f"```text\n{raw}\n```"
 
 
 def format_field_value(name: str, value: str) -> str:
-    value = (value or "").replace("\t", "  ").strip() or "—"
+    value = clean_field_text(value) or "—"
     if name in BULLET_FIELDS:
         return format_multiline_bullets(value)
     if name in CODE_FIELDS:
@@ -202,7 +240,8 @@ def parse_body(body: str):
             if key == "host" and not value:
                 value = HOSTNAME
 
-            fields.append({"name": trunc(label, 80), "value": format_field_value(label, value or "—")})
+            initial_value = format_field_value(label, value) if value else ""
+            fields.append({"name": trunc(label, 80), "value": initial_value})
             current_idx = len(fields) - 1
             continue
 
@@ -221,8 +260,11 @@ def parse_body(body: str):
 
     cleaned = []
     for field in fields:
-        if field["name"].strip().lower() == "arquivos" and field["value"].strip() in {"", "—"}:
+        value = field["value"].strip()
+        if field["name"].strip().lower() == "arquivos" and value in {"", "—"}:
             continue
+        if not value:
+            field["value"] = "—"
         cleaned.append(field)
     return description or "Notificação automática.", cleaned[:25], footer or NOW
 
@@ -259,10 +301,14 @@ def make_separator():
 def render_field_block(title: str, pairs):
     if not pairs:
         return []
-    lines = [f"## {title}"]
+    parts = [f"## {title}"]
     for name, value in pairs:
-        lines.append(f"- **{name}:** {value}")
-    joined = "\n".join(lines)
+        value = (value or "—").strip() or "—"
+        if value.startswith("```") or "\n" in value:
+            parts.append(f"### {name}\n{value}")
+        else:
+            parts.append(f"- **{name}:** {value}")
+    joined = "\n\n".join(parts)
     return [make_text(chunk) for chunk in split_text(joined)]
 
 
