@@ -639,6 +639,88 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         filename = f"{safe_name}.mp3"
         return discord.File(_io.BytesIO(audio_bytes), filename=filename)
 
+
+    def _sanitize_audio_capability_claim(self, reply: str, *, audio_will_be_sent: bool) -> str:
+        """Remove contradições quando o bot efetivamente envia áudio."""
+        if not audio_will_be_sent:
+            return reply
+        lowered = (reply or "").lower()
+        deny_markers = (
+            "não consigo criar áudios",
+            "não consigo gerar áudios",
+            "não posso criar áudios",
+            "não posso gerar áudios",
+            "não consigo enviar áudio",
+            "não posso enviar áudio",
+            "não consigo gerar audio",
+            "não posso gerar audio",
+        )
+        if not any(marker in lowered for marker in deny_markers):
+            return reply
+        return "Te respondi em áudio e texto. " + (reply or "")
+
+    async def _maybe_enqueue_voice_call_tts(
+        self,
+        *,
+        message: discord.Message,
+        profile: ChatbotProfile,
+        spoken_text: str,
+        requested_audio: bool,
+    ) -> None:
+        """Enfileira fala na call atual quando user pediu áudio e já está na mesma call do bot."""
+        if not requested_audio:
+            return
+        guild = message.guild
+        if guild is None:
+            return
+
+        tts_cog = self.bot.get_cog("TTSVoice")
+        if tts_cog is None:
+            return
+
+        member_voice = getattr(message.author, "voice", None)
+        member_channel = getattr(member_voice, "channel", None)
+        me = getattr(guild, "me", None)
+        me_voice = getattr(me, "voice", None)
+        bot_channel = getattr(me_voice, "channel", None)
+        if member_channel is None or bot_channel is None or int(member_channel.id) != int(bot_channel.id):
+            return
+
+        db = getattr(self.bot, "settings_db", None)
+        if db is None or not hasattr(db, "resolve_tts"):
+            return
+
+        try:
+            resolved = await tts_cog._maybe_await(db.resolve_tts(guild.id, message.author.id))
+            resolved = dict(resolved or {})
+            text_for_call = f"{profile.name} disse: {spoken_text}".strip()
+            if not text_for_call:
+                return
+
+            from cogs.tts.audio import QueueItem
+            queue_item = QueueItem(
+                guild_id=guild.id,
+                channel_id=member_channel.id,
+                author_id=message.author.id,
+                text=text_for_call,
+                engine=str(resolved.get("engine") or "edge"),
+                voice=str(resolved.get("edge_voice", resolved.get("voice", "pt-BR-FranciscaNeural")) or "pt-BR-FranciscaNeural"),
+                language=str(resolved.get("gtts_language", resolved.get("language", "pt-br")) or "pt-br"),
+                rate=str(resolved.get("edge_rate", resolved.get("rate", "+0%")) or "+0%"),
+                pitch=str(resolved.get("edge_pitch", resolved.get("pitch", "+0Hz")) or "+0Hz"),
+            )
+            enqueued, _dropped, deduplicated = await tts_cog._enqueue_tts_item(guild.id, queue_item)
+            if enqueued:
+                log.info(
+                    "chatbot: fala enfileirada na call | guild=%s user=%s channel=%s dedup=%s",
+                    guild.id,
+                    message.author.id,
+                    member_channel.id,
+                    deduplicated,
+                )
+        except Exception:
+            log.exception("chatbot: falha ao enfileirar fala na call")
+
     async def _fetch_channel_history(
         self, channel, message: discord.Message
     ) -> list[discord.Message]:
@@ -1294,6 +1376,20 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             if not reply:
                 return  # sem resposta útil, fica quieto
 
+            requested_audio = user_asked_for_tts(content)
+
+            # 4.5. Gera TTS se o user pediu ou se o profile tem tts_chance > 0
+            # e caiu na sorte.
+            tts_file = await self._maybe_generate_tts(
+                content=content,  # texto original do user
+                reply=reply,
+                profile=profile,
+            )
+            reply = self._sanitize_audio_capability_claim(
+                reply,
+                audio_will_be_sent=(tts_file is not None),
+            )
+
             # 4. Quote no início pra emular reply (sem ping). Limite de 2000
             # chars total do Discord — o quote consome ~150, o resto cabe.
             quote_line = self._format_reply_quote(user_display, content)
@@ -1308,14 +1404,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             if len(reply) > budget:
                 reply = reply[: max(200, budget - 3)] + "..."
             final_content = f"{quote_line}\n{reply}"
-
-            # 4.5. Gera TTS se o user pediu ou se o profile tem tts_chance > 0
-            # e caiu na sorte. Roda em paralelo ao build de `final_content`.
-            tts_file = await self._maybe_generate_tts(
-                content=content,  # texto original do user
-                reply=reply,
-                profile=profile,
-            )
 
             # 5. Envia via webhook com identidade do profile
             files: list[discord.File] = []
@@ -1341,6 +1429,13 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 except discord.HTTPException:
                     log.warning("chatbot: fallback send também falhou | channel=%s", channel.id)
                     return
+
+            await self._maybe_enqueue_voice_call_tts(
+                message=message,
+                profile=profile,
+                spoken_text=reply,
+                requested_audio=requested_audio,
+            )
 
             # 7. Persiste histórico (pessoal + coletivo DO PROFILE). Fire-and-forget.
             # Passamos `reply` SEM o quote — o histórico é semântico, não UI.
