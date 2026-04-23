@@ -539,7 +539,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 _io.BytesIO(generated.data), filename=filename,
             )
 
-            caption = generated.caption or f"*{img_prompt[:200]}*"
+            caption = f"🖼️ Imagem gerada para: *{img_prompt[:200]}*"
             sent = await self._webhooks.send_as_profile(
                 channel=channel,
                 profile_name=profile.name,
