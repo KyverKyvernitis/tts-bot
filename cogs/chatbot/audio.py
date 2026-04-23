@@ -169,22 +169,18 @@ _TTS_REQUEST_PATTERNS = (
 def user_asked_for_tts(text: str) -> bool:
     """True se a mensagem sugere que user quer resposta em áudio.
 
-    É uma heurística simples — match de substring case-insensitive.
-    Falsos positivos acontecem (ex: user escreve "ouvi o áudio que você
-    mandou"), mas nesse caso o bot gerar áudio não é catastrófico.
+    Usa regex com variações comuns do português informal pra cobrir
+    "manda um áudio", "me manda áudio", "responde em voz" etc.
     """
     if not text:
         return False
-    lower = text.lower()
-    # Evita matches triviais tipo só a palavra "voz" numa frase longa.
-    # Exige que seja pedido direto, com verbos imperativos relevantes.
-    strong = (
-        "responde por audio", "responde por áudio",
-        "responde em audio", "responde em áudio",
-        "manda audio", "manda áudio",
-        "me manda audio", "me manda áudio",
-        "manda em audio", "manda em áudio",
-        "fala por audio", "fala por áudio",
-        "fala por voz",
+
+    import re
+
+    normalized = " ".join(text.lower().split())
+    patterns = (
+        r"\b(responde|manda|fala)\s+(isso\s+)?(por|em)?\s*(um|uma)?\s*(audio|áudio|voz)\b",
+        r"\bme\s+manda\s+(um|uma)?\s*(audio|áudio|voz)\b",
+        r"\bresponde\s+(com|em)?\s*(um|uma)?\s*(audio|áudio|voz)\b",
     )
-    return any(pat in lower for pat in strong)
+    return any(re.search(pat, normalized, flags=re.IGNORECASE) for pat in patterns)

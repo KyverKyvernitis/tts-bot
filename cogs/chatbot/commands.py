@@ -662,122 +662,61 @@ class ChatbotCommandsMixin:
         )
 
     # =========================================================================
-    # Entrypoints consolidados — menos poluição no autocomplete do Discord.
-    # Cada subgrupo tem 1 comando com choice de ação, ao invés de 6 comandos
-    # separados. O handler despacha pros `_do_*` acima.
+    # Entrypoints diretos — evita o sufixo `acao` nos comandos.
     # =========================================================================
 
-    # --- /chatbot profile <acao> [profile] -----------------------------------
+    @chatbot_profile.command(name="criar", description="Criar um novo profile")
+    @_safe_slash
+    async def chatbot_profile_criar(self, interaction: discord.Interaction):
+        await self._do_profile_criar(interaction)
 
-    @chatbot_profile.command(
-        name="acao",
-        description="Gerenciar profiles do chatbot (staff)",
-    )
-    @app_commands.describe(
-        acao="O que fazer",
-        profile="(para editar/apagar/ativar) — profile alvo",
-    )
-    @app_commands.choices(acao=[
-        app_commands.Choice(name="📝 Criar novo",              value="criar"),
-        app_commands.Choice(name="✏️ Editar existente",        value="editar"),
-        app_commands.Choice(name="🗑️ Apagar",                  value="apagar"),
-        app_commands.Choice(name="📋 Listar todos",            value="listar"),
-        app_commands.Choice(name="⭐ Ativar no servidor",      value="ativar"),
-        app_commands.Choice(name="🚫 Desativar chatbot",       value="desativar"),
-    ])
+    @chatbot_profile.command(name="editar", description="Editar um profile existente")
     @app_commands.autocomplete(profile=_profile_autocomplete)
     @_safe_slash
-    async def chatbot_profile_dispatch(
-        self,
-        interaction: discord.Interaction,
-        acao: app_commands.Choice[str],
-        profile: Optional[str] = None,
-    ):
-        # Ações que EXIGEM profile como argumento
-        needs_profile = {"editar", "apagar", "ativar"}
-        if acao.value in needs_profile and not profile:
-            await interaction.response.send_message(
-                f"Ação `{acao.value}` precisa do campo `profile`. "
-                "Escolha um usando o autocomplete.",
-                ephemeral=True,
-            )
-            return
+    async def chatbot_profile_editar(self, interaction: discord.Interaction, profile: str):
+        await self._do_profile_editar(interaction, profile)
 
-        # Despacha
-        if acao.value == "criar":
-            await self._do_profile_criar(interaction)
-        elif acao.value == "editar":
-            await self._do_profile_editar(interaction, profile)
-        elif acao.value == "apagar":
-            await self._do_profile_apagar(interaction, profile)
-        elif acao.value == "listar":
-            await self._do_profile_listar(interaction)
-        elif acao.value == "ativar":
-            await self._do_profile_ativar(interaction, profile)
-        elif acao.value == "desativar":
-            await self._do_profile_desativar(interaction)
-        else:
-            await interaction.response.send_message(
-                "Ação desconhecida.", ephemeral=True
-            )
-
-    # --- /chatbot memoria <acao> ---------------------------------------------
-
-    @chatbot_memoria.command(
-        name="acao",
-        description="Gerenciar memória do chatbot (staff)",
-    )
-    @app_commands.describe(acao="O que fazer")
-    @app_commands.choices(acao=[
-        app_commands.Choice(
-            name="🧹 Resetar TODA memória do servidor (destrutivo)",
-            value="reset_server",
-        ),
-    ])
+    @chatbot_profile.command(name="apagar", description="Apagar um profile")
+    @app_commands.autocomplete(profile=_profile_autocomplete)
     @_safe_slash
-    async def chatbot_memoria_dispatch(
-        self,
-        interaction: discord.Interaction,
-        acao: app_commands.Choice[str],
-    ):
-        if acao.value == "reset_server":
-            await self._do_memoria_reset_server(interaction)
-        else:
-            await interaction.response.send_message(
-                "Ação desconhecida.", ephemeral=True
-            )
+    async def chatbot_profile_apagar(self, interaction: discord.Interaction, profile: str):
+        await self._do_profile_apagar(interaction, profile)
 
-    # --- /chatbot master <acao> ----------------------------------------------
-
-    @chatbot_master.command(
-        name="acao",
-        description="Gerenciar prompt mestre global (só config server)",
-    )
-    @app_commands.describe(acao="O que fazer")
-    @app_commands.choices(acao=[
-        app_commands.Choice(name="👁️ Ver prompt atual",        value="ver"),
-        app_commands.Choice(name="✏️ Editar prompt",            value="editar"),
-        app_commands.Choice(
-            name="🔑 Transferir config pra este server",
-            value="transferir",
-        ),
-    ])
+    @chatbot_profile.command(name="listar", description="Listar todos os profiles")
     @_safe_slash
-    async def chatbot_master_dispatch(
-        self,
-        interaction: discord.Interaction,
-        acao: app_commands.Choice[str],
-    ):
-        if acao.value == "ver":
-            await self._do_master_ver(interaction)
-        elif acao.value == "editar":
-            await self._do_master_editar(interaction)
-        elif acao.value == "transferir":
-            await self._do_master_transferir(interaction)
-        else:
-            await interaction.response.send_message(
-                "Ação desconhecida.", ephemeral=True
-            )
+    async def chatbot_profile_listar(self, interaction: discord.Interaction):
+        await self._do_profile_listar(interaction)
+
+    @chatbot_profile.command(name="ativar", description="Ativar um profile no servidor")
+    @app_commands.autocomplete(profile=_profile_autocomplete)
+    @_safe_slash
+    async def chatbot_profile_ativar(self, interaction: discord.Interaction, profile: str):
+        await self._do_profile_ativar(interaction, profile)
+
+    @chatbot_profile.command(name="desativar", description="Desativar o chatbot no servidor")
+    @_safe_slash
+    async def chatbot_profile_desativar(self, interaction: discord.Interaction):
+        await self._do_profile_desativar(interaction)
+
+    @chatbot_memoria.command(name="reset_server", description="Resetar toda a memória do servidor (destrutivo)")
+    @_safe_slash
+    async def chatbot_memoria_reset_server(self, interaction: discord.Interaction):
+        await self._do_memoria_reset_server(interaction)
+
+    @chatbot_master.command(name="ver", description="Ver prompt mestre global")
+    @_safe_slash
+    async def chatbot_master_ver(self, interaction: discord.Interaction):
+        await self._do_master_ver(interaction)
+
+    @chatbot_master.command(name="editar", description="Editar prompt mestre global")
+    @_safe_slash
+    async def chatbot_master_editar(self, interaction: discord.Interaction):
+        await self._do_master_editar(interaction)
+
+    @chatbot_master.command(name="transferir", description="Transferir config do prompt mestre para este servidor")
+    @_safe_slash
+    async def chatbot_master_transferir(self, interaction: discord.Interaction):
+        await self._do_master_transferir(interaction)
 
     # --- /imagem <prompt> — gera imagem via Gemini (qualquer membro) ---------
     # Top-level (não em /chatbot) porque /chatbot é staff-only via
@@ -821,7 +760,7 @@ class ChatbotCommandsMixin:
         if active is None:
             await interaction.response.send_message(
                 "Não há profile ativo neste servidor. A staff precisa ativar "
-                "um com `/chatbot profile acao → ativar` antes.",
+                "um com `/chatbot profile ativar` antes.",
                 ephemeral=True,
             )
             return
@@ -876,13 +815,13 @@ class ChatbotCommandsMixin:
             # Canal esquisito — manda só pela interaction
             file = discord.File(_io.BytesIO(generated.data), filename=filename)
             await interaction.followup.send(
-                content=generated.caption or f"*{prompt[:200]}*",
+                content=f"🖼️ Imagem gerada para: *{prompt[:200]}*",
                 file=file,
             )
             return
 
         file = discord.File(_io.BytesIO(generated.data), filename=filename)
-        caption = generated.caption or f"*{prompt[:200]}*"
+        caption = f"🖼️ Imagem gerada para: *{prompt[:200]}*"
         sent = await self._webhooks.send_as_profile(
             channel=channel,
             profile_name=active.name,

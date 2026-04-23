@@ -156,6 +156,7 @@ class BotLocal(commands.Bot):
 
             for guild_id in sorted(guild_ids):
                 guild_obj = discord.Object(id=guild_id)
+                self.tree.clear_commands(guild=guild_obj)
                 self.tree.copy_global_to(guild=guild_obj)
                 synced_guild = await self.tree.sync(guild=guild_obj)
                 print(f"[SYNC] Slash commands sincronizados na guild {guild_id}: {len(synced_guild)}")
