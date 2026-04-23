@@ -99,6 +99,16 @@ LABEL_MAP = {
     "result": "Resultado",
     "execmaincode": "Código",
     "execmainstatus": "Status",
+    "stderr": "Stderr",
+    "saída do erro": "Stderr",
+    "saida do erro": "Stderr",
+    "commit anterior": "Commit anterior",
+    "commit alvo": "Commit alvo",
+    "commit sujo": "Commit sujo",
+    "serviço afetado": "Serviço afetado",
+    "servico afetado": "Serviço afetado",
+    "update": "Update",
+    "zip": "ZIP",
     "últimas linhas": "Últimas linhas",
     "ultimas linhas": "Últimas linhas",
     "últimas linhas do erro": "Últimas linhas",
@@ -109,10 +119,16 @@ HEADER_FIELDS = {
     "Host",
     "Branch",
     "Commit",
+    "Commit anterior",
+    "Commit alvo",
     "Mudança",
     "Rollback",
+    "Commit sujo",
     "Duração",
     "Serviço",
+    "Serviço afetado",
+    "Update",
+    "ZIP",
     "Resultado",
     "Código",
     "Status",
@@ -122,7 +138,7 @@ HEADER_FIELDS = {
 STATUS_FIELDS = {"Bot health", "Frontend", "Backend", "Activity"}
 DETAIL_FIELDS = {"Etapa", "Motivo", "URL"}
 BULLET_FIELDS = {"Arquivos"}
-CODE_FIELDS = {"Últimas linhas", "Comando"}
+CODE_FIELDS = {"Últimas linhas", "Comando", "Stderr"}
 MAX_TEXT = 1800
 MAX_TOTAL_TEXT = 3800
 MAX_CODE = 1200

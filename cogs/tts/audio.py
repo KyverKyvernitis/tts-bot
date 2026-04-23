@@ -852,22 +852,64 @@ class TTSAudioMixin:
                 pass
             raise
 
+    def _parse_google_credentials_json(self, raw_json: str) -> dict:
+        text = (raw_json or "").strip()
+        candidates = [text]
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"\"", "'"}:
+            candidates.append(text[1:-1].strip())
+
+        last_error: Exception | None = None
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, str):
+                    parsed = json.loads(parsed)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError("GOOGLE_CREDENTIALS_JSON não contém um objeto JSON válido.")
+                return parsed
+            except Exception as exc:
+                last_error = exc
+
+        preview = text[:180].replace("\n", "\\n")
+        if isinstance(last_error, json.JSONDecodeError):
+            detail = f"linha {last_error.lineno}, coluna {last_error.colno}: {last_error.msg}"
+        elif last_error is not None:
+            detail = str(last_error)
+        else:
+            detail = "conteúdo ausente"
+        raise RuntimeError(
+            "GOOGLE_CREDENTIALS_JSON está inválido. "
+            f"Detalhe: {detail}. Prévia: {preview or 'vazia'}"
+        ) from last_error
+
     def _ensure_google_credentials_file(self) -> None:
         if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+            setattr(self, "_google_credentials_error", None)
             return
 
         raw_json = (os.getenv("GOOGLE_CREDENTIALS_JSON", "") or "").strip()
         if not raw_json:
+            setattr(self, "_google_credentials_error", None)
             return
 
+        cached_error = getattr(self, "_google_credentials_error", None)
+        if cached_error:
+            raise RuntimeError(cached_error)
+
         try:
-            parsed = json.loads(raw_json)
+            parsed = self._parse_google_credentials_json(raw_json)
         except Exception as exc:
-            raise RuntimeError("GOOGLE_CREDENTIALS_JSON está inválido e não pôde ser lido como JSON.") from exc
+            message = str(exc).strip() or "GOOGLE_CREDENTIALS_JSON está inválido."
+            setattr(self, "_google_credentials_error", message)
+            logger.error("[tts_voice] Credenciais Google inválidas: %s", message)
+            raise RuntimeError(message) from exc
 
         path = os.path.join(_CREDENTIALS_DIR, "chat_revive_google_credentials.json")
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(parsed, handle, ensure_ascii=False)
+        setattr(self, "_google_credentials_error", None)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
 
     def _get_google_tts_client(self):
@@ -989,10 +1031,17 @@ class TTSAudioMixin:
                 )
 
         if item.engine == "gcloud":
-            return await self._run_timed_generation(
-                "gcloud",
-                lambda: self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch),
-            )
+            try:
+                return await self._run_timed_generation(
+                    "gcloud",
+                    lambda: self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch),
+                )
+            except Exception as e:
+                logger.warning("[tts_voice] Google Cloud TTS falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
+                return await self._run_timed_generation(
+                    "gtts",
+                    lambda: self._generate_gtts_file(item.text, item.language),
+                )
 
         return await self._run_timed_generation(
             "gtts",

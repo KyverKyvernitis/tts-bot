@@ -15,6 +15,7 @@ SUB_STATE="$(get_prop SubState)"
 RESULT_STATE="$(get_prop Result)"
 EXEC_MAIN_CODE="$(get_prop ExecMainCode)"
 EXEC_MAIN_STATUS="$(get_prop ExecMainStatus)"
+EXEC_START="$(get_prop ExecStart)"
 
 ALERT_TYPE="error"
 ALERT_TITLE="Falha fatal no serviço"
@@ -40,16 +41,29 @@ else
   fi
 fi
 
-LOGS="$(journalctl -u "$UNIT_NAME" -n 25 --no-pager 2>/dev/null | tail -n 20)"
+LOGS="$(journalctl -u "$UNIT_NAME" -n 40 --no-pager 2>/dev/null | tail -n 25)"
+STATUS_SNIPPET="$(systemctl status "$UNIT_NAME" --no-pager --lines=12 2>/dev/null | tail -n 12)"
+
+if [[ -z "${LOGS//[[:space:]]/}" ]]; then
+  LOGS="nenhum log adicional encontrado"
+fi
+
+if [[ -z "${STATUS_SNIPPET//[[:space:]]/}" ]]; then
+  STATUS_SNIPPET="nenhuma saída adicional do systemctl status"
+fi
 
 BODY="Resumo: $SUMMARY
 Serviço: $DISPLAY_NAME
+Serviço afetado: $UNIT_NAME
 Host: $(hostname)
 ActiveState: ${ACTIVE_STATE:-desconhecido}
 SubState: ${SUB_STATE:-desconhecido}
 Result: ${RESULT_STATE:-desconhecido}
 ExecMainCode: ${EXEC_MAIN_CODE:-desconhecido}
 ExecMainStatus: ${EXEC_MAIN_STATUS:-desconhecido}
+Comando: ${EXEC_START:-desconhecido}
+Stderr:
+$STATUS_SNIPPET
 Últimas linhas:
 $LOGS
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"

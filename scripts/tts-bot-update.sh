@@ -33,6 +33,71 @@ BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
 ROLLBACK_STATUS="não foi necessário"
 CHANGED_FILES_RAW=""
+UPDATER_UNIT="tts-bot-updater.service"
+RUN_LOG_FILE="${TMPDIR:-/tmp}/tts-bot-updater.$$.log"
+: > "$RUN_LOG_FILE"
+exec > >(tee -a "$RUN_LOG_FILE") 2>&1
+
+cleanup_runtime_artifacts() {
+  rm -f "$RUN_LOG_FILE"
+}
+
+trim_alert_text() {
+  local limit="${1:-4000}"
+  python3 - "$limit" <<'PY'
+import sys
+limit = int(sys.argv[1])
+text = sys.stdin.read().replace("\r\n", "\n").replace("\r", "\n").strip()
+if not text:
+    print("")
+    raise SystemExit
+if len(text) > limit:
+    text = text[: limit - 1].rstrip() + "…"
+print(text)
+PY
+}
+
+collect_run_log_excerpt() {
+  if [[ -f "$RUN_LOG_FILE" ]]; then
+    tail -n 40 "$RUN_LOG_FILE" 2>/dev/null | sed 's/\[[0-9;]*[A-Za-z]//g' | trim_alert_text 1500
+  fi
+}
+
+service_unit_for_stage() {
+  local stage_lc="${1,,}"
+  if [[ "$stage_lc" == *"bot"* ]]; then
+    printf '%s.service' "$SERVICE"
+  else
+    printf '%s' "$UPDATER_UNIT"
+  fi
+}
+
+collect_journal_excerpt() {
+  local unit="${1:-$UPDATER_UNIT}"
+  local logs
+  logs="$(journalctl -u "$unit" -n 40 --no-pager 2>/dev/null | tail -n 25 || true)"
+  if [[ -z "${logs//[[:space:]]/}" ]]; then
+    logs="nenhum log adicional encontrado"
+  fi
+  printf '%s' "$logs" | trim_alert_text 1500
+}
+
+register_error_context() {
+  LAST_ERROR_EXIT_CODE="${1:-1}"
+  LAST_ERROR_COMMAND="${2:-desconhecido}"
+  LAST_ERROR_SERVICE_UNIT="$(service_unit_for_stage "$STAGE")"
+  LAST_ERROR_STDERR="$(collect_run_log_excerpt)"
+  LAST_ERROR_LOGS="$(collect_journal_excerpt "$LAST_ERROR_SERVICE_UNIT")"
+  if [[ -z "${LAST_ERROR_STDERR//[[:space:]]/}" ]]; then
+    LAST_ERROR_STDERR="nenhuma saída adicional capturada"
+  fi
+}
+
+LAST_ERROR_EXIT_CODE=""
+LAST_ERROR_COMMAND=""
+LAST_ERROR_SERVICE_UNIT=""
+LAST_ERROR_STDERR=""
+LAST_ERROR_LOGS=""
 
 send_info() {
   sudo -u ubuntu /home/ubuntu/bot/alert.sh info "$1" "$2" || true
@@ -215,6 +280,7 @@ deploy_backend() {
 rollback_after_failure() {
   local exit_code="${1:-1}"
   local failed_command="${2:-desconhecido}"
+  register_error_context "$exit_code" "$failed_command"
   local rollback_bot_status="não executado"
   local rollback_front_status="não executado"
   local rollback_back_status="não executado"
@@ -268,16 +334,27 @@ rollback_after_failure() {
   body="Resumo: O update falhou de forma fatal. O repositório voltou para o commit anterior e o commit remoto foi marcado como sujo nesta VPS.
 Host: $HOSTNAME
 Branch: $BRANCH
+Serviço: tts-bot-updater
+Serviço afetado: ${LAST_ERROR_SERVICE_UNIT:-$UPDATER_UNIT}
+Commit anterior: $(short_commit "$PREVIOUS_COMMIT")
+Commit alvo: $(short_commit "$REMOTE_COMMIT")
 Commit: $(short_commit "$PREVIOUS_COMMIT") ← $(short_commit "$REMOTE_COMMIT")
 Mudança: ${COMMIT_SUBJECT:-sem mensagem}
+Update: ${COMMIT_SUBJECT:-sem mensagem}
 Etapa: ${FAILED_STAGE:-$STAGE}
 Comando: $failed_command
+Código: $exit_code
 Rollback: $ROLLBACK_STATUS
+Commit sujo: sim
 Bot: $rollback_bot_status
 Frontend: $rollback_front_status
 Backend: $rollback_back_status
 Activity: $rollback_activity_status
 Motivo: reset git=$reset_status
+Stderr:
+${LAST_ERROR_STDERR:-nenhuma saída adicional capturada}
+Últimas linhas:
+${LAST_ERROR_LOGS:-nenhum log adicional encontrado}
 Duração: $duration
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
@@ -289,6 +366,7 @@ on_error() {
   local exit_code="$?"
   local failed_command="${BASH_COMMAND:-desconhecido}"
   FAILED_STAGE="$STAGE"
+  register_error_context "$exit_code" "$failed_command"
 
   if (( UPDATE_APPLIED == 1 )) && [[ -n "$PREVIOUS_COMMIT" ]]; then
     rollback_after_failure "$exit_code" "$failed_command"
@@ -298,14 +376,27 @@ on_error() {
   body="Resumo: O updater falhou antes de concluir a troca de commit.
 Host: $HOSTNAME
 Branch: $BRANCH
+Serviço: tts-bot-updater
+Serviço afetado: ${LAST_ERROR_SERVICE_UNIT:-$UPDATER_UNIT}
+Commit anterior: $(short_commit "$CURRENT_COMMIT")
+Commit alvo: $(short_commit "$REMOTE_COMMIT")
 Commit: $(short_commit "$CURRENT_COMMIT") → $(short_commit "$REMOTE_COMMIT")
+Update: ${COMMIT_SUBJECT:-sem mensagem}
 Etapa: $STAGE
 Comando: $failed_command
+Código: $exit_code
+Rollback: $ROLLBACK_STATUS
+Commit sujo: não
+Stderr:
+${LAST_ERROR_STDERR:-nenhuma saída adicional capturada}
+Últimas linhas:
+${LAST_ERROR_LOGS:-nenhum log adicional encontrado}
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   send_error "Falha no auto update" "$body"
   exit "$exit_code"
 }
 
+trap 'cleanup_runtime_artifacts' EXIT
 trap 'on_error' ERR
 
 SECONDS=0
