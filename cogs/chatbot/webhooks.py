@@ -83,15 +83,39 @@ class WebhookManager:
             self._channel_locks[channel_id] = lock
         return lock
 
+    def _webhook_host_channel(self, channel):
+        """Retorna o canal que HOSPEDA o webhook.
+
+        - Thread: webhook vive no canal pai (usamos `thread=` no send).
+        - TextChannel/VoiceChannel/StageChannel: hospeda o próprio webhook.
+        """
+        if isinstance(channel, discord.Thread):
+            return channel.parent  # pode ser None se desincronizado — tratado abaixo
+        return channel
+
     async def _resolve_webhook(
-        self, channel: discord.TextChannel
+        self, channel
     ) -> Optional[discord.Webhook]:
         """Retorna um Webhook válido pra esse canal, criando se necessário.
 
-        Retorna None se bot não tem permissão para gerenciar webhooks no canal.
+        `channel` pode ser TextChannel, VoiceChannel, StageChannel ou Thread.
+        Em thread, o webhook vem do canal pai. Retorna None se bot não tem
+        permissão Manage Webhooks, ou se é thread sem parent acessível.
         """
-        # Cache hit? Basta reconstruir o Webhook partial.
-        cached = self._cache.get(channel.id)
+        host = self._webhook_host_channel(channel)
+        if host is None:
+            return None
+        # Voice/Stage podem não ter create_webhook dependendo do tipo de guild;
+        # testamos via hasattr pra não crashar.
+        if not hasattr(host, "create_webhook"):
+            log.warning(
+                "chatbot: canal não suporta webhook | type=%s id=%s",
+                type(host).__name__, getattr(host, "id", "?"),
+            )
+            return None
+
+        # Cache é por canal HOST (thread compartilha webhook com canal pai)
+        cached = self._cache.get(host.id)
         if cached is not None:
             return discord.Webhook.partial(
                 id=cached.webhook_id,
@@ -100,9 +124,9 @@ class WebhookManager:
             )
 
         # Miss — precisa buscar/criar. Serializa por canal pra evitar criação dupla.
-        async with self._lock_for(channel.id):
+        async with self._lock_for(host.id):
             # Double-check inside lock (outra task pode ter criado no meantime)
-            cached = self._cache.get(channel.id)
+            cached = self._cache.get(host.id)
             if cached is not None:
                 return discord.Webhook.partial(
                     id=cached.webhook_id,
@@ -111,22 +135,22 @@ class WebhookManager:
                 )
 
             # Checa permissão. Manage Webhooks é o que importa.
-            me = channel.guild.me
-            if me is None or not channel.permissions_for(me).manage_webhooks:
+            me = host.guild.me if getattr(host, "guild", None) else None
+            if me is None or not host.permissions_for(me).manage_webhooks:
                 log.warning(
                     "chatbot: sem permissão Manage Webhooks | guild=%s channel=%s",
-                    channel.guild.id, channel.id,
+                    getattr(host.guild, "id", "?"), host.id,
                 )
                 return None
 
             # Procura webhook existente com nosso nome
             try:
-                existing = await channel.webhooks()
+                existing = await host.webhooks()
             except discord.Forbidden:
-                log.warning("chatbot: Forbidden ao listar webhooks | channel=%s", channel.id)
+                log.warning("chatbot: Forbidden ao listar webhooks | channel=%s", host.id)
                 return None
             except discord.HTTPException as e:
-                log.warning("chatbot: HTTPException ao listar webhooks | channel=%s err=%s", channel.id, e)
+                log.warning("chatbot: HTTPException ao listar webhooks | channel=%s err=%s", host.id, e)
                 return None
 
             managed = next(
@@ -138,23 +162,23 @@ class WebhookManager:
             if managed is None:
                 # Cria. O avatar default fica em branco (cada send sobrescreve).
                 try:
-                    managed = await channel.create_webhook(
+                    managed = await host.create_webhook(
                         name=_MANAGED_WEBHOOK_NAME,
                         reason="Chatbot profile bridge",
                     )
                 except discord.HTTPException as e:
                     log.warning(
                         "chatbot: falha ao criar webhook | channel=%s err=%s",
-                        channel.id, e,
+                        host.id, e,
                     )
                     return None
 
             if managed.token is None:
-                log.warning("chatbot: webhook sem token (não devia acontecer) | channel=%s", channel.id)
+                log.warning("chatbot: webhook sem token (não devia acontecer) | channel=%s", host.id)
                 return None
 
             self._cache.set(
-                channel.id,
+                host.id,
                 _WebhookRef(webhook_id=managed.id, webhook_token=managed.token),
             )
             # Reconstrói usando nossa session (o managed veio da session interna do bot)
@@ -167,7 +191,7 @@ class WebhookManager:
     async def send_as_profile(
         self,
         *,
-        channel: discord.TextChannel,
+        channel,  # TextChannel | VoiceChannel | StageChannel | Thread
         profile_name: str,
         avatar_url: str,
         content: str,
@@ -176,6 +200,9 @@ class WebhookManager:
 
         Retorna a WebhookMessage criada, ou None se falhou (sem permissão,
         rate limit persistente, etc).
+
+        Se `channel` é Thread, o send usa `thread=channel` pra direcionar
+        a mensagem pra thread certa (o webhook em si vive no canal pai).
         """
         webhook = await self._resolve_webhook(channel)
         if webhook is None:
@@ -192,30 +219,31 @@ class WebhookManager:
         if not safe_content:
             safe_content = "..."
 
+        # Kwargs comuns do send
+        send_kwargs = dict(
+            content=safe_content,
+            username=safe_name,
+            avatar_url=avatar_url or discord.utils.MISSING,
+            wait=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        # Se estamos enviando PRA thread, precisamos setar thread=
+        if isinstance(channel, discord.Thread):
+            send_kwargs["thread"] = channel
+
         try:
-            msg = await webhook.send(
-                content=safe_content,
-                username=safe_name,
-                avatar_url=avatar_url or discord.utils.MISSING,
-                wait=True,  # precisamos do obj de mensagem pra salvar ref
-                allowed_mentions=discord.AllowedMentions.none(),  # bot não pinga ninguém
-            )
-            return msg
+            return await webhook.send(**send_kwargs)
         except discord.NotFound:
             # Webhook foi deletado por alguém. Invalida cache e re-tenta UMA vez.
-            log.info("chatbot: webhook NotFound, invalidando cache | channel=%s", channel.id)
-            self._cache.pop(channel.id)
+            host = self._webhook_host_channel(channel)
+            host_id = host.id if host is not None else channel.id
+            log.info("chatbot: webhook NotFound, invalidando cache | channel=%s", host_id)
+            self._cache.pop(host_id)
             webhook2 = await self._resolve_webhook(channel)
             if webhook2 is None:
                 return None
             try:
-                return await webhook2.send(
-                    content=safe_content,
-                    username=safe_name,
-                    avatar_url=avatar_url or discord.utils.MISSING,
-                    wait=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                return await webhook2.send(**send_kwargs)
             except discord.HTTPException as e:
                 log.warning("chatbot: falha no retry de send | channel=%s err=%s", channel.id, e)
                 return None

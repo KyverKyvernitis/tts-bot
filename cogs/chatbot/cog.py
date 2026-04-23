@@ -31,7 +31,7 @@ from discord.ext import commands
 from . import constants as C
 from .commands import ChatbotCommandsMixin
 from .lru_cache import LRUCacheTTL
-from .master import MasterStore, MasterConfig
+from .master import MasterPrompt, MasterPromptStore
 from .memory import MemoryStore, MemoryEntry
 from .profiles import ProfileStore, ChatbotProfile
 from .providers import (
@@ -91,7 +91,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._session: Optional[aiohttp.ClientSession] = None
         self._profiles: Optional[ProfileStore] = None
         self._memory: Optional[MemoryStore] = None
-        self._master: Optional[MasterStore] = None
+        self._master: Optional[MasterPromptStore] = None
         self._router: Optional[ProviderRouter] = None
         self._webhooks: Optional[WebhookManager] = None
 
@@ -147,7 +147,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
         self._profiles = ProfileStore(chatbot_coll)
         self._memory = MemoryStore(chatbot_coll)
-        self._master = MasterStore(chatbot_coll)
+        self._master = MasterPromptStore(chatbot_coll)
 
         groq_key = os.environ.get("GROQ_API_KEY") or ""
         gemini_key = os.environ.get("GEMINI_API_KEY") or ""
@@ -748,8 +748,15 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return
         if message.guild is None:
             return  # só em guilds, DMs não
-        if not isinstance(message.channel, discord.TextChannel):
-            return  # threads/forums/stage: skip por enquanto (expandir depois)
+        # Aceita chats de: TextChannel (padrão), VoiceChannel (chat embutido
+        # da voice call), StageChannel (chat de stage), Thread (threads
+        # normais + forum posts). Todos são `Messageable` e suportam webhook.
+        if not isinstance(
+            message.channel,
+            (discord.TextChannel, discord.VoiceChannel,
+             discord.StageChannel, discord.Thread),
+        ):
+            return
         if self._router is None or self._profiles is None:
             return  # cog não inicializado
 
@@ -871,7 +878,14 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return
 
         channel = message.channel
-        if not isinstance(channel, discord.TextChannel):
+        # Aceita todos os tipos de canal com chat. Webhooks funcionam
+        # nativamente em Text/Voice/Stage. Em Thread, o webhook é do canal
+        # pai e usamos `thread=` no send.
+        supported_types = (
+            discord.TextChannel, discord.VoiceChannel,
+            discord.StageChannel, discord.Thread,
+        )
+        if not isinstance(channel, supported_types):
             return
 
         user_display = str(getattr(author, "display_name", author.name))
@@ -917,7 +931,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             user_hist = results[0] if not isinstance(results[0], Exception) else []
             guild_hist = results[1] if not isinstance(results[1], Exception) else []
             idx = 2
-            master_cfg: Optional[MasterConfig] = None
+            master_cfg: Optional[MasterPrompt] = None
             if master_task is not None:
                 r = results[idx]
                 master_cfg = r if not isinstance(r, Exception) else None
@@ -950,7 +964,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 user_name=user_display,
                 user_message=content,
                 reply_context=reply_context,
-                master_prompt=master_cfg.content if master_cfg else None,
+                master_prompt=master_cfg.prompt if master_cfg else None,
                 channel_context=channel_context,
                 is_temporary=is_temporary,
             )

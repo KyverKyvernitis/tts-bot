@@ -392,9 +392,9 @@ class MasterEditModal(discord.ui.Modal, title="Editar prompt mestre global"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            cfg = await self._store.update_content(
-                content=str(self.prompt_input.value),
-                editor_user_id=interaction.user.id,
+            cfg = await self._store.update_prompt(
+                str(self.prompt_input.value),
+                updated_by=interaction.user.id,
             )
         except Exception:
             log.exception("chatbot: falha ao salvar master prompt")
@@ -403,7 +403,7 @@ class MasterEditModal(discord.ui.Modal, title="Editar prompt mestre global"):
             )
             return
 
-        char_count = len(cfg.content)
+        char_count = len(cfg.prompt)
         await interaction.response.send_message(
             f"✅ Prompt mestre atualizado ({char_count} chars). "
             f"Vai valer imediatamente na próxima mensagem processada "
