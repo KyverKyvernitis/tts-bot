@@ -69,6 +69,38 @@ MAX_TEMPERATURE = 1.5
 GROQ_MODELS = ("llama-3.3-70b-versatile", "llama-3.1-8b-instant")
 GEMINI_MODELS = ("gemini-2.0-flash", "gemini-2.0-flash-lite")
 
+# Modelo de visão (aceita imagens via image_url ou base64). Usado só quando
+# a mensagem tem imagem — pra texto puro, os modelos acima são mais capazes
+# conversacionalmente. Llama 4 Scout: free tier Groq, multimodal nativo.
+GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+
+# Whisper Large V3 Turbo — STT grátis via Groq. ~300 req/dia free tier.
+# Usado pra transcrever voice messages do Discord.
+GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"
+GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+# Gemini 2.5 Flash Image — geração de imagem nativa via Gemini API.
+# Gemini 2.0 flash image gen foi descontinuado em março/2026; o substituto é
+# gemini-2.5-flash-image (ou gemini-3-flash-preview). Usa a MESMA key Gemini
+# que o bot já tem pra chat. Response vem com imagem em base64 no inlineData.
+# Se a key do user for nova e não tiver esse modelo ativo, cai fallback
+# graceful pro texto.
+GEMINI_IMAGEGEN_MODEL = "gemini-2.5-flash-image"
+GEMINI_IMAGEGEN_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "{model}:generateContent"
+)
+
+# Limites de anexos processáveis. Acima disso ignoramos (sem crash).
+MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024   # 20MB (limite do Groq via URL)
+MAX_AUDIO_SIZE_BYTES = 25 * 1024 * 1024   # 25MB (limite do Groq Whisper)
+MAX_IMAGES_PER_MESSAGE = 5                 # Groq limita 5/request
+SUPPORTED_IMAGE_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}
+SUPPORTED_AUDIO_MIMES = {
+    "audio/ogg", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a",
+    "audio/wav", "audio/x-wav", "audio/webm", "audio/flac",
+}
+
 # Timeout por chamada HTTP ao provider. Se passar disso, abortamos.
 PROVIDER_TIMEOUT_SECONDS = 25.0
 
@@ -182,6 +214,21 @@ DEFAULT_MASTER_PROMPT = (
     "- Se o contexto mostrar mensagens de outros chatbots (profiles) no canal, "
     "trate como diálogo paralelo. Você pode reagir ao que eles disseram, mas "
     "não imite o estilo deles — mantenha o seu.\n"
+    "\n"
+    "Suas capacidades multimídia (use naturalmente, sem anunciar):\n"
+    "- Você consegue VER imagens que o usuário anexa. Descreva, comente ou "
+    "reaja ao que vê, como faria com um amigo mostrando uma foto.\n"
+    "- Você consegue OUVIR áudios e voice messages — eles chegam transcritos "
+    "pra você como texto entre colchetes, tipo \"[áudio transcrito]: ...\". "
+    "Trate como fala normal do usuário.\n"
+    "- Você pode ser instruído a RESPONDER com áudio. Isso acontece automático "
+    "quando o user pede (\"responde por áudio\", \"manda voz\") ou quando seu "
+    "profile tem chance de áudio configurada — você não precisa se preocupar, "
+    "o sistema gera o áudio a partir do seu texto.\n"
+    "- Você pode GERAR imagens quando o user pede (\"desenha X\", \"gera imagem "
+    "de Y\"). Isso também é automático — você recebe uma mensagem diferente "
+    "quando o sistema detecta o pedido e aciona o gerador.\n"
+    "\n"
     "- PROIBIÇÕES ABSOLUTAS (valem em TODO canal, sem exceção): nunca crie "
     "conteúdo sexual envolvendo menores de idade nem personagens infantilizados. "
     "Nunca dê instruções reais pra fabricar armas, explosivos, drogas sintéticas "

@@ -195,6 +195,7 @@ class WebhookManager:
         profile_name: str,
         avatar_url: str,
         content: str,
+        files: Optional[list[discord.File]] = None,
     ) -> Optional[discord.WebhookMessage]:
         """Envia `content` no canal com a identidade do profile.
 
@@ -203,6 +204,9 @@ class WebhookManager:
 
         Se `channel` é Thread, o send usa `thread=channel` pra direcionar
         a mensagem pra thread certa (o webhook em si vive no canal pai).
+
+        `files`: lista opcional de discord.File pra anexar (áudio TTS,
+        imagem gerada, etc). Discord aceita até 10 anexos por mensagem.
         """
         webhook = await self._resolve_webhook(channel)
         if webhook is None:
@@ -230,6 +234,9 @@ class WebhookManager:
         # Se estamos enviando PRA thread, precisamos setar thread=
         if isinstance(channel, discord.Thread):
             send_kwargs["thread"] = channel
+        # Arquivos (áudio TTS, imagem gerada, etc). Discord limita a 10.
+        if files:
+            send_kwargs["files"] = files[:10]
 
         try:
             return await webhook.send(**send_kwargs)

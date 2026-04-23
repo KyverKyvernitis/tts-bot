@@ -43,6 +43,11 @@ class ChatbotProfile:
     temperature: float = C.DEFAULT_TEMPERATURE
     history_size: int = C.DEFAULT_HISTORY_SIZE
     active: bool = False
+    # tts_chance: probabilidade 0-1 de o bot responder com áudio ANEXO
+    # (além do texto) em cada mensagem, mesmo sem o user pedir. 0 = só
+    # quando pedirem explicitamente; 1 = sempre. Default 0.
+    # Permite profiles tipo "locutor" falarem muito, ou mudos tipo "sussurrador".
+    tts_chance: float = 0.0
     created_by: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -58,6 +63,7 @@ class ChatbotProfile:
             temperature=float(doc.get("temperature") or C.DEFAULT_TEMPERATURE),
             history_size=int(doc.get("history_size") or C.DEFAULT_HISTORY_SIZE),
             active=bool(doc.get("active") or False),
+            tts_chance=float(doc.get("tts_chance") or 0.0),
             created_by=int(doc.get("created_by") or 0),
             created_at=float(doc.get("created_at") or time.time()),
             updated_at=float(doc.get("updated_at") or time.time()),
@@ -74,6 +80,7 @@ class ChatbotProfile:
             "temperature": self.temperature,
             "history_size": self.history_size,
             "active": self.active,
+            "tts_chance": self.tts_chance,
             "created_by": self.created_by,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

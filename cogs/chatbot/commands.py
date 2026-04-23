@@ -779,6 +779,131 @@ class ChatbotCommandsMixin:
                 "Ação desconhecida.", ephemeral=True
             )
 
+    # --- /imagem <prompt> — gera imagem via Gemini (qualquer membro) ---------
+    # Top-level (não em /chatbot) porque /chatbot é staff-only via
+    # default_permissions. Imagegen é liberado pra qualquer membro.
+
+    @app_commands.command(
+        name="imagem",
+        description="Gera uma imagem a partir da descrição (usa o profile ativo)",
+    )
+    @app_commands.describe(
+        prompt="Descrição da imagem que você quer gerar (ex: 'gato siamês surfando')",
+    )
+    @_safe_slash
+    async def imagem(
+        self,
+        interaction: discord.Interaction,
+        prompt: str,
+    ):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "Este comando só funciona em servidor.", ephemeral=True
+            )
+            return
+        if self._profiles is None or self._webhooks is None:
+            await interaction.response.send_message(
+                "Chatbot não está pronto.", ephemeral=True
+            )
+            return
+
+        # Rate-limit por usuário — mesma lógica do chat normal
+        if self._is_user_on_cooldown(guild.id, interaction.user.id):
+            await interaction.response.send_message(
+                "⌛ Espera um pouco antes de pedir outra imagem.", ephemeral=True
+            )
+            return
+        self._apply_user_cooldown(guild.id, interaction.user.id)
+
+        # Pega profile ativo do server pra dar identidade à imagem
+        active = await self._profiles.get_active_profile(guild.id)
+        if active is None:
+            await interaction.response.send_message(
+                "Não há profile ativo neste servidor. A staff precisa ativar "
+                "um com `/chatbot profile acao → ativar` antes.",
+                ephemeral=True,
+            )
+            return
+
+        # Checa Gemini key
+        import os as _os
+        gemini_key = _os.environ.get("GEMINI_API_KEY", "").strip()
+        if not gemini_key:
+            await interaction.response.send_message(
+                "❌ Geração de imagem não configurada. O dono do bot precisa "
+                "definir `GEMINI_API_KEY`.",
+                ephemeral=True,
+            )
+            return
+
+        # Imagegen demora, então defer a interaction pra não estourar 3s
+        await interaction.response.defer(thinking=True)
+
+        from . import imagegen as _imagegen
+        import io as _io
+
+        try:
+            generated = await _imagegen.generate_image(
+                self._session,
+                api_key=gemini_key,
+                prompt=prompt.strip()[:1000],
+            )
+        except Exception:
+            log.exception("chatbot: /imagem falhou")
+            generated = None
+
+        if generated is None:
+            await interaction.followup.send(
+                "🖼️ Não consegui gerar a imagem. Tenta reescrever o pedido, "
+                "ou espera um pouco — o serviço pode estar sobrecarregado.",
+                ephemeral=True,
+            )
+            return
+
+        # Envia via webhook (com identidade do profile ativo) no canal onde
+        # foi invocado, e confirma na interaction
+        ext = "png" if "png" in (generated.mime_type or "") else "jpg"
+        safe_name = "".join(c for c in active.name if c.isalnum())[:20] or "image"
+        filename = f"{safe_name}.{ext}"
+
+        channel = interaction.channel
+        if not isinstance(
+            channel,
+            (discord.TextChannel, discord.VoiceChannel,
+             discord.StageChannel, discord.Thread),
+        ):
+            # Canal esquisito — manda só pela interaction
+            file = discord.File(_io.BytesIO(generated.data), filename=filename)
+            await interaction.followup.send(
+                content=generated.caption or f"*{prompt[:200]}*",
+                file=file,
+            )
+            return
+
+        file = discord.File(_io.BytesIO(generated.data), filename=filename)
+        caption = generated.caption or f"*{prompt[:200]}*"
+        sent = await self._webhooks.send_as_profile(
+            channel=channel,
+            profile_name=active.name,
+            avatar_url=active.avatar_url,
+            content=caption[:1900],
+            files=[file],
+        )
+        if sent is None:
+            # Fallback: manda direto na interaction
+            file2 = discord.File(_io.BytesIO(generated.data), filename=filename)
+            await interaction.followup.send(
+                content=caption[:1900],
+                file=file2,
+            )
+            return
+        # Deu certo via webhook — confirma na interaction sem duplicar
+        await interaction.followup.send(
+            f"✅ Imagem enviada no canal.",
+            ephemeral=True,
+        )
+
     # --- /reset (sem /chatbot) — qualquer membro ------------------------------
 
     @app_commands.command(

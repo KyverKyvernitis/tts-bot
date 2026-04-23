@@ -48,8 +48,35 @@ class AllProvidersExhausted(ProviderError):
 
 @dataclass
 class ChatMessage:
+    """Mensagem do histórico enviada ao modelo.
+
+    Se `image_urls` estiver preenchido, a mensagem usa o formato multimodal
+    da OpenAI: `content` vira uma lista com um bloco `text` + N blocos
+    `image_url`. O provider decide se suporta — provider sem visão ignora
+    as imagens (recomendação: usar ChatMessage.content simples pra texto
+    puro e só adicionar image_urls quando realmente tem imagem, pra não
+    fazer request mais cara à toa).
+    """
     role: str  # "user" ou "assistant"
     content: str
+    image_urls: list[str] = field(default_factory=list)
+
+    def to_openai_payload(self) -> dict:
+        """Serializa pro formato esperado pela API OpenAI-compatible.
+
+        Sem imagens: `{role, content: str}`.
+        Com imagens: `{role, content: [{type:"text",...}, {type:"image_url",...}, ...]}`.
+        """
+        if not self.image_urls:
+            return {"role": self.role, "content": self.content}
+        # Formato multimodal
+        blocks: list[dict] = [{"type": "text", "text": self.content}]
+        for url in self.image_urls[:5]:  # Groq limita a 5 imagens
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": url},
+            })
+        return {"role": self.role, "content": blocks}
 
 
 @dataclass
@@ -94,7 +121,7 @@ class _GroqClient:
         payload = {
             "model": model,
             "messages": [{"role": "system", "content": system}]
-            + [{"role": m.role, "content": m.content} for m in messages],
+            + [m.to_openai_payload() for m in messages],
             "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
             "max_tokens": C.MAX_RESPONSE_TOKENS,
             "stream": False,
@@ -160,10 +187,27 @@ class _GeminiClient:
     ) -> str:
         # Gemini tem formato próprio: "contents" ao invés de "messages",
         # roles são "user"/"model" (não "assistant"), system vai em campo separado.
+        # Imagens: Gemini aceita inlineData base64, mas implementar o download
+        # local é trabalhoso. Como Groq já cobre o caminho feliz de visão,
+        # o fallback Gemini ignora imagens e responde baseado só no texto.
+        # O prompt do bot menciona que há imagem, então não fica totalmente cego.
+        any_has_images = any(getattr(m, "image_urls", None) for m in messages)
+        if any_has_images:
+            log.info("chatbot: Gemini fallback com imagem — respondendo só texto")
+
         contents = []
         for m in messages:
             role = "user" if m.role == "user" else "model"
-            contents.append({"role": role, "parts": [{"text": m.content}]})
+            # Nota pro modelo se a mensagem tinha imagem que não pudemos anexar
+            content_text = m.content
+            if getattr(m, "image_urls", None):
+                content_text = (
+                    f"{content_text}\n"
+                    f"(nota: o usuário anexou {len(m.image_urls)} imagem(ns), "
+                    f"mas neste fallback a visão não está disponível — "
+                    f"responda reconhecendo que vê a imagem mas sem detalhes)"
+                )
+            contents.append({"role": role, "parts": [{"text": content_text}]})
 
         payload = {
             "contents": contents,
@@ -252,10 +296,22 @@ class ProviderRouter:
         messages: list[ChatMessage],
         temperature: float = C.DEFAULT_TEMPERATURE,
     ) -> str:
+        # Detecta se há imagens em alguma mensagem. Se sim, precisamos usar
+        # um modelo de visão — os modelos padrão (Llama 3.3/3.1) não aceitam
+        # blocos `image_url`. Prepend do vision model na lista de tentativas.
+        has_images = any(getattr(m, "image_urls", None) for m in messages)
+
         attempts: list[tuple[str, _ProviderState, object, tuple[str, ...]]] = []
         if self._groq is not None and self._groq_state.is_available():
-            attempts.append(("groq", self._groq_state, self._groq, C.GROQ_MODELS))
+            if has_images:
+                # Com imagem: só o vision model no Groq. Se falhar, cai pro
+                # Gemini (que também suporta imagem nativamente).
+                groq_models = (C.GROQ_VISION_MODEL,)
+            else:
+                groq_models = C.GROQ_MODELS
+            attempts.append(("groq", self._groq_state, self._groq, groq_models))
         if self._gemini is not None and self._gemini_state.is_available():
+            # Gemini 2.0 Flash aceita imagem nativamente — mesmos modelos.
             attempts.append(("gemini", self._gemini_state, self._gemini, C.GEMINI_MODELS))
 
         if not attempts:

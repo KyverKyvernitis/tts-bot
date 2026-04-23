@@ -32,6 +32,9 @@ from . import constants as C
 from .commands import ChatbotCommandsMixin
 from .lru_cache import LRUCacheTTL
 from .master import MasterPrompt, MasterPromptStore
+from .media import extract_attachments, is_voice_message, download_attachment_bytes
+from .audio import transcribe_audio, synthesize_speech, user_asked_for_tts
+from .imagegen import detect_image_request, extract_image_prompt, generate_image
 from .memory import MemoryStore, MemoryEntry
 from .profiles import ProfileStore, ChatbotProfile
 from .providers import (
@@ -427,6 +430,215 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
         return None
 
+    async def _maybe_transcribe(self, message: discord.Message) -> Optional[str]:
+        """Transcreve voice msg ou áudio anexado, se houver e key disponível.
+
+        Retorna o texto transcrito, ou None se:
+        - Não tem áudio processável na mensagem
+        - Falta GROQ_API_KEY (Whisper é só via Groq)
+        - Download ou Whisper falhou
+
+        Log de cada etapa pra facilitar debug.
+        """
+        groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+        if not groq_key:
+            return None
+        if self._session is None:
+            return None
+
+        _images, audios = extract_attachments(message)
+        if not audios:
+            return None
+
+        # Primeiro áudio (user raramente manda múltiplos)
+        audio = audios[0]
+        log.info(
+            "chatbot: transcrevendo áudio | user=%s filename=%s size=%s",
+            message.author.id, audio.filename, audio.size_bytes,
+        )
+        audio_bytes = await download_attachment_bytes(
+            self._session, audio, max_bytes=C.MAX_AUDIO_SIZE_BYTES,
+        )
+        if audio_bytes is None:
+            return None
+
+        text = await transcribe_audio(
+            self._session,
+            api_key=groq_key,
+            audio_bytes=audio_bytes,
+            filename=audio.filename,
+            language="pt",
+        )
+        if text:
+            log.info(
+                "chatbot: transcrição OK | user=%s chars=%s",
+                message.author.id, len(text),
+            )
+        return text
+
+    async def _maybe_generate_image(
+        self,
+        *,
+        message: discord.Message,
+        profile: ChatbotProfile,
+        prompt_text: str,
+    ) -> bool:
+        """Tenta gerar imagem via Gemini e enviar via webhook.
+
+        Retorna True se processou (sucesso ou falha avisada ao user),
+        False se não deu pra tentar (sem key, sem webhook, etc) e o caller
+        deve seguir pro chat normal.
+        """
+        import io as _io
+
+        gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if not gemini_key:
+            log.debug("chatbot: imagegen skip — sem GEMINI_API_KEY")
+            return False  # cai no chat normal
+        if self._session is None or self._webhooks is None:
+            return False
+
+        # Extrai o prompt real do texto do user
+        img_prompt = extract_image_prompt(prompt_text)
+        if not img_prompt.strip():
+            return False
+
+        channel = message.channel
+        log.info(
+            "chatbot: gerando imagem | profile=%s prompt=%r",
+            profile.name, img_prompt[:80],
+        )
+
+        # Reação visual "gerando" — imagegen demora 10-30s
+        reaction = await self._add_processing_reaction(message)
+        try:
+            generated = await generate_image(
+                self._session,
+                api_key=gemini_key,
+                prompt=img_prompt,
+            )
+            if generated is None:
+                # Modelo falhou ou bloqueou — avisa e deixa o chat lidar normal
+                try:
+                    await message.reply(
+                        "🖼️ Não consegui gerar essa imagem agora. "
+                        "Talvez o conteúdo foi bloqueado ou o serviço está fora. "
+                        "Tenta reescrever o pedido ou espera um pouco.",
+                        mention_author=False,
+                        delete_after=15.0,
+                    )
+                except discord.HTTPException:
+                    pass
+                return True  # processou (avisou o user)
+
+            # Envia a imagem como anexo via webhook
+            ext = "png" if "png" in generated.mime_type else "jpg"
+            safe_name = "".join(c for c in profile.name if c.isalnum())[:20] or "image"
+            filename = f"{safe_name}.{ext}"
+            file = discord.File(
+                _io.BytesIO(generated.data), filename=filename,
+            )
+
+            caption = generated.caption or f"*{img_prompt[:200]}*"
+            sent = await self._webhooks.send_as_profile(
+                channel=channel,
+                profile_name=profile.name,
+                avatar_url=profile.avatar_url,
+                content=caption[:1900],
+                files=[file],
+            )
+            if sent is None:
+                # Fallback sem webhook
+                try:
+                    file2 = discord.File(_io.BytesIO(generated.data), filename=filename)
+                    await channel.send(
+                        content=f"**{profile.name}:** {caption[:1800]}",
+                        files=[file2],
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                except discord.HTTPException:
+                    log.warning("chatbot: fallback imagegen send falhou")
+            return True
+        finally:
+            if reaction is not None:
+                await self._remove_processing_reaction(message, reaction)
+
+    async def _maybe_generate_tts(
+        self,
+        *,
+        content: str,
+        reply: str,
+        profile: ChatbotProfile,
+    ) -> Optional[discord.File]:
+        """Se bater condições, gera TTS do reply e retorna discord.File.
+
+        Condições (qualquer uma verdadeira aciona):
+        - User pediu explicitamente ("responde por áudio", "manda audio", etc)
+        - profile.tts_chance > 0 e random() < tts_chance
+        - O system_prompt do profile contém frases que indicam "sempre áudio"
+          ou "às vezes áudio" (controle textual pela staff, sem precisar de
+          campo numérico separado)
+
+        Retorna None se não precisa gerar, ou se geração falhou.
+        Formato: MP3 gerado pelo edge-tts, com nome do profile.
+        """
+        import io as _io
+        import random as _random
+
+        # Heurística no system prompt pra permitir staff configurar frequência
+        # SEM um campo dedicado no modal (modal já tá cheio).
+        prompt_lower = (profile.system_prompt or "").lower()
+        prompt_tts_chance = 0.0
+        if any(kw in prompt_lower for kw in (
+            "sempre fala por áudio", "sempre fala por audio",
+            "sempre responde em áudio", "sempre responde em audio",
+            "sempre manda áudio", "sempre manda audio",
+            "responde sempre em voz", "responde sempre em áudio",
+        )):
+            prompt_tts_chance = 1.0
+        elif any(kw in prompt_lower for kw in (
+            "às vezes fala por áudio", "as vezes fala por audio",
+            "às vezes manda áudio", "as vezes manda audio",
+            "de vez em quando manda áudio", "de vez em quando manda audio",
+        )):
+            prompt_tts_chance = 0.3
+
+        # Chance efetiva = max das duas fontes
+        effective_chance = max(profile.tts_chance, prompt_tts_chance)
+
+        # Decisão de gerar ou não
+        should = False
+        if user_asked_for_tts(content):
+            should = True
+            log.info("chatbot: TTS acionado por pedido | profile=%s", profile.name)
+        elif effective_chance > 0.0:
+            if _random.random() < effective_chance:
+                should = True
+                log.info(
+                    "chatbot: TTS acionado por sorte | profile=%s chance=%.2f",
+                    profile.name, effective_chance,
+                )
+        if not should:
+            return None
+
+        # Gera — edge-tts pode demorar 2-5s
+        try:
+            audio_bytes = await asyncio.wait_for(
+                synthesize_speech(reply),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            log.warning("chatbot: TTS timeout")
+            return None
+
+        if not audio_bytes:
+            return None
+
+        # Nome do arquivo: usa o nome do profile pra dar identidade
+        safe_name = "".join(c for c in profile.name if c.isalnum())[:20] or "audio"
+        filename = f"{safe_name}.mp3"
+        return discord.File(_io.BytesIO(audio_bytes), filename=filename)
+
     async def _fetch_channel_history(
         self, channel, message: discord.Message
     ) -> list[discord.Message]:
@@ -631,6 +843,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         channel_context: Optional[str] = None,
         is_temporary: bool = False,
         channel_is_nsfw: bool = False,
+        image_urls: Optional[list[str]] = None,
     ) -> tuple[str, list[ChatMessage]]:
         """Monta o payload final: (system_prompt, [messages]).
 
@@ -694,7 +907,11 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             prefixed = f"[{user_name}] ({reply_context}): {content}"
         else:
             prefixed = f"[{user_name}]: {content}"
-        messages.append(ChatMessage(role="user", content=prefixed))
+        messages.append(ChatMessage(
+            role="user",
+            content=prefixed,
+            image_urls=list(image_urls or []),
+        ))
 
         return system, messages
 
@@ -826,8 +1043,23 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                         pass
                 return
 
-            if not trigger.content:
-                return  # mensagem só com menção sem texto
+            # STT: se a mensagem tem voice msg ou áudio anexado e pouco texto,
+            # tenta transcrever e usar como conteúdo. Sem trigger de áudio
+            # explícito — basta que seja voice msg E tenha sido triggered
+            # (menção/reply). Se for áudio comum (não voice note) ignora,
+            # porque pode ser música/ruído que o user compartilhou.
+            content_for_ai = trigger.content
+            if not content_for_ai or is_voice_message(message):
+                transcription = await self._maybe_transcribe(message)
+                if transcription:
+                    # Concatena com qualquer texto que já tinha (raro mas possível)
+                    if content_for_ai:
+                        content_for_ai = f"{content_for_ai}\n[áudio transcrito]: {transcription}"
+                    else:
+                        content_for_ai = f"[áudio transcrito]: {transcription}"
+
+            if not content_for_ai:
+                return  # mensagem só com menção sem texto nem áudio utilizável
 
             # Cooldown — rejeita spam antes de ir pra IA/Mongo.
             if self._is_user_on_cooldown(guild.id, author.id):
@@ -853,8 +1085,18 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 return
 
             try:
+                # Branch imagegen: se user pediu imagem, gera ao invés de chat
+                if detect_image_request(content_for_ai):
+                    handled = await self._maybe_generate_image(
+                        message=message,
+                        profile=trigger.profile,
+                        prompt_text=content_for_ai,
+                    )
+                    if handled:
+                        return  # já enviou a imagem; não chama chat
+
                 await self._generate_and_send(
-                    message, trigger.profile, trigger.content,
+                    message, trigger.profile, content_for_ai,
                     is_temporary=trigger.is_temporary,
                 )
             finally:
@@ -985,6 +1227,17 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             # trata como SFW defensivamente.
             channel_is_nsfw = bool(getattr(channel, "nsfw", False))
 
+            # Extrai imagens anexadas à mensagem pra passar ao modelo multimodal.
+            # URLs do Discord CDN são públicas e a API do Groq baixa direto —
+            # não precisamos ler os bytes aqui. Economiza RAM.
+            images, _audios = extract_attachments(message)
+            image_urls = [img.url for img in images]
+            if image_urls:
+                log.info(
+                    "chatbot: mensagem com %d imagem(ns) | user=%s",
+                    len(image_urls), message.author.id,
+                )
+
             system, messages = self._build_messages(
                 profile=profile,
                 user_history=user_hist,
@@ -996,6 +1249,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 channel_context=channel_context,
                 is_temporary=is_temporary,
                 channel_is_nsfw=channel_is_nsfw,
+                image_urls=image_urls,
             )
 
             # Log do modo — útil pra debugar se diretiva entrou certo.
@@ -1055,12 +1309,25 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 reply = reply[: max(200, budget - 3)] + "..."
             final_content = f"{quote_line}\n{reply}"
 
+            # 4.5. Gera TTS se o user pediu ou se o profile tem tts_chance > 0
+            # e caiu na sorte. Roda em paralelo ao build de `final_content`.
+            tts_file = await self._maybe_generate_tts(
+                content=content,  # texto original do user
+                reply=reply,
+                profile=profile,
+            )
+
             # 5. Envia via webhook com identidade do profile
+            files: list[discord.File] = []
+            if tts_file is not None:
+                files.append(tts_file)
+
             sent = await self._webhooks.send_as_profile(
                 channel=channel,
                 profile_name=profile.name,
                 avatar_url=profile.avatar_url,
                 content=final_content,
+                files=files if files else None,
             )
             if sent is None:
                 # Fallback: envia como o próprio bot avisando que falhou o webhook.
@@ -1069,6 +1336,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     await channel.send(
                         fallback_body[:1990],
                         allowed_mentions=discord.AllowedMentions.none(),
+                        files=files if files else discord.utils.MISSING,
                     )
                 except discord.HTTPException:
                     log.warning("chatbot: fallback send também falhou | channel=%s", channel.id)
