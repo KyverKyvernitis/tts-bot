@@ -1,8 +1,8 @@
 """Slash commands do chatbot.
 
 Organização:
-- `/chatbot criar`, `/chatbot editar <profile>`, `/chatbot apagar <profile>`,
-  `/chatbot listar`, `/chatbot ativar <profile>`, `/chatbot reset_server`
+- `/chatbot profile criar`, `/chatbot editar <profile>`, `/chatbot apagar <profile>`,
+  `/chatbot profile listar`, `/chatbot ativar <profile>`, `/chatbot memoria reset_server`
   — todos exigem permissão Manage Guild (staff).
 - `/reset` — qualquer membro, limpa a memória PESSOAL dele.
 
@@ -133,12 +133,27 @@ class ChatbotCommandsMixin:
     comandos validam isso e respondem com erro se o cog não estiver pronto.
     """
 
-    # O grupo de comandos /chatbot. Declarado como class-level — discord.py
-    # automaticamente registra os subcomandos definidos com decorator aqui.
+    # O grupo raiz /chatbot + subgrupos. Declarados como class-level —
+    # discord.py automaticamente registra os subcomandos definidos com
+    # decorator neles.
+    #
+    # Discord limita a 2 níveis de nesting: `/root subgroup command` é o
+    # máximo. Por isso "profile" e "memoria" são subgroups paralelos dentro
+    # de /chatbot, não mais aninhados.
     chatbot = app_commands.Group(
         name="chatbot",
         description="Gerenciamento do chatbot do servidor",
         default_permissions=discord.Permissions(manage_guild=True),
+    )
+    chatbot_profile = app_commands.Group(
+        name="profile",
+        description="Criar, editar, ativar e apagar profiles",
+        parent=chatbot,
+    )
+    chatbot_memoria = app_commands.Group(
+        name="memoria",
+        description="Limpeza e inspeção de memória do chatbot",
+        parent=chatbot,
     )
 
     # --- Verificação de estado do cog -----------------------------------------
@@ -162,7 +177,7 @@ class ChatbotCommandsMixin:
 
     # --- /chatbot criar -------------------------------------------------------
 
-    @chatbot.command(name="criar", description="Cria um novo profile de chatbot")
+    @chatbot_profile.command(name="criar", description="Cria um novo profile de chatbot")
     @_safe_slash
     async def chatbot_criar(self, interaction: discord.Interaction):
         if not await _staff_check(interaction):
@@ -194,7 +209,7 @@ class ChatbotCommandsMixin:
 
     # --- /chatbot editar <profile> --------------------------------------------
 
-    @chatbot.command(name="editar", description="Edita um profile existente")
+    @chatbot_profile.command(name="editar", description="Edita um profile existente")
     @app_commands.describe(profile="Profile para editar")
     @app_commands.autocomplete(profile=_profile_autocomplete)
     @_safe_slash
@@ -231,7 +246,7 @@ class ChatbotCommandsMixin:
 
     # --- /chatbot apagar <profile> --------------------------------------------
 
-    @chatbot.command(name="apagar", description="Apaga um profile (não volta)")
+    @chatbot_profile.command(name="apagar", description="Apaga um profile (não volta)")
     @app_commands.describe(profile="Profile para apagar")
     @app_commands.autocomplete(profile=_profile_autocomplete)
     @_safe_slash
@@ -302,7 +317,7 @@ class ChatbotCommandsMixin:
 
     # --- /chatbot listar ------------------------------------------------------
 
-    @chatbot.command(name="listar", description="Lista todos os profiles do servidor")
+    @chatbot_profile.command(name="listar", description="Lista todos os profiles do servidor")
     @_safe_slash
     async def chatbot_listar(self, interaction: discord.Interaction):
         if not await _staff_check(interaction):
@@ -326,7 +341,7 @@ class ChatbotCommandsMixin:
         profiles = await self._profiles.list_profiles(guild.id)
         if not profiles:
             await interaction.response.send_message(
-                f"Nenhum profile ainda. Use `/chatbot criar` para o primeiro "
+                f"Nenhum profile ainda. Use `/chatbot profile criar` para o primeiro "
                 f"(limite: {C.MAX_PROFILES_PER_GUILD} por servidor).",
                 ephemeral=True,
             )
@@ -351,7 +366,7 @@ class ChatbotCommandsMixin:
 
     # --- /chatbot ativar <profile> --------------------------------------------
 
-    @chatbot.command(name="ativar", description="Escolhe o profile ativo do servidor")
+    @chatbot_profile.command(name="ativar", description="Escolhe o profile ativo do servidor")
     @app_commands.describe(profile="Profile para ativar (substitui o atual)")
     @app_commands.autocomplete(profile=_profile_autocomplete)
     @_safe_slash
@@ -382,18 +397,29 @@ class ChatbotCommandsMixin:
             )
             return
 
-        # Resposta PÚBLICA (não ephemeral) — o server todo se beneficia de saber
-        # qual profile está ativo agora.
-        await interaction.response.send_message(
-            f"⭐ Profile ativo do chatbot agora é **"
-            f"{discord.utils.escape_markdown(activated.name)}**.\n"
-            f"-# Mencione o bot no início de uma mensagem ou responda a ele "
-            f"para conversar."
+        # Resposta PÚBLICA (não ephemeral) — o server todo se beneficia de
+        # saber qual profile está ativo agora.
+        # Embed pra ficar visualmente agradável e mostrar o avatar do profile.
+        safe_name = discord.utils.escape_markdown(activated.name)
+        embed = discord.Embed(
+            title=f"⭐ Chatbot ativo: {activated.name}",
+            description=(
+                f"Mencione o bot no início de uma mensagem "
+                f"(ex: {interaction.client.user.mention} oi) ou responda a "
+                f"uma mensagem do **{safe_name}** para conversar."
+            ),
+            color=discord.Color.blurple(),
         )
+        if activated.avatar_url:
+            try:
+                embed.set_thumbnail(url=activated.avatar_url)
+            except Exception:
+                pass  # URL inválida — só ignora o thumbnail
+        await interaction.response.send_message(embed=embed)
 
     # --- /chatbot desativar ---------------------------------------------------
 
-    @chatbot.command(name="desativar", description="Desativa o chatbot (remove profile ativo)")
+    @chatbot_profile.command(name="desativar", description="Desativa o chatbot (remove profile ativo)")
     @_safe_slash
     async def chatbot_desativar(self, interaction: discord.Interaction):
         if not await _staff_check(interaction):
@@ -422,13 +448,13 @@ class ChatbotCommandsMixin:
             return
         await interaction.response.send_message(
             "🚫 Chatbot desativado. Menções e replies não serão respondidos "
-            "até reativar com `/chatbot ativar`.",
+            "até reativar com `/chatbot profile ativar`.",
             ephemeral=False,
         )
 
     # --- /chatbot reset_server ------------------------------------------------
 
-    @chatbot.command(name="reset_server", description="Apaga TODA a memória do chatbot neste servidor")
+    @chatbot_memoria.command(name="reset_server", description="Apaga TODA a memória do chatbot neste servidor")
     @_safe_slash
     async def chatbot_reset_server(self, interaction: discord.Interaction):
         if not await _staff_check(interaction):

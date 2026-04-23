@@ -86,18 +86,19 @@ class ProfileCreateModal(discord.ui.Modal, title="Criar profile do chatbot"):
         max_length=C.MAX_SYSTEM_EXTRA_LENGTH,
     )
     temperature_input = discord.ui.TextInput(
-        label="Temperatura (0.0-1.5, padrão 0.8)",
-        placeholder="0.8",
+        label="Temperatura (0.0-1.5)",
+        # Placeholder explicativo. Vai aparecer quando o campo estiver vazio
+        # — por isso NÃO setamos `default`, senão o placeholder nunca aparece.
+        # Limite: 100 chars.
+        placeholder="Baixo=preciso e repetitivo. Alto=criativo. Padrão 0.8",
         required=False,
         max_length=4,
-        default=str(C.DEFAULT_TEMPERATURE),
     )
     history_size_input = discord.ui.TextInput(
-        label="Memória: mensagens (1-40, padrão 20)",
-        placeholder="20",
+        label="Memória: mensagens (1-40)",
+        placeholder="Quantas mensagens anteriores o bot lembra. Padrão 20",
         required=False,
         max_length=3,
-        default=str(C.DEFAULT_HISTORY_SIZE),
     )
 
     def __init__(
@@ -133,7 +134,7 @@ class ProfileCreateModal(discord.ui.Modal, title="Criar profile do chatbot"):
         if count >= self._guild_limit:
             await interaction.response.send_message(
                 f"❌ Limite de {self._guild_limit} profiles atingido. "
-                f"Apague algum com `/chatbot apagar` antes de criar outro.",
+                f"Apague algum com `/chatbot profile apagar` antes de criar outro.",
                 ephemeral=True,
             )
             return
@@ -167,7 +168,7 @@ class ProfileCreateModal(discord.ui.Modal, title="Criar profile do chatbot"):
         msg = (
             f"✅ Profile **{discord.utils.escape_markdown(profile.name)}** criado!\n"
             f"`ID: {profile.profile_id}`\n"
-            f"Use `/chatbot ativar` para ativá-lo como chatbot do servidor.\n\n"
+            f"Use `/chatbot profile ativar` para ativá-lo como chatbot do servidor.\n\n"
             f"⚠️ **Sobre o system prompt**: o texto que você escreveu é "
             f"interpretado pela IA como instruções. Qualquer pessoa do server "
             f"vai conversar com esse profile. Se escrever algo malicioso, "
@@ -218,14 +219,16 @@ class ProfileEditModal(discord.ui.Modal, title="Editar profile do chatbot"):
             max_length=C.MAX_SYSTEM_EXTRA_LENGTH,
         )
         self.temperature_input = discord.ui.TextInput(
-            label="Temperatura (0.0-1.5)",
+            label="Temperatura (0=preciso, 1.5=criativo)",
             default=f"{profile.temperature:.2f}",
+            placeholder="Padrão 0.8",
             required=False,
             max_length=4,
         )
         self.history_size_input = discord.ui.TextInput(
             label="Memória: mensagens (1-40)",
             default=str(profile.history_size),
+            placeholder="Quantas mensagens o bot lembra. Padrão 20",
             required=False,
             max_length=3,
         )

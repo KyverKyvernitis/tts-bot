@@ -211,23 +211,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
     async def _is_reply_to_managed_webhook(self, message: discord.Message) -> bool:
         """True se a mensagem é reply a uma mensagem enviada por nosso webhook."""
-        ref = message.reference
-        if ref is None or ref.message_id is None:
-            return False
-
-        # Primeiro tenta resolver do cache de mensagens
-        resolved = ref.resolved if isinstance(ref.resolved, discord.Message) else None
-        if resolved is None:
-            # Fallback: fetch (custoso, mas reply é evento único — ok)
-            try:
-                channel = message.channel
-                resolved = await channel.fetch_message(ref.message_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                return False
-
-        # Critérios: mensagem tem webhook_id (foi webhook) E o webhook_id está
-        # entre os que gerenciamos, OU autor é webhook com nosso nome padrão.
-        if resolved.webhook_id is None:
+        resolved = await self._resolve_reply_target(message)
+        if resolved is None or resolved.webhook_id is None:
             return False
 
         if self._webhooks is not None and self._webhooks.is_managed_webhook_id(resolved.webhook_id):
@@ -242,6 +227,59 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return False
         author_name = str(getattr(resolved.author, "name", "") or "")
         return author_name.strip().lower() == active.name.strip().lower()
+
+    async def _resolve_reply_target(
+        self, message: discord.Message
+    ) -> Optional[discord.Message]:
+        """Retorna o obj Message sendo respondido, ou None.
+
+        Usa cache quando possível (ref.resolved), cai pro fetch_message
+        na API só quando necessário. Helper compartilhado entre detecção
+        de trigger e extração de contexto pro prompt.
+        """
+        ref = message.reference
+        if ref is None or ref.message_id is None:
+            return None
+
+        resolved = ref.resolved if isinstance(ref.resolved, discord.Message) else None
+        if resolved is not None:
+            return resolved
+
+        # Fallback: fetch da API. Custa uma request, mas só acontece no
+        # primeiro turno após reply e `ref.resolved` tá vazio.
+        try:
+            channel = message.channel
+            return await channel.fetch_message(ref.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
+    def _format_reply_context(
+        self, replied: discord.Message
+    ) -> Optional[str]:
+        """Monta o snippet que vai no prompt descrevendo a mensagem respondida.
+
+        Formato: `respondendo a Bob: "oi tudo bem?"`.
+        Limita o snippet a ~200 chars pra não inflar o prompt. Retorna None
+        se a mensagem não tem conteúdo textual útil (ex: só embed/attachment).
+        """
+        text = (replied.content or "").strip()
+        if not text:
+            return None  # sem texto útil pra dar contexto
+
+        # Nome: prefere display_name (apelido no server). Se for webhook,
+        # o author.name é o nome do profile (customizado no send).
+        author = replied.author
+        name = str(getattr(author, "display_name", None) or author.name or "alguém").strip()
+
+        # Trunca o conteúdo. Reply context não precisa ser perfeito — é só
+        # pra a IA saber do que a pessoa está falando.
+        snippet = text.replace("\n", " ")
+        if len(snippet) > 200:
+            snippet = snippet[:197] + "..."
+
+        # Aspas + nome — formato que o modelo entende naturalmente.
+        return f'respondendo a {name}: "{snippet}"'
+
 
     # -------------------------------------------------------------------------
     # Prompt building
@@ -281,6 +319,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         guild_context: list[MemoryEntry],
         user_name: str,
         user_message: str,
+        reply_context: Optional[str] = None,
     ) -> tuple[str, list[ChatMessage]]:
         """Monta o payload final: (system_prompt, [messages]).
 
@@ -288,6 +327,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                         + COLLECTIVE_GUARD + contexto coletivo formatado
 
         messages = histórico pessoal do usuário + mensagem nova
+
+        reply_context: se o user estava respondendo a uma mensagem, esta
+        string descreve qual ('respondendo a Bob: "tudo bem?"'). É embutida
+        na mensagem nova pra a IA saber a qual mensagem está reagindo.
         """
         system = self._build_system_prompt(profile)
 
@@ -310,10 +353,16 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             if e.role in ("user", "assistant") and e.content:
                 messages.append(ChatMessage(role=e.role, content=e.content))
 
-        # Mensagem nova do usuário: prefixa com nome pro modelo saber com quem fala.
-        # Usa formato "[Nome]: mensagem" que ajuda quando muda de user.
+        # Mensagem nova do usuário: prefixa com nome pro modelo saber com quem
+        # fala, e opcionalmente com o contexto de reply. Formato:
+        # - sem reply: `[Ana]: oi`
+        # - com reply: `[Ana] (respondendo a Bob: "tudo bem?"): na verdade sim`
         content = user_message.strip()[:C.MAX_USER_MESSAGE_LENGTH]
-        messages.append(ChatMessage(role="user", content=f"[{user_name}]: {content}"))
+        if reply_context:
+            prefixed = f"[{user_name}] ({reply_context}): {content}"
+        else:
+            prefixed = f"[{user_name}]: {content}"
+        messages.append(ChatMessage(role="user", content=prefixed))
 
         return system, messages
 
@@ -441,7 +490,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     try:
                         await message.reply(
                             "Nenhum profile de chatbot ativo neste servidor. "
-                            "A staff pode configurar com `/chatbot ativar`.",
+                            "A staff pode configurar com `/chatbot profile ativar`.",
                             mention_author=False,
                             delete_after=10.0,
                         )
@@ -538,12 +587,24 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 user_hist = []
                 guild_hist = []
 
+            # Resolve contexto de reply: se o user respondeu a alguém (user
+            # ou webhook), a IA precisa saber qual mensagem. Isso resolve
+            # aquela sensação de "Claude tá respondendo o nada" quando alguém
+            # clica reply. Custo: 1 read adicional (ou 0 se o obj já estava
+            # em cache via ref.resolved).
+            reply_context: Optional[str] = None
+            if message.reference is not None:
+                replied = await self._resolve_reply_target(message)
+                if replied is not None:
+                    reply_context = self._format_reply_context(replied)
+
             system, messages = self._build_messages(
                 profile=profile,
                 user_history=user_hist,
                 guild_context=guild_hist,
                 user_name=user_display,
                 user_message=content,
+                reply_context=reply_context,
             )
 
             # 3. Chamada ao provider (dentro do semaphore)
