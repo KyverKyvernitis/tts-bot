@@ -542,15 +542,22 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         profile: ChatbotProfile,
         master_prompt: Optional[str] = None,
         is_temporary: bool = False,
+        channel_is_nsfw: bool = False,
     ) -> str:
         """Monta o system prompt final.
 
-        Ordem: MASTER_PROMPT (globais do dono) → HARD_PREAMBLE (anti-injection)
-        → personalidade do profile → NOTA DE INVOCAÇÃO TEMPORÁRIA (se aplicável).
+        Ordem:
+          1. MASTER_PROMPT (globais do dono — inclui PROIBIÇÕES ABSOLUTAS)
+          2. DIRETIVA DE CANAL (SFW ou NSFW conforme channel.nsfw)
+          3. HARD_PREAMBLE (anti-injection + formato base)
+          4. Personalidade do profile
+          5. Nota de invocação temporária (se aplicável)
 
-        O master_prompt vem PRIMEIRO e é tratado como regras supremas. Tanto
-        HARD_PREAMBLE quanto o prompt do profile são "sub-regras" que devem
-        respeitar o master. Personagem NUNCA sobrescreve regras globais.
+        A diretiva de canal entra LOGO após o master porque as regras de
+        tom (SFW vs NSFW) são contextuais, e o modelo precisa saber delas
+        antes de assumir o personagem.
+
+        Personagens NUNCA sobrescrevem master nem diretivas de canal.
         """
         parts: list[str] = []
 
@@ -561,17 +568,27 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             parts.append("====== FIM DAS DIRETRIZES GLOBAIS ======")
             parts.append("")
 
-        # 2. Hard preamble (anti-injection + formato base)
+        # 2. Diretiva de canal — SFW ou NSFW. Sempre incluímos uma das duas
+        # pra o modelo ter clareza. Em "unknown", trata como SFW (defensivo).
+        parts.append("====== CONTEXTO DESTE CANAL ======")
+        if channel_is_nsfw:
+            parts.append(C.NSFW_CHANNEL_DIRECTIVE.strip())
+        else:
+            parts.append(C.SFW_CHANNEL_DIRECTIVE.strip())
+        parts.append("====== FIM DO CONTEXTO DO CANAL ======")
+        parts.append("")
+
+        # 3. Hard preamble (anti-injection + formato base)
         parts.append(C.HARD_SYSTEM_PREAMBLE.strip())
 
-        # 3. Personalidade customizada do profile
+        # 4. Personalidade customizada do profile
         custom = (profile.system_prompt or "").strip()
         if custom:
             parts.append("")
             parts.append(f"Você é {profile.name}. Personalidade:")
             parts.append(custom)
 
-        # 4. Nota sobre invocação temporária (se for o caso)
+        # 5. Nota sobre invocação temporária (se for o caso)
         if is_temporary:
             parts.append("")
             parts.append(
@@ -613,22 +630,27 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         master_prompt: Optional[str] = None,
         channel_context: Optional[str] = None,
         is_temporary: bool = False,
+        channel_is_nsfw: bool = False,
     ) -> tuple[str, list[ChatMessage]]:
         """Monta o payload final: (system_prompt, [messages]).
 
         Estrutura do system_prompt (ordem de precedência semântica):
-          1. MASTER_PROMPT (dono do bot — global)
-          2. HARD_PREAMBLE (Anthropic-style guardrails)
-          3. Personalidade do profile (staff do server)
-          4. Nota de invocação temporária (se aplicável)
-          5. Contexto coletivo da memória do profile
-          6. Contexto do canal (só se invocação temporária — últimas N msgs)
+          1. MASTER_PROMPT (dono do bot — global, inclui proibições absolutas)
+          2. DIRETIVA DE CANAL (SFW ou NSFW)
+          3. HARD_PREAMBLE (Anthropic-style guardrails)
+          4. Personalidade do profile (staff do server)
+          5. Nota de invocação temporária (se aplicável)
+          6. Contexto coletivo da memória do profile
+          7. Contexto do canal (só se invocação temporária — últimas N msgs)
 
         messages[] = histórico pessoal do user com ESSE profile + nova mensagem.
         A nova mensagem pode vir com contexto de reply embutido.
         """
         system = self._build_system_prompt(
-            profile, master_prompt=master_prompt, is_temporary=is_temporary,
+            profile,
+            master_prompt=master_prompt,
+            is_temporary=is_temporary,
+            channel_is_nsfw=channel_is_nsfw,
         )
 
         # Contexto coletivo do profile (de conversas anteriores dele no server)
@@ -957,6 +979,12 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     channel_msgs, profile.name,
                 )
 
+            # Detecta se o canal é age-restricted. Threads herdam do pai
+            # (Discord já resolve via channel.nsfw na Thread). VoiceChannel e
+            # StageChannel têm o atributo. Se não tem atributo (tipo exótico),
+            # trata como SFW defensivamente.
+            channel_is_nsfw = bool(getattr(channel, "nsfw", False))
+
             system, messages = self._build_messages(
                 profile=profile,
                 user_history=user_hist,
@@ -967,6 +995,16 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 master_prompt=master_cfg.prompt if master_cfg else None,
                 channel_context=channel_context,
                 is_temporary=is_temporary,
+                channel_is_nsfw=channel_is_nsfw,
+            )
+
+            # Log do modo — útil pra debugar se diretiva entrou certo.
+            # NÃO loga o prompt completo (é longo e pode ter PII). Só metadados.
+            log.info(
+                "chatbot: gerando resposta | profile=%s canal=%s modo=%s",
+                profile.name,
+                "nsfw" if channel_is_nsfw else "sfw",
+                "temporary" if is_temporary else "active",
             )
 
             # 3. Chamada ao provider (dentro do semaphore)

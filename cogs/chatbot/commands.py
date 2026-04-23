@@ -354,6 +354,13 @@ class ChatbotCommandsMixin:
                 f"> {discord.utils.escape_markdown(prompt_preview) or '(sem prompt)'}"
             )
 
+        # Nota sobre comportamento variável por canal
+        lines.append(
+            "\n-# 💡 Comportamento varia por canal: em canais com age-restriction "
+            "os profiles têm mais liberdade; em canais normais, tom é controlado. "
+            "Proibições absolutas (menores, crimes reais) sempre valem."
+        )
+
         text = "\n".join(lines)
         await interaction.response.send_message(text[:2000], ephemeral=True)
 
