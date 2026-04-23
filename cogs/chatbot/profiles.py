@@ -93,14 +93,17 @@ def _new_profile_id(name: str) -> str:
 
 
 class ProfileStore:
-    """Camada de persistência de profiles. Recebe o `SettingsDB` e usa `.coll`.
+    """Camada de persistência de profiles. Recebe a collection do chatbot
+    (dedicada, não a `settings` do bot — evita colisão de índices).
 
     Todos os métodos são async porque vão ao Mongo via motor.
     """
 
-    def __init__(self, settings_db):
-        # Não tipamos SettingsDB pra evitar import circular. Só precisamos de .coll.
-        self._coll = settings_db.coll
+    def __init__(self, chatbot_coll):
+        # `chatbot_coll` é o Motor AsyncIOMotorCollection da coleção
+        # `chatbot_data` (ou o que `C.CHATBOT_COLLECTION_NAME` definir).
+        # Ver cogs/chatbot/db.py:get_chatbot_collection.
+        self._coll = chatbot_coll
 
     # --- Leitura ---------------------------------------------------------------
 

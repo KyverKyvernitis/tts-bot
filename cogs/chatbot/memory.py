@@ -72,14 +72,17 @@ class MemoryEntry:
 class MemoryStore:
     """Persistência de histórico pessoal + coletivo, SEPARADO POR PROFILE.
 
+    Recebe a collection dedicada do chatbot (NÃO `settings_db.coll`, que
+    pertence a outros cogs e tem índice UNIQUE incompatível).
+
     Sem cache em RAM — cada read vai ao Mongo. Docs são pequenos (<30KB cada)
     e cada request faz no máximo 2 reads (user + guild) = ~60KB trafegados
     por mensagem. Na VPS 1GB, esse é o trade-off correto: zero state em
     processo, tudo em Mongo.
     """
 
-    def __init__(self, settings_db):
-        self._coll = settings_db.coll
+    def __init__(self, chatbot_coll):
+        self._coll = chatbot_coll
 
     # --- Memória pessoal (user x profile) --------------------------------------
 

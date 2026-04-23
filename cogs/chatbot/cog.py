@@ -86,12 +86,22 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             log.warning("chatbot: settings_db não disponível — cog não funcionará")
             return
 
+        # Coleção DEDICADA ao chatbot (não a `settings` compartilhada com
+        # TTS etc). Ver cogs/chatbot/db.py pra motivação.
+        from .db import get_chatbot_collection, ensure_indexes
+        chatbot_coll = get_chatbot_collection(db)
+        if chatbot_coll is None:
+            log.warning("chatbot: não conseguiu abrir coleção dedicada — cog não funcionará")
+            return
+        # Índices são criados em background — se falhar, log e segue
+        await ensure_indexes(chatbot_coll)
+
         # Session dedicada. NÃO reutilizamos a do bot (que é interna do discord.py)
         # para não misturar pools de conexão com as requests ao Discord API.
         self._session = aiohttp.ClientSession()
 
-        self._profiles = ProfileStore(db)
-        self._memory = MemoryStore(db)
+        self._profiles = ProfileStore(chatbot_coll)
+        self._memory = MemoryStore(chatbot_coll)
 
         groq_key = os.environ.get("GROQ_API_KEY") or ""
         gemini_key = os.environ.get("GEMINI_API_KEY") or ""
@@ -108,9 +118,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._webhooks = WebhookManager(bot=self.bot, session=self._session)
 
         self._cleanup_task = asyncio.create_task(self._cooldown_cleanup_loop())
-        log.info("chatbot: cog carregado (groq=%s gemini=%s)",
+        log.info("chatbot: cog carregado (groq=%s gemini=%s, coll=%s)",
                  "on" if groq_key else "off",
-                 "on" if gemini_key else "off")
+                 "on" if gemini_key else "off",
+                 chatbot_coll.name)
 
     async def cog_unload(self):
         if self._cleanup_task is not None:

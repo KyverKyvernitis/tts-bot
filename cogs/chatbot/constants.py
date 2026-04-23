@@ -6,6 +6,18 @@ Valores pensados para VPS de 1GB de RAM — NÃO inflacionar sem testar.
 from __future__ import annotations
 
 # -----------------------------------------------------------------------------
+# Banco de dados
+# -----------------------------------------------------------------------------
+
+# Coleção DEDICADA ao chatbot (profiles + memórias). Não usamos a coll padrão
+# `settings` do bot porque ela tem índice UNIQUE em (guild_id, user_id, type)
+# criado pro TTS, que conflita com nossos docs de profile (user_id=null no
+# profile, e múltiplos profiles por guild viola unicidade).
+# Essa coleção fica no MESMO database (chat_revive ou o que o bot estiver
+# usando), só num namespace separado.
+CHATBOT_COLLECTION_NAME = "chatbot_data"
+
+# -----------------------------------------------------------------------------
 # Limites de uso
 # -----------------------------------------------------------------------------
 
