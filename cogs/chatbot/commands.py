@@ -282,8 +282,21 @@ class ChatbotCommandsMixin:
             )
             return
 
+        # Limpa as memórias órfãs daquele profile (pessoal + coletiva).
+        # Fire-and-forget: se falhar, o `clear_all_guild_memory` do reset_server
+        # pega depois. Não bloqueia a resposta ao admin.
+        memory_count = 0
+        try:
+            memory_count = await self._memory.clear_profile_memory(
+                guild.id, profile
+            )
+        except Exception:
+            log.exception("chatbot: falha ao limpar memória do profile apagado")
+
+        msg_tail = f" ({memory_count} memórias removidas)" if memory_count else ""
         await interaction.followup.send(
-            f"🗑️ Profile **{discord.utils.escape_markdown(prof.name)}** apagado.",
+            f"🗑️ Profile **{discord.utils.escape_markdown(prof.name)}** "
+            f"apagado.{msg_tail}",
             ephemeral=True,
         )
 
@@ -480,12 +493,17 @@ class ChatbotCommandsMixin:
             )
             return
 
-        deleted = await self._memory.clear_user_history(guild.id, interaction.user.id)
-        if deleted:
+        # Apaga memória do user com TODOS os profiles do server (sem
+        # profile_id = wildcard). É o que o user espera: "esquece tudo
+        # que sabe sobre mim aqui".
+        count = await self._memory.clear_user_history(
+            guild.id, interaction.user.id
+        )
+        if count > 0:
             msg = (
-                "✅ Sua memória pessoal com o chatbot foi resetada. "
-                "Ele vai começar do zero com você.\n"
-                "-# A memória coletiva do servidor não foi afetada."
+                f"✅ Sua memória pessoal com o chatbot foi resetada "
+                f"({count} registros). O bot vai começar do zero com você.\n"
+                f"-# A memória coletiva do servidor não foi afetada."
             )
         else:
             msg = "Você ainda não tinha memória salva com o chatbot."

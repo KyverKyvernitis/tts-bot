@@ -1,12 +1,19 @@
-"""Histórico de conversas — 2 escopos.
+"""Histórico de conversas — 2 escopos, cada um SEPARADO POR PROFILE.
 
-1. Memória POR USUÁRIO: o que aquele user específico já falou com o bot.
-   Chave: (guild_id, user_id). Doc único por par. Serve para continuidade
-   natural de conversa individual.
+Este é um ponto crítico: cada profile do chatbot tem sua própria memória,
+tanto pessoal quanto coletiva. Se o server tem 2 profiles (Lua e Toguro),
+a conversa com Lua NÃO aparece quando Toguro responde — são personagens
+diferentes e confundir as memórias quebra a ilusão.
 
-2. Memória COLETIVA DO GUILD: todas as trocas recentes no servidor,
-   independente de quem falou. Chave: (guild_id). Doc único por guild.
-   Serve para dar contexto social ao bot.
+1. Memória POR USUÁRIO POR PROFILE: o que aquele user falou com aquele
+   profile específico. Chave: (guild_id, profile_id, user_id).
+   Serve para continuidade natural da conversa individual daquele usuário
+   com aquele personagem.
+
+2. Memória COLETIVA DO PROFILE: todas as trocas recentes daquele profile
+   no servidor, independente de quem falou. Chave: (guild_id, profile_id).
+   Dá contexto social ao profile (quem ele já cumprimentou, o que
+   conversaram por perto, etc).
 
 Ambas são rolling windows — ao passar do limite, as mais antigas caem.
 Cada entrada é pequena (~100-500 bytes) — docs ficam em tamanho bem
@@ -15,6 +22,10 @@ controlado mesmo com 20+30 msgs.
 IMPORTANTE — prompt injection: a memória coletiva recebe mensagens de
 qualquer usuário. O wrapper COLLECTIVE_MEMORY_GUARD é aplicado ANTES
 desse histórico no prompt final (isso fica em `cog.py`, não aqui).
+
+Compatibilidade: docs antigos salvos sem profile_id não são lidos (ficam
+órfãos). `clear_all_guild_memory` apaga eles junto. Quem quiser pode
+migrar, mas ganhamos pouco — a memória é efêmera por design.
 """
 from __future__ import annotations
 
@@ -59,7 +70,7 @@ class MemoryEntry:
 
 
 class MemoryStore:
-    """Persistência de histórico pessoal + coletivo.
+    """Persistência de histórico pessoal + coletivo, SEPARADO POR PROFILE.
 
     Sem cache em RAM — cada read vai ao Mongo. Docs são pequenos (<30KB cada)
     e cada request faz no máximo 2 reads (user + guild) = ~60KB trafegados
@@ -70,13 +81,20 @@ class MemoryStore:
     def __init__(self, settings_db):
         self._coll = settings_db.coll
 
-    # --- Memória pessoal (user) ------------------------------------------------
+    # --- Memória pessoal (user x profile) --------------------------------------
 
-    async def get_user_history(self, guild_id: int, user_id: int) -> list[MemoryEntry]:
+    async def get_user_history(
+        self, guild_id: int, profile_id: str, user_id: int
+    ) -> list[MemoryEntry]:
+        """Retorna histórico do user COM ESSE PROFILE ESPECÍFICO.
+
+        Se mudar de profile, memória começa zerada — é o comportamento certo,
+        personagens diferentes não compartilham lembranças."""
         doc = await self._coll.find_one({
             "type": C.DOC_TYPE_MEMORY,
             "scope": "user",
             "guild_id": int(guild_id),
+            "profile_id": str(profile_id),
             "user_id": int(user_id),
         })
         if not doc:
@@ -87,6 +105,7 @@ class MemoryStore:
     async def append_user_turn(
         self,
         guild_id: int,
+        profile_id: str,
         user_id: int,
         *,
         user_message: str,
@@ -94,7 +113,7 @@ class MemoryStore:
         assistant_message: str,
         max_messages: int = C.USER_MEMORY_MAX_MESSAGES,
     ) -> None:
-        """Adiciona o par (user, assistant) ao histórico pessoal, faz rotate.
+        """Adiciona o par (user, assistant) ao histórico pessoal DESSE PROFILE.
 
         Usamos uma única operação Mongo com $push + $slice pra manter o doc
         bounded sem precisar ler-modificar-escrever.
@@ -121,6 +140,7 @@ class MemoryStore:
                 "type": C.DOC_TYPE_MEMORY,
                 "scope": "user",
                 "guild_id": int(guild_id),
+                "profile_id": str(profile_id),
                 "user_id": int(user_id),
             },
             {
@@ -135,6 +155,7 @@ class MemoryStore:
                     "type": C.DOC_TYPE_MEMORY,
                     "scope": "user",
                     "guild_id": int(guild_id),
+                    "profile_id": str(profile_id),
                     "user_id": int(user_id),
                     "created_at": now,
                 },
@@ -142,22 +163,39 @@ class MemoryStore:
             upsert=True,
         )
 
-    async def clear_user_history(self, guild_id: int, user_id: int) -> bool:
-        result = await self._coll.delete_one({
+    async def clear_user_history(
+        self,
+        guild_id: int,
+        user_id: int,
+        profile_id: Optional[str] = None,
+    ) -> int:
+        """Apaga memória pessoal.
+
+        - Se `profile_id` passado: apaga só aquela com aquele profile.
+        - Se None: apaga memória do user com TODOS os profiles do guild
+          (é o que o `/reset` user-facing usa — "esquece tudo sobre mim aqui").
+        """
+        query: dict = {
             "type": C.DOC_TYPE_MEMORY,
             "scope": "user",
             "guild_id": int(guild_id),
             "user_id": int(user_id),
-        })
-        return result.deleted_count > 0
+        }
+        if profile_id is not None:
+            query["profile_id"] = str(profile_id)
+        result = await self._coll.delete_many(query)
+        return result.deleted_count
 
-    # --- Memória coletiva (guild) ----------------------------------------------
+    # --- Memória coletiva (guild x profile) ------------------------------------
 
-    async def get_guild_history(self, guild_id: int) -> list[MemoryEntry]:
+    async def get_guild_history(
+        self, guild_id: int, profile_id: str
+    ) -> list[MemoryEntry]:
         doc = await self._coll.find_one({
             "type": C.DOC_TYPE_MEMORY,
             "scope": "guild",
             "guild_id": int(guild_id),
+            "profile_id": str(profile_id),
         })
         if not doc:
             return []
@@ -167,6 +205,7 @@ class MemoryStore:
     async def append_guild_turn(
         self,
         guild_id: int,
+        profile_id: str,
         *,
         user_id: int,
         user_name: str,
@@ -174,7 +213,7 @@ class MemoryStore:
         assistant_message: str,
         max_messages: int = C.GUILD_MEMORY_MAX_MESSAGES,
     ) -> None:
-        """Adiciona par (user, assistant) à memória coletiva do guild, com rotate."""
+        """Adiciona par (user, assistant) à memória coletiva DESSE PROFILE."""
         now = time.time()
         new_entries = [
             MemoryEntry(
@@ -197,6 +236,7 @@ class MemoryStore:
                 "type": C.DOC_TYPE_MEMORY,
                 "scope": "guild",
                 "guild_id": int(guild_id),
+                "profile_id": str(profile_id),
             },
             {
                 "$push": {
@@ -210,24 +250,44 @@ class MemoryStore:
                     "type": C.DOC_TYPE_MEMORY,
                     "scope": "guild",
                     "guild_id": int(guild_id),
+                    "profile_id": str(profile_id),
                     "created_at": now,
                 },
             },
             upsert=True,
         )
 
-    async def clear_guild_history(self, guild_id: int) -> bool:
-        result = await self._coll.delete_one({
+    async def clear_guild_history(
+        self, guild_id: int, profile_id: Optional[str] = None
+    ) -> int:
+        """Apaga memória coletiva de um profile específico, ou todos do guild."""
+        query: dict = {
             "type": C.DOC_TYPE_MEMORY,
             "scope": "guild",
             "guild_id": int(guild_id),
+        }
+        if profile_id is not None:
+            query["profile_id"] = str(profile_id)
+        result = await self._coll.delete_many(query)
+        return result.deleted_count
+
+    # --- Ao apagar profile, limpar suas memórias -------------------------------
+
+    async def clear_profile_memory(self, guild_id: int, profile_id: str) -> int:
+        """Apaga TODA memória (pessoal + coletiva) daquele profile.
+        Chamado quando a staff apaga um profile — evita deixar doc órfão."""
+        result = await self._coll.delete_many({
+            "type": C.DOC_TYPE_MEMORY,
+            "guild_id": int(guild_id),
+            "profile_id": str(profile_id),
         })
-        return result.deleted_count > 0
+        return result.deleted_count
 
     # --- Utilitário conjunto (reset total do chatbot num server) ---------------
 
     async def clear_all_guild_memory(self, guild_id: int) -> int:
-        """Apaga memória coletiva E todas as pessoais do guild. Retorna total deletado."""
+        """Apaga TODA memória do guild, de todos os profiles inclusive docs
+        legados sem profile_id. Retorna total deletado."""
         result = await self._coll.delete_many({
             "type": C.DOC_TYPE_MEMORY,
             "guild_id": int(guild_id),

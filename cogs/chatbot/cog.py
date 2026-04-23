@@ -514,11 +514,13 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         # Daqui pra frente, tudo que retorna precisa passar pelo finally
         # que remove a reação. Usa try/finally explícito em vez de bloco `with`.
         try:
-            # 2. Busca históricos do Mongo (duas reads em paralelo via gather)
+            # 2. Busca históricos do Mongo (duas reads em paralelo via gather).
+            # IMPORTANTE: memória é SEPARADA POR PROFILE — passamos profile.profile_id
+            # pra isolar. Personagens diferentes não compartilham lembranças.
             try:
                 user_hist, guild_hist = await asyncio.gather(
-                    self._memory.get_user_history(guild.id, author.id),
-                    self._memory.get_guild_history(guild.id),
+                    self._memory.get_user_history(guild.id, profile.profile_id, author.id),
+                    self._memory.get_guild_history(guild.id, profile.profile_id),
                 )
             except Exception:
                 log.exception("chatbot: falha ao ler histórico")
@@ -600,10 +602,11 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     log.warning("chatbot: fallback send também falhou | channel=%s", channel.id)
                     return
 
-            # 7. Persiste histórico (pessoal + coletivo). Fire-and-forget.
+            # 7. Persiste histórico (pessoal + coletivo DO PROFILE). Fire-and-forget.
             # Passamos `reply` SEM o quote — o histórico é semântico, não UI.
             asyncio.create_task(self._persist_turn(
                 guild_id=guild.id,
+                profile_id=profile.profile_id,
                 user_id=author.id,
                 user_name=user_display,
                 user_message=content,
@@ -618,26 +621,27 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self,
         *,
         guild_id: int,
+        profile_id: str,
         user_id: int,
         user_name: str,
         user_message: str,
         assistant_message: str,
         user_history_size: int,
     ) -> None:
-        """Grava a troca nos 2 escopos. Chamado como task separada."""
+        """Grava a troca nos 2 escopos, SEPARADO POR PROFILE. Fire-and-forget."""
         if self._memory is None:
             return
         try:
             await asyncio.gather(
                 self._memory.append_user_turn(
-                    guild_id, user_id,
+                    guild_id, profile_id, user_id,
                     user_message=user_message,
                     user_name=user_name,
                     assistant_message=assistant_message,
                     max_messages=user_history_size,
                 ),
                 self._memory.append_guild_turn(
-                    guild_id,
+                    guild_id, profile_id,
                     user_id=user_id, user_name=user_name,
                     user_message=user_message,
                     assistant_message=assistant_message,
