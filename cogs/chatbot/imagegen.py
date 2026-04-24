@@ -304,6 +304,29 @@ def build_image_failure_message(result: ImageGenerationResult) -> str:
     )
 
 
+def _is_retryable_adult_failure(result: ImageGenerationResult) -> bool:
+    return (
+        not result.ok
+        and result.prompt_class == "adult_allowed"
+        and result.reason in ("timeout", "no_worker", "network_error")
+    )
+
+
+def _hf_fallback_models(adult_model: str) -> list[str]:
+    raw = (adult_model or "").strip()
+    if raw:
+        # Permite lista separada por vírgula no env ADULT_IMAGEGEN_MODEL
+        candidates = [m.strip() for m in raw.split(",") if m.strip()]
+        if candidates:
+            return candidates
+    # Priorizamos modelos populares em anime/NSFW no ecossistema SD.
+    return [
+        "Linaqruf/anything-v3.0",
+        "Linaqruf/anything-v4.0",
+        "hakurei/waifu-diffusion",
+    ]
+
+
 async def _generate_with_gemini(
     session: aiohttp.ClientSession,
     *,
@@ -941,10 +964,72 @@ async def generate_image(
     adult_key = os.environ.get("ADULT_IMAGEGEN_API_KEY", "0000000000").strip() or "0000000000"
     adult_url = os.environ.get("ADULT_IMAGEGEN_URL", "https://aihorde.net/api").strip() or "https://aihorde.net/api"
     adult_model = os.environ.get("ADULT_IMAGEGEN_MODEL", "").strip()
-    adult_provider = (os.environ.get("ADULT_IMAGEGEN_PROVIDER", "aihorde") or "aihorde").strip().lower()
+    adult_provider = (os.environ.get("ADULT_IMAGEGEN_PROVIDER", "auto") or "auto").strip().lower()
 
     if pclass == "adult_allowed":
         adult_timeout = max(timeout_seconds, 120.0)
+        if adult_provider in ("auto", "auto_free", "free"):
+            # Cadeia de fallback focada em serviços gratuitos.
+            # 1) AI Horde (crowdsourced, geralmente melhor custo/benefício)
+            # 2) Hugging Face (lista de modelos para tolerar indisponibilidades)
+            # 3) Provider adulto customizado (se configurado com model/url válidos)
+            attempts: list[ImageGenerationResult] = []
+            aihorde_result = await _generate_with_aihorde(
+                session,
+                api_key=adult_key,
+                base_url=adult_url,
+                model=adult_model,
+                prompt=prompt_clean,
+                timeout_seconds=adult_timeout,
+            )
+            attempts.append(aihorde_result)
+            if aihorde_result.ok:
+                return aihorde_result
+
+            for hf_model in _hf_fallback_models(adult_model):
+                hf_result = await _generate_with_huggingface(
+                    session,
+                    api_key=adult_key,
+                    model=hf_model,
+                    prompt=prompt_clean,
+                    timeout_seconds=adult_timeout,
+                )
+                attempts.append(hf_result)
+                if hf_result.ok:
+                    return hf_result
+                if not _is_retryable_adult_failure(hf_result):
+                    break
+
+            custom_result: ImageGenerationResult | None = None
+            has_custom_provider_config = bool(adult_model and adult_url and "aihorde.net/api" not in adult_url)
+            if has_custom_provider_config:
+                custom_result = await _generate_with_adult_provider(
+                    session,
+                    api_key=adult_key,
+                    api_url=adult_url,
+                    model=adult_model,
+                    prompt=prompt_clean,
+                    timeout_seconds=adult_timeout,
+                )
+                attempts.append(custom_result)
+                if custom_result.ok:
+                    return custom_result
+
+            # Retorna a falha mais útil pro usuário:
+            # prioriza erros "definitivos" antes de timeout genérico.
+            for reason in ("missing_key", "provider_blocked", "no_image_returned", "no_worker", "timeout"):
+                for attempt in attempts:
+                    if attempt.reason == reason:
+                        return attempt
+            if attempts:
+                return attempts[-1]
+            return ImageGenerationResult(
+                ok=False,
+                provider="router",
+                prompt_class="adult_allowed",
+                reason="no_worker",
+            )
+
         if adult_provider == "aihorde":
             return await _generate_with_aihorde(
                 session,
@@ -955,13 +1040,25 @@ async def generate_image(
                 timeout_seconds=adult_timeout,
             )
         if adult_provider in ("huggingface", "hf"):
-            hf_model = adult_model or "Linaqruf/anything-v3.0"
-            return await _generate_with_huggingface(
-                session,
-                api_key=adult_key,
-                model=hf_model,
-                prompt=prompt_clean,
-                timeout_seconds=adult_timeout,
+            attempts: list[ImageGenerationResult] = []
+            for hf_model in _hf_fallback_models(adult_model):
+                result = await _generate_with_huggingface(
+                    session,
+                    api_key=adult_key,
+                    model=hf_model,
+                    prompt=prompt_clean,
+                    timeout_seconds=adult_timeout,
+                )
+                attempts.append(result)
+                if result.ok:
+                    return result
+                if not _is_retryable_adult_failure(result):
+                    return result
+            return attempts[-1] if attempts else ImageGenerationResult(
+                ok=False,
+                provider="adult_hf",
+                prompt_class="adult_allowed",
+                reason="no_worker",
             )
         result = await _generate_with_adult_provider(
             session,
