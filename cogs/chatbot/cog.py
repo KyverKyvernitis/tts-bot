@@ -34,7 +34,12 @@ from .lru_cache import LRUCacheTTL
 from .master import MasterPrompt, MasterPromptStore
 from .media import extract_attachments, is_voice_message, download_attachment_bytes
 from .audio import transcribe_audio, synthesize_speech, user_asked_for_tts
-from .imagegen import detect_image_request, extract_image_prompt, generate_image
+from .imagegen import (
+    detect_image_request,
+    extract_image_prompt,
+    generate_image,
+    build_image_failure_message,
+)
 from .memory import MemoryStore, MemoryEntry
 from .profiles import ProfileStore, ChatbotProfile
 from .providers import (
@@ -491,10 +496,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         """
         import io as _io
 
-        gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-        if not gemini_key:
-            log.debug("chatbot: imagegen skip — sem GEMINI_API_KEY")
-            return False  # cai no chat normal
         if self._session is None or self._webhooks is None:
             return False
 
@@ -514,16 +515,14 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         try:
             generated = await generate_image(
                 self._session,
-                api_key=gemini_key,
                 prompt=img_prompt,
+                channel_is_nsfw=bool(getattr(channel, "nsfw", False)),
             )
-            if generated is None:
+            if not generated.ok or generated.image is None:
                 # Modelo falhou ou bloqueou — avisa e deixa o chat lidar normal
                 try:
                     await message.reply(
-                        "🖼️ Não consegui gerar essa imagem agora. "
-                        "Talvez o conteúdo foi bloqueado ou o serviço está fora. "
-                        "Tenta reescrever o pedido ou espera um pouco.",
+                        build_image_failure_message(generated),
                         mention_author=False,
                         delete_after=15.0,
                     )
@@ -532,11 +531,11 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 return True  # processou (avisou o user)
 
             # Envia a imagem como anexo via webhook
-            ext = "png" if "png" in generated.mime_type else "jpg"
+            ext = "png" if "png" in generated.image.mime_type else "jpg"
             safe_name = "".join(c for c in profile.name if c.isalnum())[:20] or "image"
             filename = f"{safe_name}.{ext}"
             file = discord.File(
-                _io.BytesIO(generated.data), filename=filename,
+                _io.BytesIO(generated.image.data), filename=filename,
             )
 
             caption = f"🖼️ Imagem gerada para: *{img_prompt[:200]}*"
@@ -550,7 +549,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             if sent is None:
                 # Fallback sem webhook
                 try:
-                    file2 = discord.File(_io.BytesIO(generated.data), filename=filename)
+                    file2 = discord.File(_io.BytesIO(generated.image.data), filename=filename)
                     await channel.send(
                         content=f"**{profile.name}:** {caption[:1800]}",
                         files=[file2],
