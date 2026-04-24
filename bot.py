@@ -166,12 +166,40 @@ class BotLocal(commands.Bot):
                 # Modo guild-only: se vinha de sync global antes, limpa os
                 # globais pra evitar duplicação. Só faz isso se
                 # CLEAR_GLOBAL_COMMANDS=true no .env.
+                #
+                # IMPORTANTE: NÃO usar `clear_commands(guild=None) + sync()` pra
+                # limpar globais — isso é um bulk update com lista vazia e o
+                # Discord rejeita (error 50240) porque apagaria o Entry Point
+                # da Activity junto. Em vez disso, busca os comandos globais
+                # registrados e deleta um por um, preservando Entry Point
+                # (AppCommandType.primary_entry_point, valor 4).
                 if clear_globals_on_boot:
-                    self.tree.clear_commands(guild=None)
-                    await self.tree.sync()
-                    print("[SYNC] Comandos globais limpos (CLEAR_GLOBAL_COMMANDS=true)")
+                    try:
+                        existing_globals = await self.tree.fetch_commands()
+                    except Exception as e:
+                        print(f"[SYNC] Não consegui buscar comandos globais: {e}")
+                        existing_globals = []
+                    deleted = 0
+                    preserved = 0
+                    for cmd in existing_globals:
+                        # Entry Point da Activity = type 4. Discord força a
+                        # preservação dele; qualquer tentativa de deletar
+                        # via bulk com lista vazia falha.
+                        cmd_type = getattr(cmd, "type", None)
+                        type_value = getattr(cmd_type, "value", cmd_type)
+                        if type_value == 4:
+                            preserved += 1
+                            print(f"[SYNC][GLOBAL] preservado Entry Point: /{cmd.name}")
+                            continue
+                        try:
+                            await cmd.delete()
+                            deleted += 1
+                            print(f"[SYNC][GLOBAL] deletado: /{cmd.name}")
+                        except Exception as e:
+                            print(f"[SYNC][GLOBAL] falha ao deletar /{cmd.name}: {e}")
+                    print(f"[SYNC] Limpeza global: {deleted} deletados, {preserved} preservados (Entry Point)")
                 else:
-                    print("[SYNC] Sync global pulado. Se você ainda vê comandos duplicados,")
+                    print("[SYNC] Sync global pulado. Se você vê comandos duplicados,")
                     print("[SYNC] rode UMA VEZ com CLEAR_GLOBAL_COMMANDS=true no .env pra limpar.")
 
                 for guild_id in sorted(guild_ids):
