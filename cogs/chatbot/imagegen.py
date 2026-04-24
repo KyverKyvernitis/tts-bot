@@ -738,8 +738,9 @@ async def _generate_with_aihorde(
         "nsfw": True,
         "censor_nsfw": False,
         "replacement_filter": False,
-        "trusted_workers": True,
+        "trusted_workers": False,
         "slow_workers": True,
+        "allow_downgrade": True,
         "params": {
             "n": 1,
             "width": 512,
