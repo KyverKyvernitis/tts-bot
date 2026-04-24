@@ -726,11 +726,17 @@ async def _generate_with_aihorde(
     model: str,
     prompt: str,
     timeout_seconds: float,
+    is_nsfw: bool = True,
 ) -> ImageGenerationResult:
     base = (base_url or "https://aihorde.net/api").rstrip("/")
     key = (api_key or "0000000000").strip() or "0000000000"
-    pos, neg = _augment_adult_prompt(prompt)
-    prompt_for_horde = f"{pos} ### {neg}" if neg else pos
+    # Pra SFW, não aplica o prompt adulto (que adiciona negativos NSFW-specific
+    # e prefixos de qualidade de anime/NSFW). Usa prompt limpo direto.
+    if is_nsfw:
+        pos, neg = _augment_adult_prompt(prompt)
+        prompt_for_horde = f"{pos} ### {neg}" if neg else pos
+    else:
+        prompt_for_horde = prompt
     prompt_for_horde = prompt_for_horde[:2000]
     # Timeouts desacoplados:
     #   - http_timeout: limite por chamada HTTP individual (submit, check, status, fetch).
@@ -751,7 +757,7 @@ async def _generate_with_aihorde(
     # corta ~33% do tempo de geração no lado do worker.
     submit_payload: dict[str, object] = {
         "prompt": prompt_for_horde,
-        "nsfw": True,
+        "nsfw": is_nsfw,
         "censor_nsfw": False,
         "replacement_filter": False,
         "trusted_workers": False,
@@ -993,17 +999,19 @@ async def generate_image(
     channel_is_nsfw: bool,
     timeout_seconds: float = 45.0,
 ) -> ImageGenerationResult:
-    """Geração de imagem com roteamento multi-provider (safe/adulto)."""
+    """Geração de imagem com roteamento multi-provider por perfil.
+
+    Perfil = (nsfw, style) onde style ∈ {realistic, anime, generic}.
+    Cada perfil tem uma ordem de preferência de providers (ver
+    `image_providers_ext.provider_order_for_profile`). Router itera a ordem,
+    pula providers não configurados, faz fallback se erro for retryable.
+    """
+    from . import image_providers_ext as ext
+
     prompt_clean = (prompt or "").strip()
     pclass = classify_image_prompt(prompt_clean)
-    prompt_hint = _prompt_preview(prompt_clean)
-    log.info(
-        "chatbot: imagegen classify | class=%s nsfw_channel=%s prompt=%r",
-        pclass,
-        channel_is_nsfw,
-        ("<adult:redacted>" if pclass == "adult_allowed" else prompt_hint),
-    )
 
+    # Gates de política/canal (mantidos exatamente como antes).
     if pclass == "blocked":
         return ImageGenerationResult(
             ok=False,
@@ -1026,124 +1034,307 @@ async def generate_image(
             reason="prompt_too_vague",
         )
 
+    # Perfil derivado: nsfw (binário) + estilo (anime/realistic/generic).
+    profile = ext.ImageProfile(
+        nsfw=(pclass == "adult_allowed"),
+        style=ext.detect_style(prompt_clean),
+    )
+    log.info(
+        "chatbot: imagegen classify | profile=%s nsfw_channel=%s prompt=%r",
+        profile.describe(),
+        channel_is_nsfw,
+        ("<adult:redacted>" if profile.nsfw else _prompt_preview(prompt_clean)),
+    )
+
+    # Env vars (todas opcionais — providers sem chave são pulados).
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     raw_adult_key = (os.environ.get("ADULT_IMAGEGEN_API_KEY") or "").strip()
     aihorde_key = raw_adult_key or "0000000000"
     hf_key = os.environ.get("HUGGINGFACE_API_KEY", "").strip() or raw_adult_key
     custom_key = raw_adult_key
-    adult_url = os.environ.get("ADULT_IMAGEGEN_URL", "https://aihorde.net/api").strip() or "https://aihorde.net/api"
-    adult_model = os.environ.get("ADULT_IMAGEGEN_MODEL", "").strip()
-    adult_provider = (os.environ.get("ADULT_IMAGEGEN_PROVIDER", "auto") or "auto").strip().lower()
+    adult_url = (
+        os.environ.get("ADULT_IMAGEGEN_URL", "https://aihorde.net/api").strip()
+        or "https://aihorde.net/api"
+    )
+    adult_model_override = os.environ.get("ADULT_IMAGEGEN_MODEL", "").strip()
+    pollinations_key = os.environ.get("POLLINATIONS_API_KEY", "").strip()
+    cf_account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    cf_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
 
-    if pclass == "adult_allowed":
-        adult_timeout = max(timeout_seconds, 120.0)
-        if adult_provider in ("auto", "auto_free", "free"):
-            attempts: list[ImageGenerationResult] = []
-            aihorde_result = await _generate_with_aihorde(
-                session,
-                api_key=aihorde_key,
-                base_url=adult_url,
-                model=adult_model,
-                prompt=prompt_clean,
-                timeout_seconds=adult_timeout,
+    # Override de provider via .env continua funcionando (bypass do router).
+    adult_provider = (
+        os.environ.get("ADULT_IMAGEGEN_PROVIDER", "auto") or "auto"
+    ).strip().lower()
+    use_auto_router = adult_provider in ("auto", "auto_free", "free")
+
+    # Timeout mais generoso pra NSFW (fila do Horde) e razoável pra SFW.
+    eff_timeout = max(timeout_seconds, 120.0 if profile.nsfw else 60.0)
+
+    # Modo legacy: usuário forçou um provider específico. Respeita e sai.
+    if not use_auto_router and profile.nsfw:
+        return await _run_legacy_nsfw_provider(
+            session,
+            adult_provider=adult_provider,
+            profile=profile,
+            prompt_clean=prompt_clean,
+            aihorde_key=aihorde_key,
+            hf_key=hf_key,
+            custom_key=custom_key,
+            adult_url=adult_url,
+            adult_model_override=adult_model_override,
+            eff_timeout=eff_timeout,
+        )
+
+    # Router: itera providers na ordem de preferência pro perfil.
+    order = ext.provider_order_for_profile(profile)
+    log.info(
+        "chatbot: imagegen router order | profile=%s order=%s",
+        profile.describe(),
+        order,
+    )
+
+    attempts: list[ImageGenerationResult] = []
+    for provider_name in order:
+        result = await _try_provider(
+            provider_name,
+            session=session,
+            profile=profile,
+            prompt_clean=prompt_clean,
+            timeout_seconds=eff_timeout,
+            gemini_key=gemini_key,
+            aihorde_key=aihorde_key,
+            hf_key=hf_key,
+            custom_key=custom_key,
+            adult_url=adult_url,
+            adult_model_override=adult_model_override,
+            pollinations_key=pollinations_key,
+            cf_account=cf_account,
+            cf_token=cf_token,
+        )
+        if result is None:
+            # Provider não configurado (sem chave) ou não aplicável ao perfil.
+            continue
+        attempts.append(result)
+        if result.ok:
+            log.info(
+                "chatbot: imagegen router ok | provider=%s profile=%s",
+                result.provider,
+                profile.describe(),
             )
-            attempts.append(aihorde_result)
-            if aihorde_result.ok:
-                return aihorde_result
+            return result
 
-            for hf_model in _hf_fallback_models(adult_model):
-                hf_result = await _generate_with_huggingface(
-                    session,
-                    api_key=hf_key,
-                    model=hf_model,
-                    prompt=prompt_clean,
-                    timeout_seconds=adult_timeout,
-                )
-                attempts.append(hf_result)
-                if hf_result.ok:
-                    return hf_result
-                if not _is_retryable_adult_failure(hf_result):
-                    break
+    # Todos os providers falharam. Retorna o erro mais informativo.
+    if not attempts:
+        return ImageGenerationResult(
+            ok=False,
+            provider="router",
+            prompt_class=pclass,
+            reason="missing_key",
+        )
+    # Prioriza erros "acionáveis" pro user sobre erros de infra.
+    # Ordem: missing_key > provider_blocked > no_image_returned > no_worker
+    #      > timeout > network_error.
+    # (Missing_key fica no topo se TODOS os providers faltarem chave — sinal
+    # claro pro admin que precisa configurar algo.)
+    if all(a.reason == "missing_key" for a in attempts):
+        return attempts[0]
+    priority = [
+        "provider_blocked",
+        "no_image_returned",
+        "no_worker",
+        "timeout",
+        "network_error",
+        "missing_key",
+    ]
+    for want in priority:
+        for a in attempts:
+            if a.reason == want:
+                return a
+    return attempts[-1]
 
-            custom_result: ImageGenerationResult | None = None
-            has_custom_provider_config = bool(adult_model and adult_url and "aihorde.net/api" not in adult_url)
-            if has_custom_provider_config:
-                custom_result = await _generate_with_adult_provider(
-                    session,
-                    api_key=custom_key,
-                    api_url=adult_url,
-                    model=adult_model,
-                    prompt=prompt_clean,
-                    timeout_seconds=adult_timeout,
-                )
-                attempts.append(custom_result)
-                if custom_result.ok:
-                    return custom_result
 
-            for reason in (
-                "provider_blocked",
-                "no_image_returned",
-                "no_worker",
-                "timeout",
-                "network_error",
-                "missing_key",
-            ):
-                for attempt in attempts:
-                    if attempt.reason == reason:
-                        return attempt
-            if attempts:
-                return attempts[-1]
+async def _try_provider(
+    name: str,
+    *,
+    session: aiohttp.ClientSession,
+    profile,  # ext.ImageProfile
+    prompt_clean: str,
+    timeout_seconds: float,
+    gemini_key: str,
+    aihorde_key: str,
+    hf_key: str,
+    custom_key: str,
+    adult_url: str,
+    adult_model_override: str,
+    pollinations_key: str,
+    cf_account: str,
+    cf_token: str,
+) -> ImageGenerationResult | None:
+    """Chama o provider `name`. Retorna None se o provider não está
+    configurado (router deve pular e ir pro próximo)."""
+    from . import image_providers_ext as ext
+
+    if name == "gemini":
+        if profile.nsfw or not gemini_key:
+            return None
+        return await _generate_with_gemini(
+            session,
+            api_key=gemini_key,
+            prompt=prompt_clean,
+            timeout_seconds=timeout_seconds,
+        )
+
+    if name == "pollinations":
+        # Pollinations: SFW livre (sem key). NSFW exige token.
+        if profile.nsfw and not pollinations_key:
+            return None
+        ok, data, mime, reason = await ext.generate_with_pollinations(
+            session,
+            api_key=pollinations_key,
+            prompt=prompt_clean,
+            profile=profile,
+            timeout_seconds=timeout_seconds,
+        )
+        if ok:
             return ImageGenerationResult(
-                ok=False,
-                provider="router",
-                prompt_class="adult_allowed",
-                reason="no_worker",
+                ok=True,
+                provider="pollinations",
+                prompt_class=("adult_allowed" if profile.nsfw else "safe"),
+                image=GeneratedImage(data=data, mime_type=mime or "image/jpeg"),
             )
+        return ImageGenerationResult(
+            ok=False,
+            provider="pollinations",
+            prompt_class=("adult_allowed" if profile.nsfw else "safe"),
+            reason=reason or "network_error",
+        )
 
-        if adult_provider == "aihorde":
-            return await _generate_with_aihorde(
-                session,
-                api_key=aihorde_key,
-                base_url=adult_url,
-                model=adult_model,
-                prompt=prompt_clean,
-                timeout_seconds=adult_timeout,
+    if name == "cloudflare":
+        # Cloudflare Workers AI: só SFW. Se não configurado ou se NSFW, pula.
+        if profile.nsfw or not cf_account or not cf_token:
+            return None
+        ok, data, mime, reason = await ext.generate_with_cloudflare(
+            session,
+            account_id=cf_account,
+            api_token=cf_token,
+            prompt=prompt_clean,
+            profile=profile,
+            timeout_seconds=timeout_seconds,
+        )
+        if ok:
+            return ImageGenerationResult(
+                ok=True,
+                provider="cloudflare",
+                prompt_class="safe",
+                image=GeneratedImage(data=data, mime_type=mime or "image/png"),
             )
-        if adult_provider in ("huggingface", "hf"):
-            attempts: list[ImageGenerationResult] = []
-            for hf_model in _hf_fallback_models(adult_model):
-                result = await _generate_with_huggingface(
-                    session,
-                    api_key=hf_key,
-                    model=hf_model,
-                    prompt=prompt_clean,
-                    timeout_seconds=adult_timeout,
-                )
-                attempts.append(result)
-                if result.ok:
-                    return result
-                if not _is_retryable_adult_failure(result):
-                    return result
-            return attempts[-1] if attempts else ImageGenerationResult(
-                ok=False,
-                provider="adult_hf",
-                prompt_class="adult_allowed",
-                reason="no_worker",
-            )
-        result = await _generate_with_adult_provider(
+        return ImageGenerationResult(
+            ok=False,
+            provider="cloudflare",
+            prompt_class="safe",
+            reason=reason or "network_error",
+        )
+
+    if name == "aihorde":
+        model_list = ext.aihorde_models_for_profile(profile, override=adult_model_override)
+        model_str = ",".join(model_list)
+        return await _generate_with_aihorde(
+            session,
+            api_key=aihorde_key,
+            base_url=adult_url,
+            model=model_str,
+            prompt=prompt_clean,
+            timeout_seconds=timeout_seconds,
+            is_nsfw=profile.nsfw,
+        )
+
+    if name == "huggingface":
+        hf_models = _hf_fallback_models(adult_model_override)
+        if not hf_models:
+            return None
+        return await _generate_with_huggingface(
+            session,
+            api_key=hf_key,
+            model=hf_models[0],
+            prompt=prompt_clean,
+            timeout_seconds=timeout_seconds,
+        )
+
+    if name == "adult_custom":
+        has_config = bool(
+            adult_model_override and adult_url
+            and "aihorde.net/api" not in adult_url
+        )
+        if not has_config:
+            return None
+        return await _generate_with_adult_provider(
             session,
             api_key=custom_key,
             api_url=adult_url,
-            model=adult_model,
+            model=adult_model_override,
             prompt=prompt_clean,
-            timeout_seconds=adult_timeout,
+            timeout_seconds=timeout_seconds,
         )
-        return result
 
-    result = await _generate_with_gemini(
+    return None
+
+
+async def _run_legacy_nsfw_provider(
+    session: aiohttp.ClientSession,
+    *,
+    adult_provider: str,
+    profile,  # ext.ImageProfile
+    prompt_clean: str,
+    aihorde_key: str,
+    hf_key: str,
+    custom_key: str,
+    adult_url: str,
+    adult_model_override: str,
+    eff_timeout: float,
+) -> ImageGenerationResult:
+    """Modo legacy: ADULT_IMAGEGEN_PROVIDER=aihorde|huggingface|custom força
+    usar só aquele provider (bypass do router). Mantido pra compatibilidade
+    com quem tinha essa var setada antes."""
+    from . import image_providers_ext as ext
+
+    if adult_provider == "aihorde":
+        model_list = ext.aihorde_models_for_profile(profile, override=adult_model_override)
+        return await _generate_with_aihorde(
+            session,
+            api_key=aihorde_key,
+            base_url=adult_url,
+            model=",".join(model_list),
+            prompt=prompt_clean,
+            timeout_seconds=eff_timeout,
+            is_nsfw=profile.nsfw,
+        )
+    if adult_provider in ("huggingface", "hf"):
+        attempts: list[ImageGenerationResult] = []
+        for hf_model in _hf_fallback_models(adult_model_override):
+            result = await _generate_with_huggingface(
+                session,
+                api_key=hf_key,
+                model=hf_model,
+                prompt=prompt_clean,
+                timeout_seconds=eff_timeout,
+            )
+            attempts.append(result)
+            if result.ok:
+                return result
+            if not _is_retryable_adult_failure(result):
+                return result
+        return attempts[-1] if attempts else ImageGenerationResult(
+            ok=False,
+            provider="adult_hf",
+            prompt_class="adult_allowed",
+            reason="missing_key",
+        )
+    # Custom endpoint.
+    return await _generate_with_adult_provider(
         session,
-        api_key=gemini_key,
+        api_key=custom_key,
+        api_url=adult_url,
+        model=adult_model_override,
         prompt=prompt_clean,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=eff_timeout,
     )
-    return result
