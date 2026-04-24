@@ -38,6 +38,7 @@ class GeneratedImage:
 
 
 PromptClass = Literal["safe", "adult_allowed", "blocked"]
+IntentCategory = Literal["safe", "adult_allowed"]
 FailureReason = Literal[
     "provider_blocked",
     "policy_blocked",
@@ -58,6 +59,13 @@ class ImageGenerationResult:
     image: Optional[GeneratedImage] = None
     reason: Optional[FailureReason] = None
     detail: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ImageIntent:
+    requested: bool
+    category: IntentCategory
+    prompt: str
 
 
 # -----------------------------------------------------------------------------
@@ -88,9 +96,7 @@ def detect_image_request(text: str) -> bool:
     o pedido é CLARO (ativo por default) e permitir override via comando
     explícito pros casos ambíguos.
     """
-    if not text:
-        return False
-    return bool(_IMAGE_REQUEST_RE.search(text) or looks_like_adult_image_request(text))
+    return parse_image_intent(text).requested
 
 
 def extract_image_prompt(text: str) -> str:
@@ -114,6 +120,16 @@ def extract_image_prompt(text: str) -> str:
     for pat in patterns:
         text = re.sub(pat, "", text, flags=re.IGNORECASE).strip()
     return text or "uma imagem"
+
+
+def parse_image_intent(text: str) -> ImageIntent:
+    raw = (text or "").strip()
+    if not raw:
+        return ImageIntent(requested=False, category="safe", prompt="")
+    requested = bool(_IMAGE_REQUEST_RE.search(raw) or looks_like_adult_image_request(raw))
+    prompt = extract_image_prompt(raw)
+    category: IntentCategory = "adult_allowed" if text_has_adult_hint(prompt) else "safe"
+    return ImageIntent(requested=requested, category=category, prompt=prompt)
 
 
 # -----------------------------------------------------------------------------
@@ -161,14 +177,31 @@ _ADULT_HINT_PATTERNS = (
     r"breasts?\b",
     r"naked\b",
     r"nude\b",
+    r"hentai\b",
 )
 _ADULT_IMAGE_VERB_RE = re.compile(
     r"\b(gere|gera|gerar|cria|crie|criar|desenha|desenhe|desenhar|faz|faça|faca|mostrar?|mostre)\b",
     re.IGNORECASE | re.UNICODE,
 )
 _GENERIC_ADULT_WORDS_RE = re.compile(
-    r"\b(nsfw|18\+|adult[oa]s?|conte[uú]do|er[oó]tic[oa]s?|sensual|sexual|sexo|porn[oô]|nudez|nude|nud[eo]s?|pelad[oa]s?|imagem|foto|arte|desenho|figura|gera|gere|gerar|cria|crie|criar|desenha|desenhe|desenhar|faz|faça|faca|mostra|mostrar|mostre|manda|mande|me|de|com|uma|um|a|o)\b",
+    r"\b(nsfw|18\+|adult[oa]s?|conte[uú]do|er[oó]tic[oa]s?|sensual|sexual|sexo|porn[oô]|nudez|nude|nud[eo]s?|pelad[oa]s?|hentai|imagem|foto|arte|desenho|figura|gera|gere|gerar|cria|crie|criar|desenha|desenhe|desenhar|faz|faça|faca|mostra|mostrar|mostre|manda|mande|me|de|com|uma|um|a|o)\b",
     re.IGNORECASE | re.UNICODE,
+)
+_NONCONSENSUAL_LEAK_PATTERNS = (
+    r"vazad[oa]s?\b",
+    r"vazamento\s+de\s+nude",
+    r"nudes?\s+vazad[oa]s?",
+)
+_REAL_PERSON_ADULT_PATTERNS = (
+    r"pessoa\s+real\b",
+    r"mulher\s+real\b",
+    r"homem\s+real\b",
+    r"minha\s+ex\b",
+    r"meu\s+ex\b",
+    r"minha\s+namorada\b",
+    r"meu\s+namorado\b",
+    r"instagram\b",
+    r"onlyfans\b",
 )
 
 
@@ -212,6 +245,13 @@ def classify_image_prompt(prompt: str) -> PromptClass:
         any(re.search(pat, text, flags=re.IGNORECASE) for pat in _ADULT_HINT_PATTERNS)
         and any(re.search(pat, text, flags=re.IGNORECASE) for pat in _REAL_PERSON_PATTERNS)
     ):
+        return "blocked"
+    if (
+        any(re.search(pat, text, flags=re.IGNORECASE) for pat in _ADULT_HINT_PATTERNS)
+        and any(re.search(pat, text, flags=re.IGNORECASE) for pat in _REAL_PERSON_ADULT_PATTERNS)
+    ):
+        return "blocked"
+    if any(re.search(pat, text, flags=re.IGNORECASE) for pat in _NONCONSENSUAL_LEAK_PATTERNS):
         return "blocked"
     if text_has_adult_hint(text):
         return "adult_allowed"
