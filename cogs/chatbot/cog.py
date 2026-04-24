@@ -652,8 +652,12 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             "não posso gerar áudios",
             "não consigo enviar áudio",
             "não posso enviar áudio",
+            "não consigo mandar áudio",
+            "não posso mandar áudio",
             "não consigo gerar audio",
             "não posso gerar audio",
+            "não consigo mandar audio",
+            "não posso mandar audio",
         )
         if not any(marker in lowered for marker in deny_markers):
             return reply
@@ -665,10 +669,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         message: discord.Message,
         profile: ChatbotProfile,
         spoken_text: str,
-        requested_audio: bool,
+        audio_was_sent: bool,
     ) -> None:
-        """Enfileira fala na call atual quando user pediu áudio e já está na mesma call do bot."""
-        if not requested_audio:
+        """Enfileira fala na call atual quando já houve resposta em áudio no chat."""
+        if not audio_was_sent:
             return
         guild = message.guild
         if guild is None:
@@ -1376,8 +1380,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             if not reply:
                 return  # sem resposta útil, fica quieto
 
-            requested_audio = user_asked_for_tts(content)
-
             # 4.5. Gera TTS se o user pediu ou se o profile tem tts_chance > 0
             # e caiu na sorte.
             tts_file = await self._maybe_generate_tts(
@@ -1434,7 +1436,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 message=message,
                 profile=profile,
                 spoken_text=reply,
-                requested_audio=requested_audio,
+                audio_was_sent=(tts_file is not None),
             )
 
             # 7. Persiste histórico (pessoal + coletivo DO PROFILE). Fire-and-forget.
