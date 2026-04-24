@@ -139,30 +139,50 @@ class BotLocal(commands.Bot):
 
         should_sync = str(os.getenv("SYNC_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
         allow_global_sync = str(os.getenv("SYNC_GLOBAL_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        # One-shot flag: limpa comandos globais antes de sync guild. Útil quando
+        # o bot antes rodava com sync global e agora tá em modo guild-only —
+        # sem isso, os comandos globais fantasmas continuam registrados e o
+        # Discord mostra cada comando em duplicata (um global + um guild).
+        clear_globals_on_boot = str(os.getenv("CLEAR_GLOBAL_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
         if should_sync:
             health_guild_id = 927002914449424404
             guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
             guild_ids.add(health_guild_id)
 
             if allow_global_sync:
+                # Modo global: limpa tudo das guilds pra não deixar cópias
+                # antigas coexistindo com os globais (causa de duplicação).
+                for guild_id in sorted(guild_ids):
+                    guild_obj = discord.Object(id=guild_id)
+                    self.tree.clear_commands(guild=guild_obj)
+                    await self.tree.sync(guild=guild_obj)
+                    print(f"[SYNC] Limpou comandos guild-specific da guild {guild_id}")
                 synced_global = await self.tree.sync()
                 print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced_global)}")
                 for cmd in synced_global:
                     name = getattr(cmd, "name", None) or str(cmd)
                     print(f"[SYNC][GLOBAL] /{name}")
             else:
-                print("[SYNC] Sync global pulado para preservar o Entry Point da Activity do Discord.")
-                print("[SYNC] Use SYNC_GLOBAL_SLASH_COMMANDS=true somente se você souber preservar manualmente o comando Launch.")
+                # Modo guild-only: se vinha de sync global antes, limpa os
+                # globais pra evitar duplicação. Só faz isso se
+                # CLEAR_GLOBAL_COMMANDS=true no .env.
+                if clear_globals_on_boot:
+                    self.tree.clear_commands(guild=None)
+                    await self.tree.sync()
+                    print("[SYNC] Comandos globais limpos (CLEAR_GLOBAL_COMMANDS=true)")
+                else:
+                    print("[SYNC] Sync global pulado. Se você ainda vê comandos duplicados,")
+                    print("[SYNC] rode UMA VEZ com CLEAR_GLOBAL_COMMANDS=true no .env pra limpar.")
 
-            for guild_id in sorted(guild_ids):
-                guild_obj = discord.Object(id=guild_id)
-                self.tree.clear_commands(guild=guild_obj)
-                self.tree.copy_global_to(guild=guild_obj)
-                synced_guild = await self.tree.sync(guild=guild_obj)
-                print(f"[SYNC] Slash commands sincronizados na guild {guild_id}: {len(synced_guild)}")
-                for cmd in synced_guild:
-                    name = getattr(cmd, "name", None) or str(cmd)
-                    print(f"[SYNC][GUILD {guild_id}] /{name}")
+                for guild_id in sorted(guild_ids):
+                    guild_obj = discord.Object(id=guild_id)
+                    self.tree.clear_commands(guild=guild_obj)
+                    self.tree.copy_global_to(guild=guild_obj)
+                    synced_guild = await self.tree.sync(guild=guild_obj)
+                    print(f"[SYNC] Slash commands sincronizados na guild {guild_id}: {len(synced_guild)}")
+                    for cmd in synced_guild:
+                        name = getattr(cmd, "name", None) or str(cmd)
+                        print(f"[SYNC][GUILD {guild_id}] /{name}")
         else:
             print("[SYNC] Pulado no boot (defina SYNC_SLASH_COMMANDS=true para sincronizar no startup)")
             print("[SYNC] Observação: comandos limitados por guild, como /health, só aparecem após sync da guild correspondente.")
