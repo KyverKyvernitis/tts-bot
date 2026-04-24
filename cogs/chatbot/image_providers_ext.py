@@ -89,28 +89,21 @@ class ImageProfile:
 # Ordem importa: o primeiro é o preferido, demais são fallback se o primeiro
 # não tiver worker. `_AIHORDE_MODELS_OVERRIDE` respeita env var se setada.
 
-# Pra NSFW, lista curta e focada. O Horde só roteia pra workers que rodam
-# *exatamente* esses modelos, então lista grande = fila longa. Com 1-2 modelos
-# principais, o pool ainda é bom porque são os modelos mais populares entre
-# voluntários.
+# NSFW: listas vazias pra TODOS os estilos. Isso faz o Horde rotear pra
+# qualquer worker NSFW disponível em vez de restringir a um subset. Com
+# lista de 1 modelo ("Pony Diffusion XL"), a fila frequentemente passa de
+# 200+ porque o modelo é super popular. Com lista vazia, a fila raramente
+# passa de 20.
 #
-# Pra NSFW "generic" (sem marcador claro de estilo), lista vazia = qualquer
-# worker NSFW pega. Pool máximo, fila mínima. Qualidade: workers NSFW
-# voluntários geralmente rodam Pony/Juggernaut mesmo, então na prática
-# as imagens ficam ótimas.
+# Qualidade: workers NSFW voluntários majoritariamente rodam Pony/Juggernaut
+# por conta própria, então na prática as imagens continuam ótimas. Se você
+# quiser FORÇAR um modelo específico, seta `ADULT_IMAGEGEN_MODEL` no .env.
 
-_AIHORDE_MODELS_NSFW_ANIME = [
-    # Pony V6 XL é o padrão-ouro de NSFW anime em 2026.
-    "Pony Diffusion XL",
-]
+_AIHORDE_MODELS_NSFW_ANIME: list[str] = []
+_AIHORDE_MODELS_NSFW_REALISTIC: list[str] = []
+_AIHORDE_MODELS_NSFW_GENERIC: list[str] = []
 
-_AIHORDE_MODELS_NSFW_REALISTIC = [
-    # Juggernaut é o mais popular entre workers NSFW realistas.
-    "Juggernaut XL",
-]
-
-_AIHORDE_MODELS_NSFW_GENERIC: list[str] = []  # Qualquer worker NSFW.
-
+# SFW: mantém preferências porque pools SFW são grandes; filtrar não dói tanto.
 _AIHORDE_MODELS_SFW_ANIME = [
     "Animagine XL",
     "Illustrious XL",

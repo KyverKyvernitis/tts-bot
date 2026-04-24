@@ -1,17 +1,22 @@
 """Slash commands do chatbot.
 
 Organização:
-- `/chatbot profile criar`, `/chatbot editar <profile>`, `/chatbot apagar <profile>`,
-  `/chatbot profile listar`, `/chatbot ativar <profile>`, `/chatbot memoria reset_server`
+- `/chatbot profile criar`, `/chatbot profile listar`, `/chatbot profile desativar`,
+  `/chatbot profile gerenciar <acao> <profile>` (acao=editar|apagar|ativar),
+  `/chatbot memoria reset`, `/chatbot master acao <acao>` (acao=ver|editar|transferir)
   — todos exigem permissão Manage Guild (staff).
 - `/reset` — qualquer membro, limpa a memória PESSOAL dele.
+
+Os comandos com múltiplas ações similares são consolidados via `app_commands.Choice`
+pra reduzir poluição no autocomplete do Discord (antes: 10 entradas em /chatbot,
+agora: 6).
 
 Implementação como Mixin: a classe `ChatbotCommandsMixin` é herdada pelo
 `ChatbotCog` em `cog.py`. Isso mantém o `ChatbotCog` como UM cog só (um único
 extension do discord.py), mas divide a responsabilidade entre arquivos.
 
 Todas as respostas são ephemeral (só quem rodou vê), exceto casos onde
-a feedback faz sentido ser público (p.ex. `ativar` — server todo se beneficia
+a feedback faz sentido ser público (p.ex. ativar — server todo se beneficia
 de saber que mudou o profile).
 """
 from __future__ import annotations
@@ -442,7 +447,7 @@ class ChatbotCommandsMixin:
             return
         await interaction.response.send_message(
             "🚫 Chatbot desativado. Menções e replies não serão respondidos "
-            "até reativar com `/chatbot profile ativar`.",
+            "até reativar com `/chatbot profile gerenciar acao:Ativar`.",
             ephemeral=False,
         )
 
@@ -536,7 +541,7 @@ class ChatbotCommandsMixin:
                 f"O prompt mestre só pode ser editado no servidor de "
                 f"configuração (ID atualmente: `{cfg.config_guild_id}`).\n"
                 f"-# Pra transferir a config pra este server, rode "
-                f"`/chatbot master set_config_server` a partir do server atual.",
+                f"`/chatbot master acao acao:Transferir` a partir do server atual.",
                 ephemeral=True,
             )
             return None
@@ -670,53 +675,74 @@ class ChatbotCommandsMixin:
     async def chatbot_profile_criar(self, interaction: discord.Interaction):
         await self._do_profile_criar(interaction)
 
-    @chatbot_profile.command(name="editar", description="Editar um profile existente")
-    @app_commands.autocomplete(profile=_profile_autocomplete)
-    @_safe_slash
-    async def chatbot_profile_editar(self, interaction: discord.Interaction, profile: str):
-        await self._do_profile_editar(interaction, profile)
-
-    @chatbot_profile.command(name="apagar", description="Apagar um profile")
-    @app_commands.autocomplete(profile=_profile_autocomplete)
-    @_safe_slash
-    async def chatbot_profile_apagar(self, interaction: discord.Interaction, profile: str):
-        await self._do_profile_apagar(interaction, profile)
-
     @chatbot_profile.command(name="listar", description="Listar todos os profiles")
     @_safe_slash
     async def chatbot_profile_listar(self, interaction: discord.Interaction):
         await self._do_profile_listar(interaction)
-
-    @chatbot_profile.command(name="ativar", description="Ativar um profile no servidor")
-    @app_commands.autocomplete(profile=_profile_autocomplete)
-    @_safe_slash
-    async def chatbot_profile_ativar(self, interaction: discord.Interaction, profile: str):
-        await self._do_profile_ativar(interaction, profile)
 
     @chatbot_profile.command(name="desativar", description="Desativar o chatbot no servidor")
     @_safe_slash
     async def chatbot_profile_desativar(self, interaction: discord.Interaction):
         await self._do_profile_desativar(interaction)
 
-    @chatbot_memoria.command(name="reset_server", description="Resetar toda a memória do servidor (destrutivo)")
+    # Consolidado: editar + apagar + ativar compartilham o mesmo parâmetro
+    # `profile` e o mesmo autocomplete. Usa Choice pra ação, reduz ruído
+    # no autocomplete de /chatbot.
+    @chatbot_profile.command(
+        name="gerenciar",
+        description="Editar, apagar ou ativar um profile existente",
+    )
+    @app_commands.choices(
+        acao=[
+            app_commands.Choice(name="Editar", value="editar"),
+            app_commands.Choice(name="Apagar", value="apagar"),
+            app_commands.Choice(name="Ativar no servidor", value="ativar"),
+        ]
+    )
+    @app_commands.autocomplete(profile=_profile_autocomplete)
     @_safe_slash
-    async def chatbot_memoria_reset_server(self, interaction: discord.Interaction):
+    async def chatbot_profile_gerenciar(
+        self,
+        interaction: discord.Interaction,
+        acao: app_commands.Choice[str],
+        profile: str,
+    ):
+        if acao.value == "editar":
+            await self._do_profile_editar(interaction, profile)
+        elif acao.value == "apagar":
+            await self._do_profile_apagar(interaction, profile)
+        elif acao.value == "ativar":
+            await self._do_profile_ativar(interaction, profile)
+
+    @chatbot_memoria.command(name="reset", description="Resetar toda a memória do servidor (destrutivo)")
+    @_safe_slash
+    async def chatbot_memoria_reset(self, interaction: discord.Interaction):
         await self._do_memoria_reset_server(interaction)
 
-    @chatbot_master.command(name="ver", description="Ver prompt mestre global")
+    # Consolidado: ver + editar + transferir viram uma ação só com Choice.
+    @chatbot_master.command(
+        name="acao",
+        description="Ver, editar ou transferir o prompt mestre global",
+    )
+    @app_commands.choices(
+        acao=[
+            app_commands.Choice(name="Ver prompt mestre", value="ver"),
+            app_commands.Choice(name="Editar prompt mestre", value="editar"),
+            app_commands.Choice(name="Transferir config pra este servidor", value="transferir"),
+        ]
+    )
     @_safe_slash
-    async def chatbot_master_ver(self, interaction: discord.Interaction):
-        await self._do_master_ver(interaction)
-
-    @chatbot_master.command(name="editar", description="Editar prompt mestre global")
-    @_safe_slash
-    async def chatbot_master_editar(self, interaction: discord.Interaction):
-        await self._do_master_editar(interaction)
-
-    @chatbot_master.command(name="transferir", description="Transferir config do prompt mestre para este servidor")
-    @_safe_slash
-    async def chatbot_master_transferir(self, interaction: discord.Interaction):
-        await self._do_master_transferir(interaction)
+    async def chatbot_master_acao(
+        self,
+        interaction: discord.Interaction,
+        acao: app_commands.Choice[str],
+    ):
+        if acao.value == "ver":
+            await self._do_master_ver(interaction)
+        elif acao.value == "editar":
+            await self._do_master_editar(interaction)
+        elif acao.value == "transferir":
+            await self._do_master_transferir(interaction)
 
     # --- /imagem <prompt> — gera imagem via Gemini (qualquer membro) ---------
     # Top-level (não em /chatbot) porque /chatbot é staff-only via
@@ -760,7 +786,7 @@ class ChatbotCommandsMixin:
         if active is None:
             await interaction.response.send_message(
                 "Não há profile ativo neste servidor. A staff precisa ativar "
-                "um com `/chatbot profile ativar` antes.",
+                "um com `/chatbot profile gerenciar acao:Ativar` antes.",
                 ephemeral=True,
             )
             return

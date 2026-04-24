@@ -82,19 +82,17 @@ class AihordeModelSelectionTests(unittest.TestCase):
         )
         self.assertEqual(models, ["MyCustomModel", "AnotherOne"])
 
-    def test_nsfw_anime_uses_pony(self):
-        models = aihorde_models_for_profile(ImageProfile(nsfw=True, style="anime"))
-        self.assertIn("Pony Diffusion XL", models)
-
-    def test_nsfw_realistic_uses_juggernaut(self):
-        models = aihorde_models_for_profile(ImageProfile(nsfw=True, style="realistic"))
-        self.assertIn("Juggernaut XL", models)
-
-    def test_nsfw_generic_returns_empty_list(self):
-        # Pra NSFW sem marcador de estilo claro, deixar qualquer worker NSFW
-        # do Horde pegar (pool máximo, fila mínima).
-        models = aihorde_models_for_profile(ImageProfile(nsfw=True, style="generic"))
-        self.assertEqual(models, [])
+    def test_nsfw_profiles_return_empty_list(self):
+        # Pra NSFW (qualquer estilo), não filtrar por modelo — deixa o Horde
+        # rotear pra qualquer worker NSFW. Filtrar por modelo específico
+        # faz a fila explodir porque os modelos populares (Pony, Juggernaut)
+        # ficam sobrecarregados.
+        for style in ("anime", "realistic", "generic"):
+            with self.subTest(style=style):
+                models = aihorde_models_for_profile(
+                    ImageProfile(nsfw=True, style=style)
+                )
+                self.assertEqual(models, [])
 
     def test_sfw_anime_does_not_use_nsfw_models(self):
         # Pony V6 XL é treinado em NSFW; pra SFW anime usa Animagine/Illustrious.

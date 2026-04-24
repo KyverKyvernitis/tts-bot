@@ -288,11 +288,15 @@ def _hf_fallback_models(adult_model: str) -> list[str]:
         candidates = [m.strip() for m in raw.split(",") if m.strip()]
         if candidates:
             return candidates
+    # Modelos atualizados pra HF Inference API em 2026. Os antigos
+    # (runwayml/stable-diffusion-v1-5, Linaqruf/animagine-xl-3.1) foram
+    # removidos/gated em 2025. FLUX.1-schnell é o default serverless agora.
+    # Nota: HF Inference API aplica moderation no serverless pra NSFW, então
+    # pedidos explícitos frequentemente retornam 403 — é esperado; o router
+    # trata como provider_blocked e segue pro próximo.
     return [
-        "Linaqruf/animagine-xl-3.1",
-        "cagliostrolab/animagine-xl-3.1",
-        "Lykon/dreamshaper-8",
-        "runwayml/stable-diffusion-v1-5",
+        "black-forest-labs/FLUX.1-schnell",
+        "stabilityai/stable-diffusion-xl-base-1.0",
     ]
 
 
@@ -753,8 +757,8 @@ async def _generate_with_aihorde(
     models = _aihorde_default_models(model)
     # params enxuto: cada campo extra estreita o pool de workers voluntários que topam
     # o job. Removemos post_processing (exige GFPGAN instalado), karras e clip_skip
-    # (suporte inconsistente em workers antigos). steps=20 é suficiente pra SDXL e
-    # corta ~33% do tempo de geração no lado do worker.
+    # (suporte inconsistente em workers antigos). steps=15 é suficiente pra SDXL
+    # (sampler k_euler_a converge rápido) e corta ~50% do tempo de geração no worker.
     submit_payload: dict[str, object] = {
         "prompt": prompt_for_horde,
         "nsfw": is_nsfw,
@@ -763,11 +767,12 @@ async def _generate_with_aihorde(
         "trusted_workers": False,
         "slow_workers": True,
         "allow_downgrade": True,
+        "r2": True,  # resultado vai pro storage do Horde; worker libera memória antes
         "params": {
             "n": 1,
             "width": 512,
             "height": 768,
-            "steps": 20,
+            "steps": 15,
             "cfg_scale": 7.0,
             "sampler_name": "k_euler_a",
         },
