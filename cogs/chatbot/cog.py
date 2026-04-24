@@ -22,7 +22,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 import aiohttp
 import discord
@@ -74,6 +74,25 @@ class TriggerInfo:
     is_temporary: bool
     content: str
     via: str
+
+
+IntentKind = Literal["normal_chat", "image_safe", "image_adult", "chat_adult", "audio_request"]
+
+
+@dataclass(frozen=True)
+class UserIntent:
+    kind: IntentKind
+    prompt: str = ""
+
+
+_ADULT_CHAT_RE = re.compile(
+    r"\b("
+    r"roleplay\s*nsfw|rp\s*nsfw|roleplay\s*\+?18|rp\s*\+?18|"
+    r"roleplay\s*adult[oa]|rp\s*adult[oa]|"
+    r"sexo\s+por\s+texto|er[oó]tic[oa]\s+por\s+texto"
+    r")\b",
+    re.IGNORECASE | re.UNICODE,
+)
 
 
 # Regex pra capturar `@palavra` no início da mensagem. Permite letras/números
@@ -505,9 +524,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return False
 
         channel = message.channel
+        prompt_class = "adult_allowed" if parse_image_intent(img_prompt).category == "adult_allowed" else "safe"
         log.info(
             "chatbot: gerando imagem | profile=%s prompt=%r",
-            profile.name, img_prompt[:80],
+            profile.name, ("<adult:redacted>" if prompt_class == "adult_allowed" else img_prompt[:80]),
         )
 
         # Reação visual "gerando" — imagegen demora 10-30s
@@ -561,6 +581,22 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         finally:
             if reaction is not None:
                 await self._remove_processing_reaction(message, reaction)
+
+    def _detect_user_intent(self, content: str) -> UserIntent:
+        text = (content or "").strip()
+        if not text:
+            return UserIntent(kind="normal_chat")
+        image_intent = parse_image_intent(text)
+        if image_intent.requested:
+            return UserIntent(
+                kind=("image_adult" if image_intent.category == "adult_allowed" else "image_safe"),
+                prompt=image_intent.prompt,
+            )
+        if _ADULT_CHAT_RE.search(text):
+            return UserIntent(kind="chat_adult")
+        if user_asked_for_tts(text):
+            return UserIntent(kind="audio_request")
+        return UserIntent(kind="normal_chat")
 
     async def _maybe_generate_tts(
         self,
@@ -1225,14 +1261,25 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 return
 
             try:
+                intent = self._detect_user_intent(content_for_ai)
+                if intent.kind == "chat_adult":
+                    try:
+                        await message.reply(
+                            "🔞 Roleplay adulto não está disponível no chat. Posso fazer roleplay não explícito.",
+                            mention_author=False,
+                            delete_after=20.0,
+                        )
+                    except discord.HTTPException:
+                        pass
+                    return
+
                 # Branch imagegen: se user pediu imagem, gera ao invés de chat
-                image_intent = parse_image_intent(content_for_ai)
-                if image_intent.requested:
+                if intent.kind in ("image_safe", "image_adult"):
                     handled = await self._maybe_generate_image(
                         message=message,
                         profile=trigger.profile,
                         prompt_text=content_for_ai,
-                        image_prompt=image_intent.prompt,
+                        image_prompt=intent.prompt,
                     )
                     if handled:
                         return  # já enviou a imagem; não chama chat
@@ -1452,7 +1499,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             # 4. Quote no início pra emular reply (sem ping). Limite de 2000
             # chars total do Discord — o quote consome ~150, o resto cabe.
             final_content = ""
-            if not (explicit_audio_request and tts_file is not None):
+            if tts_file is None:
                 quote_line = self._format_reply_quote(user_display, content)
                 # Calcula quanto espaço sobra pra reply. Garante um mínimo de 200
                 # chars pra resposta, senão corta o snippet do quote mais agressivamente.

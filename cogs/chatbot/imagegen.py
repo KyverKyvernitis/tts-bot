@@ -44,6 +44,7 @@ FailureReason = Literal[
     "policy_blocked",
     "channel_not_nsfw",
     "missing_key",
+    "no_worker",
     "network_error",
     "timeout",
     "no_image_returned",
@@ -266,13 +267,6 @@ def _prompt_preview(prompt: str, *, max_len: int = 120) -> str:
 
 
 def build_image_failure_message(result: ImageGenerationResult) -> str:
-    if result.provider == "aihorde" and result.reason in (
-        "timeout",
-        "no_image_returned",
-        "network_error",
-        "provider_blocked",
-    ):
-        return "⚙️ Geração adulta grátis está indisponível ou demorou demais. Tente novamente."
     if result.reason == "prompt_too_vague":
         return (
             "🖼️ O pedido de imagem ficou vago demais. "
@@ -294,15 +288,16 @@ def build_image_failure_message(result: ImageGenerationResult) -> str:
         if result.provider in ("adult", "adult_hf"):
             return "⚙️ Geração adulta está indisponível no momento."
         return "⚙️ Geração de imagem não configurada no momento."
+    if result.reason == "no_worker":
+        return "🧵 Nenhum worker adulto disponível agora. Tente novamente em instantes."
     if result.reason == "timeout":
-        return "⏱️ O provedor demorou demais para responder. Tenta de novo em instantes."
+        return "⏱️ O provedor adulto demorou demais para responder."
     if result.reason == "network_error":
         return "🌐 Falha de conexão com o provedor de imagem. Tenta novamente."
     if result.reason == "provider_blocked":
-        return (
-            "🛡️ O provedor bloqueou este pedido por política interna. "
-            "Tenta reformular o prompt."
-        )
+        return "🛡️ O provedor adulto bloqueou este pedido por política interna."
+    if result.reason == "no_image_returned":
+        return "🖼️ O provedor adulto respondeu sem imagem. Tente descrever melhor a cena."
     return (
         "🖼️ Não consegui gerar imagem agora (o provedor respondeu sem imagem). "
         "Tenta reescrever o pedido."
@@ -494,6 +489,8 @@ async def _generate_with_adult_provider(
                     reason = "timeout"
                 elif resp.status in (400, 401, 403, 422, 429):
                     reason = "provider_blocked"
+                elif resp.status in (500, 502, 503, 504):
+                    reason = "no_worker"
                 log.warning(
                     "chatbot: imagegen adult falhou | status=%s reason=%s body=%s",
                     resp.status,
@@ -595,8 +592,10 @@ async def _generate_with_huggingface(
                 reason: FailureReason = "network_error"
                 if resp.status == 408:
                     reason = "timeout"
-                elif resp.status in (400, 401, 403, 422, 429, 503):
+                elif resp.status in (400, 401, 403, 422, 429):
                     reason = "provider_blocked"
+                elif resp.status in (500, 502, 503, 504):
+                    reason = "no_worker"
                 log.warning(
                     "chatbot: imagegen hf falhou | status=%s reason=%s body=%s",
                     resp.status,
@@ -711,6 +710,8 @@ async def _generate_with_aihorde(
                     reason = "timeout"
                 elif resp.status in (400, 401, 403, 422, 429):
                     reason = "provider_blocked"
+                elif resp.status in (500, 502, 503, 504):
+                    reason = "no_worker"
                 log.warning(
                     "chatbot: imagegen aihorde submit falhou | status=%s reason=%s body=%s",
                     resp.status,
@@ -796,8 +797,8 @@ async def _generate_with_aihorde(
             ok=False,
             provider="aihorde",
             prompt_class="adult_allowed",
-            reason="timeout",
-            detail="queue_timeout",
+            reason=("no_worker" if faulted else "timeout"),
+            detail=("faulted" if faulted else "queue_timeout"),
         )
 
     try:
@@ -911,7 +912,7 @@ async def generate_image(
         "chatbot: imagegen classify | class=%s nsfw_channel=%s prompt=%r",
         pclass,
         channel_is_nsfw,
-        prompt_hint,
+        ("<adult:redacted>" if pclass == "adult_allowed" else prompt_hint),
     )
 
     if pclass == "blocked":
