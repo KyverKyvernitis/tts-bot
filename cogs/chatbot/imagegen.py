@@ -526,7 +526,10 @@ async def _generate_with_adult_provider(
                 reason: FailureReason = "network_error"
                 if resp.status == 408:
                     reason = "timeout"
-                elif resp.status in (400, 401, 403, 422, 429):
+                elif resp.status == 429:
+                    # Rate limit — tratável como "sem worker agora", retryable
+                    reason = "no_worker"
+                elif resp.status in (400, 401, 403, 422):
                     reason = "provider_blocked"
                 elif resp.status in (500, 502, 503, 504):
                     reason = "no_worker"
@@ -638,7 +641,10 @@ async def _generate_with_huggingface(
                 reason: FailureReason = "network_error"
                 if resp.status == 408:
                     reason = "timeout"
-                elif resp.status in (400, 401, 403, 422, 429):
+                elif resp.status == 429:
+                    # Rate limit do HF — retryable, não é bloqueio de política
+                    reason = "no_worker"
+                elif resp.status in (400, 401, 403, 422):
                     reason = "provider_blocked"
                 elif resp.status in (500, 502, 503, 504):
                     reason = "no_worker"
@@ -726,13 +732,23 @@ async def _generate_with_aihorde(
     pos, neg = _augment_adult_prompt(prompt)
     prompt_for_horde = f"{pos} ### {neg}" if neg else pos
     prompt_for_horde = prompt_for_horde[:2000]
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    # Timeouts desacoplados:
+    #   - http_timeout: limite por chamada HTTP individual (submit, check, status, fetch).
+    #     Curto porque cada request é leve; se travar, desiste rápido sem queimar o deadline.
+    #   - poll_deadline: limite total pro loop de polling da fila do Horde. Fila NSFW
+    #     pode levar minutos em horário de pico, então damos no mínimo 4 minutos.
+    http_timeout = aiohttp.ClientTimeout(total=20)
+    poll_deadline = time.monotonic() + max(timeout_seconds, 240.0)
     headers = {
         "Content-Type": "application/json",
         "apikey": key,
         "Client-Agent": "tts-bot:adult-imagegen:1.1",
     }
     models = _aihorde_default_models(model)
+    # params enxuto: cada campo extra estreita o pool de workers voluntários que topam
+    # o job. Removemos post_processing (exige GFPGAN instalado), karras e clip_skip
+    # (suporte inconsistente em workers antigos). steps=20 é suficiente pra SDXL e
+    # corta ~33% do tempo de geração no lado do worker.
     submit_payload: dict[str, object] = {
         "prompt": prompt_for_horde,
         "nsfw": True,
@@ -745,12 +761,9 @@ async def _generate_with_aihorde(
             "n": 1,
             "width": 512,
             "height": 768,
-            "steps": 30,
+            "steps": 20,
             "cfg_scale": 7.0,
             "sampler_name": "k_euler_a",
-            "karras": True,
-            "clip_skip": 2,
-            "post_processing": ["GFPGAN"],
         },
     }
     if models:
@@ -761,14 +774,16 @@ async def _generate_with_aihorde(
             f"{base}/v2/generate/async",
             json=submit_payload,
             headers=headers,
-            timeout=timeout,
+            timeout=http_timeout,
         ) as resp:
             if resp.status >= 400:
                 body = (await resp.text()).lower()
                 reason: FailureReason = "network_error"
                 if resp.status == 408:
                     reason = "timeout"
-                elif resp.status in (400, 401, 403, 422, 429):
+                elif resp.status == 429:
+                    reason = "no_worker"
+                elif resp.status in (400, 401, 403, 422):
                     reason = "provider_blocked"
                 elif resp.status in (500, 502, 503, 504):
                     reason = "no_worker"
@@ -811,15 +826,16 @@ async def _generate_with_aihorde(
             reason="no_image_returned",
         )
 
-    deadline = time.monotonic() + timeout_seconds
+    deadline = poll_deadline
     done = False
     faulted = False
+    last_logged_queue: tuple[int, float] | None = None
     try:
         while time.monotonic() < deadline:
             async with session.get(
                 f"{base}/v2/generate/check/{req_id}",
                 headers=headers,
-                timeout=timeout,
+                timeout=http_timeout,
             ) as resp:
                 if resp.status >= 400:
                     return ImageGenerationResult(
@@ -833,6 +849,19 @@ async def _generate_with_aihorde(
 
             done = bool((check or {}).get("done"))
             faulted = bool((check or {}).get("faulted"))
+            # Observabilidade: loga posição na fila e wait_time estimado.
+            # Só loga quando muda significativamente pra não poluir o journalctl.
+            queue_pos = int((check or {}).get("queue_position") or 0)
+            wait_time = float((check or {}).get("wait_time") or 0)
+            snapshot = (queue_pos, wait_time)
+            if last_logged_queue is None or abs(snapshot[0] - last_logged_queue[0]) >= 3:
+                log.info(
+                    "chatbot: imagegen aihorde fila | id=%s queue_pos=%s wait_time=%.0fs",
+                    req_id,
+                    queue_pos,
+                    wait_time,
+                )
+                last_logged_queue = snapshot
             if done or faulted:
                 break
             await asyncio.sleep(1.5)
@@ -865,7 +894,7 @@ async def _generate_with_aihorde(
         async with session.get(
             f"{base}/v2/generate/status/{req_id}",
             headers=headers,
-            timeout=timeout,
+            timeout=http_timeout,
         ) as resp:
             if resp.status >= 400:
                 return ImageGenerationResult(
@@ -907,7 +936,7 @@ async def _generate_with_aihorde(
 
     if img_ref.startswith(("http://", "https://")):
         try:
-            async with session.get(img_ref, timeout=timeout) as img_resp:
+            async with session.get(img_ref, timeout=http_timeout) as img_resp:
                 if img_resp.status >= 400:
                     return ImageGenerationResult(
                         ok=False,
