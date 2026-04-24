@@ -1485,6 +1485,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
             # 4.5. Gera TTS se o user pediu ou se o profile tem tts_chance > 0
             # e caiu na sorte.
+            explicit_audio_request = user_asked_for_tts(content)
             tts_file = await self._maybe_generate_tts(
                 content=content,  # texto original do user
                 reply=reply,
