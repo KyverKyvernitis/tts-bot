@@ -73,9 +73,6 @@ class ImageIntent:
 # Detecção de pedido implícito de imagem no texto do user
 # -----------------------------------------------------------------------------
 
-# Regex: frases que parecem pedido de gerar imagem.
-# Exige verbo imperativo + palavras relacionadas. Evita falsos positivos
-# tipo "vi uma imagem legal ontem".
 _IMAGE_REQUEST_RE = re.compile(
     r"\b("
     r"gera(r)?\s+(uma\s+|um\s+)?(imagem|foto|figura|desenho|arte|ilustra..o)"
@@ -91,27 +88,12 @@ _IMAGE_REQUEST_RE = re.compile(
 
 
 def detect_image_request(text: str) -> bool:
-    """True se o texto parece pedir geração de imagem.
-
-    É uma heurística — pode errar. Por isso o cog pode gerar só quando
-    o pedido é CLARO (ativo por default) e permitir override via comando
-    explícito pros casos ambíguos.
-    """
     return parse_image_intent(text).requested
 
 
 def extract_image_prompt(text: str) -> str:
-    """Extrai o que o user quer que seja desenhado.
-
-    Estratégia simples: remove o verbo imperativo + "imagem de" e deixa o
-    resto. Ex: "desenha um dragão azul" → "um dragão azul".
-
-    Se não conseguir extrair bem, retorna o texto completo (o modelo de
-    imagem costuma aguentar verbosidade).
-    """
     if not text:
         return ""
-    # Remove prefixos comuns
     text = text.strip()
     patterns = [
         r"^(gera|gere|desenha|cria|faz|faça|imagina|me mostra)\s+",
@@ -211,24 +193,12 @@ def text_has_adult_hint(text: str) -> bool:
 
 
 def looks_like_adult_image_request(text: str) -> bool:
-    """Detecta pedidos curtos como "gere peitos femininos".
-
-    A regex geral exige a palavra "imagem" para evitar falsos positivos, mas
-    em canal de chatbot o user costuma mandar só "gere/desenha <assunto>".
-    Só aceitamos essa forma curta quando há termo adulto/visual claro.
-    """
     if not text:
         return False
     return bool(_ADULT_IMAGE_VERB_RE.search(text) and text_has_adult_hint(text))
 
 
 def is_prompt_too_vague_for_adult_image(prompt: str) -> bool:
-    """Evita enviar prompts tipo só "nsfw" ao provider adulto.
-
-    Esses prompts fazem o AI Horde escolher uma cena aleatória, que foi o bug
-    visto no Discord. Exigimos pelo menos algum assunto além de termos genéricos
-    como "nsfw", "adulto" ou "imagem".
-    """
     text = re.sub(r"[^\wÀ-ÿ+]+", " ", (prompt or "").lower(), flags=re.UNICODE)
     text = _GENERIC_ADULT_WORDS_RE.sub(" ", text)
     words = [w for w in text.split() if len(w) >= 3]
@@ -315,16 +285,62 @@ def _is_retryable_adult_failure(result: ImageGenerationResult) -> bool:
 def _hf_fallback_models(adult_model: str) -> list[str]:
     raw = (adult_model or "").strip()
     if raw:
-        # Permite lista separada por vírgula no env ADULT_IMAGEGEN_MODEL
         candidates = [m.strip() for m in raw.split(",") if m.strip()]
         if candidates:
             return candidates
-    # Priorizamos modelos populares em anime/NSFW no ecossistema SD.
     return [
-        "Linaqruf/anything-v3.0",
-        "Linaqruf/anything-v4.0",
-        "hakurei/waifu-diffusion",
+        "Linaqruf/animagine-xl-3.1",
+        "cagliostrolab/animagine-xl-3.1",
+        "Lykon/dreamshaper-8",
+        "runwayml/stable-diffusion-v1-5",
     ]
+
+
+def _aihorde_default_models(adult_model: str) -> list[str]:
+    raw = (adult_model or "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return [
+        "AlbedoBase XL",
+        "Hassaku",
+        "AOM3",
+        "Deliberate",
+    ]
+
+
+_ADULT_QUALITY_PREFIX = (
+    "masterpiece, best quality, highly detailed, sharp focus, "
+    "beautiful lighting, intricate details, "
+)
+
+_ADULT_NEGATIVE_PROMPT = (
+    "lowres, worst quality, low quality, normal quality, jpeg artifacts, "
+    "blurry, out of focus, bad anatomy, bad hands, extra fingers, "
+    "fewer fingers, extra digits, missing fingers, missing limbs, "
+    "extra limbs, malformed limbs, deformed, disfigured, mutation, mutated, "
+    "ugly, poorly drawn face, poorly drawn hands, bad proportions, "
+    "cloned face, long neck, signature, watermark, text, username, "
+    "logo, cropped, duplicate, error, child, underage, loli, shota"
+)
+
+
+def _augment_adult_prompt(prompt: str) -> tuple[str, str]:
+    text = (prompt or "").strip()
+    if "###" in text:
+        pos, _, neg_user = text.partition("###")
+        pos = pos.strip()
+        neg_user = neg_user.strip()
+    else:
+        pos = text
+        neg_user = ""
+
+    if pos and not pos.lower().startswith(("masterpiece", "best quality")):
+        pos = _ADULT_QUALITY_PREFIX + pos
+
+    negative = _ADULT_NEGATIVE_PROMPT
+    if neg_user:
+        negative = f"{neg_user}, {negative}"
+    return pos, negative
 
 
 async def _generate_with_gemini(
@@ -350,8 +366,6 @@ async def _generate_with_gemini(
                 "parts": [{"text": prompt.strip()[:2000]}],
             }
         ],
-        # A documentação mostra configurar responseModalities=["IMAGE"] pra
-        # forçar resposta com imagem. Sem isso o modelo pode responder com texto.
         "generationConfig": {
             "responseModalities": ["IMAGE", "TEXT"],
         },
@@ -412,7 +426,6 @@ async def _generate_with_gemini(
             reason="network_error",
         )
 
-    # Parse: busca inlineData no primeiro candidate
     try:
         candidates = data.get("candidates") or []
         if not candidates:
@@ -492,10 +505,13 @@ async def _generate_with_adult_provider(
             reason="missing_key",
         )
 
+    pos, neg = _augment_adult_prompt(prompt)
     payload = {
         "model": model,
-        "prompt": prompt.strip()[:2000],
+        "prompt": pos[:2000],
+        "negative_prompt": neg[:1500],
         "response_format": "b64_json",
+        "size": "512x768",
     }
     headers = {
         "Content-Type": "application/json",
@@ -597,9 +613,16 @@ async def _generate_with_huggingface(
         )
 
     url = f"https://api-inference.huggingface.co/models/{model}"
+    pos, neg = _augment_adult_prompt(prompt)
     payload = {
-        "inputs": prompt.strip()[:2000],
-        "parameters": {"num_inference_steps": 28, "guidance_scale": 7.0},
+        "inputs": pos[:2000],
+        "parameters": {
+            "num_inference_steps": 35,
+            "guidance_scale": 7.5,
+            "negative_prompt": neg[:1500],
+            "width": 512,
+            "height": 768,
+        },
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -700,24 +723,37 @@ async def _generate_with_aihorde(
 ) -> ImageGenerationResult:
     base = (base_url or "https://aihorde.net/api").rstrip("/")
     key = (api_key or "0000000000").strip() or "0000000000"
-    prompt_clean = prompt.strip()[:2000]
+    pos, neg = _augment_adult_prompt(prompt)
+    prompt_for_horde = f"{pos} ### {neg}" if neg else pos
+    prompt_for_horde = prompt_for_horde[:2000]
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     headers = {
         "Content-Type": "application/json",
         "apikey": key,
-        "Client-Agent": "tts-bot:adult-imagegen:1.0",
+        "Client-Agent": "tts-bot:adult-imagegen:1.1",
     }
+    models = _aihorde_default_models(model)
     submit_payload: dict[str, object] = {
-        "prompt": prompt_clean,
+        "prompt": prompt_for_horde,
         "nsfw": True,
         "censor_nsfw": False,
         "replacement_filter": False,
+        "trusted_workers": True,
+        "slow_workers": True,
         "params": {
             "n": 1,
+            "width": 512,
+            "height": 768,
+            "steps": 30,
+            "cfg_scale": 7.0,
+            "sampler_name": "k_euler_a",
+            "karras": True,
+            "clip_skip": 2,
+            "post_processing": ["GFPGAN"],
         },
     }
-    if model:
-        submit_payload["models"] = [model]
+    if models:
+        submit_payload["models"] = models
 
     try:
         async with session.post(
@@ -961,7 +997,10 @@ async def generate_image(
         )
 
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    adult_key = os.environ.get("ADULT_IMAGEGEN_API_KEY", "0000000000").strip() or "0000000000"
+    raw_adult_key = (os.environ.get("ADULT_IMAGEGEN_API_KEY") or "").strip()
+    aihorde_key = raw_adult_key or "0000000000"
+    hf_key = os.environ.get("HUGGINGFACE_API_KEY", "").strip() or raw_adult_key
+    custom_key = raw_adult_key
     adult_url = os.environ.get("ADULT_IMAGEGEN_URL", "https://aihorde.net/api").strip() or "https://aihorde.net/api"
     adult_model = os.environ.get("ADULT_IMAGEGEN_MODEL", "").strip()
     adult_provider = (os.environ.get("ADULT_IMAGEGEN_PROVIDER", "auto") or "auto").strip().lower()
@@ -969,14 +1008,10 @@ async def generate_image(
     if pclass == "adult_allowed":
         adult_timeout = max(timeout_seconds, 120.0)
         if adult_provider in ("auto", "auto_free", "free"):
-            # Cadeia de fallback focada em serviços gratuitos.
-            # 1) AI Horde (crowdsourced, geralmente melhor custo/benefício)
-            # 2) Hugging Face (lista de modelos para tolerar indisponibilidades)
-            # 3) Provider adulto customizado (se configurado com model/url válidos)
             attempts: list[ImageGenerationResult] = []
             aihorde_result = await _generate_with_aihorde(
                 session,
-                api_key=adult_key,
+                api_key=aihorde_key,
                 base_url=adult_url,
                 model=adult_model,
                 prompt=prompt_clean,
@@ -989,7 +1024,7 @@ async def generate_image(
             for hf_model in _hf_fallback_models(adult_model):
                 hf_result = await _generate_with_huggingface(
                     session,
-                    api_key=adult_key,
+                    api_key=hf_key,
                     model=hf_model,
                     prompt=prompt_clean,
                     timeout_seconds=adult_timeout,
@@ -1005,7 +1040,7 @@ async def generate_image(
             if has_custom_provider_config:
                 custom_result = await _generate_with_adult_provider(
                     session,
-                    api_key=adult_key,
+                    api_key=custom_key,
                     api_url=adult_url,
                     model=adult_model,
                     prompt=prompt_clean,
@@ -1015,8 +1050,6 @@ async def generate_image(
                 if custom_result.ok:
                     return custom_result
 
-            # Retorna a falha mais útil pro usuário:
-            # prioriza erros "definitivos" antes de timeout genérico.
             for reason in ("missing_key", "provider_blocked", "no_image_returned", "no_worker", "timeout"):
                 for attempt in attempts:
                     if attempt.reason == reason:
@@ -1033,7 +1066,7 @@ async def generate_image(
         if adult_provider == "aihorde":
             return await _generate_with_aihorde(
                 session,
-                api_key=adult_key,
+                api_key=aihorde_key,
                 base_url=adult_url,
                 model=adult_model,
                 prompt=prompt_clean,
@@ -1044,7 +1077,7 @@ async def generate_image(
             for hf_model in _hf_fallback_models(adult_model):
                 result = await _generate_with_huggingface(
                     session,
-                    api_key=adult_key,
+                    api_key=hf_key,
                     model=hf_model,
                     prompt=prompt_clean,
                     timeout_seconds=adult_timeout,
@@ -1062,7 +1095,7 @@ async def generate_image(
             )
         result = await _generate_with_adult_provider(
             session,
-            api_key=adult_key,
+            api_key=custom_key,
             api_url=adult_url,
             model=adult_model,
             prompt=prompt_clean,
