@@ -89,47 +89,41 @@ class ImageProfile:
 # Ordem importa: o primeiro é o preferido, demais são fallback se o primeiro
 # não tiver worker. `_AIHORDE_MODELS_OVERRIDE` respeita env var se setada.
 
+# Pra NSFW, lista curta e focada. O Horde só roteia pra workers que rodam
+# *exatamente* esses modelos, então lista grande = fila longa. Com 1-2 modelos
+# principais, o pool ainda é bom porque são os modelos mais populares entre
+# voluntários.
+#
+# Pra NSFW "generic" (sem marcador claro de estilo), lista vazia = qualquer
+# worker NSFW pega. Pool máximo, fila mínima. Qualidade: workers NSFW
+# voluntários geralmente rodam Pony/Juggernaut mesmo, então na prática
+# as imagens ficam ótimas.
+
 _AIHORDE_MODELS_NSFW_ANIME = [
-    # Pony Diffusion V6 XL é o padrão-ouro de NSFW anime em 2026.
+    # Pony V6 XL é o padrão-ouro de NSFW anime em 2026.
     "Pony Diffusion XL",
-    "Hassaku",
-    "AOM3",
-    "Animagine XL",
 ]
 
 _AIHORDE_MODELS_NSFW_REALISTIC = [
-    # Juggernaut é o mais baixado pra NSFW realista em SDXL.
+    # Juggernaut é o mais popular entre workers NSFW realistas.
     "Juggernaut XL",
-    "RealVisXL",
-    "CyberRealistic",
-    "Realistic Vision",
 ]
 
-_AIHORDE_MODELS_NSFW_GENERIC = [
-    # Mix: vai cobrir tanto anime quanto realista.
-    "Pony Diffusion XL",
-    "Juggernaut XL",
-    "Hassaku",
-    "Deliberate",
-]
+_AIHORDE_MODELS_NSFW_GENERIC: list[str] = []  # Qualquer worker NSFW.
 
 _AIHORDE_MODELS_SFW_ANIME = [
     "Animagine XL",
     "Illustrious XL",
-    "Hassaku",
 ]
 
 _AIHORDE_MODELS_SFW_REALISTIC = [
     "AlbedoBase XL",
     "Juggernaut XL",
-    "RealVisXL",
-    "Deliberate",
 ]
 
 _AIHORDE_MODELS_SFW_GENERIC = [
     "AlbedoBase XL",
     "Deliberate",
-    "Animagine XL",
 ]
 
 
@@ -387,13 +381,11 @@ def provider_order_for_profile(profile: ImageProfile) -> list[ProviderName]:
     """Retorna ordem preferencial de providers pra tentar. Router pula os
     que não estão configurados (sem chave/conta)."""
     if profile.nsfw:
-        if profile.style == "anime":
-            # Horde tem Pony V6 XL — imbatível pra hentai em free.
-            return ["aihorde", "pollinations", "huggingface", "adult_custom"]
-        if profile.style == "realistic":
-            # Horde com Juggernaut XL ainda lidera em free pra NSFW realista.
-            return ["aihorde", "pollinations", "huggingface", "adult_custom"]
-        return ["aihorde", "pollinations", "huggingface", "adult_custom"]
+        # NÃO incluir Pollinations em NSFW: o provider tem safety checker
+        # (LlamaGuard) que filtra conteúdo explícito mesmo com chave e
+        # `safe=false`, então acaba entregando imagem SFW sorrateiramente.
+        # Melhor falhar explicitamente do que gerar o conteúdo errado.
+        return ["aihorde", "huggingface", "adult_custom"]
 
     # SFW — Pollinations e Cloudflare têm FLUX, qualidade topo.
     if profile.style == "realistic":

@@ -60,10 +60,18 @@ class ProviderOrderTests(unittest.TestCase):
     def test_nsfw_anime_prefers_aihorde(self):
         order = provider_order_for_profile(ImageProfile(nsfw=True, style="anime"))
         self.assertEqual(order[0], "aihorde")
+        # Pollinations filtra NSFW (LlamaGuard) mesmo com chave — não pode
+        # estar na cascata pra não mascarar falhas com output SFW.
+        self.assertNotIn("pollinations", order)
 
     def test_nsfw_realistic_prefers_aihorde(self):
         order = provider_order_for_profile(ImageProfile(nsfw=True, style="realistic"))
         self.assertEqual(order[0], "aihorde")
+        self.assertNotIn("pollinations", order)
+
+    def test_nsfw_generic_excludes_pollinations(self):
+        order = provider_order_for_profile(ImageProfile(nsfw=True, style="generic"))
+        self.assertNotIn("pollinations", order)
 
 
 class AihordeModelSelectionTests(unittest.TestCase):
@@ -81,6 +89,12 @@ class AihordeModelSelectionTests(unittest.TestCase):
     def test_nsfw_realistic_uses_juggernaut(self):
         models = aihorde_models_for_profile(ImageProfile(nsfw=True, style="realistic"))
         self.assertIn("Juggernaut XL", models)
+
+    def test_nsfw_generic_returns_empty_list(self):
+        # Pra NSFW sem marcador de estilo claro, deixar qualquer worker NSFW
+        # do Horde pegar (pool máximo, fila mínima).
+        models = aihorde_models_for_profile(ImageProfile(nsfw=True, style="generic"))
+        self.assertEqual(models, [])
 
     def test_sfw_anime_does_not_use_nsfw_models(self):
         # Pony V6 XL é treinado em NSFW; pra SFW anime usa Animagine/Illustrious.
