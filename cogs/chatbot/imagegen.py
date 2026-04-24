@@ -38,11 +38,13 @@ class GeneratedImage:
 
 
 PromptClass = Literal["safe", "adult_allowed", "blocked"]
+IntentCategory = Literal["safe", "adult_allowed"]
 FailureReason = Literal[
     "provider_blocked",
     "policy_blocked",
     "channel_not_nsfw",
     "missing_key",
+    "no_worker",
     "network_error",
     "timeout",
     "no_image_returned",
@@ -58,6 +60,13 @@ class ImageGenerationResult:
     image: Optional[GeneratedImage] = None
     reason: Optional[FailureReason] = None
     detail: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ImageIntent:
+    requested: bool
+    category: IntentCategory
+    prompt: str
 
 
 # -----------------------------------------------------------------------------
@@ -88,9 +97,7 @@ def detect_image_request(text: str) -> bool:
     o pedido é CLARO (ativo por default) e permitir override via comando
     explícito pros casos ambíguos.
     """
-    if not text:
-        return False
-    return bool(_IMAGE_REQUEST_RE.search(text) or looks_like_adult_image_request(text))
+    return parse_image_intent(text).requested
 
 
 def extract_image_prompt(text: str) -> str:
@@ -114,6 +121,16 @@ def extract_image_prompt(text: str) -> str:
     for pat in patterns:
         text = re.sub(pat, "", text, flags=re.IGNORECASE).strip()
     return text or "uma imagem"
+
+
+def parse_image_intent(text: str) -> ImageIntent:
+    raw = (text or "").strip()
+    if not raw:
+        return ImageIntent(requested=False, category="safe", prompt="")
+    requested = bool(_IMAGE_REQUEST_RE.search(raw) or looks_like_adult_image_request(raw))
+    prompt = extract_image_prompt(raw)
+    category: IntentCategory = "adult_allowed" if text_has_adult_hint(prompt) else "safe"
+    return ImageIntent(requested=requested, category=category, prompt=prompt)
 
 
 # -----------------------------------------------------------------------------
@@ -161,14 +178,31 @@ _ADULT_HINT_PATTERNS = (
     r"breasts?\b",
     r"naked\b",
     r"nude\b",
+    r"hentai\b",
 )
 _ADULT_IMAGE_VERB_RE = re.compile(
     r"\b(gere|gera|gerar|cria|crie|criar|desenha|desenhe|desenhar|faz|faça|faca|mostrar?|mostre)\b",
     re.IGNORECASE | re.UNICODE,
 )
 _GENERIC_ADULT_WORDS_RE = re.compile(
-    r"\b(nsfw|18\+|adult[oa]s?|conte[uú]do|er[oó]tic[oa]s?|sensual|sexual|sexo|porn[oô]|nudez|nude|nud[eo]s?|pelad[oa]s?|imagem|foto|arte|desenho|figura|gera|gere|gerar|cria|crie|criar|desenha|desenhe|desenhar|faz|faça|faca|mostra|mostrar|mostre|manda|mande|me|de|com|uma|um|a|o)\b",
+    r"\b(nsfw|18\+|adult[oa]s?|conte[uú]do|er[oó]tic[oa]s?|sensual|sexual|sexo|porn[oô]|nudez|nude|nud[eo]s?|pelad[oa]s?|hentai|imagem|foto|arte|desenho|figura|gera|gere|gerar|cria|crie|criar|desenha|desenhe|desenhar|faz|faça|faca|mostra|mostrar|mostre|manda|mande|me|de|com|uma|um|a|o)\b",
     re.IGNORECASE | re.UNICODE,
+)
+_NONCONSENSUAL_LEAK_PATTERNS = (
+    r"vazad[oa]s?\b",
+    r"vazamento\s+de\s+nude",
+    r"nudes?\s+vazad[oa]s?",
+)
+_REAL_PERSON_ADULT_PATTERNS = (
+    r"pessoa\s+real\b",
+    r"mulher\s+real\b",
+    r"homem\s+real\b",
+    r"minha\s+ex\b",
+    r"meu\s+ex\b",
+    r"minha\s+namorada\b",
+    r"meu\s+namorado\b",
+    r"instagram\b",
+    r"onlyfans\b",
 )
 
 
@@ -213,6 +247,13 @@ def classify_image_prompt(prompt: str) -> PromptClass:
         and any(re.search(pat, text, flags=re.IGNORECASE) for pat in _REAL_PERSON_PATTERNS)
     ):
         return "blocked"
+    if (
+        any(re.search(pat, text, flags=re.IGNORECASE) for pat in _ADULT_HINT_PATTERNS)
+        and any(re.search(pat, text, flags=re.IGNORECASE) for pat in _REAL_PERSON_ADULT_PATTERNS)
+    ):
+        return "blocked"
+    if any(re.search(pat, text, flags=re.IGNORECASE) for pat in _NONCONSENSUAL_LEAK_PATTERNS):
+        return "blocked"
     if text_has_adult_hint(text):
         return "adult_allowed"
     return "safe"
@@ -226,13 +267,6 @@ def _prompt_preview(prompt: str, *, max_len: int = 120) -> str:
 
 
 def build_image_failure_message(result: ImageGenerationResult) -> str:
-    if result.provider == "aihorde" and result.reason in (
-        "timeout",
-        "no_image_returned",
-        "network_error",
-        "provider_blocked",
-    ):
-        return "⚙️ Geração adulta grátis está indisponível ou demorou demais. Tente novamente."
     if result.reason == "prompt_too_vague":
         return (
             "🖼️ O pedido de imagem ficou vago demais. "
@@ -254,15 +288,16 @@ def build_image_failure_message(result: ImageGenerationResult) -> str:
         if result.provider in ("adult", "adult_hf"):
             return "⚙️ Geração adulta está indisponível no momento."
         return "⚙️ Geração de imagem não configurada no momento."
+    if result.reason == "no_worker":
+        return "🧵 Nenhum worker adulto disponível agora. Tente novamente em instantes."
     if result.reason == "timeout":
-        return "⏱️ O provedor demorou demais para responder. Tenta de novo em instantes."
+        return "⏱️ O provedor adulto demorou demais para responder."
     if result.reason == "network_error":
         return "🌐 Falha de conexão com o provedor de imagem. Tenta novamente."
     if result.reason == "provider_blocked":
-        return (
-            "🛡️ O provedor bloqueou este pedido por política interna. "
-            "Tenta reformular o prompt."
-        )
+        return "🛡️ O provedor adulto bloqueou este pedido por política interna."
+    if result.reason == "no_image_returned":
+        return "🖼️ O provedor adulto respondeu sem imagem. Tente descrever melhor a cena."
     return (
         "🖼️ Não consegui gerar imagem agora (o provedor respondeu sem imagem). "
         "Tenta reescrever o pedido."
@@ -454,6 +489,8 @@ async def _generate_with_adult_provider(
                     reason = "timeout"
                 elif resp.status in (400, 401, 403, 422, 429):
                     reason = "provider_blocked"
+                elif resp.status in (500, 502, 503, 504):
+                    reason = "no_worker"
                 log.warning(
                     "chatbot: imagegen adult falhou | status=%s reason=%s body=%s",
                     resp.status,
@@ -555,8 +592,10 @@ async def _generate_with_huggingface(
                 reason: FailureReason = "network_error"
                 if resp.status == 408:
                     reason = "timeout"
-                elif resp.status in (400, 401, 403, 422, 429, 503):
+                elif resp.status in (400, 401, 403, 422, 429):
                     reason = "provider_blocked"
+                elif resp.status in (500, 502, 503, 504):
+                    reason = "no_worker"
                 log.warning(
                     "chatbot: imagegen hf falhou | status=%s reason=%s body=%s",
                     resp.status,
@@ -671,6 +710,8 @@ async def _generate_with_aihorde(
                     reason = "timeout"
                 elif resp.status in (400, 401, 403, 422, 429):
                     reason = "provider_blocked"
+                elif resp.status in (500, 502, 503, 504):
+                    reason = "no_worker"
                 log.warning(
                     "chatbot: imagegen aihorde submit falhou | status=%s reason=%s body=%s",
                     resp.status,
@@ -756,8 +797,8 @@ async def _generate_with_aihorde(
             ok=False,
             provider="aihorde",
             prompt_class="adult_allowed",
-            reason="timeout",
-            detail="queue_timeout",
+            reason=("no_worker" if faulted else "timeout"),
+            detail=("faulted" if faulted else "queue_timeout"),
         )
 
     try:
@@ -871,7 +912,7 @@ async def generate_image(
         "chatbot: imagegen classify | class=%s nsfw_channel=%s prompt=%r",
         pclass,
         channel_is_nsfw,
-        prompt_hint,
+        ("<adult:redacted>" if pclass == "adult_allowed" else prompt_hint),
     )
 
     if pclass == "blocked":
