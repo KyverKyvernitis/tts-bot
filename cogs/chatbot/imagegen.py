@@ -1051,7 +1051,14 @@ async def generate_image(
                 if custom_result.ok:
                     return custom_result
 
-                        for reason in ("provider_blocked", "no_image_returned", "no_worker", "timeout", "network_error", "missing_key"):
+            for reason in (
+                "provider_blocked",
+                "no_image_returned",
+                "no_worker",
+                "timeout",
+                "network_error",
+                "missing_key",
+            ):
                 for attempt in attempts:
                     if attempt.reason == reason:
                         return attempt
