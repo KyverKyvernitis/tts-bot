@@ -12,10 +12,13 @@ Importante: a resposta pode demorar 10-30s. O cog deve reagir primeiro
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import binascii
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Literal, Optional
 
@@ -170,6 +173,13 @@ def _prompt_preview(prompt: str, *, max_len: int = 120) -> str:
 
 
 def build_image_failure_message(result: ImageGenerationResult) -> str:
+    if result.provider == "aihorde" and result.reason in (
+        "timeout",
+        "no_image_returned",
+        "network_error",
+        "provider_blocked",
+    ):
+        return "⚙️ Geração adulta grátis está indisponível ou demorou demais. Tente novamente."
     if result.reason == "policy_blocked":
         return (
             "🚫 Não posso gerar esse tipo de imagem. "
@@ -561,6 +571,235 @@ async def _generate_with_huggingface(
         )
 
 
+async def _generate_with_aihorde(
+    session: aiohttp.ClientSession,
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    prompt: str,
+    timeout_seconds: float,
+) -> ImageGenerationResult:
+    base = (base_url or "https://aihorde.net/api").rstrip("/")
+    key = (api_key or "0000000000").strip() or "0000000000"
+    prompt_clean = prompt.strip()[:2000]
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    headers = {
+        "Content-Type": "application/json",
+        "apikey": key,
+        "Client-Agent": "tts-bot:adult-imagegen:1.0",
+    }
+    submit_payload: dict[str, object] = {
+        "prompt": prompt_clean,
+        "nsfw": True,
+        "censor_nsfw": False,
+        "replacement_filter": False,
+        "params": {
+            "n": 1,
+        },
+    }
+    if model:
+        submit_payload["models"] = [model]
+
+    try:
+        async with session.post(
+            f"{base}/v2/generate/async",
+            json=submit_payload,
+            headers=headers,
+            timeout=timeout,
+        ) as resp:
+            if resp.status >= 400:
+                body = (await resp.text()).lower()
+                reason: FailureReason = "network_error"
+                if resp.status == 408:
+                    reason = "timeout"
+                elif resp.status in (400, 401, 403, 422, 429):
+                    reason = "provider_blocked"
+                log.warning(
+                    "chatbot: imagegen aihorde submit falhou | status=%s reason=%s body=%s",
+                    resp.status,
+                    reason,
+                    body[:250],
+                )
+                return ImageGenerationResult(
+                    ok=False,
+                    provider="aihorde",
+                    prompt_class="adult_allowed",
+                    reason=reason,
+                    detail=f"http_{resp.status}",
+                )
+            submit_data = await resp.json()
+    except aiohttp.ServerTimeoutError:
+        return ImageGenerationResult(
+            ok=False,
+            provider="aihorde",
+            prompt_class="adult_allowed",
+            reason="timeout",
+        )
+    except aiohttp.ClientError as e:
+        log.warning("chatbot: imagegen aihorde erro de rede submit: %s", e)
+        return ImageGenerationResult(
+            ok=False,
+            provider="aihorde",
+            prompt_class="adult_allowed",
+            reason="network_error",
+        )
+
+    req_id = str((submit_data or {}).get("id") or "").strip()
+    if not req_id:
+        return ImageGenerationResult(
+            ok=False,
+            provider="aihorde",
+            prompt_class="adult_allowed",
+            reason="no_image_returned",
+        )
+
+    deadline = time.monotonic() + timeout_seconds
+    done = False
+    faulted = False
+    try:
+        while time.monotonic() < deadline:
+            async with session.get(
+                f"{base}/v2/generate/check/{req_id}",
+                headers=headers,
+                timeout=timeout,
+            ) as resp:
+                if resp.status >= 400:
+                    return ImageGenerationResult(
+                        ok=False,
+                        provider="aihorde",
+                        prompt_class="adult_allowed",
+                        reason="network_error",
+                        detail=f"http_{resp.status}",
+                    )
+                check = await resp.json()
+
+            done = bool((check or {}).get("done"))
+            faulted = bool((check or {}).get("faulted"))
+            if done or faulted:
+                break
+            await asyncio.sleep(1.5)
+    except aiohttp.ServerTimeoutError:
+        return ImageGenerationResult(
+            ok=False,
+            provider="aihorde",
+            prompt_class="adult_allowed",
+            reason="timeout",
+        )
+    except aiohttp.ClientError as e:
+        log.warning("chatbot: imagegen aihorde erro de rede check: %s", e)
+        return ImageGenerationResult(
+            ok=False,
+            provider="aihorde",
+            prompt_class="adult_allowed",
+            reason="network_error",
+        )
+
+    if not done or faulted:
+        return ImageGenerationResult(
+            ok=False,
+            provider="aihorde",
+            prompt_class="adult_allowed",
+            reason="timeout",
+            detail="queue_timeout",
+        )
+
+    try:
+        async with session.get(
+            f"{base}/v2/generate/status/{req_id}",
+            headers=headers,
+            timeout=timeout,
+        ) as resp:
+            if resp.status >= 400:
+                return ImageGenerationResult(
+                    ok=False,
+                    provider="aihorde",
+                    prompt_class="adult_allowed",
+                    reason="network_error",
+                    detail=f"http_{resp.status}",
+                )
+            status_data = await resp.json()
+    except aiohttp.ServerTimeoutError:
+        return ImageGenerationResult(
+            ok=False,
+            provider="aihorde",
+            prompt_class="adult_allowed",
+            reason="timeout",
+        )
+    except aiohttp.ClientError as e:
+        log.warning("chatbot: imagegen aihorde erro de rede status: %s", e)
+        return ImageGenerationResult(
+            ok=False,
+            provider="aihorde",
+            prompt_class="adult_allowed",
+            reason="network_error",
+        )
+
+    gens = (status_data or {}).get("generations") or []
+    first = gens[0] if gens else {}
+    img_ref = ""
+    if isinstance(first, dict):
+        img_ref = str(first.get("img") or first.get("image") or "").strip()
+    if not img_ref:
+        return ImageGenerationResult(
+            ok=False,
+            provider="aihorde",
+            prompt_class="adult_allowed",
+            reason="no_image_returned",
+        )
+
+    if img_ref.startswith(("http://", "https://")):
+        try:
+            async with session.get(img_ref, timeout=timeout) as img_resp:
+                if img_resp.status >= 400:
+                    return ImageGenerationResult(
+                        ok=False,
+                        provider="aihorde",
+                        prompt_class="adult_allowed",
+                        reason="no_image_returned",
+                    )
+                content_type = (img_resp.headers.get("Content-Type") or "image/png").split(";")[0]
+                data = await img_resp.read()
+                if not data:
+                    return ImageGenerationResult(
+                        ok=False,
+                        provider="aihorde",
+                        prompt_class="adult_allowed",
+                        reason="no_image_returned",
+                    )
+                return ImageGenerationResult(
+                    ok=True,
+                    provider="aihorde",
+                    prompt_class="adult_allowed",
+                    image=GeneratedImage(data=data, mime_type=content_type),
+                )
+        except aiohttp.ClientError as e:
+            log.warning("chatbot: imagegen aihorde erro baixar img: %s", e)
+            return ImageGenerationResult(
+                ok=False,
+                provider="aihorde",
+                prompt_class="adult_allowed",
+                reason="network_error",
+            )
+
+    raw_b64 = img_ref.split(",", 1)[-1].strip()
+    try:
+        decoded = base64.b64decode(raw_b64)
+    except (binascii.Error, ValueError):
+        return ImageGenerationResult(
+            ok=False,
+            provider="aihorde",
+            prompt_class="adult_allowed",
+            reason="no_image_returned",
+        )
+    return ImageGenerationResult(
+        ok=True,
+        provider="aihorde",
+        prompt_class="adult_allowed",
+        image=GeneratedImage(data=decoded, mime_type="image/png"),
+    )
+
+
 async def generate_image(
     session: aiohttp.ClientSession,
     *,
@@ -595,12 +834,22 @@ async def generate_image(
         )
 
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    adult_key = os.environ.get("ADULT_IMAGEGEN_API_KEY", "").strip()
-    adult_url = os.environ.get("ADULT_IMAGEGEN_URL", "").strip()
+    adult_key = os.environ.get("ADULT_IMAGEGEN_API_KEY", "0000000000").strip() or "0000000000"
+    adult_url = os.environ.get("ADULT_IMAGEGEN_URL", "https://aihorde.net/api").strip() or "https://aihorde.net/api"
     adult_model = os.environ.get("ADULT_IMAGEGEN_MODEL", "").strip()
-    adult_provider = (os.environ.get("ADULT_IMAGEGEN_PROVIDER", "huggingface") or "huggingface").strip().lower()
+    adult_provider = (os.environ.get("ADULT_IMAGEGEN_PROVIDER", "aihorde") or "aihorde").strip().lower()
 
     if pclass == "adult_allowed":
+        adult_timeout = max(timeout_seconds, 120.0)
+        if adult_provider == "aihorde":
+            return await _generate_with_aihorde(
+                session,
+                api_key=adult_key,
+                base_url=adult_url,
+                model=adult_model,
+                prompt=prompt_clean,
+                timeout_seconds=adult_timeout,
+            )
         if adult_provider in ("huggingface", "hf"):
             hf_model = adult_model or "Linaqruf/anything-v3.0"
             return await _generate_with_huggingface(
@@ -608,7 +857,7 @@ async def generate_image(
                 api_key=adult_key,
                 model=hf_model,
                 prompt=prompt_clean,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=adult_timeout,
             )
         result = await _generate_with_adult_provider(
             session,
@@ -616,7 +865,7 @@ async def generate_image(
             api_url=adult_url,
             model=adult_model,
             prompt=prompt_clean,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=adult_timeout,
         )
         return result
 
