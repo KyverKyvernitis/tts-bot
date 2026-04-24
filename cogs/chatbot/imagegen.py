@@ -43,6 +43,7 @@ class GeneratedImage:
 _IMAGE_REQUEST_RE = re.compile(
     r"\b("
     r"gera(r)?\s+(uma\s+|um\s+)?(imagem|foto|figura|desenho|arte|ilustra..o)"
+    r"|gere\s+(uma\s+|um\s+)?(imagem|foto|figura|desenho|arte|ilustra..o)"
     r"|desenha(r)?\s+"
     r"|(faz|faça|faca|faca|faz[ae])\s+(uma\s+|um\s+)?(imagem|desenho|arte|figura|ilustra..o)"
     r"|me\s+mostra\s+(uma\s+|um\s+)?(imagem|desenho)"
@@ -79,7 +80,7 @@ def extract_image_prompt(text: str) -> str:
     # Remove prefixos comuns
     text = text.strip()
     patterns = [
-        r"^(gera|desenha|cria|faz|faça|imagina|me mostra)\s+",
+        r"^(gera|gere|desenha|cria|faz|faça|imagina|me mostra)\s+",
         r"^(uma|um)\s+",
         r"^(imagem|foto|figura|desenho|arte|ilustra[cç][aã]o|cena)\s+(de\s+|com\s+)?",
     ]
