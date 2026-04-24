@@ -46,6 +46,7 @@ FailureReason = Literal[
     "network_error",
     "timeout",
     "no_image_returned",
+    "prompt_too_vague",
 ]
 
 
@@ -89,7 +90,7 @@ def detect_image_request(text: str) -> bool:
     """
     if not text:
         return False
-    return bool(_IMAGE_REQUEST_RE.search(text))
+    return bool(_IMAGE_REQUEST_RE.search(text) or looks_like_adult_image_request(text))
 
 
 def extract_image_prompt(text: str) -> str:
@@ -142,10 +143,62 @@ _ADULT_HINT_PATTERNS = (
     r"conte[uú]do\s+adulto",
     r"er[oó]tic[oa]",
     r"nu[dz]?\b",
+    r"nudez\b",
     r"sexo\b",
+    r"sexual\b",
+    r"sensual\b",
     r"porn[oô]\b",
     r"pelad[oa]\b",
+    r"peit[oa]s?\b",
+    r"seios?\b",
+    r"mamil[oa]s?\b",
+    r"bunda(s)?\b",
+    r"raba\b",
+    r"vagina\b",
+    r"p[eê]nis\b",
+    r"genit[aá]lia",
+    r"boobs?\b",
+    r"breasts?\b",
+    r"naked\b",
+    r"nude\b",
 )
+_ADULT_IMAGE_VERB_RE = re.compile(
+    r"\b(gere|gera|gerar|cria|crie|criar|desenha|desenhe|desenhar|faz|faça|faca|mostrar?|mostre)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_GENERIC_ADULT_WORDS_RE = re.compile(
+    r"\b(nsfw|18\+|adult[oa]s?|conte[uú]do|er[oó]tic[oa]s?|sensual|sexual|sexo|porn[oô]|nudez|nude|nud[eo]s?|pelad[oa]s?|imagem|foto|arte|desenho|figura|gera|gere|gerar|cria|crie|criar|desenha|desenhe|desenhar|faz|faça|faca|mostra|mostrar|mostre|manda|mande|me|de|com|uma|um|a|o)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def text_has_adult_hint(text: str) -> bool:
+    return any(re.search(pat, text or "", flags=re.IGNORECASE) for pat in _ADULT_HINT_PATTERNS)
+
+
+def looks_like_adult_image_request(text: str) -> bool:
+    """Detecta pedidos curtos como "gere peitos femininos".
+
+    A regex geral exige a palavra "imagem" para evitar falsos positivos, mas
+    em canal de chatbot o user costuma mandar só "gere/desenha <assunto>".
+    Só aceitamos essa forma curta quando há termo adulto/visual claro.
+    """
+    if not text:
+        return False
+    return bool(_ADULT_IMAGE_VERB_RE.search(text) and text_has_adult_hint(text))
+
+
+def is_prompt_too_vague_for_adult_image(prompt: str) -> bool:
+    """Evita enviar prompts tipo só "nsfw" ao provider adulto.
+
+    Esses prompts fazem o AI Horde escolher uma cena aleatória, que foi o bug
+    visto no Discord. Exigimos pelo menos algum assunto além de termos genéricos
+    como "nsfw", "adulto" ou "imagem".
+    """
+    text = re.sub(r"[^\wÀ-ÿ+]+", " ", (prompt or "").lower(), flags=re.UNICODE)
+    text = _GENERIC_ADULT_WORDS_RE.sub(" ", text)
+    words = [w for w in text.split() if len(w) >= 3]
+    return not words
 
 
 def classify_image_prompt(prompt: str) -> PromptClass:
@@ -160,7 +213,7 @@ def classify_image_prompt(prompt: str) -> PromptClass:
         and any(re.search(pat, text, flags=re.IGNORECASE) for pat in _REAL_PERSON_PATTERNS)
     ):
         return "blocked"
-    if any(re.search(pat, text, flags=re.IGNORECASE) for pat in _ADULT_HINT_PATTERNS):
+    if text_has_adult_hint(text):
         return "adult_allowed"
     return "safe"
 
@@ -180,6 +233,12 @@ def build_image_failure_message(result: ImageGenerationResult) -> str:
         "provider_blocked",
     ):
         return "⚙️ Geração adulta grátis está indisponível ou demorou demais. Tente novamente."
+    if result.reason == "prompt_too_vague":
+        return (
+            "🖼️ O pedido de imagem ficou vago demais. "
+            "Diga o que deve aparecer na imagem, com assunto e estilo. "
+            "Ex.: `gere uma imagem de uma personagem adulta fictícia, estilo anime, ...`."
+        )
     if result.reason == "policy_blocked":
         return (
             "🚫 Não posso gerar esse tipo de imagem. "
@@ -193,11 +252,8 @@ def build_image_failure_message(result: ImageGenerationResult) -> str:
         )
     if result.reason == "missing_key":
         if result.provider in ("adult", "adult_hf"):
-            return (
-                "⚙️ Geração adulta não configurada no bot "
-                "(configure `ADULT_IMAGEGEN_PROVIDER` e as credenciais do provider)."
-            )
-        return "⚙️ Geração de imagem não configurada (falta `GEMINI_API_KEY`)."
+            return "⚙️ Geração adulta está indisponível no momento."
+        return "⚙️ Geração de imagem não configurada no momento."
     if result.reason == "timeout":
         return "⏱️ O provedor demorou demais para responder. Tenta de novo em instantes."
     if result.reason == "network_error":
@@ -831,6 +887,13 @@ async def generate_image(
             provider="router",
             prompt_class=pclass,
             reason="channel_not_nsfw",
+        )
+    if pclass == "adult_allowed" and is_prompt_too_vague_for_adult_image(prompt_clean):
+        return ImageGenerationResult(
+            ok=False,
+            provider="router",
+            prompt_class=pclass,
+            reason="prompt_too_vague",
         )
 
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()

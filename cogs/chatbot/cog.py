@@ -620,10 +620,16 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         if not should:
             return None
 
-        # Gera — edge-tts pode demorar 2-5s
+        # Gera — edge-tts pode demorar 2-5s.
+        # Sanitiza ANTES de sintetizar para o áudio não falar uma negativa
+        # contraditória do tipo "não posso responder com áudio".
+        spoken_reply = self._sanitize_audio_capability_claim(
+            reply,
+            audio_will_be_sent=True,
+        )
         try:
             audio_bytes = await asyncio.wait_for(
-                synthesize_speech(reply),
+                synthesize_speech(spoken_reply),
                 timeout=15.0,
             )
         except asyncio.TimeoutError:
@@ -640,27 +646,76 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
 
     def _sanitize_audio_capability_claim(self, reply: str, *, audio_will_be_sent: bool) -> str:
-        """Remove contradições quando o bot efetivamente envia áudio."""
+        """Remove contradições quando o bot efetivamente envia áudio.
+
+        O modelo às vezes responde "não posso responder com áudio" mesmo quando
+        o sistema acabou de gerar um anexo MP3. Nesses casos removemos a frase
+        contraditória em vez de apenas prefixar outro texto.
+        """
         if not audio_will_be_sent:
             return reply
-        lowered = (reply or "").lower()
-        deny_markers = (
-            "não consigo criar áudios",
-            "não consigo gerar áudios",
-            "não posso criar áudios",
-            "não posso gerar áudios",
-            "não consigo enviar áudio",
-            "não posso enviar áudio",
-            "não consigo mandar áudio",
-            "não posso mandar áudio",
-            "não consigo gerar audio",
-            "não posso gerar audio",
-            "não consigo mandar audio",
-            "não posso mandar audio",
+
+        text = (reply or "").strip()
+        if not text:
+            return "Te mandei o áudio."
+
+        lowered = text.lower()
+        deny_re = re.compile(
+            r"\b(n[aã]o|nao)\s+"
+            r"(consigo|posso|sou\s+capaz\s+de|tenho\s+como)\b"
+            r"[^.!?\n]{0,140}\b("
+            r"responder|enviar|mandar|gerar|criar|falar|usar"
+            r")?[^.!?\n]{0,140}\b("
+            r"áudio|audio|voz"
+            r")\b",
+            re.IGNORECASE | re.UNICODE,
         )
-        if not any(marker in lowered for marker in deny_markers):
-            return reply
-        return "Te respondi em áudio e texto. " + (reply or "")
+        text_only_re = re.compile(
+            r"\b(vamos|podemos|posso)\s+[^.!?\n]{0,80}"
+            r"(continuar|seguir|responder|conversar)\s+[^.!?\n]{0,80}"
+            r"\b(texto|por\s+texto)\b",
+            re.IGNORECASE | re.UNICODE,
+        )
+        generic_markers = (
+            "não consigo criar áudios", "não consigo gerar áudios",
+            "não posso criar áudios", "não posso gerar áudios",
+            "não consigo enviar áudio", "não posso enviar áudio",
+            "não consigo mandar áudio", "não posso mandar áudio",
+            "não consigo responder com áudio", "não posso responder com áudio",
+            "não consigo responder em áudio", "não posso responder em áudio",
+            "não consigo falar por áudio", "não posso falar por áudio",
+            "não consigo falar em áudio", "não posso falar em áudio",
+            "não consigo criar audio", "não consigo gerar audio",
+            "não posso criar audio", "não posso gerar audio",
+            "não consigo enviar audio", "não posso enviar audio",
+            "não consigo mandar audio", "não posso mandar audio",
+            "não consigo responder com audio", "não posso responder com audio",
+            "não consigo responder em audio", "não posso responder em audio",
+            "não consigo falar por audio", "não posso falar por audio",
+            "não consigo falar em audio", "não posso falar em audio",
+        )
+        has_contradiction = (
+            deny_re.search(text) is not None
+            or text_only_re.search(text) is not None
+            or any(marker in lowered for marker in generic_markers)
+        )
+        if not has_contradiction:
+            return text
+
+        pieces = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+", text) if p.strip()]
+        kept: list[str] = []
+        for piece in pieces:
+            piece_lower = piece.lower()
+            if deny_re.search(piece) or text_only_re.search(piece):
+                continue
+            if any(marker in piece_lower for marker in generic_markers):
+                continue
+            kept.append(piece)
+
+        cleaned = " ".join(kept).strip()
+        if cleaned:
+            return f"Te mandei em áudio. {cleaned}"
+        return "Te mandei o áudio."
 
     async def _maybe_enqueue_voice_call_tts(
         self,
