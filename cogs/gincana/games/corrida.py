@@ -6,6 +6,8 @@ import discord
 
 
 CORRIDA_STAKE = 40
+CORRIDA_RODADA_CHEIA_THRESHOLD = 5
+CORRIDA_RODADA_CHEIA_BONUS = 40
 _CORRIDA_TRACK_LENGTH = 18
 _CORRIDA_UPDATES = 10
 _CORRIDA_UPDATE_SECONDS = 2.0
@@ -75,6 +77,9 @@ class _RaceLobbyView(discord.ui.LayoutView):
         participants = self.cog._get_race_participants(self.guild, self.session)
         pot_total = self.cog._race_pot_total(self.session)
         bonus_pool = int(self.session.get("bonus_pool", 0) or 0)
+        pending_bonus = self.cog._race_rodada_cheia_pending_bonus(self.session)
+        effective_bonus = bonus_pool + pending_bonus
+        rodada_cheia_active = pending_bonus > 0
 
         header_lines = [
             "# 🐎 Corrida aberta",
@@ -82,8 +87,10 @@ class _RaceLobbyView(discord.ui.LayoutView):
         ]
         if special_name:
             header_lines.append(f"**Especial:** {special_name}")
+        if rodada_cheia_active:
+            header_lines.append(f"🎉 **Rodada cheia ativada** (+{CORRIDA_RODADA_CHEIA_BONUS} fichas bônus)")
         header_lines.append(f"**Entrada:** {self.cog._chip_amount(CORRIDA_STAKE)}")
-        header_lines.append(f"**Pote atual:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(bonus_pool)}" if bonus_pool > 0 else ""))
+        header_lines.append(f"**Pote atual:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(effective_bonus)}" if effective_bonus > 0 else ""))
         header_lines.append(f"**Duração:** **{_CORRIDA_DURATION_SECONDS}s**")
 
         participants_lines = [f"### Participantes ({len(participants)})"]
@@ -477,6 +484,8 @@ class _RaceStateView(discord.ui.LayoutView):
         header_lines = [title, f"**Condição:** {condition_name}"]
         if special_name:
             header_lines.append(f"**Especial:** {special_name}")
+        if session.get("rodada_cheia"):
+            header_lines.append("🎉 **Rodada cheia**")
 
         track_lines = list(lines)
         if narration:
@@ -580,6 +589,20 @@ class GincanaCorridaMixin:
         participant_count = len(set(session.get("locked_participants", set()) or []))
         return max(0, participant_count - 1) * CORRIDA_STAKE
 
+    def _race_rodada_cheia_pending_bonus(self, session: dict) -> int:
+        """Bonus that will be added at race start if participant count meets the threshold."""
+        if session.get("started"):
+            return 0
+        participant_count = len(set(session.get("locked_participants", set()) or []))
+        if participant_count >= CORRIDA_RODADA_CHEIA_THRESHOLD:
+            return CORRIDA_RODADA_CHEIA_BONUS
+        return 0
+
+    def _race_is_rodada_cheia(self, session: dict) -> bool:
+        if session.get("rodada_cheia"):
+            return True
+        return self._race_rodada_cheia_pending_bonus(session) > 0
+
     def _race_lobby_view_matches(self, session: dict, source_view: discord.ui.LayoutView | None) -> bool:
         if source_view is None:
             return True
@@ -659,6 +682,8 @@ class GincanaCorridaMixin:
     def _make_race_embed(self, guild: discord.Guild, session: dict, *, finished: bool = False) -> discord.Embed:
         pot_total = self._race_pot_total(session)
         bonus_pool = int(session.get("bonus_pool", 0) or 0)
+        pending_bonus = self._race_rodada_cheia_pending_bonus(session)
+        effective_bonus = bonus_pool + pending_bonus
         title = "🐎 Corrida aberta"
         if session.get("started"):
             title = "🏁 Corrida encerrada" if finished else ("🔥 Reta final" if session.get("final_stretch") else "🐎 Corrida em andamento")
@@ -670,6 +695,8 @@ class GincanaCorridaMixin:
         description_parts = [f"Condição: **{condition_name}**"]
         if special_name:
             description_parts.append(f"Especial: **{special_name}**")
+        if self._race_is_rodada_cheia(session):
+            description_parts.append("🎉 **Rodada cheia**")
         description_parts.append("")
         description_parts.extend(lines)
         description_parts.append("")
@@ -679,7 +706,7 @@ class GincanaCorridaMixin:
 
         if not session.get("started"):
             embed.add_field(name="Entrada", value=self._chip_amount(CORRIDA_STAKE), inline=True)
-            embed.add_field(name="Pote atual", value=self._chip_amount(pot_total) + (f" • Bônus: {self._bonus_chip_amount(bonus_pool)}" if bonus_pool > 0 else ""), inline=True)
+            embed.add_field(name="Pote atual", value=self._chip_amount(pot_total) + (f" • Bônus: {self._bonus_chip_amount(effective_bonus)}" if effective_bonus > 0 else ""), inline=True)
             embed.add_field(name="Duração", value=f"**{_CORRIDA_DURATION_SECONDS}s**", inline=True)
             embed.set_footer(text="Entre no lobby. O criador ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes.")
         return embed
@@ -913,7 +940,7 @@ class GincanaCorridaMixin:
             return []
         if participant_count == 2:
             return [pot_total]
-        if participant_count <= 4:
+        if participant_count <= 5:
             first_pool = int(round(pot_total * 0.75))
             second_pool = max(0, pot_total - first_pool)
             return [first_pool, second_pool]
@@ -1144,6 +1171,11 @@ class GincanaCorridaMixin:
             progress[member.id] = 0.0
             state_map[member.id] = _HORSE_START
             await self._record_game_played(guild.id, member.id, weekly_points=4)
+
+        rodada_cheia_bonus = self._race_rodada_cheia_pending_bonus(session)
+        if rodada_cheia_bonus > 0:
+            session["bonus_pool"] = int(session.get("bonus_pool", 0) or 0) + rodada_cheia_bonus
+            session["rodada_cheia"] = True
 
         session["starting"] = True
         session["started"] = True
