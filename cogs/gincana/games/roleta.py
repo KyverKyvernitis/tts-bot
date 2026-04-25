@@ -642,7 +642,7 @@ class GincanaRoletaMixin:
                         chip_note = self._sortudo_blessing_note(guild.id, interaction.user.id, kind="roleta")
                         paid, _balance = True, self.db.get_user_chips(guild.id, interaction.user.id, default=100)
                     else:
-                        paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, entry_cost)
+                        paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, entry_cost, reason="Entrada na roleta")
                     if needs_negative_confirm:
                         chip_note = None
                     if not paid:
@@ -702,7 +702,7 @@ class GincanaRoletaMixin:
                         chip_note = self._sortudo_blessing_note(guild.id, interaction.user.id, kind="carta")
                         paid, _balance = True, self.db.get_user_chips(guild.id, interaction.user.id, default=100)
                     else:
-                        paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, entry_cost)
+                        paid, _balance, chip_note = await self._try_consume_chips(guild.id, interaction.user.id, entry_cost, reason="Entrada nas cartas")
                     if needs_negative_confirm:
                         chip_note = None
                     if not paid:
@@ -1201,7 +1201,7 @@ class GincanaRoletaMixin:
                                 except Exception:
                                     pass
                         await self._record_game_played(guild.id, actor.id, weekly_points=12)
-                        await self._change_user_chips(guild.id, actor.id, result_amount)
+                        await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                         await self.db.add_user_game_stat(guild.id, actor.id, "roleta_jackpots", 1)
                         await self._grant_weekly_points(guild.id, actor.id, 20)
                         summary = f"Você ganhou {self._chip_amount(result_amount)}."
@@ -1215,7 +1215,7 @@ class GincanaRoletaMixin:
                         embed = self._make_roleta_result_embed("💥🎰 JACKPOT 777!!" if result_kind == "jackpot_mega" else ("💥🎰 JACKPOT 999!!" if self._race_is(guild.id, actor.id, "apostador") else "💥🎰 JACKPOT!!"), summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
                     elif result_kind == "joker_premium":
                         await self._record_game_played(guild.id, actor.id, weekly_points=6)
-                        await self._change_user_chips(guild.id, actor.id, result_amount)
+                        await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                         await self._grant_weekly_points(guild.id, actor.id, 8)
                         summary = f"Teve símbolo coringa e rendeu {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
@@ -1223,7 +1223,7 @@ class GincanaRoletaMixin:
                         embed = self._make_roleta_result_embed("🎰 Coringa premiado", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
                     elif result_kind == "partial":
                         await self._record_game_played(guild.id, actor.id, weekly_points=4)
-                        await self._change_user_chips(guild.id, actor.id, result_amount)
+                        await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                         await self._grant_weekly_points(guild.id, actor.id, 6)
                         summary = f"Esse giro rendeu {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
@@ -1231,7 +1231,7 @@ class GincanaRoletaMixin:
                         embed = self._make_roleta_result_embed("🎰 Giro parcial", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
                     elif result_kind == "return":
                         await self._record_game_played(guild.id, actor.id, weekly_points=3)
-                        await self._change_user_chips(guild.id, actor.id, result_amount)
+                        await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                         summary = f"Você recuperou {self._chip_text(result_amount, kind='gain')}."
                         effect_note = self._race_effect_message(guild.id, actor.id, "666") if self._race_is(guild.id, actor.id, "apostador") else ""
                         if effect_note:
@@ -1290,7 +1290,7 @@ class GincanaRoletaMixin:
                 _streak_value, streak_line = await self._advance_carta_hot_streak(guild.id, actor.id, result_kind=result_kind)
                 if result_kind == "jackpot":
                     await self._record_game_played(guild.id, actor.id, weekly_points=12)
-                    await self._change_user_chips(guild.id, actor.id, CARTA_JACKPOT_CHIPS)
+                    await self._change_user_chips(guild.id, actor.id, CARTA_JACKPOT_CHIPS, reason="Prêmio das cartas")
                     await self.db.add_user_game_stat(guild.id, actor.id, "cartas_jackpots", 1)
                     await self._grant_weekly_points(guild.id, actor.id, 18)
                     summary = f"{flavor}\nVocê ganhou {self._chip_amount(CARTA_JACKPOT_CHIPS)}."
@@ -1303,7 +1303,7 @@ class GincanaRoletaMixin:
                 elif result_kind in {"rare", "premium", "partial", "return"}:
                     weekly_map = {"rare": 8, "premium": 7, "partial": 4, "return": 2}
                     await self._record_game_played(guild.id, actor.id, weekly_points=weekly_map.get(result_kind, 3))
-                    await self._change_user_chips(guild.id, actor.id, result_amount)
+                    await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio das cartas")
                     if result_kind in {"rare", "premium"}:
                         await self._grant_weekly_points(guild.id, actor.id, 6)
                     line = f"{flavor}\nEssa mão rendeu {self._chip_text(result_amount, kind='gain')}."
@@ -1394,7 +1394,7 @@ class GincanaRoletaMixin:
                     chip_note = self._sortudo_blessing_note(guild.id, message.author.id, kind="carta")
                     paid, _balance = True, self.db.get_user_chips(guild.id, message.author.id, default=100)
                 else:
-                    paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, entry_cost)
+                    paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, entry_cost, reason="Entrada na roleta")
                 if needs_negative_confirm:
                     chip_note = None
                 if not paid:
@@ -1473,7 +1473,7 @@ class GincanaRoletaMixin:
                     chip_note = self._sortudo_blessing_note(guild.id, message.author.id, kind="roleta")
                     paid, _balance = True, self.db.get_user_chips(guild.id, message.author.id, default=100)
                 else:
-                    paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, entry_cost)
+                    paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, entry_cost, reason="Entrada nas cartas")
                 if needs_negative_confirm:
                     chip_note = None
                 if not paid:

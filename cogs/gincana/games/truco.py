@@ -385,9 +385,9 @@ class GincanaTrucoMixin:
     async def _truco_refund_consumed_entries(self, guild_id: int, consumed_entries: list[tuple[int, int, int]]):
         for user_id, normal_amount, bonus_amount in consumed_entries:
             if bonus_amount > 0:
-                await self._change_user_bonus_chips(guild_id, int(user_id), int(bonus_amount), mark_activity=True)
+                await self._change_user_bonus_chips(guild_id, int(user_id), int(bonus_amount), mark_activity=True, reason="Devolução do truco")
             if normal_amount > 0:
-                await self._change_user_chips(guild_id, int(user_id), int(normal_amount), mark_activity=True)
+                await self._change_user_chips(guild_id, int(user_id), int(normal_amount), mark_activity=True, reason="Devolução do truco")
 
     async def _truco_abort_game_start(self, game: TrucoGame, *, notice: str):
         if getattr(game, '_start_abort_handled', False):
@@ -948,8 +948,10 @@ class GincanaTrucoMixin:
         for uid in winners:
             await self.db.add_user_game_stat(game.guild_id, uid, "truco_wins", 1)
             await self._record_game_played(game.guild_id, uid, weekly_points=6)
-            await self._change_user_chips(game.guild_id, uid, share, mark_activity=True)
-            await self._change_user_bonus_chips(game.guild_id, uid, self._truco_bonus_reward_value(game), mark_activity=True)
+            win_reason = "Vitória no truco dourado" if self._truco_is_golden(game) else "Vitória no truco"
+            bonus_reason = "Bônus do truco dourado" if self._truco_is_golden(game) else "Bônus do truco"
+            await self._change_user_chips(game.guild_id, uid, share, mark_activity=True, reason=win_reason)
+            await self._change_user_bonus_chips(game.guild_id, uid, self._truco_bonus_reward_value(game), mark_activity=True, reason=bonus_reason)
         for uid in losers:
             await self.db.add_user_game_stat(game.guild_id, uid, "truco_losses", 1)
             await self._record_game_played(game.guild_id, uid, weekly_points=2)
@@ -1190,7 +1192,7 @@ class GincanaTrucoMixin:
         consumed_entries: list[tuple[int, int, int]] = []
         for uid in players:
             normal_part, bonus_part = self._truco_entry_refund_parts(guild.id, uid, TRUCO_ENTRY)
-            paid, _bal, note = await self._try_consume_chips(guild.id, uid, TRUCO_ENTRY)
+            paid, _bal, note = await self._try_consume_chips(guild.id, uid, TRUCO_ENTRY, reason="Entrada no truco")
             if not paid:
                 if consumed_entries:
                     await self._truco_refund_consumed_entries(guild.id, consumed_entries)
@@ -1240,14 +1242,14 @@ class GincanaTrucoMixin:
         consumed_entries: list[tuple[int, int, int]] = []
         challenger_id = int(game.players_order[0])
         challenger_normal, challenger_bonus = self._truco_entry_refund_parts(game.guild_id, challenger_id, TRUCO_ENTRY)
-        paid, _b, note = await self._try_consume_chips(game.guild_id, challenger_id, TRUCO_ENTRY)
+        paid, _b, note = await self._try_consume_chips(game.guild_id, challenger_id, TRUCO_ENTRY, reason="Entrada no truco")
         if not paid:
             await interaction.response.send_message("Não foi possível cobrar a entrada do desafiante agora.", ephemeral=True)
             return
         consumed_entries.append((challenger_id, challenger_normal, challenger_bonus))
         opponent_id = int(interaction.user.id)
         opponent_normal, opponent_bonus = self._truco_entry_refund_parts(game.guild_id, opponent_id, TRUCO_ENTRY)
-        paid, _b, note = await self._try_consume_chips(game.guild_id, opponent_id, TRUCO_ENTRY)
+        paid, _b, note = await self._try_consume_chips(game.guild_id, opponent_id, TRUCO_ENTRY, reason="Entrada no truco")
         if not paid:
             await self._truco_refund_consumed_entries(game.guild_id, consumed_entries)
             await interaction.response.send_message("Não foi possível cobrar a sua entrada agora.", ephemeral=True)
@@ -1461,7 +1463,7 @@ class GincanaTrucoMixin:
                 return
         for pid, delta in deltas.items():
             if delta > 0:
-                await self._try_consume_chips(game.guild_id, pid, delta)
+                await self._try_consume_chips(game.guild_id, pid, delta, reason="Aumento no truco")
                 game.contribution[pid] = int(game.contribution.get(pid, TRUCO_ENTRY)) + delta
         game.level = target_level
         game.pot = self._truco_target_pot(game, target_level)

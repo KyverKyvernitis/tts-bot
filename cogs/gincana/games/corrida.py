@@ -540,7 +540,7 @@ class GincanaCorridaMixin:
         refund_ids = [int(user_id) for user_id in set(session.get("locked_participants", set()) or [])]
         for user_id in refund_ids:
             try:
-                await self._change_user_chips(guild_id, int(user_id), CORRIDA_STAKE)
+                await self._change_user_chips(guild_id, int(user_id), CORRIDA_STAKE, reason="Devolução da corrida (cancelada)")
             except Exception:
                 pass
         session["ended"] = True
@@ -754,7 +754,7 @@ class GincanaCorridaMixin:
                 return
 
         entry_text = self._entry_consume_text(guild.id, user.id, CORRIDA_STAKE)
-        paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, CORRIDA_STAKE)
+        paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, CORRIDA_STAKE, reason="Entrada na corrida")
         if needs_negative_confirm:
             chip_note = None
         if not paid:
@@ -1154,7 +1154,7 @@ class GincanaCorridaMixin:
         locked_ids = set(session.get("locked_participants", set()))
         if len(locked_ids) == 1:
             only_id = next(iter(locked_ids))
-            await self._change_user_chips(guild.id, only_id, CORRIDA_STAKE)
+            await self._change_user_chips(guild.id, only_id, CORRIDA_STAKE, reason="Devolução da corrida (1 jogador)")
             session["starting"] = False
             session["ended"] = True
             await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Só 1 jogador entrou. A entrada foi devolvida.")
@@ -1162,7 +1162,7 @@ class GincanaCorridaMixin:
             return True
         if len(participants) < 2:
             for user_id in locked_ids:
-                await self._change_user_chips(guild.id, user_id, CORRIDA_STAKE)
+                await self._change_user_chips(guild.id, user_id, CORRIDA_STAKE, reason="Devolução da corrida (cancelada)")
             session["starting"] = False
             session["ended"] = True
             await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Não ficaram participantes suficientes. As entradas foram devolvidas.")
@@ -1481,13 +1481,27 @@ class GincanaCorridaMixin:
             refund = await self._maybe_apply_coringa_lobby_refund(guild.id, int(user_id), CORRIDA_STAKE)
             if refund > 0:
                 coringa_refunds.append((int(user_id), int(refund)))
+        winner_ids = {member.id for member in (final_groups[0] if final_groups else [])}
+        runner_up_ids = {member.id for member in (final_groups[1] if len(final_groups) > 1 else [])}
+        third_ids = {member.id for member in (final_groups[2] if len(final_groups) > 2 else [])}
+
+        def _race_reward_reason(uid: int) -> str:
+            if uid in winner_ids:
+                return "Prêmio da corrida (1º lugar)"
+            if uid in runner_up_ids:
+                return "Prêmio da corrida (2º lugar)"
+            if uid in third_ids:
+                return "Prêmio da corrida (3º lugar)"
+            return "Prêmio da corrida"
+
         for user_id, amount in rewards.items():
             if amount > 0:
-                await self._change_user_chips(guild.id, user_id, amount)
+                await self._change_user_chips(guild.id, user_id, amount, reason=_race_reward_reason(int(user_id)))
                 await self._grant_weekly_points(guild.id, user_id, max(4, amount // 4))
         for user_id, amount in bonus_rewards.items():
             if amount > 0:
-                await self._change_user_bonus_chips(guild.id, user_id, amount)
+                bonus_reason = "Bônus da corrida (rodada cheia)" if session.get("rodada_cheia") else "Bônus da corrida"
+                await self._change_user_bonus_chips(guild.id, user_id, amount, reason=bonus_reason)
 
         if coringa_refunds:
             if len(coringa_refunds) == 1:
@@ -1536,7 +1550,7 @@ class GincanaCorridaMixin:
             if not confirmed:
                 return True
 
-        paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, CORRIDA_STAKE)
+        paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, CORRIDA_STAKE, reason="Entrada na corrida")
         if needs_negative_confirm:
             chip_note = None
         if not paid:
@@ -1595,7 +1609,7 @@ class GincanaCorridaMixin:
             panel_message = await message.channel.send(view=view)
         except Exception:
             self._race_sessions.pop(guild.id, None)
-            await self._change_user_chips(guild.id, message.author.id, CORRIDA_STAKE)
+            await self._change_user_chips(guild.id, message.author.id, CORRIDA_STAKE, reason="Devolução da corrida (erro)")
             return True
 
         session["message"] = panel_message

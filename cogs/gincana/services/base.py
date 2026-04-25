@@ -390,21 +390,33 @@ class GincanaBase:
         except Exception:
             return 0
 
-    async def _change_user_bonus_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True) -> int:
-        new_bonus = await self.db.add_user_bonus_chips(guild_id, user_id, int(amount))
-        if mark_activity and int(amount) != 0:
-            await self._mark_chip_activity(guild_id, user_id)
+    async def _change_user_bonus_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True, reason: str | None = None) -> int:
+        delta = int(amount)
+        new_bonus = await self.db.add_user_bonus_chips(guild_id, user_id, delta)
+        if delta != 0:
+            if mark_activity:
+                await self._mark_chip_activity(guild_id, user_id)
+            try:
+                await self.db.append_chip_history(guild_id, user_id, delta=delta, kind="bonus", reason=reason)
+            except Exception:
+                pass
         return int(new_bonus)
 
-    async def _change_user_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True) -> int:
-        new_balance = await self.db.add_user_chips(guild_id, user_id, int(amount))
-        if mark_activity and int(amount) != 0:
-            await self._mark_chip_activity(guild_id, user_id)
+    async def _change_user_chips(self, guild_id: int, user_id: int, amount: int, *, mark_activity: bool = True, reason: str | None = None) -> int:
+        delta = int(amount)
+        new_balance = await self.db.add_user_chips(guild_id, user_id, delta)
+        if delta != 0:
+            if mark_activity:
+                await self._mark_chip_activity(guild_id, user_id)
+            try:
+                await self.db.append_chip_history(guild_id, user_id, delta=delta, kind="chips", reason=reason)
+            except Exception:
+                pass
         return int(new_balance)
 
-    async def _transfer_user_chips(self, guild_id: int, payer_id: int, target_id: int, *, total: int, net_amount: int) -> tuple[int, int]:
-        payer_balance = await self._change_user_chips(guild_id, payer_id, -int(total), mark_activity=True)
-        target_balance = await self._change_user_chips(guild_id, target_id, int(net_amount), mark_activity=True)
+    async def _transfer_user_chips(self, guild_id: int, payer_id: int, target_id: int, *, total: int, net_amount: int, payer_reason: str | None = None, target_reason: str | None = None) -> tuple[int, int]:
+        payer_balance = await self._change_user_chips(guild_id, payer_id, -int(total), mark_activity=True, reason=payer_reason)
+        target_balance = await self._change_user_chips(guild_id, target_id, int(net_amount), mark_activity=True, reason=target_reason)
         return payer_balance, target_balance
 
     async def _claim_daily_bonus_with_activity(self, guild_id: int, user_id: int, *, base_amount: int = 10) -> tuple[bool, int, int, int, int]:
@@ -412,6 +424,12 @@ class GincanaBase:
         bonus_chips = self._get_user_bonus_chips(guild_id, user_id)
         if claimed:
             await self._mark_chip_activity(guild_id, user_id)
+            try:
+                if int(bonus) > 0:
+                    await self.db.append_chip_history(guild_id, user_id, delta=int(bonus), kind="chips", reason="Bônus diário")
+                await self.db.append_chip_history(guild_id, user_id, delta=10, kind="bonus", reason="Bônus diário")
+            except Exception:
+                pass
         return claimed, new_balance, bonus, 10, streak
 
     async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
@@ -663,7 +681,7 @@ class GincanaBase:
             return False, chips, (
                 f"Sua recarga volta em **{self._format_chip_reset_remaining(remaining)}**."
             )
-        await self._change_user_bonus_chips(guild_id, user_id, int(CHIPS_DEFAULT), mark_activity=True)
+        await self._change_user_bonus_chips(guild_id, user_id, int(CHIPS_DEFAULT), mark_activity=True, reason="Recarga manual")
         doc = self.db._get_user_doc(guild_id, user_id)
         doc["last_chip_reset_at"] = float(__import__("time").time())
         doc["chip_recharge_manual_initialized"] = True
@@ -1253,7 +1271,7 @@ class GincanaBase:
         if random.random() >= float(chance):
             return 0
         refund = max(1, int(round(int(entry_cost) * 0.5)))
-        await self._change_user_chips(guild_id, user_id, refund, mark_activity=True)
+        await self._change_user_chips(guild_id, user_id, refund, mark_activity=True, reason="Reembolso Coringa")
         return refund
 
     async def _maybe_apply_coringa_lobby_refund(self, guild_id: int, user_id: int, entry_cost: int) -> int:
@@ -1317,6 +1335,75 @@ class GincanaBase:
         view.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(detail_lines)),
             accent_color=discord.Color.dark_green(),
+        ))
+        return view
+
+    def _format_chip_history_relative_time(self, ts: float) -> str:
+        try:
+            delta = max(0.0, time.time() - float(ts))
+        except Exception:
+            return "—"
+        if delta < 60:
+            return "agora"
+        if delta < 3600:
+            return f"há {int(delta // 60)}min"
+        if delta < 86400:
+            return f"há {int(delta // 3600)}h"
+        days = int(delta // 86400)
+        if days == 1:
+            return "ontem"
+        if days < 7:
+            return f"há {days}d"
+        weeks = days // 7
+        if weeks < 5:
+            return f"há {weeks}sem"
+        return f"há {days}d"
+
+    def _make_chip_history_view(self, member: discord.Member, *, limit: int = 7) -> discord.ui.LayoutView:
+        guild_id = member.guild.id
+        try:
+            entries = self.db.get_chip_history(guild_id, member.id, limit=int(limit))
+        except Exception:
+            entries = []
+
+        header_lines = [
+            f"# 📒 Extrato — {member.display_name}",
+            f"Últimas **{int(limit)}** movimentações de fichas",
+        ]
+
+        if not entries:
+            body_lines = ["Nenhuma movimentação registrada ainda. Jogue alguma rodada e volte aqui."]
+        else:
+            body_lines: list[str] = []
+            for entry in entries:
+                try:
+                    delta = int(entry.get("delta", 0) or 0)
+                except Exception:
+                    delta = 0
+                if delta == 0:
+                    continue
+                kind = str(entry.get("kind") or "chips").lower()
+                emoji = self._CHIP_BONUS_EMOJI if kind == "bonus" else self._CHIP_EMOJI
+                sign_marker = "🟢" if delta > 0 else "🔴"
+                amount_text = f"+{delta}" if delta > 0 else f"{delta}"
+                reason = str(entry.get("reason") or "").strip() or "Transação"
+                ts = entry.get("ts") or 0
+                when = self._format_chip_history_relative_time(ts)
+                body_lines.append(f"{sign_marker} **{amount_text}** {emoji} • {reason} ({when})")
+
+            if not body_lines:
+                body_lines = ["Nenhuma movimentação registrada ainda."]
+
+        balance_line = f"💰 **Saldo atual:** {self._format_primary_chip_balance(guild_id, member.id)}"
+
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(header_lines)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(body_lines)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(balance_line),
+            accent_color=discord.Color.gold(),
         ))
         return view
     def _make_chip_balance_embed(self, member: discord.Member) -> discord.Embed:
@@ -1419,7 +1506,7 @@ class GincanaBase:
             return f"{hours}h {minutes:02d}min"
         return f"{minutes}min"
 
-    async def _try_consume_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:
+    async def _try_consume_chips(self, guild_id: int, user_id: int, amount: int, *, reason: str | None = None) -> tuple[bool, int, str | None]:
         spend = max(0, int(amount))
         projected_chips, projected_bonus = self._project_chip_state_after_cost(guild_id, user_id, spend)
         current_before = self.db.get_user_chips(guild_id, user_id, default=CHIPS_INITIAL)
@@ -1430,9 +1517,9 @@ class GincanaBase:
         use_bonus = min(current_bonus, spend)
         remaining = spend - use_bonus
         if use_bonus > 0:
-            await self._change_user_bonus_chips(guild_id, user_id, -use_bonus, mark_activity=True)
+            await self._change_user_bonus_chips(guild_id, user_id, -use_bonus, mark_activity=True, reason=reason)
         if remaining > 0:
-            await self._change_user_chips(guild_id, user_id, -remaining, mark_activity=True)
+            await self._change_user_chips(guild_id, user_id, -remaining, mark_activity=True, reason=reason)
         return True, projected_chips, note
 
     async def _ensure_action_chips(self, guild_id: int, user_id: int, amount: int) -> tuple[bool, int, str | None]:

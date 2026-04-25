@@ -341,7 +341,7 @@ class GincanaAlvoMixin:
                 return
 
             entry_text = self._entry_consume_text(guild.id, user.id, ALVO_STAKE)
-            paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE)
+            paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE, reason="Entrada no alvo")
             if not paid:
                 try:
                     await interaction.response.send_message(chip_note or "Você não tem saldo suficiente para entrar nessa rodada.", ephemeral=True)
@@ -382,12 +382,12 @@ class GincanaAlvoMixin:
 
             if len(locked_ids) == 1:
                 only_id = next(iter(locked_ids))
-                await self._change_user_chips(guild.id, only_id, ALVO_STAKE)
+                await self._change_user_chips(guild.id, only_id, ALVO_STAKE, reason="Devolução do alvo")
                 only_member = guild.get_member(only_id)
                 final_text = f"A rodada foi cancelada porque só {only_member.mention if only_member else '1 participante'} entrou. A entrada foi reembolsada."
             elif len(participants) < 2:
                 for user_id in locked_ids:
-                    await self._change_user_chips(guild.id, user_id, ALVO_STAKE)
+                    await self._change_user_chips(guild.id, user_id, ALVO_STAKE, reason="Devolução do alvo")
                 final_text = "A rodada foi cancelada porque não ficaram participantes suficientes. As entradas foram reembolsadas."
             else:
                 pot_total = len(locked_ids) * ALVO_STAKE
@@ -428,7 +428,7 @@ class GincanaAlvoMixin:
                     bull_bonus = int(modifier.get("bullseye_bonus", 0) or 0)
                     if bull_bonus > 0:
                         for member in bullseye_members:
-                            await self._change_user_bonus_chips(guild.id, member.id, bull_bonus)
+                            await self._change_user_bonus_chips(guild.id, member.id, bull_bonus, reason="Mosca no alvo")
                             await self._grant_weekly_points(guild.id, member.id, bull_bonus)
                         result_lines.append(f"✨ Cada bullseye recebeu um bônus de {self._bonus_chip_amount(bull_bonus)}.")
 
@@ -441,12 +441,12 @@ class GincanaAlvoMixin:
                         result_lines.append(f"{badge} {member_mentions} — {self._chip_amount(total)}")
                     for user_id, amount in rewards.items():
                         if amount > 0:
-                            await self._change_user_chips(guild.id, user_id, amount)
+                            await self._change_user_chips(guild.id, user_id, amount, reason="Prêmio do alvo")
                             await self.db.add_user_game_stat(guild.id, user_id, "alvo_wins", 1)
                             await self._grant_weekly_points(guild.id, user_id, max(5, amount // 4))
                     for user_id, amount in bonus_rewards.items():
                         if amount > 0:
-                            await self._change_user_bonus_chips(guild.id, user_id, amount)
+                            await self._change_user_bonus_chips(guild.id, user_id, amount, reason="Bônus do alvo")
                 final_text = "\n".join(result_lines)
 
             embed = self._make_target_embed(guild, session, final_text=final_text)
@@ -492,7 +492,7 @@ class GincanaAlvoMixin:
                     pass
                 return True
 
-            paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ALVO_STAKE)
+            paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ALVO_STAKE, reason="Entrada no alvo")
             if not paid:
                 try:
                     await message.channel.send(embed=self._make_embed("🎯 Saldo insuficiente", chip_note or "Você não tem saldo suficiente.", ok=False))
@@ -523,7 +523,7 @@ class GincanaAlvoMixin:
                 panel_message = await message.channel.send(embed=embed, view=view)
             except Exception:
                 self._target_sessions.pop(guild.id, None)
-                await self._change_user_chips(guild.id, message.author.id, ALVO_STAKE)
+                await self._change_user_chips(guild.id, message.author.id, ALVO_STAKE, reason="Devolução do alvo")
                 return True
 
             session["message"] = panel_message
@@ -707,7 +707,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         if guild is not None:
             for user_id in sorted(locked_ids):
                 try:
-                    await self._change_user_chips(guild.id, int(user_id), ALVO_STAKE)
+                    await self._change_user_chips(guild.id, int(user_id), ALVO_STAKE, reason="Devolução do alvo")
                 except Exception:
                     pass
         lobby_message = session.get('lobby_message') or session.get('message')
@@ -769,7 +769,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             if not confirmed:
                 return
         entry_text = self._entry_consume_text(guild.id, user.id, ALVO_STAKE)
-        paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE)
+        paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE, reason="Entrada no alvo")
         if needs_negative_confirm:
             chip_note = None
         if not paid:
@@ -859,7 +859,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
         participants = self._get_target_participants(guild, session)
         if len(locked_ids) == 1:
             only_id = next(iter(locked_ids))
-            await self._change_user_chips(guild.id, only_id, ALVO_STAKE)
+            await self._change_user_chips(guild.id, only_id, ALVO_STAKE, reason="Devolução do alvo")
             if lobby_message is not None:
                 try:
                     await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'Só 1 jogador entrou. A entrada foi devolvida.'))
@@ -868,7 +868,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             return True
         if len(participants) < 2:
             for user_id in locked_ids:
-                await self._change_user_chips(guild.id, user_id, ALVO_STAKE)
+                await self._change_user_chips(guild.id, user_id, ALVO_STAKE, reason="Devolução do alvo")
             if lobby_message is not None:
                 try:
                     await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'Não ficaram participantes suficientes. As entradas foram devolvidas.'))
@@ -917,7 +917,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             bull_bonus = int(modifier.get('bullseye_bonus', 0) or 0)
             if bull_bonus > 0:
                 for member in bullseye_members:
-                    await self._change_user_bonus_chips(guild.id, member.id, bull_bonus)
+                    await self._change_user_bonus_chips(guild.id, member.id, bull_bonus, reason="Mosca no alvo")
                     await self._grant_weekly_points(guild.id, member.id, bull_bonus)
                 bonus_line = f"✨ Bullseye bônus: {self._bonus_chip_amount(bull_bonus)} para cada bullseye."
         podium_lines = []
@@ -936,12 +936,12 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                     winning_reward = total
             for user_id, amount in rewards.items():
                 if amount > 0:
-                    await self._change_user_chips(guild.id, user_id, amount)
+                    await self._change_user_chips(guild.id, user_id, amount, reason="Prêmio do alvo")
                     await self.db.add_user_game_stat(guild.id, user_id, 'alvo_wins', 1)
                     await self._grant_weekly_points(guild.id, user_id, max(3, amount // 4))
             for user_id, amount in bonus_rewards.items():
                 if amount > 0:
-                    await self._change_user_bonus_chips(guild.id, user_id, amount)
+                    await self._change_user_bonus_chips(guild.id, user_id, amount, reason="Bônus do alvo")
         coringa_refunds: list[tuple[int, int]] = []
         for member in participants:
             if int(rewards.get(member.id, 0) or 0) > 0:
@@ -1016,7 +1016,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, ALVO_STAKE, title="🎯 Confirmar entrada")
             if not confirmed:
                 return True
-        paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ALVO_STAKE)
+        paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ALVO_STAKE, reason="Entrada no alvo")
         if needs_negative_confirm:
             chip_note = None
         if not paid:
@@ -1046,7 +1046,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             panel_message = await message.channel.send(view=view)
         except Exception:
             self._target_sessions.pop(guild.id, None)
-            await self._change_user_chips(guild.id, message.author.id, ALVO_STAKE)
+            await self._change_user_chips(guild.id, message.author.id, ALVO_STAKE, reason="Devolução do alvo")
             return True
         session['lobby_message'] = panel_message
         session['message'] = panel_message

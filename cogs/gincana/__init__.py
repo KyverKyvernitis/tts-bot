@@ -196,7 +196,12 @@ class _MendigarRequestView(discord.ui.LayoutView):
                 ephemeral=True,
             )
             return
-        await self.cog._transfer_user_chips(self.guild_id, donor.id, recipient.id, total=self.amount, net_amount=self.amount)
+        await self.cog._transfer_user_chips(
+            self.guild_id, donor.id, recipient.id,
+            total=self.amount, net_amount=self.amount,
+            payer_reason=f"Esmola para {recipient.display_name}",
+            target_reason=f"Esmola de {donor.display_name}",
+        )
         now_ts = float(time.time())
         donor_doc["last_esmola_at"] = now_ts
         await self.cog.db._save_user_doc(self.guild_id, donor.id, donor_doc)
@@ -293,7 +298,7 @@ class _RacePanelView(discord.ui.LayoutView):
         if normal_chips < RACE_REROLL_COST:
             await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", [f"Você precisa de {RACE_REROLL_COST} {self.cog._CHIP_EMOJI} para trocar."], ok=False), ephemeral=True)
             return
-        await self.cog._change_user_chips(self.guild_id, self.user_id, -RACE_REROLL_COST, mark_activity=True)
+        await self.cog._change_user_chips(self.guild_id, self.user_id, -RACE_REROLL_COST, mark_activity=True, reason="Troca de raça")
         await self.cog._roll_user_race(self.guild_id, self.user_id, exclude_current=bool(current))
         spinner_texts = ("Sorteando sua nova raça.", "Sorteando sua nova raça..", "Sorteando sua nova raça...", "Definindo sua nova raça...")
         await interaction.response.edit_message(view=self.cog._make_race_spinner_view(spinner_texts[0]))
@@ -684,8 +689,8 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if success:
             max_rob = 40 if self._race_is(guild.id, author.id, "preto") else 30
             amount = random.randint(5, min(max_rob, max(5, target_chips)))
-            await self._change_user_chips(guild.id, target.id, -amount, mark_activity=True)
-            await self._change_user_chips(guild.id, author.id, amount, mark_activity=True)
+            await self._change_user_chips(guild.id, target.id, -amount, mark_activity=True, reason=f"Roubado por {author.display_name}")
+            await self._change_user_chips(guild.id, author.id, amount, mark_activity=True, reason=f"Roubo bem-sucedido em {target.display_name}")
             flavor = random.choice([
                 f"Você roubou {self._chip_text(amount, kind='gain')} de {target.mention}.",
                 f"O golpe encaixou. Você levou {self._chip_text(amount, kind='gain')} de {target.mention}.",
@@ -708,7 +713,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         if self._coringa_avoids_robbery_penalty(guild.id, author.id):
             penalty = 0
         if penalty > 0:
-            await self._change_user_chips(guild.id, author.id, -penalty, mark_activity=True)
+            await self._change_user_chips(guild.id, author.id, -penalty, mark_activity=True, reason="Multa por roubo falho")
         lines = [
             f"Você tentou roubar {target.mention}, mas foi pego no flagra.",
             (f"Você perdeu {self._chip_text(penalty, kind='loss')}." if penalty > 0 else "Mas o efeito Coringa te salvou dessa perda.")

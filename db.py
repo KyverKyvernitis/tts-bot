@@ -1377,6 +1377,39 @@ SettingsDB.claim_daily_bonus = claim_daily_bonus
 SettingsDB.get_chip_leaderboard = _settingsdb_get_chip_leaderboard
 
 
+CHIP_HISTORY_MAX_ENTRIES = 25
+
+
+async def _settingsdb_append_chip_history(self, guild_id: int, user_id: int, *, delta: int, kind: str, reason: str | None = None, ts: float | None = None):
+    delta_int = int(delta)
+    if delta_int == 0:
+        return
+    doc = self._get_user_doc(guild_id, user_id)
+    history = list(doc.get("chip_history", []) or [])
+    history.append({
+        "ts": float(ts) if ts is not None else time.time(),
+        "delta": delta_int,
+        "kind": str(kind or "chips"),
+        "reason": (str(reason).strip() if reason else "")[:80],
+    })
+    if len(history) > CHIP_HISTORY_MAX_ENTRIES:
+        history = history[-CHIP_HISTORY_MAX_ENTRIES:]
+    doc["chip_history"] = history
+    await self._save_user_doc(guild_id, user_id, doc)
+
+
+def _settingsdb_get_chip_history(self, guild_id: int, user_id: int, *, limit: int = 7) -> list[dict]:
+    doc = self.user_cache.get((guild_id, user_id), {})
+    history = list(doc.get("chip_history", []) or [])
+    if limit > 0:
+        history = history[-limit:]
+    return list(reversed(history))
+
+
+SettingsDB.append_chip_history = _settingsdb_append_chip_history
+SettingsDB.get_chip_history = _settingsdb_get_chip_history
+
+
 # ---- chip season / global reset helpers ----
 def _settingsdb_get_chip_season_state(self, guild_id: int) -> Dict[str, Any]:
     doc = self._get_guild_doc(guild_id)

@@ -28,12 +28,15 @@ class GincanaMessageRouterMixin:
         content = str(message.content or "").strip().casefold()
         if not content or content.startswith("_"):
             return False
-        if content not in {"ficha", "fichas", "rank", "leaderboard", "daily", "bonus", "login", "recarga", "recarrega", "gincanahelp", "helpgincana", "jogoshelp"}:
+        if content not in {"ficha", "fichas", "rank", "leaderboard", "daily", "bonus", "login", "recarga", "recarrega", "gincanahelp", "helpgincana", "jogoshelp", "extrato"}:
             return False
         if message.guild is None:
             return True
         if content in {"ficha", "fichas"}:
             await message.channel.send(view=self._make_chip_balance_view(message.author))
+            return True
+        if content == "extrato":
+            await message.channel.send(view=self._make_chip_history_view(message.author, limit=7))
             return True
         if content in {"rank", "leaderboard"}:
             await message.channel.send(embed=await self._make_chip_leaderboard_embed_async(message.guild, message.author))
@@ -47,6 +50,7 @@ class GincanaMessageRouterMixin:
                 "Jogos, fichas e atalhos da gincana em um lugar só.\n\n"
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 "• `ficha` — mostra seu saldo e seus destaques\n"
+                "• `extrato` — últimas 7 movimentações de fichas\n"
                 "• `daily` — resgata o bônus diário\n"
                 "• `recarga` — entrega 100 fichas bônus quando seu saldo total fica abaixo de 15\n"
                 "• `rank` — ranking dos maiores saldos\n"

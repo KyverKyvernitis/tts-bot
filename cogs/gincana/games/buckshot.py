@@ -183,7 +183,7 @@ class GincanaBuckshotMixin:
                     return
 
             entry_text = self._entry_consume_text(guild.id, member.id, BUCKSHOT_STAKE)
-            paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE)
+            paid, _balance, note = await self._try_consume_chips(guild.id, member.id, BUCKSHOT_STAKE, reason="Entrada no buckshot")
             if needs_negative_confirm:
                 note = None
             if not paid:
@@ -272,7 +272,7 @@ class GincanaBuckshotMixin:
                     for index, winner in enumerate(winners):
                         bonus = payout_each + (1 if index < payout_remainder else 0)
                         if bonus > 0:
-                            await self._change_user_bonus_chips(guild.id, winner.id, bonus)
+                            await self._change_user_bonus_chips(guild.id, winner.id, bonus, reason="Vitória no buckshot")
                             await self.db.add_user_game_stat(guild.id, winner.id, "buckshot_survivals", 1)
                             await self._record_game_played(guild.id, winner.id, weekly_points=8)
                             await self._grant_weekly_points(guild.id, winner.id, max(3, bonus // 3))
@@ -548,9 +548,9 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
     async def _buckshot_refund_entry(self, guild_id: int, session: dict, user_id: int, stake: int):
         spend = self._buckshot_entry_spend(session, user_id, stake)
         if spend.get('bonus', 0) > 0:
-            await self._change_user_bonus_chips(guild_id, user_id, int(spend['bonus']))
+            await self._change_user_bonus_chips(guild_id, user_id, int(spend['bonus']), reason='Devolução do buckshot')
         if spend.get('chips', 0) > 0:
-            await self._change_user_chips(guild_id, user_id, int(spend['chips']))
+            await self._change_user_chips(guild_id, user_id, int(spend['chips']), reason='Devolução do buckshot')
 
     async def _refresh_buckshot_message(self, guild_id: int):
         session = self._get_buckshot_session(guild_id)
@@ -603,7 +603,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                     return
             entry_text = self._entry_consume_text(guild.id, member.id, stake)
             bonus_before = self._get_user_bonus_chips(guild.id, member.id)
-            paid, _balance, note = await self._try_consume_chips(guild.id, member.id, stake)
+            paid, _balance, note = await self._try_consume_chips(guild.id, member.id, stake, reason="Entrada no buckshot")
             if needs_negative_confirm:
                 note = None
             if not paid:
@@ -769,9 +769,9 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                         normal_gain = returned_normal + base_each + (1 if index < base_remainder else 0)
                         bonus_gain = returned_bonus + eliminated_bonus_each + (1 if index < eliminated_bonus_remainder else 0) + bonus_each + (1 if index < bonus_remainder else 0) + golden_bonus_each
                         if normal_gain > 0:
-                            await self._change_user_chips(guild.id, winner.id, normal_gain)
+                            await self._change_user_chips(guild.id, winner.id, normal_gain, reason="Vitória no buckshot")
                         if bonus_gain > 0:
-                            await self._change_user_bonus_chips(guild.id, winner.id, bonus_gain)
+                            await self._change_user_bonus_chips(guild.id, winner.id, bonus_gain, reason='Vitória no buckshot')
                         if normal_gain > 0 or bonus_gain > 0:
                             await self.db.add_user_game_stat(guild.id, winner.id, 'buckshot_survivals', 1)
                             if is_golden:
@@ -879,7 +879,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, stake, title="💥 Confirmar entrada")
             if not confirmed:
                 return True
-        paid, _balance, note = await self._try_consume_chips(guild.id, message.author.id, stake)
+        paid, _balance, note = await self._try_consume_chips(guild.id, message.author.id, stake, reason="Entrada no buckshot")
         if needs_negative_confirm:
             note = None
         if not paid:
