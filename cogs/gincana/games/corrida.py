@@ -578,7 +578,7 @@ class GincanaCorridaMixin:
 
     def _race_pot_total(self, session: dict) -> int:
         participant_count = len(set(session.get("locked_participants", set()) or []))
-        return max(0, participant_count - 1) * CORRIDA_STAKE
+        return max(0, participant_count) * CORRIDA_STAKE
 
     def _race_lobby_view_matches(self, session: dict, source_view: discord.ui.LayoutView | None) -> bool:
         if source_view is None:
