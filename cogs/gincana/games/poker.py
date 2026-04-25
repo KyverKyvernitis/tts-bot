@@ -254,10 +254,26 @@ class GincanaPokerMixin:
         game.stack_normal[player_id] = int(game.stack_normal.get(player_id, 0) or 0) + max(0, int(amount))
         game.stacks[player_id] = self._poker_total_stack(game, player_id)
 
-    async def _persist_poker_player_stack(self, guild_id: int, user_id: int, *, normal: int, bonus: int):
-        await self.db.set_user_chips(guild_id, user_id, int(normal))
-        await self.db.set_user_bonus_chips(guild_id, user_id, int(bonus))
+    async def _persist_poker_player_stack(self, guild_id: int, user_id: int, *, normal: int, bonus: int, reason: str = "Poker"):
+        new_normal = int(normal)
+        new_bonus = int(bonus)
+        current_normal = int(self.db.get_user_chips(guild_id, user_id, default=100) or 0)
+        current_bonus = int(self._get_user_bonus_chips(guild_id, user_id) or 0)
+        delta_normal = new_normal - current_normal
+        delta_bonus = new_bonus - current_bonus
+        await self.db.set_user_chips(guild_id, user_id, new_normal)
+        await self.db.set_user_bonus_chips(guild_id, user_id, new_bonus)
         await self._mark_chip_activity(guild_id, user_id)
+        if delta_normal != 0:
+            try:
+                await self.db.append_chip_history(guild_id, user_id, delta=delta_normal, kind="chips", reason=reason)
+            except Exception:
+                pass
+        if delta_bonus != 0:
+            try:
+                await self.db.append_chip_history(guild_id, user_id, delta=delta_bonus, kind="bonus", reason=reason)
+            except Exception:
+                pass
 
     def _poker_entry_block_note(self, guild_id: int, user_id: int, buy_in: int) -> str | None:
         chips = int(self.db.get_user_chips(guild_id, user_id, default=100) or 0)
@@ -497,7 +513,7 @@ class GincanaPokerMixin:
                 stack_normal, stack_bonus, _total = self._poker_project_stack_after_buy_in(game.guild_id, player_id, game.buy_in)
                 normal = stack_normal + game.buy_in
                 bonus = stack_bonus
-            await self._persist_poker_player_stack(game.guild_id, player_id, normal=normal, bonus=bonus)
+            await self._persist_poker_player_stack(game.guild_id, player_id, normal=normal, bonus=bonus, reason="Devolução do poker")
         await self._disable_poker_views(game)
         if game.status_message is not None:
             try:
@@ -559,8 +575,8 @@ class GincanaPokerMixin:
         loser = guild.get_member(loser_id)
         if winner is None or loser is None:
             return
-        await self._persist_poker_player_stack(game.guild_id, winner_id, normal=game.stack_normal.get(winner_id, 0), bonus=game.stack_bonus.get(winner_id, 0))
-        await self._persist_poker_player_stack(game.guild_id, loser_id, normal=game.stack_normal.get(loser_id, 0), bonus=game.stack_bonus.get(loser_id, 0))
+        await self._persist_poker_player_stack(game.guild_id, winner_id, normal=game.stack_normal.get(winner_id, 0), bonus=game.stack_bonus.get(winner_id, 0), reason="Vitória no poker")
+        await self._persist_poker_player_stack(game.guild_id, loser_id, normal=game.stack_normal.get(loser_id, 0), bonus=game.stack_bonus.get(loser_id, 0), reason="Derrota no poker")
         await self._record_poker_result(game.guild_id, winner_id, loser_id)
         await self._disable_poker_views(game)
         if game.status_message is not None:
@@ -614,8 +630,17 @@ class GincanaPokerMixin:
             split_right = game.pot - split_left
             self._add_poker_stack_normal(game, player_a.id, split_left)
             self._add_poker_stack_normal(game, player_b.id, split_right)
-        await self._persist_poker_player_stack(game.guild_id, player_a.id, normal=game.stack_normal.get(player_a.id, 0), bonus=game.stack_bonus.get(player_a.id, 0))
-        await self._persist_poker_player_stack(game.guild_id, player_b.id, normal=game.stack_normal.get(player_b.id, 0), bonus=game.stack_bonus.get(player_b.id, 0))
+        if outcome > 0:
+            reason_a = "Vitória no poker"
+            reason_b = "Derrota no poker"
+        elif outcome < 0:
+            reason_a = "Derrota no poker"
+            reason_b = "Vitória no poker"
+        else:
+            reason_a = "Empate no poker"
+            reason_b = "Empate no poker"
+        await self._persist_poker_player_stack(game.guild_id, player_a.id, normal=game.stack_normal.get(player_a.id, 0), bonus=game.stack_bonus.get(player_a.id, 0), reason=reason_a)
+        await self._persist_poker_player_stack(game.guild_id, player_b.id, normal=game.stack_normal.get(player_b.id, 0), bonus=game.stack_bonus.get(player_b.id, 0), reason=reason_b)
         if outcome > 0:
             await self._record_poker_result(game.guild_id, player_a.id, player_b.id)
         elif outcome < 0:

@@ -1359,50 +1359,78 @@ class GincanaBase:
             return f"há {weeks}sem"
         return f"há {days}d"
 
-    def _make_chip_history_view(self, member: discord.Member, *, limit: int = 7) -> discord.ui.LayoutView:
+    def _make_chip_history_view(self, member: discord.Member, *, limit: int = 10) -> discord.ui.LayoutView:
         guild_id = member.guild.id
         try:
             entries = self.db.get_chip_history(guild_id, member.id, limit=int(limit))
         except Exception:
             entries = []
 
-        header_lines = [
-            f"# 📒 Extrato — {member.display_name}",
-            f"Últimas **{int(limit)}** movimentações de fichas",
-        ]
-
-        if not entries:
-            body_lines = ["Nenhuma movimentação registrada ainda. Jogue alguma rodada e volte aqui."]
-        else:
-            body_lines: list[str] = []
-            for entry in entries:
-                try:
-                    delta = int(entry.get("delta", 0) or 0)
-                except Exception:
-                    delta = 0
-                if delta == 0:
-                    continue
-                kind = str(entry.get("kind") or "chips").lower()
-                emoji = self._CHIP_BONUS_EMOJI if kind == "bonus" else self._CHIP_EMOJI
-                sign_marker = "🟢" if delta > 0 else "🔴"
-                amount_text = f"+{delta}" if delta > 0 else f"{delta}"
-                reason = str(entry.get("reason") or "").strip() or "Transação"
-                ts = entry.get("ts") or 0
-                when = self._format_chip_history_relative_time(ts)
-                body_lines.append(f"{sign_marker} **{amount_text}** {emoji} • {reason} ({when})")
-
-            if not body_lines:
-                body_lines = ["Nenhuma movimentação registrada ainda."]
-
-        balance_line = f"💰 **Saldo atual:** {self._format_primary_chip_balance(guild_id, member.id)}"
+        header_text = (
+            f"# 📒 Extrato — {member.display_name}\n"
+            f"Últimas **{int(limit)}** movimentações de fichas"
+        )
 
         view = discord.ui.LayoutView(timeout=None)
+
+        if not entries:
+            empty_lines = [
+                header_text,
+                "",
+                "Nenhuma movimentação registrada ainda.",
+                "Entre em uma rodada e o histórico começa a contar.",
+            ]
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay("\n".join(empty_lines)),
+                accent_color=discord.Color.gold(),
+            ))
+            return view
+
+        movement_lines: list[str] = []
+        chips_total = 0
+        bonus_total = 0
+        for entry in entries:
+            try:
+                delta = int(entry.get("delta", 0) or 0)
+            except Exception:
+                delta = 0
+            if delta == 0:
+                continue
+            kind = str(entry.get("kind") or "chips").lower()
+            is_bonus = (kind == "bonus")
+            if is_bonus:
+                chip_emoji = self._CHIP_BONUS_EMOJI
+                bonus_total += delta
+            else:
+                chip_emoji = self._CHIP_GAIN_EMOJI if delta > 0 else self._CHIP_LOSS_EMOJI
+                chips_total += delta
+            amount_text = f"+{delta}" if delta > 0 else f"{delta}"
+            reason = str(entry.get("reason") or "").strip() or "Transação"
+            ts = entry.get("ts") or 0
+            when = self._format_chip_history_relative_time(ts)
+            movement_lines.append(f"{chip_emoji} **{amount_text}** • {reason} · _{when}_")
+
+        if not movement_lines:
+            movement_lines = ["Nenhuma movimentação registrada ainda."]
+
+        net_parts: list[str] = []
+        if chips_total != 0:
+            sign = "+" if chips_total > 0 else ""
+            chip_icon = self._CHIP_GAIN_EMOJI if chips_total > 0 else self._CHIP_LOSS_EMOJI
+            net_parts.append(f"{chip_icon} **{sign}{chips_total}**")
+        if bonus_total != 0:
+            sign = "+" if bonus_total > 0 else ""
+            net_parts.append(f"{self._CHIP_BONUS_EMOJI} **{sign}{bonus_total}**")
+        net_text = " • ".join(net_parts) if net_parts else f"{self._CHIP_EMOJI} **0**"
+        balance_text = f"💰 **Saldo atual:** {self._format_primary_chip_balance(guild_id, member.id)}"
+
         view.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(header_lines)),
+            discord.ui.TextDisplay(header_text),
             discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(body_lines)),
+            discord.ui.TextDisplay("\n".join(movement_lines)),
             discord.ui.Separator(),
-            discord.ui.TextDisplay(balance_line),
+            discord.ui.TextDisplay(f"📊 **Saldo destas {len(entries)} movimentações:** {net_text}"),
+            discord.ui.TextDisplay(balance_text),
             accent_color=discord.Color.gold(),
         ))
         return view
