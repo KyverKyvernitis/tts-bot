@@ -578,7 +578,7 @@ class GincanaCorridaMixin:
 
     def _race_pot_total(self, session: dict) -> int:
         participant_count = len(set(session.get("locked_participants", set()) or []))
-        return max(0, participant_count) * CORRIDA_STAKE
+        return max(0, participant_count - 1) * CORRIDA_STAKE
 
     def _race_lobby_view_matches(self, session: dict, source_view: discord.ui.LayoutView | None) -> bool:
         if source_view is None:
@@ -1376,15 +1376,18 @@ class GincanaCorridaMixin:
         session["ended"] = True
         total_pot = self._race_pot_total(session)
         bonus_pool = int(session.get("bonus_pool", 0) or 0)
-        rewards, placements = self._allocate_race_rewards(final_groups, total_pot)
+        participant_count = len(set(session.get("locked_participants", set()) or []))
+        prize_pot = max(0, participant_count) * CORRIDA_STAKE
+        rewards, placements = self._allocate_race_rewards(final_groups, prize_pot)
         bonus_rewards, _bonus_placements = self._allocate_race_rewards(final_groups, bonus_pool) if bonus_pool > 0 else ({}, [])
         result_lines: list[str] = []
         if final_groups:
             first_group = final_groups[0]
             winner = first_group[0]
             winner_amount = int(rewards.get(winner.id, 0) or 0)
+            winner_net = max(0, winner_amount - CORRIDA_STAKE)
             winner_bonus = int(bonus_rewards.get(winner.id, 0) or 0)
-            winner_text = self._chip_text(winner_amount, kind='gain')
+            winner_text = self._chip_text(winner_net, kind='gain')
             if winner_bonus > 0:
                 winner_text += f" + {self._bonus_chip_amount(winner_bonus)}"
             result_lines.append(f"🏆 {winner.mention} venceu a corrida — {winner_text}")
