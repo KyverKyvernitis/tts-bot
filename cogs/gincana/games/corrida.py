@@ -8,6 +8,8 @@ import discord
 CORRIDA_STAKE = 40
 CORRIDA_RODADA_CHEIA_THRESHOLD = 5
 CORRIDA_RODADA_CHEIA_BONUS = 40
+CORRIDA_RODADA_CHEIA_BONUS_LARGE = 50
+CORRIDA_RODADA_CHEIA_LARGE_THRESHOLD = 6
 _CORRIDA_TRACK_LENGTH = 18
 _CORRIDA_UPDATES = 10
 _CORRIDA_UPDATE_SECONDS = 2.0
@@ -88,7 +90,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
         if special_name:
             header_lines.append(f"**Especial:** {special_name}")
         if rodada_cheia_active:
-            header_lines.append(f"🎉 **Rodada cheia ativada** (+{CORRIDA_RODADA_CHEIA_BONUS} fichas bônus)")
+            header_lines.append(f"🎉 **Rodada cheia ativada** (+{pending_bonus} fichas bônus)")
         header_lines.append(f"**Entrada:** {self.cog._chip_amount(CORRIDA_STAKE)}")
         header_lines.append(f"**Pote atual:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(effective_bonus)}" if effective_bonus > 0 else ""))
         header_lines.append(f"**Duração:** **{_CORRIDA_DURATION_SECONDS}s**")
@@ -590,10 +592,12 @@ class GincanaCorridaMixin:
         return max(0, participant_count - 1) * CORRIDA_STAKE
 
     def _race_rodada_cheia_pending_bonus(self, session: dict) -> int:
-        """Bonus that will be added at race start if participant count meets the threshold."""
+        """Bonus that will be added at race start based on participant count tier."""
         if session.get("started"):
             return 0
         participant_count = len(set(session.get("locked_participants", set()) or []))
+        if participant_count >= CORRIDA_RODADA_CHEIA_LARGE_THRESHOLD:
+            return CORRIDA_RODADA_CHEIA_BONUS_LARGE
         if participant_count >= CORRIDA_RODADA_CHEIA_THRESHOLD:
             return CORRIDA_RODADA_CHEIA_BONUS
         return 0

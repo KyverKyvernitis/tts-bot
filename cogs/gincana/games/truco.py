@@ -969,10 +969,11 @@ class GincanaTrucoMixin:
             summary = "O jogo foi encerrado."
             game.status_text = "Jogo encerrado com vitória normal."
         lines = self._truco_status_lines(game, title="🃏 Truco")
+        reward_bonus = self._truco_bonus_reward_value(game)
         reward_line = (
-            f"{winner_text} levou **{game.pot}** {self._CHIP_GAIN_EMOJI} e ganhou **+{TRUCO_BONUS_REWARD}** {self._CHIP_BONUS_EMOJI}."
+            f"{winner_text} levou **{game.pot}** {self._CHIP_GAIN_EMOJI} e ganhou **+{reward_bonus}** {self._CHIP_BONUS_EMOJI}."
             if game.mode == "1v1" else
-            f"{winner_text} levou **{game.pot}** {self._CHIP_GAIN_EMOJI} e cada vencedor ganhou **+{TRUCO_BONUS_REWARD}** {self._CHIP_BONUS_EMOJI}."
+            f"{winner_text} levou **{game.pot}** {self._CHIP_GAIN_EMOJI} e cada vencedor ganhou **+{reward_bonus}** {self._CHIP_BONUS_EMOJI}."
         )
         lines["status"] = [game.status_text, end_line, summary, reward_line]
         closed = discord.ui.LayoutView(timeout=None)
