@@ -296,3 +296,14 @@ class MemoryStore:
             "guild_id": int(guild_id),
         })
         return result.deleted_count
+
+    async def clear_all_memory_everywhere(self) -> int:
+        """Apaga TODA memória de chatbot do banco — todas as guilds, todos
+        os profiles, pessoal e coletiva. Operação destrutiva irreversível.
+        Usada pelo comando admin `/chatbot reset_global`. Retorna total
+        deletado."""
+        result = await self._coll.delete_many({
+            "type": C.DOC_TYPE_MEMORY,
+        })
+        return result.deleted_count
+

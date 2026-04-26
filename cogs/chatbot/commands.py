@@ -3,13 +3,19 @@
 Organização:
 - `/chatbot profile <acao> [profile?]` — acao=criar|listar|editar|apagar|ativar|desativar
 - `/chatbot memoria` — reseta toda a memória do servidor
-- `/chatbot master <acao>` — acao=ver|editar|transferir
+- `/chatbotadmin master <acao>` — acao=ver|editar|transferir (management guild only)
+- `/chatbotadmin reset_global` — apaga toda memória cross-guild (management guild only)
 - Todos exigem permissão Manage Guild (staff).
 - `/reset` — qualquer membro, limpa a memória PESSOAL dele.
 
 Em vez de subgroups (que ficam poluídos no autocomplete do Discord), usamos
-comandos diretos com `app_commands.Choice` pra escolher a ação. Fica apenas 3
+comandos diretos com `app_commands.Choice` pra escolher a ação. Fica apenas 2
 entradas em `/chatbot` em vez de 10 espalhadas por 3 subgroups.
+
+Comandos de "operador do bot" (master prompt, reset cross-guild) ficam em um
+grupo separado `/chatbotadmin` registrado só na MANAGEMENT_GUILD_ID. Eles não
+poderiam ficar dentro de /chatbot porque discord.py exige que toda a Group
+seja guild-restricted juntos — não dá pra restringir só alguns subcomandos.
 
 Implementação como Mixin: a classe `ChatbotCommandsMixin` é herdada pelo
 `ChatbotCog` em `cog.py`. Isso mantém o `ChatbotCog` como UM cog só (um único
@@ -152,6 +158,20 @@ class ChatbotCommandsMixin:
         name="chatbot",
         description="Gerenciamento do chatbot do servidor",
         default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    # Grupo separado pra comandos cross-guild / "operador do bot" — só fica
+    # registrado e visível na MANAGEMENT_GUILD. discord.py não permite restringir
+    # subcomandos individuais de um Group por guild ("child commands cannot have
+    # default guilds set"), então a única forma de ter comando guild-restricted
+    # é criar um Group inteiro restrito. Por isso esses comandos NÃO ficam
+    # dentro de /chatbot — usar /chatbot teria forçado todo o grupo a virar
+    # guild-only, escondendo /chatbot profile do resto dos servers.
+    chatbot_admin = app_commands.Group(
+        name="chatbotadmin",
+        description="Operações administrativas do bot (management guild only)",
+        default_permissions=discord.Permissions(manage_guild=True),
+        guild_ids=[C.MANAGEMENT_GUILD_ID],
     )
 
     # --- Verificação de estado do cog -----------------------------------------
@@ -529,7 +549,7 @@ class ChatbotCommandsMixin:
                 f"O prompt mestre só pode ser editado no servidor de "
                 f"configuração (ID atualmente: `{cfg.config_guild_id}`).\n"
                 f"-# Pra transferir a config pra este server, rode "
-                f"`/chatbot master acao:Transferir` a partir do server atual.",
+                f"`/chatbotadmin master acao:Transferir` a partir do server atual.",
                 ephemeral=True,
             )
             return None
@@ -633,7 +653,7 @@ class ChatbotCommandsMixin:
             prompt=(
                 f"⚠️ Transferir autoridade do prompt mestre pra **{guild.name}** "
                 f"(`{guild.id}`)? O server antigo (`{cfg.config_guild_id}`) "
-                f"perderá o acesso ao `/chatbot master`."
+                f"perderá o acesso ao `/chatbotadmin master`."
             ),
             confirm_label="Transferir",
         )
@@ -717,8 +737,11 @@ class ChatbotCommandsMixin:
     async def chatbot_memoria(self, interaction: discord.Interaction):
         await self._do_memoria_reset_server(interaction)
 
-    # --- /chatbot master <acao> -----------------------------------------------
-    @chatbot.command(
+    # --- /chatbotadmin master <acao> ------------------------------------------
+    # Era /chatbot master, mas movido pro grupo `chatbotadmin` (guild-restrict)
+    # porque só faz sentido na management guild — o comando edita o prompt
+    # mestre global do bot, não tem por que aparecer pra staff de outras guilds.
+    @chatbot_admin.command(
         name="master",
         description="Ver, editar ou transferir o prompt mestre global",
     )
@@ -730,7 +753,7 @@ class ChatbotCommandsMixin:
         ]
     )
     @_safe_slash
-    async def chatbot_master(
+    async def chatbotadmin_master(
         self,
         interaction: discord.Interaction,
         acao: app_commands.Choice[str],
@@ -741,6 +764,58 @@ class ChatbotCommandsMixin:
             await self._do_master_editar(interaction)
         elif acao.value == "transferir":
             await self._do_master_transferir(interaction)
+
+    # --- /chatbotadmin reset_global -------------------------------------------
+    # Apaga TODA memória do chatbot — todas as guilds, todos os profiles,
+    # pessoal e coletiva. Só registrado na management guild via guild_ids
+    # do Group, então o autocomplete não mostra esse comando em outros servers.
+    # Mantemos confirmação dupla porque é destrutivo e cross-guild.
+    @chatbot_admin.command(
+        name="reset_global",
+        description="Apagar TODA a memória do chatbot em TODAS as guilds (irreversível)",
+    )
+    @_safe_slash
+    async def chatbotadmin_reset_global(self, interaction: discord.Interaction):
+        if not await _staff_check(interaction):
+            await interaction.response.send_message(
+                "Só staff (Manage Server) pode rodar isso.",
+                ephemeral=True,
+            )
+            return
+        if not self._require_ready(interaction):
+            await interaction.response.send_message(
+                "Chatbot não está pronto.", ephemeral=True
+            )
+            return
+
+        view = ConfirmView(
+            requester_id=interaction.user.id,
+            prompt=(
+                "🚨 **RESET GLOBAL** 🚨\n\n"
+                "Isso apaga **toda** a memória do chatbot em **todas as guilds** "
+                "onde o bot está presente — pessoal de cada membro + coletiva, "
+                "todos os profiles. Operação **irreversível**.\n\n"
+                "Confirma?"
+            ),
+            confirm_label="Apagar tudo (cross-guild)",
+        )
+        await interaction.response.send_message(
+            view.prompt, view=view, ephemeral=True
+        )
+        await view.wait()
+        if view.result is not True:
+            return
+
+        count = await self._memory.clear_all_memory_everywhere()
+        log.warning(
+            "chatbot: reset_global executado | requester=%s registros_apagados=%s",
+            interaction.user.id, count,
+        )
+        await interaction.followup.send(
+            f"🧹 Memória global do chatbot apagada. ({count} registros removidos "
+            f"em todas as guilds)",
+            ephemeral=True,
+        )
 
     # --- /imagem <prompt> — gera imagem via Gemini (qualquer membro) ---------
     # Top-level (não em /chatbot) porque /chatbot é staff-only via

@@ -239,45 +239,59 @@ class RouterFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class NsfwGuildAllowlistTests(unittest.TestCase):
-    """Allowlist de NSFW por guild — gate aplicado no caller, não aqui."""
+    """Allowlist de NSFW por guild — gate aplicado no caller, não no imagegen."""
 
-    def test_helper_returns_true_for_allowed_guild(self):
+    def test_helper_returns_true_for_management_guild(self):
         from cogs.chatbot import constants as C
-        # ID da guild com NSFW habilitado. Não importa qual é o ID; importa
-        # que pelo menos uma guild esteja registrada e o lookup retorne True
-        # pra ela.
-        self.assertTrue(any(C.nsfw_enabled_for_guild(g) for g in C._NSFW_ENABLED_GUILDS))
+        self.assertTrue(C.nsfw_enabled_for_guild(C.MANAGEMENT_GUILD_ID))
 
     def test_helper_returns_false_for_random_guild(self):
         from cogs.chatbot import constants as C
-        # Pega um ID aleatório que não esteja na allowlist.
         random_id = 999999999999999999
         self.assertNotIn(random_id, C._NSFW_ENABLED_GUILDS)
         self.assertFalse(C.nsfw_enabled_for_guild(random_id))
 
     def test_helper_returns_false_for_dm(self):
-        # DMs (guild_id=None) sempre são SFW por segurança.
         from cogs.chatbot import constants as C
         self.assertFalse(C.nsfw_enabled_for_guild(None))
 
 
+class ManagementGuildScopingTests(unittest.TestCase):
+    """Garante que comandos admin estão restritos à management guild."""
+
+    def test_chatbot_admin_group_is_guild_restricted(self):
+        from cogs.chatbot import constants as C
+        from cogs.chatbot.commands import ChatbotCommandsMixin
+        admin = ChatbotCommandsMixin.__dict__["chatbot_admin"]
+        self.assertEqual(admin._guild_ids, [C.MANAGEMENT_GUILD_ID])
+
+    def test_chatbot_group_is_global(self):
+        # /chatbot continua disponível em qualquer guild — só o admin é restrito.
+        from cogs.chatbot.commands import ChatbotCommandsMixin
+        chatbot = ChatbotCommandsMixin.__dict__["chatbot"]
+        self.assertIsNone(getattr(chatbot, "_guild_ids", None))
+
+    def test_admin_group_has_master_and_reset_global(self):
+        from cogs.chatbot.commands import ChatbotCommandsMixin
+        admin = ChatbotCommandsMixin.__dict__["chatbot_admin"]
+        names = sorted(c.name for c in admin.walk_commands())
+        self.assertEqual(names, ["master", "reset_global"])
+
+
 class GateBehaviorIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    """Verifica que channel_is_nsfw=False (simulando guild fora da allowlist
-    com canal NSFW no Discord) faz imagegen tratar prompt adulto como
-    'channel_not_nsfw' — mesmo erro genérico de qualquer canal SFW."""
+    """Verifica que channel_is_nsfw=False (gate de guild aplicado upstream) faz
+    imagegen tratar prompt adulto como 'channel_not_nsfw' — mesmo erro
+    genérico de qualquer canal SFW. Sem mensagem específica de guild."""
 
     async def test_adult_prompt_with_nsfw_disabled_gives_channel_not_nsfw(self):
         async with aiohttp.ClientSession() as session:
             result = await generate_image(
                 session,
                 prompt="gere uma imagem nsfw",
-                channel_is_nsfw=False,  # simulando gate de guild aplicado
+                channel_is_nsfw=False,
             )
         self.assertFalse(result.ok)
         self.assertEqual(result.reason, "channel_not_nsfw")
-        # A mensagem é genérica, não menciona guild específica nem allowlist.
-        # (O reason "channel_not_nsfw" é o mesmo que daria pra um canal
-        # comum sem age-restriction, o que é exatamente o que queremos.)
 
 
 if __name__ == "__main__":

@@ -287,15 +287,23 @@ CHANNEL_HISTORY_CACHE_MAX_ENTRIES = 50
 
 
 # -----------------------------------------------------------------------------
-# Allowlist de NSFW por guild
+# Guild de gerenciamento + allowlist de NSFW
 # -----------------------------------------------------------------------------
-# Conjunto de guilds onde o bot pode operar em modo NSFW. Em qualquer outra
-# guild, mesmo que o canal seja age-restricted no Discord, o bot trata o
-# canal como SFW: imagegen adulto é recusado e o chatbot recebe a diretiva
+# A "management guild" é a única guild onde:
+#   1) Comandos administrativos cross-guild (`/chatbot master`, reset global)
+#      ficam visíveis no autocomplete (via @app_commands.guilds(...)).
+#   2) Features NSFW (imagegen adulto + diretiva NSFW do chatbot) são habilitadas.
+# Em qualquer outra guild, mesmo que o canal seja age-restricted no Discord,
+# o bot trata como SFW: imagegen adulto é recusado e o chatbot recebe a diretiva
 # SFW. Profiles continuam funcionando normalmente em todas as guilds (sem
 # nenhuma menção a essa restrição); a única diferença é o limite de conteúdo.
 
-_NSFW_ENABLED_GUILDS: frozenset[int] = frozenset({927002914449424404})
+import discord as _discord  # só pra criar o Object; não exportamos pra fora
+
+MANAGEMENT_GUILD_ID: int = 927002914449424404
+MANAGEMENT_GUILD_OBJ: _discord.Object = _discord.Object(id=MANAGEMENT_GUILD_ID)
+
+_NSFW_ENABLED_GUILDS: frozenset[int] = frozenset({MANAGEMENT_GUILD_ID})
 
 
 def nsfw_enabled_for_guild(guild_id: int | None) -> bool:
