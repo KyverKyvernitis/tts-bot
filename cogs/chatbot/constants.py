@@ -284,3 +284,25 @@ CHANNEL_HISTORY_FETCH_COUNT = 10
 # são invocados em sequência no mesmo canal.
 CHANNEL_HISTORY_CACHE_TTL_SECONDS = 30
 CHANNEL_HISTORY_CACHE_MAX_ENTRIES = 50
+
+
+# -----------------------------------------------------------------------------
+# Allowlist de NSFW por guild
+# -----------------------------------------------------------------------------
+# Conjunto de guilds onde o bot pode operar em modo NSFW. Em qualquer outra
+# guild, mesmo que o canal seja age-restricted no Discord, o bot trata o
+# canal como SFW: imagegen adulto é recusado e o chatbot recebe a diretiva
+# SFW. Profiles continuam funcionando normalmente em todas as guilds (sem
+# nenhuma menção a essa restrição); a única diferença é o limite de conteúdo.
+
+_NSFW_ENABLED_GUILDS: frozenset[int] = frozenset({927002914449424404})
+
+
+def nsfw_enabled_for_guild(guild_id: int | None) -> bool:
+    """Retorna True se a guild pode usar features NSFW (imagegen adulto +
+    diretiva NSFW do chatbot). Mensagens diretas (guild_id=None) ficam
+    sempre SFW por segurança."""
+    if guild_id is None:
+        return False
+    return guild_id in _NSFW_ENABLED_GUILDS
+

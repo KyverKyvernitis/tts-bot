@@ -796,10 +796,17 @@ class ChatbotCommandsMixin:
         import io as _io
 
         try:
+            # NSFW só vale se: (a) canal é age-restricted no Discord, E
+            # (b) a guild está na allowlist de NSFW (constants.nsfw_enabled_for_guild).
+            # Fora da allowlist, força channel_is_nsfw=False — o imagegen vai
+            # tratar como SFW e recusar prompts adultos com a mesma mensagem
+            # genérica que daria pra um canal não-NSFW qualquer.
+            channel_nsfw_flag = bool(getattr(interaction.channel, "nsfw", False))
+            effective_nsfw = channel_nsfw_flag and C.nsfw_enabled_for_guild(guild.id)
             generated = await _imagegen.generate_image(
                 self._session,
                 prompt=prompt.strip()[:1000],
-                channel_is_nsfw=bool(getattr(interaction.channel, "nsfw", False)),
+                channel_is_nsfw=effective_nsfw,
             )
         except Exception:
             log.exception("chatbot: /imagem falhou")

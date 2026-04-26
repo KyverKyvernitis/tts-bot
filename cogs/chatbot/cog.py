@@ -530,13 +530,21 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             profile.name, ("<adult:redacted>" if prompt_class == "adult_allowed" else img_prompt[:80]),
         )
 
+        # NSFW só vale se: (a) canal é age-restricted no Discord, E (b) a guild
+        # está na allowlist (constants.nsfw_enabled_for_guild). Fora da allowlist
+        # tratamos o canal como SFW silenciosamente; o resto do fluxo cuida da
+        # mensagem genérica caso o pedido fosse adulto.
+        guild_id = message.guild.id if message.guild else None
+        channel_nsfw_flag = bool(getattr(channel, "nsfw", False))
+        effective_nsfw = channel_nsfw_flag and C.nsfw_enabled_for_guild(guild_id)
+
         # Reação visual "gerando" — imagegen demora 10-30s
         reaction = await self._add_processing_reaction(message)
         try:
             generated = await generate_image(
                 self._session,
                 prompt=img_prompt,
-                channel_is_nsfw=bool(getattr(channel, "nsfw", False)),
+                channel_is_nsfw=effective_nsfw,
             )
             if not generated.ok or generated.image is None:
                 # Modelo falhou ou bloqueou — avisa e deixa o chat lidar normal
@@ -1414,7 +1422,17 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             # (Discord já resolve via channel.nsfw na Thread). VoiceChannel e
             # StageChannel têm o atributo. Se não tem atributo (tipo exótico),
             # trata como SFW defensivamente.
-            channel_is_nsfw = bool(getattr(channel, "nsfw", False))
+            #
+            # NSFW também exige que a guild esteja na allowlist
+            # (constants.nsfw_enabled_for_guild). Em qualquer outra guild o
+            # bot trata o canal como SFW e injeta a SFW_CHANNEL_DIRECTIVE,
+            # mesmo que o canal seja age-restricted no Discord. O profile
+            # em si funciona normal (xingamentos, personalidade, etc).
+            guild_id_for_nsfw = message.guild.id if message.guild else None
+            channel_nsfw_flag = bool(getattr(channel, "nsfw", False))
+            channel_is_nsfw = (
+                channel_nsfw_flag and C.nsfw_enabled_for_guild(guild_id_for_nsfw)
+            )
 
             # Extrai imagens anexadas à mensagem pra passar ao modelo multimodal.
             # URLs do Discord CDN são públicas e a API do Groq baixa direto —
