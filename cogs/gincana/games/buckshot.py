@@ -255,7 +255,7 @@ class GincanaBuckshotMixin:
                 except Exception:
                     pass
                 try:
-                    await chosen.move_to(None, reason="gincana buckshot")
+                    await chosen.move_to(None, reason="economia buckshot")
                 except Exception:
                     pass
 

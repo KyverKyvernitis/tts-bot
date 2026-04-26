@@ -28,7 +28,7 @@ class GincanaCommandMixin:
 
             role_total = len(self.db.get_gincana_role_ids(guild.id))
             embed = self._make_embed(
-                "Configuração da gincana",
+                "Configuração da economia",
                 f"Status: **{'Ativado' if new_value else 'Desativado'}**\n"
                 f"Roles cadastradas: **{role_total}**\n"
                 f"Modo só para staff: **{'Ativado' if self._gincana_only_kick_members(guild.id) else 'Desativado'}**",
@@ -44,7 +44,7 @@ class GincanaCommandMixin:
 
             embed = self._make_embed(
                 "Modo só para staff atualizado",
-                f"Agora a gincana está **{'limitada à staff da gincana' if new_value else 'liberada para qualquer membro da call disparar'}**.",
+                f"Agora a economia está **{'limitada à staff' if new_value else 'liberada para qualquer membro da call disparar'}**.",
                 ok=True,
             )
             await interaction.response.send_message(embed=embed)
@@ -55,7 +55,7 @@ class GincanaCommandMixin:
             if not role_ids:
                 embed = self._make_embed(
                     "Sem roles cadastradas",
-                    f"Nenhuma role está cadastrada no gincana no momento\n\n"
+                    f"Nenhuma role está cadastrada na economia no momento\n\n"
                     f"Status: **{'Ativado' if self.db.gincana_enabled(guild.id) else 'Desativado'}**\n"
                     f"Modo só para staff: **{'Ativado' if self._gincana_only_kick_members(guild.id) else 'Desativado'}**",
                     ok=False,
@@ -69,7 +69,7 @@ class GincanaCommandMixin:
                 lines.append(role.mention if role else f"`{rid}`")
 
             embed = self._make_embed(
-                "Roles da gincana",
+                "Roles da economia",
                 "\n".join(lines)
                 + f"\n\nStatus: **{'Ativado' if self.db.gincana_enabled(guild.id) else 'Desativado'}**"
                 + f"\nModo só para staff: **{'Ativado' if self._gincana_only_kick_members(guild.id) else 'Desativado'}**",
@@ -143,7 +143,7 @@ class GincanaCommandMixin:
             if not added:
                 embed = self._make_embed(
                     "Role já cadastrada",
-                    f"A role {role.mention} já está cadastrada no gincana",
+                    f"A role {role.mention} já está cadastrada na economia",
                     ok=False,
                 )
                 await interaction.response.send_message(embed=embed)
@@ -152,7 +152,7 @@ class GincanaCommandMixin:
             total = len(self.db.get_gincana_role_ids(guild.id))
             embed = self._make_embed(
                 "Role adicionada",
-                f"✅ Role {role.mention} adicionada ao gincana\n\n"
+                f"✅ Role {role.mention} adicionada à economia\n\n"
                 f"Agora há **{total}** role(s) cadastrada(s)\n"
                 f"Status: **{'Ativado' if self.db.gincana_enabled(guild.id) else 'Desativado'}**",
             )
@@ -164,7 +164,7 @@ class GincanaCommandMixin:
             if not removed:
                 embed = self._make_embed(
                     "Role não cadastrada",
-                    f"A role com ID `{parsed_role_id}` não está cadastrada no gincana",
+                    f"A role com ID `{parsed_role_id}` não está cadastrada na economia",
                     ok=False,
                 )
                 await interaction.response.send_message(embed=embed)
@@ -174,7 +174,7 @@ class GincanaCommandMixin:
             total = len(self.db.get_gincana_role_ids(guild.id))
             embed = self._make_embed(
                 "Role removida",
-                f"✅ Role {role_text} removida da gincana\n\n"
+                f"✅ Role {role_text} removida da economia\n\n"
                 f"Roles restantes: **{total}**\n"
                 f"Status: **{'Ativado' if self.db.gincana_enabled(guild.id) else 'Desativado'}**",
                 ok=True,
@@ -186,12 +186,12 @@ class GincanaCommandMixin:
         if isinstance(error, app_commands.MissingPermissions):
             embed = self._make_embed(
                 "Sem permissão",
-                "Você precisa ter o cargo staff da gincana ou a permissão **Expulsar Membros** para usar esse comando.",
+                "Você precisa ter o cargo staff ou a permissão **Expulsar Membros** para usar esse comando.",
                 ok=False,
             )
         else:
             embed = self._make_embed(
-                "Erro na gincana",
+                "Erro na economia",
                 "Ocorreu um erro ao executar esse comando",
                 ok=False,
             )

@@ -28,7 +28,7 @@ class GincanaMessageRouterMixin:
         content = str(message.content or "").strip().casefold()
         if not content or content.startswith("_"):
             return False
-        if content not in {"ficha", "fichas", "rank", "leaderboard", "daily", "bonus", "login", "recarga", "recarrega", "gincanahelp", "helpgincana", "jogoshelp", "extrato"}:
+        if content not in {"ficha", "fichas", "rank", "leaderboard", "daily", "bonus", "login", "recarga", "recarrega", "economia", "economiahelp", "extrato"}:
             return False
         if message.guild is None:
             return True
@@ -45,9 +45,9 @@ class GincanaMessageRouterMixin:
             used, new_balance, note = await self._try_use_chip_recharge(message.guild.id, message.author.id)
             await message.channel.send(view=self._make_chip_recharge_view(message.guild.id, message.author.id, used, new_balance, note))
             return True
-        if content in {"gincanahelp", "helpgincana", "jogoshelp"}:
-            await message.channel.send(embed=discord.Embed(title="🎲 Help da gincana", description=(
-                "Jogos, fichas e atalhos da gincana em um lugar só.\n\n"
+        if content in {"economia", "economiahelp"}:
+            await message.channel.send(embed=discord.Embed(title="🎲 Help da economia", description=(
+                "Jogos, fichas e atalhos da economia em um lugar só.\n\n"
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 "• `ficha` — mostra seu saldo e seus destaques\n"
                 "• `extrato` — últimas 10 movimentações de fichas\n"
@@ -59,13 +59,17 @@ class GincanaMessageRouterMixin:
                 "• `mendigar valor @usuário` — pede esmola para uma pessoa específica\n\n"
                 "🎮 **Jogos**\n"
                 "• `roleta` — aposta rápida com jackpot\n"
+                "• `carta` — saque rápido de cartas\n"
                 "• `buckshot` — rodada de sobrevivência\n"
                 "• `alvo` — disputa de mira\n"
                 "• `corrida` — corrida de cavalos\n"
-                "• `poker` — mesa de poker\n\n"
+                "• `poker` — mesa de poker\n"
+                "• `truco @usuário` — desafio de truco 1v1\n"
+                "• `truco2` — truco em duplas (2v2)\n\n"
                 "🕹️ **Como entra**\n"
                 "• alguns jogos abrem um lobby com botão\n"
                 "• `atirar` fecha o buckshot\n"
+                "• `disparar` envia o tiro no alvo\n"
                 "• use os botões dos lobbies para começar os jogos"
             ), color=discord.Color.blurple()))
             return True
@@ -212,7 +216,7 @@ class GincanaMessageRouterMixin:
             for target in targets:
                 if target.voice and target.voice.channel:
                     try:
-                        await target.move_to(None, reason="gincana disconnect")
+                        await target.move_to(None, reason="economia disconnect")
                     except Exception:
                         pass
 
@@ -227,7 +231,7 @@ class GincanaMessageRouterMixin:
                 if target.voice and target.voice.channel:
                     try:
                         new_muted = not bool(target.voice.mute)
-                        await target.edit(mute=new_muted, reason="gincana toggle mute")
+                        await target.edit(mute=new_muted, reason="economia toggle mute")
                     except Exception:
                         pass
 

@@ -50,7 +50,7 @@ class GincanaToggleMixin:
 
             try:
                 if role in getattr(member, "roles", []):
-                    await member.remove_roles(role, reason="gincana pica expirado")
+                    await member.remove_roles(role, reason="economia pica expirado")
             except Exception:
                 return
             finally:
@@ -87,9 +87,9 @@ class GincanaToggleMixin:
                 overwrite = channel.overwrites_for(member)
                 overwrite.use_soundboard = None
                 if overwrite.is_empty():
-                    await channel.set_permissions(member, overwrite=None, reason="gincana dj expirado")
+                    await channel.set_permissions(member, overwrite=None, reason="economia dj expirado")
                 else:
-                    await channel.set_permissions(member, overwrite=overwrite, reason="gincana dj expirado")
+                    await channel.set_permissions(member, overwrite=overwrite, reason="economia dj expirado")
             except Exception:
                 return
             finally:
@@ -115,9 +115,9 @@ class GincanaToggleMixin:
         async def _send_role_toggle_feedback(self, message: discord.Message, activated: bool):
             title = "🔇 TTS desativado para os alvos" if activated else "🔊 TTS reativado para os alvos"
             description = (
-                "Por **`2 horas`** o cargo de ignorar TTS foi aplicado aos alvos atuais da gincana."
+                "Por **`2 horas`** o cargo de ignorar TTS foi aplicado aos alvos atuais."
                 if activated
-                else "O cargo de ignorar TTS foi removido dos alvos atuais da gincana."
+                else "O cargo de ignorar TTS foi removido dos alvos atuais."
             )
             embed = self._make_embed(title, description, ok=not activated)
             try:
@@ -184,14 +184,14 @@ class GincanaToggleMixin:
                     key = (guild.id, target.id)
                     if should_activate:
                         if ignored_tts_role not in getattr(target, "roles", []):
-                            await target.add_roles(ignored_tts_role, reason="gincana role toggle")
+                            await target.add_roles(ignored_tts_role, reason="economia role toggle")
                         self._pica_expirations[key] = now + _PICA_DURATION_SECONDS
                         self.bot.loop.create_task(self._expire_pica_role_later(guild.id, target.id, role_id, _PICA_DURATION_SECONDS))
                         changed = True
                     else:
                         self._pica_expirations.pop(key, None)
                         if ignored_tts_role in getattr(target, "roles", []):
-                            await target.remove_roles(ignored_tts_role, reason="gincana role toggle")
+                            await target.remove_roles(ignored_tts_role, reason="economia role toggle")
                         changed = True
                 except Exception:
                     pass
@@ -263,16 +263,16 @@ class GincanaToggleMixin:
                     key = (guild.id, voice_channel.id, target.id)
                     if should_activate:
                         overwrite.use_soundboard = False
-                        await voice_channel.set_permissions(target, overwrite=overwrite, reason="gincana dj trigger")
+                        await voice_channel.set_permissions(target, overwrite=overwrite, reason="economia dj trigger")
                         self._dj_expirations[key] = now + _DJ_DURATION_SECONDS
                         self.bot.loop.create_task(self._expire_dj_block_later(guild.id, voice_channel.id, target.id, _DJ_DURATION_SECONDS))
                     else:
                         self._dj_expirations.pop(key, None)
                         overwrite.use_soundboard = None
                         if overwrite.is_empty():
-                            await voice_channel.set_permissions(target, overwrite=None, reason="gincana dj trigger")
+                            await voice_channel.set_permissions(target, overwrite=None, reason="economia dj trigger")
                         else:
-                            await voice_channel.set_permissions(target, overwrite=overwrite, reason="gincana dj trigger")
+                            await voice_channel.set_permissions(target, overwrite=overwrite, reason="economia dj trigger")
                     changed += 1
                 except Exception:
                     pass

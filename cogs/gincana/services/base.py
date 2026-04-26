@@ -298,7 +298,7 @@ class GincanaBase:
             return
 
         try:
-            await member.edit(nick=new_nick, reason="gincana atualizar sufixo do alvo")
+            await member.edit(nick=new_nick, reason="economia atualizar sufixo do alvo")
         except Exception:
             pass
 

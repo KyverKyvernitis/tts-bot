@@ -503,7 +503,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         return True
 
     @_guild_scoped()
-    @app_commands.command(name="gincana", description="Gerencia as roles e modos da gincana")
+    @app_commands.command(name="economia", description="Gerencia as roles e modos da economia")
     @app_commands.describe(
         action="Escolha o que fazer",
         role_id="ID da role para adicionar ou remover",
@@ -517,7 +517,7 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         app_commands.Choice(name="Definir cargo staff", value="set_staff_role"),
         app_commands.Choice(name="Remover cargo staff", value="clear_staff_role"),
     ])
-    async def gincana(
+    async def economia(
         self,
         interaction: discord.Interaction,
         action: str,
@@ -525,8 +525,8 @@ class GincanaCog(dcommands.Cog, GincanaCore):
     ):
         await self._run_gincana_command(interaction, action, role_id)
 
-    @gincana.error
-    async def gincana_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+    @economia.error
+    async def economia_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         await self._handle_gincana_error(interaction, error)
 
     @dcommands.command(name="ficha", aliases=["fichas"])
@@ -740,15 +740,15 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return
         await self._run_robbery(ctx.channel, ctx.guild, ctx.author, target)
 
-    @dcommands.command(name="gincanahelp", aliases=["helpgincana", "jogoshelp"])
-    async def gincanahelp(self, ctx: dcommands.Context):
+    @dcommands.command(name="economia", aliases=["economiahelp"])
+    async def economia_help(self, ctx: dcommands.Context):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return
         embed = discord.Embed(
-            title="🎲 Help da gincana",
+            title="🎲 Help da economia",
             description=(
-                "Jogos, fichas e atalhos da gincana em um lugar só.\n\n"
+                "Jogos, fichas e atalhos da economia em um lugar só.\n\n"
                 f"{self._CHIP_EMOJI} **Economia**\n"
                 f"• `{ctx.clean_prefix}ficha` — mostra seu saldo e seus destaques\n"
                 f"• `{ctx.clean_prefix}daily` — resgata o bônus diário\n"
@@ -762,15 +762,19 @@ class GincanaCog(dcommands.Cog, GincanaCore):
                 "\n"
                 "🎮 **Jogos**\n"
                 "• `roleta` — aposta rápida com jackpot\n"
+                "• `carta` — saque rápido de cartas\n"
                 "• `buckshot` — rodada de sobrevivência\n"
                 "• `alvo` — disputa de mira\n"
                 "• `corrida` — corrida de cavalos\n"
-                "• `poker` — mesa de poker\n\n"
+                "• `poker` — mesa de poker\n"
+                "• `truco @usuário` — desafio de truco 1v1\n"
+                "• `truco2` — truco em duplas (2v2)\n\n"
                 "🕹️ **Como entra**\n"
                 "• alguns jogos abrem um lobby com botão\n"
                 "• `atirar` fecha o buckshot\n"
+                "• `disparar` envia o tiro no alvo\n"
                 "• use os botões dos lobbies para começar os jogos\n\n"
-                "A gincana agora pode ser usada fora de call também."
+                "A economia agora pode ser usada fora de call também."
             ),
             color=discord.Color.blurple(),
         )

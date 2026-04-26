@@ -179,6 +179,16 @@ class Utility(commands.Cog):
         tts_user_slash = slash_mention(root_ids, root="tts", path="tts usuario")
         tts_server_menu_slash = slash_mention(root_ids, root="tts", path="tts server menu")
 
+        # Mentions adicionais pra chatbot, toggles, cores e economia.
+        # slash_mention retorna `</nome:0>` se o root não estiver no cache;
+        # quando o comando é de outra árvore, fallback é o texto literal.
+        chatbot_profile_slash = slash_mention(root_ids, root="chatbot", path="chatbot profile")
+        chatbot_memoria_slash = slash_mention(root_ids, root="chatbot", path="chatbot memoria")
+        imagem_slash = slash_mention(root_ids, root="imagem", path="imagem")
+        chatbot_reset_slash = slash_mention(root_ids, root="reset", path="reset")
+        toggle_menu_slash = slash_mention(root_ids, root="toggle_menu", path="toggle_menu")
+        economia_slash = slash_mention(root_ids, root="economia", path="economia")
+
         prefix_help = format_prefixed_aliases(bot_prefix, "help")
         prefix_panel = format_prefixed_aliases(bot_prefix, "panel_user")
         prefix_server_panel = format_prefixed_aliases(bot_prefix, "panel_server")
@@ -187,6 +197,8 @@ class Utility(commands.Cog):
         prefix_clear = format_prefixed_aliases(bot_prefix, "clear")
         prefix_reset = f"{format_prefixed_aliases(bot_prefix, 'reset')} `@usuário`"
         prefix_set_lang = f"{format_prefixed_aliases(bot_prefix, 'set_lang')} `pt`"
+        prefix_color = format_prefixed_aliases(bot_prefix, "color")
+        prefix_coloredit = format_prefixed_aliases(bot_prefix, "coloredit")
 
         pages: list[discord.Embed] = []
 
@@ -205,9 +217,11 @@ class Utility(commands.Cog):
                 "**Página 2** • atalhos de fala por prefixo\n"
                 "**Página 3** • comandos do usuário\n"
                 "**Página 4** • comandos de servidor\n"
-                "**Página 5** • utilidades\n"
-                "**Página 6** • fichas\n"
-                "**Página 7** • jogos"
+                "**Página 5** • chatbot e imagens\n"
+                "**Página 6** • cores e outros\n"
+                "**Página 7** • utilidades\n"
+                "**Página 8** • economia\n"
+                "**Página 9** • jogos"
             ),
             inline=False,
         )
@@ -352,6 +366,110 @@ class Utility(commands.Cog):
         )
         pages.append(server_page)
 
+        # --- Página: chatbot e imagens ----------------------------------------
+        chatbot_page = discord.Embed(
+            title="🤖 Chatbot e imagens",
+            description=(
+                "Personagens conversacionais (profiles), geração de imagem e "
+                "memória do chatbot. Configurações de profile exigem permissão "
+                "Manage Server."
+            ),
+            color=discord.Color.fuchsia(),
+            timestamp=discord.utils.utcnow(),
+        )
+        chatbot_page.add_field(
+            name="🎭 Profiles",
+            value=(
+                f"**Slash:** {chatbot_profile_slash}\n"
+                "**Uso:** criar, listar, editar, apagar, ativar ou desativar profiles "
+                "(personagens) do chatbot no servidor.\n"
+                "**Ações:** `Criar`, `Listar`, `Editar`, `Apagar`, `Ativar`, `Desativar`.\n"
+                "Apenas um profile fica ativo por servidor — ele responde a menções "
+                "e replies. Outros profiles podem ser invocados temporariamente "
+                "via `@nome` em uma mensagem."
+            ),
+            inline=False,
+        )
+        chatbot_page.add_field(
+            name="🖼️ Geração de imagem",
+            value=(
+                f"**Slash:** {imagem_slash} `prompt`\n"
+                "**Uso:** gera uma imagem a partir do texto. Em canais NSFW "
+                "(em servidores onde a feature está habilitada), o gerador "
+                "aceita conteúdo adulto; senão fica em modo SFW e recusa "
+                "esses pedidos.\n"
+                "**Dica:** seja específico no prompt — \"floresta de pinheiros "
+                "ao amanhecer, neblina, fotografia\" rende melhor que \"árvore\"."
+            ),
+            inline=False,
+        )
+        chatbot_page.add_field(
+            name="🧹 Memória",
+            value=(
+                f"**Reset pessoal:** {chatbot_reset_slash}\n"
+                "Limpa a sua conversa pessoal com o profile ativo (qualquer membro "
+                "pode rodar pra si mesmo).\n"
+                f"\n**Reset do servidor:** {chatbot_memoria_slash}\n"
+                "Apaga toda a memória do chatbot no servidor — pessoal de cada "
+                "membro + coletiva, todos os profiles. Operação irreversível, "
+                "exige Manage Server."
+            ),
+            inline=False,
+        )
+        chatbot_page.add_field(
+            name="💡 Como conversar",
+            value=(
+                "• Mencione o profile ativo (`@bot`) ou responda a uma mensagem "
+                "dele pra continuar a conversa.\n"
+                "• Use `@nome do profile` pra invocar **outro** profile "
+                "temporariamente (sem trocar o ativo).\n"
+                "• Anexe imagens/áudios — o profile entende e reage."
+            ),
+            inline=False,
+        )
+        pages.append(chatbot_page)
+
+        # --- Página: cores e outros -------------------------------------------
+        others_page = discord.Embed(
+            title="🎨 Cores, toggles e outros",
+            description=(
+                "Customizações pessoais e ajustes rápidos por servidor."
+            ),
+            color=discord.Color.magenta(),
+            timestamp=discord.utils.utcnow(),
+        )
+        others_page.add_field(
+            name="🌈 Cores personalizadas",
+            value=(
+                f"**Pedir uma cor:** {prefix_color} `#hex` ou nome\n"
+                f"**Editar a sua cor:** {prefix_coloredit} `#hex`\n"
+                "**Uso:** cria/atualiza um cargo só seu com a cor escolhida. "
+                "Útil pra destacar seu nome no chat sem depender da staff."
+            ),
+            inline=False,
+        )
+        others_page.add_field(
+            name="🎛️ Toggles do TTS",
+            value=(
+                f"**Slash:** {toggle_menu_slash}\n"
+                "**Uso:** painel guiado pros toggles de TTS — auto-join, "
+                "ignore-list, filtros e mais. Mais rápido que decorar "
+                "comandos individuais."
+            ),
+            inline=False,
+        )
+        others_page.add_field(
+            name="🏠 Painel completo do servidor",
+            value=(
+                f"**Slash:** {tts_server_menu_slash}\n"
+                f"**Prefixo:** {prefix_server_panel}\n"
+                "**Uso:** painel mestre do servidor. Define prefixos, engine "
+                "padrão, permissões. Exige Manage Server."
+            ),
+            inline=False,
+        )
+        pages.append(others_page)
+
         utility_page = discord.Embed(
             title="🧰 Utilidades",
             description="Comandos gerais do bot para consulta rápida.",
@@ -385,16 +503,21 @@ class Utility(commands.Cog):
         pages.append(utility_page)
 
         fichas_page = discord.Embed(
+            title="🪙 Economia",
+            description="Saldo, daily, recarga, ranking e atalhos da economia do servidor.",
             color=discord.Color.orange(),
             timestamp=discord.utils.utcnow(),
         )
         fichas_page.add_field(
             name="📌 Seus atalhos principais",
             value=(
-                f"**Saldo:** `{bot_prefix}ficha`\n"
-                f"**Daily:** `{bot_prefix}daily`\n"
+                f"**Saldo:** `{bot_prefix}ficha` ou só `ficha`\n"
+                f"**Extrato:** `extrato` (10 últimas movimentações)\n"
+                f"**Daily:** `{bot_prefix}daily` ou só `daily`\n"
                 "**Recarga:** `recarga`\n"
-                f"**Ranking:** `{bot_prefix}rank`"
+                f"**Ranking:** `{bot_prefix}rank` ou só `rank`\n"
+                "**Pagar alguém:** `pay @usuário valor`\n"
+                "**Mendigar:** `mendigar valor` ou `mendigar valor @usuário`"
             ),
             inline=False,
         )
@@ -425,9 +548,21 @@ class Utility(commands.Cog):
             ),
             inline=False,
         )
+        fichas_page.add_field(
+            name="⚙️ Configuração (staff)",
+            value=(
+                f"**Slash:** {economia_slash}\n"
+                "**Uso:** ativa/desativa a economia no servidor, define cargo "
+                "staff específico, gerencia roles que recebem features extras. "
+                "Exige permissão Expulsar Membros ou cargo staff configurado."
+            ),
+            inline=False,
+        )
         pages.append(fichas_page)
 
         jogos_page = discord.Embed(
+            title="🎮 Jogos",
+            description="Apostas rápidas, lobbies e jogos de mesa. Triggers são palavras digitadas sozinhas no chat.",
             color=discord.Color.dark_magenta(),
             timestamp=discord.utils.utcnow(),
         )
@@ -451,18 +586,30 @@ class Utility(commands.Cog):
             inline=False,
         )
         jogos_page.add_field(
-            name="🃏 Poker",
+            name="🃏 Poker e Truco",
             value=(
-                "**Trigger:** `poker`\n"
-                "**Uso:** abre a mesa de poker com entrada própria."
+                "**Trigger:** `poker` — abre a mesa de poker com entrada própria.\n"
+                "**Trigger:** `truco @usuário` — desafio de truco 1v1.\n"
+                "**Trigger:** `truco2` — truco em duplas (2v2)."
             ),
             inline=False,
         )
         jogos_page.add_field(
-            name="💸 Pagamento e atalho útil",
+            name="🦹 Roubo",
             value=(
-                "**Trigger:** `pay @usuário valor`\n"
-                "**Extra:** `atirar` fecha a rodada de buckshot quando ela estiver aberta."
+                "**Trigger:** `roubar @usuário` ou `rob @usuário`\n"
+                "**Uso:** tenta roubar parte do saldo do alvo. Tem chance de "
+                "falhar e tem janela com cooldown."
+            ),
+            inline=False,
+        )
+        jogos_page.add_field(
+            name="💸 Atalhos úteis",
+            value=(
+                "**Pagar:** `pay @usuário valor`\n"
+                "**Pedir:** `mendigar valor` ou `mendigar valor @usuário`\n"
+                "**Encerrar buckshot:** `atirar`\n"
+                "**Disparar no alvo:** `disparar`"
             ),
             inline=False,
         )

@@ -1197,7 +1197,7 @@ class GincanaRoletaMixin:
                         for target in targets:
                             if target.voice and target.voice.channel:
                                 try:
-                                    await target.move_to(None, reason="gincana roleta")
+                                    await target.move_to(None, reason="economia roleta")
                                 except Exception:
                                     pass
                         await self._record_game_played(guild.id, actor.id, weekly_points=12)
