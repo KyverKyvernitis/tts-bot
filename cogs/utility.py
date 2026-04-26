@@ -698,6 +698,54 @@ class Utility(commands.Cog):
             return f"{int(size)} {units[idx]}"
         return f"{size:.2f} {units[idx]}"
 
+    def _format_member_count(self, value: Any) -> str:
+        try:
+            count = int(value)
+        except Exception:
+            return "indisponível"
+        return f"{count} membro" if count == 1 else f"{count} membros"
+
+    def _format_health_guilds(self, max_chars: int = 1024) -> str:
+        guilds = list(getattr(self.bot, "guilds", []) or [])
+        if not guilds:
+            return "Nenhum servidor carregado no cache do bot."
+
+        def _safe_guild_name(guild: discord.Guild) -> str:
+            name = str(getattr(guild, "name", None) or "Servidor sem nome")
+            name = discord.utils.escape_mentions(discord.utils.escape_markdown(name))
+            if len(name) > 52:
+                name = f"{name[:49].rstrip()}..."
+            return name
+
+        lines: list[str] = []
+        sorted_guilds = sorted(guilds, key=lambda item: (getattr(item, "name", "") or "").casefold())
+        for index, guild in enumerate(sorted_guilds):
+            member_count = getattr(guild, "member_count", None)
+            if member_count is None:
+                cached_members = getattr(guild, "members", None)
+                if cached_members is not None:
+                    try:
+                        member_count = len(cached_members)
+                    except Exception:
+                        member_count = None
+
+            line = f"• **{_safe_guild_name(guild)}** — `{self._format_member_count(member_count)}`"
+            remaining = len(sorted_guilds) - index
+            overflow_line = f"… e mais `{remaining}` servidor{'es' if remaining != 1 else ''}."
+            current = "\n".join(lines)
+            extra_separator = 1 if current else 0
+            would_fit_with_overflow = len(current) + extra_separator + len(line) + 1 + len(overflow_line) <= max_chars
+
+            if lines and not would_fit_with_overflow:
+                lines.append(overflow_line)
+                break
+            if not lines and len(line) > max_chars:
+                lines.append(f"{line[:max(0, max_chars - 1)]}…")
+                break
+            lines.append(line)
+
+        return "\n".join(lines)[:max_chars]
+
     def _build_health_embeds(self) -> list[discord.Embed]:
         snapshot = {}
         get_snapshot = getattr(self.bot, "get_health_snapshot", None)
@@ -777,6 +825,11 @@ class Utility(commands.Cog):
                 f"**Voice clients:** `{len(getattr(self.bot, 'voice_clients', []) or [])}`"
             ),
             inline=True,
+        )
+        summary.add_field(
+            name="Servidores do bot",
+            value=self._format_health_guilds(),
+            inline=False,
         )
         summary.add_field(
             name="Fila e despacho",
