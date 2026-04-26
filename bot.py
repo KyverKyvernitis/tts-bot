@@ -150,18 +150,23 @@ class BotLocal(commands.Bot):
             guild_ids.add(health_guild_id)
 
             if allow_global_sync:
-                # Modo global: limpa tudo das guilds pra não deixar cópias
-                # antigas coexistindo com os globais (causa de duplicação).
-                for guild_id in sorted(guild_ids):
-                    guild_obj = discord.Object(id=guild_id)
-                    self.tree.clear_commands(guild=guild_obj)
-                    await self.tree.sync(guild=guild_obj)
-                    print(f"[SYNC] Limpou comandos guild-specific da guild {guild_id}")
+                # Modo global: sincroniza global mas TAMBÉM faz sync de cada
+                # guild registrada pra propagar os Groups com guild_ids
+                # explícitos (que NÃO entram no sync global). Não usamos
+                # clear_commands aqui pelas mesmas razões do branch guild-only
+                # mais abaixo.
                 synced_global = await self.tree.sync()
                 print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced_global)}")
                 for cmd in synced_global:
                     name = getattr(cmd, "name", None) or str(cmd)
                     print(f"[SYNC][GLOBAL] /{name}")
+                for guild_id in sorted(guild_ids):
+                    guild_obj = discord.Object(id=guild_id)
+                    synced_guild = await self.tree.sync(guild=guild_obj)
+                    print(f"[SYNC] Comandos guild-specific sincronizados na guild {guild_id}: {len(synced_guild)}")
+                    for cmd in synced_guild:
+                        name = getattr(cmd, "name", None) or str(cmd)
+                        print(f"[SYNC][GUILD {guild_id}] /{name}")
             else:
                 # Modo guild-only: se vinha de sync global antes, limpa os
                 # globais pra evitar duplicação. Só faz isso se
@@ -204,7 +209,20 @@ class BotLocal(commands.Bot):
 
                 for guild_id in sorted(guild_ids):
                     guild_obj = discord.Object(id=guild_id)
-                    self.tree.clear_commands(guild=guild_obj)
+                    # NÃO chamar `clear_commands(guild=guild_obj)` aqui!
+                    # Isso apaga da árvore local TODOS os comandos guild-specific,
+                    # incluindo os Groups com `guild_ids=[...]` que estão
+                    # registrados nativamente pra essa guild (ex: /chatbotadmin
+                    # registrado pra MANAGEMENT_GUILD_ID, /health da Utility).
+                    # Depois do clear, copy_global_to só repõe os globais —
+                    # os guild-restricted desaparecem do sync e o usuário não
+                    # vê os comandos no autocomplete.
+                    #
+                    # Tradeoff: comandos que foram REMOVIDOS do código continuam
+                    # como "fantasmas" no Discord até alguém rodar manualmente
+                    # `tree.clear_commands(guild=...)` + sync. Isso é raro e
+                    # vale a pena pelo benefício de Groups guild-restricted
+                    # funcionarem sem cuidado especial.
                     self.tree.copy_global_to(guild=guild_obj)
                     synced_guild = await self.tree.sync(guild=guild_obj)
                     print(f"[SYNC] Slash commands sincronizados na guild {guild_id}: {len(synced_guild)}")
