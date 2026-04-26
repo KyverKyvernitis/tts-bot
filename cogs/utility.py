@@ -394,9 +394,9 @@ class Utility(commands.Cog):
             name="🖼️ Geração de imagem",
             value=(
                 f"**Slash:** {imagem_slash} `prompt`\n"
-                "**Uso:** gera uma imagem a partir do texto. Em canais NSFW "
-                "(em servidores onde a feature está habilitada), o gerador "
-                "aceita conteúdo adulto; senão fica em modo SFW e recusa "
+                "**Uso:** gera uma imagem a partir do texto.  "
+                "(gerador "
+                "a "
                 "esses pedidos.\n"
                 "**Dica:** seja específico no prompt — \"floresta de pinheiros "
                 "ao amanhecer, neblina, fotografia\" rende melhor que \"árvore\"."
