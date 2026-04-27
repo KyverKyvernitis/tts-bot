@@ -1,3 +1,9 @@
+"""Gate de mensagem do TTS — decide se a mensagem entra no pipeline.
+
+Centraliza todos os filtros (TTS desligado, autor é bot, conteúdo vazio,
+prefixo casado etc) num lugar só, retornando uma decisão estruturada que o
+cog principal só interpreta. Evita ifs espalhados pelo `on_message`.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +20,8 @@ from ..prefix import (
 
 @dataclass(frozen=True)
 class MessageGateDecision:
+    # Resultado do gate. Os flags são exclusivos: ou processa TTS, ou despacha
+    # comando prefixado, ou ignora — nunca os três ao mesmo tempo.
     should_process_tts: bool
     should_dispatch_prefix_command: bool
     guild_defaults: dict[str, Any]
@@ -24,6 +32,7 @@ class MessageGateDecision:
 
 
 async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision:
+    # Filtros baratos primeiro — evita tocar o DB por mensagem de bot ou DM.
     if not getattr(config, "TTS_ENABLED", True):
         return MessageGateDecision(False, False, {}, reason="tts_disabled")
     if getattr(getattr(message, "author", None), "bot", False):
@@ -33,6 +42,7 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
     if not getattr(message, "content", None):
         return MessageGateDecision(False, False, {}, reason="empty_content")
 
+    # Defaults do servidor e roteamento de prefixos vêm do DB.
     db = cog._get_db()
     guild_defaults = await cog._maybe_await(db.get_guild_tts_defaults(message.guild.id)) if db else {}
     guild_defaults = guild_defaults or {}
@@ -42,6 +52,8 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
         gcloud_prefix_default=str(getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'"),
     )
 
+    # Comandos `_join`, `_leave`, `_clear`, etc passam por aqui antes de qualquer
+    # tentativa de TTS — assim a mensagem `_join` não é falada.
     prefix_command = match_prefix_control_command(message.content, routing.bot_prefix)
     if prefix_command is not None:
         return MessageGateDecision(
@@ -52,6 +64,8 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
             reason="prefix_command",
         )
 
+    # Casa um dos três prefixos de fala (gTTS / Edge / gcloud). Se nenhum casar,
+    # a mensagem é texto comum e o gate ignora.
     forced_engine, active_prefix = match_engine_prefix(
         message.content,
         edge_prefix=routing.edge_prefix,

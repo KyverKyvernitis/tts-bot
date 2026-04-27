@@ -740,47 +740,6 @@ class GincanaCog(dcommands.Cog, GincanaCore):
             return
         await self._run_robbery(ctx.channel, ctx.guild, ctx.author, target)
 
-    @dcommands.command(name="economia", aliases=["economiahelp"])
-    async def economia_help(self, ctx: dcommands.Context):
-        if ctx.guild is None:
-            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
-            return
-        embed = discord.Embed(
-            title="🎲 Help da economia",
-            description=(
-                "Jogos, fichas e atalhos da economia em um lugar só.\n\n"
-                f"{self._CHIP_EMOJI} **Economia**\n"
-                f"• `{ctx.clean_prefix}ficha` — mostra seu saldo e seus destaques\n"
-                f"• `{ctx.clean_prefix}daily` — resgata o bônus diário\n"
-                "• `recarga` — entrega 100 fichas bônus quando seu saldo total fica abaixo de 15\n"
-                "• `pay @usuário valor` — transfere só fichas normais\n"
-                "• `mendigar valor` — pede uma esmola geral\n"
-                "• `mendigar valor @usuário` — pede esmola para alguém específico\n"
-                "• fichas bônus saem primeiro nas apostas\n"
-                "• ganhos quitam a dívida antes de voltar ao saldo normal\n"
-                f"• `{ctx.clean_prefix}rank` — ranking dos maiores saldos\n"
-                "\n"
-                "🎮 **Jogos**\n"
-                "• `roleta` — aposta rápida com jackpot\n"
-                "• `carta` — saque rápido de cartas\n"
-                "• `buckshot` — rodada de sobrevivência\n"
-                "• `alvo` — disputa de mira\n"
-                "• `corrida` — corrida de cavalos\n"
-                "• `poker` — mesa de poker\n"
-                "• `truco @usuário` — desafio de truco 1v1\n"
-                "• `truco2` — truco em duplas (2v2)\n\n"
-                "🕹️ **Como entra**\n"
-                "• alguns jogos abrem um lobby com botão\n"
-                "• `atirar` fecha o buckshot\n"
-                "• `disparar` envia o tiro no alvo\n"
-                "• use os botões dos lobbies para começar os jogos\n\n"
-                "A economia agora pode ser usada fora de call também."
-            ),
-            color=discord.Color.blurple(),
-        )
-        embed.set_footer(text="Use os triggers sozinhos na mensagem para abrir os jogos")
-        await ctx.reply(embed=embed, mention_author=False)
-
     @dcommands.Cog.listener()
     async def on_message(self, message: discord.Message):
         try:

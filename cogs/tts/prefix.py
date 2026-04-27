@@ -1,3 +1,12 @@
+"""Roteamento dos prefixos do TTS.
+
+Tem dois tipos de prefixo aqui:
+- prefixo do BOT (`_join`, `_leave`, `_help` etc) — comandos de controle
+- prefixo de FALA (`,`, `.`, `'`) — escolhe a engine de TTS pra essa mensagem
+
+Cada guild pode customizar todos os prefixos via painel de servidor; este
+módulo só aplica e devolve a decisão pro cog principal executar.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,6 +30,8 @@ class PrefixRoutingConfig:
 
 
 def build_prefix_routing_config(guild_defaults: dict[str, Any] | None, *, bot_prefix_default: str, gcloud_prefix_default: str) -> PrefixRoutingConfig:
+    # Cada prefixo tem um fallback hardcoded — usado quando a guild ainda
+    # não configurou nada ou o doc tá faltando o campo.
     defaults = guild_defaults or {}
     return PrefixRoutingConfig(
         bot_prefix=str(defaults.get("bot_prefix", bot_prefix_default) or bot_prefix_default),
@@ -31,6 +42,8 @@ def build_prefix_routing_config(guild_defaults: dict[str, Any] | None, *, bot_pr
 
 
 def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControlCommand | None:
+    # Casa o conteúdo contra cada comando de controle conhecido. Os com
+    # argumento (`reset`, `set_lang`) extraem o resto da string como argumento.
     raw = str(content or "").strip()
     if not raw:
         return None
@@ -57,6 +70,8 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
 
 
 def match_engine_prefix(content: str, *, edge_prefix: str, gtts_prefix: str, gcloud_prefix: str) -> tuple[str | None, str | None]:
+    # Ordem importa: edge é checado antes do gtts porque pode haver overlap
+    # se a guild configurou prefixos parecidos.
     text = str(content or "")
     if text.startswith(edge_prefix):
         return "edge", edge_prefix
@@ -68,6 +83,9 @@ def match_engine_prefix(content: str, *, edge_prefix: str, gtts_prefix: str, gcl
 
 
 async def dispatch_prefix_control_command(cog: Any, message: Any, command: PrefixControlCommand) -> bool:
+    # Despacho 1-1 do comando casado pra o handler do cog. `help` é tratado
+    # à parte (pelo Utility.on_message), aqui só absorve o evento pra não
+    # cair no path de TTS.
     kind = command.kind
 
     if kind == "help":

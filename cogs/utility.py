@@ -111,14 +111,23 @@ class HelpPaginatorView(discord.ui.LayoutView):
         at_start = self.page_index <= 0
         at_end = self.page_index >= total - 1
 
-        # Conteúdo: heading + corpo. Footer com índice da página.
-        body_text = (
-            f"## {page.title}\n"
-            f"{page.body}\n\n"
-            f"-# Página {self.page_index + 1} de {total} • use os botões abaixo para navegar"
+        # Cabeçalho: linha fina de breadcrumb + título destacado. O índice da
+        # página fica em cima ao invés de no fim, aí o user já sabe onde tá
+        # antes mesmo de ler o corpo.
+        header_text = (
+            f"-# 📖 Central de ajuda · página **{self.page_index + 1}** de **{total}**\n"
+            f"## {page.title}"
         )
 
-        # Linha de botões: ⏪ ◀ N/Total ▶ ⏩
+        # Rodapé curto com a dica do paginator. Vai abaixo do corpo, antes dos
+        # botões — fica claro pra quê serve cada controle sem ter que clicar.
+        footer_hint = (
+            f"-# ⏪ início · ◀ anterior · `{self.page_index + 1}/{total}` pula direto · "
+            f"▶ próxima · ⏩ fim"
+        )
+
+        # Linha de botões: ⏪ ◀ N/Total ▶ ⏩. O botão central abre o modal de
+        # jump em vez de ser puramente decorativo.
         first = discord.ui.Button(
             emoji="⏪", style=discord.ButtonStyle.secondary, disabled=at_start,
         )
@@ -129,7 +138,6 @@ class HelpPaginatorView(discord.ui.LayoutView):
         )
         prev_b.callback = self._go_prev
 
-        # Botão central — clicar abre modal de jump.
         jump = discord.ui.Button(
             label=f"{self.page_index + 1}/{total}",
             style=discord.ButtonStyle.primary,
@@ -148,9 +156,14 @@ class HelpPaginatorView(discord.ui.LayoutView):
 
         action_row = discord.ui.ActionRow(first, prev_b, jump, next_b, last)
 
+        # Layout: cabeçalho · corpo · rodapé · botões. As Separators visuais
+        # quebram a leitura sem precisar enfeitar o markdown do corpo.
         container = discord.ui.Container(
-            discord.ui.TextDisplay(body_text),
+            discord.ui.TextDisplay(header_text),
             discord.ui.Separator(),
+            discord.ui.TextDisplay(page.body),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(footer_hint),
             action_row,
             accent_color=page.accent,
         )
@@ -314,21 +327,21 @@ class Utility(commands.Cog):
             "**9.** Jogos"
         )
         prefixes_text = (
-            f"**bot:** `{bot_prefix}`  •  **gTTS:** `{gtts_prefix}`  •  "
-            f"**edge:** `{edge_prefix}`  •  **gcloud:** `{gcloud_prefix}`"
+            f"**Bot:** `{bot_prefix}`  ·  **gTTS:** `{gtts_prefix}`  ·  "
+            f"**Edge:** `{edge_prefix}`  ·  **gcloud:** `{gcloud_prefix}`"
         )
         quick_start = (
-            f"{help_slash} ou {prefix_help} — abre esta central\n"
-            f"{tts_menu_slash} ou {prefix_panel} — painel pessoal de TTS\n"
-            f"`{edge_prefix}oi cheguei na call` — fala usando Edge\n"
-            f"`{gtts_prefix}teste de voz` — fala usando gTTS"
+            f"› {help_slash} ou {prefix_help} — abre esta central\n"
+            f"› {tts_menu_slash} ou {prefix_panel} — painel pessoal de TTS\n"
+            f"› `{edge_prefix}oi cheguei na call` — fala usando Edge\n"
+            f"› `{gtts_prefix}teste de voz` — fala usando gTTS"
         )
         pages.append(HelpPage(
             title="📚 Central de ajuda",
             body=(
-                "**Bem-vindo ao painel de ajuda do bot.**\n"
-                "Os comandos principais ficam separados por categoria. Use os botões "
-                "abaixo para navegar; o número no centro abre uma seleção rápida de página.\n\n"
+                "Bem-vindo ao painel de ajuda do bot. Os comandos estão separados "
+                "por categoria; use os botões abaixo pra navegar e o número no centro "
+                "abre uma seleção rápida de página.\n\n"
                 f"### Navegação\n{nav}\n\n"
                 f"### Prefixos ativos neste servidor\n{prefixes_text}\n\n"
                 f"### Começo rápido\n{quick_start}"

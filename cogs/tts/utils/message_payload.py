@@ -1,3 +1,9 @@
+"""Monta o payload de TTS a partir de uma mensagem do Discord.
+
+Aplica o engine forçado pelo prefixo (gtts/edge/gcloud), preenche valores
+default quando o user não configurou, renderiza o texto final (limpo +
+prefixo de autor se ligado) e devolve o `QueueItem` pronto pro dispatcher.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,6 +35,8 @@ async def build_message_tts_payload(
         print("[tts_voice] ignorado | settings_db indisponível")
         return None
 
+    # `resolve_tts` retorna a configuração efetiva do user (mistura
+    # config pessoal + defaults da guild). Pode falhar se o Mongo cair.
     try:
         resolved = await cog._maybe_await(db.resolve_tts(message.guild.id, message.author.id))
     except Exception as e:
@@ -38,6 +46,8 @@ async def build_message_tts_payload(
     resolved = dict(resolved or {})
     forced_gtts = False
 
+    # Override pelo prefixo: se o user usou o prefixo de Edge, ele quer Edge
+    # nessa fala mesmo que o engine padrão dele seja gTTS (e idem pros outros).
     if forced_engine == "gtts":
         resolved["engine"] = "gtts"
         resolved["language"] = resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br")
@@ -53,6 +63,8 @@ async def build_message_tts_payload(
         resolved["rate"] = resolved.get("gcloud_rate") or str(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0) or 1.0)
         resolved["pitch"] = resolved.get("gcloud_pitch") or str(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0) or 0.0)
 
+    # Texto final: tira o prefixo de fala, limpa marcadores e prepende o
+    # nome falado do autor quando o servidor tem essa opção ligada.
     text = cog._render_tts_text(message, message.content[len(active_prefix):].strip())
     text = cog._apply_author_prefix_if_needed(
         message.guild.id,
@@ -64,6 +76,7 @@ async def build_message_tts_payload(
         print("[tts_voice] ignorado | texto vazio após prefixo")
         return None
 
+    # Sem voice channel não tem onde tocar — descarta cedo.
     author_voice = getattr(message.author, "voice", None)
     voice_channel = getattr(author_voice, "channel", None)
     if voice_channel is None:

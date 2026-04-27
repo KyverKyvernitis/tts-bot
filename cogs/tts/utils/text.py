@@ -1,3 +1,9 @@
+"""Conversores de menções/links/anexos pra texto falado.
+
+A regra geral aqui é: tudo que cair em fallback genérico (`cargo do discord`,
+`link`, `Anexo de imagem`) é melhor do que tentar pronunciar lixo. Vozes do
+TTS soltam pérolas com nome de role tipo `Lvl-15-🌟` se a gente deixar.
+"""
 from __future__ import annotations
 
 from urllib.parse import urlparse
@@ -10,6 +16,7 @@ def tts_user_reference(member, *, resolver: Callable, guild_id: int | None = Non
 
 
 def tts_role_reference(role, *, normalize_spaces: Callable[[str], str], looks_pronounceable_for_tts: Callable[[str], bool], speech_name: Callable[[str], str]) -> str:
+    # Se o nome do cargo tem só símbolos/emojis, fala "cargo do discord".
     name = normalize_spaces(getattr(role, "name", None) or "")
     if looks_pronounceable_for_tts(name):
         spoken = speech_name(name)
@@ -37,6 +44,8 @@ def tts_link_reference(
     looks_pronounceable_for_tts: Callable[[str], bool],
     speech_name: Callable[[str], str],
 ) -> str:
+    # Caso especial: link de canal do próprio Discord vira "canal X" em vez
+    # de "link do discord", que é mais informativo na call.
     cleaned_url = str(url or "").strip().rstrip(".,!?)]}")
     match = discord_channel_url_pattern.fullmatch(cleaned_url)
     if match and guild is not None:
@@ -49,6 +58,8 @@ def tts_link_reference(
     except Exception:
         return "link"
 
+    # Pra links externos só fala o domínio principal ("youtube", "twitter"
+    # etc) — pronunciar o path inteiro nunca dá certo.
     domain = extract_primary_domain(parsed.hostname or "")
     if looks_pronounceable_for_tts(domain):
         spoken = speech_name(domain)
@@ -58,6 +69,8 @@ def tts_link_reference(
 
 
 def tts_attachment_descriptions(attachments, *, image_extensions: tuple[str, ...], video_extensions: tuple[str, ...]) -> list[str]:
+    # Resumo curto pra anexos. GIF tem categoria própria porque é mais comum
+    # no Discord e o user costuma anunciar "manda um GIF".
     descriptions: list[str] = []
     for attachment in attachments or []:
         content_type = str(getattr(attachment, "content_type", "") or "").lower()
