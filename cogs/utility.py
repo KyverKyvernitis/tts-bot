@@ -115,7 +115,7 @@ class HelpPaginatorView(discord.ui.LayoutView):
         body_text = (
             f"## {page.title}\n"
             f"{page.body}\n\n"
-            f"-# \U0001F4D6 Página {self.page_index + 1} de {total} • \U0001F522 use os botões abaixo para navegar"
+            f"-# Página {self.page_index + 1} de {total} • use os botões abaixo para navegar"
         )
 
         # Linha de botões: ⏪ ◀ N/Total ▶ ⏩
@@ -303,79 +303,74 @@ class Utility(commands.Cog):
 
         # === Página 1 — Visão geral ===========================================
         nav = (
-            "**1. \U0001F4DA** visão geral e começo rápido\n"
-            "**2. \U0001F50A** atalhos de fala\n"
-            "**3. \U0001F464** comandos do usuário\n"
-            "**4. \U0001F6E1\ufe0f** comandos de servidor\n"
-            "**5. \U0001F916** chatbot e imagens\n"
-            "**6. \U0001F3A8** cores\n"
-            "**7. \U0001F9F0** utilidades\n"
-            "**8. \U0001FA99** economia\n"
-            "**9. \U0001F3AE** jogos"
+            "**1.** Visão geral e começo rápido\n"
+            "**2.** Atalhos de fala\n"
+            "**3.** Comandos do usuário\n"
+            "**4.** Comandos do servidor\n"
+            "**5.** Chatbot e imagens\n"
+            "**6.** Cores\n"
+            "**7.** Utilidades\n"
+            "**8.** Economia\n"
+            "**9.** Jogos"
         )
         prefixes_text = (
-            f"\U0001F916 **bot:** `{bot_prefix}`  •  \U0001F508 **gTTS:** `{gtts_prefix}`  •  "
-            f"\U0001F5E3\ufe0f **edge:** `{edge_prefix}`  •  \u2601\ufe0f **gcloud:** `{gcloud_prefix}`"
+            f"**bot:** `{bot_prefix}`  •  **gTTS:** `{gtts_prefix}`  •  "
+            f"**edge:** `{edge_prefix}`  •  **gcloud:** `{gcloud_prefix}`"
         )
         quick_start = (
-            f"\U0001F4D6 {help_slash} ou {prefix_help} — abre esta central\n"
-            f"\U0001F39A\ufe0f {tts_menu_slash} ou {prefix_panel} — painel pessoal de TTS\n"
-            f"\U0001F5E3\ufe0f `{edge_prefix}oi cheguei na call` — fala usando Edge\n"
-            f"\U0001F508 `{gtts_prefix}teste de voz` — fala usando gTTS"
+            f"{help_slash} ou {prefix_help} — abre esta central\n"
+            f"{tts_menu_slash} ou {prefix_panel} — painel pessoal de TTS\n"
+            f"`{edge_prefix}oi cheguei na call` — fala usando Edge\n"
+            f"`{gtts_prefix}teste de voz` — fala usando gTTS"
         )
         pages.append(HelpPage(
-            title="\U0001F4DA Central de ajuda",
+            title="📚 Central de ajuda",
             body=(
-                "\u2728 **Bem-vindo ao painel de ajuda do bot.**\n"
-                "Tudo que importa fica separado por categoria. Use os botões "
-                "abaixo pra navegar — o número no centro abre uma seleção "
-                "rápida de página.\n\n"
-                f"### \U0001F9ED Navegação\n{nav}\n\n"
-                f"### \U0001F9E9 Prefixos ativos neste servidor\n{prefixes_text}\n\n"
-                f"### \u26A1 Começo rápido\n{quick_start}"
+                "**Bem-vindo ao painel de ajuda do bot.**\n"
+                "Os comandos principais ficam separados por categoria. Use os botões "
+                "abaixo para navegar; o número no centro abre uma seleção rápida de página.\n\n"
+                f"### Navegação\n{nav}\n\n"
+                f"### Prefixos ativos neste servidor\n{prefixes_text}\n\n"
+                f"### Começo rápido\n{quick_start}"
             ),
             accent=discord.Color.blurple(),
         ))
 
         # === Página 2 — Atalhos de fala =======================================
         pages.append(HelpPage(
-            title="\U0001F50A Atalhos de fala",
+            title="🔊 Atalhos de fala",
             body=(
-                "\U0001F4AC Não são painéis — são **prefixos de fala**. Você manda a mensagem "
+                "Não são painéis: são **prefixos de fala**. Você manda a mensagem "
                 "começando com o prefixo e o bot fala.\n\n"
-                f"### \U0001F508 gTTS — `{gtts_prefix}`\n"
-                f"\U0001F4DD Exemplo: `{gtts_prefix}olá tudo bem`\n"
+                f"### gTTS — `{gtts_prefix}`\n"
+                f"Exemplo: `{gtts_prefix}olá tudo bem`\n"
                 "Voz padrão da web, leve, funciona em qualquer cenário.\n\n"
-                f"### \U0001F5E3\ufe0f Edge — `{edge_prefix}`\n"
-                f"\U0001F4DD Exemplo: `{edge_prefix}essa frase vai no edge`\n"
-                "Vozes neurais da Microsoft. Mais natural, várias opções por "
-                "idioma.\n\n"
-                f"### \u2601\ufe0f Google Cloud — `{gcloud_prefix}`\n"
-                f"\U0001F4DD Exemplo: `{gcloud_prefix}essa fala usa o google cloud`\n"
-                "Vozes premium do Google. Qualidade alta, requer config no "
-                "servidor.\n\n"
-                "\U0001F39A\ufe0f Voz, idioma, velocidade e tom usados nesses prefixos seguem "
-                f"o painel pessoal ({tts_menu_slash}) ou o painel do "
-                "servidor."
+                f"### Edge — `{edge_prefix}`\n"
+                f"Exemplo: `{edge_prefix}essa frase vai no edge`\n"
+                "Vozes neurais da Microsoft. Mais natural, com várias opções por idioma.\n\n"
+                f"### Google Cloud — `{gcloud_prefix}`\n"
+                f"Exemplo: `{gcloud_prefix}essa fala usa o google cloud`\n"
+                "Vozes premium do Google. Qualidade alta, requer config no servidor.\n\n"
+                "Voz, idioma, velocidade e tom usados nesses prefixos seguem o "
+                f"painel pessoal ({tts_menu_slash}) ou o painel do servidor."
             ),
             accent=discord.Color.purple(),
         ))
 
         # === Página 3 — Comandos do usuário ===================================
         pages.append(HelpPage(
-            title="\U0001F464 Comandos do usuário",
+            title="👤 Comandos do usuário",
             body=(
-                "\u2728 Painéis pessoais e atalhos voltados pra cada membro.\n\n"
-                f"### \U0001F39A\ufe0f Painel pessoal\n"
+                "Painéis pessoais e atalhos voltados para cada membro.\n\n"
+                f"### Painel pessoal\n"
                 f"{tts_menu_slash} ou {prefix_panel}\n"
-                "Abre o painel principal do seu TTS — botões e menus pra mexer "
-                "em voz, idioma, velocidade, tom e apelido falado sem precisar "
-                "decorar comando.\n\n"
-                f"### \U0001F4CA Status do TTS\n"
+                "Abre o painel principal do seu TTS — botões e menus para mexer "
+                "em voz, idioma, velocidade, tom e apelido falado sem precisar decorar comando.\n\n"
+                f"### Status do TTS\n"
                 f"{tts_status_slash}\n"
                 "Vê o seu status, mostra o de outro usuário ou copia a config "
                 "dele pra você. Ações: `self`, `show_other`, `copy_other`.\n\n"
-                f"### \U0001F465 Gerenciar outro usuário\n"
+                f"### Gerenciar outro usuário\n"
                 f"{tts_user_slash}\n"
                 "Abre o painel de outro usuário, troca o apelido falado dele "
                 "ou reseta as configs. Ações: `panel`, `spoken_name`, `reset`."
@@ -385,56 +380,48 @@ class Utility(commands.Cog):
 
         # === Página 4 — Comandos de servidor ==================================
         pages.append(HelpPage(
-            title="\U0001F6E1\ufe0f Comandos do servidor",
+            title="🛡️ Comandos do servidor",
             body=(
-                "\U0001F9F0 Área de staff. Os marcados com 🔒 dependem da permissão "
+                "Área de staff. Comandos marcados com 🔒 dependem da permissão "
                 "**Expulsar membros**.\n\n"
-                f"### 🔒 \U0001F3DB\ufe0f Painel do servidor\n"
+                f"### 🔒 Painel do servidor\n"
                 f"{tts_server_menu_slash} ou {prefix_server_panel}\n"
-                "Define os padrões do servidor — prefixos, engine padrão, "
-                "permissões e configs globais.\n\n"
-                "### \U0001F50C Conexão\n"
-                f"\u2705 Entrar na call: {prefix_join}\n"
-                f"\U0001F6AA Sair da call: {prefix_leave}\n"
-                f"\U0001F9F9 Limpar fila: {prefix_clear}\n\n"
-                "### \u26A1 Atalhos rápidos\n"
+                "Define os padrões do servidor — prefixos, engine padrão, permissões e configs globais.\n\n"
+                "### Conexão\n"
+                f"Entrar na call: {prefix_join}\n"
+                f"Sair da call: {prefix_leave}\n"
+                f"Limpar fila: {prefix_clear}\n\n"
+                "### Atalhos rápidos\n"
                 f"🔒 Resetar um usuário: {prefix_reset} `@usuário`\n"
-                f"\U0001F30E Trocar idioma pessoal do gTTS: {prefix_set_lang} `pt`"
+                f"Trocar idioma pessoal do gTTS: {prefix_set_lang} `pt`"
             ),
             accent=discord.Color.gold(),
         ))
 
         # === Página 5 — Chatbot e imagens =====================================
         pages.append(HelpPage(
-            title="\U0001F916 Chatbot e imagens",
+            title="🤖 Chatbot e imagens",
             body=(
-                "\U0001F9E0 Personagens conversacionais (profiles), geração de imagem e "
-                "memória do chatbot. Profiles exigem **Manage Server**.\n\n"
-                f"### \U0001F3AD Profiles\n"
+                "Profiles conversacionais, geração de imagem e memória do chatbot. "
+                "Profiles exigem **Manage Server**.\n\n"
+                f"### Profiles\n"
                 f"{chatbot_profile_slash}\n"
-                "Cria, lista, edita, apaga, ativa ou desativa profiles do "
-                "chatbot no servidor. Ações: `Criar`, `Listar`, `Editar`, "
-                "`Apagar`, `Ativar`, `Desativar`.\n"
-                "Só um profile fica ativo por servidor — ele é quem responde "
-                "menções e replies. Outros profiles podem ser invocados "
+                "Cria, lista, edita, apaga, ativa ou desativa profiles do chatbot no servidor. "
+                "Ações: `Criar`, `Listar`, `Editar`, `Apagar`, `Ativar`, `Desativar`.\n"
+                "Só um profile fica ativo por servidor. Outros profiles podem ser invocados "
                 "temporariamente com `@nome` em uma mensagem.\n\n"
-                f"### \U0001F5BC\ufe0f Geração de imagem\n"
+                f"### Geração de imagem\n"
                 f"{imagem_slash} `prompt`\n"
-                "Gera uma imagem a partir do texto. Quanto mais específico o "
-                "prompt, melhor — \"floresta de pinheiros ao amanhecer, "
-                "neblina, fotografia\" rende mais que \"árvore\".\n\n"
-                f"### \U0001F9E0 Memória\n"
-                f"\U0001F9CD Reset pessoal: {chatbot_reset_slash}\n"
-                "Limpa só a sua conversa pessoal com o profile ativo. "
-                "Qualquer membro pode rodar pra si mesmo.\n\n"
-                f"\U0001F3E0 Reset do servidor: {chatbot_memoria_slash}\n"
-                "Apaga toda a memória do chatbot no servidor — pessoal de "
-                "cada membro mais a coletiva, todos os profiles. "
-                "Irreversível, exige Manage Server.\n\n"
-                "### \U0001F4AC Como conversar\n"
-                "Mencione (`@bot`) ou responda a uma mensagem dele pra "
-                "continuar a conversa. Use `@nome do profile` pra invocar "
-                "**outro** profile temporariamente sem trocar o ativo. "
+                "Gera uma imagem a partir do texto. Quanto mais específico o prompt, melhor.\n\n"
+                f"### Memória\n"
+                f"Reset pessoal: {chatbot_reset_slash}\n"
+                "Limpa só a sua conversa pessoal com o profile ativo.\n\n"
+                f"Reset do servidor: {chatbot_memoria_slash}\n"
+                "Apaga toda a memória do chatbot no servidor — pessoal de cada membro "
+                "mais a coletiva, todos os profiles. Irreversível, exige Manage Server.\n\n"
+                "### Como conversar\n"
+                "Mencione (`@bot`) ou responda a uma mensagem dele para continuar a conversa. "
+                "Use `@nome do profile` para invocar outro profile temporariamente sem trocar o ativo. "
                 "Imagens e áudios anexados são entendidos pelo profile."
             ),
             accent=discord.Color.fuchsia(),
@@ -442,95 +429,87 @@ class Utility(commands.Cog):
 
         # === Página 6 — Cores =================================================
         pages.append(HelpPage(
-            title="\U0001F3A8 Cores",
+            title="🎨 Cores",
             body=(
-                "\U0001F308 Painel de cargos coloridos do servidor. Comandos exigem "
-                "**Administrador**.\n\n"
-                f"### \U0001F4CC Publicar o painel\n"
+                "Painel de cargos coloridos do servidor. Comandos exigem **Administrador**.\n\n"
+                f"### Publicar o painel\n"
                 f"{prefix_color}\n"
-                "Posta o painel público de cores no canal atual. Os membros "
-                "clicam na cor que quiserem e ganham o cargo correspondente. "
-                "Substitui o painel anterior se já existir um.\n\n"
-                f"### \U0001F6E0\ufe0f Editar as cores disponíveis\n"
+                "Posta o painel público de cores no canal atual. Os membros clicam na cor "
+                "que quiserem e ganham o cargo correspondente. Substitui o painel anterior se já existir um.\n\n"
+                f"### Editar as cores disponíveis\n"
                 f"{prefix_coloredit}\n"
-                "Abre um editor interativo pra adicionar, remover ou trocar "
-                "cores do painel — escolhe nome, hex e ícone de cada uma. As "
-                "mudanças aplicam no painel publicado automaticamente.\n\n"
-                "\u23F1\ufe0f Cooldown curto entre publicações pra evitar spam de painéis."
+                "Abre um editor interativo para adicionar, remover ou trocar cores do painel — "
+                "escolhe nome, hex e ícone de cada uma. As mudanças aplicam no painel publicado automaticamente.\n\n"
+                "Cooldown curto entre publicações para evitar spam de painéis."
             ),
             accent=discord.Color.from_rgb(255, 105, 180),
         ))
 
         # === Página 7 — Utilidades ============================================
         pages.append(HelpPage(
-            title="\U0001F9F0 Utilidades",
+            title="🧰 Utilidades",
             body=(
-                "\U0001F6E0\ufe0f Comandos gerais e diagnósticos rápidos.\n\n"
-                f"### \U0001F3D3 Ping\n"
+                "Comandos gerais e diagnósticos rápidos.\n\n"
+                f"### Ping\n"
                 f"{ping_slash}\n"
                 "Latência, uptime, uso de recursos e status geral do bot.\n\n"
-                f"### \U0001F4D6 Help\n"
+                f"### Help\n"
                 f"{help_slash} ou {prefix_help}\n"
                 "Abre esta central de ajuda. O número no centro do paginator "
-                "abre um modal pra pular direto pra qualquer página."
+                "abre um modal para pular direto para qualquer página."
             ),
             accent=discord.Color.teal(),
         ))
 
         # === Página 8 — Economia ==============================================
         pages.append(HelpPage(
-            title="\U0001FA99 Economia",
+            title="🪙 Economia",
             body=(
-                "\U0001F4B0 Saldo, daily, recarga, pagamentos e ranking. Triggers como "
-                "`ficha` ou `daily` funcionam digitando a palavra sozinha "
-                "no chat (sem prefixo).\n\n"
-                "### \u26A1 Atalhos do dia a dia\n"
-                f"\U0001F4B5 Saldo: `{bot_prefix}ficha` ou `ficha`\n"
-                "\U0001F4DC Extrato: `extrato` — 10 últimas movimentações\n"
-                f"\U0001F381 Daily: `{bot_prefix}daily` ou `daily`\n"
-                "\U0001F9EF Recarga: `recarga` — volta saldo pra 100 quando está abaixo de 15\n"
-                f"\U0001F3C6 Ranking: `{bot_prefix}rank` ou `rank`\n"
-                "\U0001F91D Pagar: `pay @usuário valor`\n"
-                "\U0001F97A Mendigar: `mendigar valor` ou `mendigar valor @usuário`\n\n"
-                "### \U0001F9EE Como funciona o saldo\n"
-                "Fichas bônus saem antes das normais nas apostas, e ganhos "
-                "quitam dívida primeiro antes de voltar pro saldo. O daily "
-                "dá fichas normais, fichas bônus e libera os giros extras "
-                "do dia.\n\n"
-                "### \U0001F6E1\ufe0f Painel de staff\n"
+                "Saldo, daily, recarga, pagamentos e ranking. Triggers como `ficha` ou `daily` "
+                "funcionam digitando a palavra sozinha no chat, sem prefixo.\n\n"
+                "### Atalhos do dia a dia\n"
+                f"Saldo: `{bot_prefix}ficha` ou `ficha`\n"
+                "Extrato: `extrato` — 10 últimas movimentações\n"
+                f"Daily: `{bot_prefix}daily` ou `daily`\n"
+                "Recarga: `recarga` — volta saldo para 100 quando está abaixo de 15\n"
+                f"Ranking: `{bot_prefix}rank` ou `rank`\n"
+                "Pagar: `pay @usuário valor`\n"
+                "Mendigar: `mendigar valor` ou `mendigar valor @usuário`\n\n"
+                "### Como funciona o saldo\n"
+                "Fichas bônus saem antes das normais nas apostas, e ganhos quitam dívida primeiro "
+                "antes de voltar para o saldo. O daily dá fichas normais, fichas bônus e libera "
+                "os giros extras do dia.\n\n"
+                "### Painel de staff\n"
                 f"`{bot_prefix}painelficha` (alias: `fichapainel`, `adminficha`)\n"
-                "Painel completo pra ajustar saldo, resetar usuário ou "
-                "resetar o servidor inteiro. Qualquer staff com permissão "
-                "**Expulsar membros** pode usar todos os botões.\n\n"
-                "### \u2699\ufe0f Configuração\n"
+                "Painel completo para ajustar saldo, resetar usuário ou resetar o servidor inteiro. "
+                "Qualquer staff com permissão **Expulsar membros** pode usar todos os botões.\n\n"
+                "### Configuração\n"
                 f"{economia_slash}\n"
-                "Ativa/desativa a economia, define cargo staff, gerencia "
-                "roles que recebem features extras."
+                "Ativa/desativa a economia, define cargo staff e gerencia roles que recebem features extras."
             ),
             accent=discord.Color.orange(),
         ))
 
         # === Página 9 — Jogos =================================================
         pages.append(HelpPage(
-            title="\U0001F3AE Jogos",
+            title="🎮 Jogos",
             body=(
-                "\U0001F3B2 Triggers são palavras digitadas sozinhas no chat. Se faltar "
-                "saldo, o jogo avisa antes de te jogar no vermelho.\n\n"
-                "### \u26A1 Apostas rápidas\n"
-                "\U0001F3B0 `roleta` — aposta com jackpot\n"
-                "\U0001F0CF `carta` ou `cartas` — saque rápido de cartas\n\n"
-                "### \U0001F3C1 Lobbies com botão pra entrar\n"
-                "\U0001F52B `buckshot` — rodada de sobrevivência\n"
-                "\U0001F3AF `alvo` — disputa de mira\n"
-                "\U0001F40E `corrida` — corrida de cavalos\n\n"
-                "### \U0001F0CF Mesas\n"
-                "\u2660\ufe0f `poker` — mesa de poker com entrada própria\n"
-                "\U0001F0CF `truco @usuário` — desafio de truco 1v1\n"
-                "\U0001F465 `truco2` — truco em duplas 2v2\n\n"
-                "### \U0001F575\ufe0f Roubo\n"
-                "\U0001F4B0 `roubar @usuário` — alias `rob @usuário`\n"
-                "Tenta roubar parte do saldo do alvo. Pode falhar; tem "
-                "janela com cooldown."
+                "Triggers são palavras digitadas sozinhas no chat. Se faltar saldo, "
+                "o jogo avisa antes de te jogar no vermelho.\n\n"
+                "### Apostas rápidas\n"
+                "`roleta` — aposta com jackpot\n"
+                "`carta` ou `cartas` — saque rápido de cartas\n\n"
+                "### Lobbies com botão para entrar\n"
+                "`buckshot` — rodada de sobrevivência\n"
+                "`alvo` — disputa de mira\n"
+                "`corrida` — corrida de cavalos\n\n"
+                "### Mesas\n"
+                "`poker` — mesa de poker com entrada própria\n"
+                "`truco @usuário` — desafio de truco 1v1\n"
+                "`truco2` — truco em duplas 2v2\n\n"
+                "### Roubo\n"
+                "`roubar @usuário` — alias `rob @usuário`\n"
+                "Tenta roubar parte do saldo do alvo. Pode falhar; tem janela com cooldown."
             ),
             accent=discord.Color.dark_magenta(),
         ))
