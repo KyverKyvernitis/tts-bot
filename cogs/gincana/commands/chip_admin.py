@@ -65,7 +65,7 @@ class _AdminUserResetModal(discord.ui.Modal, title="Resetar usuário"):
         self.opener_id = int(opener_id)
 
     async def on_submit(self, interaction: discord.Interaction):
-        if not await self.cog._chip_admin_validate_interaction(interaction, opener_id=self.opener_id, owner_only=True):
+        if not await self.cog._chip_admin_validate_interaction(interaction, opener_id=self.opener_id, owner_only=False):
             return
         guild = interaction.guild
         if guild is None:
@@ -89,7 +89,7 @@ class _AdminServerResetModal(discord.ui.Modal, title="Resetar servidor"):
         self.opener_id = int(opener_id)
 
     async def on_submit(self, interaction: discord.Interaction):
-        if not await self.cog._chip_admin_validate_interaction(interaction, opener_id=self.opener_id, owner_only=True):
+        if not await self.cog._chip_admin_validate_interaction(interaction, opener_id=self.opener_id, owner_only=False):
             return
         guild = interaction.guild
         if guild is None:
@@ -115,12 +115,11 @@ class _ChipAdminPanelView(discord.ui.LayoutView):
         super().__init__(timeout=600)
         self.cog = cog
         self.opener_id = int(opener_id)
-        owner = _is_owner(self.opener_id)
         adjust_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label='Ajustar usuário', emoji='💰')
         adjust_button.callback = self._adjust_user
-        reset_user_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label='Resetar usuário', emoji='♻️', disabled=not owner)
+        reset_user_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label='Resetar usuário', emoji='♻️')
         reset_user_button.callback = self._reset_user
-        reset_server_button = discord.ui.Button(style=discord.ButtonStyle.danger, label='Resetar servidor', emoji='🧨', disabled=not owner)
+        reset_server_button = discord.ui.Button(style=discord.ButtonStyle.danger, label='Resetar servidor', emoji='🧨')
         reset_server_button.callback = self._reset_server
         close_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label='Fechar', emoji='✖️')
         close_button.callback = self._close_panel
@@ -128,7 +127,7 @@ class _ChipAdminPanelView(discord.ui.LayoutView):
         lines = [
             '# 🛠️ Painel de fichas',
             'Ajuste fichas normais e bônus em um só lugar.',
-            'Staff pode ajustar saldo. Resetar usuário e servidor é exclusivo do dono do bot.',
+            'Qualquer staff pode usar todos os botões.',
             'Valores negativos são aceitos nas fichas normais.',
         ]
         self.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(lines)), row, accent_color=discord.Color.blurple()))
@@ -139,12 +138,15 @@ class _ChipAdminPanelView(discord.ui.LayoutView):
         await interaction.response.send_modal(_AdminUserAdjustModal(self.cog, self.opener_id))
 
     async def _reset_user(self, interaction: discord.Interaction):
-        if not await self.cog._chip_admin_validate_interaction(interaction, opener_id=self.opener_id, owner_only=True, send_response=False):
+        # Antes: owner_only=True (só dono do bot resetava usuários).
+        # Agora: qualquer staff que abriu o painel.
+        if not await self.cog._chip_admin_validate_interaction(interaction, opener_id=self.opener_id, owner_only=False, send_response=False):
             return
         await interaction.response.send_modal(_AdminUserResetModal(self.cog, self.opener_id))
 
     async def _reset_server(self, interaction: discord.Interaction):
-        if not await self.cog._chip_admin_validate_interaction(interaction, opener_id=self.opener_id, owner_only=True, send_response=False):
+        # Antes: owner_only=True (só dono do bot). Agora: qualquer staff.
+        if not await self.cog._chip_admin_validate_interaction(interaction, opener_id=self.opener_id, owner_only=False, send_response=False):
             return
         await interaction.response.send_modal(_AdminServerResetModal(self.cog, self.opener_id))
 

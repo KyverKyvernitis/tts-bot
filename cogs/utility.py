@@ -19,8 +19,72 @@ HEALTH_COMMAND_GUILD_ID = 927002914449424404
 HEALTH_COMMAND_GUILD = discord.Object(id=HEALTH_COMMAND_GUILD_ID)
 
 
-class HelpPaginatorView(discord.ui.View):
-    def __init__(self, cog: "Utility", *, owner_id: int, pages: list[discord.Embed], command_mention: str, prefix_hint: str, timeout: float = 180):
+from dataclasses import dataclass
+
+
+@dataclass
+class HelpPage:
+    """Página do help. `body` é markdown que vai dentro de um TextDisplay; o
+    Discord cuida da renderização. `title` aparece como heading com ##."""
+    title: str
+    body: str
+    accent: discord.Color
+
+
+class _HelpPageJumpModal(discord.ui.Modal, title="Ir para página"):
+    """Modal acionado pelo botão central do paginator. O usuário digita o
+    número da página e o paginator muda de página direto, sem ter que clicar
+    várias vezes em prev/next."""
+
+    page_input = discord.ui.TextInput(
+        label="Número da página",
+        placeholder="Ex: 5",
+        required=True,
+        max_length=2,
+    )
+
+    def __init__(self, view: "HelpPaginatorView"):
+        super().__init__(timeout=60)
+        self.view_ref = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.page_input.value or "").strip()
+        try:
+            target = int(raw)
+        except ValueError:
+            await interaction.response.send_message(
+                "Digite só o número da página.",
+                ephemeral=True,
+            )
+            return
+        total = len(self.view_ref.pages)
+        if target < 1 or target > total:
+            await interaction.response.send_message(
+                f"Página fora do intervalo. Use 1 a {total}.",
+                ephemeral=True,
+            )
+            return
+        self.view_ref.page_index = target - 1
+        self.view_ref._rebuild_layout()
+        await interaction.response.edit_message(view=self.view_ref)
+
+
+class HelpPaginatorView(discord.ui.LayoutView):
+    """Paginator do help em Components V2. Usa Container + TextDisplay no lugar
+    de Embed pra ter layout mais limpo. O botão central abre um modal de
+    seleção rápida em vez de só mostrar o número."""
+
+    def __init__(
+        self,
+        cog: "Utility",
+        *,
+        owner_id: int,
+        pages: list[HelpPage],
+        command_mention: str,
+        prefix_hint: str,
+        bot_avatar_url: str | None = None,
+        timeout: float = 180,
+    ):
         requested_timeout = max(1.0, float(timeout or HELP_EXPIRE_AFTER_SECONDS))
         dispatch_timeout = max(requested_timeout, HELP_DISPATCH_TIMEOUT_SECONDS)
         super().__init__(timeout=dispatch_timeout)
@@ -29,32 +93,71 @@ class HelpPaginatorView(discord.ui.View):
         self.pages = pages
         self.command_mention = str(command_mention or "`/help`")
         self.prefix_hint = str(prefix_hint or "`help`")
+        self.bot_avatar_url = bot_avatar_url
         self.page_index = 0
         self.message: discord.Message | None = None
         self.expires_at_monotonic = time.monotonic() + requested_timeout
-        self._refresh_buttons()
+        self._rebuild_layout()
 
-    def _is_expired(self) -> bool:
-        return time.monotonic() >= self.expires_at_monotonic
+    def _rebuild_layout(self) -> None:
+        """Reconstrói os componentes V2 com a página atual. Chamado a cada
+        navegação porque a estrutura inteira do Container muda."""
+        # Limpa items existentes do LayoutView e reanexa.
+        for item in list(self.children):
+            self.remove_item(item)
 
-    def _refresh_buttons(self) -> None:
+        page = self.pages[self.page_index]
         total = max(1, len(self.pages))
         at_start = self.page_index <= 0
         at_end = self.page_index >= total - 1
 
-        self.first_button.disabled = at_start
-        self.prev_button.disabled = at_start
-        self.page_button.label = f"{self.page_index + 1}/{total}"
-        self.page_button.disabled = True
-        self.next_button.disabled = at_end
-        self.last_button.disabled = at_end
+        # Conteúdo: heading + corpo. Footer com índice da página.
+        body_text = (
+            f"## {page.title}\n"
+            f"{page.body}\n\n"
+            f"-# Página {self.page_index + 1} de {total} • use os botões abaixo para navegar"
+        )
 
-        self.clear_items()
-        self.add_item(self.first_button)
-        self.add_item(self.prev_button)
-        self.add_item(self.page_button)
-        self.add_item(self.next_button)
-        self.add_item(self.last_button)
+        # Linha de botões: ⏪ ◀ N/Total ▶ ⏩
+        first = discord.ui.Button(
+            emoji="⏪", style=discord.ButtonStyle.secondary, disabled=at_start,
+        )
+        first.callback = self._go_first
+
+        prev_b = discord.ui.Button(
+            emoji="◀️", style=discord.ButtonStyle.secondary, disabled=at_start,
+        )
+        prev_b.callback = self._go_prev
+
+        # Botão central — clicar abre modal de jump.
+        jump = discord.ui.Button(
+            label=f"{self.page_index + 1}/{total}",
+            style=discord.ButtonStyle.primary,
+        )
+        jump.callback = self._open_jump_modal
+
+        next_b = discord.ui.Button(
+            emoji="▶️", style=discord.ButtonStyle.secondary, disabled=at_end,
+        )
+        next_b.callback = self._go_next
+
+        last = discord.ui.Button(
+            emoji="⏩", style=discord.ButtonStyle.secondary, disabled=at_end,
+        )
+        last.callback = self._go_last
+
+        action_row = discord.ui.ActionRow(first, prev_b, jump, next_b, last)
+
+        container = discord.ui.Container(
+            discord.ui.TextDisplay(body_text),
+            discord.ui.Separator(),
+            action_row,
+            accent_color=page.accent,
+        )
+        self.add_item(container)
+
+    def _is_expired(self) -> bool:
+        return time.monotonic() >= self.expires_at_monotonic
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self._is_expired():
@@ -87,35 +190,33 @@ class HelpPaginatorView(discord.ui.View):
     async def on_timeout(self) -> None:
         pass
 
-    @discord.ui.button(emoji="⏪", style=discord.ButtonStyle.secondary, row=0)
-    async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _go_first(self, interaction: discord.Interaction):
         self.page_index = 0
-        self._refresh_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
+        self._rebuild_layout()
+        await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
-    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _go_prev(self, interaction: discord.Interaction):
         if self.page_index > 0:
             self.page_index -= 1
-        self._refresh_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
+        self._rebuild_layout()
+        await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(label="1/1", style=discord.ButtonStyle.primary, disabled=True, row=0)
-    async def page_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        pass
+    async def _open_jump_modal(self, interaction: discord.Interaction):
+        # Botão central: em vez de ser desabilitado, agora abre modal com
+        # input pra digitar a página. Mais rápido que apertar prev/next várias
+        # vezes pra chegar na página 8.
+        await interaction.response.send_modal(_HelpPageJumpModal(self))
 
-    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary, row=0)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _go_next(self, interaction: discord.Interaction):
         if self.page_index < len(self.pages) - 1:
             self.page_index += 1
-        self._refresh_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
+        self._rebuild_layout()
+        await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(emoji="⏩", style=discord.ButtonStyle.secondary, row=0)
-    async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _go_last(self, interaction: discord.Interaction):
         self.page_index = max(0, len(self.pages) - 1)
-        self._refresh_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.page_index], view=self)
+        self._rebuild_layout()
+        await interaction.response.edit_message(view=self)
 
 
 class Utility(commands.Cog):
@@ -166,27 +267,25 @@ class Utility(commands.Cog):
             include_global_fallback=True,
         )
 
-    def _build_help_embeds(self, *, guild: discord.Guild | None, prefixes: dict[str, str], root_ids: dict[str, int]) -> list[discord.Embed]:
+    def _build_help_pages(self, *, guild: discord.Guild | None, prefixes: dict[str, str], root_ids: dict[str, int]) -> list[HelpPage]:
         bot_prefix = prefixes["bot_prefix"]
         gtts_prefix = prefixes["gtts_prefix"]
         edge_prefix = prefixes["edge_prefix"]
         gcloud_prefix = prefixes["gcloud_prefix"]
 
+        # Slash mentions: cada um vira `</nome:ID>` no Discord (clicável). Quando
+        # o root não está no cache (comando guild-only fora da guild correta,
+        # por exemplo), o helper retorna texto literal `/path`.
         help_slash = slash_mention(root_ids, root="help", path="help")
         ping_slash = slash_mention(root_ids, root="ping", path="ping")
         tts_menu_slash = slash_mention(root_ids, root="tts", path="tts menu")
         tts_status_slash = slash_mention(root_ids, root="tts", path="tts status")
         tts_user_slash = slash_mention(root_ids, root="tts", path="tts usuario")
         tts_server_menu_slash = slash_mention(root_ids, root="tts", path="tts server menu")
-
-        # Mentions adicionais pra chatbot, toggles, cores e economia.
-        # slash_mention retorna `</nome:0>` se o root não estiver no cache;
-        # quando o comando é de outra árvore, fallback é o texto literal.
         chatbot_profile_slash = slash_mention(root_ids, root="chatbot", path="chatbot profile")
         chatbot_memoria_slash = slash_mention(root_ids, root="chatbot", path="chatbot memoria")
         imagem_slash = slash_mention(root_ids, root="imagem", path="imagem")
         chatbot_reset_slash = slash_mention(root_ids, root="reset", path="reset")
-        toggle_menu_slash = slash_mention(root_ids, root="toggle_menu", path="toggle_menu")
         economia_slash = slash_mention(root_ids, root="economia", path="economia")
 
         prefix_help = format_prefixed_aliases(bot_prefix, "help")
@@ -195,433 +294,248 @@ class Utility(commands.Cog):
         prefix_join = format_prefixed_aliases(bot_prefix, "join")
         prefix_leave = format_prefixed_aliases(bot_prefix, "leave")
         prefix_clear = format_prefixed_aliases(bot_prefix, "clear")
-        prefix_reset = f"{format_prefixed_aliases(bot_prefix, 'reset')} `@usuário`"
-        prefix_set_lang = f"{format_prefixed_aliases(bot_prefix, 'set_lang')} `pt`"
+        prefix_reset = format_prefixed_aliases(bot_prefix, "reset")
+        prefix_set_lang = format_prefixed_aliases(bot_prefix, "set_lang")
         prefix_color = format_prefixed_aliases(bot_prefix, "color")
         prefix_coloredit = format_prefixed_aliases(bot_prefix, "coloredit")
 
-        pages: list[discord.Embed] = []
+        pages: list[HelpPage] = []
 
-        overview = discord.Embed(
-            title="📘 Central de ajuda do TTS",
-            description=(
-                f"Tudo que importa no bot, separado por categoria e com exemplos práticos pra você achar o comando certo sem enrolação."
-            ),
-            color=discord.Color.blurple(),
-            timestamp=discord.utils.utcnow(),
+        # === Página 1 — Visão geral ===========================================
+        nav = (
+            "**1.** visão geral\n"
+            "**2.** atalhos de fala\n"
+            "**3.** comandos do usuário\n"
+            "**4.** comandos de servidor\n"
+            "**5.** chatbot e imagens\n"
+            "**6.** cores\n"
+            "**7.** utilidades\n"
+            "**8.** economia\n"
+            "**9.** jogos"
         )
-        overview.add_field(
-            name="🧭 Navegação",
-            value=(
-                "**Página 1** • visão geral\n"
-                "**Página 2** • atalhos de fala por prefixo\n"
-                "**Página 3** • comandos do usuário\n"
-                "**Página 4** • comandos de servidor\n"
-                "**Página 5** • chatbot e imagens\n"
-                "**Página 6** • cores e outros\n"
-                "**Página 7** • utilidades\n"
-                "**Página 8** • economia\n"
-                "**Página 9** • jogos"
-            ),
-            inline=False,
+        prefixes_text = (
+            f"**bot:** `{bot_prefix}`  •  **gTTS:** `{gtts_prefix}`  •  "
+            f"**edge:** `{edge_prefix}`  •  **gcloud:** `{gcloud_prefix}`"
         )
-        overview.add_field(
-            name="⚙️ Prefixos ativos",
-            value=(
-                f"**Bot:** `{bot_prefix}`\n"
-                f"**gTTS:** `{gtts_prefix}`\n"
-                f"**Edge:** `{edge_prefix}`\n"
-                f"**Google Cloud:** `{gcloud_prefix}`"
-            ),
-            inline=True,
+        quick_start = (
+            f"{help_slash} ou {prefix_help} — abrem este help\n"
+            f"{tts_menu_slash} ou {prefix_panel} — painel pessoal de TTS\n"
+            f"`{edge_prefix}oi cheguei na call` — fala via Edge\n"
+            f"`{gtts_prefix}teste de voz` — fala via gTTS"
         )
-        overview.add_field(
-            name="✨ Começo rápido",
-            value=(
-                f"{help_slash} ou {prefix_help}\n"
+        pages.append(HelpPage(
+            title="Central de ajuda",
+            body=(
+                "Tudo que importa, separado por categoria. Use os botões "
+                "abaixo pra navegar — o número no centro abre uma seleção "
+                "rápida de página.\n\n"
+                f"### Navegação\n{nav}\n\n"
+                f"### Prefixos ativos neste servidor\n{prefixes_text}\n\n"
+                f"### Começo rápido\n{quick_start}"
+            ),
+            accent=discord.Color.blurple(),
+        ))
+
+        # === Página 2 — Atalhos de fala =======================================
+        pages.append(HelpPage(
+            title="Atalhos de fala",
+            body=(
+                "Não são painéis — são **prefixos**. Você manda a mensagem "
+                "começando com o prefixo e o bot fala.\n\n"
+                f"### gTTS — `{gtts_prefix}`\n"
+                f"Exemplo: `{gtts_prefix}olá tudo bem`\n"
+                "Voz padrão da web, leve, funciona em qualquer cenário.\n\n"
+                f"### Edge — `{edge_prefix}`\n"
+                f"Exemplo: `{edge_prefix}essa frase vai no edge`\n"
+                "Vozes neurais da Microsoft. Mais natural, várias opções por "
+                "idioma.\n\n"
+                f"### Google Cloud — `{gcloud_prefix}`\n"
+                f"Exemplo: `{gcloud_prefix}essa fala usa o google cloud`\n"
+                "Vozes premium do Google. Qualidade alta, requer config no "
+                "servidor.\n\n"
+                "Voz, idioma, velocidade e tom usados nesses prefixos seguem "
+                f"o painel pessoal ({tts_menu_slash}) ou o painel do "
+                "servidor."
+            ),
+            accent=discord.Color.purple(),
+        ))
+
+        # === Página 3 — Comandos do usuário ===================================
+        pages.append(HelpPage(
+            title="Comandos do usuário",
+            body=(
+                "Painéis pessoais e atalhos voltados pra cada membro.\n\n"
+                f"### Painel pessoal\n"
                 f"{tts_menu_slash} ou {prefix_panel}\n"
-                f"`{edge_prefix}oi, cheguei na call`\n"
-                f"`{gtts_prefix}teste de voz`"
+                "Abre o painel principal do seu TTS — botões e menus pra mexer "
+                "em voz, idioma, velocidade, tom e apelido falado sem precisar "
+                "decorar comando.\n\n"
+                f"### Status do TTS\n"
+                f"{tts_status_slash}\n"
+                "Vê o seu status, mostra o de outro usuário ou copia a config "
+                "dele pra você. Ações: `self`, `show_other`, `copy_other`.\n\n"
+                f"### Gerenciar outro usuário\n"
+                f"{tts_user_slash}\n"
+                "Abre o painel de outro usuário, troca o apelido falado dele "
+                "ou reseta as configs. Ações: `panel`, `spoken_name`, `reset`."
             ),
-            inline=True,
-        )
-        pages.append(overview)
+            accent=discord.Color.green(),
+        ))
 
-        speech_page = discord.Embed(
-            title="🎙️ Atalhos de fala por prefixo",
-            description="Esses não são painéis; são os prefixos que fazem o bot falar a mensagem diretamente.",
-            color=discord.Color.purple(),
-            timestamp=discord.utils.utcnow(),
-        )
-        speech_page.add_field(
-            name="🌐 gTTS",
-            value=(
-                f"**Prefixo:** `{gtts_prefix}`\n"
-                f"**Exemplo:** `{gtts_prefix}olá, tudo bem?`\n"
-                "**Uso:** fala a mensagem usando o modo gTTS."
+        # === Página 4 — Comandos de servidor ==================================
+        pages.append(HelpPage(
+            title="Comandos do servidor",
+            body=(
+                "Itens de staff. Os marcados com 🔒 dependem da permissão "
+                "**Expulsar membros**.\n\n"
+                f"### 🔒 Painel do servidor\n"
+                f"{tts_server_menu_slash} ou {prefix_server_panel}\n"
+                "Define os padrões do servidor — prefixos, engine padrão, "
+                "permissões e configs globais.\n\n"
+                "### Conexão\n"
+                f"Entrar na call: {prefix_join}\n"
+                f"Sair da call: {prefix_leave}\n"
+                f"Limpar fila: {prefix_clear}\n\n"
+                "### 🔒 Atalhos rápidos\n"
+                f"Resetar um usuário: {prefix_reset} `@usuário`\n"
+                f"Trocar idioma pessoal do gTTS: {prefix_set_lang} `pt`"
             ),
-            inline=False,
-        )
-        speech_page.add_field(
-            name="🗣️ Edge",
-            value=(
-                f"**Prefixo:** `{edge_prefix}`\n"
-                f"**Exemplo:** `{edge_prefix}essa frase vai no edge`\n"
-                "**Uso:** fala a mensagem usando o modo Edge."
-            ),
-            inline=False,
-        )
-        speech_page.add_field(
-            name="☁️ Google Cloud",
-            value=(
-                f"**Prefixo:** `{gcloud_prefix}`\n"
-                f"**Exemplo:** `{gcloud_prefix}essa frase vai no google cloud`\n"
-                "**Uso:** fala a mensagem usando o modo Google Cloud."
-            ),
-            inline=False,
-        )
-        speech_page.add_field(
-            name="📝 Observação",
-            value="As vozes, idiomas e ajustes usados nesses prefixos podem mudar conforme o painel do usuário ou o painel do servidor.",
-            inline=False,
-        )
-        pages.append(speech_page)
+            accent=discord.Color.gold(),
+        ))
 
-        user_page = discord.Embed(
-            title="👤 Comandos do usuário",
-            description="Painéis pessoais, status e ajustes voltados para cada membro.",
-            color=discord.Color.green(),
-            timestamp=discord.utils.utcnow(),
-        )
-        user_page.add_field(
-            name="🟢 Painel pessoal",
-            value=(
-                f"**Slash:** {tts_menu_slash}\n"
-                f"**Prefixo:** {prefix_panel}\n"
-                "**Uso:** abre o painel principal do seu TTS com botões e menus."
-            ),
-            inline=False,
-        )
-        user_page.add_field(
-            name="🏠 Status do TTS",
-            value=(
-                f"**Slash:** {tts_status_slash}\n"
-                "**Uso:** ver o próprio status, mostrar o de outro usuário ou copiar a configuração dele.\n"
-                "**Exemplos:** `acao=self`, `acao=show_other`, `acao=copy_other`."
-            ),
-            inline=False,
-        )
-        user_page.add_field(
-            name="🔒 Gerenciar um usuário",
-            value=(
-                f"**Slash:** {tts_user_slash}\n"
-                "**Uso:** abrir o painel de outro usuário, trocar o apelido falado ou resetar as configurações dele.\n"
-                "**Ações:** `panel`, `spoken_name`, `reset`."
-            ),
-            inline=False,
-        )
-        user_page.add_field(
-            name="💡 Dica",
-            value="O painel pessoal é o atalho mais completo quando você quer mexer em voz, idioma, velocidade, tom e apelido falado sem decorar comando.",
-            inline=False,
-        )
-        pages.append(user_page)
-
-        server_page = discord.Embed(
-            title="🏠 Comandos de servidor e moderação",
-            description="Ferramentas para administrar o comportamento do TTS no servidor.",
-            color=discord.Color.gold(),
-            timestamp=discord.utils.utcnow(),
-        )
-        server_page.add_field(
-            name="🔒 Painel do servidor",
-            value=(
-                f"**Slash:** {tts_server_menu_slash}\n"
-                f"**Prefixo:** {prefix_server_panel}\n"
-                "**Uso:** abre o painel com os padrões do servidor, como prefixos, engine padrão e configurações globais."
-            ),
-            inline=False,
-        )
-        server_page.add_field(
-            name="🏠 Controle de conexão",
-            value=(
-                f"**Entrar na call:** {prefix_join}\n"
-                f"**Sair da call:** {prefix_leave}\n"
-                f"**Limpar fila:** {prefix_clear}"
-            ),
-            inline=False,
-        )
-        server_page.add_field(
-            name="🔒 Administração rápida por prefixo",
-            value=(
-                f"**Resetar um usuário:** {prefix_reset}\n"
-                f"**Trocar idioma pessoal do gTTS:** {prefix_set_lang}"
-            ),
-            inline=False,
-        )
-        server_page.add_field(
-            name="🛡️ Permissão",
-            value="Os itens marcados com 🔒 dependem da permissão `Expulsar Membros`.",
-            inline=False,
-        )
-        pages.append(server_page)
-
-        # --- Página: chatbot e imagens ----------------------------------------
-        chatbot_page = discord.Embed(
-            title="🤖 Chatbot e imagens",
-            description=(
+        # === Página 5 — Chatbot e imagens =====================================
+        pages.append(HelpPage(
+            title="Chatbot e imagens",
+            body=(
                 "Personagens conversacionais (profiles), geração de imagem e "
-                "memória do chatbot. Configurações de profile exigem permissão "
-                "Manage Server."
+                "memória do chatbot. Profiles exigem **Manage Server**.\n\n"
+                f"### Profiles\n"
+                f"{chatbot_profile_slash}\n"
+                "Cria, lista, edita, apaga, ativa ou desativa profiles do "
+                "chatbot no servidor. Ações: `Criar`, `Listar`, `Editar`, "
+                "`Apagar`, `Ativar`, `Desativar`.\n"
+                "Só um profile fica ativo por servidor — ele é quem responde "
+                "menções e replies. Outros profiles podem ser invocados "
+                "temporariamente com `@nome` em uma mensagem.\n\n"
+                f"### Geração de imagem\n"
+                f"{imagem_slash} `prompt`\n"
+                "Gera uma imagem a partir do texto. Quanto mais específico o "
+                "prompt, melhor — \"floresta de pinheiros ao amanhecer, "
+                "neblina, fotografia\" rende mais que \"árvore\".\n\n"
+                f"### Memória\n"
+                f"Reset pessoal: {chatbot_reset_slash}\n"
+                "Limpa só a sua conversa pessoal com o profile ativo. "
+                "Qualquer membro pode rodar pra si mesmo.\n\n"
+                f"Reset do servidor: {chatbot_memoria_slash}\n"
+                "Apaga toda a memória do chatbot no servidor — pessoal de "
+                "cada membro mais a coletiva, todos os profiles. "
+                "Irreversível, exige Manage Server.\n\n"
+                "### Como conversar\n"
+                "Mencione (`@bot`) ou responda a uma mensagem dele pra "
+                "continuar a conversa. Use `@nome do profile` pra invocar "
+                "**outro** profile temporariamente sem trocar o ativo. "
+                "Imagens e áudios anexados são entendidos pelo profile."
             ),
-            color=discord.Color.fuchsia(),
-            timestamp=discord.utils.utcnow(),
-        )
-        chatbot_page.add_field(
-            name="🎭 Profiles",
-            value=(
-                f"**Slash:** {chatbot_profile_slash}\n"
-                "**Uso:** criar, listar, editar, apagar, ativar ou desativar profiles "
-                "(personagens) do chatbot no servidor.\n"
-                "**Ações:** `Criar`, `Listar`, `Editar`, `Apagar`, `Ativar`, `Desativar`.\n"
-                "Apenas um profile fica ativo por servidor — ele responde a menções "
-                "e replies. Outros profiles podem ser invocados temporariamente "
-                "via `@nome` em uma mensagem."
-            ),
-            inline=False,
-        )
-        chatbot_page.add_field(
-            name="🖼️ Geração de imagem",
-            value=(
-                f"**Slash:** {imagem_slash} `prompt`\n"
-                "**Uso:** gera uma imagem a partir do texto.  "
-                "(gerador "
-                "a "
-                "esses pedidos.\n"
-                "**Dica:** seja específico no prompt — \"floresta de pinheiros "
-                "ao amanhecer, neblina, fotografia\" rende melhor que \"árvore\"."
-            ),
-            inline=False,
-        )
-        chatbot_page.add_field(
-            name="🧹 Memória",
-            value=(
-                f"**Reset pessoal:** {chatbot_reset_slash}\n"
-                "Limpa a sua conversa pessoal com o profile ativo (qualquer membro "
-                "pode rodar pra si mesmo).\n"
-                f"\n**Reset do servidor:** {chatbot_memoria_slash}\n"
-                "Apaga toda a memória do chatbot no servidor — pessoal de cada "
-                "membro + coletiva, todos os profiles. Operação irreversível, "
-                "exige Manage Server."
-            ),
-            inline=False,
-        )
-        chatbot_page.add_field(
-            name="💡 Como conversar",
-            value=(
-                "• Mencione o profile ativo (`@bot`) ou responda a uma mensagem "
-                "dele pra continuar a conversa.\n"
-                "• Use `@nome do profile` pra invocar **outro** profile "
-                "temporariamente (sem trocar o ativo).\n"
-                "• Anexe imagens/áudios — o profile entende e reage."
-            ),
-            inline=False,
-        )
-        pages.append(chatbot_page)
+            accent=discord.Color.fuchsia(),
+        ))
 
-        # --- Página: cores e outros -------------------------------------------
-        others_page = discord.Embed(
-            title="🎨 Cores, toggles e outros",
-            description=(
-                "Customizações pessoais e ajustes rápidos por servidor."
+        # === Página 6 — Cores =================================================
+        pages.append(HelpPage(
+            title="Cores",
+            body=(
+                "Painel de cargos coloridos do servidor. Comandos exigem "
+                "**Administrador**.\n\n"
+                f"### Publicar o painel\n"
+                f"{prefix_color}\n"
+                "Posta o painel público de cores no canal atual. Os membros "
+                "clicam na cor que quiserem e ganham o cargo correspondente. "
+                "Substitui o painel anterior se já existir um.\n\n"
+                f"### Editar as cores disponíveis\n"
+                f"{prefix_coloredit}\n"
+                "Abre um editor interativo pra adicionar, remover ou trocar "
+                "cores do painel — escolhe nome, hex e ícone de cada uma. As "
+                "mudanças aplicam no painel publicado automaticamente.\n\n"
+                "Cooldown curto entre publicações pra evitar spam de painéis."
             ),
-            color=discord.Color.magenta(),
-            timestamp=discord.utils.utcnow(),
-        )
-        others_page.add_field(
-            name="🌈 Cores personalizadas",
-            value=(
-                f"**Pedir uma cor:** {prefix_color} `#hex` ou nome\n"
-                f"**Editar a sua cor:** {prefix_coloredit} `#hex`\n"
-                "**Uso:** cria/atualiza um cargo só seu com a cor escolhida. "
-                "Útil pra destacar seu nome no chat sem depender da staff."
-            ),
-            inline=False,
-        )
-        others_page.add_field(
-            name="🎛️ Toggles do TTS",
-            value=(
-                f"**Slash:** {toggle_menu_slash}\n"
-                "**Uso:** painel guiado pros toggles de TTS — auto-join, "
-                "ignore-list, filtros e mais. Mais rápido que decorar "
-                "comandos individuais."
-            ),
-            inline=False,
-        )
-        others_page.add_field(
-            name="🏠 Painel completo do servidor",
-            value=(
-                f"**Slash:** {tts_server_menu_slash}\n"
-                f"**Prefixo:** {prefix_server_panel}\n"
-                "**Uso:** painel mestre do servidor. Define prefixos, engine "
-                "padrão, permissões. Exige Manage Server."
-            ),
-            inline=False,
-        )
-        pages.append(others_page)
+            accent=discord.Color.from_rgb(255, 105, 180),
+        ))
 
-        utility_page = discord.Embed(
-            title="🧰 Utilidades",
-            description="Comandos gerais do bot para consulta rápida.",
-            color=discord.Color.teal(),
-            timestamp=discord.utils.utcnow(),
-        )
-        utility_page.add_field(
-            name="🏓 Ping",
-            value=(
-                f"**Slash:** {ping_slash}\n"
-                "**Uso:** mostra latência, uptime, uso de recursos e status geral do bot."
+        # === Página 7 — Utilidades ============================================
+        pages.append(HelpPage(
+            title="Utilidades",
+            body=(
+                "Comandos gerais.\n\n"
+                f"### Ping\n"
+                f"{ping_slash}\n"
+                "Latência, uptime, uso de recursos e status geral do bot.\n\n"
+                f"### Help\n"
+                f"{help_slash} ou {prefix_help}\n"
+                "Abre esta central de ajuda. O número no centro do paginator "
+                "abre um modal pra pular direto pra qualquer página."
             ),
-            inline=False,
-        )
-        utility_page.add_field(
-            name="❓ Help",
-            value=(
-                f"**Slash:** {help_slash}\n"
-                f"**Prefixo:** {prefix_help}\n"
-                "**Uso:** abre esta central de ajuda com paginação por botão."
-            ),
-            inline=False,
-        )
-        utility_page.add_field(
-            name="🚀 Dica final",
-            value=(
-                f"Para configurar quase tudo sem decorar sintaxe, começa por {tts_menu_slash} ou {prefix_panel}."
-            ),
-            inline=False,
-        )
-        pages.append(utility_page)
+            accent=discord.Color.teal(),
+        ))
 
-        fichas_page = discord.Embed(
-            title="🪙 Economia",
-            description="Saldo, daily, recarga, ranking e atalhos da economia do servidor.",
-            color=discord.Color.orange(),
-            timestamp=discord.utils.utcnow(),
-        )
-        fichas_page.add_field(
-            name="📌 Seus atalhos principais",
-            value=(
-                f"**Saldo:** `{bot_prefix}ficha` ou só `ficha`\n"
-                f"**Extrato:** `extrato` (10 últimas movimentações)\n"
-                f"**Daily:** `{bot_prefix}daily` ou só `daily`\n"
-                "**Recarga:** `recarga`\n"
-                f"**Ranking:** `{bot_prefix}rank` ou só `rank`\n"
-                "**Pagar alguém:** `pay @usuário valor`\n"
-                "**Mendigar:** `mendigar valor` ou `mendigar valor @usuário`"
+        # === Página 8 — Economia ==============================================
+        pages.append(HelpPage(
+            title="Economia",
+            body=(
+                "Saldo, daily, recarga, pagamentos, ranking. Triggers como "
+                "`ficha` ou `daily` funcionam digitando a palavra sozinha "
+                "no chat (sem prefixo).\n\n"
+                "### Atalhos do dia a dia\n"
+                f"Saldo: `{bot_prefix}ficha` ou `ficha`\n"
+                "Extrato: `extrato` (10 últimas movimentações)\n"
+                f"Daily: `{bot_prefix}daily` ou `daily`\n"
+                "Recarga: `recarga` (volta saldo pra 100 quando está abaixo de 15)\n"
+                f"Ranking: `{bot_prefix}rank` ou `rank`\n"
+                "Pagar: `pay @usuário valor`\n"
+                "Mendigar: `mendigar valor` ou `mendigar valor @usuário`\n\n"
+                "### Como funciona o saldo\n"
+                "Fichas bônus saem antes das normais nas apostas, e ganhos "
+                "quitam dívida primeiro antes de voltar pro saldo. O daily "
+                "dá fichas normais, fichas bônus e libera os giros extras "
+                "do dia.\n\n"
+                "### Painel de staff\n"
+                f"`{bot_prefix}painelficha` (alias: `fichapainel`, `adminficha`)\n"
+                "Painel completo pra ajustar saldo, resetar usuário ou "
+                "resetar o servidor inteiro. Qualquer staff com permissão "
+                "**Expulsar membros** pode usar todos os botões.\n\n"
+                "### Configuração\n"
+                f"{economia_slash}\n"
+                "Ativa/desativa a economia, define cargo staff, gerencia "
+                "roles que recebem features extras."
             ),
-            inline=False,
-        )
-        fichas_page.add_field(
-            name="🎁 Daily",
-            value=(
-                f"**Comando:** `{bot_prefix}daily`\n"
-                "**Uso:** resgata fichas normais, +10 fichas bônus e libera os giros extras do dia. As fichas bônus saem antes das normais."
-            ),
-            inline=False,
-        )
-        fichas_page.add_field(
-            name="🔋 Recarga",
-            value=(
-                "**Trigger:** `recarga`\n"
-                "**Uso:** restaura seu saldo para **100** quando ele estiver abaixo de **15**.\n"
-                "**Observação:** a recarga tem cooldown próprio."
-            ),
-            inline=False,
-        )
-        fichas_page.add_field(
-            name="🏆 Ranking e administração",
-            value=(
-                f"**Ranking:** `{bot_prefix}rank`\n"
-                f"**Resetar um usuário:** `{bot_prefix}resetficha @usuário`\n"
-                f"**Resetar o servidor:** `{bot_prefix}resetfichasservidor`\n"
-                "Os resets são voltados para staff."
-            ),
-            inline=False,
-        )
-        fichas_page.add_field(
-            name="⚙️ Configuração (staff)",
-            value=(
-                f"**Slash:** {economia_slash}\n"
-                "**Uso:** ativa/desativa a economia no servidor, define cargo "
-                "staff específico, gerencia roles que recebem features extras. "
-                "Exige permissão Expulsar Membros ou cargo staff configurado."
-            ),
-            inline=False,
-        )
-        pages.append(fichas_page)
+            accent=discord.Color.orange(),
+        ))
 
-        jogos_page = discord.Embed(
-            title="🎮 Jogos",
-            description="Apostas rápidas, lobbies e jogos de mesa. Triggers são palavras digitadas sozinhas no chat.",
-            color=discord.Color.dark_magenta(),
-            timestamp=discord.utils.utcnow(),
-        )
-        jogos_page.add_field(
-            name="🎰 Apostas rápidas",
-            value=(
-                "**Trigger:** `roleta`\n"
-                "**Trigger:** `carta` ou `cartas`\n"
-                "**Uso:** faz uma rodada rápida. Se faltar saldo, o jogo avisa antes de te jogar no vermelho."
+        # === Página 9 — Jogos =================================================
+        pages.append(HelpPage(
+            title="Jogos",
+            body=(
+                "Triggers são palavras digitadas sozinhas no chat. Se faltar "
+                "saldo, o jogo avisa antes de te jogar no vermelho.\n\n"
+                "### Apostas rápidas\n"
+                "`roleta` — aposta com jackpot\n"
+                "`carta` ou `cartas` — saque rápido de cartas\n\n"
+                "### Lobbies (botão pra entrar)\n"
+                "`buckshot` — rodada de sobrevivência\n"
+                "`alvo` — disputa de mira\n"
+                "`corrida` — corrida de cavalos\n\n"
+                "### Mesas\n"
+                "`poker` — mesa de poker com entrada própria\n"
+                "`truco @usuário` — desafio de truco 1v1\n"
+                "`truco2` — truco em duplas (2v2)\n\n"
+                "### Roubo\n"
+                "`roubar @usuário` (alias `rob @usuário`)\n"
+                "Tenta roubar parte do saldo do alvo. Pode falhar; tem "
+                "janela com cooldown."
             ),
-            inline=False,
-        )
-        jogos_page.add_field(
-            name="🔫 Rodadas e lobbies",
-            value=(
-                "**Trigger:** `buckshot`\n"
-                "**Trigger:** `alvo`\n"
-                "**Trigger:** `corrida`\n"
-                "**Uso:** abre uma rodada para entrar e disputar o prêmio no fim. Quem estiver no vermelho precisa confirmar antes de entrar."
-            ),
-            inline=False,
-        )
-        jogos_page.add_field(
-            name="🃏 Poker e Truco",
-            value=(
-                "**Trigger:** `poker` — abre a mesa de poker com entrada própria.\n"
-                "**Trigger:** `truco @usuário` — desafio de truco 1v1.\n"
-                "**Trigger:** `truco2` — truco em duplas (2v2)."
-            ),
-            inline=False,
-        )
-        jogos_page.add_field(
-            name="🦹 Roubo",
-            value=(
-                "**Trigger:** `roubar @usuário` ou `rob @usuário`\n"
-                "**Uso:** tenta roubar parte do saldo do alvo. Tem chance de "
-                "falhar e tem janela com cooldown."
-            ),
-            inline=False,
-        )
-        jogos_page.add_field(
-            name="💸 Atalhos úteis",
-            value=(
-                "**Pagar:** `pay @usuário valor`\n"
-                "**Pedir:** `mendigar valor` ou `mendigar valor @usuário`\n"
-                "**Encerrar buckshot:** `atirar`\n"
-                "**Disparar no alvo:** `disparar`"
-            ),
-            inline=False,
-        )
-        pages.append(jogos_page)
-
-        if self.bot.user and self.bot.user.display_avatar:
-            avatar_url = self.bot.user.display_avatar.url
-            for index, embed in enumerate(pages, start=1):
-                embed.set_thumbnail(url=avatar_url)
-                embed.set_footer(text=f"Página {index}/{len(pages)} • Use os botões abaixo para navegar")
+            accent=discord.Color.dark_magenta(),
+        ))
 
         return pages
+
 
     async def _send_help_response(
         self,
@@ -634,27 +548,36 @@ class Utility(commands.Cog):
     ):
         prefixes = await self._get_prefix_data(guild)
         root_ids = await self._fetch_root_command_ids_cached(guild)
-        pages = self._build_help_embeds(guild=guild, prefixes=prefixes, root_ids=root_ids)
+        pages = self._build_help_pages(guild=guild, prefixes=prefixes, root_ids=root_ids)
+        avatar_url = None
+        if self.bot.user and self.bot.user.display_avatar:
+            avatar_url = self.bot.user.display_avatar.url
         view = HelpPaginatorView(
             self,
             owner_id=owner.id,
             pages=pages,
             command_mention=slash_mention(root_ids, root="help", path="help"),
             prefix_hint=f"`{prefixes['bot_prefix']}help`",
+            bot_avatar_url=avatar_url,
         )
 
+        # Components V2: o conteúdo (heading + corpo + botões) vai TODO dentro
+        # do LayoutView. Não passa `embed=`, não passa `content=` — só `view=`.
+        # A flag `components_v2=True` é exigida pelo Discord pra aceitar o
+        # layout. discord.py 2.5+ sabe setar isso automaticamente quando o
+        # view é uma LayoutView, mas mantemos explícito por clareza.
         if interaction is not None:
             if not interaction.response.is_done():
-                await interaction.response.send_message(embed=pages[0], view=view, ephemeral=ephemeral)
+                await interaction.response.send_message(view=view, ephemeral=ephemeral)
                 try:
                     view.message = await interaction.original_response()
                 except Exception:
                     pass
             else:
-                view.message = await interaction.followup.send(embed=pages[0], view=view, ephemeral=ephemeral)
+                view.message = await interaction.followup.send(view=view, ephemeral=ephemeral)
             return
 
-        view.message = await responder.send(embed=pages[0], view=view)
+        view.message = await responder.send(view=view)
 
     def _format_bool_badge(self, value: bool, *, ok_label: str = "OK", bad_label: str = "Falha") -> str:
         return f"🟢 {ok_label}" if bool(value) else f"🔴 {bad_label}"
@@ -697,54 +620,6 @@ class Utility(commands.Cog):
         if idx == 0:
             return f"{int(size)} {units[idx]}"
         return f"{size:.2f} {units[idx]}"
-
-    def _format_member_count(self, value: Any) -> str:
-        try:
-            count = int(value)
-        except Exception:
-            return "indisponível"
-        return f"{count} membro" if count == 1 else f"{count} membros"
-
-    def _format_health_guilds(self, max_chars: int = 1024) -> str:
-        guilds = list(getattr(self.bot, "guilds", []) or [])
-        if not guilds:
-            return "Nenhum servidor carregado no cache do bot."
-
-        def _safe_guild_name(guild: discord.Guild) -> str:
-            name = str(getattr(guild, "name", None) or "Servidor sem nome")
-            name = discord.utils.escape_mentions(discord.utils.escape_markdown(name))
-            if len(name) > 52:
-                name = f"{name[:49].rstrip()}..."
-            return name
-
-        lines: list[str] = []
-        sorted_guilds = sorted(guilds, key=lambda item: (getattr(item, "name", "") or "").casefold())
-        for index, guild in enumerate(sorted_guilds):
-            member_count = getattr(guild, "member_count", None)
-            if member_count is None:
-                cached_members = getattr(guild, "members", None)
-                if cached_members is not None:
-                    try:
-                        member_count = len(cached_members)
-                    except Exception:
-                        member_count = None
-
-            line = f"• **{_safe_guild_name(guild)}** — `{self._format_member_count(member_count)}`"
-            remaining = len(sorted_guilds) - index
-            overflow_line = f"… e mais `{remaining}` servidor{'es' if remaining != 1 else ''}."
-            current = "\n".join(lines)
-            extra_separator = 1 if current else 0
-            would_fit_with_overflow = len(current) + extra_separator + len(line) + 1 + len(overflow_line) <= max_chars
-
-            if lines and not would_fit_with_overflow:
-                lines.append(overflow_line)
-                break
-            if not lines and len(line) > max_chars:
-                lines.append(f"{line[:max(0, max_chars - 1)]}…")
-                break
-            lines.append(line)
-
-        return "\n".join(lines)[:max_chars]
 
     def _build_health_embeds(self) -> list[discord.Embed]:
         snapshot = {}
@@ -825,11 +700,6 @@ class Utility(commands.Cog):
                 f"**Voice clients:** `{len(getattr(self.bot, 'voice_clients', []) or [])}`"
             ),
             inline=True,
-        )
-        summary.add_field(
-            name="Servidores do bot",
-            value=self._format_health_guilds(),
-            inline=False,
         )
         summary.add_field(
             name="Fila e despacho",
