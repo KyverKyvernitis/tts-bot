@@ -60,7 +60,7 @@ class _HelpPageJumpModal(discord.ui.Modal, title="Ir para página"):
         total = len(self.view_ref.pages)
         if target < 1 or target > total:
             await interaction.response.send_message(
-                f"Página fora do intervalo. Use 1 a {total}.",
+                f"Página inválida. Use 1 a {total}.",
                 ephemeral=True,
             )
             return
@@ -122,8 +122,8 @@ class HelpPaginatorView(discord.ui.LayoutView):
         # Rodapé curto com a dica do paginator. Vai abaixo do corpo, antes dos
         # botões — fica claro pra quê serve cada controle sem ter que clicar.
         footer_hint = (
-            f"-# ⏪ início · ◀ anterior · `{self.page_index + 1}/{total}` pula direto · "
-            f"▶ próxima · ⏩ fim"
+            f"-# ⏪ início · ◀ voltar `{self.page_index + 1}/{total}` pular · "
+            f"▶ próx. · ⏩ fim"
         )
 
         # Linha de botões: ⏪ ◀ N/Total ▶ ⏩. O botão central abre o modal de
