@@ -122,7 +122,7 @@ class HelpPaginatorView(discord.ui.LayoutView):
         # Rodapé curto com a dica do paginator. Vai abaixo do corpo, antes dos
         # botões — fica claro pra quê serve cada controle sem ter que clicar.
         footer_hint = (
-            f"-# _  _⏪ Início · ◀ Voltar `{self.page_index + 1}/{total}` Pular "
+            f"-# _    _⏪ Início · ◀ Voltar `{self.page_index + 1}/{total}` Pular "
             f"▶ · Fim ⏩"
         )
 
