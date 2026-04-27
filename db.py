@@ -68,11 +68,14 @@ class SettingsDB:
         async for doc in cursor:
             doc_type = doc.get("type")
             gid = int(doc.get("guild_id", 0) or 0)
+            has_user_id = doc.get("user_id") is not None
 
-            if doc_type == "guild" and gid:
+            if (doc_type == "guild" or (not doc_type and gid and not has_user_id)) and gid:
+                doc.setdefault("type", "guild")
                 self.guild_cache[gid] = doc
-            elif doc_type == "user" and gid and doc.get("user_id") is not None:
+            elif (doc_type == "user" or (not doc_type and gid and has_user_id)) and gid and has_user_id:
                 uid = int(doc["user_id"])
+                doc.setdefault("type", "user")
                 self.user_cache[(gid, uid)] = doc
 
     def _get_guild_doc(self, guild_id: int) -> Dict[str, Any]:
@@ -1263,6 +1266,111 @@ SettingsDB.add_user_game_stat = _settingsdb_add_user_game_stat
 SettingsDB.get_chip_leaderboard = _settingsdb_get_chip_leaderboard
 SettingsDB.get_game_stat_leaderboard = _settingsdb_get_game_stat_leaderboard
 
+
+# ---- TTS panel history helpers ----
+def _settingsdb_history_list(panel: Dict[str, Any], *keys: str) -> list[str]:
+    for key in keys:
+        value = (panel or {}).get(key)
+        if isinstance(value, list):
+            cleaned = [str(x) for x in value if str(x or "").strip()]
+            if cleaned:
+                return cleaned[-3:]
+        elif str(value or "").strip():
+            return [str(value or "")]
+    return []
+
+
+def _settingsdb_get_panel_history(self, guild_id: int, user_id: int) -> Dict[str, Any]:
+    guild_doc = self.guild_cache.get(guild_id, {}) or {}
+    guild_panel = guild_doc.get("panel_history", {}) or {}
+    user_doc = self.user_cache.get((guild_id, user_id), {}) or {}
+    user_panel = user_doc.get("panel_history", {}) or {}
+
+    user_last_changes = _settingsdb_history_list(
+        user_panel,
+        "last_changes",
+        "user_last_changes",
+        "last_change",
+        "user_last_change",
+    )
+    server_last_changes = _settingsdb_history_list(
+        guild_panel,
+        "server_last_changes",
+        "server_last_change",
+        "last_changes",
+        "last_change",
+    )
+    toggle_last_changes = _settingsdb_history_list(
+        guild_panel,
+        "toggle_last_changes",
+        "toggle_last_change",
+    )
+
+    return {
+        "user_last_change": user_last_changes[-1] if user_last_changes else "",
+        "server_last_change": server_last_changes[-1] if server_last_changes else "",
+        "toggle_last_change": toggle_last_changes[-1] if toggle_last_changes else "",
+        "user_last_changes": user_last_changes[-3:],
+        "server_last_changes": server_last_changes[-3:],
+        "toggle_last_changes": toggle_last_changes[-3:],
+    }
+
+
+async def _settingsdb_set_user_panel_last_change(self, guild_id: int, user_id: int, text: str):
+    key = (guild_id, user_id)
+    doc = self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id})
+    panel = doc.get("panel_history", {}) or {}
+    text = str(text or "")
+    last_changes = _settingsdb_history_list(panel, "last_changes", "user_last_changes", "last_change", "user_last_change")
+    if text:
+        last_changes.append(text)
+    last_changes = last_changes[-3:]
+    panel["last_change"] = text
+    panel["last_changes"] = last_changes
+    panel["user_last_change"] = text
+    panel["user_last_changes"] = last_changes
+    doc["type"] = "user"
+    doc["guild_id"] = guild_id
+    doc["user_id"] = user_id
+    doc["panel_history"] = panel
+    self.user_cache[key] = doc
+    await self.coll.update_one(
+        {"type": "user", "guild_id": guild_id, "user_id": user_id},
+        {"$set": doc},
+        upsert=True,
+    )
+
+
+async def _settingsdb_set_guild_panel_last_change(self, guild_id: int, *, server_last_change: str | None = None, toggle_last_change: str | None = None):
+    doc = self._get_guild_doc(guild_id)
+    panel = doc.get("panel_history", {}) or {}
+
+    if server_last_change is not None:
+        text = str(server_last_change or "")
+        server_last_changes = _settingsdb_history_list(panel, "server_last_changes", "server_last_change", "last_changes", "last_change")
+        if text:
+            server_last_changes.append(text)
+        server_last_changes = server_last_changes[-3:]
+        panel["server_last_change"] = text
+        panel["server_last_changes"] = server_last_changes
+    if toggle_last_change is not None:
+        text = str(toggle_last_change or "")
+        toggle_last_changes = _settingsdb_history_list(panel, "toggle_last_changes", "toggle_last_change")
+        if text:
+            toggle_last_changes.append(text)
+        toggle_last_changes = toggle_last_changes[-3:]
+        panel["toggle_last_change"] = text
+        panel["toggle_last_changes"] = toggle_last_changes
+
+    doc["panel_history"] = panel
+    await self._save_guild_doc(guild_id, doc)
+
+
+# These methods were also left inside an unreachable nested block during the DB refactor.
+# Bind them explicitly so the TTS menu can read/write the 3 latest changes again.
+SettingsDB.get_panel_history = _settingsdb_get_panel_history
+SettingsDB.set_user_panel_last_change = _settingsdb_set_user_panel_last_change
+SettingsDB.set_guild_panel_last_change = _settingsdb_set_guild_panel_last_change
 
 # ---- bonus chips / debt overrides ----
 def _settingsdb_get_user_bonus_chips(self, guild_id: int, user_id: int) -> int:
