@@ -1298,7 +1298,12 @@ class TTSAudioMixin:
                 except Exception:
                     pass
 
-        vc = await self._maybe_await(self._ensure_connected(guild, target_channel))
+        vc = await self._maybe_await(self._ensure_connected(
+            guild,
+            target_channel,
+            notify_owner_on_failure=True,
+            failure_context=f"entrada automática do TTS para reproduzir mensagem de {item.author_id}",
+        ))
         if vc is None:
             current = self._get_voice_client_for_guild(guild)
             if current is not None and current.is_connected():

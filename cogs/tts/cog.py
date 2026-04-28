@@ -160,6 +160,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._runtime_voice_restore_suppressed_until: dict[int, float] = {}
         self._expected_voice_channel_ids: dict[int, int] = {}
         self._manual_voice_disconnect_until: dict[int, float] = {}
+        self._voice_first_connect_fail_notified: set[int] = set()
+        self._voice_failure_dm_target_id: int | None = None
         self._voice_auto_restore_enabled: bool = False
 
     async def cog_load(self):
@@ -181,6 +183,225 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
+
+    def _voice_channel_name(self, channel) -> str:
+        if channel is None:
+            return "canal desconhecido"
+        name = getattr(channel, "name", None) or "canal desconhecido"
+        channel_id = getattr(channel, "id", None)
+        if channel_id:
+            return f"{name} (`{channel_id}`)"
+        return str(name)
+
+    def _voice_permissions_report(self, guild: discord.Guild, voice_channel) -> str:
+        member = getattr(guild, "me", None)
+        if member is None and getattr(self.bot, "user", None) is not None:
+            try:
+                member = guild.get_member(self.bot.user.id)
+            except Exception:
+                member = None
+        if member is None or voice_channel is None:
+            return "não consegui ler o membro/canal do bot"
+        try:
+            perms = voice_channel.permissions_for(member)
+        except Exception as e:
+            return f"não consegui ler permissões: {type(e).__name__}: {e}"
+
+        parts = [
+            f"Ver canal: {'sim' if getattr(perms, 'view_channel', False) else 'não'}",
+            f"Conectar: {'sim' if getattr(perms, 'connect', False) else 'não'}",
+            f"Falar: {'sim' if getattr(perms, 'speak', False) else 'não'}",
+            f"Mover membros: {'sim' if getattr(perms, 'move_members', False) else 'não'}",
+        ]
+        return " • ".join(parts)
+
+    def _diagnose_voice_connect_precheck(self, guild: discord.Guild, voice_channel) -> str | None:
+        if guild is None:
+            return "guild ausente antes da conexão"
+        if voice_channel is None:
+            return "canal de voz ausente antes da conexão"
+        if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
+            return f"canal inválido para voz: {type(voice_channel).__name__}"
+
+        member = getattr(guild, "me", None)
+        if member is None and getattr(self.bot, "user", None) is not None:
+            try:
+                member = guild.get_member(self.bot.user.id)
+            except Exception:
+                member = None
+        if member is None:
+            return "não consegui encontrar o membro do bot dentro do servidor"
+
+        try:
+            perms = voice_channel.permissions_for(member)
+        except Exception as e:
+            return f"não consegui checar permissões do canal: {type(e).__name__}: {e}"
+
+        missing: list[str] = []
+        if not getattr(perms, "view_channel", False):
+            missing.append("Ver Canal")
+        if not getattr(perms, "connect", False):
+            missing.append("Conectar")
+        if not getattr(perms, "speak", False):
+            missing.append("Falar")
+        if missing:
+            return "faltam permissões no canal de voz: " + ", ".join(missing)
+
+        try:
+            current_vc = self._get_voice_client_for_guild(guild)
+            current_channel = getattr(current_vc, "channel", None) if current_vc is not None else None
+            already_in_target = bool(
+                current_vc is not None
+                and getattr(current_vc, "is_connected", lambda: False)()
+                and getattr(current_channel, "id", None) == getattr(voice_channel, "id", None)
+            )
+            user_limit = int(getattr(voice_channel, "user_limit", 0) or 0)
+            if not already_in_target and user_limit > 0 and len(getattr(voice_channel, "members", []) or []) >= user_limit and not getattr(perms, "move_members", False):
+                return f"canal cheio ({len(getattr(voice_channel, 'members', []) or [])}/{user_limit}) e o bot não tem Mover Membros para furar o limite"
+        except Exception:
+            pass
+
+        return None
+
+    def _classify_voice_connect_exception(self, exc: BaseException) -> str:
+        if isinstance(exc, asyncio.TimeoutError):
+            return "timeout no handshake de voz com o Discord"
+        if isinstance(exc, discord.Forbidden):
+            return "Discord recusou por falta de permissão"
+        if isinstance(exc, discord.NotFound):
+            return "canal/servidor não encontrado pelo Discord"
+        if isinstance(exc, discord.HTTPException):
+            return "Discord retornou erro HTTP durante a conexão de voz"
+        if isinstance(exc, discord.ClientException):
+            msg = str(exc).lower()
+            if "already connected" in msg:
+                return "o discord.py acha que já existe uma conexão de voz nesse servidor"
+            return "discord.py bloqueou a conexão por estado de cliente inválido"
+
+        exc_name = type(exc).__name__
+        msg = str(exc).lower()
+        if exc_name == "OpusNotLoaded" or "opus" in msg:
+            return "Opus/lib de áudio não carregou corretamente"
+        if "closing transport" in msg:
+            return "transporte de voz estava fechando durante a conexão"
+        if "not connected to voice" in msg:
+            return "estado interno dizia que o bot não estava conectado à voz"
+        return f"erro inesperado ao conectar na call ({exc_name})"
+
+    def _format_voice_exception(self, exc: BaseException | None) -> str:
+        if exc is None:
+            return "sem exceção técnica; falhou em pré-checagem ou retornou None"
+        return _shorten(f"{type(exc).__name__}: {exc}", 900)
+
+    async def _resolve_voice_failure_dm_target(self) -> discord.User | None:
+        candidate_ids: list[int] = []
+        for attr in ("TTS_VOICE_FAILURE_DM_USER_ID", "VOICE_FAILURE_DM_USER_ID", "BOT_OWNER_ID", "OWNER_ID"):
+            try:
+                raw = getattr(config, attr, 0)
+                parsed = int(raw or 0)
+            except Exception:
+                parsed = 0
+            if parsed > 0 and parsed not in candidate_ids:
+                candidate_ids.append(parsed)
+
+        try:
+            owner_id = int(getattr(self.bot, "owner_id", 0) or 0)
+        except Exception:
+            owner_id = 0
+        if owner_id > 0 and owner_id not in candidate_ids:
+            candidate_ids.append(owner_id)
+
+        try:
+            owner_ids = getattr(self.bot, "owner_ids", None) or []
+            for raw in owner_ids:
+                parsed = int(raw or 0)
+                if parsed > 0 and parsed not in candidate_ids:
+                    candidate_ids.append(parsed)
+        except Exception:
+            pass
+
+        for user_id in candidate_ids:
+            try:
+                user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                if user is not None:
+                    self._voice_failure_dm_target_id = user_id
+                    return user
+            except Exception:
+                continue
+
+        if self._voice_failure_dm_target_id:
+            try:
+                user = self.bot.get_user(self._voice_failure_dm_target_id) or await self.bot.fetch_user(self._voice_failure_dm_target_id)
+                if user is not None:
+                    return user
+            except Exception:
+                pass
+
+        try:
+            app = await self.bot.application_info()
+        except Exception as e:
+            print(f"[tts_voice] não consegui obter application_info para DM de falha: {e}")
+            return None
+
+        owner = getattr(app, "owner", None)
+        if owner is not None and int(getattr(owner, "id", 0) or 0) > 0:
+            self._voice_failure_dm_target_id = int(owner.id)
+            return owner
+
+        team = getattr(app, "team", None)
+        for member in getattr(team, "members", []) or []:
+            user = getattr(member, "user", None) or member
+            user_id = int(getattr(user, "id", 0) or 0)
+            if user_id <= 0:
+                continue
+            try:
+                resolved = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                if resolved is not None:
+                    self._voice_failure_dm_target_id = user_id
+                    return resolved
+            except Exception:
+                continue
+        return None
+
+    async def _notify_owner_voice_connect_failure_once(
+        self,
+        guild: discord.Guild,
+        voice_channel,
+        *,
+        reason: str,
+        exc: BaseException | None = None,
+        context: str = "entrada na call",
+    ) -> None:
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        if guild_id <= 0:
+            return
+        if guild_id in self._voice_first_connect_fail_notified:
+            return
+        self._voice_first_connect_fail_notified.add(guild_id)
+
+        target = await self._resolve_voice_failure_dm_target()
+        if target is None:
+            print(f"[tts_voice] falha na call sem DM: dono do bot não encontrado | guild={guild_id} reason={reason}")
+            return
+
+        embed = discord.Embed(
+            title="Falha ao entrar na call",
+            description="Primeira falha de conexão de voz detectada neste boot. A DM é enviada só uma vez por servidor para evitar spam em loop.",
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Servidor", value=f"{getattr(guild, 'name', 'desconhecido')} (`{guild_id}`)", inline=False)
+        embed.add_field(name="Canal", value=self._voice_channel_name(voice_channel), inline=False)
+        embed.add_field(name="Contexto", value=_shorten(context, 250), inline=False)
+        embed.add_field(name="Motivo detectado", value=_shorten(reason, 900), inline=False)
+        embed.add_field(name="Erro técnico", value=f"```py\n{self._format_voice_exception(exc)}\n```", inline=False)
+        embed.add_field(name="Permissões lidas", value=_shorten(self._voice_permissions_report(guild, voice_channel), 900), inline=False)
+        embed.add_field(name="Ação tomada", value="não enviei outras DMs para esta guild neste boot; veja os logs `tts_voice` para as próximas tentativas.", inline=False)
+
+        try:
+            await target.send(embed=embed)
+            print(f"[tts_voice] DM de falha de voz enviada ao dono | guild={guild_id} channel={getattr(voice_channel, 'id', None)} reason={reason}")
+        except Exception as e:
+            print(f"[tts_voice] não consegui enviar DM de falha de voz | guild={guild_id} owner={getattr(target, 'id', None)} error={e}")
 
 
     async def _set_remembered_voice_channel(self, guild_id: int, channel_id: int | None) -> None:
@@ -322,7 +543,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
                 try:
                     await self._recover_stale_voice_client(guild, reason="startup_restore")
-                    vc = await self._ensure_connected(guild, channel)
+                    vc = await self._ensure_connected(
+                        guild,
+                        channel,
+                        notify_owner_on_failure=(attempt == 0),
+                        failure_context="primeira tentativa automática após reinício",
+                    )
                     if vc is not None and getattr(vc, "is_connected", lambda: False)():
                         self._remember_expected_voice_channel(guild_id, channel_id)
                         self._runtime_voice_restore_failures[guild_id] = 0
@@ -331,6 +557,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         continue
                 except Exception as e:
                     print(f"[tts_voice] falha ao restaurar call após boot | guild={guild_id} channel={channel_id} error={e}")
+                    if attempt == 0:
+                        await self._notify_owner_voice_connect_failure_once(
+                            guild,
+                            channel,
+                            reason=self._classify_voice_connect_exception(e),
+                            exc=e,
+                            context="primeira tentativa automática após reinício",
+                        )
 
                 remaining[guild_id] = channel_id
 
@@ -553,7 +787,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
                     try:
                         await self._recover_stale_voice_client(current_guild, reason=f"runtime_restore:{reason}:{attempt}")
-                        vc = await self._ensure_connected(current_guild, desired_channel)
+                        vc = await self._ensure_connected(
+                            current_guild,
+                            desired_channel,
+                            notify_owner_on_failure=(attempt == 0),
+                            failure_context=f"primeira tentativa de restore em runtime ({reason})",
+                        )
                         if vc is not None and getattr(vc, "is_connected", lambda: False)() and getattr(getattr(vc, "channel", None), "id", None) == desired_channel_id:
                             self._runtime_voice_restore_failures[guild_id] = 0
                             self._runtime_voice_restore_next_allowed_at[guild_id] = time.monotonic() + 10.0
@@ -563,6 +802,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         raise
                     except Exception as e:
                         print(f"[tts_voice] falha ao restaurar call em runtime | guild={guild_id} channel={desired_channel_id} reason={reason} error={e}")
+                        if attempt == 0:
+                            await self._notify_owner_voice_connect_failure_once(
+                                current_guild,
+                                desired_channel,
+                                reason=self._classify_voice_connect_exception(e),
+                                exc=e,
+                                context=f"primeira tentativa de restore em runtime ({reason})",
+                            )
 
                     attempt += 1
                     self._runtime_voice_restore_failures[guild_id] = attempt
@@ -1387,9 +1634,35 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             print(f"[tts_voice] saindo da call | sozinho ou só com bots | guild={guild.id} channel={vc.channel.id}")
             await self._disconnect_and_clear(guild)
 
-    async def _ensure_connected(self, guild: discord.Guild, voice_channel) -> Optional[discord.VoiceClient]:
+    async def _ensure_connected(
+        self,
+        guild: discord.Guild,
+        voice_channel,
+        *,
+        notify_owner_on_failure: bool = False,
+        failure_context: str = "entrada na call",
+    ) -> Optional[discord.VoiceClient]:
         if voice_channel is None:
             print(f"[tts_voice] _ensure_connected recebeu canal None | guild={guild.id}")
+            if notify_owner_on_failure:
+                await self._notify_owner_voice_connect_failure_once(
+                    guild,
+                    voice_channel,
+                    reason="canal de voz ausente antes da conexão",
+                    context=failure_context,
+                )
+            return None
+
+        precheck_reason = self._diagnose_voice_connect_precheck(guild, voice_channel)
+        if precheck_reason:
+            print(f"[tts_voice] pré-checagem bloqueou conexão | guild={guild.id} channel={getattr(voice_channel, 'id', None)} reason={precheck_reason}")
+            if notify_owner_on_failure:
+                await self._notify_owner_voice_connect_failure_once(
+                    guild,
+                    voice_channel,
+                    reason=precheck_reason,
+                    context=failure_context,
+                )
             return None
 
         async def _desired_self_deaf() -> bool:
@@ -1541,9 +1814,25 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         return await _fresh_connect()
                     except Exception as retry_err:
                         print(f"[tts_voice] Erro ao reconectar na guild {guild.id}: {retry_err}")
+                        if notify_owner_on_failure:
+                            await self._notify_owner_voice_connect_failure_once(
+                                guild,
+                                voice_channel,
+                                reason=self._classify_voice_connect_exception(retry_err),
+                                exc=retry_err,
+                                context=failure_context,
+                            )
                         return None
 
                 print(f"[tts_voice] Erro ao conectar na guild {guild.id}: {e}")
+                if notify_owner_on_failure:
+                    await self._notify_owner_voice_connect_failure_once(
+                        guild,
+                        voice_channel,
+                        reason=self._classify_voice_connect_exception(e),
+                        exc=e,
+                        context=failure_context,
+                    )
                 return None
 
     def _chunk_lines(self, lines: list[str], max_chars: int = 3500) -> list[str]:
@@ -2780,7 +3069,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             return
 
-        vc = await self._ensure_connected(interaction.guild, user_voice.channel)
+        vc = await self._ensure_connected(
+            interaction.guild,
+            user_voice.channel,
+            notify_owner_on_failure=True,
+            failure_context=f"entrada manual pelo painel de TTS por {interaction.user} ({interaction.user.id})",
+        )
         if vc is None or not vc.is_connected():
             await interaction.response.send_message(
                 embed=self._make_embed("Falha ao conectar", "Não consegui entrar na call agora.", ok=False),
@@ -2868,7 +3162,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await self._set_remembered_voice_channel(message.guild.id, getattr(author_voice.channel, "id", None))
         self._clear_manual_voice_disconnect(message.guild.id)
 
-        vc = await self._ensure_connected(message.guild, author_voice.channel)
+        vc = await self._ensure_connected(
+            message.guild,
+            author_voice.channel,
+            notify_owner_on_failure=True,
+            failure_context=f"entrada manual por comando de prefixo por {message.author} ({message.author.id})",
+        )
         if vc is None or not vc.is_connected():
             embed = self._make_embed("Falha ao conectar", "Não consegui entrar na call agora", ok=False)
             await message.channel.send(embed=embed)

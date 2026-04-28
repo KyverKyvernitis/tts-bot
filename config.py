@@ -54,6 +54,13 @@ TTS_ENABLED = _parse_bool(os.getenv("TTS_ENABLED", "true"), True)
 BLOCK_VOICE_BOT_ID = _parse_int(os.getenv("BLOCK_VOICE_BOT_ID", "0"), 0)
 ONLY_TTS_USER_ID = _parse_int(os.getenv("ONLY_TTS_USER_ID", "0"), 0)
 
+# Usuário que recebe DM quando a primeira conexão de voz de uma guild falha no boot.
+# Se vazio, o bot tenta usar o dono do aplicativo Discord automaticamente.
+TTS_VOICE_FAILURE_DM_USER_ID = _parse_int(
+    os.getenv("TTS_VOICE_FAILURE_DM_USER_ID", os.getenv("BOT_OWNER_ID", os.getenv("OWNER_ID", "0"))),
+    0,
+)
+
 PORT = _parse_int(os.getenv("PORT", "10000"), 10000)
 
 MONGODB_URI = (os.getenv("MONGODB_URI", "") or "").strip()
