@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +63,7 @@ class DevAI(commands.Cog):
         self.reporter = WebhookReporter(self.session, str(getattr(config, "DEVAI_WEBHOOK_URL", "") or ""))
 
         # Mantém um entendimento inicial da estrutura do projeto, mas sem travar o bot.
-        asyncio.create_task(asyncio.to_thread(self.indexer.load_or_build, max_age_seconds=60))
+        asyncio.create_task(asyncio.to_thread(self.indexer.build_index))
 
         if self._enabled():
             self.watcher = LogWatcher(
@@ -173,7 +174,10 @@ REGRAS OBRIGATÓRIAS:
 {{
   "cause": "causa provável do erro",
   "summary": "o que foi alterado",
+  "effect": "o que essa alteração faz na prática",
   "risk": "baixo|médio|alto",
+  "recommendations": ["recomendação curta para o dono após revisar/aplicar"],
+  "tests": ["teste manual ou comando útil para validar"],
   "files": [{{"path": "cogs/exemplo.py", "content": "conteúdo completo do arquivo corrigido"}}]
 }}
 
@@ -240,12 +244,17 @@ RESUMO DA ESTRUTURA DO PROJETO:
             return
         files = "\n".join(f"• `{p}`" for p in built.changed_files)
         validation = "\n".join(f"• {v}" for v in built.validation) or "• Sem arquivos Python para compilar."
+        recommendations = self._format_bullets(built.recommendations, fallback="• Nenhuma recomendação extra informada.", max_items=6)
+        tests = self._format_bullets(built.tests, fallback="• Validar o fluxo afetado manualmente após aplicar.", max_items=6)
         title = "🧠 DevAI corrigiu um erro e gerou um patch"
         description = (
             f"**Provider:** `{result.provider}` · `{result.model}` · `{result.elapsed_ms} ms`\n"
             f"**Assinatura:** `{event.signature}`\n\n"
             f"**Causa provável**\n{redact_secrets(built.cause, max_chars=900)}\n\n"
             f"**Alteração**\n{redact_secrets(built.summary, max_chars=900)}\n\n"
+            f"**O que faz**\n{redact_secrets(built.effect, max_chars=900)}\n\n"
+            f"**Recomendações**\n{recommendations}\n\n"
+            f"**Como validar**\n{tests}\n\n"
             f"**Arquivos no zip**\n{files}\n\n"
             f"**Validação**\n{validation}\n\n"
             f"⚠️ O patch foi **gerado automaticamente**, mas **não foi aplicado**. Revise o `.zip` antes de enviar no canal de update."
@@ -275,6 +284,225 @@ RESUMO DA ESTRUTURA DO PROJETO:
                 f"**Assinatura:** `{event.signature}`\n"
                 f"**Erro ao montar patch:** `{type(exc).__name__}: {redact_secrets(str(exc), max_chars=1000)}`\n\n"
                 "Isso geralmente acontece quando a IA devolve JSON inválido, arquivo sem conteúdo completo ou caminho bloqueado."
+            ),
+            color=0xFEE75C,
+        )
+
+
+    def _format_bullets(self, items: list[str] | tuple[str, ...] | None, *, fallback: str, max_items: int = 6) -> str:
+        values: list[str] = []
+        for item in list(items or [])[:max_items]:
+            text = redact_secrets(str(item).strip(), max_chars=450)
+            if text:
+                values.append(f"• {text}")
+        return "\n".join(values) if values else fallback
+
+    def _read_zip_patch_context(self, zip_path: Path, changed_files: list[str]) -> str:
+        max_files = int(getattr(config, "DEVAI_PATCH_REVIEW_MAX_FILES", 8) or 8)
+        max_chars_per_file = int(getattr(config, "DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE", 9000) or 9000)
+        wanted = {str(path).replace("\\", "/").lstrip("/") for path in changed_files}
+        blocks: list[str] = []
+        if not zip_path or not zip_path.exists():
+            return "ZIP não disponível para leitura."
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                file_infos = [info for info in zf.infolist() if not info.is_dir()]
+                for info in file_infos:
+                    normalized = info.filename.replace("\\", "/").lstrip("/")
+                    if wanted and normalized not in wanted and normalized.split("/", 1)[-1] not in wanted:
+                        if not any(normalized.endswith("/" + item) for item in wanted):
+                            continue
+                    if len(blocks) >= max_files:
+                        break
+                    if info.file_size > int(getattr(config, "DEVAI_MAX_FILE_BYTES", 220000) or 220000):
+                        blocks.append(f"### {normalized}\n<arquivo grande demais para comentar inteiro: {info.file_size} bytes>")
+                        continue
+                    try:
+                        raw = zf.read(info)
+                        text = raw.decode("utf-8", errors="replace")
+                    except Exception as exc:
+                        blocks.append(f"### {normalized}\n<não consegui ler: {type(exc).__name__}: {exc}>")
+                        continue
+                    if len(text) > max_chars_per_file:
+                        text = text[: max_chars_per_file // 2] + "\n\n# ... trecho central omitido ...\n\n" + text[-max_chars_per_file // 2 :]
+                    blocks.append(f"### {normalized}\n```txt\n{redact_secrets(text, max_chars=max_chars_per_file)}\n```")
+        except Exception as exc:
+            return f"Falha ao ler ZIP para comentário: {type(exc).__name__}: {redact_secrets(str(exc), max_chars=600)}"
+        return "\n\n".join(blocks) if blocks else "Nenhum arquivo do ZIP pôde ser lido para comentário."
+
+    def _build_patch_review_prompt(
+        self,
+        *,
+        changed_files: list[str],
+        commit_hash: str | None,
+        branch: str,
+        zip_filename: str,
+        triggered_update: bool,
+        zip_context: str,
+    ) -> str:
+        index = self.indexer.load_or_build(max_age_seconds=int(getattr(config, "DEVAI_INDEX_MAX_AGE_SECONDS", 1800) or 1800))
+        project_context = self.indexer.compact_context(index, max_chars=int(getattr(config, "DEVAI_MAX_INDEX_CHARS", 12000) or 12000))
+        files_text = "\n".join(f"- {path}" for path in changed_files) or "- nenhum"
+        return f"""
+Você é a DevAI do projeto. Um patch foi recebido, validado e enviado com sucesso para o GitHub pelo auto-updater do Discord.
+
+Sua tarefa é comentar o patch para o dono do bot: explique o que mudou, o que a alteração faz, riscos, recomendações e como validar.
+
+REGRAS OBRIGATÓRIAS:
+- Responda SOMENTE JSON válido, sem markdown fora do JSON.
+- Não gere arquivos corrigidos aqui; este fluxo é apenas comentário/revisão de patch já aceito.
+- Seja direto, útil e específico ao código alterado.
+- Não copie segredos nem tokens.
+- O JSON deve seguir este formato:
+{{
+  "summary": "resumo curto do patch",
+  "what_changed": ["mudança importante"],
+  "effect": "o que a alteração faz na prática",
+  "risk": "baixo|médio|alto",
+  "recommendations": ["recomendação útil"],
+  "tests": ["teste ou comando para validar"]
+}}
+
+METADADOS DO PATCH:
+ZIP: {zip_filename}
+Branch: {branch}
+Commit: {commit_hash or 'desconhecido'}
+Updater systemd encontrado: {'sim' if triggered_update else 'não'}
+
+ARQUIVOS ALTERADOS:
+{files_text}
+
+CONTEÚDO DO PATCH:
+{zip_context}
+
+RESUMO DA ESTRUTURA DO PROJETO:
+```txt
+{project_context}
+```
+""".strip()
+
+    async def review_successful_patch(
+        self,
+        *,
+        changed_files: list[str],
+        commit_hash: str | None,
+        branch: str,
+        zip_filename: str,
+        zip_path: Path | None = None,
+        triggered_update: bool = False,
+    ) -> None:
+        if not self._enabled() or not bool(getattr(config, "DEVAI_PATCH_REVIEW_ENABLED", True)):
+            return
+        if self.ai is None or self.reporter is None or not self.reporter.available():
+            return
+        if not changed_files:
+            return
+
+        async with self._analysis_lock:
+            zip_context = await asyncio.to_thread(self._read_zip_patch_context, zip_path or Path(), changed_files)
+            prompt = await asyncio.to_thread(
+                self._build_patch_review_prompt,
+                changed_files=changed_files,
+                commit_hash=commit_hash,
+                branch=branch,
+                zip_filename=zip_filename,
+                triggered_update=triggered_update,
+                zip_context=zip_context,
+            )
+            result, errors = await self.ai.generate_patch_json(prompt)
+            if result is None:
+                await self._report_patch_review_fallback(
+                    changed_files=changed_files,
+                    commit_hash=commit_hash,
+                    branch=branch,
+                    zip_filename=zip_filename,
+                    errors=errors,
+                )
+                return
+
+            try:
+                data = self.patch_builder.parse_ai_json(result.text)
+            except Exception as exc:
+                await self._report_patch_review_fallback(
+                    changed_files=changed_files,
+                    commit_hash=commit_hash,
+                    branch=branch,
+                    zip_filename=zip_filename,
+                    errors=[f"JSON inválido do provider {result.provider}: {type(exc).__name__}: {exc}"],
+                )
+                return
+
+            await asyncio.to_thread(self.indexer.build_index)
+            await self._report_patch_review(
+                data=data,
+                result=result,
+                changed_files=changed_files,
+                commit_hash=commit_hash,
+                branch=branch,
+                zip_filename=zip_filename,
+                triggered_update=triggered_update,
+            )
+
+    async def _report_patch_review(
+        self,
+        *,
+        data: dict[str, Any],
+        result: AIResult,
+        changed_files: list[str],
+        commit_hash: str | None,
+        branch: str,
+        zip_filename: str,
+        triggered_update: bool,
+    ) -> None:
+        if self.reporter is None or not self.reporter.available():
+            return
+        files = "\n".join(f"• `{p}`" for p in changed_files[:12])
+        if len(changed_files) > 12:
+            files += f"\n• ... e mais {len(changed_files) - 12} arquivo(s)"
+        what_changed = self._format_bullets(data.get("what_changed") or data.get("changes") or [], fallback="• Não informado pela IA.", max_items=8)
+        recommendations = self._format_bullets(data.get("recommendations") or data.get("next_steps") or [], fallback="• Revisar logs após o deploy e validar o fluxo alterado.", max_items=6)
+        tests = self._format_bullets(data.get("tests") or data.get("tests_to_run") or [], fallback="• Reiniciar o bot e testar manualmente os comandos/menus afetados.", max_items=6)
+        short_hash = str(commit_hash or "desconhecido")[:7]
+        description = (
+            f"**Provider:** `{result.provider}` · `{result.model}` · `{result.elapsed_ms} ms`\n"
+            f"**ZIP:** `{redact_secrets(zip_filename, max_chars=120)}`\n"
+            f"**Branch:** `{branch}` · **Commit:** `{short_hash}`\n"
+            f"**Aplicação:** {'updater systemd deve aplicar automaticamente' if triggered_update else 'commit enviado, mas updater systemd não foi detectado'}\n\n"
+            f"**Resumo**\n{redact_secrets(str(data.get('summary') or 'Patch comentado pela DevAI.'), max_chars=900)}\n\n"
+            f"**O que mudou**\n{what_changed}\n\n"
+            f"**O que faz**\n{redact_secrets(str(data.get('effect') or data.get('what_it_does') or 'Não informado pela IA.'), max_chars=900)}\n\n"
+            f"**Risco**\n`{redact_secrets(str(data.get('risk') or 'médio'), max_chars=80)}`\n\n"
+            f"**Recomendações**\n{recommendations}\n\n"
+            f"**Como validar**\n{tests}\n\n"
+            f"**Arquivos alterados**\n{files}"
+        )
+        await self.reporter.send_report(
+            title="🧠 DevAI comentou um patch aplicado com sucesso",
+            description=description,
+            color=0x57F287,
+        )
+
+    async def _report_patch_review_fallback(
+        self,
+        *,
+        changed_files: list[str],
+        commit_hash: str | None,
+        branch: str,
+        zip_filename: str,
+        errors: list[str],
+    ) -> None:
+        if self.reporter is None or not self.reporter.available():
+            return
+        files = "\n".join(f"• `{p}`" for p in changed_files[:12])
+        err_text = "\n".join(f"• {redact_secrets(err, max_chars=450)}" for err in errors[-6:]) or "• nenhum detalhe"
+        await self.reporter.send_report(
+            title="🧠 DevAI registrou patch, mas não conseguiu comentar com IA",
+            description=(
+                f"**ZIP:** `{redact_secrets(zip_filename, max_chars=120)}`\n"
+                f"**Branch:** `{branch}` · **Commit:** `{str(commit_hash or 'desconhecido')[:7]}`\n\n"
+                f"**Arquivos alterados**\n{files}\n\n"
+                f"**Falhas dos providers**\n{err_text}\n\n"
+                "Recomendação padrão: revisar logs após o deploy e testar os fluxos dos arquivos alterados."
             ),
             color=0xFEE75C,
         )

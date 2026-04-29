@@ -540,6 +540,53 @@ class BotLocal(commands.Bot):
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
+    async def _schedule_devai_patch_review(
+        self,
+        *,
+        zip_path: Path,
+        changed_files: list[str],
+        commit_hash: object,
+        branch: object,
+        triggered_update: bool,
+    ) -> None:
+        devai = self.get_cog("DevAI")
+        review = getattr(devai, "review_successful_patch", None)
+        if not callable(review):
+            return
+
+        review_zip_path: Path | None = None
+        try:
+            review_dir = self._repo_root / "data" / "dev_ai" / "patch_reviews"
+            review_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = "".join(ch if ch.isalnum() or ch in {".", "-", "_"} else "_" for ch in zip_path.name)[:120] or "patch.zip"
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            review_zip_path = review_dir / f"{stamp}_{safe_name}"
+            shutil.copy2(zip_path, review_zip_path)
+        except Exception as e:
+            print(f"[zip_update] DevAI não conseguiu copiar zip para comentário: {e!r}")
+            return
+
+        async def _runner() -> None:
+            try:
+                await review(
+                    changed_files=[str(path) for path in changed_files],
+                    commit_hash=str(commit_hash or "") or None,
+                    branch=str(branch or "main"),
+                    zip_filename=zip_path.name,
+                    zip_path=review_zip_path,
+                    triggered_update=triggered_update,
+                )
+            except Exception as e:
+                print(f"[zip_update] DevAI falhou ao comentar patch: {e!r}")
+            finally:
+                try:
+                    if review_zip_path is not None:
+                        review_zip_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        asyncio.create_task(_runner())
+
     async def _handle_zip_update_message(self, message: discord.Message):
         zip_attachment = None
         for attachment in message.attachments:
@@ -601,8 +648,15 @@ class BotLocal(commands.Bot):
                 await self._send_zip_update_message(
                     message,
                     "✅ Update enviado para o GitHub",
-                    f"Branch: **{branch}**\nCommit: **{short_hash}**\nArquivos alterados: **{len(changed_files)}**\n\n{preview_files}\n\n{update_line}",
+                    f"Branch: **{branch}**\nCommit: **{short_hash}**\nArquivos alterados: **{len(changed_files)}**\n\n{preview_files}\n\n{update_line}\n\n🧠 A DevAI vai tentar comentar esse patch no webhook configurado.",
                     discord.Color.green(),
+                )
+                await self._schedule_devai_patch_review(
+                    zip_path=zip_path,
+                    changed_files=changed_files,
+                    commit_hash=commit_hash,
+                    branch=branch,
+                    triggered_update=triggered_update,
                 )
             except zipfile.BadZipFile:
                 await self._send_zip_update_message(

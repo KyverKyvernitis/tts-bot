@@ -162,7 +162,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._manual_voice_disconnect_until: dict[int, float] = {}
         self._voice_first_connect_fail_notified: set[int] = set()
         self._voice_failure_dm_target_id: int | None = None
-        self._voice_auto_restore_enabled: bool = False
+        self._voice_auto_restore_enabled: bool = bool(getattr(config, "TTS_VOICE_AUTO_RESTORE_ENABLED", True))
 
     async def cog_load(self):
         self._prime_tts_runtime()
@@ -171,6 +171,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             asyncio.create_task(self._boot_warmup())
         if self._voice_auto_restore_enabled:
             self._voice_restore_task = asyncio.create_task(self._restore_voice_sessions_after_ready())
+        else:
+            print("[tts_voice] restore automático de call desativado por TTS_VOICE_AUTO_RESTORE_ENABLED=false")
 
     async def _get_root_command_ids_cached(self, guild: discord.Guild | None = None, *, ttl_seconds: float = 600.0) -> dict[str, int]:
         return await fetch_root_command_ids_cached(
@@ -502,7 +504,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         pending = {int(gid): int(cid) for gid, cid in dict(remembered or {}).items() if int(cid or 0) > 0}
         if not pending:
+            print("[tts_voice] restore pós-boot sem canais lembrados")
             return
+
+        for guild_id, channel_id in pending.items():
+            self._remember_expected_voice_channel(guild_id, channel_id)
+        print(f"[tts_voice] restore pós-boot iniciado | guilds={len(pending)}")
 
         for attempt in range(4):
             if not pending or self.bot.is_closed():
@@ -539,6 +546,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 if current_vc is not None and not self._is_voice_client_stale(guild, current_vc):
                     current_channel = getattr(current_vc, "channel", None)
                     if getattr(current_channel, "id", None) == channel_id:
+                        self._remember_expected_voice_channel(guild_id, channel_id)
                         continue
 
                 try:
@@ -1980,10 +1988,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         )
             elif before.channel is not None:
                 print(f"[tts_voice] bot saiu da call | guild={guild.id} channel={getattr(before.channel, 'id', None)}")
+                expected_channel_id = int(self._expected_voice_channel_ids.get(guild.id, 0) or 0)
+                remembered_channel_id = await self._get_remembered_voice_channel_id(guild.id)
+                before_channel_id = int(getattr(before.channel, "id", 0) or 0)
+                has_restore_target = expected_channel_id > 0 or remembered_channel_id > 0 or before_channel_id > 0
                 manual_or_intentional = (
                     self._is_manual_voice_disconnect_recent(guild.id)
                     or self._runtime_voice_restore_is_suppressed(guild.id)
-                    or int(self._expected_voice_channel_ids.get(guild.id, 0) or 0) <= 0
+                    or not has_restore_target
                 )
                 if manual_or_intentional:
                     self._cancel_runtime_voice_restore(guild.id)
@@ -1993,16 +2005,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     await self._clear_remembered_voice_channel(guild.id)
                     print(f"[tts_voice] saída intencional/guardada; restore ignorado | guild={guild.id}")
                 else:
+                    target_channel_id = before_channel_id or expected_channel_id or remembered_channel_id
                     if self._voice_auto_restore_enabled:
-                        self._remember_expected_voice_channel(guild.id, getattr(before.channel, "id", None))
-                        await self._set_remembered_voice_channel(guild.id, getattr(before.channel, "id", None))
+                        self._remember_expected_voice_channel(guild.id, target_channel_id)
+                        await self._set_remembered_voice_channel(guild.id, target_channel_id)
                         if await self._runtime_should_restore_voice(guild.id):
                             await self._schedule_runtime_voice_restore(
                                 guild,
-                                channel_id=getattr(before.channel, "id", None),
+                                channel_id=target_channel_id,
                                 reason="voice_state_disconnect",
                                 initial_delay=4.0,
                             )
+                        else:
+                            print(f"[tts_voice] restore em runtime não agendado porque auto-leave está ativo | guild={guild.id} channel={target_channel_id}")
                     else:
                         self._cancel_runtime_voice_restore(guild.id)
                         self._runtime_voice_restore_failures[guild.id] = 0

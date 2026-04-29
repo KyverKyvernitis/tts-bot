@@ -61,6 +61,10 @@ TTS_VOICE_FAILURE_DM_USER_ID = _parse_int(
     0,
 )
 
+# Reentra automaticamente na última call lembrada depois de restart/queda.
+# Desative apenas se quiser impedir qualquer restore automático de voz.
+TTS_VOICE_AUTO_RESTORE_ENABLED = _parse_bool(os.getenv("TTS_VOICE_AUTO_RESTORE_ENABLED", "true"), True)
+
 PORT = _parse_int(os.getenv("PORT", "10000"), 10000)
 
 MONGODB_URI = (os.getenv("MONGODB_URI", "") or "").strip()
@@ -184,3 +188,8 @@ DEVAI_MAX_CONTEXT_FILES = _parse_int(os.getenv("DEVAI_MAX_CONTEXT_FILES", "4"), 
 DEVAI_MAX_FILE_CONTEXT_CHARS = _parse_int(os.getenv("DEVAI_MAX_FILE_CONTEXT_CHARS", "24000"), 24000)
 DEVAI_MAX_FILES_PER_PATCH = _parse_int(os.getenv("DEVAI_MAX_FILES_PER_PATCH", "5"), 5)
 DEVAI_MAX_FILE_BYTES = _parse_int(os.getenv("DEVAI_MAX_FILE_BYTES", "220000"), 220000)
+
+# Comentário automático da DevAI para patches aceitos pelo auto-updater de ZIP.
+DEVAI_PATCH_REVIEW_ENABLED = _parse_bool(os.getenv("DEVAI_PATCH_REVIEW_ENABLED", "true"), True)
+DEVAI_PATCH_REVIEW_MAX_FILES = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_FILES", "8"), 8)
+DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE", "9000"), 9000)

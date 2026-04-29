@@ -22,6 +22,9 @@ class BuiltPatch:
     summary: str
     cause: str
     risk: str
+    effect: str
+    recommendations: list[str]
+    tests: list[str]
 
 
 class PatchBuilder:
@@ -30,6 +33,21 @@ class PatchBuilder:
         self.output_dir = output_dir
         self.max_files = max_files
         self.max_file_bytes = max_file_bytes
+
+    def _string_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [line.strip(" -•") for line in value.splitlines() if line.strip()]
+        if isinstance(value, list):
+            result: list[str] = []
+            for item in value:
+                text = str(item).strip()
+                if text:
+                    result.append(text)
+            return result
+        text = str(value).strip()
+        return [text] if text else []
 
     def parse_ai_json(self, raw_text: str) -> dict[str, Any]:
         text = (raw_text or "").strip()
@@ -109,6 +127,9 @@ class PatchBuilder:
                 "provider_summary": str(data.get("summary") or "")[:1000],
                 "cause": str(data.get("cause") or data.get("analysis") or "")[:1000],
                 "risk": str(data.get("risk") or "médio")[:80],
+                "effect": str(data.get("effect") or data.get("what_it_does") or data.get("impact") or "")[:1000],
+                "recommendations": self._string_list(data.get("recommendations") or data.get("next_steps") or [])[:8],
+                "tests": self._string_list(data.get("tests") or data.get("tests_to_run") or data.get("validation") or [])[:8],
             }
             history_path = self.output_dir.parent / "patch_history.jsonl"
             with history_path.open("a", encoding="utf-8") as fp:
@@ -121,6 +142,9 @@ class PatchBuilder:
                 summary=str(data.get("summary") or data.get("fix_summary") or "Patch gerado pela DevAI.").strip(),
                 cause=str(data.get("cause") or data.get("analysis") or "Causa não informada pela IA.").strip(),
                 risk=str(data.get("risk") or "médio").strip(),
+                effect=str(data.get("effect") or data.get("what_it_does") or data.get("impact") or "Não informado pela IA.").strip(),
+                recommendations=self._string_list(data.get("recommendations") or data.get("next_steps") or [])[:8],
+                tests=self._string_list(data.get("tests") or data.get("tests_to_run") or data.get("validation") or [])[:8],
             )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
