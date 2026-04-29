@@ -132,3 +132,55 @@ TTS_GTTS_CONCURRENCY = _parse_int(os.getenv("TTS_GTTS_CONCURRENCY", "1"), 1)
 # FFmpeg enxuto para reprodução
 TTS_FFMPEG_BEFORE_OPTIONS = (os.getenv("TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin") or "-nostdin").strip()
 TTS_FFMPEG_OPTIONS = (os.getenv("TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error").strip()
+
+# -----------------------------------------------------------------------------
+# DevAI — analisa logs, pede correção para providers gratuitos/fallbacks e
+# oferece patch .zip pelo webhook. Nunca aplica patch automaticamente.
+# -----------------------------------------------------------------------------
+
+def _parse_csv(value: str) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+DEVAI_ENABLED = _parse_bool(os.getenv("DEVAI_ENABLED", "false"), False)
+DEVAI_WEBHOOK_URL = (os.getenv("DEVAI_WEBHOOK_URL", os.getenv("ALERT_WEBHOOK_URL", "")) or "").strip()
+DEVAI_COMMENT_CHANNEL_ID = _parse_int(os.getenv("DEVAI_COMMENT_CHANNEL_ID", "0"), 0)
+DEVAI_OWNER_IDS = _parse_guild_ids(os.getenv("DEVAI_OWNER_IDS", os.getenv("BOT_OWNER_ID", os.getenv("OWNER_ID", ""))))
+
+DEVAI_PROVIDER_ORDER = _parse_csv(os.getenv("DEVAI_PROVIDER_ORDER", "gemini,groq,cloudflare,huggingface,pollinations"))
+DEVAI_PROVIDER_TIMEOUT_SECONDS = _parse_int(os.getenv("DEVAI_PROVIDER_TIMEOUT_SECONDS", "45"), 45)
+DEVAI_MAX_OUTPUT_TOKENS = _parse_int(os.getenv("DEVAI_MAX_OUTPUT_TOKENS", "12000"), 12000)
+DEVAI_TEMPERATURE = _parse_float(os.getenv("DEVAI_TEMPERATURE", "0.15"), 0.15)
+
+# Chaves já usadas por outros módulos podem existir no .env; a DevAI só lê aqui.
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY", "") or "").strip()
+GROQ_API_KEY = (os.getenv("GROQ_API_KEY", "") or "").strip()
+CLOUDFLARE_API_TOKEN = (os.getenv("CLOUDFLARE_API_TOKEN", "") or "").strip()
+CLOUDFLARE_ACCOUNT_ID = (os.getenv("CLOUDFLARE_ACCOUNT_ID", "") or "").strip()
+HUGGINGFACE_API_KEY = (os.getenv("HUGGINGFACE_API_KEY", "") or "").strip()
+POLLINATIONS_API_KEY = (os.getenv("POLLINATIONS_API_KEY", "") or "").strip()
+
+DEVAI_GEMINI_MODEL = (os.getenv("DEVAI_GEMINI_MODEL", "gemini-2.0-flash") or "gemini-2.0-flash").strip()
+DEVAI_GROQ_BASE_URL = (os.getenv("DEVAI_GROQ_BASE_URL", "https://api.groq.com/openai/v1") or "https://api.groq.com/openai/v1").strip()
+DEVAI_GROQ_MODEL = (os.getenv("DEVAI_GROQ_MODEL", "openai/gpt-oss-20b") or "openai/gpt-oss-20b").strip()
+DEVAI_CLOUDFLARE_BASE_URL = (os.getenv("DEVAI_CLOUDFLARE_BASE_URL", "") or "").strip()
+DEVAI_CLOUDFLARE_MODEL = (os.getenv("DEVAI_CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct") or "@cf/meta/llama-3.1-8b-instruct").strip()
+DEVAI_HUGGINGFACE_BASE_URL = (os.getenv("DEVAI_HUGGINGFACE_BASE_URL", "https://router.huggingface.co/v1") or "https://router.huggingface.co/v1").strip()
+DEVAI_HUGGINGFACE_MODEL = (os.getenv("DEVAI_HUGGINGFACE_MODEL", "Qwen/Qwen2.5-Coder-32B-Instruct") or "Qwen/Qwen2.5-Coder-32B-Instruct").strip()
+DEVAI_POLLINATIONS_BASE_URL = (os.getenv("DEVAI_POLLINATIONS_BASE_URL", "https://gen.pollinations.ai/v1") or "https://gen.pollinations.ai/v1").strip()
+DEVAI_POLLINATIONS_MODEL = (os.getenv("DEVAI_POLLINATIONS_MODEL", "openai") or "openai").strip()
+
+DEVAI_LOG_PATHS = (os.getenv("DEVAI_LOG_PATHS", "logs/*.log,bot.log,logs/bot.log") or "logs/*.log,bot.log,logs/bot.log").strip()
+DEVAI_SCAN_EXISTING_LOGS_ON_BOOT = _parse_bool(os.getenv("DEVAI_SCAN_EXISTING_LOGS_ON_BOOT", "false"), False)
+DEVAI_POLL_INTERVAL_SECONDS = _parse_float(os.getenv("DEVAI_POLL_INTERVAL_SECONDS", "8.0"), 8.0)
+DEVAI_COOLDOWN_SECONDS = _parse_int(os.getenv("DEVAI_COOLDOWN_SECONDS", "300"), 300)
+DEVAI_MAX_LOG_LINES = _parse_int(os.getenv("DEVAI_MAX_LOG_LINES", "180"), 180)
+DEVAI_MAX_LOG_CHARS = _parse_int(os.getenv("DEVAI_MAX_LOG_CHARS", "18000"), 18000)
+DEVAI_INDEX_MAX_AGE_SECONDS = _parse_int(os.getenv("DEVAI_INDEX_MAX_AGE_SECONDS", "1800"), 1800)
+DEVAI_MAX_INDEX_CHARS = _parse_int(os.getenv("DEVAI_MAX_INDEX_CHARS", "12000"), 12000)
+DEVAI_MAX_CONTEXT_FILES = _parse_int(os.getenv("DEVAI_MAX_CONTEXT_FILES", "4"), 4)
+DEVAI_MAX_FILE_CONTEXT_CHARS = _parse_int(os.getenv("DEVAI_MAX_FILE_CONTEXT_CHARS", "24000"), 24000)
+DEVAI_MAX_FILES_PER_PATCH = _parse_int(os.getenv("DEVAI_MAX_FILES_PER_PATCH", "5"), 5)
+DEVAI_MAX_FILE_BYTES = _parse_int(os.getenv("DEVAI_MAX_FILE_BYTES", "220000"), 220000)

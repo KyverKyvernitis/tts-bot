@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import logging.handlers
 import os
 import shutil
 import stat
@@ -16,10 +17,22 @@ from pathlib import Path, PurePosixPath
 # Nível geral INFO; libs barulhentas (discord.gateway / discord.voice_client)
 # são rebaixadas para WARNING para não poluir.
 # -----------------------------------------------------------------------------
+_LOG_DIR = Path(__file__).resolve().parent / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.handlers.RotatingFileHandler(
+            _LOG_DIR / "bot.log",
+            maxBytes=2_000_000,
+            backupCount=3,
+            encoding="utf-8",
+        ),
+    ],
 )
 logging.getLogger("discord.gateway").setLevel(logging.WARNING)
 logging.getLogger("discord.voice_client").setLevel(logging.WARNING)
