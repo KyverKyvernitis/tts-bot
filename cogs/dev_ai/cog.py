@@ -77,13 +77,13 @@ class DevAI(commands.Cog):
         self.queue: asyncio.Queue[LogEvent] = asyncio.Queue(maxsize=20)
         self._analysis_lock = asyncio.Lock()
         self._last_auto_started_at = 0.0
+        # IDs de mensagens postadas pela DevAI no webhook configurado.
+        # Separados pra que reply em CHAT não dispare re-análise de erro:
+        #   _report_message_ids → reply leva pro fluxo de re-análise/patch
+        #   _chat_message_ids   → reply continua a conversa em modo chat
         self._report_message_ids: set[int] = set()
+        self._chat_message_ids: set[int] = set()
         self._last_event_by_message: dict[int, LogEvent] = {}
-        # Cache de webhook gerenciado por canal pra modo chat ("DevAI Bridge").
-        # Invalidado lazy: se o webhook foi deletado, o próximo send dá 404 e
-        # cai no fallback.
-        self._chat_webhook_cache: dict[int, discord.Webhook] = {}
-        self._chat_webhook_lock = asyncio.Lock()
 
     def _enabled(self) -> bool:
         return bool(getattr(config, "DEVAI_ENABLED", False))
@@ -727,11 +727,14 @@ SCHEMA EXATO DO JSON:
         lower = content.lower()
 
         # ---- detecção de gatilhos ---------------------------------------
-        # 1) Mention direta do bot (qualquer canal — limitamos depois com is_ownerish).
+        # 1) Mention direta do bot.
         bot_user = getattr(self.bot, "user", None)
         bot_mentioned = bool(bot_user) and bot_user in (message.mentions or [])
-        # 2) Reply pra um relatório anterior da DevAI.
-        is_reply_to_report = self._is_reply_to_report(message)
+        # 2) Reply pra alguma mensagem da DevAI — pode ser de relatório ou de chat.
+        ref = getattr(message, "reference", None)
+        ref_id = int(getattr(ref, "message_id", 0) or 0) if ref is not None else 0
+        is_reply_to_report = ref_id in self._report_message_ids
+        is_reply_to_chat = ref_id in self._chat_message_ids
         # 3) Prefixo textual "devai"/"ia" — só conta no canal de comentário.
         channel_id = int(getattr(config, "DEVAI_COMMENT_CHANNEL_ID", 0) or 0)
         in_comment_channel = (
@@ -740,21 +743,18 @@ SCHEMA EXATO DO JSON:
         )
         text_prefix = (lower.startswith("devai") or lower.startswith("ia ") or lower == "ia") and in_comment_channel
 
-        if not (bot_mentioned or is_reply_to_report or text_prefix):
+        if not (bot_mentioned or is_reply_to_report or is_reply_to_chat or text_prefix):
             return
 
         # Limpa prefixo/mention pra deixar só a pergunta/comentário.
         cleaned = self._strip_prefix_and_mentions(content)
-        if not cleaned and not is_reply_to_report:
+        if not cleaned and not (is_reply_to_report or is_reply_to_chat):
             cleaned = content  # fallback
 
         # ---- decisão de modo --------------------------------------------
-        # Se for reply num relatório de erro, mantemos o comportamento antigo:
-        # tenta refazer o patch usando a mensagem do dono como instrução
-        # prioritária. Esse caminho gera ZIP novo se a IA achar que precisa.
-        # A reação 🧠 fica permanente no modo patch (sinaliza "estamos refazendo").
+        # Reply em RELATÓRIO de erro/patch → modo re-analyze (gera ZIP novo).
+        # A reação 🧠 fica permanente: sinaliza "ok, vou refazer o patch".
         if is_reply_to_report:
-            ref_id = int(getattr(getattr(message, "reference", None), "message_id", 0) or 0)
             event = self._last_event_by_message.get(ref_id)
             if event is None and self._last_event_by_message:
                 event = list(self._last_event_by_message.values())[-1]
@@ -767,8 +767,8 @@ SCHEMA EXATO DO JSON:
                 return
             # Sem evento associado — cai pro modo chat.
 
-        # Caso contrário: chat livre. Resposta em texto puro, no canal,
-        # sem gerar ZIP.
+        # Caso contrário (mention, prefixo, ou reply em CHAT): conversa livre.
+        # A reação entra/sai dentro de `_chat_with_owner`.
         asyncio.create_task(self._chat_with_owner(message, cleaned))
 
     def _strip_prefix_and_mentions(self, content: str) -> str:
@@ -794,13 +794,21 @@ SCHEMA EXATO DO JSON:
         if self.ai is None:
             return
 
+        # Busca a mensagem citada AGORA (em async) pra ter o conteúdo. O
+        # `cached_message` quase nunca tem mensagens de webhook, então fazemos
+        # fetch ativo. Custo: 1 HTTP call quando há reply.
+        referenced_text = await self._fetch_referenced_text(message)
+
         # Reação de processamento: entra antes de chamar a IA, sai depois.
         reaction_used = await self._add_processing_reaction(message)
 
         try:
             try:
                 prompt = await asyncio.to_thread(
-                    self._build_chat_prompt, message=message, question=question
+                    self._build_chat_prompt,
+                    message=message,
+                    question=question,
+                    referenced_text=referenced_text,
                 )
             except Exception as exc:
                 log.exception("DevAI chat: falha montando prompt")
@@ -836,6 +844,29 @@ SCHEMA EXATO DO JSON:
             if reaction_used is not None:
                 await self._remove_processing_reaction(message, reaction_used)
 
+    async def _fetch_referenced_text(self, message: discord.Message) -> str:
+        """Quando a mensagem é reply, retorna o conteúdo da mensagem citada
+        (incluindo respostas anteriores da DevAI via webhook). Tenta:
+        1. `reference.cached_message.content` (rápido, mas raro pra webhook)
+        2. `channel.fetch_message(reference.message_id)` (1 HTTP call)
+        Volta string vazia se nada deu certo."""
+        ref = getattr(message, "reference", None)
+        if ref is None:
+            return ""
+        cached = getattr(ref, "cached_message", None)
+        if cached is not None and getattr(cached, "content", None):
+            return str(cached.content)
+        ref_id = int(getattr(ref, "message_id", 0) or 0)
+        if not ref_id:
+            return ""
+        try:
+            fetched = await message.channel.fetch_message(ref_id)
+            return str(getattr(fetched, "content", "") or "")
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return ""
+        except Exception:
+            return ""
+
     # ----- reações de processamento (mesmo padrão do cogs/chatbot) -----
 
     _PROCESSING_REACTIONS: tuple[str, ...] = ("🧠", "⏳")
@@ -869,21 +900,21 @@ SCHEMA EXATO DO JSON:
         except Exception:
             pass
 
-    # ----- envio via webhook gerenciado da DevAI ----------------------
-
-    _CHAT_WEBHOOK_NAME = "DevAI Bridge"
+    # ----- envio via webhook configurado da DevAI ---------------------
 
     async def _send_chat_response(self, message: discord.Message, content: str) -> None:
-        """Envia resposta de chat com a identidade DevAI (webhook). Faz
-        chunking automático em pedaços de 1900 chars (limite do Discord 2000).
+        """Envia resposta de chat com a identidade DevAI usando o webhook
+        configurado em `DEVAI_WEBHOOK_URL`.
 
-        Estratégia em 3 camadas:
-        1. Webhook gerenciado no MESMO canal da mensagem (pra ficar igual ao
-           chatbot — username "DevAI", avatar do bot).
-        2. Se falhar (sem permissão de manage_webhooks, canal sem suporte,
-           etc), tenta o webhook fixo do `DEVAI_WEBHOOK_URL` (mesmo que ele
-           esteja em outro canal — a resposta sai lá).
-        3. Último recurso: `message.reply` normal como bot.
+        Faz chunking automático em pedaços de 1900 chars. Cada mensagem
+        enviada tem o ID guardado em `_chat_message_ids` pra que o user possa
+        REPLICAR a mensagem da DevAI e a conversa continuar (em vez do listener
+        ignorar por não reconhecer o reference).
+
+        Estratégia:
+        1. Webhook fixo do `.env` (canal de relatórios — onde o dono fala
+           normalmente com a DevAI).
+        2. Fallback: `message.reply` no canal original se o webhook falhar.
         """
         chunks: list[str] = []
         remaining = content
@@ -893,115 +924,42 @@ SCHEMA EXATO DO JSON:
         if not chunks:
             return
 
-        # 1) webhook gerenciado no canal local
-        try:
-            webhook = await self._get_chat_webhook(message.channel)
-        except Exception:
-            log.exception("DevAI chat: falha ao obter webhook do canal")
-            webhook = None
-
-        if webhook is not None:
-            avatar_url = self._bot_avatar_url()
-            try:
-                thread = message.channel if isinstance(message.channel, discord.Thread) else discord.utils.MISSING
-                for chunk in chunks:
-                    await webhook.send(
-                        content=chunk,
-                        username="DevAI",
-                        avatar_url=avatar_url,
-                        thread=thread,
-                        wait=True,
-                    )
-                return
-            except Exception:
-                log.exception("DevAI chat: falha ao enviar pelo webhook gerenciado")
-
-        # 2) webhook global da DevAI (canal de relatórios)
+        # 1) Webhook configurado (DEVAI_WEBHOOK_URL).
+        sent_via_webhook = False
         if self.reporter is not None and self.reporter.available():
             try:
                 for chunk in chunks:
-                    await self.reporter.send_plain(chunk, username="DevAI")
-                return
+                    sent = await self.reporter.send_plain(chunk, username="DevAI")
+                    if sent is not None:
+                        # Registra pro listener reconhecer reply na resposta.
+                        self._chat_message_ids.add(int(sent.id))
+                        sent_via_webhook = True
+                if sent_via_webhook:
+                    return
             except Exception:
-                log.exception("DevAI chat: falha ao enviar pelo webhook global")
+                log.exception("DevAI chat: falha enviando pelo webhook configurado")
 
-        # 3) fallback final: resposta como bot
+        # 2) Fallback final: resposta como bot no canal original.
         try:
             first = True
             for chunk in chunks:
                 if first:
-                    await message.reply(chunk, mention_author=False)
+                    sent = await message.reply(chunk, mention_author=False)
                     first = False
                 else:
-                    await message.channel.send(chunk)
+                    sent = await message.channel.send(chunk)
+                if sent is not None:
+                    self._chat_message_ids.add(int(sent.id))
         except Exception:
             log.exception("DevAI chat: todos os caminhos de envio falharam")
 
-    def _bot_avatar_url(self) -> str:
-        """URL do avatar do bot pra usar no webhook (deixa idêntico ao bot)."""
-        me = self.bot.user
-        if me is None:
-            return ""
-        avatar = getattr(me, "display_avatar", None) or getattr(me, "avatar", None)
-        if avatar is not None:
-            try:
-                return str(avatar.url)
-            except Exception:
-                return ""
-        return ""
-
-    async def _get_chat_webhook(self, channel) -> discord.Webhook | None:
-        """Retorna um webhook DevAI no canal, reusando se já existir.
-
-        Funciona em TextChannel, VoiceChannel, StageChannel e Thread (nesta
-        última, o webhook vive no canal pai e usamos `thread=` no send).
-        Cacheia por id do canal-host pra não bater na API toda vez.
-        """
-        host = channel.parent if isinstance(channel, discord.Thread) else channel
-        if host is None or not hasattr(host, "webhooks"):
-            return None
-
-        # cache simples — invalida só se o webhook for deletado externamente
-        # (próximo send vai dar 404 e nós recriamos no próximo turno).
-        cached = self._chat_webhook_cache.get(int(host.id))
-        if cached is not None:
-            return cached
-
-        async with self._chat_webhook_lock:
-            cached = self._chat_webhook_cache.get(int(host.id))
-            if cached is not None:
-                return cached
-            # Procura um webhook existente nosso.
-            try:
-                existing = await host.webhooks()
-            except discord.Forbidden:
-                log.warning("DevAI chat: sem permissão Manage Webhooks no canal %s", host.id)
-                return None
-            except Exception:
-                log.exception("DevAI chat: falha listando webhooks do canal %s", host.id)
-                return None
-            for wh in existing:
-                if wh.name == self._CHAT_WEBHOOK_NAME and wh.user == self.bot.user:
-                    self._chat_webhook_cache[int(host.id)] = wh
-                    return wh
-            # Cria um novo.
-            try:
-                wh = await host.create_webhook(name=self._CHAT_WEBHOOK_NAME, reason="DevAI chat replies")
-            except discord.Forbidden:
-                log.warning("DevAI chat: sem permissão pra criar webhook no canal %s", host.id)
-                return None
-            except discord.HTTPException:
-                log.exception("DevAI chat: falha ao criar webhook no canal %s", host.id)
-                return None
-            self._chat_webhook_cache[int(host.id)] = wh
-            return wh
-
-    def _build_chat_prompt(self, *, message: discord.Message, question: str) -> str:
+    def _build_chat_prompt(self, *, message: discord.Message, question: str, referenced_text: str = "") -> str:
         """Monta o prompt do modo chat. Inclui:
         - estrutura compacta do projeto
         - últimos 3 patches (pra "lembrar" o que aconteceu)
-        - se a mensagem for reply de algo, o conteúdo da mensagem referenciada
-        - histórico curto do canal (últimas 6 msgs antes desta) pra dar contexto
+        - se a mensagem for reply de algo (incluindo resposta anterior da
+          DevAI via webhook), o conteúdo da mensagem referenciada — passada
+          em `referenced_text` pelo `_chat_with_owner` (que faz fetch async).
         """
         index = self.indexer.load_or_build(
             max_age_seconds=int(getattr(config, "DEVAI_INDEX_MAX_AGE_SECONDS", 1800) or 1800)
@@ -1019,28 +977,33 @@ SCHEMA EXATO DO JSON:
             ref_id = int(getattr(ref, "message_id", 0) or 0)
             event = self._last_event_by_message.get(ref_id)
             if event is not None:
+                # Reply num relatório de erro/patch — não chega aqui no fluxo
+                # normal (re-analyze é tratado antes), mas mantemos por
+                # robustez se alguém forçar.
                 ref_block = (
-                    "MENSAGEM CITADA (relatório de erro):\n"
+                    "MENSAGEM CITADA (relatório de erro/patch):\n"
                     f"- Assinatura: {event.signature}\n"
                     f"- Fonte: {event.source}\n"
-                    f"```txt\n{redact_secrets(event.text, max_chars=4000)}\n```\n"
+                    f"```txt\n{redact_secrets(event.text, max_chars=4000)}\n```\n\n"
                 )
-            else:
-                # Tenta puxar o cached message — em alguns casos o discord.py
-                # já tem.
-                cached = getattr(ref, "cached_message", None)
-                if cached is not None and cached.content:
-                    ref_block = (
-                        "MENSAGEM CITADA:\n"
-                        f"```\n{redact_secrets(str(cached.content), max_chars=2000)}\n```\n"
-                    )
+            elif referenced_text:
+                # Reply numa mensagem de chat anterior da DevAI ou em
+                # qualquer outra coisa relevante.
+                label = (
+                    "MENSAGEM CITADA (resposta anterior da DevAI)"
+                    if ref_id in self._chat_message_ids
+                    else "MENSAGEM CITADA"
+                )
+                ref_block = (
+                    f"{label}:\n"
+                    f"```\n{redact_secrets(referenced_text, max_chars=2500)}\n```\n\n"
+                )
 
         return f"""
 PERGUNTA DO DONO:
 {redact_secrets(question, max_chars=2500)}
 
-{ref_block}
-PATCHES RECENTES:
+{ref_block}PATCHES RECENTES:
 {history_block}
 
 ESTRUTURA RESUMIDA DO PROJETO:
