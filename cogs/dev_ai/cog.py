@@ -122,6 +122,11 @@ class DevAI(commands.Cog):
             )
             self.worker_task = asyncio.create_task(self._watch_loop())
             log.info("DevAI habilitada. Logs monitoradas: %s", ", ".join(p.as_posix() for p in self._configured_log_paths()))
+
+            # Verifica se há reviews pendentes que ficaram interrompidos por
+            # restart do systemd. Se houver, retoma em background — não trava
+            # o startup do bot.
+            asyncio.create_task(self._resume_pending_reviews())
         else:
             log.info("DevAI carregada, mas desabilitada. Defina DEVAI_ENABLED=true para ativar.")
 
@@ -576,9 +581,58 @@ SCHEMA EXATO DO JSON:
         if not changed_files:
             return
 
+        # Persiste o pedido ANTES de fazer o trabalho. Se o bot for morto pelo
+        # systemd updater no meio do review, o próximo startup vê esta entrada
+        # e retoma (usando git pra reconstruir o diff).
+        pending_id = self._persist_pending_review(
+            changed_files=changed_files,
+            commit_hash=commit_hash,
+            branch=branch,
+            zip_filename=zip_filename,
+            triggered_update=triggered_update,
+        )
+
+        try:
+            await self._run_patch_review_inner(
+                changed_files=changed_files,
+                commit_hash=commit_hash,
+                branch=branch,
+                zip_filename=zip_filename,
+                zip_path=zip_path,
+                triggered_update=triggered_update,
+            )
+        finally:
+            # Remove a entrada se o review terminou (com sucesso ou com
+            # _report_patch_review_fallback). Só fica pendente se o bot foi
+            # KILLED no meio (sem chance de chegar até o finally).
+            if pending_id:
+                self._remove_pending_review(pending_id)
+
+    async def _run_patch_review_inner(
+        self,
+        *,
+        changed_files: list[str],
+        commit_hash: str | None,
+        branch: str,
+        zip_filename: str,
+        zip_path: Path | None,
+        triggered_update: bool,
+    ) -> None:
         async with self._analysis_lock:
             zip_files = await asyncio.to_thread(self._read_zip_patch_context, zip_path or Path(), changed_files)
+            # Se zip_files está vazio (zip já apagado, p.ex. retomada após
+            # restart), tenta reconstruir lendo do disco — depois do systemd
+            # updater, o disco tem o estado pós-patch e podemos comparar com
+            # `git show <hash>~1:<file>` pra ter o estado pré-patch.
+            if not zip_files:
+                zip_files = await asyncio.to_thread(self._read_files_from_disk, changed_files)
+            # Diff: tenta o caminho normal (zip vs disco). Se vazio, recorre
+            # ao git pra mostrar o que o commit mudou.
             diff_block = await asyncio.to_thread(self._make_diff_block, zip_files)
+            if "Disco já está idêntico" in diff_block and commit_hash:
+                git_diff = await asyncio.to_thread(self._git_diff_for_commit, commit_hash, changed_files)
+                if git_diff:
+                    diff_block = git_diff
 
             prompt = await asyncio.to_thread(
                 self._build_patch_review_prompt,
@@ -724,6 +778,203 @@ SCHEMA EXATO DO JSON:
             ),
             color=0xFEE75C,
         )
+
+    # ----- persistência de reviews pendentes (sobrevive a restart) -----
+
+    @property
+    def _pending_reviews_path(self) -> Path:
+        return self.data_dir / "pending_reviews.jsonl"
+
+    def _persist_pending_review(
+        self,
+        *,
+        changed_files: list[str],
+        commit_hash: str | None,
+        branch: str,
+        zip_filename: str,
+        triggered_update: bool,
+    ) -> str:
+        """Append review request to pending queue. Returns ID for later removal.
+
+        Sobrevive a restart do bot: se o systemd updater matar o processo no
+        meio do review, esta entrada continua e `_resume_pending_reviews` vai
+        retomá-la no próximo startup, usando `git show` pra reconstruir o
+        diff (já que o ZIP original foi removido).
+        """
+        import time as _time
+        import uuid as _uuid
+        entry_id = _uuid.uuid4().hex[:12]
+        record = {
+            "id": entry_id,
+            "created_at": _time.time(),
+            "changed_files": list(changed_files),
+            "commit_hash": commit_hash,
+            "branch": branch,
+            "zip_filename": zip_filename,
+            "triggered_update": bool(triggered_update),
+        }
+        try:
+            self._pending_reviews_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._pending_reviews_path.open("a", encoding="utf-8") as fp:
+                fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+            return entry_id
+        except OSError:
+            log.warning("DevAI: falha ao persistir review pendente (vai rodar mas não sobrevive a restart)", exc_info=True)
+            return ""
+
+    def _remove_pending_review(self, entry_id: str) -> None:
+        """Remove entry by ID. Reescreve o arquivo sem ela."""
+        if not entry_id:
+            return
+        path = self._pending_reviews_path
+        if not path.exists():
+            return
+        try:
+            lines = path.read_text("utf-8", errors="replace").splitlines()
+            kept: list[str] = []
+            for line in lines:
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                try:
+                    rec = json.loads(line_stripped)
+                except json.JSONDecodeError:
+                    kept.append(line)
+                    continue
+                if rec.get("id") == entry_id:
+                    continue  # remove
+                kept.append(line)
+            if kept:
+                path.write_text("\n".join(kept) + "\n", "utf-8")
+            else:
+                path.unlink(missing_ok=True)
+        except OSError:
+            log.warning("DevAI: falha ao remover review pendente %s", entry_id, exc_info=True)
+
+    async def _resume_pending_reviews(self) -> None:
+        """Lê pending_reviews.jsonl e roda cada review remanescente.
+
+        Chamado uma vez no `cog_load`. Reviews antigas (>24h) são descartadas
+        pra não enviar comentário sobre patch que o dono já esqueceu. Cada
+        review usa `git show` pra reconstruir o diff já que o ZIP original
+        foi apagado pelo finally do bot.py.
+        """
+        path = self._pending_reviews_path
+        if not path.exists():
+            return
+        # Pequeno delay pra dar tempo do bot conectar ao Discord — sem isso,
+        # a primeira chamada ao webhook pode falhar com "session not started".
+        await asyncio.sleep(8)
+        try:
+            lines = path.read_text("utf-8", errors="replace").splitlines()
+        except OSError:
+            return
+
+        import time as _time
+        cutoff = _time.time() - 24 * 3600  # 24h
+        pending: list[dict[str, Any]] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if float(rec.get("created_at") or 0) < cutoff:
+                continue  # muito velho — descarta
+            pending.append(rec)
+
+        if not pending:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+
+        log.info("DevAI: retomando %d review(s) pendente(s) após restart", len(pending))
+        for rec in pending:
+            entry_id = str(rec.get("id") or "")
+            try:
+                # Avisa no webhook que esta é uma retomada — útil pra debug.
+                if self.reporter is not None and self.reporter.available():
+                    try:
+                        await self.reporter.send_plain(
+                            f"🔄 DevAI retomando review do commit `{str(rec.get('commit_hash') or '?')[:7]}` "
+                            f"(interrompido por restart)",
+                            username="DevAI",
+                        )
+                    except Exception:
+                        pass
+
+                await self._run_patch_review_inner(
+                    changed_files=list(rec.get("changed_files") or []),
+                    commit_hash=str(rec.get("commit_hash") or "") or None,
+                    branch=str(rec.get("branch") or "main"),
+                    zip_filename=str(rec.get("zip_filename") or "patch.zip"),
+                    zip_path=None,  # sem ZIP — vai cair no path do git diff
+                    triggered_update=bool(rec.get("triggered_update")),
+                )
+            except Exception:
+                log.exception("DevAI: falha retomando review pendente %s", entry_id)
+            finally:
+                if entry_id:
+                    self._remove_pending_review(entry_id)
+
+    # ----- leitura alternativa: do disco e via git ---------------------
+
+    def _read_files_from_disk(self, rel_paths: list[str]) -> dict[str, str]:
+        """Lê os arquivos diretamente do disco (estado atual). Usado quando
+        o ZIP original já não existe — após restart, o disco já contém o
+        estado pós-patch e podemos usar isso como referência."""
+        out: dict[str, str] = {}
+        max_chars_per_file = int(getattr(config, "DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE", 9000) or 9000)
+        for raw in rel_paths:
+            try:
+                rel = str(raw).replace("\\", "/").lstrip("/")
+                full = self.repo_root / rel
+                if not full.exists() or not full.is_file():
+                    continue
+                text = full.read_text("utf-8", errors="replace")
+                if len(text) > max_chars_per_file:
+                    text = text[: max_chars_per_file // 2] + "\n\n# ... trecho central omitido ...\n\n" + text[-max_chars_per_file // 2 :]
+                out[rel] = redact_secrets(text, max_chars=max_chars_per_file)
+            except OSError:
+                continue
+        return out
+
+    def _git_diff_for_commit(self, commit_hash: str, changed_files: list[str]) -> str:
+        """Reconstrói o diff exato que esse commit aplicou usando
+        `git show <hash> -- <files>`. Útil quando o ZIP original foi removido
+        (ex: review está sendo retomada após restart do bot)."""
+        import subprocess
+        if not commit_hash:
+            return ""
+        commit = commit_hash.strip()
+        if not commit or len(commit) < 4:
+            return ""
+        # Sanitiza pra evitar argumentos injetados em commit_hash exótico.
+        if not all(c.isalnum() for c in commit):
+            return ""
+        max_diff_chars = int(getattr(config, "DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS", 14000) or 14000)
+        cmd = ["git", "-C", str(self.repo_root), "show", "--no-color", commit, "--"]
+        cmd.extend(str(p).replace("\\", "/").lstrip("/") for p in changed_files[:20])
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return ""
+        if proc.returncode != 0:
+            return ""
+        out = proc.stdout or ""
+        # `git show` mostra header (autor, data, msg) + diff. Pega só do
+        # primeiro `diff --git` em diante pra a IA focar nas mudanças.
+        idx = out.find("diff --git")
+        if idx > 0:
+            out = out[idx:]
+        out = redact_secrets(out, max_chars=max_diff_chars)
+        if len(out) > max_diff_chars:
+            out = out[: max_diff_chars // 2] + "\n... (diff truncado) ...\n" + out[-max_diff_chars // 2 :]
+        return f"### diff reconstruído via `git show {commit[:12]}`\n```diff\n{out}\n```"
 
     # ---------------------------------------------------------- Discord listeners
 

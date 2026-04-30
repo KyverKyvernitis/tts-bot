@@ -590,7 +590,15 @@ class BotLocal(commands.Bot):
                 except Exception:
                     pass
 
-        asyncio.create_task(_runner())
+        # IMPORTANTE: awaited (não mais fire-and-forget). Antes era
+        # `asyncio.create_task(_runner())` mas isso fazia o review ser
+        # cancelado quando o systemd updater reiniciava o bot ~60s depois
+        # do push (o updater detecta novo commit no minuto seguinte e
+        # roda `systemctl restart tts-bot.service`). Agora aguardamos:
+        # se o review demorar mais que isso, a DevAI também persistiu o
+        # pedido em `data/dev_ai/pending_reviews.jsonl` e vai retomar no
+        # próximo startup com diff reconstruído via git.
+        await _runner()
 
     async def _handle_zip_update_message(self, message: discord.Message):
         zip_attachment = None
