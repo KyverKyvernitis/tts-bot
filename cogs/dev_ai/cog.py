@@ -86,7 +86,17 @@ class DevAI(commands.Cog):
         self._last_event_by_message: dict[int, LogEvent] = {}
 
     def _enabled(self) -> bool:
-        return bool(getattr(config, "DEVAI_ENABLED", False))
+        """A DevAI considera-se habilitada se:
+        (a) `DEVAI_ENABLED=true` explícito no .env, OU
+        (b) há webhook URL E canal de comentário configurados — config
+            implícita: se o dono se deu o trabalho de setar essas duas
+            variáveis, claramente quer a DevAI ligada.
+        Esse "auto-enable" cobre o caso comum de esquecer a flag explícita."""
+        if bool(getattr(config, "DEVAI_ENABLED", False)):
+            return True
+        webhook_set = bool(getattr(config, "DEVAI_WEBHOOK_URL", "") or "")
+        channel_set = bool(int(getattr(config, "DEVAI_COMMENT_CHANNEL_ID", 0) or 0))
+        return webhook_set and channel_set
 
     def _devai_webhook_id(self) -> int:
         """Extrai o ID do webhook do `DEVAI_WEBHOOK_URL` pra comparar com o
@@ -1613,7 +1623,9 @@ Responda em texto puro (markdown leve permitido). Não devolva JSON.
             is_app_owner = False
         report = (
             "**DevAI diagnóstico**\n"
-            f"• Cog enabled: `{self._enabled()}`\n"
+            f"• Cog enabled: `{self._enabled()}` "
+            f"(flag explícita: `{bool(getattr(config, 'DEVAI_ENABLED', False))}`, "
+            f"auto-enable por config: `{(not bool(getattr(config, 'DEVAI_ENABLED', False))) and self._enabled()}`)\n"
             f"• Webhook URL configurado: `{wh_url_set}`\n"
             f"• Webhook ID extraído: `{wh_id or 'não detectado'}`\n"
             f"• Reporter disponível: `{self.reporter is not None and self.reporter.available()}`\n"
