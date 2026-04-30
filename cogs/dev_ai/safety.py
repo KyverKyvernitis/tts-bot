@@ -4,12 +4,21 @@ import re
 from pathlib import Path, PurePosixPath
 
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?i)(discord[_-]?token|bot[_-]?token|client[_-]?secret|api[_-]?key|webhook[_-]?url|authorization|bearer)\s*[:=]\s*([^\s'\"`]+)"),
+    # Atribuição com VALOR aspeado: `webhook_url = "https://..."`,
+    # `api_key: 'gsk_...'`. Exige string literal de 8+ chars, não captura
+    # type hints como `webhook_url: str = ""` ou `def f(api_key=DEFAULT)`.
+    re.compile(
+        r"(?i)\b(discord[_-]?token|bot[_-]?token|client[_-]?secret|api[_-]?key|webhook[_-]?url|authorization|bearer)\b"
+        r"\s*[:=]\s*"
+        r"(['\"])([^'\"\s]{8,})\2"
+    ),
+    # Tokens conhecidos por prefixo — sempre redact independente de contexto.
     re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),
     re.compile(r"gsk_[0-9A-Za-z_\-]{20,}"),
     re.compile(r"sk_[0-9A-Za-z_\-]{20,}"),
     re.compile(r"hf_[0-9A-Za-z_\-]{20,}"),
     re.compile(r"cfut_[0-9A-Za-z_\-]{20,}"),
+    re.compile(r"csk-[0-9A-Za-z_\-]{20,}"),  # Cerebras
     re.compile(r"https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_\-\.]+"),
     re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----.*?-----END [A-Z ]+PRIVATE KEY-----", re.DOTALL),
 )
@@ -66,7 +75,10 @@ def redact_secrets(text: str, *, max_chars: int | None = None) -> str:
     value = str(text or "")
     for pattern in _SECRET_PATTERNS:
         def repl(match: re.Match[str]) -> str:
-            if match.lastindex and match.lastindex >= 2:
+            # Padrão 1 (atribuição): grupos = (key, quote, value)
+            #   webhook_url = "abc..." → webhook_url=<redacted>
+            # Padrão 2 (token solto): grupos vazios → <redacted-secret>
+            if match.lastindex and match.lastindex >= 3:
                 return f"{match.group(1)}=<redacted>"
             return "<redacted-secret>"
         value = pattern.sub(repl, value)
