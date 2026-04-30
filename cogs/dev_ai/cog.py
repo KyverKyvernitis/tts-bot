@@ -79,6 +79,11 @@ class DevAI(commands.Cog):
         self._last_auto_started_at = 0.0
         self._report_message_ids: set[int] = set()
         self._last_event_by_message: dict[int, LogEvent] = {}
+        # Cache de webhook gerenciado por canal pra modo chat ("DevAI Bridge").
+        # Invalidado lazy: se o webhook foi deletado, o próximo send dá 404 e
+        # cai no fallback.
+        self._chat_webhook_cache: dict[int, discord.Webhook] = {}
+        self._chat_webhook_lock = asyncio.Lock()
 
     def _enabled(self) -> bool:
         return bool(getattr(config, "DEVAI_ENABLED", False))
@@ -743,21 +748,21 @@ SCHEMA EXATO DO JSON:
         if not cleaned and not is_reply_to_report:
             cleaned = content  # fallback
 
-        try:
-            await message.add_reaction("🧠")
-        except Exception:
-            pass
-
         # ---- decisão de modo --------------------------------------------
         # Se for reply num relatório de erro, mantemos o comportamento antigo:
         # tenta refazer o patch usando a mensagem do dono como instrução
         # prioritária. Esse caminho gera ZIP novo se a IA achar que precisa.
+        # A reação 🧠 fica permanente no modo patch (sinaliza "estamos refazendo").
         if is_reply_to_report:
             ref_id = int(getattr(getattr(message, "reference", None), "message_id", 0) or 0)
             event = self._last_event_by_message.get(ref_id)
             if event is None and self._last_event_by_message:
                 event = list(self._last_event_by_message.values())[-1]
             if event is not None:
+                try:
+                    await message.add_reaction("🧠")
+                except Exception:
+                    pass
                 asyncio.create_task(self._analyze_event(event, comment=cleaned))
                 return
             # Sem evento associado — cai pro modo chat.
@@ -780,67 +785,216 @@ SCHEMA EXATO DO JSON:
 
     async def _chat_with_owner(self, message: discord.Message, question: str) -> None:
         """Modo conversa: monta um prompt com contexto do projeto + opcional
-        contexto do erro/patch citado e responde em texto puro como reply.
+        contexto do erro/patch citado e responde em texto puro.
 
-        Não posta no webhook formal — responde direto no canal. Ideal pra
-        perguntas tipo 'explique X', 'por que escolheu Y', 'qual cog faz Z'.
+        Resposta sai via webhook gerenciado da DevAI (mesma identidade visual
+        que os relatórios), com reação de "processando" 🧠 enquanto a IA
+        pensa — removida assim que a resposta vai pro canal.
         """
         if self.ai is None:
             return
-        try:
-            prompt = await asyncio.to_thread(self._build_chat_prompt, message=message, question=question)
-        except Exception as exc:
-            log.exception("DevAI chat: falha montando prompt")
-            await self._reply_safely(
-                message,
-                f"⚠️ Não consegui montar o contexto: `{type(exc).__name__}: {exc}`",
-            )
-            return
+
+        # Reação de processamento: entra antes de chamar a IA, sai depois.
+        reaction_used = await self._add_processing_reaction(message)
 
         try:
-            result, errors = await self.ai.chat_freeform(prompt, system=SYSTEM_PROMPT_CHAT)
-        except Exception as exc:
-            log.exception("DevAI chat: falha chamando IA")
-            await self._reply_safely(
-                message,
-                f"⚠️ Falha ao chamar a IA: `{type(exc).__name__}: {exc}`",
-            )
+            try:
+                prompt = await asyncio.to_thread(
+                    self._build_chat_prompt, message=message, question=question
+                )
+            except Exception as exc:
+                log.exception("DevAI chat: falha montando prompt")
+                await self._send_chat_response(
+                    message,
+                    f"⚠️ Não consegui montar o contexto: `{type(exc).__name__}: {exc}`",
+                )
+                return
+
+            try:
+                result, errors = await self.ai.chat_freeform(prompt, system=SYSTEM_PROMPT_CHAT)
+            except Exception as exc:
+                log.exception("DevAI chat: falha chamando IA")
+                await self._send_chat_response(
+                    message,
+                    f"⚠️ Falha ao chamar a IA: `{type(exc).__name__}: {exc}`",
+                )
+                return
+
+            if result is None or not result.text.strip():
+                err_text = "; ".join(errors[-3:]) if errors else "sem detalhe"
+                await self._send_chat_response(
+                    message,
+                    f"⚠️ Nenhum provider respondeu. Últimos erros: `{redact_secrets(err_text, max_chars=400)}`",
+                )
+                return
+
+            text = redact_secrets(result.text.strip(), max_chars=3500)
+            footer = f"\n\n_— {result.provider} · `{result.model}` · {result.elapsed_ms} ms_"
+            await self._send_chat_response(message, text + footer)
+        finally:
+            # Garante que a reação some mesmo se algum send falhar.
+            if reaction_used is not None:
+                await self._remove_processing_reaction(message, reaction_used)
+
+    # ----- reações de processamento (mesmo padrão do cogs/chatbot) -----
+
+    _PROCESSING_REACTIONS: tuple[str, ...] = ("🧠", "⏳")
+
+    async def _add_processing_reaction(self, message: discord.Message) -> str | None:
+        """Tenta colocar 🧠 na mensagem do usuário. Cai pra ⏳ se falhar.
+        Retorna a string aplicada (pra `_remove_processing_reaction` saber qual
+        tirar) ou None se nenhuma deu certo."""
+        for emoji in self._PROCESSING_REACTIONS:
+            try:
+                await message.add_reaction(emoji)
+                return emoji
+            except (discord.HTTPException, discord.NotFound, discord.Forbidden):
+                continue
+            except Exception:
+                continue
+        return None
+
+    async def _remove_processing_reaction(self, message: discord.Message, emoji: str | None) -> None:
+        """Remove a reação aplicada por `_add_processing_reaction`. Silencioso
+        em qualquer falha (mensagem deletada, perda de permissão, etc)."""
+        if not emoji:
             return
+        try:
+            me = self.bot.user
+            if me is None:
+                return
+            await message.remove_reaction(emoji, me)
+        except (discord.HTTPException, discord.NotFound, discord.Forbidden):
+            pass
+        except Exception:
+            pass
 
-        if result is None or not result.text.strip():
-            err_text = "; ".join(errors[-3:]) if errors else "sem detalhe"
-            await self._reply_safely(
-                message,
-                f"⚠️ Nenhum provider respondeu. Últimos erros: `{redact_secrets(err_text, max_chars=400)}`",
-            )
-            return
+    # ----- envio via webhook gerenciado da DevAI ----------------------
 
-        text = redact_secrets(result.text.strip(), max_chars=1800)
-        footer = f"\n\n_— {result.provider} · `{result.model}` · {result.elapsed_ms} ms_"
-        await self._reply_safely(message, text + footer)
+    _CHAT_WEBHOOK_NAME = "DevAI Bridge"
 
-    async def _reply_safely(self, message: discord.Message, content: str) -> None:
-        """Envia uma reply Discord lidando com canais sem permissão de reply
-        (DM, threads bloqueadas) — cai pro send normal."""
+    async def _send_chat_response(self, message: discord.Message, content: str) -> None:
+        """Envia resposta de chat com a identidade DevAI (webhook). Faz
+        chunking automático em pedaços de 1900 chars (limite do Discord 2000).
+
+        Estratégia em 3 camadas:
+        1. Webhook gerenciado no MESMO canal da mensagem (pra ficar igual ao
+           chatbot — username "DevAI", avatar do bot).
+        2. Se falhar (sem permissão de manage_webhooks, canal sem suporte,
+           etc), tenta o webhook fixo do `DEVAI_WEBHOOK_URL` (mesmo que ele
+           esteja em outro canal — a resposta sai lá).
+        3. Último recurso: `message.reply` normal como bot.
+        """
         chunks: list[str] = []
-        # Discord limita a 2000 chars/mensagem. Quebra em pedaços se preciso.
         remaining = content
         while remaining:
             chunks.append(remaining[:1900])
             remaining = remaining[1900:]
-        first = True
-        for chunk in chunks:
+        if not chunks:
+            return
+
+        # 1) webhook gerenciado no canal local
+        try:
+            webhook = await self._get_chat_webhook(message.channel)
+        except Exception:
+            log.exception("DevAI chat: falha ao obter webhook do canal")
+            webhook = None
+
+        if webhook is not None:
+            avatar_url = self._bot_avatar_url()
             try:
+                thread = message.channel if isinstance(message.channel, discord.Thread) else discord.utils.MISSING
+                for chunk in chunks:
+                    await webhook.send(
+                        content=chunk,
+                        username="DevAI",
+                        avatar_url=avatar_url,
+                        thread=thread,
+                        wait=True,
+                    )
+                return
+            except Exception:
+                log.exception("DevAI chat: falha ao enviar pelo webhook gerenciado")
+
+        # 2) webhook global da DevAI (canal de relatórios)
+        if self.reporter is not None and self.reporter.available():
+            try:
+                for chunk in chunks:
+                    await self.reporter.send_plain(chunk, username="DevAI")
+                return
+            except Exception:
+                log.exception("DevAI chat: falha ao enviar pelo webhook global")
+
+        # 3) fallback final: resposta como bot
+        try:
+            first = True
+            for chunk in chunks:
                 if first:
                     await message.reply(chunk, mention_author=False)
                     first = False
                 else:
                     await message.channel.send(chunk)
+        except Exception:
+            log.exception("DevAI chat: todos os caminhos de envio falharam")
+
+    def _bot_avatar_url(self) -> str:
+        """URL do avatar do bot pra usar no webhook (deixa idêntico ao bot)."""
+        me = self.bot.user
+        if me is None:
+            return ""
+        avatar = getattr(me, "display_avatar", None) or getattr(me, "avatar", None)
+        if avatar is not None:
+            try:
+                return str(avatar.url)
             except Exception:
-                try:
-                    await message.channel.send(chunk)
-                except Exception:
-                    return  # canal fechado — desiste
+                return ""
+        return ""
+
+    async def _get_chat_webhook(self, channel) -> discord.Webhook | None:
+        """Retorna um webhook DevAI no canal, reusando se já existir.
+
+        Funciona em TextChannel, VoiceChannel, StageChannel e Thread (nesta
+        última, o webhook vive no canal pai e usamos `thread=` no send).
+        Cacheia por id do canal-host pra não bater na API toda vez.
+        """
+        host = channel.parent if isinstance(channel, discord.Thread) else channel
+        if host is None or not hasattr(host, "webhooks"):
+            return None
+
+        # cache simples — invalida só se o webhook for deletado externamente
+        # (próximo send vai dar 404 e nós recriamos no próximo turno).
+        cached = self._chat_webhook_cache.get(int(host.id))
+        if cached is not None:
+            return cached
+
+        async with self._chat_webhook_lock:
+            cached = self._chat_webhook_cache.get(int(host.id))
+            if cached is not None:
+                return cached
+            # Procura um webhook existente nosso.
+            try:
+                existing = await host.webhooks()
+            except discord.Forbidden:
+                log.warning("DevAI chat: sem permissão Manage Webhooks no canal %s", host.id)
+                return None
+            except Exception:
+                log.exception("DevAI chat: falha listando webhooks do canal %s", host.id)
+                return None
+            for wh in existing:
+                if wh.name == self._CHAT_WEBHOOK_NAME and wh.user == self.bot.user:
+                    self._chat_webhook_cache[int(host.id)] = wh
+                    return wh
+            # Cria um novo.
+            try:
+                wh = await host.create_webhook(name=self._CHAT_WEBHOOK_NAME, reason="DevAI chat replies")
+            except discord.Forbidden:
+                log.warning("DevAI chat: sem permissão pra criar webhook no canal %s", host.id)
+                return None
+            except discord.HTTPException:
+                log.exception("DevAI chat: falha ao criar webhook no canal %s", host.id)
+                return None
+            self._chat_webhook_cache[int(host.id)] = wh
+            return wh
 
     def _build_chat_prompt(self, *, message: discord.Message, question: str) -> str:
         """Monta o prompt do modo chat. Inclui:
@@ -1066,10 +1220,8 @@ Responda em texto puro (markdown leve permitido). Não devolva JSON.
                 mention_author=False,
             )
             return
-        try:
-            await ctx.message.add_reaction("🧠")
-        except Exception:
-            pass
+        # Reação 🧠 é colocada e removida dentro de _chat_with_owner — entra
+        # quando começa a pensar, sai assim que a resposta vai pro canal.
         asyncio.create_task(self._chat_with_owner(ctx.message, question))
 
 
