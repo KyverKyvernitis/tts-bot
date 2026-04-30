@@ -984,8 +984,20 @@ SCHEMA EXATO DO JSON:
             return
         if not self._enabled():
             return
-        if not await self._is_ownerish(message.author):
-            return
+
+        # Owner check tem nuance: se a mensagem está no canal de comentário
+        # configurado (que normalmente é privado/restrito ao dono), aceitamos
+        # sem checar bot.is_owner — porque is_owner pode falhar se a
+        # application info ainda não foi carregada (dá False silenciosamente
+        # logo depois do startup) OU se OWNER_ID estiver vazio no .env.
+        # Em qualquer outro canal, a checagem é estrita.
+        channel_id_cfg = int(getattr(config, "DEVAI_COMMENT_CHANNEL_ID", 0) or 0)
+        msg_channel_id = int(getattr(message.channel, "id", 0) or 0)
+        in_comment_channel = channel_id_cfg != 0 and msg_channel_id == channel_id_cfg
+
+        if not in_comment_channel:
+            if not await self._is_ownerish(message.author):
+                return
 
         content = (message.content or "").strip()
         if not content:
@@ -1010,44 +1022,67 @@ SCHEMA EXATO DO JSON:
         ref_id = int(getattr(ref, "message_id", 0) or 0) if ref is not None else 0
         is_reply_to_report = False
         is_reply_to_chat = False
+        reply_diag = "no-ref"
         if ref_id:
             classification = self._classify_reply_via_resolved(message)
             if classification == "report":
                 is_reply_to_report = True
+                reply_diag = "resolved-report"
             elif classification == "chat":
                 is_reply_to_chat = True
+                reply_diag = "resolved-chat"
             # Camada (b): sets em RAM.
             if not (is_reply_to_report or is_reply_to_chat):
                 if ref_id in self._report_message_ids:
                     is_reply_to_report = True
+                    reply_diag = "ram-report"
                 elif ref_id in self._chat_message_ids:
                     is_reply_to_chat = True
+                    reply_diag = "ram-chat"
             # Camada (c): fetch ativo — só vai aqui se as outras falharam.
             if not (is_reply_to_report or is_reply_to_chat):
                 classification = await self._classify_reply_via_webhook(message, ref_id)
                 if classification == "report":
                     is_reply_to_report = True
+                    reply_diag = "fetch-report"
                 elif classification == "chat":
                     is_reply_to_chat = True
+                    reply_diag = "fetch-chat"
+                else:
+                    reply_diag = "ref-not-devai"
 
         # 3) Prefixo textual ou @DevAI literal — só conta no canal de
-        #    comentário pra não vazar pra outros canais. `@DevAI` é
-        #    importante porque o nome do bot REAL é diferente de "DevAI"
-        #    (DevAI é só identidade de webhook), então o autocomplete do
-        #    Discord não converte em mention real — fica como texto puro.
-        channel_id = int(getattr(config, "DEVAI_COMMENT_CHANNEL_ID", 0) or 0)
-        in_comment_channel = (
-            channel_id == 0
-            or int(getattr(message.channel, "id", 0) or 0) == channel_id
-        )
+        #    comentário pra não vazar pra outros canais.
         text_prefix = (
             lower.startswith("devai")
             or lower.startswith("@devai")
+            or lower.startswith("@dev ai")  # tolera quebra natural
             or lower.startswith("ia ")
             or lower == "ia"
         ) and in_comment_channel
 
-        if not (bot_mentioned or is_reply_to_report or is_reply_to_chat or text_prefix):
+        triggered = bot_mentioned or is_reply_to_report or is_reply_to_chat or text_prefix
+
+        # Logging de diagnóstico — sempre que está no canal de comentário,
+        # registra o que o listener viu. Você vê em logs/bot.log e o LogWatcher
+        # da DevAI também pode ver. Isso é a chave pra debugar mensagens
+        # ignoradas: se você manda algo e nada acontece, esse log conta o porquê.
+        if in_comment_channel or bot_mentioned:
+            log.info(
+                "DevAI listener: ch=%s author=%s wh_id=%s ref_id=%s reply_diag=%s "
+                "mentioned=%s prefix=%s triggered=%s | %r",
+                msg_channel_id,
+                int(getattr(message.author, "id", 0) or 0),
+                self._devai_webhook_id(),
+                ref_id,
+                reply_diag,
+                bot_mentioned,
+                text_prefix,
+                triggered,
+                content[:80],
+            )
+
+        if not triggered:
             return
 
         # Limpa prefixo/mention pra deixar só a pergunta/comentário.
@@ -1141,18 +1176,16 @@ SCHEMA EXATO DO JSON:
         return "chat"
 
     def _strip_prefix_and_mentions(self, content: str) -> str:
-        """Remove `devai:`, `ia:`, `@DevAI` no começo e mentions reais do bot
-        pra deixar a pergunta limpa. `@DevAI` (literal) precisa ser tratado
-        porque o Discord não autocompletar como mention real (o nome do bot
-        é diferente — DevAI é só identidade visual no webhook)."""
+        """Remove `devai:`, `ia:`, `@DevAI`, `@dev ai` no começo e mentions
+        reais do bot pra deixar a pergunta limpa."""
         # Remove mention real do bot (formato <@id> ou <@!id>).
         bot_user = getattr(self.bot, "user", None)
         bot_id = int(getattr(bot_user, "id", 0) or 0)
         if bot_id:
             content = re.sub(rf"<@!?{bot_id}>", "", content)
-        # Remove `@DevAI` literal (texto puro) no começo. Pode aparecer várias
-        # vezes seguidas (`@DevAI @DevAI oi`) — strip iterativo.
-        content = re.sub(r"^\s*(?:@devai\s*)+", "", content, flags=re.I)
+        # Remove `@DevAI`/`@dev ai` literal (texto puro) no começo. Tolera
+        # múltiplos seguidos e espaço entre "dev" e "ai".
+        content = re.sub(r"^\s*(?:@dev\s*ai\s*)+", "", content, flags=re.I)
         # Remove prefixo textual `devai:`, `ia:`, etc.
         content = re.sub(r"^\s*(devai|ia)[:,\s-]*", "", content, flags=re.I)
         return content.strip()
@@ -1436,7 +1469,7 @@ Responda em texto puro (markdown leve permitido). Não devolva JSON.
         if not await self._is_ownerish(ctx.author):
             return
         await ctx.reply(
-            "DevAI: use `_devai status`, `_devai providers`, `_devai scan`, `_devai index` ou `_devai ask <pergunta>`.",
+            "DevAI: `_devai status`, `_devai providers`, `_devai diag`, `_devai scan`, `_devai index`, `_devai ask <pergunta>`.",
             mention_author=False,
         )
 
@@ -1560,6 +1593,46 @@ Responda em texto puro (markdown leve permitido). Não devolva JSON.
         # Reação 🧠 é colocada e removida dentro de _chat_with_owner — entra
         # quando começa a pensar, sai assim que a resposta vai pro canal.
         asyncio.create_task(self._chat_with_owner(ctx.message, question))
+
+    @devai_group.command(name="diag")
+    async def devai_diag(self, ctx: commands.Context):
+        """Diagnóstico do listener: mostra exatamente o que a DevAI vê.
+        Usa `_devai diag` em qualquer canal (idealmente o de comentário) pra
+        confirmar que o cog está vivo e identificar configs erradas."""
+        if not await self._is_ownerish(ctx.author):
+            return
+        cfg_channel = int(getattr(config, "DEVAI_COMMENT_CHANNEL_ID", 0) or 0)
+        cur_channel = int(getattr(ctx.channel, "id", 0) or 0)
+        wh_id = self._devai_webhook_id()
+        wh_url_set = bool(getattr(config, "DEVAI_WEBHOOK_URL", "") or "")
+        owner_ids = sorted(self._owner_ids())
+        author_id = int(getattr(ctx.author, "id", 0) or 0)
+        try:
+            is_app_owner = await self.bot.is_owner(ctx.author)
+        except Exception:
+            is_app_owner = False
+        report = (
+            "**DevAI diagnóstico**\n"
+            f"• Cog enabled: `{self._enabled()}`\n"
+            f"• Webhook URL configurado: `{wh_url_set}`\n"
+            f"• Webhook ID extraído: `{wh_id or 'não detectado'}`\n"
+            f"• Reporter disponível: `{self.reporter is not None and self.reporter.available()}`\n"
+            f"• Comment channel cfg: `{cfg_channel or 'não definido (qualquer canal)'}`\n"
+            f"• Canal atual: `{cur_channel}` "
+            f"{'✅ MATCH' if cfg_channel == cur_channel else '❌ diferente' if cfg_channel else ''}\n"
+            f"• OWNER_IDS na config: `{owner_ids or 'vazio'}`\n"
+            f"• Seu ID: `{author_id}` "
+            f"{'✅ na lista' if author_id in owner_ids else '❌ NÃO na lista'}\n"
+            f"• bot.is_owner(você): `{is_app_owner}`\n"
+            f"• Mensagens chat tracked (RAM): `{len(self._chat_message_ids)}`\n"
+            f"• Mensagens report tracked (RAM): `{len(self._report_message_ids)}`\n"
+            f"• Providers stats: `{sum(s.success for s in self.ai.stats.values()) if self.ai else 0}` ok / "
+            f"`{sum(s.failure for s in self.ai.stats.values()) if self.ai else 0}` falhas\n\n"
+            "Se algum item está vermelho, ajuste o `.env` e reinicie. "
+            "Logs detalhados de cada mensagem agora vão pro `bot.log` "
+            "(prefixo `DevAI listener:`)."
+        )
+        await ctx.reply(report, mention_author=False)
 
 
 async def setup(bot: commands.Bot):
