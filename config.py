@@ -153,10 +153,20 @@ DEVAI_WEBHOOK_URL = (os.getenv("DEVAI_WEBHOOK_URL", os.getenv("ALERT_WEBHOOK_URL
 DEVAI_COMMENT_CHANNEL_ID = _parse_int(os.getenv("DEVAI_COMMENT_CHANNEL_ID", "0"), 0)
 DEVAI_OWNER_IDS = _parse_guild_ids(os.getenv("DEVAI_OWNER_IDS", os.getenv("BOT_OWNER_ID", os.getenv("OWNER_ID", ""))))
 
-DEVAI_PROVIDER_ORDER = _parse_csv(os.getenv("DEVAI_PROVIDER_ORDER", "gemini,groq,cloudflare,huggingface,pollinations"))
-DEVAI_PROVIDER_TIMEOUT_SECONDS = _parse_int(os.getenv("DEVAI_PROVIDER_TIMEOUT_SECONDS", "45"), 45)
-DEVAI_MAX_OUTPUT_TOKENS = _parse_int(os.getenv("DEVAI_MAX_OUTPUT_TOKENS", "12000"), 12000)
+# Ordem padrão atualizada (Apr/2026): Groq primeiro porque é o mais rápido +
+# generoso no free tier; Gemini 2.5 Flash em seguida (1M context, ainda free);
+# OpenRouter como passe-livre pra Qwen3-Coder free; Cerebras pra modelos 70B+
+# rápidos (1M tokens/dia free); Cloudflare/HF como fallbacks; Pollinations
+# como último recurso (qualidade variável).
+DEVAI_PROVIDER_ORDER = _parse_csv(
+    os.getenv("DEVAI_PROVIDER_ORDER", "groq,gemini,openrouter,cerebras,cloudflare,huggingface,pollinations")
+)
+DEVAI_PROVIDER_TIMEOUT_SECONDS = _parse_int(os.getenv("DEVAI_PROVIDER_TIMEOUT_SECONDS", "60"), 60)
+DEVAI_MAX_OUTPUT_TOKENS = _parse_int(os.getenv("DEVAI_MAX_OUTPUT_TOKENS", "16000"), 16000)
 DEVAI_TEMPERATURE = _parse_float(os.getenv("DEVAI_TEMPERATURE", "0.15"), 0.15)
+# Tenta UMA rodada de "repair" (re-pedir JSON pra IA) quando o JSON vem inválido
+# ou o Python não compila. Modelos pequenos quase sempre acertam na 2ª tentativa.
+DEVAI_REPAIR_ENABLED = _parse_bool(os.getenv("DEVAI_REPAIR_ENABLED", "true"), True)
 
 # Chaves já usadas por outros módulos podem existir no .env; a DevAI só lê aqui.
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY", "") or "").strip()
@@ -165,16 +175,34 @@ CLOUDFLARE_API_TOKEN = (os.getenv("CLOUDFLARE_API_TOKEN", "") or "").strip()
 CLOUDFLARE_ACCOUNT_ID = (os.getenv("CLOUDFLARE_ACCOUNT_ID", "") or "").strip()
 HUGGINGFACE_API_KEY = (os.getenv("HUGGINGFACE_API_KEY", "") or "").strip()
 POLLINATIONS_API_KEY = (os.getenv("POLLINATIONS_API_KEY", "") or "").strip()
+# Novas chaves pros providers adicionados em Apr/2026.
+OPENROUTER_API_KEY = (os.getenv("OPENROUTER_API_KEY", "") or "").strip()
+CEREBRAS_API_KEY = (os.getenv("CEREBRAS_API_KEY", "") or "").strip()
 
-DEVAI_GEMINI_MODEL = (os.getenv("DEVAI_GEMINI_MODEL", "gemini-2.0-flash") or "gemini-2.0-flash").strip()
+DEVAI_GEMINI_MODEL = (os.getenv("DEVAI_GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash").strip()
 DEVAI_GROQ_BASE_URL = (os.getenv("DEVAI_GROQ_BASE_URL", "https://api.groq.com/openai/v1") or "https://api.groq.com/openai/v1").strip()
-DEVAI_GROQ_MODEL = (os.getenv("DEVAI_GROQ_MODEL", "openai/gpt-oss-20b") or "openai/gpt-oss-20b").strip()
+DEVAI_GROQ_MODEL = (os.getenv("DEVAI_GROQ_MODEL", "openai/gpt-oss-120b") or "openai/gpt-oss-120b").strip()
+# OpenRouter free dá acesso a Qwen3-Coder e DeepSeek R1 sem cartão.
+# Use ":free" no sufixo pra forçar tier gratuito. Limites ~20 RPM, ~200 RPD/modelo.
+DEVAI_OPENROUTER_BASE_URL = (os.getenv("DEVAI_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1") or "https://openrouter.ai/api/v1").strip()
+DEVAI_OPENROUTER_MODEL = (os.getenv("DEVAI_OPENROUTER_MODEL", "qwen/qwen3-coder:free") or "qwen/qwen3-coder:free").strip()
+DEVAI_OPENROUTER_REFERER = (os.getenv("DEVAI_OPENROUTER_REFERER", "") or "").strip()
+# Cerebras: 30 RPM, 60K TPM, 1M tokens/dia FREE com gpt-oss-120b ou Qwen3 235B.
+# Hardware proprietário entrega ~3x a velocidade do Groq, mas com menos RPM.
+DEVAI_CEREBRAS_BASE_URL = (os.getenv("DEVAI_CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1") or "https://api.cerebras.ai/v1").strip()
+DEVAI_CEREBRAS_MODEL = (os.getenv("DEVAI_CEREBRAS_MODEL", "gpt-oss-120b") or "gpt-oss-120b").strip()
 DEVAI_CLOUDFLARE_BASE_URL = (os.getenv("DEVAI_CLOUDFLARE_BASE_URL", "") or "").strip()
-DEVAI_CLOUDFLARE_MODEL = (os.getenv("DEVAI_CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct") or "@cf/meta/llama-3.1-8b-instruct").strip()
+# Llama-3.1-8B é fraco demais pra retornar arquivo Python completo.
+# Qwen2.5-Coder-32B é o estado-da-arte open-source pra código no Workers AI.
+# Alternativas: "@cf/openai/gpt-oss-120b" ou "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b".
+DEVAI_CLOUDFLARE_MODEL = (os.getenv("DEVAI_CLOUDFLARE_MODEL", "@cf/qwen/qwen2.5-coder-32b-instruct") or "@cf/qwen/qwen2.5-coder-32b-instruct").strip()
 DEVAI_HUGGINGFACE_BASE_URL = (os.getenv("DEVAI_HUGGINGFACE_BASE_URL", "https://router.huggingface.co/v1") or "https://router.huggingface.co/v1").strip()
-DEVAI_HUGGINGFACE_MODEL = (os.getenv("DEVAI_HUGGINGFACE_MODEL", "Qwen/Qwen2.5-Coder-32B-Instruct") or "Qwen/Qwen2.5-Coder-32B-Instruct").strip()
+# Qwen3-Coder MoE é mais rápido que o 2.5-Coder e melhor em multi-arquivo.
+# Se quiser o mais poderoso: "deepseek-ai/DeepSeek-V3.2".
+DEVAI_HUGGINGFACE_MODEL = (os.getenv("DEVAI_HUGGINGFACE_MODEL", "Qwen/Qwen3-Coder-30B-A3B-Instruct") or "Qwen/Qwen3-Coder-30B-A3B-Instruct").strip()
 DEVAI_POLLINATIONS_BASE_URL = (os.getenv("DEVAI_POLLINATIONS_BASE_URL", "https://gen.pollinations.ai/v1") or "https://gen.pollinations.ai/v1").strip()
-DEVAI_POLLINATIONS_MODEL = (os.getenv("DEVAI_POLLINATIONS_MODEL", "openai") or "openai").strip()
+# Pollinations "openclaw" = Qwen3-Coder-30B (28/04/2026), feito pra coding agents.
+DEVAI_POLLINATIONS_MODEL = (os.getenv("DEVAI_POLLINATIONS_MODEL", "openclaw") or "openclaw").strip()
 
 DEVAI_LOG_PATHS = (os.getenv("DEVAI_LOG_PATHS", "logs/*.log,bot.log,logs/bot.log") or "logs/*.log,bot.log,logs/bot.log").strip()
 DEVAI_SCAN_EXISTING_LOGS_ON_BOOT = _parse_bool(os.getenv("DEVAI_SCAN_EXISTING_LOGS_ON_BOOT", "false"), False)
@@ -193,3 +221,9 @@ DEVAI_MAX_FILE_BYTES = _parse_int(os.getenv("DEVAI_MAX_FILE_BYTES", "220000"), 2
 DEVAI_PATCH_REVIEW_ENABLED = _parse_bool(os.getenv("DEVAI_PATCH_REVIEW_ENABLED", "true"), True)
 DEVAI_PATCH_REVIEW_MAX_FILES = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_FILES", "8"), 8)
 DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE", "9000"), 9000)
+DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS", "14000"), 14000)
+
+# Histórico de patches recentes injetado no prompt — evita a IA repetir
+# tentativas que falharam ou propor solução já aplicada.
+DEVAI_HISTORY_ITEMS = _parse_int(os.getenv("DEVAI_HISTORY_ITEMS", "5"), 5)
+DEVAI_HISTORY_MAX_AGE_SECONDS = _parse_int(os.getenv("DEVAI_HISTORY_MAX_AGE_SECONDS", str(7 * 24 * 3600)), 7 * 24 * 3600)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import os
@@ -16,14 +17,41 @@ from discord.ext import commands
 
 import config
 
-from .ai_client import DevAIClient, AIResult
+from .ai_client import DevAIClient, AIResult, SYSTEM_PROMPT_FIX, SYSTEM_PROMPT_REVIEW
 from .log_watcher import LogEvent, LogWatcher
-from .patch_builder import BuiltPatch, PatchBuilder
+from .patch_builder import BuiltPatch, HistoryItem, PatchBuilder
 from .project_indexer import ProjectIndexer
 from .safety import redact_secrets
 from .webhook_reporter import WebhookReporter
 
 log = logging.getLogger(__name__)
+
+
+# Schema do JSON de patch — fica fora do _build_prompt pra ficar fácil de
+# ajustar e pra não pesar todo prompt build.
+PATCH_JSON_SCHEMA = """{
+  "cause": "causa-raiz em 1-2 frases — quem disparou o erro e por quê",
+  "summary": "o que você mudou em 1 frase",
+  "effect": "o que essa mudança faz na prática (sintoma -> resultado esperado)",
+  "risk": "baixo|médio|alto",
+  "recommendations": ["recomendação curta para o dono após aplicar"],
+  "tests": ["teste manual ou comando útil para validar"],
+  "files": [
+    {
+      "path": "cogs/exemplo.py",
+      "content": "# conteúdo COMPLETO do arquivo, sem '...' nem trecho omitido"
+    }
+  ]
+}"""
+
+REVIEW_JSON_SCHEMA = """{
+  "summary": "resumo curto do patch (1 frase)",
+  "what_changed": ["mudança importante em 1 linha"],
+  "effect": "o que a alteração faz na prática",
+  "risk": "baixo|médio|alto",
+  "recommendations": ["recomendação útil pro dono"],
+  "tests": ["teste/comando pra validar"]
+}"""
 
 
 class DevAI(commands.Cog):
@@ -136,15 +164,42 @@ class DevAI(commands.Cog):
         except asyncio.QueueEmpty:
             return
         self._last_auto_started_at = now
-        asyncio.create_task(self._analyze_event(event, auto=True))
+        asyncio.create_task(self._analyze_event(event))
+
+    # ---------------------------------------------------------------- prompt
+
+    def _format_history_block(self, history: list[HistoryItem]) -> str:
+        if not history:
+            return "Nenhum patch recente. Você está vendo este projeto pela 1ª vez nesta sessão."
+        lines: list[str] = []
+        for item in history:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(item.created_at))
+            files = ", ".join(item.changed_files[:5])
+            if len(item.changed_files) > 5:
+                files += f" (+{len(item.changed_files) - 5})"
+            cause = redact_secrets((item.cause or item.summary or "")[:240])
+            lines.append(
+                f"- [{ts}] arquivos={files or '-'} | risco={item.risk or '-'} | causa: {cause or '(sem descrição)'}"
+            )
+        return "\n".join(lines)
 
     def _build_prompt(self, *, event: LogEvent, comment: str | None = None) -> str:
         index = self.indexer.load_or_build(max_age_seconds=int(getattr(config, "DEVAI_INDEX_MAX_AGE_SECONDS", 1800) or 1800))
         project_context = self.indexer.compact_context(index, max_chars=int(getattr(config, "DEVAI_MAX_INDEX_CHARS", 12000) or 12000))
 
+        # Expande arquivos do traceback usando o grafo de imports do indexador
+        # em vez de chute por palavra-chave. O fallback por palavra-chave fica
+        # como reforço quando o traceback não traz path nenhum.
         candidate_files = list(event.file_paths or [])
-        candidate_files.extend(self._guess_related_files(event.text))
-        # Remove duplicatas preservando ordem.
+        if candidate_files:
+            candidate_files = self.indexer.expand_related_files(
+                candidate_files,
+                index,
+                max_total=int(getattr(config, "DEVAI_MAX_CONTEXT_FILES", 4) or 4),
+            )
+        else:
+            candidate_files = self._guess_related_files(event.text)
+
         seen: set[str] = set()
         candidate_files = [p for p in candidate_files if not (p in seen or seen.add(p))]
         file_context = self.indexer.read_files_for_context(
@@ -153,81 +208,133 @@ class DevAI(commands.Cog):
             max_chars_per_file=int(getattr(config, "DEVAI_MAX_FILE_CONTEXT_CHARS", 24000) or 24000),
         )
 
-        context_blocks = []
+        context_blocks: list[str] = []
         for path, text in file_context.items():
             context_blocks.append(f"### {path}\n```py\n{text}\n```")
 
-        comment_block = f"\nComentário do dono sobre esse erro:\n{redact_secrets(comment, max_chars=2500)}\n" if comment else ""
+        # Histórico recente — evita repetir tentativa que já foi feita.
+        history = self.patch_builder.recent_history(
+            limit=int(getattr(config, "DEVAI_HISTORY_ITEMS", 5) or 5),
+            max_age_seconds=int(getattr(config, "DEVAI_HISTORY_MAX_AGE_SECONDS", 7 * 24 * 3600) or 7 * 24 * 3600),
+        )
+        history_block = self._format_history_block(history)
 
-        return f"""
-Você é a DevAI do projeto. Sua tarefa é corrigir erro real em um bot Discord Python.
+        # O comentário do dono vai NO TOPO do user prompt (em vez de no fim)
+        # porque modelos pequenos costumam ancorar mais no início.
+        comment_top = ""
+        if comment:
+            comment_top = (
+                "\n>>> INSTRUÇÃO PRIORITÁRIA DO DONO (siga antes de tudo):\n"
+                f">>> {redact_secrets(comment, max_chars=2500)}\n"
+            )
 
-REGRAS OBRIGATÓRIAS:
-- Responda SOMENTE JSON válido, sem markdown fora do JSON.
-- Gere um patch mínimo.
-- Retorne arquivos COMPLETOS, não diff.
-- Não altere tokens, .env, credenciais, banco .db ou arquivos de segredo.
-- Não invente arquivos se o erro puder ser corrigido nos arquivos existentes.
-- Preserve o estilo do projeto.
-- Se não tiver segurança suficiente para corrigir, retorne "files": [] e explique em "cause".
-- O JSON deve seguir este formato:
-{{
-  "cause": "causa provável do erro",
-  "summary": "o que foi alterado",
-  "effect": "o que essa alteração faz na prática",
-  "risk": "baixo|médio|alto",
-  "recommendations": ["recomendação curta para o dono após revisar/aplicar"],
-  "tests": ["teste manual ou comando útil para validar"],
-  "files": [{{"path": "cogs/exemplo.py", "content": "conteúdo completo do arquivo corrigido"}}]
-}}
-
+        return f"""{comment_top}
 ERRO DETECTADO:
-Fonte: {event.source}
-Assinatura: {event.signature}
+- Fonte: {event.source}
+- Assinatura: {event.signature}
 ```txt
 {redact_secrets(event.text, max_chars=int(getattr(config, 'DEVAI_MAX_LOG_CHARS', 18000) or 18000))}
 ```
-{comment_block}
 
-ARQUIVOS RELACIONADOS LIDOS:
+ARQUIVOS RELACIONADOS LIDOS DO PROJETO:
 {chr(10).join(context_blocks) if context_blocks else 'Nenhum arquivo relacionado foi lido automaticamente.'}
 
-RESUMO DA ESTRUTURA DO PROJETO:
+PATCHES RECENTES DA DEVAI (não repita o que já tentou):
+{history_block}
+
+ESTRUTURA RESUMIDA DO PROJETO:
 ```txt
 {project_context}
 ```
+
+REGRAS DE SAÍDA:
+- Responda SOMENTE com JSON válido (UTF-8), sem markdown, sem ``` antes ou depois.
+- Patch mínimo: idealmente 1 arquivo. Máximo {int(getattr(config, 'DEVAI_MAX_FILES_PER_PATCH', 5) or 5)} arquivos.
+- Cada `files[i].content` deve ser o ARQUIVO COMPLETO (não use '...' nem 'mantém o resto igual').
+- Não invente módulos. Use só o que existe nos arquivos lidos ou no índice.
+- Se não tiver certeza suficiente, retorne `"files": []` e explique em `cause`.
+
+SCHEMA EXATO DO JSON:
+{PATCH_JSON_SCHEMA}
 """.strip()
 
     def _guess_related_files(self, text: str) -> list[str]:
+        """Fallback de palavras-chave para quando o traceback não tem path.
+        Mantido com mesma cobertura do código antigo + mais alguns mapeamentos."""
         text_lower = text.lower()
         guesses: list[str] = []
         if "tts" in text_lower or "voice" in text_lower or "call" in text_lower:
             guesses.extend(["cogs/tts/cog.py", "cogs/tts/audio.py", "cogs/tts/ui.py"])
         if "webhook" in text_lower or "zip" in text_lower or "update" in text_lower:
             guesses.extend(["bot.py", "alert.sh"])
-        if "mongodb" in text_lower or "mongo" in text_lower or "database" in text_lower:
+        if "mongodb" in text_lower or "mongo" in text_lower or "database" in text_lower or "duplicate key" in text_lower:
             guesses.extend(["db.py", "config.py"])
         if "help" in text_lower or "health" in text_lower:
             guesses.append("cogs/utility.py")
+        if "chatbot" in text_lower or "imagegen" in text_lower or "imagem" in text_lower:
+            guesses.extend(["cogs/chatbot/cog.py", "cogs/chatbot/imagegen.py"])
+        if "gincana" in text_lower:
+            guesses.append("cogs/gincana/cog.py")
+        if "color" in text_lower or "role" in text_lower:
+            guesses.extend(["cogs/color_roles.py", "cogs/role_cooldown.py"])
+        if "devai" in text_lower or "patch" in text_lower:
+            guesses.extend(["cogs/dev_ai/cog.py", "cogs/dev_ai/ai_client.py"])
         return guesses
 
-    async def _analyze_event(self, event: LogEvent, *, auto: bool, comment: str | None = None) -> None:
+    # --------------------------------------------------------------- analyze
+
+    async def _analyze_event(self, event: LogEvent, *, comment: str | None = None) -> None:
         if self.ai is None or self.reporter is None:
             return
         async with self._analysis_lock:
             try:
                 prompt = await asyncio.to_thread(self._build_prompt, event=event, comment=comment)
-                result, errors = await self.ai.generate_patch_json(prompt)
+                result, errors = await self.ai.generate_patch_json(prompt, system=SYSTEM_PROMPT_FIX)
                 if result is None:
                     await self._report_failure(event, errors, comment=comment)
                     return
 
+                # Tenta montar o patch. Se JSON ou compilação falhar, pede UMA
+                # rodada de repair pra mesma cadeia de providers — modelos
+                # menores quase sempre acertam quando recebem o erro de volta.
                 try:
-                    built = await asyncio.to_thread(self.patch_builder.build_from_ai_response, result.text, label=event.signature)
+                    built = await asyncio.to_thread(
+                        self.patch_builder.build_from_ai_response, result.text, label=event.signature
+                    )
                 except Exception as build_exc:
-                    await self._report_build_failure(event, result, build_exc, comment=comment)
-                    return
+                    if not bool(getattr(config, "DEVAI_REPAIR_ENABLED", True)):
+                        await self._report_build_failure(event, result, build_exc, comment=comment)
+                        return
+                    log.info("DevAI: tentando repair após falha: %s", build_exc)
+                    repair_result, repair_errors = await self.ai.repair_patch_json(
+                        original_prompt=prompt,
+                        bad_response=result.text,
+                        error_message=str(build_exc),
+                        system=SYSTEM_PROMPT_FIX,
+                    )
+                    if repair_result is None:
+                        merged_errors = errors + ["repair: " + e for e in repair_errors]
+                        await self._report_build_failure(
+                            event,
+                            result,
+                            RuntimeError(
+                                f"falha original: {build_exc}; repair também falhou: {merged_errors[-3:]}"
+                            ),
+                            comment=comment,
+                        )
+                        return
+                    try:
+                        built = await asyncio.to_thread(
+                            self.patch_builder.build_from_ai_response,
+                            repair_result.text,
+                            label=event.signature,
+                        )
+                        result = repair_result  # passa a usar o resultado bem-sucedido
+                    except Exception as build_exc2:
+                        await self._report_build_failure(event, repair_result, build_exc2, comment=comment)
+                        return
 
+                # Re-indexa pra IA "aprender" a estrutura nova nas próximas rodadas.
                 await asyncio.to_thread(self.indexer.build_index)
                 await self._report_patch(event, result, built, comment=comment)
             except Exception as exc:
@@ -238,6 +345,8 @@ RESUMO DA ESTRUTURA DO PROJETO:
                         description=f"Assinatura: `{event.signature}`\nErro interno: `{type(exc).__name__}: {redact_secrets(str(exc), max_chars=700)}`",
                         color=0xED4245,
                     )
+
+    # -------------------------------------------------------------- relatos
 
     async def _report_patch(self, event: LogEvent, result: AIResult, built: BuiltPatch, *, comment: str | None = None):
         if self.reporter is None or not self.reporter.available():
@@ -288,7 +397,6 @@ RESUMO DA ESTRUTURA DO PROJETO:
             color=0xFEE75C,
         )
 
-
     def _format_bullets(self, items: list[str] | tuple[str, ...] | None, *, fallback: str, max_items: int = 6) -> str:
         values: list[str] = []
         for item in list(items or [])[:max_items]:
@@ -297,13 +405,18 @@ RESUMO DA ESTRUTURA DO PROJETO:
                 values.append(f"• {text}")
         return "\n".join(values) if values else fallback
 
-    def _read_zip_patch_context(self, zip_path: Path, changed_files: list[str]) -> str:
+    # ---------------------------------------------------- patch review (post-apply)
+
+    def _read_zip_patch_context(self, zip_path: Path, changed_files: list[str]) -> dict[str, str]:
+        """Devolve mapa {path -> conteúdo novo} pra os arquivos do ZIP que
+        bateram com `changed_files`. O texto fica truncado se o arquivo for
+        muito grande."""
         max_files = int(getattr(config, "DEVAI_PATCH_REVIEW_MAX_FILES", 8) or 8)
         max_chars_per_file = int(getattr(config, "DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE", 9000) or 9000)
         wanted = {str(path).replace("\\", "/").lstrip("/") for path in changed_files}
-        blocks: list[str] = []
+        out: dict[str, str] = {}
         if not zip_path or not zip_path.exists():
-            return "ZIP não disponível para leitura."
+            return out
         try:
             with zipfile.ZipFile(zip_path) as zf:
                 file_infos = [info for info in zf.infolist() if not info.is_dir()]
@@ -312,23 +425,61 @@ RESUMO DA ESTRUTURA DO PROJETO:
                     if wanted and normalized not in wanted and normalized.split("/", 1)[-1] not in wanted:
                         if not any(normalized.endswith("/" + item) for item in wanted):
                             continue
-                    if len(blocks) >= max_files:
+                    if len(out) >= max_files:
                         break
                     if info.file_size > int(getattr(config, "DEVAI_MAX_FILE_BYTES", 220000) or 220000):
-                        blocks.append(f"### {normalized}\n<arquivo grande demais para comentar inteiro: {info.file_size} bytes>")
+                        out[normalized] = f"<arquivo grande demais para ler inteiro: {info.file_size} bytes>"
                         continue
                     try:
                         raw = zf.read(info)
                         text = raw.decode("utf-8", errors="replace")
                     except Exception as exc:
-                        blocks.append(f"### {normalized}\n<não consegui ler: {type(exc).__name__}: {exc}>")
+                        out[normalized] = f"<não consegui ler: {type(exc).__name__}: {exc}>"
                         continue
                     if len(text) > max_chars_per_file:
                         text = text[: max_chars_per_file // 2] + "\n\n# ... trecho central omitido ...\n\n" + text[-max_chars_per_file // 2 :]
-                    blocks.append(f"### {normalized}\n```txt\n{redact_secrets(text, max_chars=max_chars_per_file)}\n```")
-        except Exception as exc:
-            return f"Falha ao ler ZIP para comentário: {type(exc).__name__}: {redact_secrets(str(exc), max_chars=600)}"
-        return "\n\n".join(blocks) if blocks else "Nenhum arquivo do ZIP pôde ser lido para comentário."
+                    out[normalized] = redact_secrets(text, max_chars=max_chars_per_file)
+        except Exception:
+            return out
+        return out
+
+    def _make_diff_block(self, new_files: dict[str, str]) -> str:
+        """Computa diff unificado entre o conteúdo NOVO (do ZIP) e o que está
+        no disco AGORA. Como a review roda DEPOIS do auto-updater já ter
+        commitado, na maioria dos casos o disco == novo, e o diff fica vazio.
+        Quando há diferença (ex: o updater não conseguiu aplicar tudo), o diff
+        revela. Sempre que o arquivo é novo, mostra o diff contra vazio.
+
+        Esse diff é muito mais informativo pra IA do que o arquivo todo,
+        especialmente em arquivos grandes — modelos pequenos focam melhor
+        com diff."""
+        max_diff_chars = int(getattr(config, "DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS", 14000) or 14000)
+        blocks: list[str] = []
+        for path, new_text in new_files.items():
+            disk_path = self.repo_root / path
+            old_text = ""
+            if disk_path.exists() and disk_path.is_file():
+                try:
+                    old_text = disk_path.read_text("utf-8", errors="replace")
+                except OSError:
+                    old_text = ""
+            if old_text == new_text:
+                continue
+            diff = difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+                n=3,
+            )
+            joined = "".join(diff)
+            if not joined:
+                continue
+            if len(joined) > max_diff_chars // max(1, len(new_files)):
+                cap = max_diff_chars // max(1, len(new_files))
+                joined = joined[: cap // 2] + "\n... (diff truncado) ...\n" + joined[-cap // 2 :]
+            blocks.append(f"### diff: {path}\n```diff\n{joined}\n```")
+        return "\n\n".join(blocks) if blocks else "Disco já está idêntico aos arquivos do ZIP — sem diff a mostrar."
 
     def _build_patch_review_prompt(
         self,
@@ -338,47 +489,54 @@ RESUMO DA ESTRUTURA DO PROJETO:
         branch: str,
         zip_filename: str,
         triggered_update: bool,
-        zip_context: str,
+        zip_files: dict[str, str],
+        diff_block: str,
     ) -> str:
         index = self.indexer.load_or_build(max_age_seconds=int(getattr(config, "DEVAI_INDEX_MAX_AGE_SECONDS", 1800) or 1800))
         project_context = self.indexer.compact_context(index, max_chars=int(getattr(config, "DEVAI_MAX_INDEX_CHARS", 12000) or 12000))
         files_text = "\n".join(f"- {path}" for path in changed_files) or "- nenhum"
+
+        # Histórico ajuda a IA notar tendências ("é a 3ª vez que mexem em
+        # cogs/tts essa semana").
+        history = self.patch_builder.recent_history(limit=4)
+        history_block = self._format_history_block(history)
+
+        full_files_block_parts: list[str] = []
+        for path, content in zip_files.items():
+            full_files_block_parts.append(f"### {path}\n```txt\n{content}\n```")
+        full_files_block = "\n\n".join(full_files_block_parts) if full_files_block_parts else "Nenhum arquivo lido do ZIP."
+
         return f"""
-Você é a DevAI do projeto. Um patch foi recebido, validado e enviado com sucesso para o GitHub pelo auto-updater do Discord.
-
-Sua tarefa é comentar o patch para o dono do bot: explique o que mudou, o que a alteração faz, riscos, recomendações e como validar.
-
-REGRAS OBRIGATÓRIAS:
-- Responda SOMENTE JSON válido, sem markdown fora do JSON.
-- Não gere arquivos corrigidos aqui; este fluxo é apenas comentário/revisão de patch já aceito.
-- Seja direto, útil e específico ao código alterado.
-- Não copie segredos nem tokens.
-- O JSON deve seguir este formato:
-{{
-  "summary": "resumo curto do patch",
-  "what_changed": ["mudança importante"],
-  "effect": "o que a alteração faz na prática",
-  "risk": "baixo|médio|alto",
-  "recommendations": ["recomendação útil"],
-  "tests": ["teste ou comando para validar"]
-}}
-
 METADADOS DO PATCH:
-ZIP: {zip_filename}
-Branch: {branch}
-Commit: {commit_hash or 'desconhecido'}
-Updater systemd encontrado: {'sim' if triggered_update else 'não'}
+- ZIP: {zip_filename}
+- Branch: {branch}
+- Commit: {commit_hash or 'desconhecido'}
+- Updater systemd encontrado: {'sim' if triggered_update else 'não'}
 
 ARQUIVOS ALTERADOS:
 {files_text}
 
-CONTEÚDO DO PATCH:
-{zip_context}
+DIFF UNIFICADO (o que efetivamente mudou no disco vs. ZIP):
+{diff_block}
 
-RESUMO DA ESTRUTURA DO PROJETO:
+CONTEÚDO COMPLETO DOS ARQUIVOS DO ZIP (referência se o diff for insuficiente):
+{full_files_block}
+
+PATCHES RECENTES DA DEVAI:
+{history_block}
+
+ESTRUTURA RESUMIDA DO PROJETO:
 ```txt
 {project_context}
 ```
+
+REGRAS DE SAÍDA:
+- Responda SOMENTE com JSON válido, sem markdown.
+- Não gere arquivos novos — este fluxo é apenas comentário/revisão.
+- Foque no diff. O conteúdo completo está só pra contexto.
+
+SCHEMA EXATO DO JSON:
+{REVIEW_JSON_SCHEMA}
 """.strip()
 
     async def review_successful_patch(
@@ -399,7 +557,9 @@ RESUMO DA ESTRUTURA DO PROJETO:
             return
 
         async with self._analysis_lock:
-            zip_context = await asyncio.to_thread(self._read_zip_patch_context, zip_path or Path(), changed_files)
+            zip_files = await asyncio.to_thread(self._read_zip_patch_context, zip_path or Path(), changed_files)
+            diff_block = await asyncio.to_thread(self._make_diff_block, zip_files)
+
             prompt = await asyncio.to_thread(
                 self._build_patch_review_prompt,
                 changed_files=changed_files,
@@ -407,9 +567,10 @@ RESUMO DA ESTRUTURA DO PROJETO:
                 branch=branch,
                 zip_filename=zip_filename,
                 triggered_update=triggered_update,
-                zip_context=zip_context,
+                zip_files=zip_files,
+                diff_block=diff_block,
             )
-            result, errors = await self.ai.generate_patch_json(prompt)
+            result, errors = await self.ai.generate_patch_json(prompt, system=SYSTEM_PROMPT_REVIEW)
             if result is None:
                 await self._report_patch_review_fallback(
                     changed_files=changed_files,
@@ -423,14 +584,51 @@ RESUMO DA ESTRUTURA DO PROJETO:
             try:
                 data = self.patch_builder.parse_ai_json(result.text)
             except Exception as exc:
-                await self._report_patch_review_fallback(
-                    changed_files=changed_files,
-                    commit_hash=commit_hash,
-                    branch=branch,
-                    zip_filename=zip_filename,
-                    errors=[f"JSON inválido do provider {result.provider}: {type(exc).__name__}: {exc}"],
-                )
-                return
+                # Tenta repair também na review.
+                if bool(getattr(config, "DEVAI_REPAIR_ENABLED", True)):
+                    repair_result, repair_errors = await self.ai.repair_patch_json(
+                        original_prompt=prompt,
+                        bad_response=result.text,
+                        error_message=str(exc),
+                        system=SYSTEM_PROMPT_REVIEW,
+                    )
+                    if repair_result is not None:
+                        try:
+                            data = self.patch_builder.parse_ai_json(repair_result.text)
+                            result = repair_result
+                        except Exception as exc2:
+                            await self._report_patch_review_fallback(
+                                changed_files=changed_files,
+                                commit_hash=commit_hash,
+                                branch=branch,
+                                zip_filename=zip_filename,
+                                errors=[
+                                    f"JSON inválido do provider {result.provider}: {type(exc).__name__}: {exc}",
+                                    f"repair também falhou: {type(exc2).__name__}: {exc2}",
+                                ],
+                            )
+                            return
+                    else:
+                        await self._report_patch_review_fallback(
+                            changed_files=changed_files,
+                            commit_hash=commit_hash,
+                            branch=branch,
+                            zip_filename=zip_filename,
+                            errors=[
+                                f"JSON inválido do provider {result.provider}: {type(exc).__name__}: {exc}",
+                                *(f"repair: {e}" for e in repair_errors[-3:]),
+                            ],
+                        )
+                        return
+                else:
+                    await self._report_patch_review_fallback(
+                        changed_files=changed_files,
+                        commit_hash=commit_hash,
+                        branch=branch,
+                        zip_filename=zip_filename,
+                        errors=[f"JSON inválido do provider {result.provider}: {type(exc).__name__}: {exc}"],
+                    )
+                    return
 
             await asyncio.to_thread(self.indexer.build_index)
             await self._report_patch_review(
@@ -507,6 +705,8 @@ RESUMO DA ESTRUTURA DO PROJETO:
             color=0xFEE75C,
         )
 
+    # ---------------------------------------------------------- Discord listeners
+
     @commands.Cog.listener("on_message")
     async def _devai_comment_listener(self, message: discord.Message):
         if getattr(message.author, "bot", False):
@@ -542,7 +742,7 @@ RESUMO DA ESTRUTURA DO PROJETO:
             await message.add_reaction("🧠")
         except Exception:
             pass
-        asyncio.create_task(self._analyze_event(event, auto=False, comment=comment))
+        asyncio.create_task(self._analyze_event(event, comment=comment))
 
     def _is_reply_to_report(self, message: discord.Message) -> bool:
         ref = getattr(message, "reference", None)
@@ -551,12 +751,14 @@ RESUMO DA ESTRUTURA DO PROJETO:
         mid = int(getattr(ref, "message_id", 0) or 0)
         return mid in self._report_message_ids
 
+    # ---------------------------------------------------------- Discord commands
+
     @commands.group(name="devai", hidden=True, invoke_without_command=True)
     async def devai_group(self, ctx: commands.Context):
         if not await self._is_ownerish(ctx.author):
             return
         await ctx.reply(
-            "DevAI: use `_devai status`, `_devai scan` ou `_devai index`.",
+            "DevAI: use `_devai status`, `_devai providers`, `_devai scan` ou `_devai index`.",
             mention_author=False,
         )
 
@@ -574,6 +776,71 @@ RESUMO DA ESTRUTURA DO PROJETO:
             f"Gerados: `{self.generated_dir}`",
             mention_author=False,
         )
+
+    @devai_group.command(name="providers")
+    async def devai_providers(self, ctx: commands.Context):
+        """Mostra estatísticas de cada provider — útil pra ver qual está
+        falhando muito ou se a chave tá ausente."""
+        if not await self._is_ownerish(ctx.author):
+            return
+        if self.ai is None:
+            await ctx.reply("DevAI ainda não inicializou.", mention_author=False)
+            return
+
+        order = self.ai.provider_order()
+        stats = self.ai.stats_summary()
+        lines = ["**DevAI providers:**"]
+        for name in order:
+            st = stats.get(name)
+            model = self._configured_model_for(name)
+            key_present = self._has_credentials_for(name)
+            line = f"• `{name}` → `{model or '?'}`  "
+            line += f"key={'✅' if key_present else '❌'}  "
+            if st:
+                line += f"ok={st['success']} err={st['failure']} "
+                if st["last_latency_ms"]:
+                    line += f"({st['last_latency_ms']} ms) "
+                if st["last_error"]:
+                    line += f"último_erro=`{st['last_error']}`"
+            else:
+                line += "(ainda não usado)"
+            lines.append(line)
+        await ctx.reply("\n".join(lines)[:1900], mention_author=False)
+
+    def _configured_model_for(self, name: str) -> str:
+        mapping = {
+            "gemini": "DEVAI_GEMINI_MODEL",
+            "groq": "DEVAI_GROQ_MODEL",
+            "openrouter": "DEVAI_OPENROUTER_MODEL",
+            "cerebras": "DEVAI_CEREBRAS_MODEL",
+            "cloudflare": "DEVAI_CLOUDFLARE_MODEL",
+            "huggingface": "DEVAI_HUGGINGFACE_MODEL",
+            "pollinations": "DEVAI_POLLINATIONS_MODEL",
+        }
+        attr = mapping.get(name)
+        if not attr:
+            return ""
+        return str(getattr(config, attr, "") or "")
+
+    def _has_credentials_for(self, name: str) -> bool:
+        if name == "gemini":
+            return bool(getattr(config, "GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", ""))
+        if name == "groq":
+            return bool(getattr(config, "GROQ_API_KEY", "") or os.getenv("GROQ_API_KEY", ""))
+        if name == "openrouter":
+            return bool(getattr(config, "OPENROUTER_API_KEY", "") or os.getenv("OPENROUTER_API_KEY", ""))
+        if name == "cerebras":
+            return bool(getattr(config, "CEREBRAS_API_KEY", "") or os.getenv("CEREBRAS_API_KEY", ""))
+        if name == "cloudflare":
+            return bool(
+                (getattr(config, "CLOUDFLARE_API_TOKEN", "") or os.getenv("CLOUDFLARE_API_TOKEN", ""))
+                and (getattr(config, "CLOUDFLARE_ACCOUNT_ID", "") or os.getenv("CLOUDFLARE_ACCOUNT_ID", ""))
+            )
+        if name == "huggingface":
+            return bool(getattr(config, "HUGGINGFACE_API_KEY", "") or os.getenv("HUGGINGFACE_API_KEY", ""))
+        if name == "pollinations":
+            return bool(getattr(config, "POLLINATIONS_API_KEY", "") or os.getenv("POLLINATIONS_API_KEY", ""))
+        return False
 
     @devai_group.command(name="index")
     async def devai_index(self, ctx: commands.Context):
@@ -598,7 +865,7 @@ RESUMO DA ESTRUTURA DO PROJETO:
             return
         event = events[-1]
         await ctx.reply(f"Analisando último erro encontrado: `{event.signature}`", mention_author=False)
-        asyncio.create_task(self._analyze_event(event, auto=False, comment="scan manual solicitado pelo dono"))
+        asyncio.create_task(self._analyze_event(event, comment="scan manual solicitado pelo dono"))
 
 
 async def setup(bot: commands.Bot):
