@@ -88,6 +88,21 @@ class DevAI(commands.Cog):
     def _enabled(self) -> bool:
         return bool(getattr(config, "DEVAI_ENABLED", False))
 
+    def _devai_webhook_id(self) -> int:
+        """Extrai o ID do webhook do `DEVAI_WEBHOOK_URL` pra comparar com o
+        `webhook_id` de mensagens citadas em replies.
+
+        URL formato: `https://discord.com/api/webhooks/{ID}/{TOKEN}`. Retorna
+        0 se não der match (URL vazia/inválida)."""
+        url = str(getattr(config, "DEVAI_WEBHOOK_URL", "") or "")
+        match = re.search(r"/webhooks/(\d+)/", url)
+        if match:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                return 0
+        return 0
+
     async def cog_load(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.generated_dir.mkdir(parents=True, exist_ok=True)
@@ -730,11 +745,26 @@ SCHEMA EXATO DO JSON:
         # 1) Mention direta do bot.
         bot_user = getattr(self.bot, "user", None)
         bot_mentioned = bool(bot_user) and bot_user in (message.mentions or [])
-        # 2) Reply pra alguma mensagem da DevAI — pode ser de relatório ou de chat.
+
+        # 2) Reply pra alguma mensagem da DevAI — pode ser de relatório,
+        #    de chat, ou de qualquer outra postagem do webhook DevAI.
+        #    Detecção em 2 camadas:
+        #      (a) sets em memória — funciona dentro da mesma sessão do bot
+        #      (b) `webhook_id` da mensagem citada == ID do DEVAI_WEBHOOK_URL
+        #          — sobrevive a restart do bot, porque não depende de RAM.
         ref = getattr(message, "reference", None)
         ref_id = int(getattr(ref, "message_id", 0) or 0) if ref is not None else 0
         is_reply_to_report = ref_id in self._report_message_ids
         is_reply_to_chat = ref_id in self._chat_message_ids
+        # Se nenhum set bateu mas existe um reference, vale conferir se é
+        # mensagem do webhook DevAI via fetch_message.
+        if ref_id and not (is_reply_to_report or is_reply_to_chat):
+            classification = await self._classify_reply_via_webhook(message, ref_id)
+            if classification == "report":
+                is_reply_to_report = True
+            elif classification == "chat":
+                is_reply_to_chat = True
+
         # 3) Prefixo textual "devai"/"ia" — só conta no canal de comentário.
         channel_id = int(getattr(config, "DEVAI_COMMENT_CHANNEL_ID", 0) or 0)
         in_comment_channel = (
@@ -753,7 +783,9 @@ SCHEMA EXATO DO JSON:
 
         # ---- decisão de modo --------------------------------------------
         # Reply em RELATÓRIO de erro/patch → modo re-analyze (gera ZIP novo).
-        # A reação 🧠 fica permanente: sinaliza "ok, vou refazer o patch".
+        # SÓ vai pra esse caminho se ainda temos o LogEvent associado em RAM.
+        # Se perdemos (restart), cai pro modo chat — usuário ainda recebe
+        # uma resposta útil em vez de silêncio.
         if is_reply_to_report:
             event = self._last_event_by_message.get(ref_id)
             if event is None and self._last_event_by_message:
@@ -765,11 +797,41 @@ SCHEMA EXATO DO JSON:
                     pass
                 asyncio.create_task(self._analyze_event(event, comment=cleaned))
                 return
-            # Sem evento associado — cai pro modo chat.
+            # Sem evento associado (reinício do bot, p.ex.) — cai pro chat.
 
-        # Caso contrário (mention, prefixo, ou reply em CHAT): conversa livre.
-        # A reação entra/sai dentro de `_chat_with_owner`.
+        # Caso contrário (mention, prefixo, ou reply em CHAT/qualquer DevAI):
+        # conversa livre. A reação entra/sai dentro de `_chat_with_owner`.
         asyncio.create_task(self._chat_with_owner(message, cleaned))
+
+    async def _classify_reply_via_webhook(self, message: discord.Message, ref_id: int) -> str:
+        """Verifica se a mensagem citada veio do webhook DevAI. Sobrevive a
+        restart do bot (não depende dos sets em RAM).
+
+        Retorna:
+            "report" - mensagem citada é embed do webhook DevAI (relatório)
+            "chat"   - mensagem citada é texto do webhook DevAI (chat anterior)
+            "none"   - mensagem citada não é da DevAI ou não conseguimos ver
+        """
+        devai_wh_id = self._devai_webhook_id()
+        if not devai_wh_id:
+            return "none"
+        # cached_message é raríssimo pra webhook — fetch ativo.
+        try:
+            fetched = await message.channel.fetch_message(ref_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return "none"
+        except Exception:
+            return "none"
+        msg_wh_id = int(getattr(fetched, "webhook_id", 0) or 0)
+        if msg_wh_id != devai_wh_id:
+            return "none"
+        # É do nosso webhook. Heurística pra distinguir relatório de chat:
+        # relatórios são enviados via send_report() com embed; chat usa
+        # send_plain() sem embed. Se tem embed → tratamos como relatório
+        # (mas a re-análise só dispara se houver LogEvent em RAM).
+        if getattr(fetched, "embeds", None):
+            return "report"
+        return "chat"
 
     def _strip_prefix_and_mentions(self, content: str) -> str:
         """Remove `devai:`, `ia:` no começo e mentions do bot pra deixar a
