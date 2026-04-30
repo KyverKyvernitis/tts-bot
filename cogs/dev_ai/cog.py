@@ -1604,6 +1604,81 @@ Responda em texto puro (markdown leve permitido). Não devolva JSON.
         # quando começa a pensar, sai assim que a resposta vai pro canal.
         asyncio.create_task(self._chat_with_owner(ctx.message, question))
 
+    @devai_group.command(name="review")
+    async def devai_review(self, ctx: commands.Context, commit: str = "HEAD"):
+        """Força a DevAI a comentar um commit específico (passado, geralmente
+        o último). Útil quando o auto-comentário foi pulado por algum motivo
+        (cog desabilitado na hora do auto-update, p.ex.).
+
+        Uso:
+          `_devai review`           — comenta o commit HEAD atual
+          `_devai review f730f28`   — comenta o commit f730f28
+          `_devai review HEAD~1`    — comenta o commit anterior
+        """
+        if not await self._is_ownerish(ctx.author):
+            return
+        commit = (commit or "HEAD").strip()
+
+        # Resolve o ref pra hash absoluto e pega lista de arquivos alterados.
+        import subprocess
+        try:
+            hash_proc = subprocess.run(
+                ["git", "-C", str(self.repo_root), "rev-parse", commit],
+                capture_output=True, text=True, timeout=8,
+            )
+            if hash_proc.returncode != 0:
+                await ctx.reply(
+                    f"❌ Não consegui resolver `{commit}`: `{(hash_proc.stderr or '').strip()[:200]}`",
+                    mention_author=False,
+                )
+                return
+            commit_hash = hash_proc.stdout.strip()
+
+            files_proc = subprocess.run(
+                ["git", "-C", str(self.repo_root), "show", "--name-only", "--pretty=format:", commit_hash],
+                capture_output=True, text=True, timeout=8,
+            )
+            if files_proc.returncode != 0:
+                await ctx.reply(
+                    f"❌ git show falhou: `{(files_proc.stderr or '').strip()[:200]}`",
+                    mention_author=False,
+                )
+                return
+            changed_files = [line.strip() for line in (files_proc.stdout or "").splitlines() if line.strip()]
+            if not changed_files:
+                await ctx.reply(
+                    f"⚠️ Commit `{commit_hash[:7]}` não tem arquivos alterados.",
+                    mention_author=False,
+                )
+                return
+
+            branch_proc = subprocess.run(
+                ["git", "-C", str(self.repo_root), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=8,
+            )
+            branch = (branch_proc.stdout or "main").strip() or "main"
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            await ctx.reply(f"❌ Erro chamando git: `{exc}`", mention_author=False)
+            return
+
+        await ctx.reply(
+            f"🧠 Forçando review do commit `{commit_hash[:7]}` "
+            f"({len(changed_files)} arquivo(s)) — comentário vai pro webhook.",
+            mention_author=False,
+        )
+        try:
+            await self.review_successful_patch(
+                changed_files=changed_files,
+                commit_hash=commit_hash,
+                branch=branch,
+                zip_filename=f"manual_review_{commit_hash[:7]}.zip",
+                zip_path=None,  # sem zip — vai cair no caminho de git diff
+                triggered_update=False,
+            )
+        except Exception as exc:
+            log.exception("DevAI: falha em review manual")
+            await ctx.reply(f"❌ Review falhou: `{type(exc).__name__}: {exc}`", mention_author=False)
+
     @devai_group.command(name="diag")
     async def devai_diag(self, ctx: commands.Context):
         """Diagnóstico do listener: mostra exatamente o que a DevAI vê.
