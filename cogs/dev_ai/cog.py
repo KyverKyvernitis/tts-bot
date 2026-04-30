@@ -628,6 +628,52 @@ SCHEMA EXATO DO JSON:
         zip_path: Path | None,
         triggered_update: bool,
     ) -> None:
+        # Timeout duro pra review inteiro — sem isso, um provider lento poderia
+        # segurar o `_analysis_lock` indefinidamente e bloquear o próximo
+        # review (ex: review forçado disputando lock com resume pendente).
+        timeout_s = float(getattr(config, "DEVAI_PATCH_REVIEW_TIMEOUT_SECONDS", 120) or 120)
+        try:
+            await asyncio.wait_for(
+                self._run_patch_review_inner_locked(
+                    changed_files=changed_files,
+                    commit_hash=commit_hash,
+                    branch=branch,
+                    zip_filename=zip_filename,
+                    zip_path=zip_path,
+                    triggered_update=triggered_update,
+                ),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            log.error(
+                "DevAI patch review: TIMEOUT após %ss (commit=%s zip=%s)",
+                timeout_s, commit_hash, zip_filename,
+            )
+            try:
+                await self._report_patch_review_fallback(
+                    changed_files=changed_files,
+                    commit_hash=commit_hash,
+                    branch=branch,
+                    zip_filename=zip_filename,
+                    errors=[f"timeout após {timeout_s}s — provider muito lento ou travou"],
+                )
+            except Exception:
+                log.exception("DevAI patch review: nem o fallback pôde ser enviado")
+
+    async def _run_patch_review_inner_locked(
+        self,
+        *,
+        changed_files: list[str],
+        commit_hash: str | None,
+        branch: str,
+        zip_filename: str,
+        zip_path: Path | None,
+        triggered_update: bool,
+    ) -> None:
+        log.info(
+            "DevAI patch review: iniciando (commit=%s files=%d zip=%s)",
+            commit_hash, len(changed_files), zip_filename,
+        )
         async with self._analysis_lock:
             zip_files = await asyncio.to_thread(self._read_zip_patch_context, zip_path or Path(), changed_files)
             # Se zip_files está vazio (zip já apagado, p.ex. retomada após
@@ -636,6 +682,7 @@ SCHEMA EXATO DO JSON:
             # `git show <hash>~1:<file>` pra ter o estado pré-patch.
             if not zip_files:
                 zip_files = await asyncio.to_thread(self._read_files_from_disk, changed_files)
+            log.info("DevAI patch review: zip_files=%d arquivos", len(zip_files))
             # Diff: tenta o caminho normal (zip vs disco). Se vazio, recorre
             # ao git pra mostrar o que o commit mudou.
             diff_block = await asyncio.to_thread(self._make_diff_block, zip_files)
@@ -643,6 +690,7 @@ SCHEMA EXATO DO JSON:
                 git_diff = await asyncio.to_thread(self._git_diff_for_commit, commit_hash, changed_files)
                 if git_diff:
                     diff_block = git_diff
+                    log.info("DevAI patch review: usando git diff (disco idêntico ao zip)")
 
             prompt = await asyncio.to_thread(
                 self._build_patch_review_prompt,
@@ -654,8 +702,13 @@ SCHEMA EXATO DO JSON:
                 zip_files=zip_files,
                 diff_block=diff_block,
             )
+            log.info("DevAI patch review: prompt montado (%d chars), chamando IA…", len(prompt))
             result, errors = await self.ai.generate_patch_json(prompt, system=SYSTEM_PROMPT_REVIEW)
             if result is None:
+                log.warning(
+                    "DevAI patch review: NENHUM PROVIDER respondeu (errors=%s)",
+                    errors[-3:] if errors else "vazio",
+                )
                 await self._report_patch_review_fallback(
                     changed_files=changed_files,
                     commit_hash=commit_hash,
@@ -664,10 +717,15 @@ SCHEMA EXATO DO JSON:
                     errors=errors,
                 )
                 return
+            log.info(
+                "DevAI patch review: provider %s respondeu em %dms (%d chars)",
+                result.provider, result.elapsed_ms, len(result.text),
+            )
 
             try:
                 data = self.patch_builder.parse_ai_json(result.text)
             except Exception as exc:
+                log.warning("DevAI patch review: JSON inválido de %s, tentando repair: %s", result.provider, exc)
                 # Tenta repair também na review.
                 if bool(getattr(config, "DEVAI_REPAIR_ENABLED", True)):
                     repair_result, repair_errors = await self.ai.repair_patch_json(
@@ -680,7 +738,9 @@ SCHEMA EXATO DO JSON:
                         try:
                             data = self.patch_builder.parse_ai_json(repair_result.text)
                             result = repair_result
+                            log.info("DevAI patch review: repair bem-sucedido via %s", result.provider)
                         except Exception as exc2:
+                            log.error("DevAI patch review: repair também devolveu JSON inválido: %s", exc2)
                             await self._report_patch_review_fallback(
                                 changed_files=changed_files,
                                 commit_hash=commit_hash,
@@ -693,6 +753,7 @@ SCHEMA EXATO DO JSON:
                             )
                             return
                     else:
+                        log.error("DevAI patch review: repair não conseguiu chamar nenhum provider: %s", repair_errors[-3:])
                         await self._report_patch_review_fallback(
                             changed_files=changed_files,
                             commit_hash=commit_hash,
@@ -705,6 +766,7 @@ SCHEMA EXATO DO JSON:
                         )
                         return
                 else:
+                    log.error("DevAI patch review: JSON inválido e DEVAI_REPAIR_ENABLED=false")
                     await self._report_patch_review_fallback(
                         changed_files=changed_files,
                         commit_hash=commit_hash,
@@ -714,16 +776,35 @@ SCHEMA EXATO DO JSON:
                     )
                     return
 
-            await asyncio.to_thread(self.indexer.build_index)
-            await self._report_patch_review(
-                data=data,
-                result=result,
-                changed_files=changed_files,
-                commit_hash=commit_hash,
-                branch=branch,
-                zip_filename=zip_filename,
-                triggered_update=triggered_update,
-            )
+            log.info("DevAI patch review: enviando comentário pro webhook…")
+            try:
+                await asyncio.to_thread(self.indexer.build_index)
+            except Exception:
+                log.exception("DevAI patch review: falha re-indexando (ignorado, segue com comentário)")
+            try:
+                await self._report_patch_review(
+                    data=data,
+                    result=result,
+                    changed_files=changed_files,
+                    commit_hash=commit_hash,
+                    branch=branch,
+                    zip_filename=zip_filename,
+                    triggered_update=triggered_update,
+                )
+                log.info("DevAI patch review: COMENTÁRIO ENVIADO COM SUCESSO (commit=%s)", commit_hash)
+            except Exception:
+                log.exception("DevAI patch review: falha enviando comentário pro webhook")
+                # Última cartada: tenta o fallback simples.
+                try:
+                    await self._report_patch_review_fallback(
+                        changed_files=changed_files,
+                        commit_hash=commit_hash,
+                        branch=branch,
+                        zip_filename=zip_filename,
+                        errors=["render do comentário falhou — veja bot.log"],
+                    )
+                except Exception:
+                    log.exception("DevAI patch review: nem o fallback funcionou")
 
     async def _report_patch_review(
         self,
