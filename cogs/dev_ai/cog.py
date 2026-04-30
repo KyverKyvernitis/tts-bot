@@ -17,7 +17,7 @@ from discord.ext import commands
 
 import config
 
-from .ai_client import DevAIClient, AIResult, SYSTEM_PROMPT_FIX, SYSTEM_PROMPT_REVIEW
+from .ai_client import DevAIClient, AIResult, SYSTEM_PROMPT_FIX, SYSTEM_PROMPT_REVIEW, SYSTEM_PROMPT_CHAT
 from .log_watcher import LogEvent, LogWatcher
 from .patch_builder import BuiltPatch, HistoryItem, PatchBuilder
 from .project_indexer import ProjectIndexer
@@ -713,36 +713,223 @@ SCHEMA EXATO DO JSON:
             return
         if not self._enabled():
             return
-        channel_id = int(getattr(config, "DEVAI_COMMENT_CHANNEL_ID", 0) or 0)
-        if channel_id and int(getattr(message.channel, "id", 0) or 0) != channel_id:
-            return
         if not await self._is_ownerish(message.author):
             return
 
         content = (message.content or "").strip()
+        if not content:
+            return
         lower = content.lower()
-        if not (lower.startswith("devai") or lower.startswith("ia") or self._is_reply_to_report(message)):
+
+        # ---- detecção de gatilhos ---------------------------------------
+        # 1) Mention direta do bot (qualquer canal — limitamos depois com is_ownerish).
+        bot_user = getattr(self.bot, "user", None)
+        bot_mentioned = bool(bot_user) and bot_user in (message.mentions or [])
+        # 2) Reply pra um relatório anterior da DevAI.
+        is_reply_to_report = self._is_reply_to_report(message)
+        # 3) Prefixo textual "devai"/"ia" — só conta no canal de comentário.
+        channel_id = int(getattr(config, "DEVAI_COMMENT_CHANNEL_ID", 0) or 0)
+        in_comment_channel = (
+            channel_id == 0
+            or int(getattr(message.channel, "id", 0) or 0) == channel_id
+        )
+        text_prefix = (lower.startswith("devai") or lower.startswith("ia ") or lower == "ia") and in_comment_channel
+
+        if not (bot_mentioned or is_reply_to_report or text_prefix):
             return
 
-        if not self._is_reply_to_report(message):
-            # Comentário solto só responde se houver um último evento em memória.
-            if not self._last_event_by_message:
-                return
-            event = list(self._last_event_by_message.values())[-1]
-        else:
-            ref_id = int(getattr(getattr(message, "reference", None), "message_id", 0) or 0)
-            event = self._last_event_by_message.get(ref_id)
-            if event is None and self._last_event_by_message:
-                event = list(self._last_event_by_message.values())[-1]
-            if event is None:
-                return
+        # Limpa prefixo/mention pra deixar só a pergunta/comentário.
+        cleaned = self._strip_prefix_and_mentions(content)
+        if not cleaned and not is_reply_to_report:
+            cleaned = content  # fallback
 
-        comment = re.sub(r"^(devai|ia)[:,\s-]*", "", content, flags=re.I).strip() or content
         try:
             await message.add_reaction("🧠")
         except Exception:
             pass
-        asyncio.create_task(self._analyze_event(event, comment=comment))
+
+        # ---- decisão de modo --------------------------------------------
+        # Se for reply num relatório de erro, mantemos o comportamento antigo:
+        # tenta refazer o patch usando a mensagem do dono como instrução
+        # prioritária. Esse caminho gera ZIP novo se a IA achar que precisa.
+        if is_reply_to_report:
+            ref_id = int(getattr(getattr(message, "reference", None), "message_id", 0) or 0)
+            event = self._last_event_by_message.get(ref_id)
+            if event is None and self._last_event_by_message:
+                event = list(self._last_event_by_message.values())[-1]
+            if event is not None:
+                asyncio.create_task(self._analyze_event(event, comment=cleaned))
+                return
+            # Sem evento associado — cai pro modo chat.
+
+        # Caso contrário: chat livre. Resposta em texto puro, no canal,
+        # sem gerar ZIP.
+        asyncio.create_task(self._chat_with_owner(message, cleaned))
+
+    def _strip_prefix_and_mentions(self, content: str) -> str:
+        """Remove `devai:`, `ia:` no começo e mentions do bot pra deixar a
+        pergunta limpa."""
+        # Remove mention do bot (formato <@id> ou <@!id>).
+        bot_user = getattr(self.bot, "user", None)
+        bot_id = int(getattr(bot_user, "id", 0) or 0)
+        if bot_id:
+            content = re.sub(rf"<@!?{bot_id}>", "", content)
+        # Remove prefixo textual.
+        content = re.sub(r"^\s*(devai|ia)[:,\s-]*", "", content, flags=re.I)
+        return content.strip()
+
+    async def _chat_with_owner(self, message: discord.Message, question: str) -> None:
+        """Modo conversa: monta um prompt com contexto do projeto + opcional
+        contexto do erro/patch citado e responde em texto puro como reply.
+
+        Não posta no webhook formal — responde direto no canal. Ideal pra
+        perguntas tipo 'explique X', 'por que escolheu Y', 'qual cog faz Z'.
+        """
+        if self.ai is None:
+            return
+        try:
+            prompt = await asyncio.to_thread(self._build_chat_prompt, message=message, question=question)
+        except Exception as exc:
+            log.exception("DevAI chat: falha montando prompt")
+            await self._reply_safely(
+                message,
+                f"⚠️ Não consegui montar o contexto: `{type(exc).__name__}: {exc}`",
+            )
+            return
+
+        try:
+            result, errors = await self.ai.chat_freeform(prompt, system=SYSTEM_PROMPT_CHAT)
+        except Exception as exc:
+            log.exception("DevAI chat: falha chamando IA")
+            await self._reply_safely(
+                message,
+                f"⚠️ Falha ao chamar a IA: `{type(exc).__name__}: {exc}`",
+            )
+            return
+
+        if result is None or not result.text.strip():
+            err_text = "; ".join(errors[-3:]) if errors else "sem detalhe"
+            await self._reply_safely(
+                message,
+                f"⚠️ Nenhum provider respondeu. Últimos erros: `{redact_secrets(err_text, max_chars=400)}`",
+            )
+            return
+
+        text = redact_secrets(result.text.strip(), max_chars=1800)
+        footer = f"\n\n_— {result.provider} · `{result.model}` · {result.elapsed_ms} ms_"
+        await self._reply_safely(message, text + footer)
+
+    async def _reply_safely(self, message: discord.Message, content: str) -> None:
+        """Envia uma reply Discord lidando com canais sem permissão de reply
+        (DM, threads bloqueadas) — cai pro send normal."""
+        chunks: list[str] = []
+        # Discord limita a 2000 chars/mensagem. Quebra em pedaços se preciso.
+        remaining = content
+        while remaining:
+            chunks.append(remaining[:1900])
+            remaining = remaining[1900:]
+        first = True
+        for chunk in chunks:
+            try:
+                if first:
+                    await message.reply(chunk, mention_author=False)
+                    first = False
+                else:
+                    await message.channel.send(chunk)
+            except Exception:
+                try:
+                    await message.channel.send(chunk)
+                except Exception:
+                    return  # canal fechado — desiste
+
+    def _build_chat_prompt(self, *, message: discord.Message, question: str) -> str:
+        """Monta o prompt do modo chat. Inclui:
+        - estrutura compacta do projeto
+        - últimos 3 patches (pra "lembrar" o que aconteceu)
+        - se a mensagem for reply de algo, o conteúdo da mensagem referenciada
+        - histórico curto do canal (últimas 6 msgs antes desta) pra dar contexto
+        """
+        index = self.indexer.load_or_build(
+            max_age_seconds=int(getattr(config, "DEVAI_INDEX_MAX_AGE_SECONDS", 1800) or 1800)
+        )
+        project_context = self.indexer.compact_context(
+            index,
+            max_chars=int(getattr(config, "DEVAI_MAX_INDEX_CHARS", 12000) or 12000),
+        )
+        history = self.patch_builder.recent_history(limit=3)
+        history_block = self._format_history_block(history)
+
+        ref_block = ""
+        ref = getattr(message, "reference", None)
+        if ref is not None:
+            ref_id = int(getattr(ref, "message_id", 0) or 0)
+            event = self._last_event_by_message.get(ref_id)
+            if event is not None:
+                ref_block = (
+                    "MENSAGEM CITADA (relatório de erro):\n"
+                    f"- Assinatura: {event.signature}\n"
+                    f"- Fonte: {event.source}\n"
+                    f"```txt\n{redact_secrets(event.text, max_chars=4000)}\n```\n"
+                )
+            else:
+                # Tenta puxar o cached message — em alguns casos o discord.py
+                # já tem.
+                cached = getattr(ref, "cached_message", None)
+                if cached is not None and cached.content:
+                    ref_block = (
+                        "MENSAGEM CITADA:\n"
+                        f"```\n{redact_secrets(str(cached.content), max_chars=2000)}\n```\n"
+                    )
+
+        return f"""
+PERGUNTA DO DONO:
+{redact_secrets(question, max_chars=2500)}
+
+{ref_block}
+PATCHES RECENTES:
+{history_block}
+
+ESTRUTURA RESUMIDA DO PROJETO:
+```txt
+{project_context}
+```
+
+Responda em texto puro (markdown leve permitido). Não devolva JSON.
+""".strip()
+
+    # ----------------------------------------------------- alerta externo
+
+    async def notify_external_event(self, *, source: str, text: str, signature_hint: str = "") -> None:
+        """Hook público: o bot.py chama isso quando detecta uma falha que NÃO
+        passou pelos arquivos de log (ex: erro do auto-update que só virou
+        `print` ou exception capturada antes do logger).
+
+        Cria um LogEvent sintético e enfileira pra análise normal.
+        """
+        if not self._enabled() or self.watcher is None:
+            return
+        import hashlib
+        sig = signature_hint or hashlib.sha256(
+            (source + "|" + text[:1000]).encode("utf-8", errors="replace")
+        ).hexdigest()[:16]
+        # Usa o LogWatcher pra deduplicar: se essa assinatura já apareceu nos
+        # últimos 15 min, ele ignora.
+        now = time.time()
+        last = self.watcher.recent_signatures.get(sig, 0.0)
+        if now - last < 900:
+            return
+        self.watcher.recent_signatures[sig] = now
+        event = LogEvent(
+            source=source,
+            text=redact_secrets(text, max_chars=int(getattr(config, "DEVAI_MAX_LOG_CHARS", 18000) or 18000)),
+            signature=sig,
+            file_paths=[],
+            created_at=now,
+        )
+        try:
+            self.queue.put_nowait(event)
+        except asyncio.QueueFull:
+            log.warning("DevAI: fila cheia, alerta externo ignorado: %s", sig)
 
     def _is_reply_to_report(self, message: discord.Message) -> bool:
         ref = getattr(message, "reference", None)
@@ -758,7 +945,7 @@ SCHEMA EXATO DO JSON:
         if not await self._is_ownerish(ctx.author):
             return
         await ctx.reply(
-            "DevAI: use `_devai status`, `_devai providers`, `_devai scan` ou `_devai index`.",
+            "DevAI: use `_devai status`, `_devai providers`, `_devai scan`, `_devai index` ou `_devai ask <pergunta>`.",
             mention_author=False,
         )
 
@@ -866,6 +1053,24 @@ SCHEMA EXATO DO JSON:
         event = events[-1]
         await ctx.reply(f"Analisando último erro encontrado: `{event.signature}`", mention_author=False)
         asyncio.create_task(self._analyze_event(event, comment="scan manual solicitado pelo dono"))
+
+    @devai_group.command(name="ask")
+    async def devai_ask(self, ctx: commands.Context, *, question: str = ""):
+        """Conversa livre com a DevAI: `_devai ask como funciona o auto-update?`"""
+        if not await self._is_ownerish(ctx.author):
+            return
+        question = (question or "").strip()
+        if not question:
+            await ctx.reply(
+                "Uso: `_devai ask <pergunta>`\nEx: `_devai ask explique como funciona o sistema de TTS`",
+                mention_author=False,
+            )
+            return
+        try:
+            await ctx.message.add_reaction("🧠")
+        except Exception:
+            pass
+        asyncio.create_task(self._chat_with_owner(ctx.message, question))
 
 
 async def setup(bot: commands.Bot):

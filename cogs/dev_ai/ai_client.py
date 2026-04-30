@@ -77,6 +77,22 @@ SYSTEM_PROMPT_REVIEW = (
     "Responda SOMENTE com JSON válido."
 )
 
+SYSTEM_PROMPT_CHAT = (
+    "Você é DevAI: assistente de manutenção de um bot Discord Python (discord.py). "
+    "O dono está te chamando pra conversar — pode ser uma dúvida sobre o código, "
+    "uma análise de patch, uma decisão arquitetural, ou só um pedido de "
+    "explicação. Seja DIRETA, técnica e curta. Use português brasileiro.\n\n"
+    "REGRAS:\n"
+    "- NÃO devolva JSON. Responda em texto plano (markdown leve permitido).\n"
+    "- Se a pergunta for sobre arquivo/módulo do projeto, use SÓ o que tem no "
+    "contexto. Se faltar informação, diga 'não tenho contexto suficiente, me "
+    "passe o arquivo X'.\n"
+    "- Não invente APIs ou comportamento que você não viu no código.\n"
+    "- Limite-se a ~600 palavras a não ser que peçam mais.\n"
+    "- Se o dono pedir um patch concreto, oriente: 'use _devai scan' ou 'me responda "
+    "no relato de erro pra eu gerar o ZIP'."
+)
+
 
 @dataclass
 class AIResult:
@@ -143,7 +159,7 @@ class DevAIClient:
         errors: list[str] = []
         for provider in self.provider_order():
             try:
-                result = await self._dispatch(provider, prompt, sys_prompt)
+                result = await self._dispatch(provider, prompt, sys_prompt, json_mode=True)
                 if result and result.text.strip():
                     self._record_success(provider, result.elapsed_ms)
                     return result, errors
@@ -184,11 +200,34 @@ class DevAIClient:
         )
         return await self.generate_patch_json(repair_prompt, system=sys_prompt)
 
+    async def chat_freeform(self, prompt: str, *, system: str | None = None) -> tuple[AIResult | None, list[str]]:
+        """Modo conversa: NÃO pede JSON, devolve texto plano.
+
+        Usado quando o dono manda mention/pergunta na DevAI sem querer um
+        patch. Tira `response_format=json_object` e o `responseMimeType` do
+        Gemini, e usa o SYSTEM_PROMPT_CHAT por padrão.
+        """
+        sys_prompt = system or SYSTEM_PROMPT_CHAT
+        errors: list[str] = []
+        for provider in self.provider_order():
+            try:
+                result = await self._dispatch(provider, prompt, sys_prompt, json_mode=False)
+                if result and result.text.strip():
+                    self._record_success(provider, result.elapsed_ms)
+                    return result, errors
+                errors.append(f"{provider}: resposta vazia")
+                self._record_failure(provider, "empty")
+            except Exception as exc:
+                msg = f"{provider}: {type(exc).__name__}: {exc}"
+                errors.append(msg)
+                self._record_failure(provider, type(exc).__name__)
+        return None, errors
+
     # ------------------------------------------------------------ dispatching
 
-    async def _dispatch(self, provider: str, prompt: str, system: str) -> AIResult:
+    async def _dispatch(self, provider: str, prompt: str, system: str, *, json_mode: bool = True) -> AIResult:
         if provider == "gemini":
-            return await self._call_gemini(prompt, system)
+            return await self._call_gemini(prompt, system, json_mode=json_mode)
         if provider == "groq":
             return await self._call_openai_compatible(
                 provider="groq",
@@ -197,7 +236,7 @@ class DevAIClient:
                 model=str(getattr(self.config, "DEVAI_GROQ_MODEL", "openai/gpt-oss-120b") or "openai/gpt-oss-120b"),
                 prompt=prompt,
                 system=system,
-                supports_json_mode=True,
+                supports_json_mode=json_mode,
             )
         if provider == "openrouter":
             return await self._call_openai_compatible(
@@ -207,7 +246,7 @@ class DevAIClient:
                 model=str(getattr(self.config, "DEVAI_OPENROUTER_MODEL", "qwen/qwen3-coder:free") or "qwen/qwen3-coder:free"),
                 prompt=prompt,
                 system=system,
-                supports_json_mode=True,
+                supports_json_mode=json_mode,
                 extra_headers={
                     "HTTP-Referer": str(getattr(self.config, "DEVAI_OPENROUTER_REFERER", "https://github.com/devai-bot") or ""),
                     "X-Title": "DevAI Bot Maintainer",
@@ -221,7 +260,7 @@ class DevAIClient:
                 model=str(getattr(self.config, "DEVAI_CEREBRAS_MODEL", "gpt-oss-120b") or "gpt-oss-120b"),
                 prompt=prompt,
                 system=system,
-                supports_json_mode=True,
+                supports_json_mode=json_mode,
             )
         if provider == "cloudflare":
             account_id = str(getattr(self.config, "CLOUDFLARE_ACCOUNT_ID", "") or os.getenv("CLOUDFLARE_ACCOUNT_ID", "")).strip()
@@ -246,7 +285,7 @@ class DevAIClient:
                 model=str(getattr(self.config, "DEVAI_HUGGINGFACE_MODEL", "Qwen/Qwen3-Coder-30B-A3B-Instruct") or "Qwen/Qwen3-Coder-30B-A3B-Instruct"),
                 prompt=prompt,
                 system=system,
-                supports_json_mode=True,
+                supports_json_mode=json_mode,
             )
         if provider == "pollinations":
             return await self._call_openai_compatible(
@@ -256,7 +295,7 @@ class DevAIClient:
                 model=str(getattr(self.config, "DEVAI_POLLINATIONS_MODEL", "openclaw") or "openclaw"),
                 prompt=prompt,
                 system=system,
-                supports_json_mode=True,
+                supports_json_mode=json_mode,
             )
         raise RuntimeError(f"provider desconhecido: {provider}")
 
@@ -277,22 +316,22 @@ class DevAIClient:
             except json.JSONDecodeError as exc:
                 raise RuntimeError(f"resposta não é JSON: {text[:800]}") from exc
 
-    async def _call_gemini(self, prompt: str, system: str) -> AIResult:
+    async def _call_gemini(self, prompt: str, system: str, *, json_mode: bool = True) -> AIResult:
         api_key = str(getattr(self.config, "GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")).strip()
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY ausente")
         model = str(getattr(self.config, "DEVAI_GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash")
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        generation_config: dict[str, Any] = {
+            "temperature": self.temperature,
+            "maxOutputTokens": self._output_tokens_for(model),
+        }
+        if json_mode:
+            generation_config["responseMimeType"] = "application/json"
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": self.temperature,
-                "maxOutputTokens": self._output_tokens_for(model),
-                "responseMimeType": "application/json",
-            },
-            # 'thinking_budget' é específico do 2.5-pro mas é ignorado nas Flash;
-            # mantém zero pra responder rápido e barato.
+            "generationConfig": generation_config,
             "safetySettings": [
                 {"category": cat, "threshold": "BLOCK_NONE"}
                 for cat in (

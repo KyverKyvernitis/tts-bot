@@ -204,7 +204,7 @@ DEVAI_POLLINATIONS_BASE_URL = (os.getenv("DEVAI_POLLINATIONS_BASE_URL", "https:/
 # Pollinations "openclaw" = Qwen3-Coder-30B (28/04/2026), feito pra coding agents.
 DEVAI_POLLINATIONS_MODEL = (os.getenv("DEVAI_POLLINATIONS_MODEL", "openclaw") or "openclaw").strip()
 
-DEVAI_LOG_PATHS = (os.getenv("DEVAI_LOG_PATHS", "logs/*.log,bot.log,logs/bot.log") or "logs/*.log,bot.log,logs/bot.log").strip()
+DEVAI_LOG_PATHS = (os.getenv("DEVAI_LOG_PATHS", "logs/*.log,bot.log,logs/bot.log,logs/updater.log") or "logs/*.log,bot.log,logs/bot.log,logs/updater.log").strip()
 DEVAI_SCAN_EXISTING_LOGS_ON_BOOT = _parse_bool(os.getenv("DEVAI_SCAN_EXISTING_LOGS_ON_BOOT", "false"), False)
 DEVAI_POLL_INTERVAL_SECONDS = _parse_float(os.getenv("DEVAI_POLL_INTERVAL_SECONDS", "8.0"), 8.0)
 DEVAI_COOLDOWN_SECONDS = _parse_int(os.getenv("DEVAI_COOLDOWN_SECONDS", "300"), 300)

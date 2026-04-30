@@ -36,7 +36,28 @@ CHANGED_FILES_RAW=""
 UPDATER_UNIT="tts-bot-updater.service"
 RUN_LOG_FILE="${TMPDIR:-/tmp}/tts-bot-updater.$$.log"
 : > "$RUN_LOG_FILE"
-exec > >(tee -a "$RUN_LOG_FILE") 2>&1
+
+# DevAI integration: log persistente que a DevAI lê via DEVAI_LOG_PATHS.
+# Sem isso a DevAI nunca vê falhas do updater systemd (que loga só pra
+# journalctl + tmpfile com PID no nome).
+PERSISTENT_LOG_DIR="$REPO_DIR/logs"
+PERSISTENT_LOG_FILE="$PERSISTENT_LOG_DIR/updater.log"
+mkdir -p "$PERSISTENT_LOG_DIR" 2>/dev/null || true
+# Rotação simples: se passar de 2MB, renomeia .log -> .log.1 e começa do zero.
+if [[ -f "$PERSISTENT_LOG_FILE" ]]; then
+  log_size=$(stat -c '%s' "$PERSISTENT_LOG_FILE" 2>/dev/null || echo 0)
+  if [[ "$log_size" -gt 2097152 ]]; then
+    mv -f "$PERSISTENT_LOG_FILE" "$PERSISTENT_LOG_FILE.1" 2>/dev/null || true
+  fi
+fi
+{
+  echo ""
+  echo "===== $(date -Iseconds) updater started (pid=$$) ====="
+} >> "$PERSISTENT_LOG_FILE" 2>/dev/null || true
+
+# Tee pra ambos os arquivos. O persistente vira logs/updater.log;
+# o tmpfile continua existindo pra `collect_run_log_excerpt`.
+exec > >(tee -a "$RUN_LOG_FILE" "$PERSISTENT_LOG_FILE") 2>&1
 
 cleanup_runtime_artifacts() {
   rm -f "$RUN_LOG_FILE"

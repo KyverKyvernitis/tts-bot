@@ -7,6 +7,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import traceback
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -563,7 +564,9 @@ class BotLocal(commands.Bot):
             review_zip_path = review_dir / f"{stamp}_{safe_name}"
             shutil.copy2(zip_path, review_zip_path)
         except Exception as e:
-            print(f"[zip_update] DevAI não conseguiu copiar zip para comentário: {e!r}")
+            logging.getLogger("zip_update").error(
+                "DevAI não conseguiu copiar zip para comentário: %r", e
+            )
             return
 
         async def _runner() -> None:
@@ -577,7 +580,9 @@ class BotLocal(commands.Bot):
                     triggered_update=triggered_update,
                 )
             except Exception as e:
-                print(f"[zip_update] DevAI falhou ao comentar patch: {e!r}")
+                logging.getLogger("zip_update").error(
+                    "DevAI falhou ao comentar patch: %r", e
+                )
             finally:
                 try:
                     if review_zip_path is not None:
@@ -666,13 +671,41 @@ class BotLocal(commands.Bot):
                     discord.Color.red(),
                 )
             except Exception as e:
-                print(f"[zip_update] falha: {e!r}")
+                # IMPORTANTE: usa logger.exception (vai pro bot.log) em vez de print —
+                # caso contrário o LogWatcher da DevAI nunca veria essa falha.
+                logging.getLogger("zip_update").exception(
+                    "Falha no auto-update via ZIP do Discord"
+                )
                 await self._send_zip_update_message(
                     message,
                     "❌ Falha no update automático",
                     f"Nada foi aplicado. Motivo: **{e}**",
                     discord.Color.red(),
                 )
+                # Notifica a DevAI explicitamente — não esperar o LogWatcher
+                # bater o log; queremos análise imediata em falha de update.
+                try:
+                    devai = self.get_cog("DevAI")
+                    notify = getattr(devai, "notify_external_event", None)
+                    if callable(notify):
+                        zip_name = zip_attachment.filename if zip_attachment else "?"
+                        synthetic_text = (
+                            f"AUTO-UPDATE FALHOU\n"
+                            f"Stage: _handle_zip_update_message\n"
+                            f"ZIP: {zip_name}\n"
+                            f"Erro: {type(e).__name__}: {e}\n\n"
+                            f"Traceback (most recent call last):\n"
+                            f"{traceback.format_exc()}"
+                        )
+                        await notify(
+                            source="auto_update",
+                            text=synthetic_text,
+                            signature_hint=f"auto_update_fail:{type(e).__name__}",
+                        )
+                except Exception:
+                    logging.getLogger("zip_update").debug(
+                        "DevAI notify_external_event falhou (não-crítico)", exc_info=True
+                    )
             finally:
                 shutil.rmtree(work_dir, ignore_errors=True)
 
