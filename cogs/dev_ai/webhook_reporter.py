@@ -38,12 +38,19 @@ class WebhookReporter:
         try:
             if file_path is not None and file_path.exists():
                 file = discord.File(str(file_path), filename=file_path.name)
-            return await webhook.send(
-                username=username,
-                embed=embed,
-                file=file,
-                wait=True,
-            )
+            # IMPORTANTE: só passa `file=` se realmente tem arquivo. discord.py
+            # 2.x crasha com `AttributeError: 'NoneType' object has no
+            # attribute 'to_dict'` quando recebe `file=None` explicitamente
+            # (chama file.to_dict() sem checar). Esse era o bug que matava
+            # silenciosamente todos os comentários de patch review.
+            kwargs: dict[str, Any] = {
+                "username": username,
+                "embed": embed,
+                "wait": True,
+            }
+            if file is not None:
+                kwargs["file"] = file
+            return await webhook.send(**kwargs)
         finally:
             if file is not None:
                 try:
