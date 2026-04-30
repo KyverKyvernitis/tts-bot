@@ -993,36 +993,59 @@ SCHEMA EXATO DO JSON:
         lower = content.lower()
 
         # ---- detecção de gatilhos ---------------------------------------
-        # 1) Mention direta do bot.
+        # 1) Mention real do bot (autocompletada pelo Discord como <@id>).
         bot_user = getattr(self.bot, "user", None)
         bot_mentioned = bool(bot_user) and bot_user in (message.mentions or [])
 
-        # 2) Reply pra alguma mensagem da DevAI — pode ser de relatório,
-        #    de chat, ou de qualquer outra postagem do webhook DevAI.
-        #    Detecção em 2 camadas:
-        #      (a) sets em memória — funciona dentro da mesma sessão do bot
-        #      (b) `webhook_id` da mensagem citada == ID do DEVAI_WEBHOOK_URL
-        #          — sobrevive a restart do bot, porque não depende de RAM.
+        # 2) Reply pra alguma mensagem da DevAI. Detecção em 3 camadas
+        #    (cada uma cobre o gap da anterior):
+        #    (a) `message.reference.resolved` — populado pelo gateway, zero
+        #        API calls, sobrevive a restart do bot. Verifica `webhook_id`
+        #        contra o ID extraído de DEVAI_WEBHOOK_URL.
+        #    (b) sets em RAM (`_chat_message_ids`/`_report_message_ids`) —
+        #        cobre o caso raro do gateway não enviar `resolved`.
+        #    (c) fetch_message ativo — último recurso, requer Read Message
+        #        History no canal.
         ref = getattr(message, "reference", None)
         ref_id = int(getattr(ref, "message_id", 0) or 0) if ref is not None else 0
-        is_reply_to_report = ref_id in self._report_message_ids
-        is_reply_to_chat = ref_id in self._chat_message_ids
-        # Se nenhum set bateu mas existe um reference, vale conferir se é
-        # mensagem do webhook DevAI via fetch_message.
-        if ref_id and not (is_reply_to_report or is_reply_to_chat):
-            classification = await self._classify_reply_via_webhook(message, ref_id)
+        is_reply_to_report = False
+        is_reply_to_chat = False
+        if ref_id:
+            classification = self._classify_reply_via_resolved(message)
             if classification == "report":
                 is_reply_to_report = True
             elif classification == "chat":
                 is_reply_to_chat = True
+            # Camada (b): sets em RAM.
+            if not (is_reply_to_report or is_reply_to_chat):
+                if ref_id in self._report_message_ids:
+                    is_reply_to_report = True
+                elif ref_id in self._chat_message_ids:
+                    is_reply_to_chat = True
+            # Camada (c): fetch ativo — só vai aqui se as outras falharam.
+            if not (is_reply_to_report or is_reply_to_chat):
+                classification = await self._classify_reply_via_webhook(message, ref_id)
+                if classification == "report":
+                    is_reply_to_report = True
+                elif classification == "chat":
+                    is_reply_to_chat = True
 
-        # 3) Prefixo textual "devai"/"ia" — só conta no canal de comentário.
+        # 3) Prefixo textual ou @DevAI literal — só conta no canal de
+        #    comentário pra não vazar pra outros canais. `@DevAI` é
+        #    importante porque o nome do bot REAL é diferente de "DevAI"
+        #    (DevAI é só identidade de webhook), então o autocomplete do
+        #    Discord não converte em mention real — fica como texto puro.
         channel_id = int(getattr(config, "DEVAI_COMMENT_CHANNEL_ID", 0) or 0)
         in_comment_channel = (
             channel_id == 0
             or int(getattr(message.channel, "id", 0) or 0) == channel_id
         )
-        text_prefix = (lower.startswith("devai") or lower.startswith("ia ") or lower == "ia") and in_comment_channel
+        text_prefix = (
+            lower.startswith("devai")
+            or lower.startswith("@devai")
+            or lower.startswith("ia ")
+            or lower == "ia"
+        ) and in_comment_channel
 
         if not (bot_mentioned or is_reply_to_report or is_reply_to_chat or text_prefix):
             return
@@ -1053,6 +1076,39 @@ SCHEMA EXATO DO JSON:
         # Caso contrário (mention, prefixo, ou reply em CHAT/qualquer DevAI):
         # conversa livre. A reação entra/sai dentro de `_chat_with_owner`.
         asyncio.create_task(self._chat_with_owner(message, cleaned))
+
+    def _classify_reply_via_resolved(self, message: discord.Message) -> str:
+        """Detecção de reply usando `message.reference.resolved`.
+
+        O resolved é populado automaticamente pelo gateway do Discord quando
+        a mensagem citada existe — sem precisar fazer fetch_message (sem custo
+        de API, sem precisar de Read Message History). Funciona em ~100% dos
+        replies em condições normais.
+
+        Retorna "report"/"chat"/"none" igual a `_classify_reply_via_webhook`.
+        """
+        ref = getattr(message, "reference", None)
+        if ref is None:
+            return "none"
+        resolved = getattr(ref, "resolved", None)
+        # discord.py também expõe `cached_message` como fallback antigo.
+        if resolved is None:
+            resolved = getattr(ref, "cached_message", None)
+        if resolved is None:
+            return "none"
+        # `resolved` pode ser DeletedReferencedMessage — sem webhook_id.
+        if not hasattr(resolved, "webhook_id"):
+            return "none"
+        devai_wh_id = self._devai_webhook_id()
+        if not devai_wh_id:
+            return "none"
+        msg_wh_id = int(getattr(resolved, "webhook_id", 0) or 0)
+        if msg_wh_id != devai_wh_id:
+            return "none"
+        # É do nosso webhook. Tem embed → relatório; texto puro → chat.
+        if getattr(resolved, "embeds", None):
+            return "report"
+        return "chat"
 
     async def _classify_reply_via_webhook(self, message: discord.Message, ref_id: int) -> str:
         """Verifica se a mensagem citada veio do webhook DevAI. Sobrevive a
@@ -1085,14 +1141,19 @@ SCHEMA EXATO DO JSON:
         return "chat"
 
     def _strip_prefix_and_mentions(self, content: str) -> str:
-        """Remove `devai:`, `ia:` no começo e mentions do bot pra deixar a
-        pergunta limpa."""
-        # Remove mention do bot (formato <@id> ou <@!id>).
+        """Remove `devai:`, `ia:`, `@DevAI` no começo e mentions reais do bot
+        pra deixar a pergunta limpa. `@DevAI` (literal) precisa ser tratado
+        porque o Discord não autocompletar como mention real (o nome do bot
+        é diferente — DevAI é só identidade visual no webhook)."""
+        # Remove mention real do bot (formato <@id> ou <@!id>).
         bot_user = getattr(self.bot, "user", None)
         bot_id = int(getattr(bot_user, "id", 0) or 0)
         if bot_id:
             content = re.sub(rf"<@!?{bot_id}>", "", content)
-        # Remove prefixo textual.
+        # Remove `@DevAI` literal (texto puro) no começo. Pode aparecer várias
+        # vezes seguidas (`@DevAI @DevAI oi`) — strip iterativo.
+        content = re.sub(r"^\s*(?:@devai\s*)+", "", content, flags=re.I)
+        # Remove prefixo textual `devai:`, `ia:`, etc.
         content = re.sub(r"^\s*(devai|ia)[:,\s-]*", "", content, flags=re.I)
         return content.strip()
 
