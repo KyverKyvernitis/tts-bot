@@ -169,6 +169,27 @@ class DevAIClient:
             items = [str(p).strip().lower() for p in raw if str(p).strip()]
         return items or ["gemini", "groq", "openrouter", "cerebras", "cloudflare", "huggingface", "pollinations"]
 
+    def review_provider_order(self) -> list[str]:
+        """Ordem de providers EXCLUSIVA pra patch review.
+
+        Modelos médios (Qwen-30B em HuggingFace, Llama-32B em Cloudflare,
+        Pollinations) alucinaram remoções inexistentes em testes — exemplo:
+        afirmaram que `import os` foi removido sobre código onde a linha
+        estava intacta, citando linhas `-import os` que não existiam no
+        diff. Em review, é preferível nenhum comentário a um comentário
+        alucinado que faz o dono desfazer mudanças corretas.
+
+        Esta lista filtra pros providers com raciocínio suficientemente
+        forte pra não inventar ao ler diff. Se nada aqui responder, cai no
+        fallback simples ('DevAI não conseguiu chamar nenhum provider').
+        """
+        raw = getattr(self.config, "DEVAI_REVIEW_PROVIDER_ORDER", []) or []
+        if isinstance(raw, str):
+            items = [p.strip().lower() for p in raw.split(",") if p.strip()]
+        else:
+            items = [str(p).strip().lower() for p in raw if str(p).strip()]
+        return items or ["gemini", "groq", "openrouter", "cerebras"]
+
     def stats_summary(self) -> dict[str, dict[str, Any]]:
         """Snapshot dos contadores — usado em `_devai status`."""
         out: dict[str, dict[str, Any]] = {}
@@ -184,11 +205,22 @@ class DevAIClient:
 
     # ---------------------------------------------------------------- entrada
 
-    async def generate_patch_json(self, prompt: str, *, system: str | None = None) -> tuple[AIResult | None, list[str]]:
-        """Roda os providers em ordem, devolve o primeiro com texto não-vazio."""
+    async def generate_patch_json(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        provider_order: list[str] | None = None,
+    ) -> tuple[AIResult | None, list[str]]:
+        """Roda os providers em ordem, devolve o primeiro com texto não-vazio.
+
+        `provider_order` permite override pontual — usado pelo review de
+        patch pra usar `review_provider_order` (sem modelos alucinatórios).
+        """
         sys_prompt = system or SYSTEM_PROMPT_FIX
+        order = provider_order if provider_order is not None else self.provider_order()
         errors: list[str] = []
-        for provider in self.provider_order():
+        for provider in order:
             try:
                 result = await self._dispatch(provider, prompt, sys_prompt, json_mode=True)
                 if result and result.text.strip():

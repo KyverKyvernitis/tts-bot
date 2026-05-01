@@ -158,10 +158,23 @@ DEVAI_OWNER_IDS = _parse_guild_ids(os.getenv("DEVAI_OWNER_IDS", os.getenv("BOT_O
 # OpenRouter como passe-livre pra Qwen3-Coder free; Cerebras pra modelos 70B+
 # rápidos (1M tokens/dia free); Cloudflare/HF como fallbacks; Pollinations
 # como último recurso (qualidade variável).
+# Provider order padrão (geração de patch). Inclui modelos pequenos no
+# final pra evitar gerar patches alucinando.
 DEVAI_PROVIDER_ORDER = _parse_csv(
     os.getenv("DEVAI_PROVIDER_ORDER", "groq,gemini,openrouter,cerebras,cloudflare,huggingface,pollinations")
 )
-DEVAI_PROVIDER_TIMEOUT_SECONDS = _parse_int(os.getenv("DEVAI_PROVIDER_TIMEOUT_SECONDS", "60"), 60)
+# Provider order EXCLUSIVO pra review de patches. Modelos médios (Qwen-30B,
+# Llama-32B em Cloudflare, Pollinations) alucinam removals que não existem,
+# então ficam fora dessa lista. Se nada nesta cadeia responder, melhor o
+# fallback simples ("DevAI não conseguiu chamar nenhum provider") do que
+# inventar problemas inexistentes que o dono vai correr atrás.
+DEVAI_REVIEW_PROVIDER_ORDER = _parse_csv(
+    os.getenv("DEVAI_REVIEW_PROVIDER_ORDER", "gemini,groq,openrouter,cerebras")
+)
+# Timeout 60s era apertado pro Gemini 2.5 Pro (raciocina mais que Flash).
+# Pro free tier costuma responder em 20-50s, mas pode chegar a 90s pra
+# diffs grandes. 120s dá margem confortável.
+DEVAI_PROVIDER_TIMEOUT_SECONDS = _parse_int(os.getenv("DEVAI_PROVIDER_TIMEOUT_SECONDS", "120"), 120)
 DEVAI_MAX_OUTPUT_TOKENS = _parse_int(os.getenv("DEVAI_MAX_OUTPUT_TOKENS", "16000"), 16000)
 DEVAI_TEMPERATURE = _parse_float(os.getenv("DEVAI_TEMPERATURE", "0.15"), 0.15)
 # Tenta UMA rodada de "repair" (re-pedir JSON pra IA) quando o JSON vem inválido

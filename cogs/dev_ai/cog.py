@@ -709,7 +709,13 @@ SCHEMA EXATO DO JSON:
             )
             prompt = self._truncate_prompt_if_needed(prompt)
             log.info("DevAI patch review: prompt montado (%d chars), chamando IA…", len(prompt))
-            result, errors = await self.ai.generate_patch_json(prompt, system=SYSTEM_PROMPT_REVIEW)
+            # Review usa cadeia restrita (sem modelos médios que alucinam
+            # remoções). Veja `review_provider_order()` em ai_client.py.
+            result, errors = await self.ai.generate_patch_json(
+                prompt,
+                system=SYSTEM_PROMPT_REVIEW,
+                provider_order=self.ai.review_provider_order(),
+            )
             if result is None:
                 log.warning(
                     "DevAI patch review: NENHUM PROVIDER respondeu (errors=%s)",
