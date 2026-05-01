@@ -513,7 +513,11 @@ SCHEMA EXATO DO JSON:
                 continue
             if len(joined) > max_diff_chars // max(1, len(new_files)):
                 cap = max_diff_chars // max(1, len(new_files))
-                joined = joined[: cap // 2] + "\n... (diff truncado) ...\n" + joined[-cap // 2 :]
+                joined = (
+                    joined[: cap // 2]
+                    + "\n\n=== ⚠️ DIFF TRUNCADO AQUI — NÃO INFIRA O QUE FOI CORTADO ===\n\n"
+                    + joined[-cap // 2 :]
+                )
             blocks.append(f"### diff: {path}\n```diff\n{joined}\n```")
         return "\n\n".join(blocks) if blocks else "Disco já está idêntico aos arquivos do ZIP — sem diff a mostrar."
 
@@ -1066,7 +1070,11 @@ SCHEMA EXATO DO JSON:
             out = out[idx:]
         out = redact_secrets(out, max_chars=max_diff_chars)
         if len(out) > max_diff_chars:
-            out = out[: max_diff_chars // 2] + "\n... (diff truncado) ...\n" + out[-max_diff_chars // 2 :]
+            out = (
+                out[: max_diff_chars // 2]
+                + "\n\n=== ⚠️ DIFF TRUNCADO AQUI — NÃO INFIRA O QUE FOI CORTADO ===\n\n"
+                + out[-max_diff_chars // 2 :]
+            )
         return f"### diff reconstruído via `git show {commit[:12]}`\n```diff\n{out}\n```"
 
     # ---------------------------------------------------------- Discord listeners
@@ -1093,7 +1101,7 @@ SCHEMA EXATO DO JSON:
         tail_chars = max_chars - head_chars - 200  # resto pro fim, menos marker
         truncated = (
             prompt[:head_chars]
-            + f"\n\n[...trecho do meio omitido — {len(prompt) - head_chars - tail_chars} chars cortados pra caber no rate limit...]\n\n"
+            + f"\n\n=== ⚠️ TRECHO DO MEIO TRUNCADO — {len(prompt) - head_chars - tail_chars} chars cortados pra caber no rate limit. NÃO INFIRA O QUE FOI CORTADO; comente apenas o que está visível. ===\n\n"
             + prompt[-tail_chars:]
         )
         log.info(

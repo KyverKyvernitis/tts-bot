@@ -229,7 +229,7 @@ DEVAI_MAX_PROMPT_CHARS = _parse_int(os.getenv("DEVAI_MAX_PROMPT_CHARS", "28000")
 DEVAI_PATCH_REVIEW_ENABLED = _parse_bool(os.getenv("DEVAI_PATCH_REVIEW_ENABLED", "true"), True)
 DEVAI_PATCH_REVIEW_MAX_FILES = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_FILES", "5"), 5)
 DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE", "5000"), 5000)
-DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS", "8000"), 8000)
+DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS", "12000"), 12000)
 # Timeout duro pro review inteiro (montar prompt + chamar IA + render +
 # enviar). Sem isso, um provider lento poderia segurar o `_analysis_lock`
 # indefinidamente e bloquear o próximo review.
