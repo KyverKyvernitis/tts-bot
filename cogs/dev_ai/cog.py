@@ -513,10 +513,26 @@ SCHEMA EXATO DO JSON:
                 continue
             if len(joined) > max_diff_chars // max(1, len(new_files)):
                 cap = max_diff_chars // max(1, len(new_files))
+                # Corta SEMPRE em quebras de linha completas — corte no meio
+                # de uma linha de código (ex: `BASE_DIR = os.path.di` →
+                # `pname(...)`) gera fragmentos que IA interpreta como linhas
+                # quebradas/erros de sintaxe.
+                head_target = cap // 2
+                tail_target = cap // 2
+                head_end = joined.rfind("\n", 0, head_target)
+                if head_end < head_target // 2:
+                    head_end = head_target
+                else:
+                    head_end += 1
+                tail_start = joined.find("\n", len(joined) - tail_target)
+                if tail_start < 0 or tail_start > len(joined) - tail_target // 2:
+                    tail_start = len(joined) - tail_target
+                else:
+                    tail_start += 1
                 joined = (
-                    joined[: cap // 2]
-                    + "\n\n=== ⚠️ DIFF TRUNCADO AQUI — NÃO INFIRA O QUE FOI CORTADO ===\n\n"
-                    + joined[-cap // 2 :]
+                    joined[:head_end]
+                    + "\n=== ⚠️ DIFF TRUNCADO AQUI — NÃO INFIRA O QUE FOI CORTADO ===\n"
+                    + joined[tail_start:]
                 )
             blocks.append(f"### diff: {path}\n```diff\n{joined}\n```")
         return "\n\n".join(blocks) if blocks else "Disco já está idêntico aos arquivos do ZIP — sem diff a mostrar."
@@ -1076,10 +1092,22 @@ SCHEMA EXATO DO JSON:
             out = out[idx:]
         out = redact_secrets(out, max_chars=max_diff_chars)
         if len(out) > max_diff_chars:
+            head_target = max_diff_chars // 2
+            tail_target = max_diff_chars // 2
+            head_end = out.rfind("\n", 0, head_target)
+            if head_end < head_target // 2:
+                head_end = head_target
+            else:
+                head_end += 1
+            tail_start = out.find("\n", len(out) - tail_target)
+            if tail_start < 0 or tail_start > len(out) - tail_target // 2:
+                tail_start = len(out) - tail_target
+            else:
+                tail_start += 1
             out = (
-                out[: max_diff_chars // 2]
-                + "\n\n=== ⚠️ DIFF TRUNCADO AQUI — NÃO INFIRA O QUE FOI CORTADO ===\n\n"
-                + out[-max_diff_chars // 2 :]
+                out[:head_end]
+                + "\n=== ⚠️ DIFF TRUNCADO AQUI — NÃO INFIRA O QUE FOI CORTADO ===\n"
+                + out[tail_start:]
             )
         return f"### diff reconstruído via `git show {commit[:12]}`\n```diff\n{out}\n```"
 
@@ -1088,31 +1116,52 @@ SCHEMA EXATO DO JSON:
     def _truncate_prompt_if_needed(self, prompt: str) -> str:
         """Garante que o prompt cabe no limite do free tier de cada provider.
 
-        Free tiers comuns (Apr/2026):
-        - Groq: TPM 8000 (sim, oito mil — muito apertado)
-        - Cloudflare Workers AI: max context 32768 tokens
-        - Cerebras qwen-3-32b: 8000 TPM no free tier
-        - Gemini 2.5 Flash: 1M context (sem problema)
-        - OpenRouter/HuggingFace: variável
+        IMPORTANTE: corta SEMPRE em quebras de linha completas. Cortar no
+        meio de uma linha (como `BASE_DIR = os.path.di` → `pname(...)`)
+        gera fragmentos que IA interpreta como linhas adicionadas/quebradas
+        (`+me(os.path.abspath(...))`) e dispara alucinações de "código
+        corrompido". Esse foi o bug que causou Gemini Pro a alucinar
+        "patch corrompido, reverter imediatamente" sobre código intacto.
 
-        ~4 chars/token. Se o prompt passar de DEVAI_MAX_PROMPT_CHARS,
-        prefere cortar do meio (mantém início + fim, que são as instruções
-        e o JSON schema). Os providers com contexto grande recebem o
-        prompt completo. Os pequenos recebem versão cortada e podem ainda
-        falhar com 413 — caso em que o fallback cobre."""
-        max_chars = int(getattr(config, "DEVAI_MAX_PROMPT_CHARS", 28000) or 28000)
+        Free tiers comuns (May/2026):
+        - Groq: TPM 8000 (~32k chars total, mas 16k são output → ~14k prompt)
+        - Cloudflare Workers AI: max context 32768 tokens
+        - Cerebras llama3.1-8b: TPM 60k
+        - Gemini 2.5 Pro: 250K TPM (sem problema)
+        """
+        max_chars = int(getattr(config, "DEVAI_MAX_PROMPT_CHARS", 14000) or 14000)
         if len(prompt) <= max_chars:
             return prompt
-        head_chars = max_chars * 6 // 10  # 60% pro início
-        tail_chars = max_chars - head_chars - 200  # resto pro fim, menos marker
+        # Estratégia: 60% pro head (instruções, schema), 40% pro tail (final
+        # do diff e instrução de output). Sempre alinhar a quebras de linha.
+        head_target = max_chars * 6 // 10
+        tail_target = max_chars - head_target - 250  # marker tem ~250 chars
+
+        # Encontra quebra de linha mais próxima do alvo no head (corta APÓS
+        # uma quebra completa).
+        head_end = prompt.rfind("\n", 0, head_target)
+        if head_end < head_target // 2:
+            # Sem quebra próxima — usa o alvo bruto (ruim mas evita head vazio).
+            head_end = head_target
+        else:
+            head_end += 1  # inclui o \n
+
+        # Encontra quebra de linha mais próxima do alvo no tail (começa após
+        # uma quebra completa).
+        tail_start = prompt.find("\n", len(prompt) - tail_target)
+        if tail_start < 0 or tail_start > len(prompt) - tail_target // 2:
+            tail_start = len(prompt) - tail_target
+        else:
+            tail_start += 1  # pula o \n inicial
+
         truncated = (
-            prompt[:head_chars]
-            + f"\n\n=== ⚠️ TRECHO DO MEIO TRUNCADO — {len(prompt) - head_chars - tail_chars} chars cortados pra caber no rate limit. NÃO INFIRA O QUE FOI CORTADO; comente apenas o que está visível. ===\n\n"
-            + prompt[-tail_chars:]
+            prompt[:head_end]
+            + f"\n\n=== ⚠️ TRECHO DO MEIO TRUNCADO — {tail_start - head_end} chars cortados pra caber no rate limit. NÃO INFIRA O QUE FOI CORTADO; comente apenas o que está visível. Linhas que parecem incompletas no FIM/INÍCIO de cada metade são por causa do CORTE, não do código real. ===\n\n"
+            + prompt[tail_start:]
         )
         log.info(
-            "DevAI: prompt cortado de %d → %d chars (limite=%d)",
-            len(prompt), len(truncated), max_chars,
+            "DevAI: prompt cortado de %d → %d chars (head=%d tail=%d limite=%d)",
+            len(prompt), len(truncated), head_end, len(prompt) - tail_start, max_chars,
         )
         return truncated
 
