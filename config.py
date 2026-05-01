@@ -179,7 +179,12 @@ POLLINATIONS_API_KEY = (os.getenv("POLLINATIONS_API_KEY", "") or "").strip()
 OPENROUTER_API_KEY = (os.getenv("OPENROUTER_API_KEY", "") or "").strip()
 CEREBRAS_API_KEY = (os.getenv("CEREBRAS_API_KEY", "") or "").strip()
 
-DEVAI_GEMINI_MODEL = (os.getenv("DEVAI_GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash").strip()
+# Gemini 2.5 Pro: 5 RPM, 100 RPD, 250K TPM no free tier (Apr/2026). Mais
+# lento que Flash mas raciocina muito melhor — crucial pra patch review onde
+# Flash estava alucinando "removeu import os" sobre código onde o import
+# está claramente presente. Pro custa 1 RPM contra 2 RPM do Flash, mas com
+# 100 RPD ainda comporta dezenas de reviews por dia.
+DEVAI_GEMINI_MODEL = (os.getenv("DEVAI_GEMINI_MODEL", "gemini-2.5-pro") or "gemini-2.5-pro").strip()
 DEVAI_GROQ_BASE_URL = (os.getenv("DEVAI_GROQ_BASE_URL", "https://api.groq.com/openai/v1") or "https://api.groq.com/openai/v1").strip()
 DEVAI_GROQ_MODEL = (os.getenv("DEVAI_GROQ_MODEL", "openai/gpt-oss-120b") or "openai/gpt-oss-120b").strip()
 # OpenRouter free dá acesso a Qwen3-Coder e DeepSeek R1 sem cartão.
