@@ -205,11 +205,16 @@ DEVAI_GROQ_MODEL = (os.getenv("DEVAI_GROQ_MODEL", "openai/gpt-oss-120b") or "ope
 DEVAI_OPENROUTER_BASE_URL = (os.getenv("DEVAI_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1") or "https://openrouter.ai/api/v1").strip()
 DEVAI_OPENROUTER_MODEL = (os.getenv("DEVAI_OPENROUTER_MODEL", "qwen/qwen3-coder:free") or "qwen/qwen3-coder:free").strip()
 DEVAI_OPENROUTER_REFERER = (os.getenv("DEVAI_OPENROUTER_REFERER", "") or "").strip()
-# Cerebras: gpt-oss-120b virou indisponível pra free tier ("temporarily reduced").
-# qwen-3-32b é stable, free tier e mais rápido pra prompts médios.
-# Confirmar que o model id da sua conta é esse — se não for, troque pra "llama3.1-8b".
+# Cerebras: `qwen-3-32b` foi deprecado em 16/02/2026. Production models
+# atuais (Apr/2026): `llama3.1-8b` (estável, free tier viável), `gpt-oss-120b`
+# (rate limits reduzidos por alta demanda), `zai-glm-4.7` (idem).
+# Llama 3.1 8B é menos capaz que 32B, mas em review de patch o que importa
+# é seguir as regras do system prompt — modelos pequenos com prompt forte
+# funcionam ok se a regra "cite a linha do diff antes de afirmar" for
+# respeitada. Se preferir mais qualidade, troque pra `gpt-oss-120b` no .env
+# (mas pode dar 503 por sobrecarga).
 DEVAI_CEREBRAS_BASE_URL = (os.getenv("DEVAI_CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1") or "https://api.cerebras.ai/v1").strip()
-DEVAI_CEREBRAS_MODEL = (os.getenv("DEVAI_CEREBRAS_MODEL", "qwen-3-32b") or "qwen-3-32b").strip()
+DEVAI_CEREBRAS_MODEL = (os.getenv("DEVAI_CEREBRAS_MODEL", "llama3.1-8b") or "llama3.1-8b").strip()
 DEVAI_CLOUDFLARE_BASE_URL = (os.getenv("DEVAI_CLOUDFLARE_BASE_URL", "") or "").strip()
 # Llama-3.1-8B é fraco demais pra retornar arquivo Python completo.
 # Qwen2.5-Coder-32B é o estado-da-arte open-source pra código no Workers AI.
@@ -231,23 +236,28 @@ DEVAI_COOLDOWN_SECONDS = _parse_int(os.getenv("DEVAI_COOLDOWN_SECONDS", "300"), 
 DEVAI_MAX_LOG_LINES = _parse_int(os.getenv("DEVAI_MAX_LOG_LINES", "180"), 180)
 DEVAI_MAX_LOG_CHARS = _parse_int(os.getenv("DEVAI_MAX_LOG_CHARS", "18000"), 18000)
 DEVAI_INDEX_MAX_AGE_SECONDS = _parse_int(os.getenv("DEVAI_INDEX_MAX_AGE_SECONDS", "1800"), 1800)
-# Cortes agressivos pra caber no free tier dos providers (Groq tem TPM 8000,
-# Cloudflare context max 32768). Antes os defaults eram muito grandes e
-# resultavam em HTTP 413/400 em quase todos os providers.
-DEVAI_MAX_INDEX_CHARS = _parse_int(os.getenv("DEVAI_MAX_INDEX_CHARS", "5000"), 5000)
-DEVAI_MAX_CONTEXT_FILES = _parse_int(os.getenv("DEVAI_MAX_CONTEXT_FILES", "3"), 3)
-DEVAI_MAX_FILE_CONTEXT_CHARS = _parse_int(os.getenv("DEVAI_MAX_FILE_CONTEXT_CHARS", "8000"), 8000)
+# Cortes ainda mais agressivos pra caber no Groq free tier que tem TPM 8000
+# (~32k chars total, mas tem que descontar output 16k = ~16k chars de prompt).
+# Mantemos margem de segurança pra 14k chars no prompt — isso libera ~10k pra
+# diff/contexto + ~4k pra system prompt + schema + headers.
+DEVAI_MAX_INDEX_CHARS = _parse_int(os.getenv("DEVAI_MAX_INDEX_CHARS", "3000"), 3000)
+DEVAI_MAX_CONTEXT_FILES = _parse_int(os.getenv("DEVAI_MAX_CONTEXT_FILES", "2"), 2)
+DEVAI_MAX_FILE_CONTEXT_CHARS = _parse_int(os.getenv("DEVAI_MAX_FILE_CONTEXT_CHARS", "5000"), 5000)
 DEVAI_MAX_FILES_PER_PATCH = _parse_int(os.getenv("DEVAI_MAX_FILES_PER_PATCH", "5"), 5)
 DEVAI_MAX_FILE_BYTES = _parse_int(os.getenv("DEVAI_MAX_FILE_BYTES", "220000"), 220000)
-# Estimativa hardcoded: ~4 chars por token. Se o prompt total estimado
-# passar deste limite, o cog corta diff/contexto progressivamente.
-DEVAI_MAX_PROMPT_CHARS = _parse_int(os.getenv("DEVAI_MAX_PROMPT_CHARS", "28000"), 28000)
+# Limite total do prompt — corte adaptativo do meio se passar.
+# 14000 chars ~= 3500 tokens, deixando margem pro output (16k) caber em 8000 TPM
+# do Groq. Gemini Pro/Cerebras suportam muito mais que isso, então é
+# "lowest common denominator".
+DEVAI_MAX_PROMPT_CHARS = _parse_int(os.getenv("DEVAI_MAX_PROMPT_CHARS", "14000"), 14000)
 
 # Comentário automático da DevAI para patches aceitos pelo auto-updater de ZIP.
 DEVAI_PATCH_REVIEW_ENABLED = _parse_bool(os.getenv("DEVAI_PATCH_REVIEW_ENABLED", "true"), True)
 DEVAI_PATCH_REVIEW_MAX_FILES = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_FILES", "5"), 5)
-DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE", "5000"), 5000)
-DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS", "12000"), 12000)
+DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE", "3000"), 3000)
+# Diff cap reduzido pra caber em 14k chars de prompt total (descontando
+# system prompt 2k + schema 1k + headers/contexto 4k = ~7k disponível pra diff).
+DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS", "6000"), 6000)
 # Timeout duro pro review inteiro (montar prompt + chamar IA + render +
 # enviar). Sem isso, um provider lento poderia segurar o `_analysis_lock`
 # indefinidamente e bloquear o próximo review.

@@ -406,7 +406,38 @@ class DevAIClient:
             ],
         }
         started = time.perf_counter()
-        data = await self._post_json(url, {"Content-Type": "application/json"}, payload)
+        # Retry com backoff em 503 (UNAVAILABLE / high demand). Esse erro é
+        # frequente no free tier do Gemini Pro porque a infra é compartilhada.
+        # Geralmente passa em 5-15 segundos. Tentamos até 3 vezes antes de
+        # desistir e cair no próximo provider.
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                data = await self._post_json(url, {"Content-Type": "application/json"}, payload)
+                break
+            except RuntimeError as exc:
+                msg = str(exc)
+                # Só retry em 503/UNAVAILABLE/overloaded — outros erros (auth,
+                # quota, etc) não vão melhorar com retry.
+                is_transient = (
+                    "HTTP 503" in msg
+                    or "UNAVAILABLE" in msg
+                    or "overloaded" in msg.lower()
+                    or "high demand" in msg.lower()
+                )
+                if not is_transient or attempt >= 2:
+                    raise
+                last_exc = exc
+                # Backoff: 4s, 8s. Total max 12s antes do timeout do provider
+                # (que é 120s no DEVAI_PROVIDER_TIMEOUT_SECONDS), então cabe.
+                await asyncio.sleep(4 * (2 ** attempt))
+        else:
+            # for-else: nunca achou um break — só acontece se as 3 tentativas
+            # falharam transientes seguidas, que é raro mas possível.
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError("Gemini: sem resposta após 3 tentativas")
+
         text_parts: list[str] = []
         for cand in data.get("candidates", []) or []:
             content = cand.get("content") or {}
