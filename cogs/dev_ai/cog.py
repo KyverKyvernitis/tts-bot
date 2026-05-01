@@ -324,6 +324,7 @@ SCHEMA EXATO DO JSON:
         async with self._analysis_lock:
             try:
                 prompt = await asyncio.to_thread(self._build_prompt, event=event, comment=comment)
+                prompt = self._truncate_prompt_if_needed(prompt)
                 result, errors = await self.ai.generate_patch_json(prompt, system=SYSTEM_PROMPT_FIX)
                 if result is None:
                     await self._report_failure(event, errors, comment=comment)
@@ -702,6 +703,7 @@ SCHEMA EXATO DO JSON:
                 zip_files=zip_files,
                 diff_block=diff_block,
             )
+            prompt = self._truncate_prompt_if_needed(prompt)
             log.info("DevAI patch review: prompt montado (%d chars), chamando IA…", len(prompt))
             result, errors = await self.ai.generate_patch_json(prompt, system=SYSTEM_PROMPT_REVIEW)
             if result is None:
@@ -1069,6 +1071,37 @@ SCHEMA EXATO DO JSON:
 
     # ---------------------------------------------------------- Discord listeners
 
+    def _truncate_prompt_if_needed(self, prompt: str) -> str:
+        """Garante que o prompt cabe no limite do free tier de cada provider.
+
+        Free tiers comuns (Apr/2026):
+        - Groq: TPM 8000 (sim, oito mil — muito apertado)
+        - Cloudflare Workers AI: max context 32768 tokens
+        - Cerebras qwen-3-32b: 8000 TPM no free tier
+        - Gemini 2.5 Flash: 1M context (sem problema)
+        - OpenRouter/HuggingFace: variável
+
+        ~4 chars/token. Se o prompt passar de DEVAI_MAX_PROMPT_CHARS,
+        prefere cortar do meio (mantém início + fim, que são as instruções
+        e o JSON schema). Os providers com contexto grande recebem o
+        prompt completo. Os pequenos recebem versão cortada e podem ainda
+        falhar com 413 — caso em que o fallback cobre."""
+        max_chars = int(getattr(config, "DEVAI_MAX_PROMPT_CHARS", 28000) or 28000)
+        if len(prompt) <= max_chars:
+            return prompt
+        head_chars = max_chars * 6 // 10  # 60% pro início
+        tail_chars = max_chars - head_chars - 200  # resto pro fim, menos marker
+        truncated = (
+            prompt[:head_chars]
+            + f"\n\n[...trecho do meio omitido — {len(prompt) - head_chars - tail_chars} chars cortados pra caber no rate limit...]\n\n"
+            + prompt[-tail_chars:]
+        )
+        log.info(
+            "DevAI: prompt cortado de %d → %d chars (limite=%d)",
+            len(prompt), len(truncated), max_chars,
+        )
+        return truncated
+
     @commands.Cog.listener("on_message")
     async def _devai_comment_listener(self, message: discord.Message):
         if getattr(message.author, "bot", False):
@@ -1308,6 +1341,7 @@ SCHEMA EXATO DO JSON:
                     question=question,
                     referenced_text=referenced_text,
                 )
+                prompt = self._truncate_prompt_if_needed(prompt)
             except Exception as exc:
                 log.exception("DevAI chat: falha montando prompt")
                 await self._send_chat_response(

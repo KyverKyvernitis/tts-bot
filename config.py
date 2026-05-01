@@ -187,10 +187,11 @@ DEVAI_GROQ_MODEL = (os.getenv("DEVAI_GROQ_MODEL", "openai/gpt-oss-120b") or "ope
 DEVAI_OPENROUTER_BASE_URL = (os.getenv("DEVAI_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1") or "https://openrouter.ai/api/v1").strip()
 DEVAI_OPENROUTER_MODEL = (os.getenv("DEVAI_OPENROUTER_MODEL", "qwen/qwen3-coder:free") or "qwen/qwen3-coder:free").strip()
 DEVAI_OPENROUTER_REFERER = (os.getenv("DEVAI_OPENROUTER_REFERER", "") or "").strip()
-# Cerebras: 30 RPM, 60K TPM, 1M tokens/dia FREE com gpt-oss-120b ou Qwen3 235B.
-# Hardware proprietário entrega ~3x a velocidade do Groq, mas com menos RPM.
+# Cerebras: gpt-oss-120b virou indisponível pra free tier ("temporarily reduced").
+# qwen-3-32b é stable, free tier e mais rápido pra prompts médios.
+# Confirmar que o model id da sua conta é esse — se não for, troque pra "llama3.1-8b".
 DEVAI_CEREBRAS_BASE_URL = (os.getenv("DEVAI_CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1") or "https://api.cerebras.ai/v1").strip()
-DEVAI_CEREBRAS_MODEL = (os.getenv("DEVAI_CEREBRAS_MODEL", "gpt-oss-120b") or "gpt-oss-120b").strip()
+DEVAI_CEREBRAS_MODEL = (os.getenv("DEVAI_CEREBRAS_MODEL", "qwen-3-32b") or "qwen-3-32b").strip()
 DEVAI_CLOUDFLARE_BASE_URL = (os.getenv("DEVAI_CLOUDFLARE_BASE_URL", "") or "").strip()
 # Llama-3.1-8B é fraco demais pra retornar arquivo Python completo.
 # Qwen2.5-Coder-32B é o estado-da-arte open-source pra código no Workers AI.
@@ -201,8 +202,9 @@ DEVAI_HUGGINGFACE_BASE_URL = (os.getenv("DEVAI_HUGGINGFACE_BASE_URL", "https://r
 # Se quiser o mais poderoso: "deepseek-ai/DeepSeek-V3.2".
 DEVAI_HUGGINGFACE_MODEL = (os.getenv("DEVAI_HUGGINGFACE_MODEL", "Qwen/Qwen3-Coder-30B-A3B-Instruct") or "Qwen/Qwen3-Coder-30B-A3B-Instruct").strip()
 DEVAI_POLLINATIONS_BASE_URL = (os.getenv("DEVAI_POLLINATIONS_BASE_URL", "https://gen.pollinations.ai/v1") or "https://gen.pollinations.ai/v1").strip()
-# Pollinations "openclaw" = Qwen3-Coder-30B (28/04/2026), feito pra coding agents.
-DEVAI_POLLINATIONS_MODEL = (os.getenv("DEVAI_POLLINATIONS_MODEL", "openclaw") or "openclaw").strip()
+# `openclaw` foi removido da Pollinations entre Apr/2026. `openai-large` (GPT-4o)
+# ou `mistral` continuam disponíveis. Verifique em https://text.pollinations.ai/models.
+DEVAI_POLLINATIONS_MODEL = (os.getenv("DEVAI_POLLINATIONS_MODEL", "openai-large") or "openai-large").strip()
 
 DEVAI_LOG_PATHS = (os.getenv("DEVAI_LOG_PATHS", "logs/*.log,bot.log,logs/bot.log,logs/updater.log") or "logs/*.log,bot.log,logs/bot.log,logs/updater.log").strip()
 DEVAI_SCAN_EXISTING_LOGS_ON_BOOT = _parse_bool(os.getenv("DEVAI_SCAN_EXISTING_LOGS_ON_BOOT", "false"), False)
@@ -211,17 +213,23 @@ DEVAI_COOLDOWN_SECONDS = _parse_int(os.getenv("DEVAI_COOLDOWN_SECONDS", "300"), 
 DEVAI_MAX_LOG_LINES = _parse_int(os.getenv("DEVAI_MAX_LOG_LINES", "180"), 180)
 DEVAI_MAX_LOG_CHARS = _parse_int(os.getenv("DEVAI_MAX_LOG_CHARS", "18000"), 18000)
 DEVAI_INDEX_MAX_AGE_SECONDS = _parse_int(os.getenv("DEVAI_INDEX_MAX_AGE_SECONDS", "1800"), 1800)
-DEVAI_MAX_INDEX_CHARS = _parse_int(os.getenv("DEVAI_MAX_INDEX_CHARS", "12000"), 12000)
-DEVAI_MAX_CONTEXT_FILES = _parse_int(os.getenv("DEVAI_MAX_CONTEXT_FILES", "4"), 4)
-DEVAI_MAX_FILE_CONTEXT_CHARS = _parse_int(os.getenv("DEVAI_MAX_FILE_CONTEXT_CHARS", "24000"), 24000)
+# Cortes agressivos pra caber no free tier dos providers (Groq tem TPM 8000,
+# Cloudflare context max 32768). Antes os defaults eram muito grandes e
+# resultavam em HTTP 413/400 em quase todos os providers.
+DEVAI_MAX_INDEX_CHARS = _parse_int(os.getenv("DEVAI_MAX_INDEX_CHARS", "5000"), 5000)
+DEVAI_MAX_CONTEXT_FILES = _parse_int(os.getenv("DEVAI_MAX_CONTEXT_FILES", "3"), 3)
+DEVAI_MAX_FILE_CONTEXT_CHARS = _parse_int(os.getenv("DEVAI_MAX_FILE_CONTEXT_CHARS", "8000"), 8000)
 DEVAI_MAX_FILES_PER_PATCH = _parse_int(os.getenv("DEVAI_MAX_FILES_PER_PATCH", "5"), 5)
 DEVAI_MAX_FILE_BYTES = _parse_int(os.getenv("DEVAI_MAX_FILE_BYTES", "220000"), 220000)
+# Estimativa hardcoded: ~4 chars por token. Se o prompt total estimado
+# passar deste limite, o cog corta diff/contexto progressivamente.
+DEVAI_MAX_PROMPT_CHARS = _parse_int(os.getenv("DEVAI_MAX_PROMPT_CHARS", "28000"), 28000)
 
 # Comentário automático da DevAI para patches aceitos pelo auto-updater de ZIP.
 DEVAI_PATCH_REVIEW_ENABLED = _parse_bool(os.getenv("DEVAI_PATCH_REVIEW_ENABLED", "true"), True)
-DEVAI_PATCH_REVIEW_MAX_FILES = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_FILES", "8"), 8)
-DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE", "9000"), 9000)
-DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS", "14000"), 14000)
+DEVAI_PATCH_REVIEW_MAX_FILES = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_FILES", "5"), 5)
+DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_CHARS_PER_FILE", "5000"), 5000)
+DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_MAX_DIFF_CHARS", "8000"), 8000)
 # Timeout duro pro review inteiro (montar prompt + chamar IA + render +
 # enviar). Sem isso, um provider lento poderia segurar o `_analysis_lock`
 # indefinidamente e bloquear o próximo review.
