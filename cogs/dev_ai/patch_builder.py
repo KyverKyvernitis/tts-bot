@@ -87,6 +87,74 @@ class PatchBuilder:
             raise RuntimeError("resposta JSON da IA não é um objeto")
         return data
 
+    def _detect_truncation(self, content: str, before: str | None, rel_path: str) -> str | None:
+        """Detecta se a IA devolveu arquivo truncado/incompleto.
+
+        Retorna mensagem de erro se suspeito, ou None se ok. Modelos médios
+        (e às vezes Pro também) têm o vício de:
+        - Cortar o arquivo no meio quando atinge limite de output
+        - Substituir parte do código por `# ... resto inalterado ...`
+        - Usar `pass` ou `...` como placeholder no meio de uma função
+
+        Esses casos NUNCA devem ser aplicados — quebra o bot inteiro.
+        """
+        # Marcadores explícitos de "código omitido" — a IA é viciada nisso.
+        # Lista de padrões observados em respostas reais de Gemini/Qwen/Llama.
+        suspicious_markers = [
+            "# ... resto",
+            "# ... rest",
+            "# ... código original",
+            "# ... unchanged",
+            "# ... (omitido",
+            "# ... (omitted",
+            "# resto do arquivo",
+            "# restante do arquivo",
+            "# resto do código",
+            "# (mesmo conteúdo",
+            "# same as before",
+            "# code unchanged",
+            "// ... resto",
+            "/* ... resto",
+            "<!-- ... -->",
+        ]
+        lower = content.lower()
+        for marker in suspicious_markers:
+            if marker.lower() in lower:
+                return (
+                    f"arquivo {rel_path} contém marcador de código omitido "
+                    f"({marker!r}) — a IA cortou o conteúdo. Patch rejeitado."
+                )
+
+        # Detecta encolhimento drástico vs original. Se arquivo novo tem
+        # <70% das linhas do original (sendo o original >100 linhas),
+        # quase certeza que foi truncado. Limite generoso pra não bloquear
+        # refatorações reais que encolhem código.
+        if before is not None and len(before) > 1000:
+            before_lines = before.count("\n") + 1
+            content_lines = content.count("\n") + 1
+            if before_lines >= 100 and content_lines < before_lines * 0.7:
+                return (
+                    f"arquivo {rel_path} encolheu drasticamente: "
+                    f"{before_lines} → {content_lines} linhas "
+                    f"({content_lines * 100 // before_lines}%). "
+                    f"Provavelmente foi truncado pela IA. Patch rejeitado."
+                )
+
+        # Detecta `...` solto como statement Python (Ellipsis usado como
+        # placeholder em meio de função). É sintaticamente válido mas
+        # quase sempre é IA truncando.
+        # Padrão: linha que tem só "..." ou "    ..." ou "        ..." (apenas
+        # whitespace + ellipsis). Aceita 1 ocorrência se for em function stub
+        # válido (como em protocols/ABC), mas 3+ é red flag.
+        ellipsis_lines = sum(1 for line in content.splitlines() if line.strip() == "...")
+        if ellipsis_lines >= 3:
+            return (
+                f"arquivo {rel_path} tem {ellipsis_lines} linhas com '...' como "
+                f"placeholder — provavelmente truncamento da IA. Patch rejeitado."
+            )
+
+        return None
+
     def build_from_ai_response(self, raw_text: str, *, label: str = "auto") -> BuiltPatch:
         data = self.parse_ai_json(raw_text)
         files = data.get("files") or data.get("changed_files") or []
@@ -113,10 +181,19 @@ class PatchBuilder:
                     content = str(content)
                 if len(content.encode("utf-8")) > self.max_file_bytes:
                     raise RuntimeError(f"arquivo grande demais para patch automático: {rel.as_posix()}")
-                # Não deixa a IA gravar secrets acidentalmente em arquivo novo.
-                content = redact_secrets(content)
+                # IMPORTANTE: detecção de truncamento ANTES de comparar com
+                # original. Se a IA cortou o arquivo, o conteúdo "novo" pode
+                # não ser igual ao original, passar de `before == content`,
+                # e a gente acabar gravando lixo. Bloqueia aqui.
                 source_path = safe_join(self.repo_root, rel)
                 before = source_path.read_text("utf-8", errors="replace") if source_path.exists() else None
+                truncation_msg = self._detect_truncation(content, before, rel.as_posix())
+                if truncation_msg is not None:
+                    raise RuntimeError(truncation_msg)
+                # NÃO aplica redact_secrets no content do arquivo — isso muda
+                # o código real que vai pro disco. redact_secrets é pra logs/
+                # prompts da IA, não pra arquivos físicos. Se o original tinha
+                # webhook_url hardcoded (não deveria, mas), preserva como está.
                 if before == content:
                     continue
                 out_path = temp_dir / rel

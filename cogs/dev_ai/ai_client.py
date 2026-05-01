@@ -34,11 +34,24 @@ import aiohttp
 # o teto do modelo em vez do DEVAI_MAX_OUTPUT_TOKENS global. Isso evita 400 em
 # modelos como llama-3.3-70b-versatile (32K) ou qwen3-32b (40K).
 _MODEL_OUTPUT_LIMITS: dict[str, int] = {
+    # Gemini: Pro suporta 65536 output, Flash 8192. Free tier respeita os mesmos.
+    "gemini-2.5-pro": 65000,
+    "gemini-2.5-flash": 8000,
+    "gemini-2.0-flash": 8000,
+    # Groq production models.
     "openai/gpt-oss-120b": 65000,
     "openai/gpt-oss-20b": 65000,
     "llama-3.3-70b-versatile": 32000,
     "llama-3.1-8b-instant": 32000,
+    # Cerebras production models (May/2026).
+    "llama3.1-8b": 32000,
+    "gpt-oss-120b": 65000,
+    # OpenRouter / huggingface.
     "qwen/qwen3-32b": 40000,
+    "qwen/qwen3-coder": 40000,
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct": 40000,
+    # Cloudflare Workers AI tem cap próprio bem mais baixo.
+    "@cf/qwen/qwen2.5-coder-32b-instruct": 8000,
     "meta-llama/llama-4-scout-17b-16e-instruct": 8000,
 }
 
@@ -47,6 +60,21 @@ SYSTEM_PROMPT_FIX = (
     "Você é DevAI: engenheira sênior de manutenção de um bot Discord em Python "
     "(discord.py). Seu trabalho é receber um traceback + arquivos relacionados + "
     "estrutura do projeto, e devolver UM patch mínimo que corrija a causa-raiz.\n\n"
+    "🛑 REGRA #0 — ARQUIVO COMPLETO OU NADA 🛑\n"
+    "Quando você devolve um arquivo no campo `files[].content`, ele DEVE ser o "
+    "arquivo INTEIRO, do início ao fim, sem cortes. NUNCA use:\n"
+    "  ❌ `# ... resto do código ...`\n"
+    "  ❌ `# ... (omitido)`\n"
+    "  ❌ `# resto inalterado`\n"
+    "  ❌ `# code unchanged`\n"
+    "  ❌ `...` solto como linha\n"
+    "  ❌ `# ... (mesmo conteúdo de antes)`\n"
+    "Se o arquivo é grande demais pra você devolver inteiro, ESCOLHA OUTRO "
+    "ARQUIVO menor pra modificar, ou devolva files=[] e explique em `cause` "
+    "que o arquivo é grande demais. NÃO corte. O sistema rejeita patches com "
+    "qualquer marcador de omissão e o usuário fica sem fix.\n\n"
+    "Se o arquivo original tem 1500 linhas, sua resposta tem que ter 1500 "
+    "linhas (com a sua mudança aplicada). Se tem 200, devolva 200. NÃO encolha.\n\n"
     "METODOLOGIA OBRIGATÓRIA:\n"
     "1. Leia o traceback de baixo pra cima — a última linha é o erro real.\n"
     "2. Localize a função no código fornecido. NÃO altere arquivos que não foram "
@@ -58,13 +86,15 @@ SYSTEM_PROMPT_FIX = (
     "6. Se NÃO tiver certeza de qual arquivo mexer, devolva files=[] e explique em "
     "cause. Não chute.\n\n"
     "ANTI-PADRÕES PROIBIDOS:\n"
-    "- Devolver arquivo truncado/incompleto.\n"
+    "- Devolver arquivo truncado/incompleto (vide REGRA #0).\n"
     "- Inventar funções/classes que não existem no projeto.\n"
     "- Mexer em .env, tokens, .db, credenciais.\n"
     "- Adicionar dependências novas sem necessidade absoluta.\n"
     "- Reescrever do zero.\n\n"
-    "FORMATO DE RESPOSTA: SOMENTE JSON válido, sem markdown, sem texto antes ou "
-    "depois. Schema fornecido no prompt do usuário."
+    "FORMATO DA RESPOSTA: SOMENTE JSON válido, sem markdown, sem texto antes ou "
+    "depois. Schema fornecido no prompt do usuário. Cada `files[].path` deve ter "
+    "o caminho COMPLETO relativo ao repo (ex: 'cogs/dev_ai/cog.py', não só "
+    "'cog.py'). Cada `files[].content` deve ter o arquivo INTEIRO."
 )
 
 SYSTEM_PROMPT_REVIEW = (

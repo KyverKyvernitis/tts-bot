@@ -175,7 +175,11 @@ DEVAI_REVIEW_PROVIDER_ORDER = _parse_csv(
 # Pro free tier costuma responder em 20-50s, mas pode chegar a 90s pra
 # diffs grandes. 120s dá margem confortável.
 DEVAI_PROVIDER_TIMEOUT_SECONDS = _parse_int(os.getenv("DEVAI_PROVIDER_TIMEOUT_SECONDS", "120"), 120)
-DEVAI_MAX_OUTPUT_TOKENS = _parse_int(os.getenv("DEVAI_MAX_OUTPUT_TOKENS", "16000"), 16000)
+# Output tokens. Gemini 2.5 Pro suporta até 65k de output. Subindo de 16k →
+# 32k pra caber arquivos médios inteiros (cog.py do tts-bot tem ~1900 linhas
+# que é ~30k tokens). Modelos menores que não suportam tanto fazem cap
+# automático em `_output_tokens_for`.
+DEVAI_MAX_OUTPUT_TOKENS = _parse_int(os.getenv("DEVAI_MAX_OUTPUT_TOKENS", "32000"), 32000)
 DEVAI_TEMPERATURE = _parse_float(os.getenv("DEVAI_TEMPERATURE", "0.15"), 0.15)
 # Tenta UMA rodada de "repair" (re-pedir JSON pra IA) quando o JSON vem inválido
 # ou o Python não compila. Modelos pequenos quase sempre acertam na 2ª tentativa.
