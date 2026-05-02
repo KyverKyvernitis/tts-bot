@@ -1839,3 +1839,87 @@ async def _settingsdb_set_color_roles_config(self, guild_id: int, config: Dict[s
 
 SettingsDB.get_color_roles_config = _settingsdb_get_color_roles_config
 SettingsDB.set_color_roles_config = _settingsdb_set_color_roles_config
+
+
+# ===== Forms cog =====
+# Persistência da cog cogs/forms/. Segue o padrão monkey-patch usado pra
+# color_roles acima — mantém o SettingsDB original limpo e adiciona métodos
+# por extensão.
+
+def _settingsdb_forms_defaults() -> Dict[str, Any]:
+    return {
+        "form_channel_id": 0,
+        "responses_channel_id": 0,
+        "active_message_id": 0,
+        "active_c_trigger": {"channel_id": 0, "message_id": 0},
+        "active_c_panel": {"channel_id": 0, "message_id": 0},
+        "panel": {
+            "title": "📝 Formulário de apresentação",
+            "description": "Clique no botão abaixo pra preencher seu formulário.",
+            "button_label": "Preencher formulário",
+        },
+        "modal": {
+            "title": "Preencher formulário",
+            "age_label": "Idade e pronome (ex: 18, ele)",
+            "age_placeholder": "18, ele/dele",
+            "desc_label": "Descrição",
+            "desc_placeholder": "Conta um pouco sobre você...",
+        },
+        "response": {
+            "header": "**{user}** — `{idade_pronome}`",
+            "body": "{descricao}",
+        },
+    }
+
+
+def _settingsdb_get_forms_config(self, guild_id: int) -> Dict[str, Any]:
+    """Lê a config da cog forms pra uma guild, mesclando com defaults.
+
+    Sanitiza tipos (int pra IDs, dict pros sub-objetos) pra resistir a
+    documentos antigos sem todos os campos ou com tipos inesperados.
+    """
+    doc = self._get_guild_doc(guild_id)
+    raw = deepcopy(doc.get("forms") or {})
+    base = _settingsdb_forms_defaults()
+
+    base["form_channel_id"] = int(raw.get("form_channel_id") or 0)
+    base["responses_channel_id"] = int(raw.get("responses_channel_id") or 0)
+    base["active_message_id"] = int(raw.get("active_message_id") or 0)
+
+    for key in ("active_c_trigger", "active_c_panel"):
+        entry = raw.get(key) or {}
+        base[key] = {
+            "channel_id": int(entry.get("channel_id") or 0),
+            "message_id": int(entry.get("message_id") or 0),
+        }
+
+    panel = raw.get("panel") or {}
+    base["panel"] = {
+        "title": str(panel.get("title") or base["panel"]["title"]),
+        "description": str(panel.get("description") or base["panel"]["description"]),
+        "button_label": str(panel.get("button_label") or base["panel"]["button_label"]),
+    }
+
+    modal = raw.get("modal") or {}
+    for k in ("title", "age_label", "age_placeholder", "desc_label", "desc_placeholder"):
+        v = modal.get(k)
+        if v is not None:
+            base["modal"][k] = str(v)
+
+    response = raw.get("response") or {}
+    for k in ("header", "body"):
+        v = response.get(k)
+        if v is not None:
+            base["response"][k] = str(v)
+
+    return base
+
+
+async def _settingsdb_set_forms_config(self, guild_id: int, config: Dict[str, Any]):
+    doc = self._get_guild_doc(guild_id)
+    doc["forms"] = deepcopy(config)
+    await self._save_guild_doc(guild_id, doc)
+
+
+SettingsDB.get_forms_config = _settingsdb_get_forms_config
+SettingsDB.set_forms_config = _settingsdb_set_forms_config
