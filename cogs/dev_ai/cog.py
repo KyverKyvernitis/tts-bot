@@ -834,6 +834,45 @@ SCHEMA EXATO DO JSON:
                 except Exception:
                     log.exception("DevAI patch review: nem o fallback funcionou")
 
+    @staticmethod
+    def _is_empty_review(data: dict[str, Any]) -> bool:
+        """Detecta quando um review veio com conteúdo essencialmente vazio.
+
+        Acontece quando o fallback cai em modelo pequeno (ex: Cerebras
+        Llama 3.1 8B) que segue o system prompt anti-alucinação à risca e,
+        por não ter capacidade pra analisar diff, devolve JSON com todos os
+        campos vazios. Isso é tecnicamente correto (admitir limitação >
+        inventar), mas o comentário no Discord fica inútil — só mostra
+        'Não informado pela IA' em todos os campos.
+
+        A detecção checa se os 3 campos principais estão todos vazios ou
+        com placeholders genéricos. Se sim, o cog renderiza o embed com
+        título distinto que avisa o dono pra re-rodar `_devai review` quando
+        o modelo principal estiver disponível.
+        """
+        what_changed = data.get("what_changed") or data.get("changes") or []
+        effect = str(data.get("effect") or data.get("what_it_does") or "").strip().lower()
+        cause = str(data.get("cause") or data.get("analysis") or "").strip().lower()
+        summary = str(data.get("summary") or "").strip().lower()
+
+        # what_changed vazio (lista vazia ou só strings vazias)
+        wc_empty = not what_changed or all(
+            not str(item).strip() for item in (what_changed if isinstance(what_changed, list) else [what_changed])
+        )
+        # effect/cause vazios ou genéricos
+        generic_phrases = ("não informado", "n/a", "não disponível", "sem informação", "")
+        effect_empty = not effect or any(p in effect for p in generic_phrases if p)
+        cause_empty = not cause or any(p in cause for p in generic_phrases if p)
+        summary_generic = (
+            not summary
+            or "patch comentado" in summary
+            or "patch aplicado" in summary
+            or len(summary) < 30
+        )
+        # 3 dos 4 indicadores vazios = fallback
+        empty_count = sum([wc_empty, effect_empty, cause_empty, summary_generic])
+        return empty_count >= 3
+
     async def _report_patch_review(
         self,
         *,
@@ -850,6 +889,36 @@ SCHEMA EXATO DO JSON:
         files = "\n".join(f"• `{p}`" for p in changed_files[:12])
         if len(changed_files) > 12:
             files += f"\n• ... e mais {len(changed_files) - 12} arquivo(s)"
+
+        # Detecta review vazio (modelo pequeno respondeu mas não analisou).
+        # Quando isso acontece, mostra título de aviso em vez de fingir que
+        # tem conteúdo útil. Cor amarela igual ao fallback total.
+        is_empty = self._is_empty_review(data)
+        if is_empty:
+            short_hash = str(commit_hash or "desconhecido")[:7]
+            description = (
+                f"**Provider:** `{result.provider}` · `{result.model}` · `{result.elapsed_ms} ms`\n"
+                f"**ZIP:** `{redact_secrets(zip_filename, max_chars=120)}`\n"
+                f"**Branch:** `{branch}` · **Commit:** `{short_hash}`\n"
+                f"**Aplicação:** {'updater systemd deve aplicar automaticamente' if triggered_update else 'commit enviado, mas updater systemd não foi detectado'}\n\n"
+                f"**Por que isso aconteceu**\n"
+                f"O provider principal (Gemini Pro) provavelmente estava com rate limit ou 503, "
+                f"então o fallback caiu em `{result.provider}` (`{result.model}`) — modelo "
+                f"pequeno demais pra analisar diff complexo. Ele seguiu o system prompt "
+                f"anti-alucinação corretamente: em vez de inventar, devolveu campos vazios.\n\n"
+                f"**O que fazer**\n"
+                f"Quando o Gemini Pro estiver disponível novamente, rode no canal:\n"
+                f"```\n_devai review {short_hash}\n```\n"
+                f"para gerar uma análise completa do mesmo commit.\n\n"
+                f"**Arquivos alterados**\n{files}"
+            )
+            await self.reporter.send_report(
+                title="⚠️ DevAI registrou patch (modelo pequeno não analisou)",
+                description=description,
+                color=0xFEE75C,
+            )
+            return
+
         what_changed = self._format_bullets(data.get("what_changed") or data.get("changes") or [], fallback="• Não informado pela IA.", max_items=8)
         recommendations = self._format_bullets(data.get("recommendations") or data.get("next_steps") or [], fallback="• Revisar logs após o deploy e validar o fluxo alterado.", max_items=6)
         tests = self._format_bullets(data.get("tests") or data.get("tests_to_run") or [], fallback="• Reiniciar o bot e testar manualmente os comandos/menus afetados.", max_items=6)
