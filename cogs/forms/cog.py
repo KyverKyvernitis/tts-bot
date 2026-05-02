@@ -58,6 +58,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from .constants import (
+    DEFAULT_APPROVAL,
     DEFAULT_MODAL,
     DEFAULT_PANEL,
     DEFAULT_RESPONSE,
@@ -65,7 +66,7 @@ from .constants import (
     TRIGGER_WORDS_FORM,
 )
 from .modals import FormSubmissionModal
-from .views import CustomizationPanelView, FormView, SetupView
+from .views import CustomizationPanelView, FormView, ResponseReviewView, SetupView
 
 
 log = logging.getLogger(__name__)
@@ -173,6 +174,7 @@ class FormsCog(commands.Cog):
             "panel": deepcopy(DEFAULT_PANEL),
             "modal": deepcopy(DEFAULT_MODAL),
             "response": deepcopy(DEFAULT_RESPONSE),
+            "approval": deepcopy(DEFAULT_APPROVAL),
         }
 
     # ===== Permission helper =====
@@ -413,13 +415,28 @@ class FormsCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         *,
-        age_pronoun: str,
-        description: str,
+        field_values: dict[str, str] | None = None,
+        age_pronoun: str | None = None,
+        description: str | None = None,
     ):
         """Recebe o submit do FormSubmissionModal e posta no canal de respostas."""
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
         resp_ch_id = int(cfg.get("responses_channel_id") or 0)
+
+        if field_values is None:
+            # Compatibilidade com chamadas antigas: campo 2/3 recebem os nomes antigos.
+            field_values = {
+                "field1": getattr(interaction.user, "display_name", str(interaction.user)),
+                "field2": str(age_pronoun or "").strip(),
+                "field3": str(description or "").strip(),
+            }
+        else:
+            field_values = {
+                "field1": str(field_values.get("field1") or "").strip(),
+                "field2": str(field_values.get("field2") or "").strip(),
+                "field3": str(field_values.get("field3") or "").strip(),
+            }
 
         if not resp_ch_id:
             await self._safe_send_ephemeral(
@@ -437,7 +454,7 @@ class FormsCog(commands.Cog):
             return
 
         response_view = self._build_response_view(
-            cfg, interaction.user, age_pronoun, description
+            guild_id, interaction.user, field_values
         )
 
         try:
@@ -466,62 +483,77 @@ class FormsCog(commands.Cog):
 
     def _build_response_view(
         self,
-        cfg: dict,
+        guild_id: int,
         user,
-        age_pronoun: str,
-        description: str,
+        field_values: dict[str, str],
     ) -> discord.ui.LayoutView:
-        """Constrói a LayoutView que vai pro canal de respostas, aplicando
-        os placeholders {user}, {idade_pronome}, {descricao} no template."""
-        template = cfg.get("response") or {}
-        header_tpl = str(template.get("header") or DEFAULT_RESPONSE["header"])
-        body_tpl = str(template.get("body") or DEFAULT_RESPONSE["body"])
-
-        ctx = {
-            "user": getattr(user, "mention", str(user)),
-            "idade_pronome": age_pronoun,
-            "descricao": description,
-        }
-        header = self._safe_format(header_tpl, ctx)
-        body = self._safe_format(body_tpl, ctx)
-
-        view = discord.ui.LayoutView(timeout=None)
-        view.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay(header),
-                discord.ui.Separator(),
-                discord.ui.TextDisplay(body),
-                accent_color=discord.Color.green(),
-            )
+        """Constrói a mensagem Components V2 com campos separados."""
+        return ResponseReviewView(
+            self,
+            guild_id=int(guild_id),
+            applicant_id=int(getattr(user, "id", 0) or 0),
+            field_values=field_values,
         )
-        return view
+
+    def _build_template_ctx(
+        self,
+        guild_id: int,
+        user_id: int,
+        field_values: dict[str, str] | None,
+        *,
+        sample: bool = False,
+    ) -> dict[str, str]:
+        """Contexto de placeholders para resposta/DMs."""
+        guild = self.bot.get_guild(int(guild_id))
+        member = guild.get_member(int(user_id)) if guild is not None and user_id else None
+        user_mention = f"<@{int(user_id)}>" if user_id else "<@123456789>"
+        display_name = getattr(member, "display_name", "Leonardo" if sample else str(user_id or "Usuário"))
+        guild_name = getattr(guild, "name", "Servidor" if sample else "este servidor")
+        values = dict(field_values or {})
+        field1 = str(values.get("field1") or ("Leonardo" if sample else ""))
+        field2 = str(values.get("field2") or ("17" if sample else ""))
+        field3 = str(values.get("field3") or ("Não sei" if sample else ""))
+        return {
+            "user": user_mention,
+            "membro": user_mention,
+            "user_id": str(user_id or "123456789"),
+            "user_name": display_name,
+            "nome_usuario": display_name,
+            "guild": guild_name,
+            "servidor": guild_name,
+            "field1": field1,
+            "field2": field2,
+            "field3": field3,
+            "nome": field1,
+            "idade": field2,
+            "motivo": field3,
+            # aliases antigos
+            "idade_pronome": field2,
+            "descricao": field3,
+        }
 
     @staticmethod
     def _safe_format(template: str, ctx: dict) -> str:
-        """format_map com fallback que não levanta KeyError em placeholders
-        desconhecidos — eles ficam intactos no resultado (ex: '{foo}').
-        """
+        """format_map com fallback: placeholders desconhecidos ficam intactos."""
 
         class _SafeDict(dict):
             def __missing__(self, key):
                 return "{" + key + "}"
 
         try:
-            return template.format_map(_SafeDict(ctx))
+            return str(template or "").format_map(_SafeDict(ctx))
         except Exception:
-            return template
+            return str(template or "")
 
     # ===== Customization panel (trigger 'c') =====
 
     async def _open_customization_panel(self, message: discord.Message):
-        """Apaga sessão 'c' anterior, apaga palavra atual, posta painel novo."""
+        """Apaga sessão `c` anterior e posta painel novo; a palavra atual fica até apagar."""
         guild_id = int(message.guild.id)
 
-        # Limpeza global: independente de quem disparou a sessão anterior
+        # Limpeza global: independente de quem disparou a sessão anterior.
+        # Isso apaga o `c` anterior e o painel anterior, mas não apaga o `c` atual.
         await self._purge_previous_c_session(guild_id)
-
-        # Apaga a palavra 'c' do staff
-        await self._delete_with_fallback(message, actor=message.author)
 
         view = CustomizationPanelView(
             self, guild_id=guild_id, staff_id=int(message.author.id)
@@ -533,7 +565,6 @@ class FormsCog(commands.Cog):
             log.warning("[forms] falha ao postar customization panel gid=%s: %r", guild_id, e)
             return
 
-        # Registra nova sessão (a anterior já foi limpa em _purge acima)
         cfg = self._get_config(guild_id)
         cfg["active_c_trigger"] = {
             "channel_id": int(message.channel.id),
@@ -546,13 +577,7 @@ class FormsCog(commands.Cog):
         await self._save_config(guild_id, cfg)
 
     async def _purge_previous_c_session(self, guild_id: int):
-        """Apaga mensagem trigger e painel da sessão 'c' atual + zera o DB.
-
-        Idempotente: chamado por novo 'c' (no _open_customization_panel),
-        pelo botão "Apagar" e pelo on_timeout do painel. Sempre zera os
-        campos no DB mesmo se algum delete falhou — manter entry zumbi
-        no DB causaria tentativas repetidas de delete em mensagens já mortas.
-        """
+        """Apaga mensagem trigger e painel da sessão 'c' atual + zera o DB."""
         cfg = self._get_config(guild_id)
         for key in ("active_c_trigger", "active_c_panel"):
             entry = cfg.get(key) or {}
@@ -582,16 +607,23 @@ class FormsCog(commands.Cog):
         title: str,
         description: str,
         button_label: str,
+        button_emoji: str = "",
+        media_url: str = "",
     ):
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
+        old = cfg.get("panel") or {}
         cfg["panel"] = {
             "title": title,
             "description": description,
             "button_label": button_label,
+            "button_emoji": button_emoji,
+            "button_style": str(old.get("button_style") or DEFAULT_PANEL.get("button_style") or "primary"),
+            "media_url": media_url,
         }
         await self._save_config(guild_id, cfg)
         await self._rerender_active_form(guild_id)
+        await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0))
         await self._safe_send_ephemeral(interaction, "✅ Painel atualizado.")
 
     async def _update_modal_config(
@@ -599,37 +631,245 @@ class FormsCog(commands.Cog):
         interaction: discord.Interaction,
         *,
         title: str,
-        age_label: str,
-        age_placeholder: str,
-        desc_label: str,
-        desc_placeholder: str,
+        field1_label: str,
+        field1_placeholder: str,
+        field2_label: str,
+        field2_placeholder: str,
+        field3_label: str,
+        field3_placeholder: str,
     ):
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
+        old = cfg.get("modal") or {}
         cfg["modal"] = {
             "title": title,
-            "age_label": age_label,
-            "age_placeholder": age_placeholder,
-            "desc_label": desc_label,
-            "desc_placeholder": desc_placeholder,
+            "field1_label": field1_label,
+            "field1_placeholder": field1_placeholder,
+            "field1_required": bool(old.get("field1_required", True)),
+            "field2_label": field2_label,
+            "field2_placeholder": field2_placeholder,
+            "field2_required": bool(old.get("field2_required", True)),
+            "field3_label": field3_label,
+            "field3_placeholder": field3_placeholder,
+            "field3_required": bool(old.get("field3_required", True)),
         }
         await self._save_config(guild_id, cfg)
-        # Modal não precisa re-render — é construído fresh em cada clique.
-        await self._safe_send_ephemeral(interaction, "✅ Modal atualizado.")
+        await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0))
+        await self._safe_send_ephemeral(interaction, "✅ Campos do modal atualizados.")
 
     async def _update_response_config(
         self,
         interaction: discord.Interaction,
         *,
-        header: str,
-        body: str,
+        title: str,
+        intro: str,
+        footer: str,
+        media_url: str,
     ):
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
-        cfg["response"] = {"header": header, "body": body}
+        cfg["response"] = {
+            "title": title,
+            "intro": intro,
+            "footer": footer,
+            "media_url": media_url,
+        }
         await self._save_config(guild_id, cfg)
-        # Template de resposta não precisa re-render — aplicado em cada submit.
+        await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0))
         await self._safe_send_ephemeral(interaction, "✅ Resposta atualizada.")
+
+    async def _toggle_approval(self, interaction: discord.Interaction):
+        guild_id = int(interaction.guild_id or 0)
+        cfg = self._get_config(guild_id)
+        approval = dict(cfg.get("approval") or DEFAULT_APPROVAL)
+        approval["enabled"] = not bool(approval.get("enabled", False))
+        cfg["approval"] = approval
+        await self._save_config(guild_id, cfg)
+        await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0), interaction=interaction)
+
+    async def _set_approval_role(self, interaction: discord.Interaction, role_id: int):
+        guild_id = int(interaction.guild_id or 0)
+        cfg = self._get_config(guild_id)
+        approval = dict(cfg.get("approval") or DEFAULT_APPROVAL)
+        approval["role_id"] = int(role_id)
+        cfg["approval"] = approval
+        await self._save_config(guild_id, cfg)
+        await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0), interaction=interaction)
+
+    async def _update_approval_config(
+        self,
+        interaction: discord.Interaction,
+        *,
+        approve_label: str,
+        approve_emoji: str,
+        reject_label: str,
+        reject_emoji: str,
+        approve_dm: str,
+        reject_dm: str,
+    ):
+        guild_id = int(interaction.guild_id or 0)
+        cfg = self._get_config(guild_id)
+        old = dict(cfg.get("approval") or DEFAULT_APPROVAL)
+        old.update({
+            "approve_label": approve_label,
+            "approve_emoji": approve_emoji,
+            "reject_label": reject_label,
+            "reject_emoji": reject_emoji,
+            "approve_dm": approve_dm,
+            "reject_dm": reject_dm,
+        })
+        cfg["approval"] = old
+        await self._save_config(guild_id, cfg)
+        await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0))
+        await self._safe_send_ephemeral(interaction, "✅ Aprovação atualizada.")
+
+    async def _rerender_customization_panel(
+        self,
+        guild_id: int,
+        staff_id: int,
+        *,
+        interaction: discord.Interaction | None = None,
+    ):
+        """Atualiza o painel `c` ativo para refletir os previews vivos."""
+        if interaction is not None and not interaction.response.is_done():
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except discord.HTTPException:
+                pass
+        cfg = self._get_config(guild_id)
+        entry = cfg.get("active_c_panel") or {}
+        ch_id = int(entry.get("channel_id") or 0)
+        msg_id = int(entry.get("message_id") or 0)
+        if not (ch_id and msg_id):
+            if interaction is not None:
+                await self._safe_send_ephemeral(interaction, "✅ Atualizado.")
+            return
+        channel = self.bot.get_channel(ch_id)
+        if channel is None:
+            if interaction is not None:
+                await self._safe_send_ephemeral(interaction, "✅ Atualizado.")
+            return
+        try:
+            msg = await channel.fetch_message(msg_id)
+            new_view = CustomizationPanelView(self, guild_id=guild_id, staff_id=staff_id)
+            await msg.edit(view=new_view)
+            new_view.message = msg
+            if interaction is not None:
+                try:
+                    await interaction.followup.send("✅ Atualizado.", ephemeral=True)
+                except discord.HTTPException:
+                    pass
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            if interaction is not None:
+                await self._safe_send_ephemeral(interaction, "✅ Atualizado, mas não consegui redesenhar o painel `c`.")
+
+    async def _handle_review_action(self, interaction: discord.Interaction, view: ResponseReviewView, *, approved: bool):
+        if not isinstance(interaction.user, discord.Member) or not self._is_staff(interaction.user):
+            await self._safe_send_ephemeral(interaction, "❌ Só staff pode revisar formulários.")
+            return
+
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+        guild_id = int(interaction.guild_id or view.guild_id)
+        cfg = self._get_config(guild_id)
+        approval = cfg.get("approval") or DEFAULT_APPROVAL
+        applicant = None
+        if interaction.guild is not None:
+            applicant = interaction.guild.get_member(int(view.applicant_id))
+            if applicant is None:
+                try:
+                    applicant = await interaction.guild.fetch_member(int(view.applicant_id))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    applicant = None
+
+        role_warning = ""
+        if approved:
+            role_id = int(approval.get("role_id") or 0)
+            if role_id and isinstance(applicant, discord.Member):
+                role = interaction.guild.get_role(role_id) if interaction.guild is not None else None
+                if role is None:
+                    role_warning = "\n⚠️ Cargo configurado não encontrado."
+                else:
+                    try:
+                        await applicant.add_roles(role, reason=f"Formulário aprovado por {interaction.user}")
+                    except (discord.Forbidden, discord.HTTPException):
+                        role_warning = "\n⚠️ Não consegui dar o cargo. Verifique minha hierarquia/permissões."
+
+        dm_ok = await self._send_review_dm(
+            guild_id,
+            int(view.applicant_id),
+            view.field_values,
+            approved=approved,
+        )
+        dm_warning = "" if dm_ok else "\n⚠️ Não consegui enviar DM ao membro."
+
+        new_status = "approved" if approved else "rejected"
+        new_view = ResponseReviewView(
+            self,
+            guild_id=guild_id,
+            applicant_id=int(view.applicant_id),
+            field_values=view.field_values,
+            status=new_status,
+            reviewer_mention=getattr(interaction.user, "mention", ""),
+        )
+        try:
+            if interaction.message is not None:
+                await interaction.message.edit(view=new_view)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+        label = "aprovado" if approved else "rejeitado"
+        try:
+            await interaction.followup.send(f"✅ Formulário {label}.{role_warning}{dm_warning}", ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+    async def _send_review_dm(
+        self,
+        guild_id: int,
+        applicant_id: int,
+        field_values: dict[str, str],
+        *,
+        approved: bool,
+    ) -> bool:
+        guild = self.bot.get_guild(int(guild_id))
+        user = None
+        if guild is not None:
+            user = guild.get_member(int(applicant_id))
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(int(applicant_id))
+            except (discord.NotFound, discord.HTTPException):
+                return False
+        cfg = self._get_config(guild_id)
+        approval = cfg.get("approval") or DEFAULT_APPROVAL
+        tpl_raw = approval.get("approve_dm") if approved else approval.get("reject_dm")
+        tpl = str(tpl_raw or "")
+        if not tpl:
+            tpl = DEFAULT_APPROVAL["approve_dm" if approved else "reject_dm"]
+        ctx = self._build_template_ctx(guild_id, applicant_id, field_values)
+        body = self._safe_format(tpl, ctx)
+        title = "✅ Verificação aprovada" if approved else "❌ Verificação rejeitada"
+        dm_view = discord.ui.LayoutView(timeout=None)
+        dm_view.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(f"# {title}"),
+                discord.ui.TextDisplay(body),
+                accent_color=discord.Color.green() if approved else discord.Color.red(),
+            )
+        )
+        try:
+            await user.send(view=dm_view)
+            return True
+        except (discord.Forbidden, discord.HTTPException):
+            try:
+                await user.send(body)
+                return True
+            except (discord.Forbidden, discord.HTTPException):
+                return False
 
     async def _rerender_active_form(self, guild_id: int):
         """Edita a mensagem ativa do form pra refletir novos textos.

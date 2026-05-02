@@ -1,16 +1,10 @@
 """Views da cog de formulários.
 
-- FormView: mensagem persistente postada no canal de form. Botão único.
-  custom_id usa `:{guild_id}` no fim pra resistir a reboots via
-  bot.add_view() sem colisão entre guilds.
-- CustomizationPanelView: 4 botões pra editar painel/modal/resposta + apagar
-  sessão. Timeout 10min, não-persistente (não sobrevive reboot por design).
-- SetupView: 2 ChannelSelect + Confirmar pro setup inicial. Timeout 10min.
-
-Convenções:
-- LayoutView+Container pra visual consistente com gincana/color_roles.
-- Cada view "owned" guarda staff_id e usa interaction_check pra travar
-  cliques de outros usuários.
+- FormView: mensagem persistente postada no canal de form.
+- ResponseReviewView: mensagem enviada ao canal da staff, com campos separados
+  e botões opcionais de aprovação/rejeição.
+- CustomizationPanelView: painel `c` com previews vivos e controles.
+- SetupView: setup inicial com ChannelSelect.
 """
 from __future__ import annotations
 
@@ -20,15 +14,24 @@ import discord
 
 from .constants import (
     BUTTON_LABEL_MAX,
+    CID_CUST_APPROVAL_EDIT_BTN,
+    CID_CUST_APPROVAL_ROLE_SELECT,
+    CID_CUST_APPROVAL_TOGGLE_BTN,
     CID_CUST_DELETE_BTN,
     CID_CUST_MODAL_BTN,
     CID_CUST_PANEL_BTN,
     CID_CUST_RESPONSE_BTN,
+    CID_REVIEW_APPROVE_PREFIX,
+    CID_REVIEW_REJECT_PREFIX,
     CID_SETUP_CONFIRM_BTN,
     CID_SETUP_FORM_SELECT,
     CID_SETUP_RESP_SELECT,
     CID_SUBMIT_PREFIX,
     CUSTOMIZATION_VIEW_TIMEOUT,
+    DEFAULT_APPROVAL,
+    DEFAULT_MODAL,
+    DEFAULT_PANEL,
+    DEFAULT_RESPONSE,
     SETUP_VIEW_TIMEOUT,
 )
 
@@ -41,15 +44,46 @@ def _truncate(text, limit: int) -> str:
     return text[:limit] if len(text) > limit else text
 
 
-class FormView(discord.ui.LayoutView):
-    """View persistente do form. Conteúdo (título, descrição, label do
-    botão) é lido do DB na construção — então edições via 'c' aparecem
-    quando a mensagem é re-renderizada (via _rerender_active_form no cog).
+def _clean_emoji(text: str | None) -> str | None:
+    text = str(text or "").strip()
+    return text or None
 
-    O custom_id do botão inclui guild_id pra que múltiplas guilds com
-    forms ativos não compartilhem a mesma chave persistente — o discord.py
-    registra views persistentes por custom_id como chave global.
-    """
+
+def _media_url(text: str | None) -> str:
+    text = str(text or "").strip()
+    if text.startswith(("https://", "http://", "attachment://")):
+        return text
+    return ""
+
+
+def _style_from_name(name: str | None, default: discord.ButtonStyle = discord.ButtonStyle.primary) -> discord.ButtonStyle:
+    name = str(name or "").strip().lower()
+    mapping = {
+        "primary": discord.ButtonStyle.primary,
+        "blurple": discord.ButtonStyle.primary,
+        "secondary": discord.ButtonStyle.secondary,
+        "gray": discord.ButtonStyle.secondary,
+        "grey": discord.ButtonStyle.secondary,
+        "success": discord.ButtonStyle.success,
+        "green": discord.ButtonStyle.success,
+        "danger": discord.ButtonStyle.danger,
+        "red": discord.ButtonStyle.danger,
+    }
+    return mapping.get(name, default)
+
+
+def _format_field_block(label: str, value: str) -> str:
+    label = str(label or "Campo").strip() or "Campo"
+    value = str(value or "—").strip() or "—"
+    return f"**{label}**\n{value}"
+
+
+def _sample_values() -> dict[str, str]:
+    return {"field1": "Leonardo", "field2": "17", "field3": "Não sei"}
+
+
+class FormView(discord.ui.LayoutView):
+    """View persistente do form público."""
 
     def __init__(self, cog: "FormsCog", guild_id: int):
         super().__init__(timeout=None)
@@ -58,24 +92,36 @@ class FormView(discord.ui.LayoutView):
 
         cfg = cog._get_config(guild_id)
         panel = cfg.get("panel") or {}
-        title = str(panel.get("title") or "📝 Formulário")
-        description = str(panel.get("description") or "Clique no botão abaixo.")
-        button_label = _truncate(panel.get("button_label") or "Preencher formulário", BUTTON_LABEL_MAX)
+        title = str(panel.get("title") or DEFAULT_PANEL["title"])
+        description = str(panel.get("description") or DEFAULT_PANEL["description"])
+        button_label = _truncate(panel.get("button_label") or DEFAULT_PANEL["button_label"], BUTTON_LABEL_MAX)
+        button_emoji = _clean_emoji(panel.get("button_emoji") or DEFAULT_PANEL.get("button_emoji"))
+        media_url = _media_url(panel.get("media_url"))
 
         button = discord.ui.Button(
             label=button_label,
-            emoji="📝",
-            style=discord.ButtonStyle.primary,
+            emoji=button_emoji,
+            style=_style_from_name(panel.get("button_style"), discord.ButtonStyle.primary),
             custom_id=f"{CID_SUBMIT_PREFIX}:{self.guild_id}",
         )
         button.callback = self._on_submit_click
 
+        children: list[discord.ui.Item] = [
+            discord.ui.TextDisplay(f"# {title}"),
+            discord.ui.TextDisplay(description),
+        ]
+        if media_url:
+            children.extend([
+                discord.ui.Separator(),
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(media_url, description="Imagem/GIF do formulário")
+                ),
+            ])
+        children.extend([discord.ui.Separator(), discord.ui.ActionRow(button)])
+
         self.add_item(
             discord.ui.Container(
-                discord.ui.TextDisplay(f"# {title}"),
-                discord.ui.TextDisplay(description),
-                discord.ui.Separator(),
-                discord.ui.ActionRow(button),
+                *children,
                 accent_color=discord.Color.blurple(),
             )
         )
@@ -84,16 +130,128 @@ class FormView(discord.ui.LayoutView):
         await self.cog._handle_submit_click(interaction, self.guild_id)
 
 
+class ResponseReviewView(discord.ui.LayoutView):
+    """Mensagem de submissão enviada ao canal de respostas."""
+
+    def __init__(
+        self,
+        cog: "FormsCog",
+        guild_id: int,
+        applicant_id: int,
+        field_values: dict[str, str],
+        *,
+        status: str = "",
+        reviewer_mention: str = "",
+    ):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.applicant_id = int(applicant_id)
+        self.field_values = dict(field_values or {})
+        self.status = str(status or "")
+        self.reviewer_mention = str(reviewer_mention or "")
+        self._build()
+
+    def _build(self):
+        cfg = self.cog._get_config(self.guild_id)
+        modal = cfg.get("modal") or {}
+        response = cfg.get("response") or {}
+        approval = cfg.get("approval") or {}
+
+        title = str(response.get("title") or DEFAULT_RESPONSE["title"])
+        intro = str(response.get("intro") or "").strip()
+        footer_tpl = str(response.get("footer") or DEFAULT_RESPONSE["footer"])
+        media_url = _media_url(response.get("media_url"))
+
+        ctx = self.cog._build_template_ctx(
+            self.guild_id,
+            self.applicant_id,
+            self.field_values,
+        )
+        footer = self.cog._safe_format(footer_tpl, ctx)
+
+        children: list[discord.ui.Item] = [discord.ui.TextDisplay(f"# {title}")]
+        if intro:
+            children.append(discord.ui.TextDisplay(self.cog._safe_format(intro, ctx)))
+        children.extend([
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(_format_field_block(modal.get("field1_label") or DEFAULT_MODAL["field1_label"], self.field_values.get("field1") or "")),
+            discord.ui.TextDisplay(_format_field_block(modal.get("field2_label") or DEFAULT_MODAL["field2_label"], self.field_values.get("field2") or "")),
+            discord.ui.TextDisplay(_format_field_block(modal.get("field3_label") or DEFAULT_MODAL["field3_label"], self.field_values.get("field3") or "")),
+        ])
+        if media_url:
+            children.extend([
+                discord.ui.Separator(),
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(media_url, description="Imagem/GIF da verificação")
+                ),
+            ])
+        if footer:
+            children.extend([discord.ui.Separator(), discord.ui.TextDisplay(footer)])
+
+        if self.status:
+            label = "Aprovado" if self.status == "approved" else "Rejeitado"
+            emoji = "✅" if self.status == "approved" else "❌"
+            by = f" por {self.reviewer_mention}" if self.reviewer_mention else ""
+            children.extend([
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(f"## {emoji} {label}{by}"),
+            ])
+        elif bool(approval.get("enabled", False)):
+            approve_label = _truncate(approval.get("approve_label") or DEFAULT_APPROVAL["approve_label"], BUTTON_LABEL_MAX)
+            reject_label = _truncate(approval.get("reject_label") or DEFAULT_APPROVAL["reject_label"], BUTTON_LABEL_MAX)
+            approve_btn = discord.ui.Button(
+                label=approve_label,
+                emoji=_clean_emoji(approval.get("approve_emoji") or DEFAULT_APPROVAL["approve_emoji"]),
+                style=discord.ButtonStyle.success,
+                custom_id=f"{CID_REVIEW_APPROVE_PREFIX}:{self.guild_id}:{self.applicant_id}",
+            )
+            reject_btn = discord.ui.Button(
+                label=reject_label,
+                emoji=_clean_emoji(approval.get("reject_emoji") or DEFAULT_APPROVAL["reject_emoji"]),
+                style=discord.ButtonStyle.danger,
+                custom_id=f"{CID_REVIEW_REJECT_PREFIX}:{self.guild_id}:{self.applicant_id}",
+            )
+            approve_btn.callback = self._on_approve
+            reject_btn.callback = self._on_reject
+            children.extend([discord.ui.Separator(), discord.ui.ActionRow(approve_btn, reject_btn)])
+
+        self.add_item(
+            discord.ui.Container(
+                *children,
+                accent_color=(discord.Color.green() if self.status == "approved" else discord.Color.red() if self.status == "rejected" else discord.Color.blurple()),
+            )
+        )
+
+    async def _on_approve(self, interaction: discord.Interaction):
+        await self.cog._handle_review_action(interaction, self, approved=True)
+
+    async def _on_reject(self, interaction: discord.Interaction):
+        await self.cog._handle_review_action(interaction, self, approved=False)
+
+
+class _ApprovalRoleSelect(discord.ui.RoleSelect):
+    def __init__(self, parent: "CustomizationPanelView"):
+        super().__init__(
+            placeholder="Cargo dado ao aprovar (opcional)",
+            min_values=1,
+            max_values=1,
+            custom_id=CID_CUST_APPROVAL_ROLE_SELECT,
+        )
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.parent_view.interaction_check(interaction):
+            return
+        if not self.values:
+            await interaction.response.send_message("Escolha um cargo.", ephemeral=True)
+            return
+        role = self.values[0]
+        await self.parent_view.cog._set_approval_role(interaction, int(role.id))
+
+
 class CustomizationPanelView(discord.ui.LayoutView):
-    """Painel de customização aberto via 'c' ou /form_customizar.
-
-    Travado pelo interaction_check pro staff que disparou — outros membros
-    veem mensagem ephemeral explicando que não podem clicar.
-
-    O botão "Apagar" e o on_timeout chamam o mesmo método no cog
-    (_purge_previous_c_session) que limpa toda mensagem 'c' e painel
-    registrados no DB pra essa guild — independente de quem disparou.
-    """
+    """Painel `c` com previews vivos e controles."""
 
     def __init__(
         self,
@@ -107,30 +265,125 @@ class CustomizationPanelView(discord.ui.LayoutView):
         self.guild_id = int(guild_id)
         self.staff_id = int(staff_id)
         self.message: Optional[discord.Message] = None
+        self._build()
+
+    def _preview_form_children(self) -> list[discord.ui.Item]:
+        cfg = self.cog._get_config(self.guild_id)
+        panel = cfg.get("panel") or {}
+        title = str(panel.get("title") or DEFAULT_PANEL["title"])
+        description = str(panel.get("description") or DEFAULT_PANEL["description"])
+        media_url = _media_url(panel.get("media_url"))
+        submit = discord.ui.Button(
+            label=_truncate(panel.get("button_label") or DEFAULT_PANEL["button_label"], BUTTON_LABEL_MAX),
+            emoji=_clean_emoji(panel.get("button_emoji") or DEFAULT_PANEL.get("button_emoji")),
+            style=_style_from_name(panel.get("button_style"), discord.ButtonStyle.primary),
+            disabled=True,
+        )
+        items: list[discord.ui.Item] = [
+            discord.ui.TextDisplay("## 👁️ Preview do painel público"),
+            discord.ui.TextDisplay(f"# {title}"),
+            discord.ui.TextDisplay(description),
+        ]
+        if media_url:
+            items.extend([
+                discord.ui.Separator(),
+                discord.ui.MediaGallery(discord.MediaGalleryItem(media_url, description="Preview da mídia do painel")),
+            ])
+        items.extend([discord.ui.Separator(), discord.ui.ActionRow(submit)])
+        return items
+
+    def _preview_response_children(self) -> list[discord.ui.Item]:
+        cfg = self.cog._get_config(self.guild_id)
+        modal = cfg.get("modal") or {}
+        response = cfg.get("response") or {}
+        approval = cfg.get("approval") or {}
+        values = _sample_values()
+        ctx = self.cog._build_template_ctx(self.guild_id, 0, values, sample=True)
+        title = str(response.get("title") or DEFAULT_RESPONSE["title"])
+        intro = str(response.get("intro") or "").strip()
+        footer = self.cog._safe_format(str(response.get("footer") or DEFAULT_RESPONSE["footer"]), ctx)
+        media_url = _media_url(response.get("media_url"))
+        items: list[discord.ui.Item] = [
+            discord.ui.TextDisplay("## 👁️ Preview da resposta da staff"),
+            discord.ui.TextDisplay(f"# {title}"),
+        ]
+        if intro:
+            items.append(discord.ui.TextDisplay(self.cog._safe_format(intro, ctx)))
+        items.extend([
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(_format_field_block(modal.get("field1_label") or DEFAULT_MODAL["field1_label"], values["field1"])),
+            discord.ui.TextDisplay(_format_field_block(modal.get("field2_label") or DEFAULT_MODAL["field2_label"], values["field2"])),
+            discord.ui.TextDisplay(_format_field_block(modal.get("field3_label") or DEFAULT_MODAL["field3_label"], values["field3"])),
+        ])
+        if media_url:
+            items.extend([
+                discord.ui.Separator(),
+                discord.ui.MediaGallery(discord.MediaGalleryItem(media_url, description="Preview da mídia da resposta")),
+            ])
+        if footer:
+            items.extend([discord.ui.Separator(), discord.ui.TextDisplay(footer)])
+        if bool(approval.get("enabled", False)):
+            approve = discord.ui.Button(
+                label=_truncate(approval.get("approve_label") or DEFAULT_APPROVAL["approve_label"], BUTTON_LABEL_MAX),
+                emoji=_clean_emoji(approval.get("approve_emoji") or DEFAULT_APPROVAL["approve_emoji"]),
+                style=discord.ButtonStyle.success,
+                disabled=True,
+            )
+            reject = discord.ui.Button(
+                label=_truncate(approval.get("reject_label") or DEFAULT_APPROVAL["reject_label"], BUTTON_LABEL_MAX),
+                emoji=_clean_emoji(approval.get("reject_emoji") or DEFAULT_APPROVAL["reject_emoji"]),
+                style=discord.ButtonStyle.danger,
+                disabled=True,
+            )
+            items.extend([discord.ui.Separator(), discord.ui.ActionRow(approve, reject)])
+        return items
+
+    def _build(self):
+        cfg = self.cog._get_config(self.guild_id)
+        form_ch_id = int(cfg.get("form_channel_id") or 0)
+        resp_ch_id = int(cfg.get("responses_channel_id") or 0)
+        approval = cfg.get("approval") or {}
+        role_id = int(approval.get("role_id") or 0)
+        approval_state = "ligado" if bool(approval.get("enabled", False)) else "desligado"
+        role_text = f"<@&{role_id}>" if role_id else "nenhum cargo configurado"
 
         panel_btn = discord.ui.Button(
-            label="Painel do form",
+            label="Editar painel",
             emoji="📝",
             style=discord.ButtonStyle.primary,
             custom_id=CID_CUST_PANEL_BTN,
         )
         panel_btn.callback = self._on_panel
         modal_btn = discord.ui.Button(
-            label="Modal de submissão",
+            label="Editar campos",
             emoji="📋",
             style=discord.ButtonStyle.primary,
             custom_id=CID_CUST_MODAL_BTN,
         )
         modal_btn.callback = self._on_modal
         response_btn = discord.ui.Button(
-            label="Mensagem de resposta",
+            label="Editar resposta",
             emoji="📨",
             style=discord.ButtonStyle.primary,
             custom_id=CID_CUST_RESPONSE_BTN,
         )
         response_btn.callback = self._on_response
+        toggle_btn = discord.ui.Button(
+            label=("Desativar aprovação" if approval_state == "ligado" else "Ativar aprovação"),
+            emoji=("🔕" if approval_state == "ligado" else "✅"),
+            style=(discord.ButtonStyle.secondary if approval_state == "ligado" else discord.ButtonStyle.success),
+            custom_id=CID_CUST_APPROVAL_TOGGLE_BTN,
+        )
+        toggle_btn.callback = self._on_approval_toggle
+        approval_edit_btn = discord.ui.Button(
+            label="Editar aprovação",
+            emoji="🛠️",
+            style=discord.ButtonStyle.secondary,
+            custom_id=CID_CUST_APPROVAL_EDIT_BTN,
+        )
+        approval_edit_btn.callback = self._on_approval_edit
         delete_btn = discord.ui.Button(
-            label="Apagar",
+            label="Apagar painel",
             emoji="🗑️",
             style=discord.ButtonStyle.danger,
             custom_id=CID_CUST_DELETE_BTN,
@@ -141,15 +394,42 @@ class CustomizationPanelView(discord.ui.LayoutView):
             discord.ui.Container(
                 discord.ui.TextDisplay("# ⚙️ Customização do formulário"),
                 discord.ui.TextDisplay(
-                    "Escolha o que editar abaixo. **Apagar** limpa a mensagem "
-                    "`c` e o painel ativos da sessão atual."
+                    "Use os botões abaixo pra editar com modal. Os previews atualizam "
+                    "sozinhos depois de salvar.\n\n"
+                    f"**Canal do formulário:** {f'<#{form_ch_id}>' if form_ch_id else '_não configurado_'}\n"
+                    f"**Canal das respostas:** {f'<#{resp_ch_id}>' if resp_ch_id else '_não configurado_'}\n"
+                    f"**Botões Aprovar/Rejeitar:** **{approval_state}**\n"
+                    f"**Cargo ao aprovar:** {role_text}\n\n"
+                    "A mensagem `c` fica no chat enquanto este painel existir. Ela só é apagada "
+                    "quando outro `c` for enviado por staff ou quando você clicar em **Apagar painel**."
                 ),
                 discord.ui.Separator(),
                 discord.ui.ActionRow(panel_btn, modal_btn, response_btn),
-                discord.ui.ActionRow(delete_btn),
+                discord.ui.ActionRow(toggle_btn, approval_edit_btn, delete_btn),
                 accent_color=discord.Color.gold(),
             )
         )
+        self.add_item(
+            discord.ui.Container(
+                *self._preview_form_children(),
+                accent_color=discord.Color.blurple(),
+            )
+        )
+        self.add_item(
+            discord.ui.Container(
+                *self._preview_response_children(),
+                accent_color=discord.Color.green() if approval_state == "ligado" else discord.Color.blurple(),
+            )
+        )
+        if bool(approval.get("enabled", False)):
+            self.add_item(
+                discord.ui.Container(
+                    discord.ui.TextDisplay("## 🎭 Cargo ao aprovar"),
+                    discord.ui.TextDisplay("Selecione o cargo que o botão **Aprovar** vai entregar. Se nenhum cargo for escolhido, ele só envia a DM."),
+                    discord.ui.ActionRow(_ApprovalRoleSelect(self)),
+                    accent_color=discord.Color.green(),
+                )
+            )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if int(getattr(interaction.user, "id", 0) or 0) != self.staff_id:
@@ -163,12 +443,11 @@ class CustomizationPanelView(discord.ui.LayoutView):
         return True
 
     async def on_timeout(self):
-        # Timeout aplica a mesma limpeza que o botão "Apagar" — a sessão 'c'
-        # atual (mensagem trigger + painel) é apagada.
-        await self.cog._purge_previous_c_session(self.guild_id)
+        # Não apaga automaticamente: o usuário pediu para limpar só com outro `c`
+        # ou pelo botão de apagar.
+        return
 
     async def _on_panel(self, interaction: discord.Interaction):
-        # import lazy pra evitar ciclo (modals importa cog -> views -> modals)
         from .modals import PanelEditModal
         await interaction.response.send_modal(PanelEditModal(self.cog, self.guild_id))
 
@@ -180,6 +459,13 @@ class CustomizationPanelView(discord.ui.LayoutView):
         from .modals import ResponseEditModal
         await interaction.response.send_modal(ResponseEditModal(self.cog, self.guild_id))
 
+    async def _on_approval_toggle(self, interaction: discord.Interaction):
+        await self.cog._toggle_approval(interaction)
+
+    async def _on_approval_edit(self, interaction: discord.Interaction):
+        from .modals import ApprovalEditModal
+        await interaction.response.send_modal(ApprovalEditModal(self.cog, self.guild_id))
+
     async def _on_delete(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer()
@@ -190,12 +476,7 @@ class CustomizationPanelView(discord.ui.LayoutView):
 
 
 class SetupView(discord.ui.LayoutView):
-    """Wizard inicial: 2 ChannelSelect + Confirmar.
-
-    Botão Confirmar começa disabled e habilita quando os 2 canais foram
-    escolhidos. Após confirmar, o cog finaliza salvando os IDs no DB e
-    posta o form no canal escolhido.
-    """
+    """Wizard inicial: 2 ChannelSelect + Confirmar."""
 
     def __init__(
         self,

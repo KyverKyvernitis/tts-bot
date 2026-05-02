@@ -1854,20 +1854,40 @@ def _settingsdb_forms_defaults() -> Dict[str, Any]:
         "active_c_trigger": {"channel_id": 0, "message_id": 0},
         "active_c_panel": {"channel_id": 0, "message_id": 0},
         "panel": {
-            "title": "📝 Formulário de apresentação",
-            "description": "Clique no botão abaixo pra preencher seu formulário.",
+            "title": "📝 Formulário de verificação",
+            "description": "Clique no botão abaixo pra preencher sua verificação.",
             "button_label": "Preencher formulário",
+            "button_emoji": "📝",
+            "button_style": "primary",
+            "media_url": "",
         },
         "modal": {
-            "title": "Preencher formulário",
-            "age_label": "Idade e pronome (ex: 18, ele)",
-            "age_placeholder": "18, ele/dele",
-            "desc_label": "Descrição",
-            "desc_placeholder": "Conta um pouco sobre você...",
+            "title": "Nova verificação",
+            "field1_label": "Nome",
+            "field1_placeholder": "Leonardo",
+            "field1_required": True,
+            "field2_label": "Idade",
+            "field2_placeholder": "17",
+            "field2_required": True,
+            "field3_label": "Motivo",
+            "field3_placeholder": "Não sei",
+            "field3_required": True,
         },
         "response": {
-            "header": "**{user}** — `{idade_pronome}`",
-            "body": "{descricao}",
+            "title": "Nova Verificação",
+            "intro": "",
+            "footer": "Enviado por {user} • ID `{user_id}`",
+            "media_url": "",
+        },
+        "approval": {
+            "enabled": False,
+            "role_id": 0,
+            "approve_label": "Aprovar",
+            "approve_emoji": "✅",
+            "reject_label": "Rejeitar",
+            "reject_emoji": "❌",
+            "approve_dm": "✅ **Você foi aprovado em {guild}!**\nO cargo de aprovado foi aplicado, quando configurado pela staff.",
+            "reject_dm": "❌ **Você foi rejeitado em {guild}.**\nConfira as regras e tente novamente se a staff permitir.",
         },
     }
 
@@ -1875,8 +1895,7 @@ def _settingsdb_forms_defaults() -> Dict[str, Any]:
 def _settingsdb_get_forms_config(self, guild_id: int) -> Dict[str, Any]:
     """Lê a config da cog forms pra uma guild, mesclando com defaults.
 
-    Sanitiza tipos (int pra IDs, dict pros sub-objetos) pra resistir a
-    documentos antigos sem todos os campos ou com tipos inesperados.
+    Sanitiza tipos pra resistir a documentos antigos sem todos os campos.
     """
     doc = self._get_guild_doc(guild_id)
     raw = deepcopy(doc.get("forms") or {})
@@ -1894,23 +1913,54 @@ def _settingsdb_get_forms_config(self, guild_id: int) -> Dict[str, Any]:
         }
 
     panel = raw.get("panel") or {}
-    base["panel"] = {
-        "title": str(panel.get("title") or base["panel"]["title"]),
-        "description": str(panel.get("description") or base["panel"]["description"]),
-        "button_label": str(panel.get("button_label") or base["panel"]["button_label"]),
-    }
+    for k in ("title", "description", "button_label", "button_emoji", "button_style", "media_url"):
+        v = panel.get(k)
+        if v is not None:
+            base["panel"][k] = str(v)
 
     modal = raw.get("modal") or {}
-    for k in ("title", "age_label", "age_placeholder", "desc_label", "desc_placeholder"):
+    # Migração leve do modelo antigo (idade/pronome + descrição) para 3 campos.
+    if "field1_label" not in modal and any(k in modal for k in ("age_label", "desc_label")):
+        old_age_label = str(modal.get("age_label") or base["modal"]["field2_label"])
+        old_age_ph = str(modal.get("age_placeholder") or base["modal"]["field2_placeholder"])
+        old_desc_label = str(modal.get("desc_label") or base["modal"]["field3_label"])
+        old_desc_ph = str(modal.get("desc_placeholder") or base["modal"]["field3_placeholder"])
+        base["modal"].update({
+            "title": str(modal.get("title") or base["modal"]["title"]),
+            "field2_label": old_age_label,
+            "field2_placeholder": old_age_ph,
+            "field3_label": old_desc_label,
+            "field3_placeholder": old_desc_ph,
+        })
+    for k in (
+        "title",
+        "field1_label", "field1_placeholder", "field2_label", "field2_placeholder", "field3_label", "field3_placeholder",
+    ):
         v = modal.get(k)
         if v is not None:
             base["modal"][k] = str(v)
+    for k in ("field1_required", "field2_required", "field3_required"):
+        if k in modal:
+            base["modal"][k] = bool(modal.get(k))
 
     response = raw.get("response") or {}
-    for k in ("header", "body"):
+    # Migração leve do template antigo para intro/footer, sem quebrar o layout novo.
+    if "title" not in response and any(k in response for k in ("header", "body")):
+        body = str(response.get("body") or "").strip()
+        if body and body != "{descricao}":
+            base["response"]["intro"] = body
+    for k in ("title", "intro", "footer", "media_url"):
         v = response.get(k)
         if v is not None:
             base["response"][k] = str(v)
+
+    approval = raw.get("approval") or {}
+    for k in ("approve_label", "approve_emoji", "reject_label", "reject_emoji", "approve_dm", "reject_dm"):
+        v = approval.get(k)
+        if v is not None:
+            base["approval"][k] = str(v)
+    base["approval"]["enabled"] = bool(approval.get("enabled", base["approval"]["enabled"]))
+    base["approval"]["role_id"] = int(approval.get("role_id") or 0)
 
     return base
 
