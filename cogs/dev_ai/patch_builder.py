@@ -87,6 +87,83 @@ class PatchBuilder:
             raise RuntimeError("resposta JSON da IA não é um objeto")
         return data
 
+    def _detect_api_rewrite(self, content: str, before: str | None, rel_path: str) -> str | None:
+        """Detecta se a IA reescreveu funções públicas com assinatura diferente.
+
+        Caso real observado: a IA recebeu pedido pra suprimir log ruidoso de
+        WebSocket de voz e devolveu o módulo `audio.py` inteiro reescrito,
+        com `transcribe_audio(session, *, api_key, audio_bytes)` virando
+        `transcribe_audio(sink: WaveSink, members: list[Member])`. O detector
+        de truncamento não pegou (sintaxe OK, encolhimento <30%, sem
+        markers), mas o patch quebraria todos os call sites do bot.
+
+        Esta verificação extrai assinaturas de funções/classes públicas
+        (não começam com `_`) do arquivo ANTES e DEPOIS, e bloqueia o patch
+        se uma função pública desaparecer ou trocar de parâmetros.
+
+        Funções privadas (`_foo`) e novos símbolos públicos NÃO bloqueiam —
+        adicionar é ok, remover/alterar API existente é que é problema.
+
+        Retorna mensagem de erro se suspeito, ou None se ok.
+        """
+        if before is None:
+            # Arquivo novo, não há API anterior pra comparar.
+            return None
+        if not rel_path.endswith(".py"):
+            return None
+
+        try:
+            import ast
+            tree_old = ast.parse(before)
+            tree_new = ast.parse(content)
+        except SyntaxError:
+            # Se um dos dois não parseia, deixa o py_compile pegar.
+            return None
+
+        def public_signatures(tree: ast.AST) -> dict[str, str]:
+            """Extrai {nome: assinatura} de funções/classes públicas top-level."""
+            out: dict[str, str] = {}
+            for node in tree.body if isinstance(tree, ast.Module) else []:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if node.name.startswith("_"):
+                        continue
+                    args = ast.unparse(node.args) if hasattr(ast, "unparse") else str(len(node.args.args))
+                    out[node.name] = args
+                elif isinstance(node, ast.ClassDef):
+                    if node.name.startswith("_"):
+                        continue
+                    out[node.name] = "class"
+            return out
+
+        try:
+            old_sigs = public_signatures(tree_old)
+            new_sigs = public_signatures(tree_new)
+        except Exception:
+            return None  # Falha de extração — não bloqueia
+
+        removed = set(old_sigs.keys()) - set(new_sigs.keys())
+        changed = []
+        for name in old_sigs.keys() & new_sigs.keys():
+            if old_sigs[name] != new_sigs[name]:
+                changed.append(name)
+
+        if removed:
+            return (
+                f"arquivo {rel_path} REMOVEU funções/classes públicas existentes: "
+                f"{sorted(removed)[:5]}. Isso quebra call sites no resto do bot. "
+                f"A IA provavelmente reescreveu o módulo em vez de fazer mudança "
+                f"cirúrgica. Patch rejeitado."
+            )
+        if changed:
+            return (
+                f"arquivo {rel_path} ALTEROU assinatura de funções públicas: "
+                f"{sorted(changed)[:5]}. Isso quebra call sites que dependem da API "
+                f"original. Se a mudança era intencional, o pedido devia ter sido "
+                f"explícito; senão é a IA reescrevendo gratuitamente. Patch rejeitado."
+            )
+
+        return None
+
     def _detect_truncation(self, content: str, before: str | None, rel_path: str) -> str | None:
         """Detecta se a IA devolveu arquivo truncado/incompleto.
 
@@ -190,6 +267,12 @@ class PatchBuilder:
                 truncation_msg = self._detect_truncation(content, before, rel.as_posix())
                 if truncation_msg is not None:
                     raise RuntimeError(truncation_msg)
+                # Detecta reescrita não-solicitada da API. Caso real: IA
+                # pediram pra suprimir log e ela reescreveu o módulo inteiro
+                # com novas assinaturas de função, quebrando call sites.
+                rewrite_msg = self._detect_api_rewrite(content, before, rel.as_posix())
+                if rewrite_msg is not None:
+                    raise RuntimeError(rewrite_msg)
                 # NÃO aplica redact_secrets no content do arquivo — isso muda
                 # o código real que vai pro disco. redact_secrets é pra logs/
                 # prompts da IA, não pra arquivos físicos. Se o original tinha
