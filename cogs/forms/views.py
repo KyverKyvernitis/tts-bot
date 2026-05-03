@@ -127,7 +127,7 @@ class FormView(discord.ui.LayoutView):
             children.extend([
                 discord.ui.Separator(),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(media_url, description="Imagem/GIF do formulário")
+                    discord.MediaGalleryItem(media_url)
                 ),
             ])
         children.extend([discord.ui.Separator(), discord.ui.ActionRow(button)])
@@ -193,7 +193,7 @@ class ResponseReviewView(discord.ui.LayoutView):
             children.extend([
                 discord.ui.Separator(),
                 discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(media_url, description="Imagem/GIF da verificação")
+                    discord.MediaGalleryItem(media_url)
                 ),
             ])
         if footer:
