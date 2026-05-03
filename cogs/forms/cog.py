@@ -62,8 +62,17 @@ from .constants import (
     DEFAULT_MODAL,
     DEFAULT_PANEL,
     DEFAULT_RESPONSE,
+    MODAL_FIELD_LIMIT,
     TRIGGER_WORD_CUSTOMIZE,
     TRIGGER_WORDS_FORM,
+)
+from .fields import (
+    get_field_value,
+    next_field_id,
+    normalize_form_fields,
+    normalize_modal_config,
+    slugify_placeholder,
+    sync_legacy_field_keys,
 )
 from .modals import FormSubmissionModal
 from .views import CustomizationPanelView, FormView, ResponseReviewView, SetupView
@@ -170,16 +179,13 @@ class FormsCog(commands.Cog):
                 current = {}
             merged = deepcopy(base.get(section) or {})
             merged.update(current)
+            if section == "modal" and "fields" not in current:
+                # Sem isso, os fields default do base impedem a migração correta
+                # de configs antigas que só têm field1_label/field2_label/field3_label.
+                merged.pop("fields", None)
             cfg[section] = merged
 
-        modal = cfg.get("modal") or {}
-        if str(modal.get("field2_label") or "").strip().lower() == "idade":
-            modal["field2_label"] = DEFAULT_MODAL["field2_label"]
-            if str(modal.get("field2_placeholder") or "").strip() in {"", "17"}:
-                modal["field2_placeholder"] = DEFAULT_MODAL["field2_placeholder"]
-        if str(modal.get("field3_label") or "").strip().lower() == "motivo":
-            modal["field3_label"] = DEFAULT_MODAL["field3_label"]
-        cfg["modal"] = modal
+        cfg["modal"] = normalize_modal_config(cfg.get("modal") or {})
         return cfg
 
     async def _save_config(self, guild_id: int, cfg: dict[str, Any]):
@@ -205,6 +211,30 @@ class FormsCog(commands.Cog):
             "response": deepcopy(DEFAULT_RESPONSE),
             "approval": deepcopy(DEFAULT_APPROVAL),
         }
+
+    def _get_form_fields(self, guild_id: int) -> list[dict[str, Any]]:
+        cfg = self._get_config(int(guild_id))
+        return normalize_form_fields(cfg.get("modal") or {})
+
+    @staticmethod
+    def _get_form_fields_from_config(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+        return normalize_form_fields((cfg or {}).get("modal") or {})
+
+    async def _save_modal_fields(
+        self,
+        guild_id: int,
+        fields: list[dict[str, Any]],
+        *,
+        title: str | None = None,
+    ):
+        cfg = self._get_config(int(guild_id))
+        modal = dict(cfg.get("modal") or DEFAULT_MODAL)
+        if title is not None:
+            modal["title"] = str(title or DEFAULT_MODAL["title"]).strip() or DEFAULT_MODAL["title"]
+        modal["fields"] = normalize_form_fields(fields)
+        cfg["modal"] = sync_legacy_field_keys(modal)
+        await self._save_config(int(guild_id), cfg)
+        return cfg["modal"]["fields"]
 
     # ===== Permission helper =====
 
@@ -453,19 +483,23 @@ class FormsCog(commands.Cog):
         cfg = self._get_config(guild_id)
         resp_ch_id = int(cfg.get("responses_channel_id") or 0)
 
+        fields = self._get_form_fields_from_config(cfg)
         if field_values is None:
-            # Compatibilidade com chamadas antigas: campo 2/3 recebem os nomes antigos.
+            # Compatibilidade com chamadas antigas.
             field_values = {
                 "field1": getattr(interaction.user, "display_name", str(interaction.user)),
                 "field2": str(age_pronoun or "").strip(),
                 "field3": str(description or "").strip(),
             }
         else:
-            field_values = {
-                "field1": str(field_values.get("field1") or "").strip(),
-                "field2": str(field_values.get("field2") or "").strip(),
-                "field3": str(field_values.get("field3") or "").strip(),
-            }
+            field_values = {str(k): str(v or "").strip() for k, v in dict(field_values or {}).items()}
+
+        # Garante aliases field1/field2/... mesmo quando os IDs internos forem customizados.
+        for index, field in enumerate(fields, start=1):
+            field_id = str(field.get("id") or f"field{index}")
+            value = field_values.get(field_id, field_values.get(f"field{index}", ""))
+            field_values[field_id] = str(value or "").strip()
+            field_values[f"field{index}"] = str(value or "").strip()
 
         if not resp_ch_id:
             await self._safe_send_ephemeral(
@@ -539,10 +573,9 @@ class FormsCog(commands.Cog):
         display_name = getattr(member, "display_name", "Leonardo" if sample else str(user_id or "Usuário"))
         guild_name = getattr(guild, "name", "Servidor" if sample else "este servidor")
         values = dict(field_values or {})
-        field1 = str(values.get("field1") or ("Leonardo" if sample else ""))
-        field2 = str(values.get("field2") or ("17, ele" if sample else ""))
-        field3 = str(values.get("field3") or ("Não sei" if sample else ""))
-        return {
+        cfg = self._get_config(guild_id)
+        fields = self._get_form_fields_from_config(cfg)
+        ctx = {
             "user": user_mention,
             "membro": user_mention,
             "user_id": str(user_id or "123456789"),
@@ -550,17 +583,34 @@ class FormsCog(commands.Cog):
             "nome_usuario": display_name,
             "guild": guild_name,
             "servidor": guild_name,
-            "field1": field1,
-            "field2": field2,
-            "field3": field3,
+        }
+        samples = ["Leonardo", "17, ele/dele", "Não sei", "Exemplo", "Observação"]
+        resolved: list[str] = []
+        for index, field in enumerate(fields, start=1):
+            value = get_field_value(values, field, index - 1)
+            if not value and sample:
+                value = samples[index - 1] if index - 1 < len(samples) else "Exemplo"
+            field_key = str(field.get("id") or f"field{index}")
+            ctx[field_key] = value
+            ctx[f"field{index}"] = value
+            ctx[f"campo{index}"] = value
+            slug = slugify_placeholder(field.get("response_label") or field.get("label") or "")
+            if slug and slug not in ctx:
+                ctx[slug] = value
+            resolved.append(value)
+
+        field1 = resolved[0] if len(resolved) > 0 else ("Leonardo" if sample else "")
+        field2 = resolved[1] if len(resolved) > 1 else ("17, ele/dele" if sample else "")
+        field3 = resolved[2] if len(resolved) > 2 else ("Não sei" if sample else "")
+        ctx.update({
             "nome": field1,
             "idade": field2,
-            "motivo": field3,
             "pronome": field2,
-            # aliases antigos
             "idade_pronome": field2,
             "descricao": field3,
-        }
+            "motivo": field3,  # alias antigo
+        })
+        return ctx
 
     @staticmethod
     def _safe_format(template: str, ctx: dict) -> str:
@@ -668,24 +718,115 @@ class FormsCog(commands.Cog):
         field3_label: str,
         field3_placeholder: str,
     ):
+        """Compatibilidade com o modal legado de 3 campos."""
         guild_id = int(interaction.guild_id or 0)
-        cfg = self._get_config(guild_id)
-        old = cfg.get("modal") or {}
-        cfg["modal"] = {
-            "title": title,
-            "field1_label": field1_label,
-            "field1_placeholder": field1_placeholder,
-            "field1_required": bool(old.get("field1_required", True)),
-            "field2_label": field2_label,
-            "field2_placeholder": field2_placeholder,
-            "field2_required": bool(old.get("field2_required", True)),
-            "field3_label": field3_label,
-            "field3_placeholder": field3_placeholder,
-            "field3_required": bool(old.get("field3_required", True)),
-        }
-        await self._save_config(guild_id, cfg)
+        fields = self._get_form_fields(guild_id)
+        while len(fields) < 3:
+            fields.append({
+                "id": next_field_id(fields),
+                "label": f"Campo {len(fields) + 1}",
+                "placeholder": "",
+                "response_label": f"Campo {len(fields) + 1}",
+                "required": True,
+                "long": False,
+                "show_in_response": True,
+                "enabled": True,
+                "min_length": 0,
+                "max_length": 120,
+            })
+        updates = [
+            (field1_label, field1_placeholder),
+            (field2_label, field2_placeholder),
+            (field3_label, field3_placeholder),
+        ]
+        for index, (label, placeholder) in enumerate(updates):
+            fields[index]["label"] = str(label or fields[index].get("label") or f"Campo {index + 1}")
+            fields[index]["placeholder"] = str(placeholder or "")
+            fields[index]["response_label"] = fields[index]["label"]
+        await self._update_modal_title_and_fields(
+            interaction,
+            title=title,
+            fields=fields,
+            success_message="✅ Campos do modal atualizados.",
+        )
+
+    async def _update_modal_title_and_fields(
+        self,
+        interaction: discord.Interaction,
+        *,
+        title: str,
+        fields: list[dict[str, Any]],
+        success_message: str = "✅ Campos atualizados.",
+    ):
+        guild_id = int(interaction.guild_id or 0)
+        await self._save_modal_fields(guild_id, fields, title=title)
         await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0))
-        await self._safe_send_ephemeral(interaction, "✅ Campos do modal atualizados.")
+        await self._safe_send_ephemeral(interaction, success_message)
+
+    async def _upsert_form_field(
+        self,
+        interaction: discord.Interaction,
+        *,
+        index: int | None,
+        field: dict[str, Any],
+        staff_id: int,
+    ) -> int:
+        guild_id = int(interaction.guild_id or 0)
+        fields = self._get_form_fields(guild_id)
+        if index is None:
+            if len(fields) >= MODAL_FIELD_LIMIT:
+                return max(0, len(fields) - 1)
+            field = dict(field)
+            field["id"] = str(field.get("id") or next_field_id(fields))
+            fields.append(field)
+            selected_index = len(fields) - 1
+        else:
+            selected_index = max(0, min(int(index), len(fields) - 1))
+            current = dict(fields[selected_index])
+            current.update(field)
+            current["id"] = str(current.get("id") or fields[selected_index].get("id") or f"field{selected_index + 1}")
+            fields[selected_index] = current
+        await self._save_modal_fields(guild_id, fields)
+        await self._rerender_customization_panel(guild_id, int(staff_id or getattr(interaction.user, "id", 0) or 0))
+        return selected_index
+
+    async def _remove_form_field(
+        self,
+        interaction: discord.Interaction,
+        *,
+        index: int,
+        staff_id: int,
+    ) -> int:
+        guild_id = int(interaction.guild_id or 0)
+        fields = self._get_form_fields(guild_id)
+        if len(fields) <= 1:
+            return 0
+        index = max(0, min(int(index), len(fields) - 1))
+        fields.pop(index)
+        await self._save_modal_fields(guild_id, fields)
+        await self._rerender_customization_panel(guild_id, int(staff_id or getattr(interaction.user, "id", 0) or 0))
+        return max(0, min(index, len(fields) - 1))
+
+    async def _move_form_field(
+        self,
+        interaction: discord.Interaction,
+        *,
+        index: int,
+        direction: int,
+        staff_id: int,
+    ) -> int:
+        guild_id = int(interaction.guild_id or 0)
+        fields = self._get_form_fields(guild_id)
+        if not fields:
+            return 0
+        index = max(0, min(int(index), len(fields) - 1))
+        new_index = max(0, min(index + int(direction), len(fields) - 1))
+        if new_index == index:
+            return index
+        fields[index], fields[new_index] = fields[new_index], fields[index]
+        await self._save_modal_fields(guild_id, fields)
+        await self._rerender_customization_panel(guild_id, int(staff_id or getattr(interaction.user, "id", 0) or 0))
+        return new_index
 
     async def _update_response_config(
         self,

@@ -29,12 +29,17 @@ CID_REVIEW_REJECT_PREFIX = "forms:review:reject"
 CID_CUST_PANEL_BTN = "forms:cust:panel"
 CID_CUST_MODAL_BTN = "forms:cust:modal"
 CID_CUST_RESPONSE_BTN = "forms:cust:response"
-CID_CUST_APPROVAL_TOGGLE_BTN = "forms:cust:approval_toggle"
 CID_CUST_APPROVAL_EDIT_BTN = "forms:cust:approval_edit"
 CID_CUST_OPTIONS_BTN = "forms:cust:options"
 CID_CUST_DELETE_BTN = "forms:cust:delete"
-CID_CUST_APPROVAL_ROLE_SELECT = "forms:cust:approval_role_select"
-CID_CUST_APPROVAL_ROLE_CLEAR_BTN = "forms:cust:approval_role_clear"
+CID_FIELDS_SELECT = "forms:fields:select"
+CID_FIELDS_ADD_BTN = "forms:fields:add"
+CID_FIELDS_EDIT_BTN = "forms:fields:edit"
+CID_FIELDS_REMOVE_BTN = "forms:fields:remove"
+CID_FIELDS_REMOVE_CONFIRM_BTN = "forms:fields:remove_confirm"
+CID_FIELDS_REMOVE_CANCEL_BTN = "forms:fields:remove_cancel"
+CID_FIELDS_MOVE_UP_BTN = "forms:fields:move_up"
+CID_FIELDS_MOVE_DOWN_BTN = "forms:fields:move_down"
 
 # Setup view components
 CID_SETUP_FORM_SELECT = "forms:setup:form_select"
@@ -64,9 +69,11 @@ RESPONSE_INTRO_MAX = 700
 RESPONSE_FOOTER_MAX = 700
 REVIEW_DM_MAX = 1000
 FIELD_CONFIG_MAX = 160
+FIELD_LENGTH_CONFIG_MAX = 32
 
 
 # ===== Limites do modal de submissão =====
+MODAL_FIELD_LIMIT = 5
 FIELD_VALUE_SHORT_MAX = 120
 FIELD_VALUE_LONG_MAX = 1000
 
@@ -81,16 +88,57 @@ DEFAULT_PANEL = {
     "media_url": "",
 }
 
+DEFAULT_MODAL_FIELDS = [
+    {
+        "id": "field1",
+        "label": "Nome",
+        "placeholder": "Leonardo",
+        "response_label": "Nome",
+        "required": True,
+        "long": False,
+        "show_in_response": True,
+        "enabled": True,
+        "min_length": 0,
+        "max_length": FIELD_VALUE_SHORT_MAX,
+    },
+    {
+        "id": "field2",
+        "label": "Idade e pronome",
+        "placeholder": "17, ele/dele",
+        "response_label": "Idade e pronome",
+        "required": True,
+        "long": False,
+        "show_in_response": True,
+        "enabled": True,
+        "min_length": 0,
+        "max_length": FIELD_VALUE_SHORT_MAX,
+    },
+    {
+        "id": "field3",
+        "label": "Descrição",
+        "placeholder": "Conta um pouco sobre você...",
+        "response_label": "Descrição",
+        "required": True,
+        "long": True,
+        "show_in_response": True,
+        "enabled": True,
+        "min_length": 0,
+        "max_length": FIELD_VALUE_LONG_MAX,
+    },
+]
+
 DEFAULT_MODAL = {
     "title": "Nova verificação",
+    "fields": DEFAULT_MODAL_FIELDS,
+    # chaves legadas mantidas para compatibilidade com configs antigas
     "field1_label": "Nome",
     "field1_placeholder": "Leonardo",
     "field1_required": True,
     "field2_label": "Idade e pronome",
-    "field2_placeholder": "17, ele",
+    "field2_placeholder": "17, ele/dele",
     "field2_required": True,
     "field3_label": "Descrição",
-    "field3_placeholder": "Não sei",
+    "field3_placeholder": "Conta um pouco sobre você...",
     "field3_required": True,
 }
 

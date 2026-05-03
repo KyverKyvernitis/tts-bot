@@ -1,14 +1,4 @@
-"""Modais da cog de formulários.
-
-- FormSubmissionModal: aberto pelo botão do form. Coleta 3 campos separados.
-- PanelEditModal: edita texto/botão/mídia do painel público.
-- SubmissionModalEditModal: edita o título do modal e os 3 campos usando
-  linhas "Label | Placeholder" para caber no limite de 5 inputs do Discord.
-- ResponseEditModal: edita a aparência da mensagem enviada ao canal da staff.
-- ApprovalEditModal: edita textos/emoji e DMs de aprovação/rejeição.
-- ApprovalOptionsModal: usa componentes novos de modal (RadioGroup,
-  Checkbox e RoleSelect) para opções marcáveis, cores e cargo.
-"""
+"""Modais da cog de formulários."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -19,6 +9,7 @@ from .constants import (
     BUTTON_EMOJI_MAX,
     BUTTON_LABEL_MAX,
     FIELD_CONFIG_MAX,
+    FIELD_LENGTH_CONFIG_MAX,
     FIELD_VALUE_LONG_MAX,
     FIELD_VALUE_SHORT_MAX,
     MEDIA_URL_MAX,
@@ -29,6 +20,12 @@ from .constants import (
     RESPONSE_INTRO_MAX,
     RESPONSE_TITLE_MAX,
     REVIEW_DM_MAX,
+)
+from .fields import (
+    DISCORD_TEXT_INPUT_MAX,
+    default_form_fields,
+    next_field_id,
+    normalize_form_fields,
 )
 
 if TYPE_CHECKING:
@@ -79,6 +76,7 @@ def _style_value(name: str | None, default: str = "primary") -> str:
 def _make_style_radio_group(current: str | None, *, default: str = "primary"):
     current = _style_value(current, default)
     group = discord.ui.RadioGroup(required=True)
+    # Lista única e fixa para evitar duplicação visual acidental.
     for value, label, description in (
         ("primary", "Azul/Roxo", "Cor principal do Discord"),
         ("secondary", "Cinza", "Cor neutra"),
@@ -98,6 +96,37 @@ def _selected_style(group, fallback: str = "primary") -> str:
     return _style_value(getattr(group, "value", None) or fallback, fallback)
 
 
+def _parse_lengths(raw: str, *, fallback_min: int = 0, fallback_max: int = FIELD_VALUE_SHORT_MAX) -> tuple[int, int]:
+    raw = str(raw or "").strip()
+    if not raw:
+        return int(fallback_min or 0), int(fallback_max or FIELD_VALUE_SHORT_MAX)
+    for sep in ("|", ",", ";", "/"):
+        if sep in raw:
+            left, right = raw.split(sep, 1)
+            break
+    else:
+        left, right = "0", raw
+    try:
+        min_len = int(str(left).strip() or 0)
+    except ValueError:
+        min_len = int(fallback_min or 0)
+    try:
+        max_len = int(str(right).strip() or fallback_max)
+    except ValueError:
+        max_len = int(fallback_max or FIELD_VALUE_SHORT_MAX)
+    max_len = max(1, min(DISCORD_TEXT_INPUT_MAX, max_len))
+    min_len = max(0, min(max_len, min_len))
+    return min_len, max_len
+
+
+def _flag_values(group) -> set[str]:
+    values = getattr(group, "values", []) or []
+    result: set[str] = set()
+    for value in values:
+        result.add(str(getattr(value, "value", value)))
+    return result
+
+
 class FormSubmissionModal(discord.ui.Modal):
     """Modal mostrado ao usuário ao clicar no botão do form."""
 
@@ -108,47 +137,31 @@ class FormSubmissionModal(discord.ui.Modal):
         super().__init__(title=title)
         self.cog = cog
         self.guild_id = int(guild_id)
+        self.field_inputs: list[tuple[str, discord.ui.TextInput]] = []
 
-        f1_label = _truncate(modal_cfg.get("field1_label") or "Nome", 45)
-        f1_placeholder = _truncate(modal_cfg.get("field1_placeholder") or "Leonardo", 100)
-        f2_label = _truncate(modal_cfg.get("field2_label") or "Idade e pronome", 45)
-        f2_placeholder = _truncate(modal_cfg.get("field2_placeholder") or "17, ele", 100)
-        f3_label = _truncate(modal_cfg.get("field3_label") or "Descrição", 45)
-        f3_placeholder = _truncate(modal_cfg.get("field3_placeholder") or "Não sei", 100)
-
-        self.field1_input = discord.ui.TextInput(
-            label=f1_label,
-            placeholder=f1_placeholder,
-            style=discord.TextStyle.short,
-            max_length=FIELD_VALUE_SHORT_MAX,
-            required=bool(modal_cfg.get("field1_required", True)),
-        )
-        self.field2_input = discord.ui.TextInput(
-            label=f2_label,
-            placeholder=f2_placeholder,
-            style=discord.TextStyle.short,
-            max_length=FIELD_VALUE_SHORT_MAX,
-            required=bool(modal_cfg.get("field2_required", True)),
-        )
-        self.field3_input = discord.ui.TextInput(
-            label=f3_label,
-            placeholder=f3_placeholder,
-            style=discord.TextStyle.paragraph,
-            max_length=FIELD_VALUE_LONG_MAX,
-            required=bool(modal_cfg.get("field3_required", True)),
-        )
-        self.add_item(self.field1_input)
-        self.add_item(self.field2_input)
-        self.add_item(self.field3_input)
+        fields = normalize_form_fields(modal_cfg)
+        for index, field in enumerate(fields):
+            if not field.get("enabled", True):
+                continue
+            max_length = int(field.get("max_length") or (FIELD_VALUE_LONG_MAX if field.get("long") else FIELD_VALUE_SHORT_MAX))
+            min_length = int(field.get("min_length") or 0)
+            kwargs = {
+                "label": _truncate(field.get("label") or f"Campo {index + 1}", 45),
+                "placeholder": _truncate(field.get("placeholder") or "", 100),
+                "style": discord.TextStyle.paragraph if field.get("long") else discord.TextStyle.short,
+                "max_length": max(1, min(DISCORD_TEXT_INPUT_MAX, max_length)),
+                "required": bool(field.get("required", True)),
+            }
+            if min_length > 0:
+                kwargs["min_length"] = max(0, min(int(min_length), int(kwargs["max_length"])))
+            text_input = discord.ui.TextInput(**kwargs)
+            self.field_inputs.append((str(field.get("id") or f"field{index + 1}"), text_input))
+            self.add_item(text_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         await self.cog._handle_submission(
             interaction,
-            field_values={
-                "field1": str(self.field1_input.value or "").strip(),
-                "field2": str(self.field2_input.value or "").strip(),
-                "field3": str(self.field3_input.value or "").strip(),
-            },
+            field_values={field_id: str(text_input.value or "").strip() for field_id, text_input in self.field_inputs},
         )
 
 
@@ -217,11 +230,10 @@ class PanelEditModal(discord.ui.Modal):
 
 
 class SubmissionModalEditModal(discord.ui.Modal):
-    """Edita o modal visto pelo usuário.
+    """Edição legada: título + 3 primeiros campos.
 
-    Para caber em um único modal, cada campo usa formato:
-      Label | Placeholder
-    Exemplo: Nome | Leonardo
+    O botão principal agora abre o painel de gerenciamento de campos, mas esta
+    classe fica preservada para compatibilidade com callbacks antigos.
     """
 
     def __init__(self, cog: "FormsCog", guild_id: int):
@@ -231,6 +243,9 @@ class SubmissionModalEditModal(discord.ui.Modal):
 
         cfg = cog._get_config(guild_id)
         modal = cfg.get("modal") or {}
+        fields = normalize_form_fields(modal)
+        while len(fields) < 3:
+            fields.append(default_form_fields()[len(fields)])
 
         self.title_input = discord.ui.TextInput(
             label="Título do modal",
@@ -238,58 +253,170 @@ class SubmissionModalEditModal(discord.ui.Modal):
             max_length=MODAL_TITLE_MAX,
             required=True,
         )
-        self.field1_input = discord.ui.TextInput(
-            label="Campo 1: Label | Placeholder",
-            default=_modal_config_line(modal.get("field1_label") or "Nome", modal.get("field1_placeholder") or "Leonardo"),
-            max_length=FIELD_CONFIG_MAX,
-            required=True,
-        )
-        self.field2_input = discord.ui.TextInput(
-            label="Campo 2: Label | Placeholder",
-            default=_modal_config_line(modal.get("field2_label") or "Idade e pronome", modal.get("field2_placeholder") or "17, ele"),
-            max_length=FIELD_CONFIG_MAX,
-            required=True,
-        )
-        self.field3_input = discord.ui.TextInput(
-            label="Campo 3: Label | Placeholder",
-            default=_modal_config_line(modal.get("field3_label") or "Descrição", modal.get("field3_placeholder") or "Não sei"),
-            max_length=FIELD_CONFIG_MAX,
-            required=True,
-        )
+        self.field_inputs: list[discord.ui.TextInput] = []
+        for idx, field in enumerate(fields[:3], start=1):
+            text_input = discord.ui.TextInput(
+                label=f"Campo {idx}: Label | Placeholder",
+                default=_modal_config_line(field.get("label") or f"Campo {idx}", field.get("placeholder") or ""),
+                max_length=FIELD_CONFIG_MAX,
+                required=True,
+            )
+            self.field_inputs.append(text_input)
 
         self.add_item(self.title_input)
-        self.add_item(self.field1_input)
-        self.add_item(self.field2_input)
-        self.add_item(self.field3_input)
+        for text_input in self.field_inputs:
+            self.add_item(text_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         cfg = self.cog._get_config(self.guild_id)
         modal = cfg.get("modal") or {}
-        f1_label, f1_ph = _parse_modal_config_line(
-            str(self.field1_input.value or ""),
-            fallback_label=str(modal.get("field1_label") or "Nome"),
-            fallback_placeholder=str(modal.get("field1_placeholder") or "Leonardo"),
-        )
-        f2_label, f2_ph = _parse_modal_config_line(
-            str(self.field2_input.value or ""),
-            fallback_label=str(modal.get("field2_label") or "Idade e pronome"),
-            fallback_placeholder=str(modal.get("field2_placeholder") or "17, ele"),
-        )
-        f3_label, f3_ph = _parse_modal_config_line(
-            str(self.field3_input.value or ""),
-            fallback_label=str(modal.get("field3_label") or "Descrição"),
-            fallback_placeholder=str(modal.get("field3_placeholder") or "Não sei"),
-        )
-        await self.cog._update_modal_config(
+        fields = normalize_form_fields(modal)
+        for idx, text_input in enumerate(self.field_inputs):
+            if idx >= len(fields):
+                fields.append(default_form_fields()[min(idx, 2)])
+            label, placeholder = _parse_modal_config_line(
+                str(text_input.value or ""),
+                fallback_label=str(fields[idx].get("label") or f"Campo {idx + 1}"),
+                fallback_placeholder=str(fields[idx].get("placeholder") or ""),
+            )
+            fields[idx]["label"] = label
+            fields[idx]["placeholder"] = placeholder
+            fields[idx]["response_label"] = label
+        await self.cog._update_modal_title_and_fields(
             interaction,
             title=str(self.title_input.value or "").strip(),
-            field1_label=f1_label,
-            field1_placeholder=f1_ph,
-            field2_label=f2_label,
-            field2_placeholder=f2_ph,
-            field3_label=f3_label,
-            field3_placeholder=f3_ph,
+            fields=fields,
+            success_message="✅ Campos do modal atualizados.",
         )
+
+
+class FieldEditModal(discord.ui.Modal):
+    """Cria/edita um campo individual do formulário."""
+
+    def __init__(self, cog: "FormsCog", guild_id: int, *, field_index: int | None = None, staff_id: int = 0):
+        fields = cog._get_form_fields(guild_id)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.staff_id = int(staff_id or 0)
+        self.field_index = field_index if field_index is None else max(0, min(int(field_index), len(fields) - 1))
+        self.initial_count = len(fields)
+        is_new = self.field_index is None
+        title = "Adicionar campo" if is_new else "Editar campo"
+        super().__init__(title=title)
+
+        if is_new:
+            field = {
+                "id": next_field_id(fields),
+                "label": f"Campo {len(fields) + 1}",
+                "placeholder": "",
+                "response_label": f"Campo {len(fields) + 1}",
+                "required": False,
+                "long": False,
+                "show_in_response": True,
+                "enabled": True,
+                "min_length": 0,
+                "max_length": FIELD_VALUE_SHORT_MAX,
+            }
+        else:
+            field = dict(fields[self.field_index])
+        self.field_id = str(field.get("id") or next_field_id(fields))
+
+        self.label_input = discord.ui.TextInput(
+            label="Label do campo",
+            default=_truncate(field.get("label") or "", 45),
+            max_length=45,
+            required=True,
+        )
+        self.placeholder_input = discord.ui.TextInput(
+            label="Placeholder opcional",
+            default=_truncate(field.get("placeholder") or "", 100),
+            max_length=100,
+            required=False,
+        )
+        self.response_label_input = discord.ui.TextInput(
+            label="Nome na resposta da staff",
+            default=_truncate(field.get("response_label") or field.get("label") or "", 45),
+            max_length=45,
+            required=True,
+        )
+        self.length_input = discord.ui.TextInput(
+            label="Tamanho mínimo | máximo",
+            default=f"{int(field.get('min_length') or 0)} | {int(field.get('max_length') or (FIELD_VALUE_LONG_MAX if field.get('long') else FIELD_VALUE_SHORT_MAX))}",
+            max_length=FIELD_LENGTH_CONFIG_MAX,
+            required=True,
+        )
+
+        if not hasattr(discord.ui, "CheckboxGroup"):
+            raise RuntimeError("discord.py 2.7+ é necessário para marcar opções de campo no modal.")
+        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=3)
+        self.flags_group.add_option(
+            label="Campo obrigatório",
+            value="required",
+            description="Desmarcado = o usuário pode deixar vazio.",
+            default=bool(field.get("required", True)),
+        )
+        self.flags_group.add_option(
+            label="Mostrar na resposta da staff",
+            value="show_in_response",
+            description="Desmarcado = coleta, mas não mostra no canal da staff.",
+            default=bool(field.get("show_in_response", True)),
+        )
+        self.flags_group.add_option(
+            label="Resposta longa",
+            value="long",
+            description="Usa campo grande/parágrafo no formulário.",
+            default=bool(field.get("long", False)),
+        )
+
+        self.add_item(self.label_input)
+        self.add_item(self.placeholder_input)
+        self.add_item(self.response_label_input)
+        self.add_item(self.length_input)
+        self.add_item(discord.ui.Label(
+            text="Opções do campo",
+            description="Marque/desmarque o comportamento desse campo.",
+            component=self.flags_group,
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        flags = _flag_values(self.flags_group)
+        min_len, max_len = _parse_lengths(
+            str(self.length_input.value or ""),
+            fallback_min=0,
+            fallback_max=FIELD_VALUE_LONG_MAX if "long" in flags else FIELD_VALUE_SHORT_MAX,
+        )
+        field = {
+            "id": self.field_id,
+            "label": str(self.label_input.value or "").strip(),
+            "placeholder": str(self.placeholder_input.value or "").strip(),
+            "response_label": str(self.response_label_input.value or "").strip(),
+            "required": "required" in flags,
+            "long": "long" in flags,
+            "show_in_response": "show_in_response" in flags,
+            "enabled": True,
+            "min_length": min_len,
+            "max_length": max_len,
+        }
+        selected_index = await self.cog._upsert_form_field(
+            interaction,
+            index=self.field_index,
+            field=field,
+            staff_id=self.staff_id or int(getattr(interaction.user, "id", 0) or 0),
+        )
+        from .views import FieldManagerView
+        try:
+            await interaction.response.send_message(
+                "✅ Campo salvo.",
+                view=FieldManagerView(
+                    self.cog,
+                    guild_id=self.guild_id,
+                    staff_id=self.staff_id or int(getattr(interaction.user, "id", 0) or 0),
+                    selected_index=selected_index,
+                ),
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            pass
 
 
 class ResponseEditModal(discord.ui.Modal):
@@ -348,14 +475,10 @@ class ResponseEditModal(discord.ui.Modal):
 
 
 class ApprovalEditModal(discord.ui.Modal):
-    """Edita texto/emoji dos botões e as DMs.
-
-    Cores, liga/desliga e cargo ficam no ApprovalOptionsModal, usando
-    os componentes modernos de modal do discord.py 2.7.
-    """
+    """Edita texto/emoji dos botões e as DMs."""
 
     def __init__(self, cog: "FormsCog", guild_id: int):
-        super().__init__(title="Editar aprovação")
+        super().__init__(title="Textos da aprovação")
         self.cog = cog
         self.guild_id = int(guild_id)
 
@@ -419,10 +542,7 @@ class ApprovalEditModal(discord.ui.Modal):
 
 
 class ApprovalOptionsModal(discord.ui.Modal):
-    """Opções rápidas usando RadioGroup, Checkbox e RoleSelect dentro do modal.
-
-    Requer discord.py 2.7+, que já está definido no requirements do projeto.
-    """
+    """Opções rápidas usando RadioGroup, Checkbox e RoleSelect dentro do modal."""
 
     def __init__(self, cog: "FormsCog", guild_id: int):
         super().__init__(title="Opções do formulário")
@@ -436,7 +556,6 @@ class ApprovalOptionsModal(discord.ui.Modal):
         panel = cfg.get("panel") or {}
         approval = cfg.get("approval") or {}
         role_id = int(approval.get("role_id") or 0)
-        self.current_role_id = role_id
 
         self.enabled_checkbox = discord.ui.Checkbox(default=bool(approval.get("enabled", False)))
         self.panel_style_group = _make_style_radio_group(panel.get("button_style"), default="primary")
@@ -452,17 +571,18 @@ class ApprovalOptionsModal(discord.ui.Modal):
                 default_values = [role]
                 placeholder = f"Atual: {role.name}"[:150]
             else:
-                # Object implementa Snowflake e evita quebrar caso o cargo esteja fora do cache.
                 default_values = [discord.Object(id=role_id)]
                 placeholder = "Cargo atual salvo fora do cache"
 
-        self.role_select = discord.ui.RoleSelect(
-            placeholder=placeholder,
-            min_values=0,
-            max_values=1,
-            required=False,
-            default_values=default_values,
-        )
+        role_kwargs = {
+            "placeholder": placeholder,
+            "min_values": 0,
+            "max_values": 1,
+            "required": False,
+        }
+        if default_values:
+            role_kwargs["default_values"] = default_values
+        self.role_select = discord.ui.RoleSelect(**role_kwargs)
 
         self.add_item(discord.ui.Label(
             text="Aprovação",
@@ -483,12 +603,12 @@ class ApprovalOptionsModal(discord.ui.Modal):
         ))
         self.add_item(discord.ui.Label(
             text="Cargo ao aprovar",
-            description="Para remover o cargo salvo, use Limpar cargo no painel.",
+            description="Deixe vazio e envie para limpar o cargo salvo.",
             component=self.role_select,
         ))
 
     async def on_submit(self, interaction: discord.Interaction):
-        role_id = int(getattr(self, "current_role_id", 0) or 0)
+        role_id = 0
         if getattr(self.role_select, "values", None):
             role_id = int(self.role_select.values[0].id)
 

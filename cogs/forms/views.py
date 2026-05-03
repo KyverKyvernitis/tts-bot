@@ -1,11 +1,4 @@
-"""Views da cog de formulários.
-
-- FormView: mensagem persistente postada no canal de form.
-- ResponseReviewView: mensagem enviada ao canal da staff, com campos separados
-  e botões opcionais de aprovação/rejeição.
-- CustomizationPanelView: painel `c` compacto, sem previews, com controles.
-- SetupView: setup inicial com ChannelSelect.
-"""
+"""Views da cog de formulários."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
@@ -15,14 +8,19 @@ import discord
 from .constants import (
     BUTTON_LABEL_MAX,
     CID_CUST_APPROVAL_EDIT_BTN,
-    CID_CUST_APPROVAL_ROLE_CLEAR_BTN,
-    CID_CUST_APPROVAL_ROLE_SELECT,
-    CID_CUST_APPROVAL_TOGGLE_BTN,
     CID_CUST_DELETE_BTN,
     CID_CUST_MODAL_BTN,
     CID_CUST_OPTIONS_BTN,
     CID_CUST_PANEL_BTN,
     CID_CUST_RESPONSE_BTN,
+    CID_FIELDS_ADD_BTN,
+    CID_FIELDS_EDIT_BTN,
+    CID_FIELDS_MOVE_DOWN_BTN,
+    CID_FIELDS_MOVE_UP_BTN,
+    CID_FIELDS_REMOVE_BTN,
+    CID_FIELDS_REMOVE_CANCEL_BTN,
+    CID_FIELDS_REMOVE_CONFIRM_BTN,
+    CID_FIELDS_SELECT,
     CID_REVIEW_APPROVE_PREFIX,
     CID_REVIEW_REJECT_PREFIX,
     CID_SETUP_CONFIRM_BTN,
@@ -31,11 +29,12 @@ from .constants import (
     CID_SUBMIT_PREFIX,
     CUSTOMIZATION_VIEW_TIMEOUT,
     DEFAULT_APPROVAL,
-    DEFAULT_MODAL,
     DEFAULT_PANEL,
     DEFAULT_RESPONSE,
+    MODAL_FIELD_LIMIT,
     SETUP_VIEW_TIMEOUT,
 )
+from .fields import field_display_summary, get_field_value, normalize_form_fields
 
 if TYPE_CHECKING:
     from .cog import FormsCog
@@ -96,22 +95,6 @@ def _style_label(name: str | None) -> str:
     return mapping.get(name, "🟦 Azul/Roxo")
 
 
-def _style_value(name: str | None, default: str = "primary") -> str:
-    name = str(name or "").strip().lower()
-    aliases = {
-        "primary": "primary",
-        "blurple": "primary",
-        "secondary": "secondary",
-        "gray": "secondary",
-        "grey": "secondary",
-        "success": "success",
-        "green": "success",
-        "danger": "danger",
-        "red": "danger",
-    }
-    return aliases.get(name, default)
-
-
 class FormView(discord.ui.LayoutView):
     """View persistente do form público."""
 
@@ -149,12 +132,7 @@ class FormView(discord.ui.LayoutView):
             ])
         children.extend([discord.ui.Separator(), discord.ui.ActionRow(button)])
 
-        self.add_item(
-            discord.ui.Container(
-                *children,
-                accent_color=discord.Color.blurple(),
-            )
-        )
+        self.add_item(discord.ui.Container(*children, accent_color=discord.Color.blurple()))
 
     async def _on_submit_click(self, interaction: discord.Interaction):
         await self.cog._handle_submit_click(interaction, self.guild_id)
@@ -184,31 +162,33 @@ class ResponseReviewView(discord.ui.LayoutView):
 
     def _build(self):
         cfg = self.cog._get_config(self.guild_id)
-        modal = cfg.get("modal") or {}
         response = cfg.get("response") or {}
         approval = cfg.get("approval") or {}
+        fields = normalize_form_fields(cfg.get("modal") or {})
 
         title = str(response.get("title") or DEFAULT_RESPONSE["title"])
         intro = str(response.get("intro") or "").strip()
         footer_tpl = str(response.get("footer") or DEFAULT_RESPONSE["footer"])
         media_url = _media_url(response.get("media_url"))
 
-        ctx = self.cog._build_template_ctx(
-            self.guild_id,
-            self.applicant_id,
-            self.field_values,
-        )
+        ctx = self.cog._build_template_ctx(self.guild_id, self.applicant_id, self.field_values)
         footer = self.cog._safe_format(footer_tpl, ctx)
 
         children: list[discord.ui.Item] = [discord.ui.TextDisplay(f"# {title}")]
         if intro:
             children.append(discord.ui.TextDisplay(self.cog._safe_format(intro, ctx)))
-        children.extend([
-            discord.ui.Separator(),
-            discord.ui.TextDisplay(_format_field_block(modal.get("field1_label") or DEFAULT_MODAL["field1_label"], self.field_values.get("field1") or "")),
-            discord.ui.TextDisplay(_format_field_block(modal.get("field2_label") or DEFAULT_MODAL["field2_label"], self.field_values.get("field2") or "")),
-            discord.ui.TextDisplay(_format_field_block(modal.get("field3_label") or DEFAULT_MODAL["field3_label"], self.field_values.get("field3") or "")),
-        ])
+
+        children.append(discord.ui.Separator())
+        visible_count = 0
+        for index, field in enumerate(fields):
+            if not field.get("enabled", True) or not field.get("show_in_response", True):
+                continue
+            value = get_field_value(self.field_values, field, index)
+            children.append(discord.ui.TextDisplay(_format_field_block(field.get("response_label") or field.get("label") or f"Campo {index + 1}", value)))
+            visible_count += 1
+        if not visible_count:
+            children.append(discord.ui.TextDisplay("_Nenhum campo está marcado para aparecer na resposta da staff._"))
+
         if media_url:
             children.extend([
                 discord.ui.Separator(),
@@ -223,10 +203,7 @@ class ResponseReviewView(discord.ui.LayoutView):
             label = "Aprovado" if self.status == "approved" else "Rejeitado"
             emoji = "✅" if self.status == "approved" else "❌"
             by = f" por {self.reviewer_mention}" if self.reviewer_mention else ""
-            children.extend([
-                discord.ui.Separator(),
-                discord.ui.TextDisplay(f"## {emoji} {label}{by}"),
-            ])
+            children.extend([discord.ui.Separator(), discord.ui.TextDisplay(f"## {emoji} {label}{by}")])
         elif bool(approval.get("enabled", False)):
             approve_label = _truncate(approval.get("approve_label") or DEFAULT_APPROVAL["approve_label"], BUTTON_LABEL_MAX)
             reject_label = _truncate(approval.get("reject_label") or DEFAULT_APPROVAL["reject_label"], BUTTON_LABEL_MAX)
@@ -246,12 +223,10 @@ class ResponseReviewView(discord.ui.LayoutView):
             reject_btn.callback = self._on_reject
             children.extend([discord.ui.Separator(), discord.ui.ActionRow(approve_btn, reject_btn)])
 
-        self.add_item(
-            discord.ui.Container(
-                *children,
-                accent_color=(discord.Color.green() if self.status == "approved" else discord.Color.red() if self.status == "rejected" else discord.Color.blurple()),
-            )
-        )
+        self.add_item(discord.ui.Container(
+            *children,
+            accent_color=(discord.Color.green() if self.status == "approved" else discord.Color.red() if self.status == "rejected" else discord.Color.blurple()),
+        ))
 
     async def _on_approve(self, interaction: discord.Interaction):
         await self.cog._handle_review_action(interaction, self, approved=True)
@@ -260,47 +235,8 @@ class ResponseReviewView(discord.ui.LayoutView):
         await self.cog._handle_review_action(interaction, self, approved=False)
 
 
-class _ApprovalRoleSelect(discord.ui.RoleSelect):
-    def __init__(self, parent: "CustomizationPanelView", *, role_id: int = 0):
-        self.parent_view = parent
-        role_id = int(role_id or 0)
-
-        default_values = []
-        placeholder = "Escolher cargo ao aprovar"
-        guild = parent.cog.bot.get_guild(parent.guild_id) if getattr(parent.cog, "bot", None) is not None else None
-        if role_id:
-            role = guild.get_role(role_id) if guild is not None else None
-            if role is not None:
-                default_values = [role]
-                placeholder = f"Atual: {role.name}"[:150]
-            else:
-                default_values = [discord.Object(id=role_id)]
-                placeholder = "Cargo atual salvo fora do cache"
-
-        kwargs = {
-            "placeholder": placeholder,
-            "min_values": 1,
-            "max_values": 1,
-            "custom_id": CID_CUST_APPROVAL_ROLE_SELECT,
-        }
-        if default_values:
-            kwargs["default_values"] = default_values
-        super().__init__(**kwargs)
-
-    async def callback(self, interaction: discord.Interaction):
-        if not await self.parent_view.interaction_check(interaction):
-            return
-        if not self.values:
-            await interaction.response.send_message("Escolha um cargo.", ephemeral=True)
-            return
-        role = self.values[0]
-        await self.parent_view.cog._set_approval_role(interaction, int(role.id))
-
-
-
-
-class CustomizationPanelView(discord.ui.LayoutView):
-    """Painel `c` compacto."""
+class FieldManagerView(discord.ui.LayoutView):
+    """Painel ephemeral para adicionar, editar, remover e mover campos."""
 
     def __init__(
         self,
@@ -308,7 +244,241 @@ class CustomizationPanelView(discord.ui.LayoutView):
         *,
         guild_id: int,
         staff_id: int,
+        selected_index: int = 0,
+        confirm_remove: bool = False,
     ):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.staff_id = int(staff_id)
+        self.selected_index = int(selected_index or 0)
+        self.confirm_remove = bool(confirm_remove)
+        self._build()
+
+    def _build(self):
+        cfg = self.cog._get_config(self.guild_id)
+        modal = cfg.get("modal") or {}
+        fields = normalize_form_fields(modal)
+        if not fields:
+            self.selected_index = 0
+        else:
+            self.selected_index = max(0, min(self.selected_index, len(fields) - 1))
+
+        lines = [
+            f"**Título do modal:** {modal.get('title') or 'Nova verificação'}",
+            f"**Campos:** {len(fields)}/{MODAL_FIELD_LIMIT}",
+            "",
+        ]
+        for idx, field in enumerate(fields, start=1):
+            required = "obrigatório" if field.get("required", True) else "opcional"
+            long = " • longo" if field.get("long", False) else ""
+            hidden = " • oculto na resposta" if not field.get("show_in_response", True) else ""
+            marker = "➡️ " if idx - 1 == self.selected_index else ""
+            lines.append(f"{marker}`{idx}.` **{field.get('label') or f'Campo {idx}'}** — {required}{long}{hidden}")
+
+        children: list[discord.ui.Item] = [
+            discord.ui.TextDisplay("# 📋 Campos do formulário"),
+            discord.ui.TextDisplay("\n".join(lines)),
+            discord.ui.Separator(),
+        ]
+
+        if fields:
+            options = []
+            for idx, field in enumerate(fields):
+                required = "obrigatório" if field.get("required", True) else "opcional"
+                desc = required
+                if field.get("long", False):
+                    desc += " • longo"
+                if not field.get("show_in_response", True):
+                    desc += " • oculto"
+                options.append(discord.SelectOption(
+                    label=_truncate(f"{idx + 1}. {field.get('label') or f'Campo {idx + 1}'}", 100),
+                    description=_truncate(desc, 100),
+                    value=str(idx),
+                    default=(idx == self.selected_index),
+                ))
+            select = discord.ui.Select(
+                placeholder="Escolha qual campo editar/mover/remover",
+                min_values=1,
+                max_values=1,
+                options=options,
+                custom_id=CID_FIELDS_SELECT,
+            )
+            select.callback = self._on_select
+            self.field_select = select
+            children.append(discord.ui.ActionRow(select))
+
+        add_btn = discord.ui.Button(
+            label="Adicionar campo",
+            emoji="➕",
+            style=discord.ButtonStyle.success,
+            custom_id=CID_FIELDS_ADD_BTN,
+            disabled=len(fields) >= MODAL_FIELD_LIMIT,
+        )
+        edit_btn = discord.ui.Button(
+            label="Editar campo",
+            emoji="✏️",
+            style=discord.ButtonStyle.primary,
+            custom_id=CID_FIELDS_EDIT_BTN,
+            disabled=not bool(fields),
+        )
+        remove_btn = discord.ui.Button(
+            label="Remover campo",
+            emoji="🗑️",
+            style=discord.ButtonStyle.danger,
+            custom_id=CID_FIELDS_REMOVE_BTN,
+            disabled=len(fields) <= 1,
+        )
+        up_btn = discord.ui.Button(
+            label="Subir",
+            emoji="⬆️",
+            style=discord.ButtonStyle.secondary,
+            custom_id=CID_FIELDS_MOVE_UP_BTN,
+            disabled=self.selected_index <= 0,
+        )
+        down_btn = discord.ui.Button(
+            label="Descer",
+            emoji="⬇️",
+            style=discord.ButtonStyle.secondary,
+            custom_id=CID_FIELDS_MOVE_DOWN_BTN,
+            disabled=self.selected_index >= len(fields) - 1,
+        )
+        add_btn.callback = self._on_add
+        edit_btn.callback = self._on_edit
+        remove_btn.callback = self._on_remove
+        up_btn.callback = self._on_move_up
+        down_btn.callback = self._on_move_down
+
+        children.append(discord.ui.ActionRow(add_btn, edit_btn, remove_btn))
+        children.append(discord.ui.ActionRow(up_btn, down_btn))
+
+        if self.confirm_remove and fields:
+            confirm_btn = discord.ui.Button(
+                label="Confirmar remoção",
+                emoji="⚠️",
+                style=discord.ButtonStyle.danger,
+                custom_id=CID_FIELDS_REMOVE_CONFIRM_BTN,
+            )
+            cancel_btn = discord.ui.Button(
+                label="Cancelar",
+                emoji="↩️",
+                style=discord.ButtonStyle.secondary,
+                custom_id=CID_FIELDS_REMOVE_CANCEL_BTN,
+            )
+            confirm_btn.callback = self._on_confirm_remove
+            cancel_btn.callback = self._on_cancel_remove
+            field = fields[self.selected_index]
+            children.extend([
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(f"⚠️ Confirmar remoção de **{field.get('label') or 'este campo'}**?"),
+                discord.ui.ActionRow(confirm_btn, cancel_btn),
+            ])
+
+        self.add_item(discord.ui.Container(*children, accent_color=discord.Color.blurple()))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(getattr(interaction.user, "id", 0) or 0) != self.staff_id:
+            try:
+                await interaction.response.send_message("Só quem abriu esse painel pode usar.", ephemeral=True)
+            except discord.HTTPException:
+                pass
+            return False
+        return True
+
+    async def _on_select(self, interaction: discord.Interaction):
+        select = getattr(self, "field_select", None)
+        try:
+            value = int(select.values[0]) if select is not None and select.values else 0
+        except (TypeError, ValueError):
+            value = 0
+        await interaction.response.edit_message(view=FieldManagerView(
+            self.cog,
+            guild_id=self.guild_id,
+            staff_id=self.staff_id,
+            selected_index=value,
+        ))
+
+    async def _on_add(self, interaction: discord.Interaction):
+        from .modals import FieldEditModal
+        try:
+            await interaction.response.send_modal(FieldEditModal(self.cog, self.guild_id, field_index=None, staff_id=self.staff_id))
+        except RuntimeError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+
+    async def _on_edit(self, interaction: discord.Interaction):
+        from .modals import FieldEditModal
+        try:
+            await interaction.response.send_modal(FieldEditModal(self.cog, self.guild_id, field_index=self.selected_index, staff_id=self.staff_id))
+        except RuntimeError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+
+    async def _on_remove(self, interaction: discord.Interaction):
+        fields = self.cog._get_form_fields(self.guild_id)
+        if len(fields) <= 1:
+            await interaction.response.send_message("Não dá para remover todos os campos. Mantenha pelo menos 1.", ephemeral=True)
+            return
+        await interaction.response.edit_message(view=FieldManagerView(
+            self.cog,
+            guild_id=self.guild_id,
+            staff_id=self.staff_id,
+            selected_index=self.selected_index,
+            confirm_remove=True,
+        ))
+
+    async def _on_confirm_remove(self, interaction: discord.Interaction):
+        new_index = await self.cog._remove_form_field(
+            interaction,
+            index=self.selected_index,
+            staff_id=self.staff_id,
+        )
+        await interaction.response.edit_message(view=FieldManagerView(
+            self.cog,
+            guild_id=self.guild_id,
+            staff_id=self.staff_id,
+            selected_index=new_index,
+        ))
+
+    async def _on_cancel_remove(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=FieldManagerView(
+            self.cog,
+            guild_id=self.guild_id,
+            staff_id=self.staff_id,
+            selected_index=self.selected_index,
+        ))
+
+    async def _on_move_up(self, interaction: discord.Interaction):
+        new_index = await self.cog._move_form_field(
+            interaction,
+            index=self.selected_index,
+            direction=-1,
+            staff_id=self.staff_id,
+        )
+        await interaction.response.edit_message(view=FieldManagerView(
+            self.cog,
+            guild_id=self.guild_id,
+            staff_id=self.staff_id,
+            selected_index=new_index,
+        ))
+
+    async def _on_move_down(self, interaction: discord.Interaction):
+        new_index = await self.cog._move_form_field(
+            interaction,
+            index=self.selected_index,
+            direction=1,
+            staff_id=self.staff_id,
+        )
+        await interaction.response.edit_message(view=FieldManagerView(
+            self.cog,
+            guild_id=self.guild_id,
+            staff_id=self.staff_id,
+            selected_index=new_index,
+        ))
+
+
+class CustomizationPanelView(discord.ui.LayoutView):
+    """Painel `c` compacto."""
+
+    def __init__(self, cog: "FormsCog", *, guild_id: int, staff_id: int):
         super().__init__(timeout=float(CUSTOMIZATION_VIEW_TIMEOUT))
         self.cog = cog
         self.guild_id = int(guild_id)
@@ -321,131 +491,58 @@ class CustomizationPanelView(discord.ui.LayoutView):
         form_ch_id = int(cfg.get("form_channel_id") or 0)
         resp_ch_id = int(cfg.get("responses_channel_id") or 0)
         panel = cfg.get("panel") or {}
-        modal = cfg.get("modal") or {}
         response = cfg.get("response") or {}
         approval = cfg.get("approval") or {}
+        fields = normalize_form_fields(cfg.get("modal") or {})
         role_id = int(approval.get("role_id") or 0)
         approval_enabled = bool(approval.get("enabled", False))
-        approval_state = "ligado" if approval_enabled else "desligado"
-        role_text = f"<@&{role_id}>" if role_id else "nenhum cargo configurado"
+        approval_state = "ativada" if approval_enabled else "desativada"
+        role_text = f"<@&{role_id}>" if role_id else "nenhum"
         media_panel = "configurada" if _media_url(panel.get("media_url")) else "não configurada"
         media_response = "configurada" if _media_url(response.get("media_url")) else "não configurada"
 
-        field_summary = (
-            f"{modal.get('field1_label') or DEFAULT_MODAL['field1_label']} / "
-            f"{modal.get('field2_label') or DEFAULT_MODAL['field2_label']} / "
-            f"{modal.get('field3_label') or DEFAULT_MODAL['field3_label']}"
-        )
-
-        panel_btn = discord.ui.Button(
-            label="Editar painel",
-            emoji="📝",
-            style=discord.ButtonStyle.primary,
-            custom_id=CID_CUST_PANEL_BTN,
-        )
+        panel_btn = discord.ui.Button(label="Editar painel", emoji="📝", style=discord.ButtonStyle.primary, custom_id=CID_CUST_PANEL_BTN)
+        modal_btn = discord.ui.Button(label="Editar campos", emoji="📋", style=discord.ButtonStyle.primary, custom_id=CID_CUST_MODAL_BTN)
+        response_btn = discord.ui.Button(label="Editar resposta", emoji="📨", style=discord.ButtonStyle.primary, custom_id=CID_CUST_RESPONSE_BTN)
+        options_btn = discord.ui.Button(label="Editar opções", emoji="☑️", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_OPTIONS_BTN)
+        approval_texts_btn = discord.ui.Button(label="Textos da aprovação", emoji="🛠️", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_APPROVAL_EDIT_BTN)
+        delete_btn = discord.ui.Button(label="Apagar painel", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id=CID_CUST_DELETE_BTN)
         panel_btn.callback = self._on_panel
-        modal_btn = discord.ui.Button(
-            label="Editar campos",
-            emoji="📋",
-            style=discord.ButtonStyle.primary,
-            custom_id=CID_CUST_MODAL_BTN,
-        )
         modal_btn.callback = self._on_modal
-        response_btn = discord.ui.Button(
-            label="Editar resposta",
-            emoji="📨",
-            style=discord.ButtonStyle.primary,
-            custom_id=CID_CUST_RESPONSE_BTN,
-        )
         response_btn.callback = self._on_response
-        toggle_btn = discord.ui.Button(
-            label=("Desativar aprovação" if approval_enabled else "Ativar aprovação"),
-            emoji=("🔕" if approval_enabled else "✅"),
-            style=(discord.ButtonStyle.secondary if approval_enabled else discord.ButtonStyle.success),
-            custom_id=CID_CUST_APPROVAL_TOGGLE_BTN,
-        )
-        toggle_btn.callback = self._on_approval_toggle
-        approval_edit_btn = discord.ui.Button(
-            label="Editar aprovação",
-            emoji="🛠️",
-            style=discord.ButtonStyle.secondary,
-            custom_id=CID_CUST_APPROVAL_EDIT_BTN,
-        )
-        approval_edit_btn.callback = self._on_approval_edit
-        options_btn = discord.ui.Button(
-            label="Editar opções",
-            emoji="☑️",
-            style=discord.ButtonStyle.secondary,
-            custom_id=CID_CUST_OPTIONS_BTN,
-        )
         options_btn.callback = self._on_options
-        delete_btn = discord.ui.Button(
-            label="Apagar painel",
-            emoji="🗑️",
-            style=discord.ButtonStyle.danger,
-            custom_id=CID_CUST_DELETE_BTN,
-        )
+        approval_texts_btn.callback = self._on_approval_edit
         delete_btn.callback = self._on_delete
 
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay("# ⚙️ Customização do formulário"),
-                discord.ui.TextDisplay(
-                    "Painel compacto, sem previews. Textos ficam em modais; opções marcáveis ficam no modal moderno **Editar opções**.\n\n"
-                    f"**Canal do formulário:** {f'<#{form_ch_id}>' if form_ch_id else '_não configurado_'}\n"
-                    f"**Canal das respostas:** {f'<#{resp_ch_id}>' if resp_ch_id else '_não configurado_'}\n"
-                    f"**Campos do formulário:** {field_summary}\n"
-                    f"**Mídia do painel:** {media_panel}\n"
-                    f"**Mídia da resposta:** {media_response}\n"
-                    f"**Aprovação:** **{approval_state}**\n"
-                    f"**Cargo ao aprovar:** {role_text}\n"
-                    f"**Cores:** Preencher {_style_label(panel.get('button_style') or DEFAULT_PANEL.get('button_style'))} • Aprovar {_style_label(approval.get('approve_style') or DEFAULT_APPROVAL.get('approve_style'))} • Rejeitar {_style_label(approval.get('reject_style') or DEFAULT_APPROVAL.get('reject_style'))}\n\n"
-                    "A mensagem `c` fica no chat enquanto este painel existir. Ela só é apagada quando outro `c` for enviado por staff ou quando você clicar em **Apagar painel**."
-                ),
-                discord.ui.Separator(),
-                discord.ui.ActionRow(panel_btn, modal_btn, response_btn),
-                discord.ui.ActionRow(toggle_btn, approval_edit_btn, options_btn, delete_btn),
-                accent_color=discord.Color.gold(),
-            )
-        )
-
-        if approval_enabled:
-            clear_role_btn = discord.ui.Button(
-                label="Limpar cargo",
-                emoji="🧹",
-                style=discord.ButtonStyle.secondary,
-                custom_id=CID_CUST_APPROVAL_ROLE_CLEAR_BTN,
-                disabled=not bool(role_id),
-            )
-            clear_role_btn.callback = self._on_clear_role
-            self.add_item(
-                discord.ui.Container(
-                    discord.ui.TextDisplay("## 🎭 Cargo ao aprovar"),
-                    discord.ui.TextDisplay(
-                        "Selecione o cargo que o botão **Aprovar** vai entregar. "
-                        f"\n**Cargo atual:** {role_text}\n"
-                        "Se nenhum cargo ficar configurado, o botão só envia a DM."
-                    ),
-                    discord.ui.ActionRow(_ApprovalRoleSelect(self, role_id=role_id)),
-                    discord.ui.ActionRow(clear_role_btn),
-                    accent_color=discord.Color.green(),
-                )
-            )
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("# ⚙️ Customização do formulário"),
+            discord.ui.TextDisplay(
+                "Painel compacto, sem previews. Use **Editar campos** para adicionar/remover campos e **Editar opções** para cores, aprovação e cargo.\n\n"
+                f"**Canal do formulário:** {f'<#{form_ch_id}>' if form_ch_id else '_não configurado_'}\n"
+                f"**Canal das respostas:** {f'<#{resp_ch_id}>' if resp_ch_id else '_não configurado_'}\n"
+                f"**Campos:** {len(fields)}/{MODAL_FIELD_LIMIT} — {field_display_summary(fields)}\n"
+                f"**Aprovação:** {approval_state}\n"
+                f"**Cargo ao aprovar:** {role_text}\n"
+                f"**Cores:** Preencher {_style_label(panel.get('button_style') or DEFAULT_PANEL.get('button_style'))} • Aprovar {_style_label(approval.get('approve_style') or DEFAULT_APPROVAL.get('approve_style'))} • Rejeitar {_style_label(approval.get('reject_style') or DEFAULT_APPROVAL.get('reject_style'))}\n"
+                f"**Mídia:** painel {media_panel} • resposta {media_response}\n\n"
+                "A mensagem `c` só é apagada quando outro `c` for enviado por staff ou quando você clicar em **Apagar painel**."
+            ),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(panel_btn, modal_btn, response_btn),
+            discord.ui.ActionRow(options_btn, approval_texts_btn, delete_btn),
+            accent_color=discord.Color.gold(),
+        ))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if int(getattr(interaction.user, "id", 0) or 0) != self.staff_id:
             try:
-                await interaction.response.send_message(
-                    "Só quem abriu esse painel pode usar.", ephemeral=True
-                )
+                await interaction.response.send_message("Só quem abriu esse painel pode usar.", ephemeral=True)
             except discord.HTTPException:
                 pass
             return False
         return True
 
     async def on_timeout(self):
-        # Não apaga automaticamente: o usuário pediu para limpar só com outro `c`
-        # ou pelo botão de apagar.
         return
 
     async def _on_panel(self, interaction: discord.Interaction):
@@ -453,15 +550,18 @@ class CustomizationPanelView(discord.ui.LayoutView):
         await interaction.response.send_modal(PanelEditModal(self.cog, self.guild_id))
 
     async def _on_modal(self, interaction: discord.Interaction):
-        from .modals import SubmissionModalEditModal
-        await interaction.response.send_modal(SubmissionModalEditModal(self.cog, self.guild_id))
+        await interaction.response.send_message(
+            view=FieldManagerView(
+                self.cog,
+                guild_id=self.guild_id,
+                staff_id=int(getattr(interaction.user, "id", 0) or self.staff_id),
+            ),
+            ephemeral=True,
+        )
 
     async def _on_response(self, interaction: discord.Interaction):
         from .modals import ResponseEditModal
         await interaction.response.send_modal(ResponseEditModal(self.cog, self.guild_id))
-
-    async def _on_approval_toggle(self, interaction: discord.Interaction):
-        await self.cog._toggle_approval(interaction)
 
     async def _on_approval_edit(self, interaction: discord.Interaction):
         from .modals import ApprovalEditModal
@@ -473,9 +573,6 @@ class CustomizationPanelView(discord.ui.LayoutView):
             await interaction.response.send_modal(ApprovalOptionsModal(self.cog, self.guild_id))
         except RuntimeError as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
-
-    async def _on_clear_role(self, interaction: discord.Interaction):
-        await self.cog._set_approval_role(interaction, 0)
 
     async def _on_delete(self, interaction: discord.Interaction):
         try:
@@ -489,13 +586,7 @@ class CustomizationPanelView(discord.ui.LayoutView):
 class SetupView(discord.ui.LayoutView):
     """Wizard inicial: 2 ChannelSelect + Confirmar."""
 
-    def __init__(
-        self,
-        cog: "FormsCog",
-        *,
-        guild_id: int,
-        staff_id: int,
-    ):
+    def __init__(self, cog: "FormsCog", *, guild_id: int, staff_id: int):
         super().__init__(timeout=float(SETUP_VIEW_TIMEOUT))
         self.cog = cog
         self.guild_id = int(guild_id)
@@ -531,37 +622,29 @@ class SetupView(discord.ui.LayoutView):
         )
         self.confirm_btn.callback = self._on_confirm
 
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay("# ⚙️ Configuração do formulário"),
-                discord.ui.TextDisplay(
-                    "Escolha o **canal de formulário** (onde o botão fica visível "
-                    "pra todos) e o **canal de respostas** (pra onde as submissões "
-                    "vão). Depois clique em Confirmar."
-                ),
-                discord.ui.Separator(),
-                discord.ui.ActionRow(self.form_select),
-                discord.ui.ActionRow(self.resp_select),
-                discord.ui.ActionRow(self.confirm_btn),
-                accent_color=discord.Color.blue(),
-            )
-        )
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("# ⚙️ Configuração do formulário"),
+            discord.ui.TextDisplay(
+                "Escolha o **canal de formulário** (onde o botão fica visível pra todos) e o **canal de respostas** (pra onde as submissões vão). Depois clique em Confirmar."
+            ),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(self.form_select),
+            discord.ui.ActionRow(self.resp_select),
+            discord.ui.ActionRow(self.confirm_btn),
+            accent_color=discord.Color.blue(),
+        ))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if int(getattr(interaction.user, "id", 0) or 0) != self.staff_id:
             try:
-                await interaction.response.send_message(
-                    "Só quem abriu essa configuração pode usar.", ephemeral=True
-                )
+                await interaction.response.send_message("Só quem abriu essa configuração pode usar.", ephemeral=True)
             except discord.HTTPException:
                 pass
             return False
         return True
 
     def _maybe_enable_confirm(self):
-        self.confirm_btn.disabled = not (
-            self.selected_form_channel_id and self.selected_resp_channel_id
-        )
+        self.confirm_btn.disabled = not (self.selected_form_channel_id and self.selected_resp_channel_id)
 
     async def _on_form_select(self, interaction: discord.Interaction):
         if not self.form_select.values:
@@ -586,9 +669,7 @@ class SetupView(discord.ui.LayoutView):
     async def _on_confirm(self, interaction: discord.Interaction):
         if not (self.selected_form_channel_id and self.selected_resp_channel_id):
             try:
-                await interaction.response.send_message(
-                    "Selecione os dois canais antes de confirmar.", ephemeral=True
-                )
+                await interaction.response.send_message("Selecione os dois canais antes de confirmar.", ephemeral=True)
             except discord.HTTPException:
                 pass
             return

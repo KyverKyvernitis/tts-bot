@@ -1863,14 +1863,52 @@ def _settingsdb_forms_defaults() -> Dict[str, Any]:
         },
         "modal": {
             "title": "Nova verificação",
+            "fields": [
+                {
+                    "id": "field1",
+                    "label": "Nome",
+                    "placeholder": "Leonardo",
+                    "response_label": "Nome",
+                    "required": True,
+                    "long": False,
+                    "show_in_response": True,
+                    "enabled": True,
+                    "min_length": 0,
+                    "max_length": 120,
+                },
+                {
+                    "id": "field2",
+                    "label": "Idade e pronome",
+                    "placeholder": "17, ele/dele",
+                    "response_label": "Idade e pronome",
+                    "required": True,
+                    "long": False,
+                    "show_in_response": True,
+                    "enabled": True,
+                    "min_length": 0,
+                    "max_length": 120,
+                },
+                {
+                    "id": "field3",
+                    "label": "Descrição",
+                    "placeholder": "Conta um pouco sobre você...",
+                    "response_label": "Descrição",
+                    "required": True,
+                    "long": True,
+                    "show_in_response": True,
+                    "enabled": True,
+                    "min_length": 0,
+                    "max_length": 1000,
+                },
+            ],
             "field1_label": "Nome",
             "field1_placeholder": "Leonardo",
             "field1_required": True,
-            "field2_label": "Idade",
-            "field2_placeholder": "17",
+            "field2_label": "Idade e pronome",
+            "field2_placeholder": "17, ele/dele",
             "field2_required": True,
-            "field3_label": "Motivo",
-            "field3_placeholder": "Não sei",
+            "field3_label": "Descrição",
+            "field3_placeholder": "Conta um pouco sobre você...",
             "field3_required": True,
         },
         "response": {
@@ -1884,8 +1922,10 @@ def _settingsdb_forms_defaults() -> Dict[str, Any]:
             "role_id": 0,
             "approve_label": "Aprovar",
             "approve_emoji": "✅",
+            "approve_style": "success",
             "reject_label": "Rejeitar",
             "reject_emoji": "❌",
+            "reject_style": "danger",
             "approve_dm": "✅ **Você foi aprovado em {guild}!**\nO cargo de aprovado foi aplicado, quando configurado pela staff.",
             "reject_dm": "❌ **Você foi rejeitado em {guild}.**\nConfira as regras e tente novamente se a staff permitir.",
         },
@@ -1932,6 +1972,9 @@ def _settingsdb_get_forms_config(self, guild_id: int) -> Dict[str, Any]:
             "field3_label": old_desc_label,
             "field3_placeholder": old_desc_ph,
         })
+    if isinstance(modal.get("fields"), list):
+        base["modal"]["fields"] = deepcopy(modal.get("fields") or [])
+
     for k in (
         "title",
         "field1_label", "field1_placeholder", "field2_label", "field2_placeholder", "field3_label", "field3_placeholder",
@@ -1942,6 +1985,9 @@ def _settingsdb_get_forms_config(self, guild_id: int) -> Dict[str, Any]:
     for k in ("field1_required", "field2_required", "field3_required"):
         if k in modal:
             base["modal"][k] = bool(modal.get(k))
+    if not isinstance(modal.get("fields"), list):
+        # Deixa o FormsCog converter field1/field2/field3 legados para a lista dinâmica.
+        base["modal"].pop("fields", None)
 
     response = raw.get("response") or {}
     # Migração leve do template antigo para intro/footer, sem quebrar o layout novo.
@@ -1955,7 +2001,7 @@ def _settingsdb_get_forms_config(self, guild_id: int) -> Dict[str, Any]:
             base["response"][k] = str(v)
 
     approval = raw.get("approval") or {}
-    for k in ("approve_label", "approve_emoji", "reject_label", "reject_emoji", "approve_dm", "reject_dm"):
+    for k in ("approve_label", "approve_emoji", "approve_style", "reject_label", "reject_emoji", "reject_style", "approve_dm", "reject_dm"):
         v = approval.get(k)
         if v is not None:
             base["approval"][k] = str(v)
