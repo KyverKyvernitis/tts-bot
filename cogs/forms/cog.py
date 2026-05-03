@@ -146,12 +146,41 @@ class FormsCog(commands.Cog):
     def _get_config(self, guild_id: int) -> dict[str, Any]:
         db = self.db
         if db is None or not hasattr(db, "get_forms_config"):
-            return self._default_config()
+            return self._normalize_config(self._default_config())
         try:
-            return db.get_forms_config(int(guild_id))
+            return self._normalize_config(db.get_forms_config(int(guild_id)))
         except Exception as e:
             log.warning("[forms] erro ao ler config gid=%s: %r", guild_id, e)
-            return self._default_config()
+            return self._normalize_config(self._default_config())
+
+    @staticmethod
+    def _normalize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
+        """Completa chaves novas e corrige defaults legados sem mexer em textos realmente customizados."""
+        base = FormsCog._default_config()
+        if not isinstance(cfg, dict):
+            return base
+
+        for key, value in base.items():
+            if key not in cfg:
+                cfg[key] = deepcopy(value)
+
+        for section in ("panel", "modal", "response", "approval"):
+            current = cfg.get(section)
+            if not isinstance(current, dict):
+                current = {}
+            merged = deepcopy(base.get(section) or {})
+            merged.update(current)
+            cfg[section] = merged
+
+        modal = cfg.get("modal") or {}
+        if str(modal.get("field2_label") or "").strip().lower() == "idade":
+            modal["field2_label"] = DEFAULT_MODAL["field2_label"]
+            if str(modal.get("field2_placeholder") or "").strip() in {"", "17"}:
+                modal["field2_placeholder"] = DEFAULT_MODAL["field2_placeholder"]
+        if str(modal.get("field3_label") or "").strip().lower() == "motivo":
+            modal["field3_label"] = DEFAULT_MODAL["field3_label"]
+        cfg["modal"] = modal
+        return cfg
 
     async def _save_config(self, guild_id: int, cfg: dict[str, Any]):
         db = self.db
@@ -511,7 +540,7 @@ class FormsCog(commands.Cog):
         guild_name = getattr(guild, "name", "Servidor" if sample else "este servidor")
         values = dict(field_values or {})
         field1 = str(values.get("field1") or ("Leonardo" if sample else ""))
-        field2 = str(values.get("field2") or ("17" if sample else ""))
+        field2 = str(values.get("field2") or ("17, ele" if sample else ""))
         field3 = str(values.get("field3") or ("Não sei" if sample else ""))
         return {
             "user": user_mention,
@@ -527,6 +556,7 @@ class FormsCog(commands.Cog):
             "nome": field1,
             "idade": field2,
             "motivo": field3,
+            "pronome": field2,
             # aliases antigos
             "idade_pronome": field2,
             "descricao": field3,
@@ -687,6 +717,35 @@ class FormsCog(commands.Cog):
         await self._save_config(guild_id, cfg)
         await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0), interaction=interaction)
 
+    async def _set_button_style(self, interaction: discord.Interaction, *, target: str, style_name: str):
+        guild_id = int(interaction.guild_id or 0)
+        style_name = str(style_name or "primary").strip().lower()
+        if style_name not in {"primary", "secondary", "success", "danger"}:
+            style_name = "primary"
+
+        cfg = self._get_config(guild_id)
+        target = str(target or "").strip().lower()
+        if target == "panel":
+            panel = dict(cfg.get("panel") or DEFAULT_PANEL)
+            panel["button_style"] = style_name
+            cfg["panel"] = panel
+            await self._save_config(guild_id, cfg)
+            await self._rerender_active_form(guild_id)
+        elif target in {"approve", "reject"}:
+            approval = dict(cfg.get("approval") or DEFAULT_APPROVAL)
+            approval[f"{target}_style"] = style_name
+            cfg["approval"] = approval
+            await self._save_config(guild_id, cfg)
+        else:
+            await self._safe_send_ephemeral(interaction, "❌ Botão inválido.")
+            return
+
+        await self._rerender_customization_panel(
+            guild_id,
+            int(getattr(interaction.user, "id", 0) or 0),
+            interaction=interaction,
+        )
+
     async def _set_approval_role(self, interaction: discord.Interaction, role_id: int):
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
@@ -730,7 +789,7 @@ class FormsCog(commands.Cog):
         *,
         interaction: discord.Interaction | None = None,
     ):
-        """Atualiza o painel `c` ativo para refletir os previews vivos."""
+        """Atualiza o painel `c` ativo para refletir as configs atuais."""
         if interaction is not None and not interaction.response.is_done():
             try:
                 await interaction.response.defer(ephemeral=True)

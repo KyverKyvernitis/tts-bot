@@ -3,7 +3,7 @@
 - FormView: mensagem persistente postada no canal de form.
 - ResponseReviewView: mensagem enviada ao canal da staff, com campos separados
   e botões opcionais de aprovação/rejeição.
-- CustomizationPanelView: painel `c` com previews vivos e controles.
+- CustomizationPanelView: painel `c` compacto, sem previews, com controles.
 - SetupView: setup inicial com ChannelSelect.
 """
 from __future__ import annotations
@@ -16,6 +16,7 @@ from .constants import (
     BUTTON_LABEL_MAX,
     CID_CUST_APPROVAL_EDIT_BTN,
     CID_CUST_APPROVAL_ROLE_SELECT,
+    CID_CUST_BUTTON_STYLE_SELECT_PREFIX,
     CID_CUST_APPROVAL_TOGGLE_BTN,
     CID_CUST_DELETE_BTN,
     CID_CUST_MODAL_BTN,
@@ -78,8 +79,36 @@ def _format_field_block(label: str, value: str) -> str:
     return f"**{label}**\n{value}"
 
 
-def _sample_values() -> dict[str, str]:
-    return {"field1": "Leonardo", "field2": "17", "field3": "Não sei"}
+def _style_label(name: str | None) -> str:
+    name = str(name or "").strip().lower()
+    mapping = {
+        "primary": "🟦 Azul/Roxo",
+        "blurple": "🟦 Azul/Roxo",
+        "secondary": "⬛ Cinza",
+        "gray": "⬛ Cinza",
+        "grey": "⬛ Cinza",
+        "success": "🟩 Verde",
+        "green": "🟩 Verde",
+        "danger": "🟥 Vermelho",
+        "red": "🟥 Vermelho",
+    }
+    return mapping.get(name, "🟦 Azul/Roxo")
+
+
+def _style_value(name: str | None, default: str = "primary") -> str:
+    name = str(name or "").strip().lower()
+    aliases = {
+        "primary": "primary",
+        "blurple": "primary",
+        "secondary": "secondary",
+        "gray": "secondary",
+        "grey": "secondary",
+        "success": "success",
+        "green": "success",
+        "danger": "danger",
+        "red": "danger",
+    }
+    return aliases.get(name, default)
 
 
 class FormView(discord.ui.LayoutView):
@@ -203,13 +232,13 @@ class ResponseReviewView(discord.ui.LayoutView):
             approve_btn = discord.ui.Button(
                 label=approve_label,
                 emoji=_clean_emoji(approval.get("approve_emoji") or DEFAULT_APPROVAL["approve_emoji"]),
-                style=discord.ButtonStyle.success,
+                style=_style_from_name(approval.get("approve_style"), discord.ButtonStyle.success),
                 custom_id=f"{CID_REVIEW_APPROVE_PREFIX}:{self.guild_id}:{self.applicant_id}",
             )
             reject_btn = discord.ui.Button(
                 label=reject_label,
                 emoji=_clean_emoji(approval.get("reject_emoji") or DEFAULT_APPROVAL["reject_emoji"]),
-                style=discord.ButtonStyle.danger,
+                style=_style_from_name(approval.get("reject_style"), discord.ButtonStyle.danger),
                 custom_id=f"{CID_REVIEW_REJECT_PREFIX}:{self.guild_id}:{self.applicant_id}",
             )
             approve_btn.callback = self._on_approve
@@ -250,8 +279,54 @@ class _ApprovalRoleSelect(discord.ui.RoleSelect):
         await self.parent_view.cog._set_approval_role(interaction, int(role.id))
 
 
+class _ButtonStyleSelect(discord.ui.Select):
+    STYLE_OPTIONS = (
+        ("primary", "Azul/Roxo", "🟦", "Cor principal do Discord"),
+        ("secondary", "Cinza", "⬛", "Cor neutra"),
+        ("success", "Verde", "🟩", "Cor positiva"),
+        ("danger", "Vermelho", "🟥", "Cor de alerta"),
+    )
+
+    def __init__(self, parent: "CustomizationPanelView", *, target: str, current_style: str | None):
+        self.parent_view = parent
+        self.target = str(target)
+        current = _style_value(current_style, "primary")
+        target_labels = {
+            "panel": "Cor do botão Preencher",
+            "approve": "Cor do botão Aprovar",
+            "reject": "Cor do botão Rejeitar",
+        }
+        options = [
+            discord.SelectOption(
+                label=label,
+                value=value,
+                emoji=emoji,
+                description=description,
+                default=(value == current),
+            )
+            for value, label, emoji, description in self.STYLE_OPTIONS
+        ]
+        super().__init__(
+            placeholder=target_labels.get(self.target, "Cor do botão"),
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id=f"{CID_CUST_BUTTON_STYLE_SELECT_PREFIX}:{self.target}",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.parent_view.interaction_check(interaction):
+            return
+        style_name = str(self.values[0] if self.values else "primary")
+        await self.parent_view.cog._set_button_style(
+            interaction,
+            target=self.target,
+            style_name=style_name,
+        )
+
+
 class CustomizationPanelView(discord.ui.LayoutView):
-    """Painel `c` com previews vivos e controles."""
+    """Painel `c` compacto."""
 
     def __init__(
         self,
@@ -267,85 +342,26 @@ class CustomizationPanelView(discord.ui.LayoutView):
         self.message: Optional[discord.Message] = None
         self._build()
 
-    def _preview_form_children(self) -> list[discord.ui.Item]:
-        cfg = self.cog._get_config(self.guild_id)
-        panel = cfg.get("panel") or {}
-        title = str(panel.get("title") or DEFAULT_PANEL["title"])
-        description = str(panel.get("description") or DEFAULT_PANEL["description"])
-        media_url = _media_url(panel.get("media_url"))
-        submit = discord.ui.Button(
-            label=_truncate(panel.get("button_label") or DEFAULT_PANEL["button_label"], BUTTON_LABEL_MAX),
-            emoji=_clean_emoji(panel.get("button_emoji") or DEFAULT_PANEL.get("button_emoji")),
-            style=_style_from_name(panel.get("button_style"), discord.ButtonStyle.primary),
-            disabled=True,
-        )
-        items: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("## 👁️ Preview do painel público"),
-            discord.ui.TextDisplay(f"# {title}"),
-            discord.ui.TextDisplay(description),
-        ]
-        if media_url:
-            items.extend([
-                discord.ui.Separator(),
-                discord.ui.MediaGallery(discord.MediaGalleryItem(media_url, description="Preview da mídia do painel")),
-            ])
-        items.extend([discord.ui.Separator(), discord.ui.ActionRow(submit)])
-        return items
-
-    def _preview_response_children(self) -> list[discord.ui.Item]:
-        cfg = self.cog._get_config(self.guild_id)
-        modal = cfg.get("modal") or {}
-        response = cfg.get("response") or {}
-        approval = cfg.get("approval") or {}
-        values = _sample_values()
-        ctx = self.cog._build_template_ctx(self.guild_id, 0, values, sample=True)
-        title = str(response.get("title") or DEFAULT_RESPONSE["title"])
-        intro = str(response.get("intro") or "").strip()
-        footer = self.cog._safe_format(str(response.get("footer") or DEFAULT_RESPONSE["footer"]), ctx)
-        media_url = _media_url(response.get("media_url"))
-        items: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("## 👁️ Preview da resposta da staff"),
-            discord.ui.TextDisplay(f"# {title}"),
-        ]
-        if intro:
-            items.append(discord.ui.TextDisplay(self.cog._safe_format(intro, ctx)))
-        items.extend([
-            discord.ui.Separator(),
-            discord.ui.TextDisplay(_format_field_block(modal.get("field1_label") or DEFAULT_MODAL["field1_label"], values["field1"])),
-            discord.ui.TextDisplay(_format_field_block(modal.get("field2_label") or DEFAULT_MODAL["field2_label"], values["field2"])),
-            discord.ui.TextDisplay(_format_field_block(modal.get("field3_label") or DEFAULT_MODAL["field3_label"], values["field3"])),
-        ])
-        if media_url:
-            items.extend([
-                discord.ui.Separator(),
-                discord.ui.MediaGallery(discord.MediaGalleryItem(media_url, description="Preview da mídia da resposta")),
-            ])
-        if footer:
-            items.extend([discord.ui.Separator(), discord.ui.TextDisplay(footer)])
-        if bool(approval.get("enabled", False)):
-            approve = discord.ui.Button(
-                label=_truncate(approval.get("approve_label") or DEFAULT_APPROVAL["approve_label"], BUTTON_LABEL_MAX),
-                emoji=_clean_emoji(approval.get("approve_emoji") or DEFAULT_APPROVAL["approve_emoji"]),
-                style=discord.ButtonStyle.success,
-                disabled=True,
-            )
-            reject = discord.ui.Button(
-                label=_truncate(approval.get("reject_label") or DEFAULT_APPROVAL["reject_label"], BUTTON_LABEL_MAX),
-                emoji=_clean_emoji(approval.get("reject_emoji") or DEFAULT_APPROVAL["reject_emoji"]),
-                style=discord.ButtonStyle.danger,
-                disabled=True,
-            )
-            items.extend([discord.ui.Separator(), discord.ui.ActionRow(approve, reject)])
-        return items
-
     def _build(self):
         cfg = self.cog._get_config(self.guild_id)
         form_ch_id = int(cfg.get("form_channel_id") or 0)
         resp_ch_id = int(cfg.get("responses_channel_id") or 0)
+        panel = cfg.get("panel") or {}
+        modal = cfg.get("modal") or {}
+        response = cfg.get("response") or {}
         approval = cfg.get("approval") or {}
         role_id = int(approval.get("role_id") or 0)
-        approval_state = "ligado" if bool(approval.get("enabled", False)) else "desligado"
+        approval_enabled = bool(approval.get("enabled", False))
+        approval_state = "ligado" if approval_enabled else "desligado"
         role_text = f"<@&{role_id}>" if role_id else "nenhum cargo configurado"
+        media_panel = "configurada" if _media_url(panel.get("media_url")) else "não configurada"
+        media_response = "configurada" if _media_url(response.get("media_url")) else "não configurada"
+
+        field_summary = (
+            f"{modal.get('field1_label') or DEFAULT_MODAL['field1_label']} / "
+            f"{modal.get('field2_label') or DEFAULT_MODAL['field2_label']} / "
+            f"{modal.get('field3_label') or DEFAULT_MODAL['field3_label']}"
+        )
 
         panel_btn = discord.ui.Button(
             label="Editar painel",
@@ -369,9 +385,9 @@ class CustomizationPanelView(discord.ui.LayoutView):
         )
         response_btn.callback = self._on_response
         toggle_btn = discord.ui.Button(
-            label=("Desativar aprovação" if approval_state == "ligado" else "Ativar aprovação"),
-            emoji=("🔕" if approval_state == "ligado" else "✅"),
-            style=(discord.ButtonStyle.secondary if approval_state == "ligado" else discord.ButtonStyle.success),
+            label=("Desativar aprovação" if approval_enabled else "Ativar aprovação"),
+            emoji=("🔕" if approval_enabled else "✅"),
+            style=(discord.ButtonStyle.secondary if approval_enabled else discord.ButtonStyle.success),
             custom_id=CID_CUST_APPROVAL_TOGGLE_BTN,
         )
         toggle_btn.callback = self._on_approval_toggle
@@ -394,14 +410,15 @@ class CustomizationPanelView(discord.ui.LayoutView):
             discord.ui.Container(
                 discord.ui.TextDisplay("# ⚙️ Customização do formulário"),
                 discord.ui.TextDisplay(
-                    "Use os botões abaixo pra editar com modal. Os previews atualizam "
-                    "sozinhos depois de salvar.\n\n"
+                    "Painel compacto, sem previews. Edite textos por modal e escolha cores/cargos pelos menus.\n\n"
                     f"**Canal do formulário:** {f'<#{form_ch_id}>' if form_ch_id else '_não configurado_'}\n"
                     f"**Canal das respostas:** {f'<#{resp_ch_id}>' if resp_ch_id else '_não configurado_'}\n"
-                    f"**Botões Aprovar/Rejeitar:** **{approval_state}**\n"
+                    f"**Campos do formulário:** {field_summary}\n"
+                    f"**Mídia do painel:** {media_panel}\n"
+                    f"**Mídia da resposta:** {media_response}\n"
+                    f"**Aprovação:** **{approval_state}**\n"
                     f"**Cargo ao aprovar:** {role_text}\n\n"
-                    "A mensagem `c` fica no chat enquanto este painel existir. Ela só é apagada "
-                    "quando outro `c` for enviado por staff ou quando você clicar em **Apagar painel**."
+                    "A mensagem `c` fica no chat enquanto este painel existir. Ela só é apagada quando outro `c` for enviado por staff ou quando você clicar em **Apagar painel**."
                 ),
                 discord.ui.Separator(),
                 discord.ui.ActionRow(panel_btn, modal_btn, response_btn),
@@ -409,19 +426,30 @@ class CustomizationPanelView(discord.ui.LayoutView):
                 accent_color=discord.Color.gold(),
             )
         )
+
+        color_items: list[discord.ui.Item] = [
+            discord.ui.TextDisplay("## 🎨 Cores dos botões"),
+            discord.ui.TextDisplay(
+                "Modais do Discord não têm checkbox/select interno, então as escolhas marcáveis ficam aqui.\n\n"
+                f"**Preencher:** {_style_label(panel.get('button_style') or DEFAULT_PANEL.get('button_style'))}\n"
+                f"**Aprovar:** {_style_label(approval.get('approve_style') or DEFAULT_APPROVAL.get('approve_style'))}\n"
+                f"**Rejeitar:** {_style_label(approval.get('reject_style') or DEFAULT_APPROVAL.get('reject_style'))}"
+            ),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(_ButtonStyleSelect(self, target="panel", current_style=panel.get("button_style") or DEFAULT_PANEL.get("button_style"))),
+        ]
+        color_items.extend([
+            discord.ui.ActionRow(_ButtonStyleSelect(self, target="approve", current_style=approval.get("approve_style") or DEFAULT_APPROVAL.get("approve_style"))),
+            discord.ui.ActionRow(_ButtonStyleSelect(self, target="reject", current_style=approval.get("reject_style") or DEFAULT_APPROVAL.get("reject_style"))),
+        ])
         self.add_item(
             discord.ui.Container(
-                *self._preview_form_children(),
+                *color_items,
                 accent_color=discord.Color.blurple(),
             )
         )
-        self.add_item(
-            discord.ui.Container(
-                *self._preview_response_children(),
-                accent_color=discord.Color.green() if approval_state == "ligado" else discord.Color.blurple(),
-            )
-        )
-        if bool(approval.get("enabled", False)):
+
+        if approval_enabled:
             self.add_item(
                 discord.ui.Container(
                     discord.ui.TextDisplay("## 🎭 Cargo ao aprovar"),

@@ -5,7 +5,9 @@
 - SubmissionModalEditModal: edita o título do modal e os 3 campos usando
   linhas "Label | Placeholder" para caber no limite de 5 inputs do Discord.
 - ResponseEditModal: edita a aparência da mensagem enviada ao canal da staff.
-- ApprovalEditModal: edita botões e DMs de aprovação/rejeição.
+- ApprovalEditModal: edita textos/emoji e DMs de aprovação/rejeição.
+  Cores dos botões ficam em selects no painel `c` porque modal do Discord
+  só aceita campo de texto.
 """
 from __future__ import annotations
 
@@ -71,9 +73,9 @@ class FormSubmissionModal(discord.ui.Modal):
 
         f1_label = _truncate(modal_cfg.get("field1_label") or "Nome", 45)
         f1_placeholder = _truncate(modal_cfg.get("field1_placeholder") or "Leonardo", 100)
-        f2_label = _truncate(modal_cfg.get("field2_label") or "Idade", 45)
-        f2_placeholder = _truncate(modal_cfg.get("field2_placeholder") or "17", 100)
-        f3_label = _truncate(modal_cfg.get("field3_label") or "Motivo", 45)
+        f2_label = _truncate(modal_cfg.get("field2_label") or "Idade e pronome", 45)
+        f2_placeholder = _truncate(modal_cfg.get("field2_placeholder") or "17, ele", 100)
+        f3_label = _truncate(modal_cfg.get("field3_label") or "Descrição", 45)
         f3_placeholder = _truncate(modal_cfg.get("field3_placeholder") or "Não sei", 100)
 
         self.field1_input = discord.ui.TextInput(
@@ -206,13 +208,13 @@ class SubmissionModalEditModal(discord.ui.Modal):
         )
         self.field2_input = discord.ui.TextInput(
             label="Campo 2: Label | Placeholder",
-            default=_modal_config_line(modal.get("field2_label") or "Idade", modal.get("field2_placeholder") or "17"),
+            default=_modal_config_line(modal.get("field2_label") or "Idade e pronome", modal.get("field2_placeholder") or "17, ele"),
             max_length=FIELD_CONFIG_MAX,
             required=True,
         )
         self.field3_input = discord.ui.TextInput(
             label="Campo 3: Label | Placeholder",
-            default=_modal_config_line(modal.get("field3_label") or "Motivo", modal.get("field3_placeholder") or "Não sei"),
+            default=_modal_config_line(modal.get("field3_label") or "Descrição", modal.get("field3_placeholder") or "Não sei"),
             max_length=FIELD_CONFIG_MAX,
             required=True,
         )
@@ -232,12 +234,12 @@ class SubmissionModalEditModal(discord.ui.Modal):
         )
         f2_label, f2_ph = _parse_modal_config_line(
             str(self.field2_input.value or ""),
-            fallback_label=str(modal.get("field2_label") or "Idade"),
-            fallback_placeholder=str(modal.get("field2_placeholder") or "17"),
+            fallback_label=str(modal.get("field2_label") or "Idade e pronome"),
+            fallback_placeholder=str(modal.get("field2_placeholder") or "17, ele"),
         )
         f3_label, f3_ph = _parse_modal_config_line(
             str(self.field3_input.value or ""),
-            fallback_label=str(modal.get("field3_label") or "Motivo"),
+            fallback_label=str(modal.get("field3_label") or "Descrição"),
             fallback_placeholder=str(modal.get("field3_placeholder") or "Não sei"),
         )
         await self.cog._update_modal_config(
@@ -308,7 +310,11 @@ class ResponseEditModal(discord.ui.Modal):
 
 
 class ApprovalEditModal(discord.ui.Modal):
-    """Edita os botões de aprovação/rejeição e as DMs."""
+    """Edita texto/emoji dos botões e as DMs.
+
+    As cores são escolhidas por select menu no painel `c`, porque modais
+    do Discord não suportam checkbox/select/opção marcável.
+    """
 
     def __init__(self, cog: "FormsCog", guild_id: int):
         super().__init__(title="Editar aprovação")

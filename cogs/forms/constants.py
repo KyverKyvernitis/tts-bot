@@ -33,6 +33,7 @@ CID_CUST_APPROVAL_TOGGLE_BTN = "forms:cust:approval_toggle"
 CID_CUST_APPROVAL_EDIT_BTN = "forms:cust:approval_edit"
 CID_CUST_DELETE_BTN = "forms:cust:delete"
 CID_CUST_APPROVAL_ROLE_SELECT = "forms:cust:approval_role_select"
+CID_CUST_BUTTON_STYLE_SELECT_PREFIX = "forms:cust:button_style"
 
 # Setup view components
 CID_SETUP_FORM_SELECT = "forms:setup:form_select"
@@ -84,10 +85,10 @@ DEFAULT_MODAL = {
     "field1_label": "Nome",
     "field1_placeholder": "Leonardo",
     "field1_required": True,
-    "field2_label": "Idade",
-    "field2_placeholder": "17",
+    "field2_label": "Idade e pronome",
+    "field2_placeholder": "17, ele",
     "field2_required": True,
-    "field3_label": "Motivo",
+    "field3_label": "Descrição",
     "field3_placeholder": "Não sei",
     "field3_required": True,
 }
@@ -99,7 +100,7 @@ DEFAULT_MODAL = {
 #   {guild} / {servidor}   → nome do servidor
 #   {field1} / {nome}      → campo 1
 #   {field2} / {idade}     → campo 2
-#   {field3} / {motivo}    → campo 3
+#   {field3} / {descricao} / {motivo} → campo 3
 DEFAULT_RESPONSE = {
     "title": "Nova Verificação",
     "intro": "",
@@ -112,8 +113,10 @@ DEFAULT_APPROVAL = {
     "role_id": 0,
     "approve_label": "Aprovar",
     "approve_emoji": "✅",
+    "approve_style": "success",
     "reject_label": "Rejeitar",
     "reject_emoji": "❌",
+    "reject_style": "danger",
     "approve_dm": "✅ **Você foi aprovado em {guild}!**\nO cargo de aprovado foi aplicado, quando configurado pela staff.",
     "reject_dm": "❌ **Você foi rejeitado em {guild}.**\nConfira as regras e tente novamente se a staff permitir.",
 }
