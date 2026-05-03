@@ -8,6 +8,7 @@ import discord
 from .constants import (
     BUTTON_LABEL_MAX,
     CID_CUST_APPROVAL_EDIT_BTN,
+    CID_CUST_COLORS_BTN,
     CID_CUST_DELETE_BTN,
     CID_CUST_MODAL_BTN,
     CID_CUST_OPTIONS_BTN,
@@ -94,6 +95,40 @@ def _style_label(name: str | None) -> str:
     }
     return mapping.get(name, "🟦 Azul/Roxo")
 
+_ACCENT_COLOR_PRESET_LABELS = {
+    "#5865F2": "🟦 Azul/Roxo",
+    "#747F8D": "⬛ Cinza",
+    "#57F287": "🟩 Verde",
+    "#ED4245": "🟥 Vermelho",
+    "#FEE75C": "🟨 Amarelo",
+    "#EB459E": "🩷 Rosa",
+    "#9B59B6": "🟪 Roxo",
+}
+
+
+def _normalize_accent_hex(value: str | int | None, default: str = "#5865F2") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raw = str(default or "#5865F2").strip()
+    if raw.startswith("#"):
+        raw = raw[1:]
+    elif raw.lower().startswith("0x"):
+        raw = raw[2:]
+    if len(raw) == 6 and all(ch in "0123456789abcdefABCDEF" for ch in raw):
+        return f"#{raw.upper()}"
+    return _normalize_accent_hex(default, "#5865F2") if raw != str(default or "").strip() else "#5865F2"
+
+
+def _accent_color_from_config(value: str | int | None, default: str = "#5865F2") -> discord.Color:
+    hex_value = _normalize_accent_hex(value, default)
+    return discord.Color(int(hex_value[1:], 16))
+
+
+def _accent_color_label(value: str | int | None, default: str = "#5865F2") -> str:
+    hex_value = _normalize_accent_hex(value, default)
+    preset = _ACCENT_COLOR_PRESET_LABELS.get(hex_value)
+    return f"{preset} `{hex_value}`" if preset else f"🎨 Personalizada `{hex_value}`"
+
 
 class FormView(discord.ui.LayoutView):
     """View persistente do form público."""
@@ -132,7 +167,10 @@ class FormView(discord.ui.LayoutView):
             ])
         children.extend([discord.ui.Separator(), discord.ui.ActionRow(button)])
 
-        self.add_item(discord.ui.Container(*children, accent_color=discord.Color.blurple()))
+        self.add_item(discord.ui.Container(
+            *children,
+            accent_color=_accent_color_from_config(panel.get("accent_color"), DEFAULT_PANEL.get("accent_color")),
+        ))
 
     async def _on_submit_click(self, interaction: discord.Interaction):
         await self.cog._handle_submit_click(interaction, self.guild_id)
@@ -223,9 +261,16 @@ class ResponseReviewView(discord.ui.LayoutView):
             reject_btn.callback = self._on_reject
             children.extend([discord.ui.Separator(), discord.ui.ActionRow(approve_btn, reject_btn)])
 
+        if self.status == "approved":
+            accent_color = discord.Color.green()
+        elif self.status == "rejected":
+            accent_color = discord.Color.red()
+        else:
+            accent_color = _accent_color_from_config(response.get("accent_color"), DEFAULT_RESPONSE.get("accent_color"))
+
         self.add_item(discord.ui.Container(
             *children,
-            accent_color=(discord.Color.green() if self.status == "approved" else discord.Color.red() if self.status == "rejected" else discord.Color.blurple()),
+            accent_color=accent_color,
         ))
 
     async def _on_approve(self, interaction: discord.Interaction):
@@ -526,12 +571,14 @@ class CustomizationPanelView(discord.ui.LayoutView):
         modal_btn = discord.ui.Button(label="Editar campos", emoji="📋", style=discord.ButtonStyle.primary, custom_id=CID_CUST_MODAL_BTN)
         response_btn = discord.ui.Button(label="Editar resposta", emoji="📨", style=discord.ButtonStyle.primary, custom_id=CID_CUST_RESPONSE_BTN)
         options_btn = discord.ui.Button(label="Editar opções", emoji="☑️", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_OPTIONS_BTN)
+        colors_btn = discord.ui.Button(label="Cores do card", emoji="🎨", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_COLORS_BTN)
         approval_texts_btn = discord.ui.Button(label="Textos da aprovação", emoji="🛠️", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_APPROVAL_EDIT_BTN)
         delete_btn = discord.ui.Button(label="Apagar painel", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id=CID_CUST_DELETE_BTN)
         panel_btn.callback = self._on_panel
         modal_btn.callback = self._on_modal
         response_btn.callback = self._on_response
         options_btn.callback = self._on_options
+        colors_btn.callback = self._on_colors
         approval_texts_btn.callback = self._on_approval_edit
         delete_btn.callback = self._on_delete
 
@@ -544,13 +591,14 @@ class CustomizationPanelView(discord.ui.LayoutView):
                 f"**Campos:** {len(fields)}/{MODAL_FIELD_LIMIT} — {field_display_summary(fields)}\n"
                 f"**Aprovação:** {approval_state}\n"
                 f"**Cargo ao aprovar:** {role_text}\n"
-                f"**Cores:** Preencher {_style_label(panel.get('button_style') or DEFAULT_PANEL.get('button_style'))} • Aprovar {_style_label(approval.get('approve_style') or DEFAULT_APPROVAL.get('approve_style'))} • Rejeitar {_style_label(approval.get('reject_style') or DEFAULT_APPROVAL.get('reject_style'))}\n"
+                f"**Botões:** Preencher {_style_label(panel.get('button_style') or DEFAULT_PANEL.get('button_style'))} • Aprovar {_style_label(approval.get('approve_style') or DEFAULT_APPROVAL.get('approve_style'))} • Rejeitar {_style_label(approval.get('reject_style') or DEFAULT_APPROVAL.get('reject_style'))}\n"
+                f"**Cores dos cards:** formulário {_accent_color_label(panel.get('accent_color'), DEFAULT_PANEL.get('accent_color'))} • resposta {_accent_color_label(response.get('accent_color'), DEFAULT_RESPONSE.get('accent_color'))}\n"
                 f"**Mídia:** painel {media_panel} • resposta {media_response}\n\n"
                 "A mensagem `c` só é apagada quando outro `c` for enviado por staff ou quando você clicar em **Apagar painel**."
             ),
             discord.ui.Separator(),
             discord.ui.ActionRow(panel_btn, modal_btn, response_btn),
-            discord.ui.ActionRow(options_btn, approval_texts_btn, delete_btn),
+            discord.ui.ActionRow(options_btn, colors_btn, approval_texts_btn, delete_btn),
             accent_color=discord.Color.gold(),
         ))
 
@@ -592,6 +640,13 @@ class CustomizationPanelView(discord.ui.LayoutView):
         from .modals import ApprovalOptionsModal
         try:
             await interaction.response.send_modal(ApprovalOptionsModal(self.cog, self.guild_id))
+        except RuntimeError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+
+    async def _on_colors(self, interaction: discord.Interaction):
+        from .modals import AccentColorsModal
+        try:
+            await interaction.response.send_modal(AccentColorsModal(self.cog, self.guild_id))
         except RuntimeError as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
 

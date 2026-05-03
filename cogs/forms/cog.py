@@ -951,6 +951,42 @@ class FormsCog(commands.Cog):
         await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0))
         await self._safe_send_ephemeral(interaction, "✅ Opções atualizadas.")
 
+
+
+    async def _update_accent_colors(
+        self,
+        interaction: discord.Interaction,
+        *,
+        panel_accent_color: str,
+        response_accent_color: str,
+    ):
+        await self._safe_defer_ephemeral(interaction)
+        guild_id = int(interaction.guild_id or 0)
+
+        def clean_hex(value: str, fallback: str) -> str:
+            raw = str(value or fallback).strip()
+            if raw.startswith("#"):
+                raw = raw[1:]
+            elif raw.lower().startswith("0x"):
+                raw = raw[2:]
+            if len(raw) == 6 and all(ch in "0123456789abcdefABCDEF" for ch in raw):
+                return f"#{raw.upper()}"
+            return fallback
+
+        cfg = self._get_config(guild_id)
+        panel = dict(cfg.get("panel") or DEFAULT_PANEL)
+        response = dict(cfg.get("response") or DEFAULT_RESPONSE)
+
+        panel["accent_color"] = clean_hex(panel_accent_color, str(DEFAULT_PANEL.get("accent_color") or "#5865F2"))
+        response["accent_color"] = clean_hex(response_accent_color, str(DEFAULT_RESPONSE.get("accent_color") or "#5865F2"))
+
+        cfg["panel"] = panel
+        cfg["response"] = response
+        await self._save_config(guild_id, cfg)
+        await self._rerender_active_form(guild_id)
+        await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0))
+        await self._safe_send_ephemeral(interaction, "✅ Cores dos cards atualizadas.")
+
     async def _update_approval_config(
         self,
         interaction: discord.Interaction,

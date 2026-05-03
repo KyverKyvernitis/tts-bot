@@ -31,6 +31,7 @@ CID_CUST_MODAL_BTN = "forms:cust:modal"
 CID_CUST_RESPONSE_BTN = "forms:cust:response"
 CID_CUST_APPROVAL_EDIT_BTN = "forms:cust:approval_edit"
 CID_CUST_OPTIONS_BTN = "forms:cust:options"
+CID_CUST_COLORS_BTN = "forms:cust:colors"
 CID_CUST_DELETE_BTN = "forms:cust:delete"
 CID_FIELDS_SELECT = "forms:fields:select"
 CID_FIELDS_ADD_BTN = "forms:fields:add"
@@ -86,6 +87,7 @@ DEFAULT_PANEL = {
     "button_emoji": "📝",
     "button_style": "primary",
     "media_url": "",
+    "accent_color": "#5865F2",
 }
 
 DEFAULT_MODAL_FIELDS = [
@@ -155,6 +157,7 @@ DEFAULT_RESPONSE = {
     "intro": "",
     "footer": "Enviado por {user} • ID `{user_id}`",
     "media_url": "",
+    "accent_color": "#5865F2",
 }
 
 DEFAULT_APPROVAL = {

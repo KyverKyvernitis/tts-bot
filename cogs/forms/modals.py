@@ -8,6 +8,8 @@ import discord
 from .constants import (
     BUTTON_EMOJI_MAX,
     BUTTON_LABEL_MAX,
+    DEFAULT_PANEL,
+    DEFAULT_RESPONSE,
     FIELD_CONFIG_MAX,
     FIELD_LENGTH_CONFIG_MAX,
     FIELD_VALUE_LONG_MAX,
@@ -94,6 +96,64 @@ def _make_style_radio_group(current: str | None, *, default: str = "primary"):
 
 def _selected_style(group, fallback: str = "primary") -> str:
     return _style_value(getattr(group, "value", None) or fallback, fallback)
+
+
+_ACCENT_COLOR_PRESETS = {
+    "default": ("Azul/Roxo", "#5865F2", "Cor padrão do Discord"),
+    "gray": ("Cinza", "#747F8D", "Cor neutra"),
+    "green": ("Verde", "#57F287", "Cor positiva"),
+    "red": ("Vermelho", "#ED4245", "Cor de alerta"),
+    "yellow": ("Amarelo", "#FEE75C", "Cor chamativa"),
+    "pink": ("Rosa", "#EB459E", "Cor destacada"),
+    "purple": ("Roxo", "#9B59B6", "Cor alternativa"),
+    "custom": ("Personalizada", "custom", "Usa o HEX preenchido abaixo"),
+}
+
+
+def _clean_accent_hex(raw: str | int | None, *, fallback: str = "#5865F2") -> str | None:
+    value = str(raw or "").strip()
+    if not value:
+        value = str(fallback or "#5865F2").strip()
+    if value.startswith("#"):
+        value = value[1:]
+    elif value.lower().startswith("0x"):
+        value = value[2:]
+    if len(value) == 6 and all(ch in "0123456789abcdefABCDEF" for ch in value):
+        return f"#{value.upper()}"
+    return None
+
+
+def _accent_choice_for(current: str | int | None, *, fallback: str = "#5865F2") -> tuple[str, str]:
+    hex_value = _clean_accent_hex(current, fallback=fallback) or _clean_accent_hex(fallback) or "#5865F2"
+    for key, (_, preset_hex, _) in _ACCENT_COLOR_PRESETS.items():
+        if key != "custom" and preset_hex.upper() == hex_value.upper():
+            return key, hex_value
+    return "custom", hex_value
+
+
+def _make_accent_radio_group(current: str | int | None, *, fallback: str = "#5865F2"):
+    current_key, _ = _accent_choice_for(current, fallback=fallback)
+    group = discord.ui.RadioGroup(required=True)
+    for key, (label, value, description) in _ACCENT_COLOR_PRESETS.items():
+        shown_label = f"{label} ({value})" if value != "custom" else label
+        group.add_option(
+            label=shown_label,
+            value=key,
+            description=description,
+            default=(key == current_key),
+        )
+    return group
+
+
+def _selected_accent_hex(group, custom_value: str | int | None, *, fallback: str = "#5865F2") -> tuple[str | None, str | None]:
+    value = str(getattr(group, "value", "") or "default")
+    if value == "custom":
+        hex_value = _clean_accent_hex(custom_value, fallback="")
+        if not hex_value:
+            return None, "Use um HEX válido, tipo #5865F2, 5865F2 ou 0x5865F2."
+        return hex_value, None
+    preset = _ACCENT_COLOR_PRESETS.get(value) or _ACCENT_COLOR_PRESETS["default"]
+    return str(preset[1]), None
 
 
 def _parse_lengths(raw: str, *, fallback_min: int = 0, fallback_max: int = FIELD_VALUE_SHORT_MAX) -> tuple[int, int]:
@@ -538,6 +598,76 @@ class ApprovalEditModal(discord.ui.Modal):
             reject_emoji=reject_emoji,
             approve_dm=str(self.approve_dm_input.value or "").strip(),
             reject_dm=str(self.reject_dm_input.value or "").strip(),
+        )
+
+
+class AccentColorsModal(discord.ui.Modal):
+    """Edita a cor lateral dos Containers Components V2."""
+
+    def __init__(self, cog: "FormsCog", guild_id: int):
+        super().__init__(title="Cores do card")
+        self.cog = cog
+        self.guild_id = int(guild_id)
+
+        if not all(hasattr(discord.ui, attr) for attr in ("Label", "RadioGroup")):
+            raise RuntimeError("discord.py 2.7+ é necessário para cores por RadioGroup em modal.")
+
+        cfg = cog._get_config(guild_id)
+        panel = cfg.get("panel") or {}
+        response = cfg.get("response") or {}
+
+        _, panel_hex = _accent_choice_for(panel.get("accent_color"), fallback=DEFAULT_PANEL.get("accent_color") or "#5865F2")
+        _, response_hex = _accent_choice_for(response.get("accent_color"), fallback=DEFAULT_RESPONSE.get("accent_color") or "#5865F2")
+
+        self.panel_group = _make_accent_radio_group(panel.get("accent_color"), fallback=DEFAULT_PANEL.get("accent_color") or "#5865F2")
+        self.response_group = _make_accent_radio_group(response.get("accent_color"), fallback=DEFAULT_RESPONSE.get("accent_color") or "#5865F2")
+        self.panel_custom_input = discord.ui.TextInput(
+            label="HEX personalizado do formulário",
+            default=panel_hex,
+            placeholder="#5865F2",
+            max_length=16,
+            required=False,
+        )
+        self.response_custom_input = discord.ui.TextInput(
+            label="HEX personalizado da resposta",
+            default=response_hex,
+            placeholder="#5865F2",
+            max_length=16,
+            required=False,
+        )
+
+        self.add_item(discord.ui.Label(
+            text="Cor lateral do formulário",
+            description="Muda a barrinha do card público.",
+            component=self.panel_group,
+        ))
+        self.add_item(self.panel_custom_input)
+        self.add_item(discord.ui.Label(
+            text="Cor lateral da resposta",
+            description="Muda a barrinha da mensagem enviada para a staff.",
+            component=self.response_group,
+        ))
+        self.add_item(self.response_custom_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        panel_hex, panel_error = _selected_accent_hex(
+            self.panel_group,
+            str(self.panel_custom_input.value or ""),
+            fallback=DEFAULT_PANEL.get("accent_color") or "#5865F2",
+        )
+        response_hex, response_error = _selected_accent_hex(
+            self.response_group,
+            str(self.response_custom_input.value or ""),
+            fallback=DEFAULT_RESPONSE.get("accent_color") or "#5865F2",
+        )
+        if panel_error or response_error or not panel_hex or not response_hex:
+            await interaction.response.send_message(f"❌ {panel_error or response_error}", ephemeral=True)
+            return
+
+        await self.cog._update_accent_colors(
+            interaction,
+            panel_accent_color=panel_hex,
+            response_accent_color=response_hex,
         )
 
 

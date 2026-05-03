@@ -1860,6 +1860,7 @@ def _settingsdb_forms_defaults() -> Dict[str, Any]:
             "button_emoji": "📝",
             "button_style": "primary",
             "media_url": "",
+            "accent_color": "#5865F2",
         },
         "modal": {
             "title": "Nova verificação",
@@ -1916,6 +1917,7 @@ def _settingsdb_forms_defaults() -> Dict[str, Any]:
             "intro": "",
             "footer": "Enviado por {user} • ID `{user_id}`",
             "media_url": "",
+            "accent_color": "#5865F2",
         },
         "approval": {
             "enabled": False,
@@ -1953,7 +1955,7 @@ def _settingsdb_get_forms_config(self, guild_id: int) -> Dict[str, Any]:
         }
 
     panel = raw.get("panel") or {}
-    for k in ("title", "description", "button_label", "button_emoji", "button_style", "media_url"):
+    for k in ("title", "description", "button_label", "button_emoji", "button_style", "media_url", "accent_color"):
         v = panel.get(k)
         if v is not None:
             base["panel"][k] = str(v)
@@ -1995,7 +1997,7 @@ def _settingsdb_get_forms_config(self, guild_id: int) -> Dict[str, Any]:
         body = str(response.get("body") or "").strip()
         if body and body != "{descricao}":
             base["response"]["intro"] = body
-    for k in ("title", "intro", "footer", "media_url"):
+    for k in ("title", "intro", "footer", "media_url", "accent_color"):
         v = response.get(k)
         if v is not None:
             base["response"][k] = str(v)
