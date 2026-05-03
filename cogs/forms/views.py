@@ -188,6 +188,7 @@ class ResponseReviewView(discord.ui.LayoutView):
         *,
         status: str = "",
         reviewer_mention: str = "",
+        force_buttons: bool = False,
     ):
         super().__init__(timeout=None)
         self.cog = cog
@@ -196,6 +197,7 @@ class ResponseReviewView(discord.ui.LayoutView):
         self.field_values = dict(field_values or {})
         self.status = str(status or "")
         self.reviewer_mention = str(reviewer_mention or "")
+        self.force_buttons = bool(force_buttons)
         self._build()
 
     def _build(self):
@@ -242,7 +244,7 @@ class ResponseReviewView(discord.ui.LayoutView):
             emoji = "✅" if self.status == "approved" else "❌"
             by = f" por {self.reviewer_mention}" if self.reviewer_mention else ""
             children.extend([discord.ui.Separator(), discord.ui.TextDisplay(f"## {emoji} {label}{by}")])
-        elif bool(approval.get("enabled", False)):
+        elif bool(approval.get("enabled", False)) or self.force_buttons:
             approve_label = _truncate(approval.get("approve_label") or DEFAULT_APPROVAL["approve_label"], BUTTON_LABEL_MAX)
             reject_label = _truncate(approval.get("reject_label") or DEFAULT_APPROVAL["reject_label"], BUTTON_LABEL_MAX)
             approve_btn = discord.ui.Button(

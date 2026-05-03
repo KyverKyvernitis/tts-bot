@@ -104,6 +104,7 @@ class FormsCog(commands.Cog):
         # Registro de quais (guild_id, message_id) já tiveram view persistente
         # registrada, pra evitar registrar 2x em on_ready/cog_load reentrant.
         self._registered_persistent_views: set[tuple[int, int]] = set()
+        self._registered_review_views: set[tuple[int, int]] = set()
 
     @property
     def db(self):
@@ -113,10 +114,12 @@ class FormsCog(commands.Cog):
 
     async def cog_load(self):
         await self._restore_persistent_form_views()
+        await self._restore_persistent_review_views()
 
     @commands.Cog.listener()
     async def on_ready(self):
         await self._restore_persistent_form_views()
+        await self._restore_persistent_review_views()
 
     async def _restore_persistent_form_views(self):
         """Itera todas as guilds conhecidas e re-registra a FormView ativa.
@@ -127,15 +130,7 @@ class FormsCog(commands.Cog):
         db = self.db
         if db is None:
             return
-        guild_ids: set[int] = set()
-        if hasattr(db, "guild_cache"):
-            guild_ids.update(int(gid) for gid in db.guild_cache.keys() if gid)
-        for guild in getattr(self.bot, "guilds", []):
-            gid = int(getattr(guild, "id", 0) or 0)
-            if gid:
-                guild_ids.add(gid)
-
-        for gid in sorted(guild_ids):
+        for gid in sorted(self._known_guild_ids()):
             cfg = self._get_config(gid)
             mid = int(cfg.get("active_message_id") or 0)
             if not mid:
@@ -149,6 +144,56 @@ class FormsCog(commands.Cog):
                 self._registered_persistent_views.add(key)
             except Exception as e:
                 log.warning("[forms] falha ao registrar view persistente gid=%s mid=%s: %r", gid, mid, e)
+
+    def _known_guild_ids(self) -> set[int]:
+        db = self.db
+        guild_ids: set[int] = set()
+        if db is not None and hasattr(db, "guild_cache"):
+            guild_ids.update(int(gid) for gid in db.guild_cache.keys() if gid)
+        for guild in getattr(self.bot, "guilds", []):
+            gid = int(getattr(guild, "id", 0) or 0)
+            if gid:
+                guild_ids.add(gid)
+        return guild_ids
+
+    async def _restore_persistent_review_views(self):
+        """Re-registra botões Aprovar/Rejeitar de submissões pendentes.
+
+        Sem isso, mensagens de verificação enviadas antes de um restart continuam
+        aparecendo no Discord, mas os botões perdem o handler Python e o cliente
+        mostra "Esta interação falhou".
+        """
+        if self.db is None:
+            return
+
+        for gid in sorted(self._known_guild_ids()):
+            cfg = self._get_config(gid)
+            pending = self._normalize_pending_reviews(cfg.get("pending_reviews"))
+            if pending != cfg.get("pending_reviews"):
+                cfg["pending_reviews"] = pending
+                await self._save_config(gid, cfg)
+
+            for entry in pending:
+                message_id = int(entry.get("message_id") or 0)
+                channel_id = int(entry.get("channel_id") or 0)
+                applicant_id = int(entry.get("applicant_id") or 0)
+                if not (message_id and channel_id and applicant_id):
+                    continue
+                key = (gid, message_id)
+                if key in self._registered_review_views:
+                    continue
+                try:
+                    view = ResponseReviewView(
+                        self,
+                        guild_id=gid,
+                        applicant_id=applicant_id,
+                        field_values=dict(entry.get("field_values") or {}),
+                        force_buttons=True,
+                    )
+                    self.bot.add_view(view, message_id=message_id)
+                    self._registered_review_views.add(key)
+                except Exception as e:
+                    log.warning("[forms] falha ao registrar review persistente gid=%s mid=%s: %r", gid, message_id, e)
 
     # ===== Config helpers =====
 
@@ -206,6 +251,7 @@ class FormsCog(commands.Cog):
             "active_message_id": 0,
             "active_c_trigger": {"channel_id": 0, "message_id": 0},
             "active_c_panel": {"channel_id": 0, "message_id": 0},
+            "pending_reviews": [],
             "panel": deepcopy(DEFAULT_PANEL),
             "modal": deepcopy(DEFAULT_MODAL),
             "response": deepcopy(DEFAULT_RESPONSE),
@@ -461,6 +507,78 @@ class FormsCog(commands.Cog):
 
         return True
 
+    # ===== Pending review persistence =====
+
+    @staticmethod
+    def _normalize_pending_reviews(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for raw in value:
+            if not isinstance(raw, dict):
+                continue
+            message_id = int(raw.get("message_id") or 0)
+            channel_id = int(raw.get("channel_id") or 0)
+            applicant_id = int(raw.get("applicant_id") or 0)
+            if not (message_id and channel_id and applicant_id) or message_id in seen:
+                continue
+            seen.add(message_id)
+            field_values_raw = raw.get("field_values") or {}
+            field_values = {str(k): str(v or "") for k, v in dict(field_values_raw).items()} if isinstance(field_values_raw, dict) else {}
+            normalized.append({
+                "message_id": message_id,
+                "channel_id": channel_id,
+                "applicant_id": applicant_id,
+                "field_values": field_values,
+                "status": "pending",
+            })
+        return normalized
+
+    def _find_pending_review(self, guild_id: int, message_id: int) -> dict[str, Any] | None:
+        cfg = self._get_config(int(guild_id))
+        for entry in self._normalize_pending_reviews(cfg.get("pending_reviews")):
+            if int(entry.get("message_id") or 0) == int(message_id or 0):
+                return entry
+        return None
+
+    async def _save_pending_review(
+        self,
+        guild_id: int,
+        *,
+        channel_id: int,
+        message_id: int,
+        applicant_id: int,
+        field_values: dict[str, str],
+    ):
+        cfg = self._get_config(int(guild_id))
+        pending = [
+            entry for entry in self._normalize_pending_reviews(cfg.get("pending_reviews"))
+            if int(entry.get("message_id") or 0) != int(message_id)
+        ]
+        pending.append({
+            "message_id": int(message_id),
+            "channel_id": int(channel_id),
+            "applicant_id": int(applicant_id),
+            "field_values": {str(k): str(v or "") for k, v in dict(field_values or {}).items()},
+            "status": "pending",
+        })
+        # Evita crescimento infinito caso um servidor receba muitas submissões
+        # e a staff apague mensagens manualmente sem revisar. Mantém as mais novas.
+        cfg["pending_reviews"] = pending[-250:]
+        await self._save_config(int(guild_id), cfg)
+        self._registered_review_views.add((int(guild_id), int(message_id)))
+
+    async def _remove_pending_review(self, guild_id: int, message_id: int):
+        cfg = self._get_config(int(guild_id))
+        pending = [
+            entry for entry in self._normalize_pending_reviews(cfg.get("pending_reviews"))
+            if int(entry.get("message_id") or 0) != int(message_id or 0)
+        ]
+        cfg["pending_reviews"] = pending
+        await self._save_config(int(guild_id), cfg)
+        self._registered_review_views.discard((int(guild_id), int(message_id or 0)))
+
     # ===== Submission handling =====
 
     async def _handle_submit_click(self, interaction: discord.Interaction, guild_id: int):
@@ -522,7 +640,7 @@ class FormsCog(commands.Cog):
         )
 
         try:
-            await resp_channel.send(view=response_view)
+            sent = await resp_channel.send(view=response_view)
         except (discord.Forbidden, discord.HTTPException) as e:
             log.warning("[forms] falha ao postar resposta gid=%s: %r", guild_id, e)
             await self._safe_send_ephemeral(
@@ -531,6 +649,15 @@ class FormsCog(commands.Cog):
                 "Avisa um staff.",
             )
             return
+
+        if bool((cfg.get("approval") or {}).get("enabled", False)):
+            await self._save_pending_review(
+                guild_id,
+                channel_id=int(resp_channel.id),
+                message_id=int(sent.id),
+                applicant_id=int(getattr(interaction.user, "id", 0) or 0),
+                field_values=field_values,
+            )
 
         await self._safe_send_ephemeral(interaction, "✅ Formulário enviado!")
 
@@ -718,6 +845,7 @@ class FormsCog(commands.Cog):
             "button_emoji": button_emoji,
             "button_style": str(old.get("button_style") or DEFAULT_PANEL.get("button_style") or "primary"),
             "media_url": media_url,
+            "accent_color": str(old.get("accent_color") or DEFAULT_PANEL.get("accent_color") or "#5865F2"),
         }
         await self._save_config(guild_id, cfg)
         await self._rerender_active_form(guild_id)
@@ -860,11 +988,13 @@ class FormsCog(commands.Cog):
         await self._safe_defer_ephemeral(interaction)
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
+        old = dict(cfg.get("response") or DEFAULT_RESPONSE)
         cfg["response"] = {
             "title": title,
             "intro": intro,
             "footer": footer,
             "media_url": media_url,
+            "accent_color": str(old.get("accent_color") or DEFAULT_RESPONSE.get("accent_color") or "#5865F2"),
         }
         await self._save_config(guild_id, cfg)
         await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0))
@@ -1066,6 +1196,21 @@ class FormsCog(commands.Cog):
             pass
 
         guild_id = int(interaction.guild_id or view.guild_id)
+        message_id = int(getattr(getattr(interaction, "message", None), "id", 0) or 0)
+        pending_entry = self._find_pending_review(guild_id, message_id) if message_id else None
+        if message_id and pending_entry is None and not view.status:
+            await self._safe_send_ephemeral(
+                interaction,
+                "⚠️ Esta verificação não está mais pendente ou já foi finalizada.",
+            )
+            return
+
+        # Depois de restart, a view é reconstruída do banco. Usa os dados salvos
+        # como fonte da verdade para não depender de estado antigo em memória.
+        if pending_entry is not None:
+            view.applicant_id = int(pending_entry.get("applicant_id") or view.applicant_id)
+            view.field_values = dict(pending_entry.get("field_values") or view.field_values)
+
         cfg = self._get_config(guild_id)
         approval = cfg.get("approval") or DEFAULT_APPROVAL
         applicant = None
@@ -1107,11 +1252,19 @@ class FormsCog(commands.Cog):
             status=new_status,
             reviewer_mention=getattr(interaction.user, "mention", ""),
         )
+        edit_ok = False
         try:
             if interaction.message is not None:
                 await interaction.message.edit(view=new_view)
+                edit_ok = True
         except (discord.Forbidden, discord.HTTPException):
             pass
+
+        # Se a mensagem foi atualizada, os botões sumiram e a submissão não
+        # precisa mais ser reativada no próximo boot. Se a edição falhar,
+        # mantemos no banco para pelo menos registrar o handler novamente.
+        if message_id and edit_ok:
+            await self._remove_pending_review(guild_id, message_id)
 
         label = "aprovado" if approved else "rejeitado"
         try:

@@ -1853,6 +1853,7 @@ def _settingsdb_forms_defaults() -> Dict[str, Any]:
         "active_message_id": 0,
         "active_c_trigger": {"channel_id": 0, "message_id": 0},
         "active_c_panel": {"channel_id": 0, "message_id": 0},
+        "pending_reviews": [],
         "panel": {
             "title": "📝 Formulário de verificação",
             "description": "Clique no botão abaixo pra preencher sua verificação.",
@@ -1953,6 +1954,31 @@ def _settingsdb_get_forms_config(self, guild_id: int) -> Dict[str, Any]:
             "channel_id": int(entry.get("channel_id") or 0),
             "message_id": int(entry.get("message_id") or 0),
         }
+
+    pending_reviews = raw.get("pending_reviews") or []
+    if isinstance(pending_reviews, list):
+        normalized_pending = []
+        seen_messages = set()
+        for item in pending_reviews:
+            if not isinstance(item, dict):
+                continue
+            message_id = int(item.get("message_id") or 0)
+            channel_id = int(item.get("channel_id") or 0)
+            applicant_id = int(item.get("applicant_id") or 0)
+            if not (message_id and channel_id and applicant_id) or message_id in seen_messages:
+                continue
+            seen_messages.add(message_id)
+            values = item.get("field_values") or {}
+            if not isinstance(values, dict):
+                values = {}
+            normalized_pending.append({
+                "message_id": message_id,
+                "channel_id": channel_id,
+                "applicant_id": applicant_id,
+                "field_values": {str(k): str(v or "") for k, v in values.items()},
+                "status": "pending",
+            })
+        base["pending_reviews"] = normalized_pending[-250:]
 
     panel = raw.get("panel") or {}
     for k in ("title", "description", "button_label", "button_emoji", "button_style", "media_url", "accent_color"):
