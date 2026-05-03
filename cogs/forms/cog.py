@@ -755,6 +755,39 @@ class FormsCog(commands.Cog):
         await self._save_config(guild_id, cfg)
         await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0), interaction=interaction)
 
+    async def _update_approval_options(
+        self,
+        interaction: discord.Interaction,
+        *,
+        enabled: bool,
+        role_id: int,
+        panel_style: str,
+        approve_style: str,
+        reject_style: str,
+    ):
+        guild_id = int(interaction.guild_id or 0)
+
+        def clean_style(value: str, fallback: str) -> str:
+            value = str(value or fallback).strip().lower()
+            return value if value in {"primary", "secondary", "success", "danger"} else fallback
+
+        cfg = self._get_config(guild_id)
+        panel = dict(cfg.get("panel") or DEFAULT_PANEL)
+        approval = dict(cfg.get("approval") or DEFAULT_APPROVAL)
+
+        panel["button_style"] = clean_style(panel_style, "primary")
+        approval["enabled"] = bool(enabled)
+        approval["role_id"] = max(0, int(role_id or 0))
+        approval["approve_style"] = clean_style(approve_style, "success")
+        approval["reject_style"] = clean_style(reject_style, "danger")
+
+        cfg["panel"] = panel
+        cfg["approval"] = approval
+        await self._save_config(guild_id, cfg)
+        await self._rerender_active_form(guild_id)
+        await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0))
+        await self._safe_send_ephemeral(interaction, "✅ Opções atualizadas.")
+
     async def _update_approval_config(
         self,
         interaction: discord.Interaction,

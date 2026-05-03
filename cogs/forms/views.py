@@ -15,11 +15,12 @@ import discord
 from .constants import (
     BUTTON_LABEL_MAX,
     CID_CUST_APPROVAL_EDIT_BTN,
+    CID_CUST_APPROVAL_ROLE_CLEAR_BTN,
     CID_CUST_APPROVAL_ROLE_SELECT,
-    CID_CUST_BUTTON_STYLE_SELECT_PREFIX,
     CID_CUST_APPROVAL_TOGGLE_BTN,
     CID_CUST_DELETE_BTN,
     CID_CUST_MODAL_BTN,
+    CID_CUST_OPTIONS_BTN,
     CID_CUST_PANEL_BTN,
     CID_CUST_RESPONSE_BTN,
     CID_REVIEW_APPROVE_PREFIX,
@@ -260,14 +261,31 @@ class ResponseReviewView(discord.ui.LayoutView):
 
 
 class _ApprovalRoleSelect(discord.ui.RoleSelect):
-    def __init__(self, parent: "CustomizationPanelView"):
-        super().__init__(
-            placeholder="Cargo dado ao aprovar (opcional)",
-            min_values=1,
-            max_values=1,
-            custom_id=CID_CUST_APPROVAL_ROLE_SELECT,
-        )
+    def __init__(self, parent: "CustomizationPanelView", *, role_id: int = 0):
         self.parent_view = parent
+        role_id = int(role_id or 0)
+
+        default_values = []
+        placeholder = "Escolher cargo ao aprovar"
+        guild = parent.cog.bot.get_guild(parent.guild_id) if getattr(parent.cog, "bot", None) is not None else None
+        if role_id:
+            role = guild.get_role(role_id) if guild is not None else None
+            if role is not None:
+                default_values = [role]
+                placeholder = f"Atual: {role.name}"[:150]
+            else:
+                default_values = [discord.Object(id=role_id)]
+                placeholder = "Cargo atual salvo fora do cache"
+
+        kwargs = {
+            "placeholder": placeholder,
+            "min_values": 1,
+            "max_values": 1,
+            "custom_id": CID_CUST_APPROVAL_ROLE_SELECT,
+        }
+        if default_values:
+            kwargs["default_values"] = default_values
+        super().__init__(**kwargs)
 
     async def callback(self, interaction: discord.Interaction):
         if not await self.parent_view.interaction_check(interaction):
@@ -279,50 +297,6 @@ class _ApprovalRoleSelect(discord.ui.RoleSelect):
         await self.parent_view.cog._set_approval_role(interaction, int(role.id))
 
 
-class _ButtonStyleSelect(discord.ui.Select):
-    STYLE_OPTIONS = (
-        ("primary", "Azul/Roxo", "🟦", "Cor principal do Discord"),
-        ("secondary", "Cinza", "⬛", "Cor neutra"),
-        ("success", "Verde", "🟩", "Cor positiva"),
-        ("danger", "Vermelho", "🟥", "Cor de alerta"),
-    )
-
-    def __init__(self, parent: "CustomizationPanelView", *, target: str, current_style: str | None):
-        self.parent_view = parent
-        self.target = str(target)
-        current = _style_value(current_style, "primary")
-        target_labels = {
-            "panel": "Cor do botão Preencher",
-            "approve": "Cor do botão Aprovar",
-            "reject": "Cor do botão Rejeitar",
-        }
-        options = [
-            discord.SelectOption(
-                label=label,
-                value=value,
-                emoji=emoji,
-                description=description,
-                default=(value == current),
-            )
-            for value, label, emoji, description in self.STYLE_OPTIONS
-        ]
-        super().__init__(
-            placeholder=target_labels.get(self.target, "Cor do botão"),
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id=f"{CID_CUST_BUTTON_STYLE_SELECT_PREFIX}:{self.target}",
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        if not await self.parent_view.interaction_check(interaction):
-            return
-        style_name = str(self.values[0] if self.values else "primary")
-        await self.parent_view.cog._set_button_style(
-            interaction,
-            target=self.target,
-            style_name=style_name,
-        )
 
 
 class CustomizationPanelView(discord.ui.LayoutView):
@@ -398,6 +372,13 @@ class CustomizationPanelView(discord.ui.LayoutView):
             custom_id=CID_CUST_APPROVAL_EDIT_BTN,
         )
         approval_edit_btn.callback = self._on_approval_edit
+        options_btn = discord.ui.Button(
+            label="Editar opções",
+            emoji="☑️",
+            style=discord.ButtonStyle.secondary,
+            custom_id=CID_CUST_OPTIONS_BTN,
+        )
+        options_btn.callback = self._on_options
         delete_btn = discord.ui.Button(
             label="Apagar painel",
             emoji="🗑️",
@@ -410,51 +391,43 @@ class CustomizationPanelView(discord.ui.LayoutView):
             discord.ui.Container(
                 discord.ui.TextDisplay("# ⚙️ Customização do formulário"),
                 discord.ui.TextDisplay(
-                    "Painel compacto, sem previews. Edite textos por modal e escolha cores/cargos pelos menus.\n\n"
+                    "Painel compacto, sem previews. Textos ficam em modais; opções marcáveis ficam no modal moderno **Editar opções**.\n\n"
                     f"**Canal do formulário:** {f'<#{form_ch_id}>' if form_ch_id else '_não configurado_'}\n"
                     f"**Canal das respostas:** {f'<#{resp_ch_id}>' if resp_ch_id else '_não configurado_'}\n"
                     f"**Campos do formulário:** {field_summary}\n"
                     f"**Mídia do painel:** {media_panel}\n"
                     f"**Mídia da resposta:** {media_response}\n"
                     f"**Aprovação:** **{approval_state}**\n"
-                    f"**Cargo ao aprovar:** {role_text}\n\n"
+                    f"**Cargo ao aprovar:** {role_text}\n"
+                    f"**Cores:** Preencher {_style_label(panel.get('button_style') or DEFAULT_PANEL.get('button_style'))} • Aprovar {_style_label(approval.get('approve_style') or DEFAULT_APPROVAL.get('approve_style'))} • Rejeitar {_style_label(approval.get('reject_style') or DEFAULT_APPROVAL.get('reject_style'))}\n\n"
                     "A mensagem `c` fica no chat enquanto este painel existir. Ela só é apagada quando outro `c` for enviado por staff ou quando você clicar em **Apagar painel**."
                 ),
                 discord.ui.Separator(),
                 discord.ui.ActionRow(panel_btn, modal_btn, response_btn),
-                discord.ui.ActionRow(toggle_btn, approval_edit_btn, delete_btn),
+                discord.ui.ActionRow(toggle_btn, approval_edit_btn, options_btn, delete_btn),
                 accent_color=discord.Color.gold(),
             )
         )
 
-        color_items: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("## 🎨 Cores dos botões"),
-            discord.ui.TextDisplay(
-                "Modais do Discord não têm checkbox/select interno, então as escolhas marcáveis ficam aqui.\n\n"
-                f"**Preencher:** {_style_label(panel.get('button_style') or DEFAULT_PANEL.get('button_style'))}\n"
-                f"**Aprovar:** {_style_label(approval.get('approve_style') or DEFAULT_APPROVAL.get('approve_style'))}\n"
-                f"**Rejeitar:** {_style_label(approval.get('reject_style') or DEFAULT_APPROVAL.get('reject_style'))}"
-            ),
-            discord.ui.Separator(),
-            discord.ui.ActionRow(_ButtonStyleSelect(self, target="panel", current_style=panel.get("button_style") or DEFAULT_PANEL.get("button_style"))),
-        ]
-        color_items.extend([
-            discord.ui.ActionRow(_ButtonStyleSelect(self, target="approve", current_style=approval.get("approve_style") or DEFAULT_APPROVAL.get("approve_style"))),
-            discord.ui.ActionRow(_ButtonStyleSelect(self, target="reject", current_style=approval.get("reject_style") or DEFAULT_APPROVAL.get("reject_style"))),
-        ])
-        self.add_item(
-            discord.ui.Container(
-                *color_items,
-                accent_color=discord.Color.blurple(),
-            )
-        )
-
         if approval_enabled:
+            clear_role_btn = discord.ui.Button(
+                label="Limpar cargo",
+                emoji="🧹",
+                style=discord.ButtonStyle.secondary,
+                custom_id=CID_CUST_APPROVAL_ROLE_CLEAR_BTN,
+                disabled=not bool(role_id),
+            )
+            clear_role_btn.callback = self._on_clear_role
             self.add_item(
                 discord.ui.Container(
                     discord.ui.TextDisplay("## 🎭 Cargo ao aprovar"),
-                    discord.ui.TextDisplay("Selecione o cargo que o botão **Aprovar** vai entregar. Se nenhum cargo for escolhido, ele só envia a DM."),
-                    discord.ui.ActionRow(_ApprovalRoleSelect(self)),
+                    discord.ui.TextDisplay(
+                        "Selecione o cargo que o botão **Aprovar** vai entregar. "
+                        f"\n**Cargo atual:** {role_text}\n"
+                        "Se nenhum cargo ficar configurado, o botão só envia a DM."
+                    ),
+                    discord.ui.ActionRow(_ApprovalRoleSelect(self, role_id=role_id)),
+                    discord.ui.ActionRow(clear_role_btn),
                     accent_color=discord.Color.green(),
                 )
             )
@@ -493,6 +466,16 @@ class CustomizationPanelView(discord.ui.LayoutView):
     async def _on_approval_edit(self, interaction: discord.Interaction):
         from .modals import ApprovalEditModal
         await interaction.response.send_modal(ApprovalEditModal(self.cog, self.guild_id))
+
+    async def _on_options(self, interaction: discord.Interaction):
+        from .modals import ApprovalOptionsModal
+        try:
+            await interaction.response.send_modal(ApprovalOptionsModal(self.cog, self.guild_id))
+        except RuntimeError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+
+    async def _on_clear_role(self, interaction: discord.Interaction):
+        await self.cog._set_approval_role(interaction, 0)
 
     async def _on_delete(self, interaction: discord.Interaction):
         try:

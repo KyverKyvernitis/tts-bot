@@ -6,8 +6,8 @@
   linhas "Label | Placeholder" para caber no limite de 5 inputs do Discord.
 - ResponseEditModal: edita a aparência da mensagem enviada ao canal da staff.
 - ApprovalEditModal: edita textos/emoji e DMs de aprovação/rejeição.
-  Cores dos botões ficam em selects no painel `c` porque modal do Discord
-  só aceita campo de texto.
+- ApprovalOptionsModal: usa componentes novos de modal (RadioGroup,
+  Checkbox e RoleSelect) para opções marcáveis, cores e cargo.
 """
 from __future__ import annotations
 
@@ -58,6 +58,44 @@ def _parse_modal_config_line(raw: str, *, fallback_label: str, fallback_placehol
         placeholder = placeholder.strip()
         return label, placeholder
     return raw.strip() or fallback_label, fallback_placeholder
+
+
+def _style_value(name: str | None, default: str = "primary") -> str:
+    name = str(name or "").strip().lower()
+    aliases = {
+        "primary": "primary",
+        "blurple": "primary",
+        "secondary": "secondary",
+        "gray": "secondary",
+        "grey": "secondary",
+        "success": "success",
+        "green": "success",
+        "danger": "danger",
+        "red": "danger",
+    }
+    return aliases.get(name, default)
+
+
+def _make_style_radio_group(current: str | None, *, default: str = "primary"):
+    current = _style_value(current, default)
+    group = discord.ui.RadioGroup(required=True)
+    for value, label, description in (
+        ("primary", "Azul/Roxo", "Cor principal do Discord"),
+        ("secondary", "Cinza", "Cor neutra"),
+        ("success", "Verde", "Cor positiva"),
+        ("danger", "Vermelho", "Cor de alerta"),
+    ):
+        group.add_option(
+            label=label,
+            value=value,
+            description=description,
+            default=(value == current),
+        )
+    return group
+
+
+def _selected_style(group, fallback: str = "primary") -> str:
+    return _style_value(getattr(group, "value", None) or fallback, fallback)
 
 
 class FormSubmissionModal(discord.ui.Modal):
@@ -312,8 +350,8 @@ class ResponseEditModal(discord.ui.Modal):
 class ApprovalEditModal(discord.ui.Modal):
     """Edita texto/emoji dos botões e as DMs.
 
-    As cores são escolhidas por select menu no painel `c`, porque modais
-    do Discord não suportam checkbox/select/opção marcável.
+    Cores, liga/desliga e cargo ficam no ApprovalOptionsModal, usando
+    os componentes modernos de modal do discord.py 2.7.
     """
 
     def __init__(self, cog: "FormsCog", guild_id: int):
@@ -377,4 +415,88 @@ class ApprovalEditModal(discord.ui.Modal):
             reject_emoji=reject_emoji,
             approve_dm=str(self.approve_dm_input.value or "").strip(),
             reject_dm=str(self.reject_dm_input.value or "").strip(),
+        )
+
+
+class ApprovalOptionsModal(discord.ui.Modal):
+    """Opções rápidas usando RadioGroup, Checkbox e RoleSelect dentro do modal.
+
+    Requer discord.py 2.7+, que já está definido no requirements do projeto.
+    """
+
+    def __init__(self, cog: "FormsCog", guild_id: int):
+        super().__init__(title="Opções do formulário")
+        self.cog = cog
+        self.guild_id = int(guild_id)
+
+        if not all(hasattr(discord.ui, attr) for attr in ("Label", "Checkbox", "RadioGroup", "RoleSelect")):
+            raise RuntimeError("discord.py 2.7+ é necessário para opções marcáveis em modal.")
+
+        cfg = cog._get_config(guild_id)
+        panel = cfg.get("panel") or {}
+        approval = cfg.get("approval") or {}
+        role_id = int(approval.get("role_id") or 0)
+        self.current_role_id = role_id
+
+        self.enabled_checkbox = discord.ui.Checkbox(default=bool(approval.get("enabled", False)))
+        self.panel_style_group = _make_style_radio_group(panel.get("button_style"), default="primary")
+        self.approve_style_group = _make_style_radio_group(approval.get("approve_style"), default="success")
+        self.reject_style_group = _make_style_radio_group(approval.get("reject_style"), default="danger")
+
+        default_values = []
+        placeholder = "Cargo dado ao aprovar (opcional)"
+        guild = cog.bot.get_guild(int(guild_id)) if getattr(cog, "bot", None) is not None else None
+        if role_id:
+            role = guild.get_role(role_id) if guild is not None else None
+            if role is not None:
+                default_values = [role]
+                placeholder = f"Atual: {role.name}"[:150]
+            else:
+                # Object implementa Snowflake e evita quebrar caso o cargo esteja fora do cache.
+                default_values = [discord.Object(id=role_id)]
+                placeholder = "Cargo atual salvo fora do cache"
+
+        self.role_select = discord.ui.RoleSelect(
+            placeholder=placeholder,
+            min_values=0,
+            max_values=1,
+            required=False,
+            default_values=default_values,
+        )
+
+        self.add_item(discord.ui.Label(
+            text="Aprovação",
+            description="Marcado = as respostas terão botões Aprovar/Rejeitar.",
+            component=self.enabled_checkbox,
+        ))
+        self.add_item(discord.ui.Label(
+            text="Cor do botão Preencher",
+            component=self.panel_style_group,
+        ))
+        self.add_item(discord.ui.Label(
+            text="Cor do botão Aprovar",
+            component=self.approve_style_group,
+        ))
+        self.add_item(discord.ui.Label(
+            text="Cor do botão Rejeitar",
+            component=self.reject_style_group,
+        ))
+        self.add_item(discord.ui.Label(
+            text="Cargo ao aprovar",
+            description="Para remover o cargo salvo, use Limpar cargo no painel.",
+            component=self.role_select,
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        role_id = int(getattr(self, "current_role_id", 0) or 0)
+        if getattr(self.role_select, "values", None):
+            role_id = int(self.role_select.values[0].id)
+
+        await self.cog._update_approval_options(
+            interaction,
+            enabled=bool(getattr(self.enabled_checkbox, "value", False)),
+            role_id=role_id,
+            panel_style=_selected_style(self.panel_style_group, "primary"),
+            approve_style=_selected_style(self.approve_style_group, "success"),
+            reject_style=_selected_style(self.reject_style_group, "danger"),
         )

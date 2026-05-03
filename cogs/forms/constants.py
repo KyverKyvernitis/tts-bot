@@ -31,9 +31,10 @@ CID_CUST_MODAL_BTN = "forms:cust:modal"
 CID_CUST_RESPONSE_BTN = "forms:cust:response"
 CID_CUST_APPROVAL_TOGGLE_BTN = "forms:cust:approval_toggle"
 CID_CUST_APPROVAL_EDIT_BTN = "forms:cust:approval_edit"
+CID_CUST_OPTIONS_BTN = "forms:cust:options"
 CID_CUST_DELETE_BTN = "forms:cust:delete"
 CID_CUST_APPROVAL_ROLE_SELECT = "forms:cust:approval_role_select"
-CID_CUST_BUTTON_STYLE_SELECT_PREFIX = "forms:cust:button_style"
+CID_CUST_APPROVAL_ROLE_CLEAR_BTN = "forms:cust:approval_role_clear"
 
 # Setup view components
 CID_SETUP_FORM_SELECT = "forms:setup:form_select"
