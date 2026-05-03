@@ -35,7 +35,7 @@ from .constants import (
     MODAL_FIELD_LIMIT,
     SETUP_VIEW_TIMEOUT,
 )
-from .fields import field_display_summary, get_field_value, normalize_form_fields
+from .fields import get_field_value, normalize_form_fields
 
 if TYPE_CHECKING:
     from .cog import FormsCog
@@ -78,6 +78,20 @@ def _format_field_block(label: str, value: str) -> str:
     label = str(label or "Campo").strip() or "Campo"
     value = str(value or "—").strip() or "—"
     return f"**{label}**\n{value}"
+
+
+def _format_config_field_lines(fields: list[dict]) -> str:
+    normalized = normalize_form_fields(fields)
+    if not normalized:
+        return "_nenhum campo configurado_"
+
+    lines: list[str] = []
+    for idx, field in enumerate(normalized, start=1):
+        label = _truncate(field.get("label") or f"Campo {idx}", 70)
+        required = "obrigatório" if field.get("required", True) else "opcional"
+        size = "longa" if field.get("long", False) else "curta"
+        lines.append(f"`{idx}.` **{label}** — {required} • {size}")
+    return "\n".join(lines)
 
 
 def _style_label(name: str | None) -> str:
@@ -558,14 +572,11 @@ class CustomizationPanelView(discord.ui.LayoutView):
         cfg = self.cog._get_config(self.guild_id)
         form_ch_id = int(cfg.get("form_channel_id") or 0)
         resp_ch_id = int(cfg.get("responses_channel_id") or 0)
-        panel = cfg.get("panel") or {}
-        response = cfg.get("response") or {}
         approval = cfg.get("approval") or {}
         fields = normalize_form_fields(cfg.get("modal") or {})
         approval_enabled = bool(approval.get("enabled", False))
         approval_state = "ativada" if approval_enabled else "desativada"
-        media_panel = "configurada" if _media_url(panel.get("media_url")) else "não configurada"
-        media_response = "configurada" if _media_url(response.get("media_url")) else "não configurada"
+        fields_text = _format_config_field_lines(fields)
 
         panel_btn = discord.ui.Button(label="Editar painel", emoji="📝", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_PANEL_BTN)
         modal_btn = discord.ui.Button(label="Editar campos", emoji="📋", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_MODAL_BTN)
@@ -587,11 +598,9 @@ class CustomizationPanelView(discord.ui.LayoutView):
             discord.ui.TextDisplay(
                 f"**Canal do formulário:** {f'<#{form_ch_id}>' if form_ch_id else '_não configurado_'}\n"
                 f"**Canal das respostas:** {f'<#{resp_ch_id}>' if resp_ch_id else '_não configurado_'}\n"
-                f"**Campos:** {len(fields)}/{MODAL_FIELD_LIMIT} — {field_display_summary(fields)}\n"
-                f"**Aprovação:** {approval_state}\n"
-                f"**Botões:** Preencher {_style_label(panel.get('button_style') or DEFAULT_PANEL.get('button_style'))} • Aprovar {_style_label(approval.get('approve_style') or DEFAULT_APPROVAL.get('approve_style'))} • Rejeitar {_style_label(approval.get('reject_style') or DEFAULT_APPROVAL.get('reject_style'))}\n"
-                f"**Cards:** formulário {_accent_color_label(panel.get('accent_color'), DEFAULT_PANEL.get('accent_color'))} • resposta {_accent_color_label(response.get('accent_color'), DEFAULT_RESPONSE.get('accent_color'))}\n"
-                f"**Mídia:** painel {media_panel} • resposta {media_response}"
+                f"**Aprovação:** {approval_state}\n\n"
+                f"**Campos:** {len(fields)}/{MODAL_FIELD_LIMIT}\n"
+                f"{fields_text}"
             ),
             discord.ui.Separator(),
             discord.ui.ActionRow(panel_btn, modal_btn, response_btn),
