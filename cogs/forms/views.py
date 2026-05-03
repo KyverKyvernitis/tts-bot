@@ -560,10 +560,8 @@ class CustomizationPanelView(discord.ui.LayoutView):
         response = cfg.get("response") or {}
         approval = cfg.get("approval") or {}
         fields = normalize_form_fields(cfg.get("modal") or {})
-        role_id = int(approval.get("role_id") or 0)
         approval_enabled = bool(approval.get("enabled", False))
         approval_state = "ativada" if approval_enabled else "desativada"
-        role_text = f"<@&{role_id}>" if role_id else "nenhum"
         media_panel = "configurada" if _media_url(panel.get("media_url")) else "não configurada"
         media_response = "configurada" if _media_url(response.get("media_url")) else "não configurada"
 
@@ -590,7 +588,6 @@ class CustomizationPanelView(discord.ui.LayoutView):
                 f"**Canal das respostas:** {f'<#{resp_ch_id}>' if resp_ch_id else '_não configurado_'}\n"
                 f"**Campos:** {len(fields)}/{MODAL_FIELD_LIMIT} — {field_display_summary(fields)}\n"
                 f"**Aprovação:** {approval_state}\n"
-                f"**Cargo ao aprovar:** {role_text}\n"
                 f"**Botões:** Preencher {_style_label(panel.get('button_style') or DEFAULT_PANEL.get('button_style'))} • Aprovar {_style_label(approval.get('approve_style') or DEFAULT_APPROVAL.get('approve_style'))} • Rejeitar {_style_label(approval.get('reject_style') or DEFAULT_APPROVAL.get('reject_style'))}\n"
                 f"**Cores dos cards:** formulário {_accent_color_label(panel.get('accent_color'), DEFAULT_PANEL.get('accent_color'))} • resposta {_accent_color_label(response.get('accent_color'), DEFAULT_RESPONSE.get('accent_color'))}\n"
                 f"**Mídia:** painel {media_panel} • resposta {media_response}\n\n"
