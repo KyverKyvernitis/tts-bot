@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import os
 import time
@@ -12,8 +13,9 @@ from .tts.aliases import format_prefixed_aliases, matches_prefixed_command
 from .tts.utils.app_commands import fetch_root_command_ids_cached, slash_mention
 
 
-HELP_EXPIRE_AFTER_SECONDS = 180.0
-HELP_DISPATCH_TIMEOUT_SECONDS = 86400.0
+HELP_EXPIRE_AFTER_SECONDS = 600.0
+HELP_MAX_SESSIONS_PER_GUILD = 5
+HELP_HEADER_EMOJI = "<a:livro:1500584783779070143>"
 
 HEALTH_COMMAND_GUILD_ID = 927002914449424404
 HEALTH_COMMAND_GUILD = discord.Object(id=HEALTH_COMMAND_GUILD_ID)
@@ -65,6 +67,7 @@ class _HelpPageJumpModal(discord.ui.Modal, title="Ir para página"):
             )
             return
         self.view_ref.page_index = target - 1
+        self.view_ref._touch()
         self.view_ref._rebuild_layout()
         await interaction.response.edit_message(view=self.view_ref)
 
@@ -86,8 +89,7 @@ class HelpPaginatorView(discord.ui.LayoutView):
         timeout: float = 180,
     ):
         requested_timeout = max(1.0, float(timeout or HELP_EXPIRE_AFTER_SECONDS))
-        dispatch_timeout = max(requested_timeout, HELP_DISPATCH_TIMEOUT_SECONDS)
-        super().__init__(timeout=dispatch_timeout)
+        super().__init__(timeout=requested_timeout)
         self.cog = cog
         self.owner_id = int(owner_id)
         self.pages = pages
@@ -96,7 +98,9 @@ class HelpPaginatorView(discord.ui.LayoutView):
         self.bot_avatar_url = bot_avatar_url
         self.page_index = 0
         self.message: discord.Message | None = None
+        self.timeout_seconds = requested_timeout
         self.expires_at_monotonic = time.monotonic() + requested_timeout
+        self._expired = False
         self._rebuild_layout()
 
     def _rebuild_layout(self) -> None:
@@ -115,7 +119,7 @@ class HelpPaginatorView(discord.ui.LayoutView):
         # página fica em cima ao invés de no fim, aí o user já sabe onde tá
         # antes mesmo de ler o corpo.
         header_text = (
-            f"-# 📖 Central de ajuda · página **{self.page_index + 1}** de **{total}**\n"
+            f"-# {HELP_HEADER_EMOJI} Página **{self.page_index + 1}** de **{total}**\n"
             f"## {page.title}"
         )
 
@@ -169,8 +173,23 @@ class HelpPaginatorView(discord.ui.LayoutView):
         )
         self.add_item(container)
 
+    def _touch(self) -> None:
+        self.expires_at_monotonic = time.monotonic() + self.timeout_seconds
+
     def _is_expired(self) -> bool:
-        return time.monotonic() >= self.expires_at_monotonic
+        return self._expired or time.monotonic() >= self.expires_at_monotonic
+
+    def _rebuild_expired_layout(self) -> None:
+        for item in list(self.children):
+            self.remove_item(item)
+        container = discord.ui.Container(
+            discord.ui.TextDisplay(
+                "Essa central de ajuda expirou porque ficou aberta por tempo demais.\n\n"
+                f"Use {self.command_mention} novamente — ou, se preferir, {self.prefix_hint}."
+            ),
+            accent_color=discord.Color.dark_grey(),
+        )
+        self.add_item(container)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self._is_expired():
@@ -189,6 +208,7 @@ class HelpPaginatorView(discord.ui.LayoutView):
             return False
 
         if int(getattr(getattr(interaction, "user", None), "id", 0) or 0) == self.owner_id:
+            self._touch()
             return True
         message = "Só quem abriu esse help pode trocar de página."
         try:
@@ -201,7 +221,22 @@ class HelpPaginatorView(discord.ui.LayoutView):
         return False
 
     async def on_timeout(self) -> None:
-        pass
+        self._expired = True
+        try:
+            await self.cog._unregister_help_session(self)
+        except Exception:
+            pass
+        self._rebuild_expired_layout()
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
+            except TypeError:
+                try:
+                    await self.message.edit(view=self)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
     async def _go_first(self, interaction: discord.Interaction):
         self.page_index = 0
@@ -236,6 +271,9 @@ class Utility(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._app_command_id_cache: dict[object, tuple[float, dict[str, int]]] = {}
+        self._help_sessions_by_user: dict[tuple[int, int], HelpPaginatorView] = {}
+        self._help_sessions_by_message: dict[int, HelpPaginatorView] = {}
+        self._help_session_lock = asyncio.Lock()
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
@@ -244,6 +282,128 @@ class Utility(commands.Cog):
         if inspect.isawaitable(value):
             return await value
         return value
+
+
+    def _help_guild_id(self, guild: discord.Guild | None) -> int:
+        return int(getattr(guild, "id", 0) or 0)
+
+    def _help_user_key(self, guild: discord.Guild | None, user_id: int) -> tuple[int, int]:
+        return (self._help_guild_id(guild), int(user_id))
+
+    async def _delete_message_safe(self, message: discord.Message | None) -> bool:
+        if message is None:
+            return True
+        try:
+            await message.delete()
+            return True
+        except Exception:
+            return False
+
+    def _unregister_help_session_now(self, view: HelpPaginatorView) -> None:
+        for key, registered in list(self._help_sessions_by_user.items()):
+            if registered is view:
+                self._help_sessions_by_user.pop(key, None)
+        message_id = int(getattr(getattr(view, "message", None), "id", 0) or 0)
+        if message_id:
+            self._help_sessions_by_message.pop(message_id, None)
+
+    async def _unregister_help_session(self, view: HelpPaginatorView) -> None:
+        async with self._help_session_lock:
+            self._unregister_help_session_now(view)
+
+    async def _close_help_session(self, view: HelpPaginatorView | None, *, delete_message: bool = True) -> None:
+        if view is None:
+            return
+        self._unregister_help_session_now(view)
+        try:
+            view.stop()
+        except Exception:
+            pass
+        if delete_message:
+            deleted = await self._delete_message_safe(getattr(view, "message", None))
+            if not deleted and getattr(view, "message", None) is not None:
+                try:
+                    view._expired = True
+                    view._rebuild_expired_layout()
+                    await view.message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+                except TypeError:
+                    try:
+                        await view.message.edit(view=view)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+    async def _help_message_missing(self, view: HelpPaginatorView) -> bool:
+        message = getattr(view, "message", None)
+        if message is None:
+            return False
+
+        flags = getattr(message, "flags", None)
+        if bool(getattr(flags, "ephemeral", False)):
+            return False
+
+        channel = getattr(message, "channel", None)
+        fetch_message = getattr(channel, "fetch_message", None)
+        if not callable(fetch_message):
+            return False
+
+        try:
+            await fetch_message(message.id)
+            return False
+        except discord.NotFound:
+            return True
+        except Exception:
+            return False
+
+    async def _cleanup_help_sessions(self, guild_id: int | None = None) -> None:
+        for key, view in list(self._help_sessions_by_user.items()):
+            if guild_id is not None and key[0] != int(guild_id):
+                continue
+            if view._is_expired() or view.is_finished() or await self._help_message_missing(view):
+                self._unregister_help_session_now(view)
+
+    def _cleanup_help_sessions_now(self) -> None:
+        for view in list(self._help_sessions_by_user.values()):
+            if view._is_expired() or view.is_finished():
+                self._unregister_help_session_now(view)
+
+    def _active_help_sessions_for_guild(self, guild_id: int) -> int:
+        self._cleanup_help_sessions_now()
+        count = 0
+        for key, view in self._help_sessions_by_user.items():
+            if key[0] == int(guild_id) and not view._is_expired() and not view.is_finished():
+                count += 1
+        return count
+
+    async def _send_help_limit_message(
+        self,
+        *,
+        responder: discord.abc.Messageable,
+        interaction: discord.Interaction | None,
+    ) -> None:
+        message = (
+            "Já existem 5 centrais de ajuda abertas neste servidor. "
+            "Feche uma delas ou espere expirar."
+        )
+        if interaction is not None:
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(message, ephemeral=True)
+                else:
+                    await interaction.response.send_message(message, ephemeral=True)
+            except Exception:
+                pass
+            return
+        try:
+            await responder.send(message, delete_after=12)
+        except TypeError:
+            try:
+                await responder.send(message)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     async def _get_prefix_data(self, guild: discord.Guild | None) -> dict[str, str]:
         defaults = {
@@ -569,6 +729,7 @@ class Utility(commands.Cog):
         responder: discord.abc.Messageable,
         interaction: discord.Interaction | None = None,
         ephemeral: bool = False,
+        prefix_command_message: discord.Message | None = None,
     ):
         prefixes = await self._get_prefix_data(guild)
         root_ids = await self._fetch_root_command_ids_cached(guild)
@@ -583,25 +744,54 @@ class Utility(commands.Cog):
             command_mention=slash_mention(root_ids, root="help", path="help"),
             prefix_hint=f"`{prefixes['bot_prefix']}help`",
             bot_avatar_url=avatar_url,
+            timeout=HELP_EXPIRE_AFTER_SECONDS,
         )
 
-        # Components V2: o conteúdo (heading + corpo + botões) vai TODO dentro
-        # do LayoutView. Não passa `embed=`, não passa `content=` — só `view=`.
-        # A flag `components_v2=True` é exigida pelo Discord pra aceitar o
-        # layout. discord.py 2.5+ sabe setar isso automaticamente quando o
-        # view é uma LayoutView, mas mantemos explícito por clareza.
-        if interaction is not None:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(view=view, ephemeral=ephemeral)
-                try:
-                    view.message = await interaction.original_response()
-                except Exception:
-                    pass
-            else:
-                view.message = await interaction.followup.send(view=view, ephemeral=ephemeral)
-            return
+        guild_id = self._help_guild_id(guild)
+        user_key = self._help_user_key(guild, int(owner.id))
 
-        view.message = await responder.send(view=view)
+        async with self._help_session_lock:
+            await self._cleanup_help_sessions(guild_id)
+
+            previous = self._help_sessions_by_user.get(user_key)
+            if previous is not None:
+                await self._close_help_session(previous, delete_message=True)
+
+            if self._active_help_sessions_for_guild(guild_id) >= HELP_MAX_SESSIONS_PER_GUILD:
+                await self._delete_message_safe(prefix_command_message)
+                await self._send_help_limit_message(responder=responder, interaction=interaction)
+                return
+
+            # Components V2: o conteúdo (heading + corpo + botões) vai TODO dentro
+            # do LayoutView. Não passa `embed=`, não passa `content=` — só `view=`.
+            if interaction is not None:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        view=view,
+                        ephemeral=ephemeral,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    try:
+                        view.message = await interaction.original_response()
+                    except Exception:
+                        pass
+                else:
+                    view.message = await interaction.followup.send(
+                        view=view,
+                        ephemeral=ephemeral,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+            else:
+                view.message = await responder.send(
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                await self._delete_message_safe(prefix_command_message)
+
+            self._help_sessions_by_user[user_key] = view
+            message_id = int(getattr(getattr(view, "message", None), "id", 0) or 0)
+            if message_id:
+                self._help_sessions_by_message[message_id] = view
 
     def _format_bool_badge(self, value: bool, *, ok_label: str = "OK", bad_label: str = "Falha") -> str:
         return f"🟢 {ok_label}" if bool(value) else f"🔴 {bad_label}"
@@ -796,6 +986,7 @@ class Utility(commands.Cog):
             guild=message.guild,
             owner=message.author,
             responder=message.channel,
+            prefix_command_message=message,
         )
 
     @app_commands.command(name="help", description="Mostra a central de ajuda com todos os comandos principais do bot")
