@@ -426,17 +426,24 @@ class FieldManagerView(discord.ui.LayoutView):
         ))
 
     async def _on_confirm_remove(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException:
+            pass
         new_index = await self.cog._remove_form_field(
             interaction,
             index=self.selected_index,
             staff_id=self.staff_id,
         )
-        await interaction.response.edit_message(view=FieldManagerView(
-            self.cog,
-            guild_id=self.guild_id,
-            staff_id=self.staff_id,
-            selected_index=new_index,
-        ))
+        try:
+            await interaction.edit_original_response(view=FieldManagerView(
+                self.cog,
+                guild_id=self.guild_id,
+                staff_id=self.staff_id,
+                selected_index=new_index,
+            ))
+        except discord.HTTPException:
+            pass
 
     async def _on_cancel_remove(self, interaction: discord.Interaction):
         await interaction.response.edit_message(view=FieldManagerView(
@@ -447,32 +454,46 @@ class FieldManagerView(discord.ui.LayoutView):
         ))
 
     async def _on_move_up(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException:
+            pass
         new_index = await self.cog._move_form_field(
             interaction,
             index=self.selected_index,
             direction=-1,
             staff_id=self.staff_id,
         )
-        await interaction.response.edit_message(view=FieldManagerView(
-            self.cog,
-            guild_id=self.guild_id,
-            staff_id=self.staff_id,
-            selected_index=new_index,
-        ))
+        try:
+            await interaction.edit_original_response(view=FieldManagerView(
+                self.cog,
+                guild_id=self.guild_id,
+                staff_id=self.staff_id,
+                selected_index=new_index,
+            ))
+        except discord.HTTPException:
+            pass
 
     async def _on_move_down(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException:
+            pass
         new_index = await self.cog._move_form_field(
             interaction,
             index=self.selected_index,
             direction=1,
             staff_id=self.staff_id,
         )
-        await interaction.response.edit_message(view=FieldManagerView(
-            self.cog,
-            guild_id=self.guild_id,
-            staff_id=self.staff_id,
-            selected_index=new_index,
-        ))
+        try:
+            await interaction.edit_original_response(view=FieldManagerView(
+                self.cog,
+                guild_id=self.guild_id,
+                staff_id=self.staff_id,
+                selected_index=new_index,
+            ))
+        except discord.HTTPException:
+            pass
 
 
 class CustomizationPanelView(discord.ui.LayoutView):

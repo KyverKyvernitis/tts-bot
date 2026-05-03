@@ -405,7 +405,7 @@ class FieldEditModal(discord.ui.Modal):
         )
         from .views import FieldManagerView
         try:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "✅ Campo salvo.",
                 view=FieldManagerView(
                     self.cog,

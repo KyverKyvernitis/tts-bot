@@ -479,6 +479,7 @@ class FormsCog(commands.Cog):
         description: str | None = None,
     ):
         """Recebe o submit do FormSubmissionModal e posta no canal de respostas."""
+        await self._safe_defer_ephemeral(interaction)
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
         resp_ch_id = int(cfg.get("responses_channel_id") or 0)
@@ -534,6 +535,22 @@ class FormsCog(commands.Cog):
         await self._safe_send_ephemeral(interaction, "✅ Formulário enviado!")
 
     @staticmethod
+    async def _safe_defer_ephemeral(interaction: discord.Interaction) -> bool:
+        """Responde rápido à interação para evitar o alerta vermelho do Discord.
+
+        Retorna True quando esta chamada conseguiu dar ACK agora. Se a interação
+        já tinha resposta, retorna False. Erros de rede/interação expirada são
+        engolidos para não quebrar a alteração que já foi salva.
+        """
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+                return True
+        except (discord.HTTPException, discord.InteractionResponded):
+            pass
+        return False
+
+    @staticmethod
     async def _safe_send_ephemeral(interaction: discord.Interaction, content: str):
         """Manda mensagem ephemeral sem levantar se interaction já foi respondida."""
         try:
@@ -541,7 +558,7 @@ class FormsCog(commands.Cog):
                 await interaction.followup.send(content, ephemeral=True)
             else:
                 await interaction.response.send_message(content, ephemeral=True)
-        except discord.HTTPException:
+        except (discord.HTTPException, discord.InteractionResponded):
             pass
 
     def _build_response_view(
@@ -690,6 +707,7 @@ class FormsCog(commands.Cog):
         button_emoji: str = "",
         media_url: str = "",
     ):
+        await self._safe_defer_ephemeral(interaction)
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
         old = cfg.get("panel") or {}
@@ -758,6 +776,7 @@ class FormsCog(commands.Cog):
         fields: list[dict[str, Any]],
         success_message: str = "✅ Campos atualizados.",
     ):
+        await self._safe_defer_ephemeral(interaction)
         guild_id = int(interaction.guild_id or 0)
         await self._save_modal_fields(guild_id, fields, title=title)
         await self._rerender_customization_panel(guild_id, int(getattr(interaction.user, "id", 0) or 0))
@@ -771,6 +790,7 @@ class FormsCog(commands.Cog):
         field: dict[str, Any],
         staff_id: int,
     ) -> int:
+        await self._safe_defer_ephemeral(interaction)
         guild_id = int(interaction.guild_id or 0)
         fields = self._get_form_fields(guild_id)
         if index is None:
@@ -837,6 +857,7 @@ class FormsCog(commands.Cog):
         footer: str,
         media_url: str,
     ):
+        await self._safe_defer_ephemeral(interaction)
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
         cfg["response"] = {
@@ -906,6 +927,7 @@ class FormsCog(commands.Cog):
         approve_style: str,
         reject_style: str,
     ):
+        await self._safe_defer_ephemeral(interaction)
         guild_id = int(interaction.guild_id or 0)
 
         def clean_style(value: str, fallback: str) -> str:
@@ -940,6 +962,7 @@ class FormsCog(commands.Cog):
         approve_dm: str,
         reject_dm: str,
     ):
+        await self._safe_defer_ephemeral(interaction)
         guild_id = int(interaction.guild_id or 0)
         cfg = self._get_config(guild_id)
         old = dict(cfg.get("approval") or DEFAULT_APPROVAL)
