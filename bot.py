@@ -50,6 +50,15 @@ from webserver import run_webserver, set_health_provider
 print("BOT.PY INICIOU")
 
 
+
+REMOVED_FORM_SLASH_COMMANDS = {
+    "form_config",
+    "form_customizar",
+    "form_repostar",
+    "form_reset",
+    "form_status",
+}
+
 def _cfg(*names: str, default=None):
     for name in names:
         if hasattr(config, name):
@@ -96,6 +105,34 @@ class BotLocal(commands.Bot):
         self._repo_root = Path(__file__).resolve().parent
         self._update_temp_root = Path("/tmp/discord-auto-update")
         set_health_provider(self.get_health_snapshot)
+
+    async def _cleanup_removed_form_slash_commands(self, guild_ids: set[int]) -> None:
+        """Remove comandos /form_* antigos sem tocar em comandos de outras cogs."""
+        names = REMOVED_FORM_SLASH_COMMANDS
+
+        async def delete_matching(scope: str, *, guild: discord.Object | None = None) -> None:
+            try:
+                commands_found = await self.tree.fetch_commands(guild=guild)
+            except Exception as e:
+                print(f"[SYNC][{scope}] não consegui buscar comandos pra limpar /form_*: {e}")
+                return
+
+            for cmd in commands_found:
+                name = str(getattr(cmd, "name", "") or "")
+                if name not in names:
+                    continue
+                try:
+                    await cmd.delete()
+                    print(f"[SYNC][{scope}] removido comando antigo: /{name}")
+                except Exception as e:
+                    print(f"[SYNC][{scope}] falha ao remover /{name}: {e}")
+
+        await delete_matching("GLOBAL")
+        for guild_id in sorted(guild_ids):
+            await delete_matching(
+                f"GUILD {guild_id}",
+                guild=discord.Object(id=int(guild_id)),
+            )
 
     async def setup_hook(self):
         print("SETUP_HOOK INICIOU")
@@ -153,16 +190,22 @@ class BotLocal(commands.Bot):
 
         should_sync = str(os.getenv("SYNC_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
         allow_global_sync = str(os.getenv("SYNC_GLOBAL_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
+
+        health_guild_id = 927002914449424404
+        guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
+        guild_ids.add(health_guild_id)
+
+        # Limpa só os slash antigos do formulário. Esses comandos foram
+        # substituídos pelos triggers `form` e `c`, então podem ser removidos
+        # sem usar clear_commands e sem afetar comandos de outras cogs.
+        await self._cleanup_removed_form_slash_commands(guild_ids)
+
         # One-shot flag: limpa comandos globais antes de sync guild. Útil quando
         # o bot antes rodava com sync global e agora tá em modo guild-only —
         # sem isso, os comandos globais fantasmas continuam registrados e o
         # Discord mostra cada comando em duplicata (um global + um guild).
         clear_globals_on_boot = str(os.getenv("CLEAR_GLOBAL_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
         if should_sync:
-            health_guild_id = 927002914449424404
-            guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
-            guild_ids.add(health_guild_id)
-
             if allow_global_sync:
                 # Modo global: sincroniza global mas TAMBÉM faz sync de cada
                 # guild registrada pra propagar os Groups com guild_ids

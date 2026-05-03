@@ -322,9 +322,10 @@ class Utility(commands.Cog):
             "**4.** Comandos do servidor\n"
             "**5.** Chatbot e imagens\n"
             "**6.** Cores\n"
-            "**7.** Utilidades\n"
-            "**8.** Economia\n"
-            "**9.** Jogos"
+            "**7.** Formulário\n"
+            "**8.** Utilidades\n"
+            "**9.** Economia\n"
+            "**10.** Jogos"
         )
         prefixes_text = (
             f"**Bot:** `{bot_prefix}`  ·  **gTTS:** `{gtts_prefix}`  ·  "
@@ -458,7 +459,37 @@ class Utility(commands.Cog):
             accent=discord.Color.from_rgb(255, 105, 180),
         ))
 
-        # === Página 7 — Utilidades ============================================
+        # === Página 7 — Formulário ============================================
+        pages.append(HelpPage(
+            title="📋 Formulário",
+            body=(
+                "Sistema para publicar uma inscrição no servidor. O membro clica em "
+                "**Preencher**, responde os campos e a staff recebe a resposta no canal configurado.\n\n"
+                "### Comandos\n"
+                "`form`\n"
+                "Publica ou reposta o formulário público no canal configurado. "
+                "Se os canais ainda não estiverem configurados, inicia a configuração.\n\n"
+                "`c`\n"
+                "Abre o painel de configuração do formulário para a staff.\n\n"
+                "### Pelo painel `c`\n"
+                "• editar o texto do formulário público;\n"
+                "• configurar os campos que o membro preenche;\n"
+                "• editar a resposta enviada para a staff;\n"
+                "• ativar ou desativar aprovação;\n"
+                "• escolher o cargo entregue ao aprovar;\n"
+                "• editar textos e DMs de aprovação/rejeição;\n"
+                "• mudar cores dos botões e dos cards.\n\n"
+                "### Fluxo\n"
+                "1. A staff configura usando `c`.\n"
+                "2. A staff publica usando `form`.\n"
+                "3. O membro clica em **Preencher**.\n"
+                "4. A resposta chega no canal da staff.\n"
+                "5. A staff aprova ou rejeita."
+            ),
+            accent=discord.Color.from_rgb(88, 101, 242),
+        ))
+
+        # === Página 8 — Utilidades ============================================
         pages.append(HelpPage(
             title="🧰 Utilidades",
             body=(
@@ -474,7 +505,7 @@ class Utility(commands.Cog):
             accent=discord.Color.teal(),
         ))
 
-        # === Página 8 — Economia ==============================================
+        # === Página 9 — Economia ==============================================
         pages.append(HelpPage(
             title="🪙 Economia",
             body=(
@@ -503,7 +534,7 @@ class Utility(commands.Cog):
             accent=discord.Color.orange(),
         ))
 
-        # === Página 9 — Jogos =================================================
+        # === Página 10 — Jogos =================================================
         pages.append(HelpPage(
             title="🎮 Jogos",
             body=(

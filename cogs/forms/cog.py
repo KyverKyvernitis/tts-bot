@@ -54,7 +54,6 @@ from copy import deepcopy
 from typing import Any
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from .constants import (
@@ -440,7 +439,7 @@ class FormsCog(commands.Cog):
             if posted_ok
             else (
                 f"⚠️ Configuração salva, mas falhei ao postar o form em "
-                f"<#{form_channel_id}>. Use `/form_repostar` ou digite `form` lá."
+                f"<#{form_channel_id}>. Digite `form` no canal para postar novamente."
             )
         )
         view.add_item(
@@ -1344,159 +1343,8 @@ class FormsCog(commands.Cog):
 
     # ===== Slash commands =====
 
-    @app_commands.command(
-        name="form_config",
-        description="[Staff] Configura os canais do sistema de formulário",
-    )
-    @app_commands.describe(
-        canal_form="Canal onde o botão de formulário fica visível",
-        canal_respostas="Canal pra onde as submissões vão",
-    )
-    async def slash_form_config(
-        self,
-        interaction: discord.Interaction,
-        canal_form: discord.TextChannel,
-        canal_respostas: discord.TextChannel,
-    ):
-        if not isinstance(interaction.user, discord.Member) or not self._is_staff(interaction.user):
-            await self._safe_send_ephemeral(interaction, "❌ Só staff pode usar.")
-            return
-
-        guild_id = int(interaction.guild_id or 0)
-        cfg = self._get_config(guild_id)
-        cfg["form_channel_id"] = int(canal_form.id)
-        cfg["responses_channel_id"] = int(canal_respostas.id)
-        await self._save_config(guild_id, cfg)
-
-        posted_ok = await self._post_form_message(guild_id, canal_form)
-        msg = (
-            f"✅ Configurado.\n**Canal de formulário:** {canal_form.mention}\n"
-            f"**Canal de respostas:** {canal_respostas.mention}\n"
-        )
-        msg += "Form já postado no canal." if posted_ok else (
-            "⚠️ Falha ao postar o form. Use `/form_repostar` ou trigger no canal."
-        )
-        await self._safe_send_ephemeral(interaction, msg)
-
-    @app_commands.command(
-        name="form_status",
-        description="[Staff] Mostra a configuração atual do formulário",
-    )
-    async def slash_form_status(self, interaction: discord.Interaction):
-        if not isinstance(interaction.user, discord.Member) or not self._is_staff(interaction.user):
-            await self._safe_send_ephemeral(interaction, "❌ Só staff pode usar.")
-            return
-
-        guild_id = int(interaction.guild_id or 0)
-        cfg = self._get_config(guild_id)
-        form_ch_id = int(cfg.get("form_channel_id") or 0)
-        resp_ch_id = int(cfg.get("responses_channel_id") or 0)
-        active_mid = int(cfg.get("active_message_id") or 0)
-
-        lines = [
-            f"**Canal de formulário:** {f'<#{form_ch_id}>' if form_ch_id else '_não configurado_'}",
-            f"**Canal de respostas:** {f'<#{resp_ch_id}>' if resp_ch_id else '_não configurado_'}",
-            f"**Mensagem ativa do form:** {f'`{active_mid}`' if active_mid else '_nenhuma_'}",
-        ]
-        await self._safe_send_ephemeral(interaction, "\n".join(lines))
-
-    @app_commands.command(
-        name="form_reset",
-        description="[Staff] Limpa toda configuração do formulário",
-    )
-    async def slash_form_reset(self, interaction: discord.Interaction):
-        if not isinstance(interaction.user, discord.Member) or not self._is_staff(interaction.user):
-            await self._safe_send_ephemeral(interaction, "❌ Só staff pode usar.")
-            return
-
-        guild_id = int(interaction.guild_id or 0)
-        cfg = self._default_config()
-        await self._save_config(guild_id, cfg)
-        await self._safe_send_ephemeral(
-            interaction,
-            "✅ Configuração resetada. Mensagens já postadas continuam visíveis "
-            "mas viram fantasmas (botões não respondem mais até repostagem).",
-        )
-
-    @app_commands.command(
-        name="form_repostar",
-        description="[Staff] Reposta a mensagem do formulário no canal configurado",
-    )
-    async def slash_form_repostar(self, interaction: discord.Interaction):
-        if not isinstance(interaction.user, discord.Member) or not self._is_staff(interaction.user):
-            await self._safe_send_ephemeral(interaction, "❌ Só staff pode usar.")
-            return
-
-        guild_id = int(interaction.guild_id or 0)
-        cfg = self._get_config(guild_id)
-        form_ch_id = int(cfg.get("form_channel_id") or 0)
-        if not form_ch_id:
-            await self._safe_send_ephemeral(
-                interaction,
-                "❌ Canais não configurados. Use `/form_config` primeiro.",
-            )
-            return
-
-        channel = self.bot.get_channel(form_ch_id)
-        if not isinstance(channel, discord.TextChannel):
-            await self._safe_send_ephemeral(interaction, "❌ Canal de form não acessível.")
-            return
-
-        old_mid = int(cfg.get("active_message_id") or 0)
-        if old_mid:
-            try:
-                old_msg = await channel.fetch_message(old_mid)
-                await old_msg.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
-
-        ok = await self._post_form_message(guild_id, channel)
-        await self._safe_send_ephemeral(
-            interaction,
-            "✅ Form repostado." if ok else "❌ Falha ao repostar.",
-        )
-
-    @app_commands.command(
-        name="form_customizar",
-        description="[Staff] Abre o painel de customização do formulário",
-    )
-    async def slash_form_customizar(self, interaction: discord.Interaction):
-        if not isinstance(interaction.user, discord.Member) or not self._is_staff(interaction.user):
-            await self._safe_send_ephemeral(interaction, "❌ Só staff pode usar.")
-            return
-
-        guild_id = int(interaction.guild_id or 0)
-        cfg = self._get_config(guild_id)
-        if not (int(cfg.get("form_channel_id") or 0) and int(cfg.get("responses_channel_id") or 0)):
-            await self._safe_send_ephemeral(
-                interaction,
-                "❌ Configure os canais primeiro (`/form_config` ou trigger `form` em algum canal).",
-            )
-            return
-
-        # Limpa sessão 'c' anterior pra consistência com o trigger por palavra
-        await self._purge_previous_c_session(guild_id)
-
-        view = CustomizationPanelView(
-            self, guild_id=guild_id, staff_id=int(interaction.user.id)
-        )
-        try:
-            await interaction.response.send_message(view=view)
-            sent = await interaction.original_response()
-            view.message = sent
-        except discord.HTTPException as e:
-            log.warning("[forms] falha em /form_customizar gid=%s: %r", guild_id, e)
-            return
-
-        # Registra como sessão 'c' (sem trigger msg, só painel) — assim o
-        # próximo 'c' ou botão Apagar fecha esse painel também.
-        cfg = self._get_config(guild_id)
-        cfg["active_c_trigger"] = {"channel_id": 0, "message_id": 0}
-        cfg["active_c_panel"] = {
-            "channel_id": int(sent.channel.id),
-            "message_id": int(sent.id),
-        }
-        await self._save_config(guild_id, cfg)
+    # Os antigos /form_* foram removidos. O fluxo atual usa os triggers
+    # de mensagem `form` (publicar/repostar) e `c` (customizar).
 
 
 async def setup(bot: commands.Bot):
