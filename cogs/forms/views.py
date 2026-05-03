@@ -567,13 +567,13 @@ class CustomizationPanelView(discord.ui.LayoutView):
         media_panel = "configurada" if _media_url(panel.get("media_url")) else "não configurada"
         media_response = "configurada" if _media_url(response.get("media_url")) else "não configurada"
 
-        panel_btn = discord.ui.Button(label="Editar painel", emoji="📝", style=discord.ButtonStyle.primary, custom_id=CID_CUST_PANEL_BTN)
-        modal_btn = discord.ui.Button(label="Editar campos", emoji="📋", style=discord.ButtonStyle.primary, custom_id=CID_CUST_MODAL_BTN)
-        response_btn = discord.ui.Button(label="Editar resposta", emoji="📨", style=discord.ButtonStyle.primary, custom_id=CID_CUST_RESPONSE_BTN)
+        panel_btn = discord.ui.Button(label="Editar painel", emoji="📝", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_PANEL_BTN)
+        modal_btn = discord.ui.Button(label="Editar campos", emoji="📋", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_MODAL_BTN)
+        response_btn = discord.ui.Button(label="Editar resposta", emoji="📨", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_RESPONSE_BTN)
         options_btn = discord.ui.Button(label="Editar opções", emoji="☑️", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_OPTIONS_BTN)
-        colors_btn = discord.ui.Button(label="Cores do card", emoji="🎨", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_COLORS_BTN)
+        colors_btn = discord.ui.Button(label="Cores", emoji="🎨", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_COLORS_BTN)
         approval_texts_btn = discord.ui.Button(label="Textos da aprovação", emoji="🛠️", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_APPROVAL_EDIT_BTN)
-        delete_btn = discord.ui.Button(label="Apagar painel", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id=CID_CUST_DELETE_BTN)
+        delete_btn = discord.ui.Button(emoji="⛔", style=discord.ButtonStyle.secondary, custom_id=CID_CUST_DELETE_BTN)
         panel_btn.callback = self._on_panel
         modal_btn.callback = self._on_modal
         response_btn.callback = self._on_response
@@ -583,17 +583,15 @@ class CustomizationPanelView(discord.ui.LayoutView):
         delete_btn.callback = self._on_delete
 
         self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("# ⚙️ Customização do formulário"),
+            discord.ui.TextDisplay("# ⚙️ Formulário"),
             discord.ui.TextDisplay(
-                "Painel compacto, sem previews. Use **Editar campos** para adicionar/remover campos e **Editar opções** para cores, aprovação e cargo.\n\n"
                 f"**Canal do formulário:** {f'<#{form_ch_id}>' if form_ch_id else '_não configurado_'}\n"
                 f"**Canal das respostas:** {f'<#{resp_ch_id}>' if resp_ch_id else '_não configurado_'}\n"
                 f"**Campos:** {len(fields)}/{MODAL_FIELD_LIMIT} — {field_display_summary(fields)}\n"
                 f"**Aprovação:** {approval_state}\n"
                 f"**Botões:** Preencher {_style_label(panel.get('button_style') or DEFAULT_PANEL.get('button_style'))} • Aprovar {_style_label(approval.get('approve_style') or DEFAULT_APPROVAL.get('approve_style'))} • Rejeitar {_style_label(approval.get('reject_style') or DEFAULT_APPROVAL.get('reject_style'))}\n"
-                f"**Cores dos cards:** formulário {_accent_color_label(panel.get('accent_color'), DEFAULT_PANEL.get('accent_color'))} • resposta {_accent_color_label(response.get('accent_color'), DEFAULT_RESPONSE.get('accent_color'))}\n"
-                f"**Mídia:** painel {media_panel} • resposta {media_response}\n\n"
-                "A mensagem `c` só é apagada quando outro `c` for enviado por staff ou quando você clicar em **Apagar painel**."
+                f"**Cards:** formulário {_accent_color_label(panel.get('accent_color'), DEFAULT_PANEL.get('accent_color'))} • resposta {_accent_color_label(response.get('accent_color'), DEFAULT_RESPONSE.get('accent_color'))}\n"
+                f"**Mídia:** painel {media_panel} • resposta {media_response}"
             ),
             discord.ui.Separator(),
             discord.ui.ActionRow(panel_btn, modal_btn, response_btn),
