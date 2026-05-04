@@ -182,10 +182,13 @@ class CallKeeper(commands.Cog):
     """Mantém uma call ocupada com até 3 bots auxiliares.
 
     Regras pedidas:
-    - 0 ou 1 humano: 3 bots
-    - 2 humanos: 2 bots
-    - 3 humanos: 1 bot
-    - 4+ humanos: 0 bots
+    - 0 ou 1 membro não-CallKeeper: 3 bots
+    - 2 membros não-CallKeeper: 2 bots
+    - 3 membros não-CallKeeper: 1 bot
+    - 4+ membros não-CallKeeper: 0 bots
+
+    Importante: a contagem ignora apenas os 3 bots auxiliares desta cog.
+    Outros bots normais na call, como music bots, também contam como membros.
 
     Quando um bot cai, o evento de voice_state_update agenda correção imediata.
     Se houver outro bot livre, ele assume antes do bot caído. Se os 3 já eram
@@ -402,13 +405,13 @@ class CallKeeper(commands.Cog):
         if before_id == target_id or after_id == target_id:
             self._schedule_reconcile("main_voice_state", delay=self.event_debounce)
 
-    def _required_bots_for_humans(self, humans: int) -> int:
-        humans = max(0, int(humans or 0))
-        if humans <= 1:
+    def _required_bots_for_member_count(self, member_count: int) -> int:
+        member_count = max(0, int(member_count or 0))
+        if member_count <= 1:
             return 3
-        if humans == 2:
+        if member_count == 2:
             return 2
-        if humans == 3:
+        if member_count == 3:
             return 1
         return 0
 
@@ -435,19 +438,21 @@ class CallKeeper(commands.Cog):
     def _aux_user_ids(self) -> set[int]:
         return {slot.user_id() for slot in self.slots if slot.user_id()}
 
-    async def _human_count(self) -> int:
+    async def _member_count_without_callkeeper_bots(self) -> int:
         channel = await self._target_channel()
         if channel is None:
             return 0
+
         aux_ids = self._aux_user_ids()
-        humans = 0
+        count = 0
         for member in list(channel.members):
+            # Ignora somente os 3 bots auxiliares gerenciados pelo CallKeeper.
+            # Outros bots normais da call contam como membros para a regra
+            # 0/1 -> 3 bots, 2 -> 2 bots, 3 -> 1 bot, 4+ -> 0 bots.
             if int(member.id) in aux_ids:
                 continue
-            if getattr(member, "bot", False):
-                continue
-            humans += 1
-        return humans
+            count += 1
+        return count
 
     async def _aux_channel_for_slot(self, slot: _AuxSlot, channel_id: int) -> Optional[discord.VoiceChannel]:
         client = slot.client
@@ -564,8 +569,8 @@ class CallKeeper(commands.Cog):
                 return
 
             await self._ensure_aux_clients_started()
-            humans = await self._human_count()
-            required = min(3, self._required_bots_for_humans(humans))
+            member_count = await self._member_count_without_callkeeper_bots()
+            required = min(3, self._required_bots_for_member_count(member_count))
 
             target_connected: list[_AuxSlot] = []
             connected_elsewhere: list[_AuxSlot] = []
@@ -615,9 +620,9 @@ class CallKeeper(commands.Cog):
                     connected_now += 1
 
             log.debug(
-                "[callkeeper] reconcile %s | humanos=%s required=%s connected=%s deficit=%s",
+                "[callkeeper] reconcile %s | membros_nao_callkeeper=%s required=%s connected=%s deficit=%s",
                 reason,
-                humans,
+                member_count,
                 required,
                 len(target_connected) + connected_now,
                 max(0, deficit - connected_now),
@@ -627,15 +632,15 @@ class CallKeeper(commands.Cog):
         enabled = await self._is_enabled()
         channel_id = await self._get_target_channel_id()
         channel = await self._target_channel()
-        humans = await self._human_count() if channel_id else 0
-        required = self._required_bots_for_humans(humans) if enabled else 0
+        member_count = await self._member_count_without_callkeeper_bots() if channel_id else 0
+        required = self._required_bots_for_member_count(member_count) if enabled else 0
         connected = sum(1 for slot in self.slots if channel_id and slot.voice_channel_id() == channel_id)
         target_text = channel.mention if channel else (f"`{channel_id}`" if channel_id else "não definida")
         lines = [
             f"**CallKeeper:** {'ligado' if enabled else 'desligado'}",
             f"**Servidor alvo:** `{self.guild_id or 'não configurado'}`",
             f"**Call alvo:** {target_text}",
-            f"**Humanos na call:** `{humans}`",
+            f"**Membros não-CallKeeper na call:** `{member_count}`",
             f"**Bots exigidos pela regra:** `{required}`",
             f"**Bots conectados na call:** `{connected}`",
             "",
@@ -707,7 +712,7 @@ class CallKeeper(commands.Cog):
         self._start_watchdog()
         await self._reconcile("command_on")
         await interaction.followup.send(
-            f"CallKeeper ligado em {target.mention}. Regra ativa: 0/1 humano = 3 bots, 2 humanos = 2, 3 humanos = 1, 4+ humanos = 0.",
+            f"CallKeeper ligado em {target.mention}. Regra ativa: 0/1 membro não-CallKeeper = 3 bots, 2 membros = 2, 3 membros = 1, 4+ membros = 0.",
             ephemeral=True,
         )
 
