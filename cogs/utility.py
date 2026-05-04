@@ -513,12 +513,15 @@ class HealthDashboardView(discord.ui.LayoutView):
         else:
             header_item = discord.ui.TextDisplay(self._build_summary_text())
 
+        # O Container do Components V2 fica instável quando a gente empilha
+        # componentes demais. Por isso o painel junta blocos relacionados em
+        # poucos TextDisplays e deixa a lista de guilds isolada, sem estourar
+        # limites de layout mesmo quando a paginação aparece.
+        state_and_queue_text = f"{self._build_state_text()}\n\n{self._build_queue_cache_text()}"
         children: list[Any] = [
             header_item,
             discord.ui.Separator(),
-            discord.ui.TextDisplay(self._build_state_text()),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay(self._build_queue_cache_text()),
+            discord.ui.TextDisplay(state_and_queue_text),
             discord.ui.Separator(),
             discord.ui.TextDisplay("### ⚙️ Engines\n" + self._engine_lines()),
             discord.ui.Separator(),
@@ -541,13 +544,7 @@ class HealthDashboardView(discord.ui.LayoutView):
             last = discord.ui.Button(emoji="⏩", style=discord.ButtonStyle.secondary, disabled=at_end)
             last.callback = self._go_last
 
-            children.extend([
-                discord.ui.Separator(),
-                discord.ui.TextDisplay(
-                    f"-# _    _⏪ Início · ◀ Voltar `{self.guild_page_index + 1}/{total_pages}` Pular ▶ · Fim ⏩"
-                ),
-                discord.ui.ActionRow(first, prev_b, jump, next_b, last),
-            ])
+            children.append(discord.ui.ActionRow(first, prev_b, jump, next_b, last))
 
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.success)
         refresh.callback = self._refresh
@@ -1352,25 +1349,45 @@ class Utility(commands.Cog):
     @app_commands.command(name="health", description="Mostra a saúde geral do bot, fila, cache, engines e guilds")
     @app_commands.guilds(HEALTH_COMMAND_GUILD)
     async def health(self, interaction: discord.Interaction):
-        avatar_url = None
-        if self.bot.user and self.bot.user.display_avatar:
-            avatar_url = self.bot.user.display_avatar.url
+        # Responde imediatamente ao Discord para evitar "O aplicativo não
+        # respondeu" caso a leitura de métricas/cache demore alguns segundos.
+        await interaction.response.defer(ephemeral=False, thinking=True)
 
-        view = HealthDashboardView(
-            self,
-            owner_id=int(interaction.user.id),
-            bot_avatar_url=avatar_url,
-            timeout=HELP_EXPIRE_AFTER_SECONDS,
-        )
-        await interaction.response.send_message(
-            view=view,
-            ephemeral=False,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
         try:
-            view.message = await interaction.original_response()
-        except Exception:
-            pass
+            avatar_url = None
+            if self.bot.user and self.bot.user.display_avatar:
+                avatar_url = self.bot.user.display_avatar.url
+
+            view = HealthDashboardView(
+                self,
+                owner_id=int(interaction.user.id),
+                bot_avatar_url=avatar_url,
+                timeout=HELP_EXPIRE_AFTER_SECONDS,
+            )
+            view.message = await interaction.edit_original_response(
+                content=None,
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as exc:
+            error_name = type(exc).__name__
+            error_text = str(exc).strip() or "sem detalhes"
+            if len(error_text) > 700:
+                error_text = error_text[:697].rstrip() + "..."
+            fallback = (
+                "⚠️ Não consegui montar o painel de health em Components V2.\n"
+                "A interação foi respondida para não ficar presa. Veja o erro abaixo e me mande o log completo se ainda persistir.\n\n"
+                f"`{error_name}: {discord.utils.escape_markdown(error_text)}`"
+            )
+            try:
+                await interaction.edit_original_response(
+                    content=fallback,
+                    embeds=[],
+                    view=None,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception:
+                pass
 
     @app_commands.command(name="ping", description="Mostra o status atual e a latência do bot")
     async def ping(self, interaction: discord.Interaction):
