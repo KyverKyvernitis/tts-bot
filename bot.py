@@ -195,6 +195,13 @@ class BotLocal(commands.Bot):
         guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
         guild_ids.add(health_guild_id)
 
+        try:
+            callkeeper_guild_id = int(getattr(config, "CALLKEEPER_GUILD_ID", 0) or 0)
+        except Exception:
+            callkeeper_guild_id = 0
+        if callkeeper_guild_id > 0:
+            guild_ids.add(callkeeper_guild_id)
+
         # Limpa só os slash antigos do formulário. Esses comandos foram
         # substituídos pelos triggers `form` e `c`, então podem ser removidos
         # sem usar clear_commands e sem afetar comandos de outras cogs.

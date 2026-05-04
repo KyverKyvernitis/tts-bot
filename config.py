@@ -73,6 +73,24 @@ MONGODB_COLLECTION = (os.getenv("MONGODB_COLLECTION", "settings") or "settings")
 
 GUILD_IDS = _parse_guild_ids(os.getenv("GUILD_IDS", ""))
 
+# -----------------------------------------------------------------------------
+# CallKeeper — bots auxiliares que mantêm uma call ocupada em 1 servidor
+# -----------------------------------------------------------------------------
+CALLKEEPER_GUILD_ID = _parse_int(os.getenv("CALLKEEPER_GUILD_ID", "0"), 0)
+CALLKEEPER_CHANNEL_ID = _parse_int(os.getenv("CALLKEEPER_CHANNEL_ID", "0"), 0)
+CALLKEEPER_BOT_TOKENS = [
+    token
+    for token in (
+        (os.getenv("CALLKEEPER_BOT_1_TOKEN", "") or "").strip(),
+        (os.getenv("CALLKEEPER_BOT_2_TOKEN", "") or "").strip(),
+        (os.getenv("CALLKEEPER_BOT_3_TOKEN", "") or "").strip(),
+    )
+    if token
+]
+CALLKEEPER_WATCHDOG_INTERVAL_SECONDS = _parse_float(os.getenv("CALLKEEPER_WATCHDOG_INTERVAL_SECONDS", "1.0"), 1.0)
+CALLKEEPER_EVENT_DEBOUNCE_SECONDS = _parse_float(os.getenv("CALLKEEPER_EVENT_DEBOUNCE_SECONDS", "0.20"), 0.20)
+CALLKEEPER_DISCONNECTED_BOT_COOLDOWN_SECONDS = _parse_float(os.getenv("CALLKEEPER_DISCONNECTED_BOT_COOLDOWN_SECONDS", "3.0"), 3.0)
+
 ON_COLOR = 0x57F287
 OFF_COLOR = 0xED4245
 
