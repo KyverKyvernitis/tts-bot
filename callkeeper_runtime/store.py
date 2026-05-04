@@ -20,6 +20,37 @@ class CallKeeperStateStore:
         self.db = db
         self.default_channel_id = int(default_channel_id or 0)
 
+    async def refresh_guild_state(self, guild_id: int) -> None:
+        """Recarrega do Mongo o estado desta guild.
+
+        O CallKeeper roda em processo separado do bot principal. Quando o
+        comando `_callkeeper <canal>` salva um novo foco, o cache local deste
+        serviço não é atualizado automaticamente; por isso o watchdog chama
+        este método antes de reconciliar.
+        """
+        gid = int(guild_id)
+        try:
+            doc = await self.db.coll.find_one(
+                {
+                    "guild_id": gid,
+                    "$or": [
+                        {"type": "guild"},
+                        {"type": {"$exists": False}, "user_id": {"$exists": False}},
+                        {"type": None, "user_id": {"$exists": False}},
+                    ],
+                },
+                {"_id": 0},
+            )
+        except Exception:
+            log.exception("[callkeeper] falha recarregando estado no DB")
+            return
+
+        if not doc:
+            return
+        doc.setdefault("type", "guild")
+        doc["guild_id"] = gid
+        self.db.guild_cache[gid] = doc
+
     def is_enabled(self, guild_id: int) -> bool:
         try:
             return bool(self.db.get_callkeeper_enabled(int(guild_id)))

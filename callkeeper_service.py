@@ -30,6 +30,7 @@ logging.basicConfig(
 )
 logging.getLogger("discord.gateway").setLevel(logging.WARNING)
 logging.getLogger("discord.voice_client").setLevel(logging.WARNING)
+logging.getLogger("discord.voice_state").setLevel(logging.WARNING)
 logging.getLogger("discord.player").setLevel(logging.WARNING)
 
 log = logging.getLogger("callkeeper_service")

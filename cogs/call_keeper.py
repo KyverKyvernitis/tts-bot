@@ -69,6 +69,13 @@ class CallKeeper(commands.Cog):
             return fetched
         return None
 
+    def _normalize_channel_lookup_text(self, value: str) -> str:
+        text = str(value or "").strip()
+        text = text.strip('"').strip("'").strip("` ")
+        text = re.sub(r"^[#＃]+", "", text).strip()
+        text = re.sub(r"\s+", " ", text)
+        return text.casefold()
+
     async def _resolve_channel_argument(self, ctx: commands.Context, raw: str | None):
         if not raw:
             return None
@@ -76,28 +83,55 @@ class CallKeeper(commands.Cog):
         if not text:
             return None
 
-        mention = re.fullmatch(r"<#(\d{15,25})>", text)
+        # Aceita link de canal copiado pelo Discord desktop/mobile:
+        # https://discord.com/channels/GUILD_ID/CHANNEL_ID
+        # https://canary.discord.com/channels/GUILD_ID/CHANNEL_ID
+        # https://ptb.discord.com/channels/GUILD_ID/CHANNEL_ID
+        link = re.search(
+            r"https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/channels/(\d{15,25})/(\d{15,25})(?:/\d{15,25})?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if link:
+            link_guild_id = int(link.group(1))
+            if link_guild_id != int(self.settings.guild_id):
+                return None
+            return await self._resolve_channel_by_id(ctx, int(link.group(2)))
+
+        # Aceita menção de canal mesmo se vier embutida no texto.
+        mention = re.search(r"<#(\d{15,25})>", text)
         if mention:
             return await self._resolve_channel_by_id(ctx, int(mention.group(1)))
 
-        cleaned = text.strip().strip('"').strip("'").strip()
+        cleaned = text.strip().strip('"').strip("'").strip("` ")
+
+        # Aceita ID puro ou ID colado em texto curto.
         if cleaned.isdigit():
             return await self._resolve_channel_by_id(ctx, int(cleaned))
+        ids = re.findall(r"\d{15,25}", cleaned)
+        if ids:
+            # Em links não reconhecidos, o último ID costuma ser o canal.
+            for candidate in reversed(ids):
+                channel = await self._resolve_channel_by_id(ctx, int(candidate))
+                if channel is not None:
+                    return channel
 
         guild = getattr(ctx, "guild", None)
         if guild is None:
             return None
 
-        lowered = cleaned.casefold()
+        lookup = self._normalize_channel_lookup_text(cleaned)
+        if not lookup:
+            return None
         voice_channels = [channel for channel in getattr(guild, "channels", []) if self._is_voice_target(channel)]
 
         for channel in voice_channels:
-            if str(getattr(channel, "name", "")).casefold() == lowered:
+            if self._normalize_channel_lookup_text(getattr(channel, "name", "")) == lookup:
                 return channel
 
         for channel in voice_channels:
-            name = str(getattr(channel, "name", ""))
-            if lowered in name.casefold():
+            name_lookup = self._normalize_channel_lookup_text(getattr(channel, "name", ""))
+            if lookup in name_lookup or name_lookup in lookup:
                 return channel
         return None
 

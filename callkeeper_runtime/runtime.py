@@ -188,6 +188,7 @@ class CallKeeperRuntime:
         self._scheduled_task: Optional[asyncio.Task] = None
         self._watchdog_task: Optional[asyncio.Task] = None
         self._stopping = asyncio.Event()
+        self._last_seen_target_channel_id = 0
 
     async def start(self) -> None:
         if self.settings.guild_id <= 0:
@@ -376,18 +377,32 @@ class CallKeeperRuntime:
                 return True
 
             current_vc = slot.voice_client()
+
+            channel = await self._aux_channel_for_slot(slot, channel_id)
+            if channel is None:
+                return False
+
             if current_vc is not None and current_vc.is_connected():
                 current_channel_id = int(getattr(getattr(current_vc, "channel", None), "id", 0) or 0)
                 if current_channel_id == int(channel_id):
                     await self._enforce_self_mute_deaf(slot)
                     return True
                 slot.intentional_until = time.monotonic() + 3.0
-                with contextlib.suppress(Exception):
-                    await current_vc.disconnect(force=True)
-
-            channel = await self._aux_channel_for_slot(slot, channel_id)
-            if channel is None:
-                return False
+                try:
+                    await current_vc.move_to(channel, timeout=10.0)
+                    await self._enforce_self_mute_deaf(slot)
+                    slot.blocked_until = 0.0
+                    slot.last_error = None
+                    log.info("[callkeeper] %s movido para %s", slot.label, channel_id)
+                    return True
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    slot.last_error = f"move_to: {type(exc).__name__}: {exc}"
+                    log.warning("[callkeeper] falha movendo %s: %s", slot.label, slot.last_error)
+                    slot.intentional_until = time.monotonic() + 3.0
+                    with contextlib.suppress(Exception):
+                        await current_vc.disconnect(force=True)
 
             # Se o auxiliar já está em alguma call mas este processo não tem um
             # VoiceClient local, move o voice_state existente em vez de fazer
@@ -471,15 +486,21 @@ class CallKeeperRuntime:
     async def reconcile(self, reason: str) -> None:
         async with self._reconcile_lock:
             await self.ensure_aux_clients_started()
+            await self.store.refresh_guild_state(self.settings.guild_id)
 
             if not self.is_enabled():
                 await self._disconnect_all()
+                self._last_seen_target_channel_id = 0
                 return
 
             channel_id = self.get_target_channel_id()
             if channel_id <= 0:
                 log.warning("[callkeeper] ativo, mas sem call alvo configurada")
+                self._last_seen_target_channel_id = 0
                 return
+            if self._last_seen_target_channel_id and self._last_seen_target_channel_id != channel_id:
+                log.info("[callkeeper] foco alterado: %s -> %s", self._last_seen_target_channel_id, channel_id)
+            self._last_seen_target_channel_id = channel_id
 
             member_count = await self._member_count_without_callkeeper_bots()
             required = min(3, self._required_bots_for_member_count(member_count))
