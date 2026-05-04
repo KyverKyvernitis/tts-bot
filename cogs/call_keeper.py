@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -123,10 +124,31 @@ class _AuxSlot:
         return None
 
     def voice_channel_id(self) -> int:
+        """Canal de voz atual do auxiliar.
+
+        Depois de um restart do bot principal, o Discord pode manter o bot
+        auxiliar aparecendo na call, mas o novo processo não possui mais um
+        VoiceClient local para essa conexão antiga. Por isso usamos primeiro o
+        VoiceClient, quando existe, e depois reidratamos pelo voice_state real
+        (`guild.me.voice`). Isso evita o ciclo visual de sair e entrar de novo
+        só para o manager reassumir controle.
+        """
         voice_client = self.voice_client()
-        if voice_client is None or not voice_client.is_connected():
+        if voice_client is not None and voice_client.is_connected():
+            channel = getattr(voice_client, "channel", None)
+            channel_id = int(getattr(channel, "id", 0) or 0)
+            if channel_id > 0:
+                return channel_id
+
+        client = self.client
+        if client is None or not self.is_ready():
             return 0
-        channel = getattr(voice_client, "channel", None)
+        guild = client.get_guild(self.manager.guild_id)
+        if guild is None:
+            return 0
+        me = getattr(guild, "me", None)
+        voice_state = getattr(me, "voice", None)
+        channel = getattr(voice_state, "channel", None)
         return int(getattr(channel, "id", 0) or 0)
 
     async def ensure_started(self) -> None:
@@ -411,7 +433,10 @@ class CallKeeper(commands.Cog):
             return None
         return self.bot.get_guild(self.guild_id)
 
-    async def _target_channel(self) -> Optional[discord.VoiceChannel]:
+    def _is_voice_target(self, channel: object) -> bool:
+        return isinstance(channel, (discord.VoiceChannel, discord.StageChannel))
+
+    async def _target_channel(self):
         channel_id = await self._get_target_channel_id()
         if channel_id <= 0:
             return None
@@ -419,10 +444,10 @@ class CallKeeper(commands.Cog):
         if guild is None:
             return None
         channel = guild.get_channel(channel_id)
-        if isinstance(channel, discord.VoiceChannel):
+        if self._is_voice_target(channel):
             return channel
         fetched = self.bot.get_channel(channel_id)
-        if isinstance(fetched, discord.VoiceChannel):
+        if self._is_voice_target(fetched):
             return fetched
         return None
 
@@ -445,24 +470,24 @@ class CallKeeper(commands.Cog):
             count += 1
         return count
 
-    async def _aux_channel_for_slot(self, slot: _AuxSlot, channel_id: int) -> Optional[discord.VoiceChannel]:
+    async def _aux_channel_for_slot(self, slot: _AuxSlot, channel_id: int):
         client = slot.client
         if client is None or not slot.is_ready():
             return None
         channel = client.get_channel(channel_id)
-        if isinstance(channel, discord.VoiceChannel):
+        if self._is_voice_target(channel):
             return channel
         guild = client.get_guild(self.guild_id)
         if guild is not None:
             channel = guild.get_channel(channel_id)
-            if isinstance(channel, discord.VoiceChannel):
+            if self._is_voice_target(channel):
                 return channel
         try:
             fetched = await client.fetch_channel(channel_id)
         except Exception as exc:
             slot.last_error = f"fetch_channel: {type(exc).__name__}: {exc}"
             return None
-        if isinstance(fetched, discord.VoiceChannel):
+        if self._is_voice_target(fetched):
             return fetched
         return None
 
@@ -477,12 +502,25 @@ class CallKeeper(commands.Cog):
                 slot.last_error = "gateway ainda não ficou ready"
                 return False
 
+            # Reidratação pós-restart: se o Discord já mostra o auxiliar no
+            # canal certo, não chame connect() de novo. Isso evita o sair/entrar
+            # visual que derrubava a estabilidade do CallKeeper depois do boot.
+            current_state_channel_id = slot.voice_channel_id()
+            if current_state_channel_id == int(channel_id):
+                await self._enforce_self_mute_deaf(slot)
+                slot.blocked_until = 0.0
+                slot.last_error = None
+                return True
+
             current_vc = slot.voice_client()
             if current_vc is not None and current_vc.is_connected():
                 current_channel_id = int(getattr(getattr(current_vc, "channel", None), "id", 0) or 0)
                 if current_channel_id == int(channel_id):
                     await self._enforce_self_mute_deaf(slot)
                     return True
+                # Só desconecta antes de conectar quando existe um VoiceClient
+                # local em outra call. Sem VoiceClient local, preferimos mover o
+                # voice_state abaixo para evitar leave/join desnecessário.
                 slot.intentional_until = time.monotonic() + 3.0
                 with contextlib.suppress(Exception):
                     await current_vc.disconnect(force=True)
@@ -490,6 +528,24 @@ class CallKeeper(commands.Cog):
             channel = await self._aux_channel_for_slot(slot, channel_id)
             if channel is None:
                 return False
+
+            # Se o bot aparece em alguma call mas este processo não possui
+            # VoiceClient local, mande apenas um change_voice_state para mover
+            # a presença existente. Isso é usado principalmente após restart.
+            if current_state_channel_id > 0 and current_vc is None:
+                try:
+                    guild = slot.client.get_guild(self.guild_id) if slot.client else None
+                    if guild is not None:
+                        await guild.change_voice_state(channel=channel, self_mute=True, self_deaf=True)
+                        slot.blocked_until = 0.0
+                        slot.last_error = None
+                        log.info("[callkeeper] %s movido para %s sem reconnect", slot.label, channel_id)
+                        return True
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    slot.last_error = f"move_state: {type(exc).__name__}: {exc}"
+                    log.warning("[callkeeper] falha movendo %s: %s", slot.label, slot.last_error)
 
             try:
                 await channel.connect(
@@ -516,6 +572,23 @@ class CallKeeper(commands.Cog):
         if voice_client is not None and voice_client.is_connected():
             with contextlib.suppress(Exception):
                 await voice_client.disconnect(force=True)
+            return
+
+        # Fallback pós-restart: o auxiliar pode estar em voice_state real, mas
+        # sem VoiceClient local. Nesse caso, sair pelo gateway sem fazer
+        # reconnect/leave-join artificial.
+        client = slot.client
+        if client is None or not slot.is_ready():
+            return
+        guild = client.get_guild(self.guild_id)
+        if guild is None:
+            return
+        me = getattr(guild, "me", None)
+        voice_state = getattr(me, "voice", None)
+        if getattr(voice_state, "channel", None) is None:
+            return
+        with contextlib.suppress(Exception):
+            await guild.change_voice_state(channel=None)
 
     async def _enforce_self_mute_deaf(self, slot: _AuxSlot) -> None:
         client = slot.client
@@ -668,33 +741,155 @@ class CallKeeper(commands.Cog):
             return False
         return True
 
-    async def _resolve_prefix_target_channel(self, ctx: commands.Context) -> Optional[discord.VoiceChannel]:
+    def _channel_in_callkeeper_guild(self, channel: object) -> bool:
+        guild = getattr(channel, "guild", None)
+        return bool(self._is_voice_target(channel) and guild and int(guild.id) == int(self.guild_id))
+
+    async def _resolve_channel_by_id(self, ctx: commands.Context, channel_id: int):
+        if channel_id <= 0:
+            return None
+        guild = getattr(ctx, "guild", None)
+        if guild is not None:
+            channel = guild.get_channel(channel_id)
+            if self._channel_in_callkeeper_guild(channel):
+                return channel
+        channel = self.bot.get_channel(channel_id)
+        if self._channel_in_callkeeper_guild(channel):
+            return channel
+        try:
+            fetched = await self.bot.fetch_channel(channel_id)
+        except Exception:
+            return None
+        if self._channel_in_callkeeper_guild(fetched):
+            return fetched
+        return None
+
+    async def _resolve_channel_argument(self, ctx: commands.Context, raw: str | None):
+        if not raw:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+
+        # Aceita menção <#id>, ID puro e variações coladas com aspas.
+        mention = re.fullmatch(r"<#(\d{15,25})>", text)
+        if mention:
+            return await self._resolve_channel_by_id(ctx, int(mention.group(1)))
+
+        cleaned = text.strip().strip('"').strip("'").strip()
+        if cleaned.isdigit():
+            return await self._resolve_channel_by_id(ctx, int(cleaned))
+
+        guild = getattr(ctx, "guild", None)
+        if guild is None:
+            return None
+
+        lowered = cleaned.casefold()
+        voice_channels = [
+            channel
+            for channel in getattr(guild, "channels", [])
+            if self._is_voice_target(channel)
+        ]
+
+        # Nome exato primeiro.
+        for channel in voice_channels:
+            if str(getattr(channel, "name", "")).casefold() == lowered:
+                return channel
+
+        # Depois aceita busca parcial para nomes longos/decorados.
+        for channel in voice_channels:
+            name = str(getattr(channel, "name", ""))
+            if lowered in name.casefold():
+                return channel
+        return None
+
+    async def _resolve_prefix_target_channel(self, ctx: commands.Context):
         guild = getattr(ctx, "guild", None)
         if guild is None:
             return None
 
         configured_id = int(self.config_channel_id or 0)
         if configured_id > 0:
-            channel = guild.get_channel(configured_id) or self.bot.get_channel(configured_id)
-            if isinstance(channel, discord.VoiceChannel) and int(channel.guild.id) == int(self.guild_id):
+            channel = await self._resolve_channel_by_id(ctx, configured_id)
+            if channel is not None:
                 return channel
 
         user_voice = getattr(getattr(ctx, "author", None), "voice", None)
         user_channel = getattr(user_voice, "channel", None)
-        if isinstance(user_channel, discord.VoiceChannel) and int(user_channel.guild.id) == int(self.guild_id):
+        if self._channel_in_callkeeper_guild(user_channel):
             return user_channel
 
         saved_id = await self._get_target_channel_id()
         if saved_id > 0:
-            channel = guild.get_channel(saved_id) or self.bot.get_channel(saved_id)
-            if isinstance(channel, discord.VoiceChannel) and int(channel.guild.id) == int(self.guild_id):
+            channel = await self._resolve_channel_by_id(ctx, saved_id)
+            if channel is not None:
                 return channel
         return None
 
+    async def _missing_target_permission_text(self, target) -> str:
+        guild = getattr(target, "guild", None)
+        if guild is None:
+            return "Canal inválido para o CallKeeper."
+
+        main_me = getattr(guild, "me", None)
+        if main_me is not None:
+            perms = target.permissions_for(main_me)
+            if not bool(getattr(perms, "view_channel", False) and getattr(perms, "connect", False)):
+                return "O bot principal precisa de permissão para ver e conectar nesse canal."
+
+        # Quando os auxiliares já estão online, valida eles também. Se estiverem
+        # offline porque o modo está desligado, a conexão real ainda vai reportar
+        # erro individual em status/log caso algum token não tenha permissão.
+        for slot in self.slots:
+            user_id = slot.user_id()
+            if not user_id:
+                continue
+            member = guild.get_member(user_id)
+            if member is None:
+                continue
+            perms = target.permissions_for(member)
+            if not bool(getattr(perms, "view_channel", False) and getattr(perms, "connect", False)):
+                return f"{slot.label} não tem permissão para ver/conectar em {target.mention}."
+        return ""
+
     @commands.command(name="callkeeper", hidden=True)
-    async def callkeeper_toggle(self, ctx: commands.Context):
+    async def callkeeper_toggle(self, ctx: commands.Context, *, canal: str | None = None):
         # Fora da guild alvo ou usado por outro usuário: ignora 100%, sem resposta.
         if not self._is_authorized_prefix_context(ctx):
+            return
+
+        if len(self.tokens) < 3:
+            with contextlib.suppress(discord.HTTPException):
+                await ctx.reply(
+                    "Configure os 3 tokens na `.env`: `CALLKEEPER_BOT_1_TOKEN`, `CALLKEEPER_BOT_2_TOKEN` e `CALLKEEPER_BOT_3_TOKEN`.",
+                    mention_author=False,
+                )
+            return
+
+        # _callkeeper <canal> muda o foco. Não funciona como off.
+        if canal:
+            target = await self._resolve_channel_argument(ctx, canal)
+            if target is None:
+                with contextlib.suppress(discord.HTTPException):
+                    await ctx.reply("Não encontrei esse canal de voz/stage no servidor dos CallKeepers.", mention_author=False)
+                return
+
+            permission_error = await self._missing_target_permission_text(target)
+            if permission_error:
+                with contextlib.suppress(discord.HTTPException):
+                    await ctx.reply(permission_error, mention_author=False)
+                return
+
+            await self._set_target_channel_id(int(target.id))
+            if await self._is_enabled():
+                await self._ensure_aux_clients_started()
+                self._start_watchdog()
+                await self._reconcile("prefix_focus_change")
+                with contextlib.suppress(discord.HTTPException):
+                    await ctx.reply(f"Foco do CallKeeper alterado para {target.mention}.", mention_author=False)
+            else:
+                with contextlib.suppress(discord.HTTPException):
+                    await ctx.reply(f"Foco do CallKeeper salvo em {target.mention}. Use `_callkeeper` para ligar.", mention_author=False)
             return
 
         if await self._is_enabled():
@@ -706,21 +901,19 @@ class CallKeeper(commands.Cog):
                 await ctx.reply("CallKeeper desligado. Bots auxiliares removidos da call.", mention_author=False)
             return
 
-        if len(self.tokens) < 3:
-            with contextlib.suppress(discord.HTTPException):
-                await ctx.reply(
-                    "Configure os 3 tokens na `.env`: `CALLKEEPER_BOT_1_TOKEN`, `CALLKEEPER_BOT_2_TOKEN` e `CALLKEEPER_BOT_3_TOKEN`.",
-                    mention_author=False,
-                )
-            return
-
         target = await self._resolve_prefix_target_channel(ctx)
         if target is None:
             with contextlib.suppress(discord.HTTPException):
                 await ctx.reply(
-                    "Configure `CALLKEEPER_CHANNEL_ID` ou entre na call que o CallKeeper deve proteger antes de usar o comando.",
+                    "Configure `CALLKEEPER_CHANNEL_ID`, use `_callkeeper <canal>` ou entre na call que o CallKeeper deve proteger antes de ligar.",
                     mention_author=False,
                 )
+            return
+
+        permission_error = await self._missing_target_permission_text(target)
+        if permission_error:
+            with contextlib.suppress(discord.HTTPException):
+                await ctx.reply(permission_error, mention_author=False)
             return
 
         await self._set_target_channel_id(int(target.id))
@@ -730,7 +923,6 @@ class CallKeeper(commands.Cog):
         await self._reconcile("prefix_toggle_on")
         with contextlib.suppress(discord.HTTPException):
             await ctx.reply(f"CallKeeper ligado em {target.mention}.", mention_author=False)
-
 
 async def setup(bot: commands.Bot):
     if CALLKEEPER_GUILD_ID <= 0:
