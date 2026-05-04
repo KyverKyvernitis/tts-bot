@@ -333,7 +333,7 @@ class HealthDashboardView(discord.ui.LayoutView):
         self.timeout_seconds = requested_timeout
         self.expires_at_monotonic = time.monotonic() + requested_timeout
         self._expired = False
-        self._snapshot: dict[str, Any] = {}
+        self.health_snapshot: dict[str, Any] = {}
         self._rebuild_layout(refresh_snapshot=True)
 
     def _touch(self) -> None:
@@ -343,20 +343,20 @@ class HealthDashboardView(discord.ui.LayoutView):
         return self._expired or time.monotonic() >= self.expires_at_monotonic
 
     def total_guild_pages(self) -> int:
-        guilds = list(self._snapshot.get("guilds") or [])
+        guilds = list(self.health_snapshot.get("guilds") or [])
         return max(1, (len(guilds) + HEALTH_GUILDS_PER_PAGE - 1) // HEALTH_GUILDS_PER_PAGE)
 
     def _status_accent(self) -> discord.Color:
-        if bool(self._snapshot.get("healthy")):
+        if bool(self.health_snapshot.get("healthy")):
             return discord.Color.green()
-        if bool(self._snapshot.get("starting")):
+        if bool(self.health_snapshot.get("starting")):
             return discord.Color.gold()
         return discord.Color.red()
 
     def _status_title(self) -> tuple[str, str]:
-        if bool(self._snapshot.get("starting")):
+        if bool(self.health_snapshot.get("starting")):
             return "⏳", "Inicializando"
-        if bool(self._snapshot.get("healthy")):
+        if bool(self.health_snapshot.get("healthy")):
             return "🟢", "Saudável"
         return "🔴", "Atenção necessária"
 
@@ -392,7 +392,7 @@ class HealthDashboardView(discord.ui.LayoutView):
         return name
 
     def _engine_lines(self) -> str:
-        engine_metrics = dict(self._snapshot.get("engine_metrics") or {})
+        engine_metrics = dict(self.health_snapshot.get("engine_metrics") or {})
         if not engine_metrics:
             return "Ainda não há métricas suficientes de engine para mostrar aqui."
 
@@ -414,7 +414,7 @@ class HealthDashboardView(discord.ui.LayoutView):
         return "\n".join(lines)
 
     def _guild_lines(self) -> str:
-        guilds = list(self._snapshot.get("guilds") or [])
+        guilds = list(self.health_snapshot.get("guilds") or [])
         total_pages = self.total_guild_pages()
         self.guild_page_index = max(0, min(self.guild_page_index, total_pages - 1))
         start = self.guild_page_index * HEALTH_GUILDS_PER_PAGE
@@ -433,7 +433,7 @@ class HealthDashboardView(discord.ui.LayoutView):
     def _build_summary_text(self) -> str:
         status_emoji, status_label = self._status_title()
         updated_unix = int(discord.utils.utcnow().timestamp())
-        latency = self._snapshot.get("latency_ms", "n/a")
+        latency = self.health_snapshot.get("latency_ms", "n/a")
         if isinstance(latency, float):
             latency = f"{latency:.2f}"
 
@@ -442,26 +442,26 @@ class HealthDashboardView(discord.ui.LayoutView):
             f"## {status_emoji} Saúde geral do bot\n"
             "Painel operacional em Components V2 para ver estabilidade, fila, cache, engines e guilds sem abrir logs.\n\n"
             f"**Estado geral:** {status_emoji} **{status_label}**\n"
-            f"**Status bruto:** `{self._snapshot.get('status', 'unknown')}`\n"
-            f"**Uptime:** `{self.cog._format_duration(self._snapshot.get('uptime_seconds'))}`\n"
+            f"**Status bruto:** `{self.health_snapshot.get('status', 'unknown')}`\n"
+            f"**Uptime:** `{self.cog._format_duration(self.health_snapshot.get('uptime_seconds'))}`\n"
             f"**Latência:** `{latency} ms`"
         )
 
     def _build_state_text(self) -> str:
-        starting = bool(self._snapshot.get("starting"))
-        discord_closed = bool(self._snapshot.get("discord_closed"))
+        starting = bool(self.health_snapshot.get("starting"))
+        discord_closed = bool(self.health_snapshot.get("discord_closed"))
         return (
             "### 🔌 Estado do bot\n"
-            f"**Healthy:** {self._metric_bool(self._snapshot.get('healthy'), ok='saudável', bad='com problema')}\n"
+            f"**Healthy:** {self._metric_bool(self.health_snapshot.get('healthy'), ok='saudável', bad='com problema')}\n"
             f"**Inicializando:** {'🟡 sim' if starting else '⚪ não'}\n"
-            f"**Discord pronto:** {self._metric_bool(self._snapshot.get('discord_ready'), ok='pronto', bad='não pronto')}\n"
+            f"**Discord pronto:** {self._metric_bool(self.health_snapshot.get('discord_ready'), ok='pronto', bad='não pronto')}\n"
             f"**Conexão Discord:** {'🔴 fechada' if discord_closed else '🟢 ativa'}\n"
-            f"**MongoDB:** {self._metric_bool(self._snapshot.get('mongo_ok'), ok='ok', bad='offline')}\n"
+            f"**MongoDB:** {self._metric_bool(self.health_snapshot.get('mongo_ok'), ok='ok', bad='offline')}\n"
             f"**Voice clients:** `{len(getattr(self.cog.bot, 'voice_clients', []) or [])}`"
         )
 
     def _build_queue_cache_text(self) -> str:
-        tts_metrics = dict(self._snapshot.get("tts_metrics") or {})
+        tts_metrics = dict(self.health_snapshot.get("tts_metrics") or {})
         cache_hits = int(tts_metrics.get("cache_hits", 0) or 0)
         cache_misses = int(tts_metrics.get("cache_misses", 0) or 0)
         cache_stores = int(tts_metrics.get("cache_stores", 0) or 0)
@@ -477,18 +477,18 @@ class HealthDashboardView(discord.ui.LayoutView):
             f"**Espera média:** `{self.cog._format_ms(tts_metrics.get('avg_queue_wait_ms'))}`\n"
             f"**Despacho médio:** `{self.cog._format_ms(tts_metrics.get('avg_dispatch_ms'))}`\n"
             f"**Cache:** `{cache_hits}` hits · `{cache_misses}` misses · `{cache_stores}` stores · `{cache_hit_rate:.1f}%` hit rate\n"
-            f"**tmp_audio:** `{self.cog._format_bytes_human(self._snapshot.get('total_tmp_bytes'))}` "
-            f"· runtime/cache/cred `{self._snapshot.get('runtime_files', 0)}`/`{self._snapshot.get('cache_files', 0)}`/`{self._snapshot.get('cred_files', 0)}`"
+            f"**tmp_audio:** `{self.cog._format_bytes_human(self.health_snapshot.get('total_tmp_bytes'))}` "
+            f"· runtime/cache/cred `{self.health_snapshot.get('runtime_files', 0)}`/`{self.health_snapshot.get('cache_files', 0)}`/`{self.health_snapshot.get('cred_files', 0)}`"
         )
 
     def _build_guilds_text(self) -> str:
-        guilds = list(self._snapshot.get("guilds") or [])
+        guilds = list(self.health_snapshot.get("guilds") or [])
         total_pages = self.total_guild_pages()
         page_hint = f"\n**Página:** `{self.guild_page_index + 1}/{total_pages}`" if total_pages > 1 else ""
         return (
             "### 🏠 Guilds conectadas\n"
             f"**Total:** `{self._format_int(len(guilds))}` guilds\n"
-            f"**Membros totais:** `{self._format_int(self._snapshot.get('total_members', 0))}`{page_hint}\n\n"
+            f"**Membros totais:** `{self._format_int(self.health_snapshot.get('total_members', 0))}`{page_hint}\n\n"
             f"{self._guild_lines()}"
         )
 
@@ -496,8 +496,8 @@ class HealthDashboardView(discord.ui.LayoutView):
         for item in list(self.children):
             self.remove_item(item)
 
-        if refresh_snapshot or not self._snapshot:
-            self._snapshot = self.cog._collect_health_snapshot()
+        if refresh_snapshot or not self.health_snapshot:
+            self.health_snapshot = self.cog._collect_health_snapshot()
 
         total_pages = self.total_guild_pages()
         self.guild_page_index = max(0, min(self.guild_page_index, total_pages - 1))
