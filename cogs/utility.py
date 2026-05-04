@@ -16,6 +16,7 @@ from .tts.utils.app_commands import fetch_root_command_ids_cached, slash_mention
 HELP_EXPIRE_AFTER_SECONDS = 600.0
 HELP_MAX_SESSIONS_PER_GUILD = 5
 HELP_HEADER_EMOJI = "<a:livro:1500584783779070143>"
+HEALTH_GUILDS_PER_PAGE = 15
 
 HEALTH_COMMAND_GUILD_ID = 927002914449424404
 HEALTH_COMMAND_GUILD = discord.Object(id=HEALTH_COMMAND_GUILD_ID)
@@ -265,6 +266,416 @@ class HelpPaginatorView(discord.ui.LayoutView):
         self.page_index = max(0, len(self.pages) - 1)
         self._rebuild_layout()
         await interaction.response.edit_message(view=self)
+
+
+class _HealthPageJumpModal(discord.ui.Modal, title="Ir para página de guilds"):
+    """Modal de salto rápido para a página de guilds do painel health."""
+
+    page_input = discord.ui.TextInput(
+        label="Número da página",
+        placeholder="Ex: 2",
+        required=True,
+        max_length=3,
+    )
+
+    def __init__(self, view: "HealthDashboardView"):
+        super().__init__(timeout=60)
+        self.view_ref = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.page_input.value or "").strip()
+        try:
+            target = int(raw)
+        except ValueError:
+            await interaction.response.send_message(
+                "Digite só o número da página.",
+                ephemeral=True,
+            )
+            return
+
+        total = self.view_ref.total_guild_pages()
+        if target < 1 or target > total:
+            await interaction.response.send_message(
+                f"Página inválida. Use 1 a {total}.",
+                ephemeral=True,
+            )
+            return
+
+        self.view_ref.guild_page_index = target - 1
+        self.view_ref._touch()
+        self.view_ref._rebuild_layout(refresh_snapshot=True)
+        await interaction.response.edit_message(view=self.view_ref)
+
+
+class HealthDashboardView(discord.ui.LayoutView):
+    """Painel `/health` em Components V2.
+
+    Mantém a paginação de guilds no mesmo estilo do help: início, voltar,
+    pular por modal, avançar e fim. Os botões só aparecem quando existem 2+
+    páginas; atualizar e fechar ficam separados para não poluir a navegação.
+    """
+
+    def __init__(
+        self,
+        cog: "Utility",
+        *,
+        owner_id: int,
+        bot_avatar_url: str | None = None,
+        timeout: float = HELP_EXPIRE_AFTER_SECONDS,
+    ):
+        requested_timeout = max(1.0, float(timeout or HELP_EXPIRE_AFTER_SECONDS))
+        super().__init__(timeout=requested_timeout)
+        self.cog = cog
+        self.owner_id = int(owner_id)
+        self.bot_avatar_url = bot_avatar_url
+        self.guild_page_index = 0
+        self.message: discord.Message | None = None
+        self.timeout_seconds = requested_timeout
+        self.expires_at_monotonic = time.monotonic() + requested_timeout
+        self._expired = False
+        self._snapshot: dict[str, Any] = {}
+        self._rebuild_layout(refresh_snapshot=True)
+
+    def _touch(self) -> None:
+        self.expires_at_monotonic = time.monotonic() + self.timeout_seconds
+
+    def _is_expired(self) -> bool:
+        return self._expired or time.monotonic() >= self.expires_at_monotonic
+
+    def total_guild_pages(self) -> int:
+        guilds = list(self._snapshot.get("guilds") or [])
+        return max(1, (len(guilds) + HEALTH_GUILDS_PER_PAGE - 1) // HEALTH_GUILDS_PER_PAGE)
+
+    def _status_accent(self) -> discord.Color:
+        if bool(self._snapshot.get("healthy")):
+            return discord.Color.green()
+        if bool(self._snapshot.get("starting")):
+            return discord.Color.gold()
+        return discord.Color.red()
+
+    def _status_title(self) -> tuple[str, str]:
+        if bool(self._snapshot.get("starting")):
+            return "⏳", "Inicializando"
+        if bool(self._snapshot.get("healthy")):
+            return "🟢", "Saudável"
+        return "🔴", "Atenção necessária"
+
+    def _metric_bool(self, value: Any, *, ok: str, bad: str) -> str:
+        return f"🟢 {ok}" if bool(value) else f"🔴 {bad}"
+
+    def _guild_member_count(self, guild: discord.Guild) -> int:
+        try:
+            count = getattr(guild, "member_count", None)
+            if count is not None:
+                return int(count)
+        except Exception:
+            pass
+        try:
+            return int(len(getattr(guild, "members", []) or []))
+        except Exception:
+            return 0
+
+    def _format_int(self, value: Any) -> str:
+        try:
+            return f"{int(value):,}".replace(",", ".")
+        except Exception:
+            return "0"
+
+    def _format_guild_name(self, guild: discord.Guild) -> str:
+        name = str(getattr(guild, "name", "Servidor sem nome") or "Servidor sem nome")
+        try:
+            name = discord.utils.escape_markdown(name)
+        except Exception:
+            pass
+        if len(name) > 48:
+            name = name[:45].rstrip() + "..."
+        return name
+
+    def _engine_lines(self) -> str:
+        engine_metrics = dict(self._snapshot.get("engine_metrics") or {})
+        if not engine_metrics:
+            return "Ainda não há métricas suficientes de engine para mostrar aqui."
+
+        lines: list[str] = []
+        for idx, (engine_name, data) in enumerate(sorted(engine_metrics.items()), start=1):
+            if idx > 5:
+                remaining = len(engine_metrics) - 5
+                if remaining > 0:
+                    lines.append(f"-# + {remaining} engine(s) ocultas para manter o painel limpo.")
+                break
+            data = dict(data or {})
+            failures = int(data.get("synth_failures", 0) or 0)
+            consecutive = int(data.get("consecutive_failures", 0) or 0)
+            dot = "🟢" if failures == 0 and consecutive == 0 else ("🟡" if consecutive == 0 else "🔴")
+            lines.append(
+                f"{dot} **{str(engine_name).upper()}** · synths `{int(data.get('synth_count', 0) or 0)}` "
+                f"· falhas `{failures}` · seguidas `{consecutive}` · média `{self.cog._format_ms(data.get('avg_synth_ms'))}`"
+            )
+        return "\n".join(lines)
+
+    def _guild_lines(self) -> str:
+        guilds = list(self._snapshot.get("guilds") or [])
+        total_pages = self.total_guild_pages()
+        self.guild_page_index = max(0, min(self.guild_page_index, total_pages - 1))
+        start = self.guild_page_index * HEALTH_GUILDS_PER_PAGE
+        current = guilds[start:start + HEALTH_GUILDS_PER_PAGE]
+
+        if not current:
+            return "Nenhuma guild carregada no cache do bot."
+
+        lines: list[str] = []
+        for offset, guild in enumerate(current, start=start + 1):
+            members = self._guild_member_count(guild)
+            name = self._format_guild_name(guild)
+            lines.append(f"`{offset:02d}.` **{name}**\n    👥 `{self._format_int(members)}` membros")
+        return "\n".join(lines)
+
+    def _build_summary_text(self) -> str:
+        status_emoji, status_label = self._status_title()
+        updated_unix = int(discord.utils.utcnow().timestamp())
+        latency = self._snapshot.get("latency_ms", "n/a")
+        if isinstance(latency, float):
+            latency = f"{latency:.2f}"
+
+        return (
+            f"-# 🩺 Health global · atualizado <t:{updated_unix}:R>\n"
+            f"## {status_emoji} Saúde geral do bot\n"
+            "Painel operacional em Components V2 para ver estabilidade, fila, cache, engines e guilds sem abrir logs.\n\n"
+            f"**Estado geral:** {status_emoji} **{status_label}**\n"
+            f"**Status bruto:** `{self._snapshot.get('status', 'unknown')}`\n"
+            f"**Uptime:** `{self.cog._format_duration(self._snapshot.get('uptime_seconds'))}`\n"
+            f"**Latência:** `{latency} ms`"
+        )
+
+    def _build_state_text(self) -> str:
+        starting = bool(self._snapshot.get("starting"))
+        discord_closed = bool(self._snapshot.get("discord_closed"))
+        return (
+            "### 🔌 Estado do bot\n"
+            f"**Healthy:** {self._metric_bool(self._snapshot.get('healthy'), ok='saudável', bad='com problema')}\n"
+            f"**Inicializando:** {'🟡 sim' if starting else '⚪ não'}\n"
+            f"**Discord pronto:** {self._metric_bool(self._snapshot.get('discord_ready'), ok='pronto', bad='não pronto')}\n"
+            f"**Conexão Discord:** {'🔴 fechada' if discord_closed else '🟢 ativa'}\n"
+            f"**MongoDB:** {self._metric_bool(self._snapshot.get('mongo_ok'), ok='ok', bad='offline')}\n"
+            f"**Voice clients:** `{len(getattr(self.cog.bot, 'voice_clients', []) or [])}`"
+        )
+
+    def _build_queue_cache_text(self) -> str:
+        tts_metrics = dict(self._snapshot.get("tts_metrics") or {})
+        cache_hits = int(tts_metrics.get("cache_hits", 0) or 0)
+        cache_misses = int(tts_metrics.get("cache_misses", 0) or 0)
+        cache_stores = int(tts_metrics.get("cache_stores", 0) or 0)
+        total_cache_lookups = cache_hits + cache_misses
+        cache_hit_rate = (cache_hits / total_cache_lookups * 100.0) if total_cache_lookups else 0.0
+        return (
+            "### 📦 Fila, cache e armazenamento\n"
+            f"**Na fila agora:** `{int(tts_metrics.get('queued_items_current', 0) or 0)}`\n"
+            f"**Enfileiradas / deduplicadas / descartadas:** "
+            f"`{int(tts_metrics.get('queue_enqueued', 0) or 0)}` / "
+            f"`{int(tts_metrics.get('queue_deduplicated', 0) or 0)}` / "
+            f"`{int(tts_metrics.get('queue_dropped', 0) or 0)}`\n"
+            f"**Espera média:** `{self.cog._format_ms(tts_metrics.get('avg_queue_wait_ms'))}`\n"
+            f"**Despacho médio:** `{self.cog._format_ms(tts_metrics.get('avg_dispatch_ms'))}`\n"
+            f"**Cache:** `{cache_hits}` hits · `{cache_misses}` misses · `{cache_stores}` stores · `{cache_hit_rate:.1f}%` hit rate\n"
+            f"**tmp_audio:** `{self.cog._format_bytes_human(self._snapshot.get('total_tmp_bytes'))}` "
+            f"· runtime/cache/cred `{self._snapshot.get('runtime_files', 0)}`/`{self._snapshot.get('cache_files', 0)}`/`{self._snapshot.get('cred_files', 0)}`"
+        )
+
+    def _build_guilds_text(self) -> str:
+        guilds = list(self._snapshot.get("guilds") or [])
+        total_pages = self.total_guild_pages()
+        page_hint = f"\n**Página:** `{self.guild_page_index + 1}/{total_pages}`" if total_pages > 1 else ""
+        return (
+            "### 🏠 Guilds conectadas\n"
+            f"**Total:** `{self._format_int(len(guilds))}` guilds\n"
+            f"**Membros totais:** `{self._format_int(self._snapshot.get('total_members', 0))}`{page_hint}\n\n"
+            f"{self._guild_lines()}"
+        )
+
+    def _rebuild_layout(self, *, refresh_snapshot: bool = False) -> None:
+        for item in list(self.children):
+            self.remove_item(item)
+
+        if refresh_snapshot or not self._snapshot:
+            self._snapshot = self.cog._collect_health_snapshot()
+
+        total_pages = self.total_guild_pages()
+        self.guild_page_index = max(0, min(self.guild_page_index, total_pages - 1))
+        at_start = self.guild_page_index <= 0
+        at_end = self.guild_page_index >= total_pages - 1
+
+        header_item: Any
+        if self.bot_avatar_url:
+            header_item = discord.ui.Section(
+                discord.ui.TextDisplay(self._build_summary_text()),
+                accessory=discord.ui.Thumbnail(self.bot_avatar_url, description="Avatar do bot"),
+            )
+        else:
+            header_item = discord.ui.TextDisplay(self._build_summary_text())
+
+        children: list[Any] = [
+            header_item,
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(self._build_state_text()),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(self._build_queue_cache_text()),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("### ⚙️ Engines\n" + self._engine_lines()),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(self._build_guilds_text()),
+        ]
+
+        if total_pages > 1:
+            first = discord.ui.Button(emoji="⏪", style=discord.ButtonStyle.secondary, disabled=at_start)
+            first.callback = self._go_first
+
+            prev_b = discord.ui.Button(emoji="◀️", style=discord.ButtonStyle.secondary, disabled=at_start)
+            prev_b.callback = self._go_prev
+
+            jump = discord.ui.Button(label=f"{self.guild_page_index + 1}/{total_pages}", style=discord.ButtonStyle.primary)
+            jump.callback = self._open_jump_modal
+
+            next_b = discord.ui.Button(emoji="▶️", style=discord.ButtonStyle.secondary, disabled=at_end)
+            next_b.callback = self._go_next
+
+            last = discord.ui.Button(emoji="⏩", style=discord.ButtonStyle.secondary, disabled=at_end)
+            last.callback = self._go_last
+
+            children.extend([
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(
+                    f"-# _    _⏪ Início · ◀ Voltar `{self.guild_page_index + 1}/{total_pages}` Pular ▶ · Fim ⏩"
+                ),
+                discord.ui.ActionRow(first, prev_b, jump, next_b, last),
+            ])
+
+        refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.success)
+        refresh.callback = self._refresh
+
+        close = discord.ui.Button(label="Fechar", emoji="✖️", style=discord.ButtonStyle.danger)
+        close.callback = self._close
+
+        children.append(discord.ui.ActionRow(refresh, close))
+
+        container = discord.ui.Container(*children, accent_color=self._status_accent())
+        self.add_item(container)
+
+    def _rebuild_expired_layout(self) -> None:
+        for item in list(self.children):
+            self.remove_item(item)
+        container = discord.ui.Container(
+            discord.ui.TextDisplay(
+                "### 🩺 Painel health expirado\n"
+                "Esse painel ficou aberto por tempo demais e foi congelado para evitar botões antigos.\n\n"
+                "Use `/health` novamente para abrir uma leitura nova."
+            ),
+            accent_color=discord.Color.dark_grey(),
+        )
+        self.add_item(container)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self._is_expired():
+            message = "Esse painel health já expirou. Use `/health` novamente para abrir uma leitura nova."
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(message, ephemeral=True)
+                else:
+                    await interaction.response.send_message(message, ephemeral=True)
+            except Exception:
+                pass
+            return False
+
+        user_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
+        if user_id == self.owner_id:
+            self._touch()
+            return True
+
+        perms = getattr(getattr(interaction, "user", None), "guild_permissions", None)
+        if bool(getattr(perms, "administrator", False)) or bool(getattr(perms, "manage_guild", False)):
+            self._touch()
+            return True
+
+        message = "Só quem abriu esse health ou alguém com permissão de gerenciar servidor pode usar esses botões."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception:
+            pass
+        return False
+
+    async def on_timeout(self) -> None:
+        self._expired = True
+        self._rebuild_expired_layout()
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
+            except TypeError:
+                try:
+                    await self.message.edit(view=self)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    async def _go_first(self, interaction: discord.Interaction):
+        self.guild_page_index = 0
+        self._touch()
+        self._rebuild_layout(refresh_snapshot=True)
+        await interaction.response.edit_message(view=self)
+
+    async def _go_prev(self, interaction: discord.Interaction):
+        if self.guild_page_index > 0:
+            self.guild_page_index -= 1
+        self._touch()
+        self._rebuild_layout(refresh_snapshot=True)
+        await interaction.response.edit_message(view=self)
+
+    async def _open_jump_modal(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(_HealthPageJumpModal(self))
+
+    async def _go_next(self, interaction: discord.Interaction):
+        if self.guild_page_index < self.total_guild_pages() - 1:
+            self.guild_page_index += 1
+        self._touch()
+        self._rebuild_layout(refresh_snapshot=True)
+        await interaction.response.edit_message(view=self)
+
+    async def _go_last(self, interaction: discord.Interaction):
+        self.guild_page_index = max(0, self.total_guild_pages() - 1)
+        self._touch()
+        self._rebuild_layout(refresh_snapshot=True)
+        await interaction.response.edit_message(view=self)
+
+    async def _refresh(self, interaction: discord.Interaction):
+        self._touch()
+        self._rebuild_layout(refresh_snapshot=True)
+        await interaction.response.edit_message(view=self)
+
+    async def _close(self, interaction: discord.Interaction):
+        self._expired = True
+        self.stop()
+        message = getattr(interaction, "message", None) or self.message
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except Exception:
+            pass
+        if message is not None:
+            try:
+                await message.delete()
+                return
+            except Exception:
+                pass
+        self._rebuild_expired_layout()
+        try:
+            if interaction.response.is_done():
+                await interaction.edit_original_response(view=self)
+            else:
+                await interaction.response.edit_message(view=self)
+        except Exception:
+            pass
 
 
 class Utility(commands.Cog):
@@ -835,12 +1246,17 @@ class Utility(commands.Cog):
             return f"{int(size)} {units[idx]}"
         return f"{size:.2f} {units[idx]}"
 
-    def _build_health_embeds(self) -> list[discord.Embed]:
-        snapshot = {}
+    def _collect_health_snapshot(self) -> dict[str, Any]:
+        """Coleta todos os dados usados pelo painel `/health` em Components V2.
+
+        A coleta fica separada da view para o botão Atualizar conseguir refazer
+        a leitura sem duplicar lógica de métricas, cache e guilds.
+        """
+        snapshot: dict[str, Any] = {}
         get_snapshot = getattr(self.bot, "get_health_snapshot", None)
         if callable(get_snapshot):
             try:
-                snapshot = get_snapshot() or {}
+                snapshot = dict(get_snapshot() or {})
             except Exception:
                 snapshot = {}
 
@@ -873,104 +1289,38 @@ class Utility(commands.Cog):
         cred_files, cred_bytes = _dir_stats(credentials_dir)
         total_tmp_bytes = runtime_bytes + cache_bytes + cred_bytes
 
-        healthy = bool(snapshot.get("healthy"))
-        starting = bool(snapshot.get("starting"))
-        color = discord.Color.green() if healthy else (discord.Color.gold() if starting else discord.Color.red())
+        def _guild_sort_key(guild: discord.Guild) -> tuple[int, str]:
+            try:
+                members = int(getattr(guild, "member_count", 0) or len(getattr(guild, "members", []) or []) or 0)
+            except Exception:
+                members = 0
+            name = str(getattr(guild, "name", "") or "").casefold()
+            return (-members, name)
 
-        cache_hits = int(tts_metrics.get("cache_hits", 0) or 0)
-        cache_misses = int(tts_metrics.get("cache_misses", 0) or 0)
-        cache_stores = int(tts_metrics.get("cache_stores", 0) or 0)
-        total_cache_lookups = cache_hits + cache_misses
-        cache_hit_rate = (cache_hits / total_cache_lookups * 100.0) if total_cache_lookups else 0.0
+        guilds = sorted(list(getattr(self.bot, "guilds", []) or []), key=_guild_sort_key)
+        total_members = 0
+        for guild in guilds:
+            try:
+                count = getattr(guild, "member_count", None)
+                if count is None:
+                    count = len(getattr(guild, "members", []) or [])
+                total_members += int(count or 0)
+            except Exception:
+                pass
 
-        title_badge = "🩺" if healthy else ("⏳" if starting else "🚨")
-        summary = discord.Embed(
-            title=f"{title_badge} Saúde geral do bot",
-            description=(
-                "Painel rápido de saúde, latência, fila, cache e engines do bot. "
-                "Use isto para bater o olho e entender se está tudo estável."
-            ),
-            color=color,
-            timestamp=discord.utils.utcnow(),
-        )
-        summary.add_field(
-            name="Estado do bot",
-            value=(
-                f"**Status:** `{snapshot.get('status', 'unknown')}`\n"
-                f"**Healthy:** {self._format_bool_badge(snapshot.get('healthy'), ok_label='saudável', bad_label='com problema')}\n"
-                f"**Inicializando:** {'🟡 sim' if starting else '⚪ não'}\n"
-                f"**Discord pronto:** {self._format_bool_badge(snapshot.get('discord_ready'), ok_label='pronto', bad_label='não pronto')}\n"
-                f"**Conexão fechada:** {'🔴 sim' if snapshot.get('discord_closed') else '🟢 não'}\n"
-                f"**MongoDB:** {self._format_bool_badge(snapshot.get('mongo_ok'), ok_label='ok', bad_label='offline')}"
-            ),
-            inline=False,
-        )
-        summary.add_field(
-            name="Tempo e rede",
-            value=(
-                f"**Uptime:** `{self._format_duration(snapshot.get('uptime_seconds'))}`\n"
-                f"**Latência:** `{snapshot.get('latency_ms', 'n/a')} ms`\n"
-                f"**Guilds:** `{snapshot.get('guild_count', len(self.bot.guilds))}`\n"
-                f"**Voice clients:** `{len(getattr(self.bot, 'voice_clients', []) or [])}`"
-            ),
-            inline=True,
-        )
-        summary.add_field(
-            name="Fila e despacho",
-            value=(
-                f"**Na fila agora:** `{int(tts_metrics.get('queued_items_current', 0) or 0)}`\n"
-                f"**Enfileiradas:** `{int(tts_metrics.get('queue_enqueued', 0) or 0)}`\n"
-                f"**Deduplicadas:** `{int(tts_metrics.get('queue_deduplicated', 0) or 0)}`\n"
-                f"**Descartadas:** `{int(tts_metrics.get('queue_dropped', 0) or 0)}`\n"
-                f"**Espera média:** `{self._format_ms(tts_metrics.get('avg_queue_wait_ms'))}`\n"
-                f"**Despacho médio:** `{self._format_ms(tts_metrics.get('avg_dispatch_ms'))}`"
-            ),
-            inline=True,
-        )
-        summary.add_field(
-            name="Cache e armazenamento",
-            value=(
-                f"**Hits:** `{cache_hits}`\n"
-                f"**Misses:** `{cache_misses}`\n"
-                f"**Stores:** `{cache_stores}`\n"
-                f"**Hit rate:** `{cache_hit_rate:.1f}%`\n"
-                f"**tmp_audio:** `{self._format_bytes_human(total_tmp_bytes)}`\n"
-                f"**Runtime / Cache / Cred:** `{runtime_files}` / `{cache_files}` / `{cred_files}`"
-            ),
-            inline=False,
-        )
-        if self.bot.user and self.bot.user.display_avatar:
-            summary.set_thumbnail(url=self.bot.user.display_avatar.url)
-        summary.set_footer(text="Painel global • não é limitado ao servidor atual")
+        snapshot.update({
+            "tts_metrics": tts_metrics,
+            "engine_metrics": engine_metrics,
+            "runtime_files": runtime_files,
+            "cache_files": cache_files,
+            "cred_files": cred_files,
+            "total_tmp_bytes": total_tmp_bytes,
+            "guilds": guilds,
+            "guild_count": len(guilds),
+            "total_members": total_members,
+        })
+        return snapshot
 
-        engines = discord.Embed(
-            title="⚙️ Engines e synth",
-            description="Indicadores por engine para detectar lentidão, falhas repetidas e efetividade da cache.",
-            color=color,
-            timestamp=discord.utils.utcnow(),
-        )
-        if engine_metrics:
-            for engine_name, data in sorted(engine_metrics.items()):
-                engines.add_field(
-                    name=f"{engine_name.upper()}",
-                    value=(
-                        f"**Synths:** `{int(data.get('synth_count', 0) or 0)}`\n"
-                        f"**Falhas:** `{int(data.get('synth_failures', 0) or 0)}`\n"
-                        f"**Consecutivas:** `{int(data.get('consecutive_failures', 0) or 0)}`\n"
-                        f"**Hits / Misses:** `{int(data.get('cache_hits', 0) or 0)}` / `{int(data.get('cache_misses', 0) or 0)}`\n"
-                        f"**Média synth:** `{self._format_ms(data.get('avg_synth_ms'))}`\n"
-                        f"**Última synth:** `{self._format_ms(data.get('last_synth_ms'))}`\n"
-                        f"**Slow alerts:** `{int(data.get('slow_alerts', 0) or 0)}`\n"
-                        f"**Último erro:** `{str(data.get('last_error') or 'nenhum')[:90]}`"
-                    ),
-                    inline=False,
-                )
-        else:
-            engines.add_field(name="Sem dados", value="Ainda não há métricas suficientes de engine para mostrar aqui.", inline=False)
-        if self.bot.user and self.bot.user.display_avatar:
-            engines.set_thumbnail(url=self.bot.user.display_avatar.url)
-        engines.set_footer(text="Métricas globais do TTS")
-        return [summary, engines]
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -999,11 +1349,28 @@ class Utility(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="health", description="Mostra a saúde geral do bot, fila, cache e engines")
+    @app_commands.command(name="health", description="Mostra a saúde geral do bot, fila, cache, engines e guilds")
     @app_commands.guilds(HEALTH_COMMAND_GUILD)
     async def health(self, interaction: discord.Interaction):
-        embeds = self._build_health_embeds()
-        await interaction.response.send_message(embeds=embeds, ephemeral=False)
+        avatar_url = None
+        if self.bot.user and self.bot.user.display_avatar:
+            avatar_url = self.bot.user.display_avatar.url
+
+        view = HealthDashboardView(
+            self,
+            owner_id=int(interaction.user.id),
+            bot_avatar_url=avatar_url,
+            timeout=HELP_EXPIRE_AFTER_SECONDS,
+        )
+        await interaction.response.send_message(
+            view=view,
+            ephemeral=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        try:
+            view.message = await interaction.original_response()
+        except Exception:
+            pass
 
     @app_commands.command(name="ping", description="Mostra o status atual e a latência do bot")
     async def ping(self, interaction: discord.Interaction):
