@@ -1,0 +1,16 @@
+[Unit]
+Description=CallKeeper standalone service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/tts-bot
+EnvironmentFile=/home/ubuntu/tts-bot/.env
+ExecStart=/home/ubuntu/tts-bot/venv/bin/python /home/ubuntu/tts-bot/callkeeper_service.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
