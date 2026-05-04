@@ -27,16 +27,21 @@ class CallKeeperStateStore:
         comando `_callkeeper <canal>` salva um novo foco, o cache local deste
         serviço não é atualizado automaticamente; por isso o watchdog chama
         este método antes de reconciliar.
+
+        Preferimos sempre o documento novo `type=guild`, mas ainda mesclamos
+        dados de documento legado sem `type`. Sem isso, um `find_one` pode pegar
+        o legado primeiro e o serviço fica lendo enabled/channel_id antigo.
         """
         gid = int(guild_id)
         try:
-            doc = await self.db.coll.find_one(
+            typed = await self.db.coll.find_one({"guild_id": gid, "type": "guild"}, {"_id": 0})
+            legacy = await self.db.coll.find_one(
                 {
                     "guild_id": gid,
+                    "user_id": {"$exists": False},
                     "$or": [
-                        {"type": "guild"},
-                        {"type": {"$exists": False}, "user_id": {"$exists": False}},
-                        {"type": None, "user_id": {"$exists": False}},
+                        {"type": {"$exists": False}},
+                        {"type": None},
                     ],
                 },
                 {"_id": 0},
@@ -45,9 +50,14 @@ class CallKeeperStateStore:
             log.exception("[callkeeper] falha recarregando estado no DB")
             return
 
+        doc = {}
+        if legacy:
+            doc.update(legacy)
+        if typed:
+            doc.update(typed)
         if not doc:
             return
-        doc.setdefault("type", "guild")
+        doc["type"] = "guild"
         doc["guild_id"] = gid
         self.db.guild_cache[gid] = doc
 
@@ -71,3 +81,10 @@ class CallKeeperStateStore:
 
     async def set_channel_id(self, guild_id: int, channel_id: Optional[int]) -> None:
         await self.db.set_callkeeper_channel_id(int(guild_id), int(channel_id or 0))
+
+    def get_revision(self, guild_id: int) -> int:
+        try:
+            raw = self.db.guild_cache.get(int(guild_id), {}).get("callkeeper_revision", 0)
+            return max(0, int(raw or 0))
+        except Exception:
+            return 0

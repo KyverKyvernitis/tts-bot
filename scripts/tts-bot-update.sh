@@ -4,6 +4,7 @@ set -Eeuo pipefail
 REPO_DIR="/home/ubuntu/bot"
 BRANCH="main"
 SERVICE="tts-bot"
+CALLKEEPER_SERVICE="callkeeper"
 LOG_TAG="tts-bot-updater"
 DIRTY_MARKER_FILE="$REPO_DIR/.fatal-update-dirty"
 
@@ -26,8 +27,10 @@ ROLLBACK_DONE=0
 FRONT_CHANGED=0
 BACK_CHANGED=0
 BOT_CHANGED=0
+CALLKEEPER_CHANGED=0
 
 BOT_HEALTHCHECK_STATUS="não verificado"
+CALLKEEPER_STATUS="não alterado"
 FRONT_STATUS="não alterado"
 BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
@@ -86,7 +89,9 @@ collect_run_log_excerpt() {
 
 service_unit_for_stage() {
   local stage_lc="${1,,}"
-  if [[ "$stage_lc" == *"bot"* ]]; then
+  if [[ "$stage_lc" == *"callkeeper"* ]]; then
+    printf '%s.service' "$CALLKEEPER_SERVICE"
+  elif [[ "$stage_lc" == *"bot"* ]]; then
     printf '%s.service' "$SERVICE"
   else
     printf '%s' "$UPDATER_UNIT"
@@ -237,6 +242,33 @@ deploy_bot() {
   return 1
 }
 
+deploy_callkeeper() {
+  if (( CALLKEEPER_CHANGED == 0 )); then
+    CALLKEEPER_STATUS="não alterado"
+    return 0
+  fi
+
+  STAGE="configuração do CallKeeper"
+  if [[ -f "$REPO_DIR/deploy/systemd/callkeeper.service" ]]; then
+    cp "$REPO_DIR/deploy/systemd/callkeeper.service" /etc/systemd/system/callkeeper.service
+    systemctl daemon-reload
+    systemctl enable "$CALLKEEPER_SERVICE" >/dev/null 2>&1 || true
+  fi
+
+  STAGE="reinício do CallKeeper"
+  systemctl restart "$CALLKEEPER_SERVICE"
+  sleep 2
+
+  STAGE="healthcheck do CallKeeper"
+  if systemctl is-active --quiet "$CALLKEEPER_SERVICE"; then
+    CALLKEEPER_STATUS="OK"
+    return 0
+  fi
+
+  CALLKEEPER_STATUS="falhou"
+  return 1
+}
+
 deploy_frontend() {
   if (( FRONT_CHANGED == 0 )); then
     FRONT_STATUS="não alterado"
@@ -348,6 +380,12 @@ rollback_after_failure() {
   deploy_bot
   rollback_bot_status="$BOT_HEALTHCHECK_STATUS"
 
+  local rollback_callkeeper_status="não precisou reiniciar"
+  if (( CALLKEEPER_CHANGED == 1 )); then
+    deploy_callkeeper
+    rollback_callkeeper_status="$CALLKEEPER_STATUS"
+  fi
+
   local duration
   duration="$(human_duration "$SECONDS")"
 
@@ -368,6 +406,7 @@ Código: $exit_code
 Rollback: $ROLLBACK_STATUS
 Commit sujo: sim
 Bot: $rollback_bot_status
+CallKeeper: $rollback_callkeeper_status
 Frontend: $rollback_front_status
 Backend: $rollback_back_status
 Activity: $rollback_activity_status
@@ -460,6 +499,9 @@ fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -vq '^activity /sinuca'; then
   BOT_CHANGED=1
 fi
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callkeeper_runtime/|deploy/systemd/callkeeper\.service|config\.py|db\.py|requirements\.txt)$'; then
+  CALLKEEPER_CHANGED=1
+fi
 
 logger -t "$LOG_TAG" "Atualizando de $CURRENT_COMMIT para $REMOTE_COMMIT"
 
@@ -470,6 +512,7 @@ UPDATE_APPLIED=1
 FAILED_STAGE=""
 
 deploy_bot
+deploy_callkeeper
 deploy_frontend
 deploy_backend
 
@@ -479,6 +522,9 @@ CHANGED_FILES="$(format_changed_files)"
 
 OVERALL_OK=1
 [[ "$BOT_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_OK=0
+if (( CALLKEEPER_CHANGED == 1 )) && [[ "$CALLKEEPER_STATUS" != "OK" ]]; then
+  OVERALL_OK=0
+fi
 [[ "$ACTIVITY_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_OK=0
 
 if (( OVERALL_OK == 1 )); then
@@ -499,6 +545,7 @@ Mudança: $COMMIT_SUBJECT
 Arquivos:
 $CHANGED_FILES
 Bot: $BOT_HEALTHCHECK_STATUS
+CallKeeper: $CALLKEEPER_STATUS
 Frontend: $FRONT_STATUS
 Backend: $BACK_STATUS
 Activity: $ACTIVITY_HEALTHCHECK_STATUS

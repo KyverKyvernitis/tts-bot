@@ -189,6 +189,7 @@ class CallKeeperRuntime:
         self._watchdog_task: Optional[asyncio.Task] = None
         self._stopping = asyncio.Event()
         self._last_seen_target_channel_id = 0
+        self._last_logged_state_key: tuple[bool, int, int] | None = None
 
     async def start(self) -> None:
         if self.settings.guild_id <= 0:
@@ -488,12 +489,25 @@ class CallKeeperRuntime:
             await self.ensure_aux_clients_started()
             await self.store.refresh_guild_state(self.settings.guild_id)
 
-            if not self.is_enabled():
+            enabled = self.is_enabled()
+            channel_id = self.get_target_channel_id()
+            revision = self.store.get_revision(self.settings.guild_id)
+            state_key = (enabled, channel_id, revision)
+            if state_key != self._last_logged_state_key:
+                log.info(
+                    "[callkeeper] estado DB atualizado | enabled=%s channel_id=%s revision=%s reason=%s",
+                    enabled,
+                    channel_id or 0,
+                    revision,
+                    reason,
+                )
+                self._last_logged_state_key = state_key
+
+            if not enabled:
                 await self._disconnect_all()
                 self._last_seen_target_channel_id = 0
                 return
 
-            channel_id = self.get_target_channel_id()
             if channel_id <= 0:
                 log.warning("[callkeeper] ativo, mas sem call alvo configurada")
                 self._last_seen_target_channel_id = 0
@@ -504,6 +518,13 @@ class CallKeeperRuntime:
 
             member_count = await self._member_count_without_callkeeper_bots()
             required = min(3, self._required_bots_for_member_count(member_count))
+            log.info(
+                "[callkeeper] reconcile %s | membros_nao_callkeeper=%s required=%s target=%s",
+                reason,
+                member_count,
+                required,
+                channel_id,
+            )
 
             target_connected: list[AuxSlot] = []
             connected_elsewhere: list[AuxSlot] = []
