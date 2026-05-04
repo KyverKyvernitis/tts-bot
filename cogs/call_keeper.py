@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 import config
@@ -24,13 +23,7 @@ def _safe_int(value, default: int = 0) -> int:
 
 
 CALLKEEPER_GUILD_ID = _safe_int(getattr(config, "CALLKEEPER_GUILD_ID", 0), 0)
-_CALLKEEPER_GROUP_KWARGS = {
-    "name": "callkeeper",
-    "description": "Mantém uma call ocupada com bots auxiliares.",
-    "default_permissions": discord.Permissions(manage_guild=True),
-}
-if CALLKEEPER_GUILD_ID > 0:
-    _CALLKEEPER_GROUP_KWARGS["guild_ids"] = [CALLKEEPER_GUILD_ID]
+CALLKEEPER_OWNER_USER_ID = 394316054433628160
 
 
 class _AuxVoiceClient(discord.Client):
@@ -195,8 +188,6 @@ class CallKeeper(commands.Cog):
     necessários, não existe reserva: o próprio bot caído reconecta o mais rápido
     possível.
     """
-
-    callkeeper = app_commands.Group(**_CALLKEEPER_GROUP_KWARGS)
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -666,72 +657,79 @@ class CallKeeper(commands.Cog):
             lines.append(f"- `{slot.label}`: {state}")
         return "\n".join(lines)
 
-    @callkeeper.command(name="on", description="Liga o CallKeeper na call escolhida ou na sua call atual")
-    @app_commands.describe(canal="Call que deve ser protegida. Se vazio, usa sua call atual ou CALLKEEPER_CHANNEL_ID.")
-    async def callkeeper_on(
-        self,
-        interaction: discord.Interaction,
-        canal: Optional[discord.VoiceChannel] = None,
-    ):
-        if not await self._guard(interaction, require_tokens=True):
+    def _is_authorized_prefix_context(self, ctx: commands.Context) -> bool:
+        guild = getattr(ctx, "guild", None)
+        author = getattr(ctx, "author", None)
+        if self.guild_id <= 0:
+            return False
+        if guild is None or int(getattr(guild, "id", 0) or 0) != int(self.guild_id):
+            return False
+        if int(getattr(author, "id", 0) or 0) != int(CALLKEEPER_OWNER_USER_ID):
+            return False
+        return True
+
+    async def _resolve_prefix_target_channel(self, ctx: commands.Context) -> Optional[discord.VoiceChannel]:
+        guild = getattr(ctx, "guild", None)
+        if guild is None:
+            return None
+
+        configured_id = int(self.config_channel_id or 0)
+        if configured_id > 0:
+            channel = guild.get_channel(configured_id) or self.bot.get_channel(configured_id)
+            if isinstance(channel, discord.VoiceChannel) and int(channel.guild.id) == int(self.guild_id):
+                return channel
+
+        user_voice = getattr(getattr(ctx, "author", None), "voice", None)
+        user_channel = getattr(user_voice, "channel", None)
+        if isinstance(user_channel, discord.VoiceChannel) and int(user_channel.guild.id) == int(self.guild_id):
+            return user_channel
+
+        saved_id = await self._get_target_channel_id()
+        if saved_id > 0:
+            channel = guild.get_channel(saved_id) or self.bot.get_channel(saved_id)
+            if isinstance(channel, discord.VoiceChannel) and int(channel.guild.id) == int(self.guild_id):
+                return channel
+        return None
+
+    @commands.command(name="callkeeper", hidden=True)
+    async def callkeeper_toggle(self, ctx: commands.Context):
+        # Fora da guild alvo ou usado por outro usuário: ignora 100%, sem resposta.
+        if not self._is_authorized_prefix_context(ctx):
             return
 
-        target = canal
-        if target is None:
-            user_voice = getattr(getattr(interaction, "user", None), "voice", None)
-            user_channel = getattr(user_voice, "channel", None)
-            if isinstance(user_channel, discord.VoiceChannel):
-                target = user_channel
-
-        if target is None:
-            saved_id = await self._get_target_channel_id()
-            guild = interaction.guild
-            if guild is not None and saved_id:
-                maybe = guild.get_channel(saved_id)
-                if isinstance(maybe, discord.VoiceChannel):
-                    target = maybe
-
-        if target is None:
-            await interaction.response.send_message(
-                "Escolha uma call em `canal`, entre numa call antes de usar o comando, ou configure `CALLKEEPER_CHANNEL_ID`.",
-                ephemeral=True,
-            )
+        if await self._is_enabled():
+            await self._set_enabled(False)
+            if self._watchdog_task and not self._watchdog_task.done():
+                self._watchdog_task.cancel()
+            await self._disconnect_all(close_clients=True)
+            with contextlib.suppress(discord.HTTPException):
+                await ctx.reply("CallKeeper desligado. Bots auxiliares removidos da call.", mention_author=False)
             return
 
-        if int(target.guild.id) != int(self.guild_id):
-            await interaction.response.send_message(
-                "Essa call não pertence ao servidor configurado para o CallKeeper.",
-                ephemeral=True,
-            )
+        if len(self.tokens) < 3:
+            with contextlib.suppress(discord.HTTPException):
+                await ctx.reply(
+                    "Configure os 3 tokens na `.env`: `CALLKEEPER_BOT_1_TOKEN`, `CALLKEEPER_BOT_2_TOKEN` e `CALLKEEPER_BOT_3_TOKEN`.",
+                    mention_author=False,
+                )
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        target = await self._resolve_prefix_target_channel(ctx)
+        if target is None:
+            with contextlib.suppress(discord.HTTPException):
+                await ctx.reply(
+                    "Configure `CALLKEEPER_CHANNEL_ID` ou entre na call que o CallKeeper deve proteger antes de usar o comando.",
+                    mention_author=False,
+                )
+            return
+
         await self._set_target_channel_id(int(target.id))
         await self._set_enabled(True)
         await self._ensure_aux_clients_started()
         self._start_watchdog()
-        await self._reconcile("command_on")
-        await interaction.followup.send(
-            f"CallKeeper ligado em {target.mention}. Regra ativa: 0/1 membro não-CallKeeper = 3 bots, 2 membros = 2, 3 membros = 1, 4+ membros = 0.",
-            ephemeral=True,
-        )
-
-    @callkeeper.command(name="off", description="Desliga o CallKeeper e remove os bots auxiliares da call")
-    async def callkeeper_off(self, interaction: discord.Interaction):
-        if not await self._guard(interaction):
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        await self._set_enabled(False)
-        if self._watchdog_task and not self._watchdog_task.done():
-            self._watchdog_task.cancel()
-        await self._disconnect_all(close_clients=True)
-        await interaction.followup.send("CallKeeper desligado. Todos os bots auxiliares foram desconectados.", ephemeral=True)
-
-    @callkeeper.command(name="status", description="Mostra o estado atual do CallKeeper")
-    async def callkeeper_status(self, interaction: discord.Interaction):
-        if not await self._guard(interaction):
-            return
-        await interaction.response.send_message(await self._status_text(), ephemeral=True)
+        await self._reconcile("prefix_toggle_on")
+        with contextlib.suppress(discord.HTTPException):
+            await ctx.reply(f"CallKeeper ligado em {target.mention}.", mention_author=False)
 
 
 async def setup(bot: commands.Bot):

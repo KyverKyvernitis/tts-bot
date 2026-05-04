@@ -51,12 +51,14 @@ print("BOT.PY INICIOU")
 
 
 
-REMOVED_FORM_SLASH_COMMANDS = {
+REMOVED_SLASH_COMMANDS = {
     "form_config",
     "form_customizar",
     "form_repostar",
     "form_reset",
     "form_status",
+    # O CallKeeper agora é apenas comando de prefixo; remove o grupo slash antigo.
+    "callkeeper",
 }
 
 def _cfg(*names: str, default=None):
@@ -106,15 +108,15 @@ class BotLocal(commands.Bot):
         self._update_temp_root = Path("/tmp/discord-auto-update")
         set_health_provider(self.get_health_snapshot)
 
-    async def _cleanup_removed_form_slash_commands(self, guild_ids: set[int]) -> None:
-        """Remove comandos /form_* antigos sem tocar em comandos de outras cogs."""
-        names = REMOVED_FORM_SLASH_COMMANDS
+    async def _cleanup_removed_slash_commands(self, guild_ids: set[int]) -> None:
+        """Remove comandos slash antigos sem tocar em comandos de outras cogs."""
+        names = REMOVED_SLASH_COMMANDS
 
         async def delete_matching(scope: str, *, guild: discord.Object | None = None) -> None:
             try:
                 commands_found = await self.tree.fetch_commands(guild=guild)
             except Exception as e:
-                print(f"[SYNC][{scope}] não consegui buscar comandos pra limpar /form_*: {e}")
+                print(f"[SYNC][{scope}] não consegui buscar comandos pra limpar slash antigos: {e}")
                 return
 
             for cmd in commands_found:
@@ -202,10 +204,9 @@ class BotLocal(commands.Bot):
         if callkeeper_guild_id > 0:
             guild_ids.add(callkeeper_guild_id)
 
-        # Limpa só os slash antigos do formulário. Esses comandos foram
-        # substituídos pelos triggers `form` e `c`, então podem ser removidos
+        # Limpa slash antigos que foram substituídos por comandos de prefixo/triggers,
         # sem usar clear_commands e sem afetar comandos de outras cogs.
-        await self._cleanup_removed_form_slash_commands(guild_ids)
+        await self._cleanup_removed_slash_commands(guild_ids)
 
         # One-shot flag: limpa comandos globais antes de sync guild. Útil quando
         # o bot antes rodava com sync global e agora tá em modo guild-only —
