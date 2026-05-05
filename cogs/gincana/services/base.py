@@ -107,6 +107,7 @@ class GincanaBase:
         self.db = db
         self._pica_expirations: dict[tuple[int, int], float] = {}
         self._dj_expirations: dict[tuple[int, int, int], float] = {}
+        self._gincana_timed_effects_rehydrated: bool = False
         self._roleta_last_used: dict[int, float] = {}
         self._roleta_running_guilds: set[int] = set()
         self._buckshot_sessions: dict[int, dict] = {}

@@ -255,6 +255,93 @@ class SettingsDB:
     async def clear_gincana_focus_users(self, guild_id: int) -> Dict[int, int]:
         return await self.clear_modo_censura_focus_users(guild_id)
 
+    def get_gincana_timed_effects(self, guild_id: int) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        g = self.guild_cache.get(int(guild_id), {}) or {}
+        raw = g.get("gincana_timed_effects", {}) or {}
+        result: Dict[str, Dict[str, Dict[str, Any]]] = {"pica": {}, "dj": {}}
+        if not isinstance(raw, dict):
+            return result
+
+        for effect_name in ("pica", "dj"):
+            effect_map = raw.get(effect_name, {}) or {}
+            if not isinstance(effect_map, dict):
+                continue
+            for key, record in effect_map.items():
+                if not isinstance(record, dict):
+                    continue
+                cleaned = dict(record)
+                try:
+                    expires_at = float(cleaned.get("expires_at", 0.0) or 0.0)
+                except Exception:
+                    expires_at = 0.0
+                if expires_at <= 0:
+                    continue
+
+                try:
+                    user_id = int(cleaned.get("user_id") or 0)
+                except Exception:
+                    user_id = 0
+                if user_id <= 0 and effect_name == "pica":
+                    try:
+                        user_id = int(key)
+                    except Exception:
+                        user_id = 0
+                if user_id <= 0:
+                    continue
+
+                if effect_name == "dj":
+                    try:
+                        channel_id = int(cleaned.get("channel_id") or 0)
+                    except Exception:
+                        channel_id = 0
+                    if channel_id <= 0:
+                        continue
+                    cleaned["channel_id"] = channel_id
+                    cleaned["user_id"] = user_id
+                    cleaned["expires_at"] = expires_at
+                    result[effect_name][str(key)] = cleaned
+                else:
+                    cleaned["user_id"] = user_id
+                    cleaned["expires_at"] = expires_at
+                    result[effect_name][str(user_id)] = cleaned
+        return result
+
+    async def set_gincana_timed_effect(self, guild_id: int, effect_name: str, key: str, record: Dict[str, Any]):
+        doc = self._get_guild_doc(int(guild_id))
+        effects = doc.get("gincana_timed_effects", {}) or {}
+        if not isinstance(effects, dict):
+            effects = {}
+
+        effect_name = str(effect_name or "").strip()
+        if effect_name not in {"pica", "dj"}:
+            return
+
+        bucket = effects.get(effect_name, {}) or {}
+        if not isinstance(bucket, dict):
+            bucket = {}
+        bucket[str(key)] = dict(record or {})
+        effects[effect_name] = bucket
+        doc["gincana_timed_effects"] = effects
+        await self._save_guild_doc(int(guild_id), doc)
+
+    async def remove_gincana_timed_effect(self, guild_id: int, effect_name: str, key: str):
+        doc = self._get_guild_doc(int(guild_id))
+        effects = doc.get("gincana_timed_effects", {}) or {}
+        if not isinstance(effects, dict):
+            effects = {}
+
+        effect_name = str(effect_name or "").strip()
+        bucket = effects.get(effect_name, {}) or {}
+        if isinstance(bucket, dict):
+            bucket.pop(str(key), None)
+            effects[effect_name] = bucket
+
+        if all(not (v or {}) for v in effects.values() if isinstance(v, dict)):
+            doc.pop("gincana_timed_effects", None)
+        else:
+            doc["gincana_timed_effects"] = effects
+        await self._save_guild_doc(int(guild_id), doc)
+
     def anti_mzk_enabled(self, guild_id: int) -> bool:
         g = self.guild_cache.get(guild_id, {})
         return bool(g.get("anti_mzk_enabled", True))

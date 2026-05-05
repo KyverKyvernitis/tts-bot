@@ -741,6 +741,23 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         await self._run_robbery(ctx.channel, ctx.guild, ctx.author, target)
 
     @dcommands.Cog.listener()
+    async def on_ready(self):
+        if self._gincana_timed_effects_rehydrated:
+            return
+        self._gincana_timed_effects_rehydrated = True
+        try:
+            await self._rehydrate_gincana_timed_effects()
+        except Exception as e:
+            print(f"[gincana] erro ao restaurar efeitos temporários: {e!r}")
+
+    @dcommands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        try:
+            await self._handle_gincana_voice_state_update(member, before, after)
+        except Exception as e:
+            print(f"[gincana] erro no on_voice_state_update: {e!r}")
+
+    @dcommands.Cog.listener()
     async def on_message(self, message: discord.Message):
         try:
             await self._handle_gincana_message(message)
