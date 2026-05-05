@@ -19,9 +19,12 @@ class GincanaFocusMixin:
             return "Ninguém por enquanto."
 
         lines = []
+        callkeeper_ids = self._get_callkeeper_bot_ids()
         for uid in sorted(focus_map):
+            if int(uid) in callkeeper_ids:
+                continue
             lines.append(self._focus_mention(guild, int(uid)))
-        return "\n".join(lines)
+        return "\n".join(lines) if lines else "Ninguém por enquanto."
 
     def _format_focus_mentions(self, guild: discord.Guild, user_ids: list[int]) -> str:
         return ", ".join(self._focus_mention(guild, uid) for uid in user_ids)
@@ -146,6 +149,8 @@ class GincanaFocusMixin:
         for member in mentions:
             if member.id == self.bot.user.id:
                 errored_ids.append(member.id)
+                continue
+            if self._is_callkeeper_bot(member):
                 continue
             valid_user_ids.append(member.id)
 
