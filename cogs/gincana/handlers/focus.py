@@ -8,6 +8,7 @@ from ..constants import _FOCUS_WORD_RE
 
 
 _FOCUS_EMOJI = "<:alvo:1501014211571220543>"
+_FOCUS_ALLOWED_MENTIONS = discord.AllowedMentions.none()
 _FOCUS_COMMAND_RE = re.compile(r"^\s*focus(?:\s+|$)", re.IGNORECASE)
 _FOCUS_ALL_RE = re.compile(r"^\s*focus\s+all\s*$", re.IGNORECASE)
 _FOCUS_SYNC_RE = re.compile(r"^\s*focus\s+sync(?:\s+|$)", re.IGNORECASE)
@@ -95,7 +96,10 @@ class GincanaFocusMixin:
         guild = message.guild
         if guild is None:
             return
-        await message.channel.send(view=self._build_focus_notice_view(guild, title=title, lines=lines, ok=ok, show_current=show_current))
+        await message.channel.send(
+            view=self._build_focus_notice_view(guild, title=title, lines=lines, ok=ok, show_current=show_current),
+            allowed_mentions=_FOCUS_ALLOWED_MENTIONS,
+        )
 
     async def _send_focus_feedback(
         self,
