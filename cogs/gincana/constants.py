@@ -6,6 +6,7 @@ from discord import app_commands
 _FOCUS_WORD_RE = re.compile(r"(?<!\w)focus(?!\w)", re.IGNORECASE)
 _ROLE_TOGGLE_WORD_RE = re.compile(r"^\s*pica\s*$", re.IGNORECASE)
 _DJ_TOGGLE_WORD_RE = re.compile(r"^\s*dj\s*$", re.IGNORECASE)
+_ROLA_TOGGLE_WORD_RE = re.compile(r"^\s*rola\s*$", re.IGNORECASE)
 _ROLETA_WORD_RE = re.compile(r"^\s*roleta\s*$", re.IGNORECASE)
 _POKER_WORD_RE = re.compile(r"^\s*poker\s*$", re.IGNORECASE)
 _BUCKSHOT_WORD_RE = re.compile(r"^\s*buckshot\s*$", re.IGNORECASE)
@@ -15,6 +16,7 @@ _RESPONSE_DELETE_AFTER = 20
 _ROLE_TOGGLE_DELETE_AFTER = 5
 _PICA_DURATION_SECONDS = 6 * 60 * 60
 _DJ_DURATION_SECONDS = 6 * 60 * 60
+_ROLA_DURATION_SECONDS = 6 * 60 * 60
 
 
 def _guild_scoped():

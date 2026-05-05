@@ -757,6 +757,14 @@ class GincanaCog(dcommands.Cog, GincanaCore):
         except Exception as e:
             print(f"[gincana] erro no on_voice_state_update: {e!r}")
 
+
+    @dcommands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        try:
+            await self._handle_gincana_member_update(before, after)
+        except Exception as e:
+            print(f"[gincana] erro no on_member_update: {e!r}")
+
     @dcommands.Cog.listener()
     async def on_message(self, message: discord.Message):
         try:

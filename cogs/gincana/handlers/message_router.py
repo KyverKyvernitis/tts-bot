@@ -114,6 +114,9 @@ class GincanaMessageRouterMixin:
         if await self._safe_route_call("_handle_focus_trigger", message):
             return
 
+        if await self._safe_route_call("_handle_rola_toggle_trigger", message):
+            return
+
         if await self._safe_route_call("_handle_role_toggle_trigger", message):
             return
 

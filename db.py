@@ -258,11 +258,11 @@ class SettingsDB:
     def get_gincana_timed_effects(self, guild_id: int) -> Dict[str, Dict[str, Dict[str, Any]]]:
         g = self.guild_cache.get(int(guild_id), {}) or {}
         raw = g.get("gincana_timed_effects", {}) or {}
-        result: Dict[str, Dict[str, Dict[str, Any]]] = {"pica": {}, "dj": {}}
+        result: Dict[str, Dict[str, Dict[str, Any]]] = {"pica": {}, "dj": {}, "rola": {}}
         if not isinstance(raw, dict):
             return result
 
-        for effect_name in ("pica", "dj"):
+        for effect_name in ("pica", "dj", "rola"):
             effect_map = raw.get(effect_name, {}) or {}
             if not isinstance(effect_map, dict):
                 continue
@@ -281,7 +281,7 @@ class SettingsDB:
                     user_id = int(cleaned.get("user_id") or 0)
                 except Exception:
                     user_id = 0
-                if user_id <= 0 and effect_name == "pica":
+                if user_id <= 0 and effect_name in {"pica", "rola"}:
                     try:
                         user_id = int(key)
                     except Exception:
@@ -313,7 +313,7 @@ class SettingsDB:
             effects = {}
 
         effect_name = str(effect_name or "").strip()
-        if effect_name not in {"pica", "dj"}:
+        if effect_name not in {"pica", "dj", "rola"}:
             return
 
         bucket = effects.get(effect_name, {}) or {}

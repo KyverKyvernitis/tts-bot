@@ -106,6 +106,7 @@ class GincanaBase:
         self.bot = bot
         self.db = db
         self._pica_expirations: dict[tuple[int, int], float] = {}
+        self._rola_expirations: dict[tuple[int, int], float] = {}
         self._dj_expirations: dict[tuple[int, int, int], float] = {}
         self._gincana_timed_effects_rehydrated: bool = False
         self._roleta_last_used: dict[int, float] = {}
