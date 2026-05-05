@@ -1685,8 +1685,11 @@ class GincanaBase:
     def _expand_gincana_target_members(self, guild: discord.Guild, members: list[discord.Member]) -> list[discord.Member]:
         result: dict[int, discord.Member] = {}
         seed_ids: list[int] = []
+        own_bot_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
         for member in members or []:
-            if member is None or getattr(member, "bot", False) or self._is_callkeeper_bot(member):
+            if member is None or self._is_callkeeper_bot(member):
+                continue
+            if own_bot_id and int(getattr(member, "id", 0) or 0) == own_bot_id:
                 continue
             result[int(member.id)] = member
             seed_ids.append(int(member.id))
@@ -1695,7 +1698,9 @@ class GincanaBase:
             if uid in result:
                 continue
             member = guild.get_member(int(uid))
-            if member is None or getattr(member, "bot", False) or self._is_callkeeper_bot(member):
+            if member is None or self._is_callkeeper_bot(member):
+                continue
+            if own_bot_id and int(getattr(member, "id", 0) or 0) == own_bot_id:
                 continue
             result[int(member.id)] = member
         return list(result.values())
@@ -1756,7 +1761,7 @@ class GincanaBase:
         focused_ids = set(self._expand_gincana_focus_ids(guild.id, focus_map.keys()))
         targets: dict[int, discord.Member] = {}
         for member in voice_channel.members:
-            if getattr(member, "bot", False) or self._is_callkeeper_bot(member):
+            if self._is_callkeeper_bot(member):
                 continue
             if member.id in focused_ids:
                 targets[member.id] = member

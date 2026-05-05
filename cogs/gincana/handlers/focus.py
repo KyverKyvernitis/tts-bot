@@ -27,9 +27,11 @@ class GincanaFocusMixin:
         lines = []
         for uid in sorted(self._expand_gincana_focus_ids(guild.id, focus_map.keys())):
             member = guild.get_member(int(uid))
-            if member is not None and (getattr(member, "bot", False) or self._is_callkeeper_bot(member)):
+            if member is not None and self._is_callkeeper_bot(member):
                 continue
             if int(uid) in self._get_callkeeper_bot_ids():
+                continue
+            if self.bot.user is not None and int(uid) == int(self.bot.user.id):
                 continue
             lines.append(self._focus_mention(guild, int(uid)))
         return "\n".join(lines) if lines else "Ninguém por enquanto."
@@ -182,8 +184,6 @@ class GincanaFocusMixin:
             return False
         if self.bot.user is not None and int(member.id) == int(self.bot.user.id):
             return False
-        if getattr(member, "bot", False):
-            return False
         if self._is_callkeeper_bot(member):
             return False
         return True
@@ -302,22 +302,50 @@ class GincanaFocusMixin:
             return True
 
         expanded_ids = await self._valid_expanded_focus_ids(guild, call_ids)
+        expanded_set = set(expanded_ids)
+        call_set = set(call_ids)
         current_ids = set(int(uid) for uid in self.db.get_gincana_focus_map(guild.id).keys())
-        added_ids, _ = await self._set_focus_final_ids(guild, current_ids | set(expanded_ids))
 
-        call_count = len(set(call_ids))
-        synced_count = max(0, len(set(expanded_ids) - set(call_ids)))
-        lines = [f"**{call_count}** {('membro da call entrou' if call_count == 1 else 'membros da call entraram')} no modo foco."]
-        if synced_count:
-            lines.append(f"**{synced_count}** {('sincronizado também foi incluído' if synced_count == 1 else 'sincronizados também foram incluídos')}.")
-        if not added_ids:
+        removing = bool(expanded_set) and expanded_set.issubset(current_ids)
+        if removing:
+            _, removed_ids = await self._set_focus_final_ids(guild, current_ids - expanded_set)
+            removed_set = set(removed_ids)
+            removed_total = len(removed_set)
+            removed_synced = max(0, len(removed_set - call_set))
+            if removed_total <= 0:
+                lines = ["Nada mudou por enquanto."]
+            else:
+                who = "membro saiu" if removed_total == 1 else "membros saíram"
+                lines = [f"**{removed_total}** {who} do modo foco."]
+                if removed_synced:
+                    lines.append(f"**{removed_synced}** {('sincronizado saiu junto' if removed_synced == 1 else 'sincronizados saíram junto')}.")
+            await self._send_focus_notice(
+                message,
+                title="Foco removido",
+                lines=lines,
+                ok=removed_total > 0,
+                show_current=True,
+            )
+            return True
+
+        added_ids, _ = await self._set_focus_final_ids(guild, current_ids | expanded_set)
+        added_set = set(added_ids)
+        added_call_count = len(added_set & call_set)
+        added_synced_count = max(0, len(added_set - call_set))
+        lines: list[str] = []
+        if added_call_count:
+            who = "membro da call entrou" if added_call_count == 1 else "membros da call entraram"
+            lines.append(f"**{added_call_count}** {who} no modo foco.")
+        if added_synced_count:
+            lines.append(f"**{added_synced_count}** {('sincronizado também foi incluído' if added_synced_count == 1 else 'sincronizados também foram incluídos')}.")
+        if not lines:
             lines = ["Todo mundo válido dessa call já estava em foco."]
 
         await self._send_focus_notice(
             message,
             title="Foco ativado",
             lines=lines,
-            ok=True,
+            ok=bool(added_ids),
             show_current=True,
         )
         return True

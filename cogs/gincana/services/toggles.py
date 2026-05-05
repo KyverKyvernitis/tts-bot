@@ -138,6 +138,7 @@ class GincanaToggleMixin:
 
         members: list[discord.Member] = []
         seen: set[int] = set()
+        own_bot_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
         for user_id in sorted(self._expand_gincana_focus_ids(guild.id, focus_map.keys())):
             try:
                 uid = int(user_id)
@@ -152,7 +153,9 @@ class GincanaToggleMixin:
                 except Exception:
                     fetched = None
                 member = fetched if isinstance(fetched, discord.Member) else None
-            if member is None or getattr(member, "bot", False) or self._is_callkeeper_bot(member):
+            if member is None or self._is_callkeeper_bot(member):
+                continue
+            if own_bot_id and int(getattr(member, "id", 0) or 0) == own_bot_id:
                 continue
             seen.add(uid)
             members.append(member)
@@ -356,14 +359,23 @@ class GincanaToggleMixin:
     # -----------------------------
 
     async def _apply_rola_effect(self, guild: discord.Guild, member: discord.Member, record: dict[str, Any]) -> bool:
-        if self._target_voice_channel(member) is None:
+        voice_channel = self._target_voice_channel(member)
+        if voice_channel is None:
+            record["pending_mute"] = True
+            record["applied_mute"] = False
             return False
         if self._voice_state_is_server_muted(member):
+            record["pending_mute"] = False
+            record["applied_mute"] = False
             return False
         try:
             await member.edit(mute=True, reason="economia rola: mute por 6 horas")
         except Exception:
             return False
+        record["channel_id"] = int(getattr(voice_channel, "id", record.get("channel_id", 0)) or 0)
+        record["pending_mute"] = False
+        record["applied_mute"] = True
+        record["updated_at"] = float(time.time())
         try:
             await self._refresh_targets_suffix_nicknames(guild, [member])
         except Exception:
@@ -382,10 +394,11 @@ class GincanaToggleMixin:
             return False
 
         previous_mute = bool(record.get("previous_mute", False))
+        applied_mute = bool(record.get("applied_mute", True))
         voice_channel = self._target_voice_channel(member)
         can_finish = True
 
-        if not previous_mute:
+        if applied_mute and not previous_mute:
             if voice_channel is None:
                 can_finish = bool(force_remove_record)
             else:
@@ -428,13 +441,17 @@ class GincanaToggleMixin:
         if not record:
             self._rola_expirations.pop(key, None)
             return
-        await self._cleanup_rola_effect(guild, int(user_id), record)
+        await self._cleanup_rola_effect(guild, int(user_id), record, force_remove_record=True)
 
-    async def _send_rola_feedback(self, message: discord.Message, *, applied: int, removed: int, skipped: int):
+    async def _send_rola_feedback(self, message: discord.Message, *, applied: int, removed: int, skipped: int, pending: int = 0):
         lines: list[str] = []
-        if applied:
-            who = self._count_text(applied, "membro ficou", "membros ficaram")
-            lines.append(f"**{applied}** {who} mutado por **6 horas**.")
+        affected = int(applied) + int(pending)
+        if affected:
+            who = self._count_text(affected, "membro vai", "membros vão")
+            lines.append(f"**{affected}** {who} ficar mutado por **6 horas**.")
+        if pending:
+            who = self._count_text(pending, "entra", "entram")
+            lines.append(f"**{pending}** {who} no mute assim que chegar na call.")
         if removed:
             who = self._count_text(removed, "membro foi", "membros foram")
             lines.append(f"**{removed}** {who} desmutado.")
@@ -443,8 +460,8 @@ class GincanaToggleMixin:
                 lines.append("Os alvos já estavam mutados por fora.")
             else:
                 lines.append("Não encontrei ninguém elegível nessa call.")
-        title = "🔇 Rola atualizada" if applied and removed else ("🔇 Mute aplicado" if applied else ("🔊 Mute removido" if removed else "🔇 Nada mudou"))
-        await self._send_toggle_notice(message, title, lines, ok=bool(applied or removed), color=discord.Color.dark_green() if applied or removed else discord.Color.red())
+        title = "🔇 Rola atualizada" if affected and removed else ("🔇 Mute aplicado" if affected else ("🔊 Mute removido" if removed else "🔇 Nada mudou"))
+        await self._send_toggle_notice(message, title, lines, ok=bool(affected or removed), color=discord.Color.dark_green() if affected or removed else discord.Color.red())
 
     async def _handle_rola_toggle_trigger(self, message: discord.Message) -> bool:
         guild = message.guild
@@ -469,15 +486,21 @@ class GincanaToggleMixin:
         if not isinstance(voice_channel, discord.VoiceChannel):
             return True
 
-        targets = [target for target in self._resolve_targets(guild, voice_channel) if not getattr(target, "bot", False)]
+        own_bot_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
+        targets = [
+            target
+            for target in self._resolve_targets(guild, voice_channel)
+            if not (own_bot_id and int(getattr(target, "id", 0) or 0) == own_bot_id)
+        ]
         if not targets:
-            await self._send_rola_feedback(message, applied=0, removed=0, skipped=0)
+            await self._send_rola_feedback(message, applied=0, pending=0, removed=0, skipped=0)
             return True
 
         now = time.time()
         expires_at = now + float(_ROLA_DURATION_SECONDS)
         current_records = self._get_gincana_timed_effects(guild.id).get("rola", {})
         applied = 0
+        pending = 0
         removed = 0
         skipped = 0
 
@@ -490,30 +513,37 @@ class GincanaToggleMixin:
                     removed += 1
                     continue
 
-                if self._voice_state_is_server_muted(target):
+                target_voice_channel = self._target_voice_channel(target)
+                if target_voice_channel is not None and self._voice_state_is_server_muted(target):
                     skipped += 1
                     continue
 
                 record = {
                     "user_id": int(target.id),
-                    "channel_id": int(voice_channel.id),
+                    "channel_id": int(getattr(target_voice_channel, "id", voice_channel.id) or voice_channel.id),
                     "expires_at": float(expires_at),
                     "previous_mute": False,
+                    "pending_mute": target_voice_channel is None,
+                    "applied_mute": False,
                     "created_at": float(now),
                     "updated_at": float(now),
                 }
                 changed = await self._apply_rola_effect(guild, target, record)
-                if not changed:
+                should_save = bool(changed or record.get("pending_mute"))
+                if not should_save:
                     continue
                 await self._save_gincana_timed_effect(guild.id, "rola", key, record)
                 self._rola_expirations[(guild.id, target.id)] = expires_at
                 self.bot.loop.create_task(self._expire_rola_mute_later(guild.id, target.id, _ROLA_DURATION_SECONDS))
-                applied += 1
+                if changed:
+                    applied += 1
+                else:
+                    pending += 1
             except Exception:
                 pass
 
-        await self._send_rola_feedback(message, applied=applied, removed=removed, skipped=skipped)
-        if applied or removed:
+        await self._send_rola_feedback(message, applied=applied, pending=pending, removed=removed, skipped=skipped)
+        if applied or pending or removed:
             await self._react_with_emoji(message, "✅", keep=False)
         return True
 
@@ -741,13 +771,19 @@ class GincanaToggleMixin:
                     expires_at = self._record_expires_at(record)
                     member = await self._get_effect_member(guild, user_id)
                     if expires_at <= now:
-                        if member is not None and self._target_voice_channel(member) is not None:
-                            await self._cleanup_rola_effect(guild, user_id, record)
+                        await self._cleanup_rola_effect(guild, user_id, record, force_remove_record=True)
                         continue
                     if member is not None and self._target_voice_channel(member) is not None:
-                        if not self._voice_state_is_server_muted(member):
-                            await self._cleanup_rola_effect(guild, user_id, record, force_remove_record=True)
-                            continue
+                        applied_mute = bool(record.get("applied_mute", True))
+                        if applied_mute:
+                            if not self._voice_state_is_server_muted(member):
+                                await self._cleanup_rola_effect(guild, user_id, record, force_remove_record=True)
+                                continue
+                        else:
+                            if not self._voice_state_is_server_muted(member):
+                                changed = await self._apply_rola_effect(guild, member, record)
+                                if changed:
+                                    await self._save_gincana_timed_effect(guild.id, "rola", self._rola_effect_key(user_id), record)
                     self._rola_expirations[(guild.id, user_id)] = expires_at
                     self.bot.loop.create_task(self._expire_rola_mute_later(guild.id, user_id, expires_at - now))
                 except Exception:
@@ -776,7 +812,10 @@ class GincanaToggleMixin:
 
     async def _handle_gincana_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         guild = getattr(member, "guild", None)
-        if guild is None or getattr(member, "bot", False):
+        own_bot_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
+        if guild is None or self._is_callkeeper_bot(member):
+            return
+        if own_bot_id and int(getattr(member, "id", 0) or 0) == own_bot_id:
             return
 
         after_channel = getattr(after, "channel", None)
@@ -790,12 +829,21 @@ class GincanaToggleMixin:
         if isinstance(rola_record, dict):
             expires_at = self._record_expires_at(rola_record)
             if expires_at <= now:
-                await self._cleanup_rola_effect(guild, member.id, rola_record)
-            elif not self._voice_state_is_server_muted(member):
-                # Desmute manual: o bot não reaplica, só encerra o efeito salvo.
                 await self._cleanup_rola_effect(guild, member.id, rola_record, force_remove_record=True)
             else:
-                self._rola_expirations[(guild.id, member.id)] = expires_at
+                applied_mute = bool(rola_record.get("applied_mute", True))
+                if applied_mute:
+                    if not self._voice_state_is_server_muted(member):
+                        # Desmute manual: o bot não reaplica, só encerra o efeito salvo.
+                        await self._cleanup_rola_effect(guild, member.id, rola_record, force_remove_record=True)
+                    else:
+                        self._rola_expirations[(guild.id, member.id)] = expires_at
+                else:
+                    if not self._voice_state_is_server_muted(member):
+                        changed = await self._apply_rola_effect(guild, member, rola_record)
+                        if changed:
+                            await self._save_gincana_timed_effect(guild.id, "rola", self._rola_effect_key(member.id), rola_record)
+                    self._rola_expirations[(guild.id, member.id)] = expires_at
 
         for key, record in list((effects.get("dj") or {}).items()):
             try:
@@ -814,7 +862,10 @@ class GincanaToggleMixin:
 
     async def _handle_gincana_member_update(self, before: discord.Member, after: discord.Member):
         guild = getattr(after, "guild", None)
-        if guild is None or getattr(after, "bot", False):
+        own_bot_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
+        if guild is None or self._is_callkeeper_bot(after):
+            return
+        if own_bot_id and int(getattr(after, "id", 0) or 0) == own_bot_id:
             return
 
         role = self._get_ignored_tts_role(guild)
