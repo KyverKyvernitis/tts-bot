@@ -1,3 +1,5 @@
+import re
+
 import discord
 
 from config import OFF_COLOR, ON_COLOR
@@ -6,6 +8,10 @@ from ..constants import _FOCUS_WORD_RE
 
 
 _FOCUS_EMOJI = "<:alvo:1501014211571220543>"
+_FOCUS_COMMAND_RE = re.compile(r"^\s*focus(?:\s+|$)", re.IGNORECASE)
+_FOCUS_ALL_RE = re.compile(r"^\s*focus\s+all\s*$", re.IGNORECASE)
+_FOCUS_SYNC_RE = re.compile(r"^\s*focus\s+sync(?:\s+|$)", re.IGNORECASE)
+_USER_ID_RE = re.compile(r"(?<!\d)(\d{15,22})(?!\d)")
 
 
 class GincanaFocusMixin:
@@ -19,34 +25,98 @@ class GincanaFocusMixin:
             return "Ninguém por enquanto."
 
         lines = []
-        callkeeper_ids = self._get_callkeeper_bot_ids()
-        for uid in sorted(focus_map):
-            if int(uid) in callkeeper_ids:
+        for uid in sorted(self._expand_gincana_focus_ids(guild.id, focus_map.keys())):
+            member = guild.get_member(int(uid))
+            if member is not None and (getattr(member, "bot", False) or self._is_callkeeper_bot(member)):
+                continue
+            if int(uid) in self._get_callkeeper_bot_ids():
                 continue
             lines.append(self._focus_mention(guild, int(uid)))
         return "\n".join(lines) if lines else "Ninguém por enquanto."
 
-    def _format_focus_mentions(self, guild: discord.Guild, user_ids: list[int]) -> str:
-        return ", ".join(self._focus_mention(guild, uid) for uid in user_ids)
+    def _format_focus_mentions(self, guild: discord.Guild, user_ids: list[int], *, compact_after: int = 5) -> str:
+        cleaned: list[int] = []
+        seen: set[int] = set()
+        for raw_uid in user_ids or []:
+            try:
+                uid = int(raw_uid)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0 or uid in seen:
+                continue
+            seen.add(uid)
+            cleaned.append(uid)
 
-    def _build_focus_feedback_view(
+        if not cleaned:
+            return "ninguém"
+        if len(cleaned) > compact_after:
+            return f"**{len(cleaned)}** membros"
+        mentions = [self._focus_mention(guild, uid) for uid in cleaned]
+        if len(mentions) == 1:
+            return mentions[0]
+        return f"{', '.join(mentions[:-1])} e {mentions[-1]}"
+
+    def _build_focus_notice_view(
         self,
         guild: discord.Guild,
         *,
-        added_ids: list[int],
-        removed_ids: list[int],
-        errored_ids: list[int],
-        reset: bool,
+        title: str,
+        lines: list[str],
+        ok: bool = True,
+        show_current: bool = True,
     ) -> discord.ui.LayoutView:
         view = discord.ui.LayoutView(timeout=None)
+        items: list = [
+            discord.ui.TextDisplay(f"# {_FOCUS_EMOJI} {title}"),
+            discord.ui.TextDisplay("\n".join(line for line in lines if line).strip() or "Nada mudou por enquanto."),
+        ]
+        if show_current:
+            items.extend([
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(f"## Agora em foco\n{self._format_focus_list(guild)}"),
+            ])
+        view.add_item(discord.ui.Container(
+            *items,
+            accent_color=discord.Color(ON_COLOR if ok else OFF_COLOR),
+        ))
+        return view
+
+    async def _send_focus_notice(
+        self,
+        message: discord.Message,
+        *,
+        title: str,
+        lines: list[str],
+        ok: bool = True,
+        show_current: bool = True,
+    ):
+        guild = message.guild
+        if guild is None:
+            return
+        await message.channel.send(view=self._build_focus_notice_view(guild, title=title, lines=lines, ok=ok, show_current=show_current))
+
+    async def _send_focus_feedback(
+        self,
+        message: discord.Message,
+        *,
+        added_ids: list[int],
+        removed_ids: list[int],
+        errored_ids: list[int] | None = None,
+        reset: bool = False,
+    ):
+        guild = message.guild
+        if guild is None:
+            return
 
         if reset:
-            view.add_item(discord.ui.Container(
-                discord.ui.TextDisplay(f"# {_FOCUS_EMOJI} Foco limpo"),
-                discord.ui.TextDisplay("A lista de foco foi esvaziada."),
-                accent_color=discord.Color(OFF_COLOR),
-            ))
-            return view
+            await self._send_focus_notice(
+                message,
+                title="Foco limpo",
+                lines=["A lista de foco foi esvaziada."],
+                ok=False,
+                show_current=False,
+            )
+            return
 
         lines: list[str] = []
         if added_ids:
@@ -61,47 +131,240 @@ class GincanaFocusMixin:
 
         if errored_ids:
             mentions = self._format_focus_mentions(guild, errored_ids)
-            lines.append(f"Não posso entrar na própria lista de foco: {mentions}")
+            lines.append(f"Não posso colocar {mentions} na lista de foco.")
 
         if not lines:
             lines.append("Nada mudou por enquanto.")
 
-        view.add_item(discord.ui.Container(
-            discord.ui.TextDisplay(f"# {_FOCUS_EMOJI} Foco atualizado"),
-            discord.ui.TextDisplay("\n".join(lines)),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay(f"## Agora em foco\n{self._format_focus_list(guild)}"),
-            accent_color=discord.Color(ON_COLOR),
-        ))
-        return view
+        await self._send_focus_notice(
+            message,
+            title="Foco atualizado",
+            lines=lines,
+            ok=bool(added_ids or removed_ids),
+            show_current=True,
+        )
 
-    async def _send_focus_feedback(
-        self,
-        message: discord.Message,
-        *,
-        added_ids: list[int],
-        removed_ids: list[int],
-        errored_ids: list[int] | None = None,
-        reset: bool = False,
-    ):
+    def _extract_focus_user_ids(self, message: discord.Message) -> list[int]:
+        content = str(message.content or "")
+        ordered: list[int] = []
+        seen: set[int] = set()
+
+        def add(raw_id):
+            try:
+                uid = int(raw_id)
+            except (TypeError, ValueError):
+                return
+            if uid <= 0 or uid in seen:
+                return
+            seen.add(uid)
+            ordered.append(uid)
+
+        for raw_id in getattr(message, "raw_mentions", []) or []:
+            add(raw_id)
+        for match in _USER_ID_RE.finditer(content):
+            add(match.group(1))
+        for member in getattr(message, "mentions", []) or []:
+            add(getattr(member, "id", 0))
+        return ordered
+
+    async def _get_focus_member(self, guild: discord.Guild, user_id: int) -> discord.Member | None:
+        member = guild.get_member(int(user_id))
+        if member is not None:
+            return member
+        try:
+            fetched = await guild.fetch_member(int(user_id))
+        except Exception:
+            return None
+        return fetched if isinstance(fetched, discord.Member) else None
+
+    def _focus_member_is_valid(self, member: discord.Member | None) -> bool:
+        if member is None:
+            return False
+        if self.bot.user is not None and int(member.id) == int(self.bot.user.id):
+            return False
+        if getattr(member, "bot", False):
+            return False
+        if self._is_callkeeper_bot(member):
+            return False
+        return True
+
+    async def _valid_focus_ids(self, guild: discord.Guild, user_ids) -> list[int]:
+        valid: list[int] = []
+        seen: set[int] = set()
+        for raw_uid in user_ids or []:
+            try:
+                uid = int(raw_uid)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0 or uid in seen:
+                continue
+            member = await self._get_focus_member(guild, uid)
+            if not self._focus_member_is_valid(member):
+                continue
+            seen.add(uid)
+            valid.append(uid)
+        return valid
+
+    async def _valid_expanded_focus_ids(self, guild: discord.Guild, user_ids) -> list[int]:
+        expanded = self._expand_gincana_focus_ids(guild.id, user_ids)
+        return await self._valid_focus_ids(guild, expanded)
+
+    async def _set_focus_final_ids(self, guild: discord.Guild, final_ids: set[int]) -> tuple[list[int], list[int]]:
+        current_ids = set(int(uid) for uid in self.db.get_gincana_focus_map(guild.id).keys())
+        cleaned = await self._valid_focus_ids(guild, sorted(final_ids))
+        cleaned_set = set(cleaned)
+        setter = getattr(self.db, "set_gincana_focus_users", None)
+        if callable(setter):
+            await setter(guild.id, cleaned)
+        else:
+            # Compatibilidade com bases antigas: reconstrução por clear + toggle.
+            await self.db.clear_gincana_focus_users(guild.id)
+            if cleaned:
+                await self.db.toggle_gincana_focus_users(guild.id, cleaned)
+        return sorted(cleaned_set - current_ids), sorted(current_ids - cleaned_set)
+
+    async def _handle_focus_sync(self, message: discord.Message) -> bool:
         guild = message.guild
         assert guild is not None
-        view = self._build_focus_feedback_view(
-            guild,
-            added_ids=added_ids,
-            removed_ids=removed_ids,
-            errored_ids=errored_ids or [],
-            reset=reset,
+
+        raw_ids = self._extract_focus_user_ids(message)
+        valid_ids = await self._valid_focus_ids(guild, raw_ids)
+        if len(valid_ids) < 2:
+            await self._send_focus_notice(
+                message,
+                title="Sincronização incompleta",
+                lines=["Mencione ou envie o ID de pelo menos **2 membros**."],
+                ok=False,
+                show_current=False,
+            )
+            return True
+
+        syncer = getattr(self.db, "sync_gincana_focus_users", None)
+        if callable(syncer):
+            merged_ids = await syncer(guild.id, valid_ids)
+        else:
+            merged_ids = valid_ids
+        merged_ids = await self._valid_focus_ids(guild, merged_ids)
+
+        current_ids = set(int(uid) for uid in self.db.get_gincana_focus_map(guild.id).keys())
+        sync_added: list[int] = []
+        if current_ids & set(merged_ids):
+            sync_added, _ = await self._set_focus_final_ids(guild, current_ids | set(merged_ids))
+
+        mention_text = self._format_focus_mentions(guild, merged_ids, compact_after=4)
+        if len(merged_ids) == 2:
+            detail = f"{mention_text} agora compartilham os efeitos de foco."
+        else:
+            detail = f"**{len(merged_ids)}** membros agora compartilham os efeitos de foco."
+
+        lines = [detail]
+        if sync_added:
+            lines.append("Quem já estava em foco puxou o grupo junto.")
+
+        await self._send_focus_notice(
+            message,
+            title="Sincronização criada",
+            lines=lines,
+            ok=True,
+            show_current=bool(sync_added),
         )
-        await message.channel.send(view=view)
+        return True
+
+    async def _handle_focus_all(self, message: discord.Message) -> bool:
+        guild = message.guild
+        assert guild is not None
+
+        author_voice = getattr(message.author, "voice", None)
+        voice_channel = getattr(author_voice, "channel", None)
+        if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
+            await self._send_focus_notice(
+                message,
+                title="Sem call",
+                lines=["Entre em uma call para focar todo mundo dela."],
+                ok=False,
+                show_current=False,
+            )
+            return True
+
+        call_ids: list[int] = []
+        for member in getattr(voice_channel, "members", []) or []:
+            if self._focus_member_is_valid(member):
+                call_ids.append(int(member.id))
+
+        if not call_ids:
+            await self._send_focus_notice(
+                message,
+                title="Ninguém para focar",
+                lines=["Não encontrei membros válidos na sua call."],
+                ok=False,
+                show_current=False,
+            )
+            return True
+
+        expanded_ids = await self._valid_expanded_focus_ids(guild, call_ids)
+        current_ids = set(int(uid) for uid in self.db.get_gincana_focus_map(guild.id).keys())
+        added_ids, _ = await self._set_focus_final_ids(guild, current_ids | set(expanded_ids))
+
+        call_count = len(set(call_ids))
+        synced_count = max(0, len(set(expanded_ids) - set(call_ids)))
+        lines = [f"**{call_count}** {('membro da call entrou' if call_count == 1 else 'membros da call entraram')} no modo foco."]
+        if synced_count:
+            lines.append(f"**{synced_count}** {('sincronizado também foi incluído' if synced_count == 1 else 'sincronizados também foram incluídos')}.")
+        if not added_ids:
+            lines = ["Todo mundo válido dessa call já estava em foco."]
+
+        await self._send_focus_notice(
+            message,
+            title="Foco ativado",
+            lines=lines,
+            ok=True,
+            show_current=True,
+        )
+        return True
+
+    async def _handle_focus_toggle(self, message: discord.Message) -> bool:
+        guild = message.guild
+        assert guild is not None
+
+        raw_ids = self._extract_focus_user_ids(message)
+        valid_user_ids = await self._valid_focus_ids(guild, raw_ids)
+
+        if not valid_user_ids:
+            await self.db.clear_gincana_focus_users(guild.id)
+            await self._send_focus_feedback(message, added_ids=[], removed_ids=[], errored_ids=[], reset=True)
+            return True
+
+        current_ids = set(int(uid) for uid in self.db.get_gincana_focus_map(guild.id).keys())
+        final_ids = set(current_ids)
+
+        for uid in valid_user_ids:
+            expanded_ids = set(await self._valid_expanded_focus_ids(guild, [uid]))
+            if not expanded_ids:
+                continue
+            if int(uid) in current_ids:
+                final_ids.difference_update(expanded_ids)
+            else:
+                final_ids.update(expanded_ids)
+
+        added, removed = await self._set_focus_final_ids(guild, final_ids)
+        await self._send_focus_feedback(
+            message,
+            added_ids=added,
+            removed_ids=removed,
+            errored_ids=[],
+            reset=False,
+        )
+        return True
 
     async def _handle_focus_trigger(self, message: discord.Message) -> bool:
         guild = message.guild
         if guild is None:
             return False
 
-        content = (message.content or "")
+        content = str(message.content or "")
         if not _FOCUS_WORD_RE.search(content):
+            return False
+        if not _FOCUS_COMMAND_RE.search(content):
             return False
 
         if not isinstance(message.author, discord.Member):
@@ -110,63 +373,8 @@ class GincanaFocusMixin:
         if not self._is_staff_member(message.author):
             return True
 
-        mentions: list[discord.Member] = []
-        seen: set[int] = set()
-
-        raw_ids = list(getattr(message, "raw_mentions", []) or [])
-        if raw_ids:
-            for user_id in raw_ids:
-                try:
-                    uid = int(user_id)
-                except (TypeError, ValueError):
-                    continue
-                if uid in seen:
-                    continue
-                member = guild.get_member(uid)
-                if member is None:
-                    try:
-                        fetched = await guild.fetch_member(uid)
-                    except Exception:
-                        fetched = None
-                    member = fetched if isinstance(fetched, discord.Member) else None
-                if member is None:
-                    continue
-                mentions.append(member)
-                seen.add(uid)
-        else:
-            for member in message.mentions:
-                if member.id not in seen:
-                    mentions.append(member)
-                    seen.add(member.id)
-
-        if not mentions:
-            await self.db.clear_gincana_focus_users(guild.id)
-            await self._send_focus_feedback(message, added_ids=[], removed_ids=[], errored_ids=[], reset=True)
-            return True
-
-        valid_user_ids: list[int] = []
-        errored_ids: list[int] = []
-        for member in mentions:
-            if member.id == self.bot.user.id:
-                errored_ids.append(member.id)
-                continue
-            if self._is_callkeeper_bot(member):
-                continue
-            valid_user_ids.append(member.id)
-
-        added: list[int] = []
-        removed: list[int] = []
-        if valid_user_ids:
-            added, removed, _ = await self.db.toggle_gincana_focus_users(
-                guild.id,
-                valid_user_ids,
-            )
-
-        await self._send_focus_feedback(
-            message,
-            added_ids=added,
-            removed_ids=removed,
-            errored_ids=errored_ids,
-            reset=False,
-        )
-        return True
+        if _FOCUS_SYNC_RE.search(content):
+            return await self._handle_focus_sync(message)
+        if _FOCUS_ALL_RE.fullmatch(content):
+            return await self._handle_focus_all(message)
+        return await self._handle_focus_toggle(message)

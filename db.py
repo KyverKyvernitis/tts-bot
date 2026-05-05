@@ -255,6 +255,15 @@ class SettingsDB:
     async def clear_gincana_focus_users(self, guild_id: int) -> Dict[int, int]:
         return await self.clear_modo_censura_focus_users(guild_id)
 
+    async def set_gincana_focus_users(self, guild_id: int, user_ids: list[int]) -> Dict[int, int]:
+        return await self.set_modo_censura_focus_users(guild_id, user_ids)
+
+    def get_gincana_focus_sync_groups(self, guild_id: int) -> list[list[int]]:
+        return self.get_modo_censura_focus_sync_groups(guild_id)
+
+    async def sync_gincana_focus_users(self, guild_id: int, user_ids: list[int]) -> list[int]:
+        return await self.sync_modo_censura_focus_users(guild_id, user_ids)
+
     def get_gincana_timed_effects(self, guild_id: int) -> Dict[str, Dict[str, Dict[str, Any]]]:
         g = self.guild_cache.get(int(guild_id), {}) or {}
         raw = g.get("gincana_timed_effects", {}) or {}
@@ -462,6 +471,96 @@ class SettingsDB:
         doc["modo_censura_focus_users"] = {}
         await self._save_guild_doc(guild_id, doc)
         return {}
+
+    async def set_modo_censura_focus_users(self, guild_id: int, user_ids: list[int]) -> Dict[int, int]:
+        doc = self._get_guild_doc(guild_id)
+        cleaned: Dict[int, int] = {}
+        for raw_uid in user_ids or []:
+            try:
+                uid = int(raw_uid)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0:
+                continue
+            cleaned[uid] = 1
+        doc["modo_censura_focus_users"] = {str(uid): stored for uid, stored in cleaned.items()}
+        await self._save_guild_doc(guild_id, doc)
+        return dict(cleaned)
+
+    def get_modo_censura_focus_sync_groups(self, guild_id: int) -> list[list[int]]:
+        g = self.guild_cache.get(guild_id, {})
+        raw = g.get("modo_censura_focus_sync_groups", []) or []
+        groups: list[set[int]] = []
+
+        if isinstance(raw, dict):
+            iterable = raw.values()
+        else:
+            iterable = raw
+
+        for item in iterable:
+            if isinstance(item, dict):
+                values = item.get("members") or item.get("user_ids") or []
+            else:
+                values = item
+            if not isinstance(values, (list, tuple, set)):
+                continue
+
+            group: set[int] = set()
+            for raw_uid in values:
+                try:
+                    uid = int(raw_uid)
+                except (TypeError, ValueError):
+                    continue
+                if uid > 0:
+                    group.add(uid)
+            if len(group) >= 2:
+                groups.append(group)
+
+        merged: list[set[int]] = []
+        for group in groups:
+            overlaps = [existing for existing in merged if existing & group]
+            if not overlaps:
+                merged.append(set(group))
+                continue
+            combined = set(group)
+            for existing in overlaps:
+                combined.update(existing)
+                merged.remove(existing)
+            merged.append(combined)
+
+        cleaned = [sorted(group) for group in merged if len(group) >= 2]
+        cleaned.sort(key=lambda group: (group[0], len(group), group))
+        return cleaned
+
+    async def sync_modo_censura_focus_users(self, guild_id: int, user_ids: list[int]) -> list[int]:
+        new_ids: set[int] = set()
+        for raw_uid in user_ids or []:
+            try:
+                uid = int(raw_uid)
+            except (TypeError, ValueError):
+                continue
+            if uid > 0:
+                new_ids.add(uid)
+
+        if len(new_ids) < 2:
+            return sorted(new_ids)
+
+        groups = [set(group) for group in self.get_modo_censura_focus_sync_groups(guild_id)]
+        merged = set(new_ids)
+        remaining: list[set[int]] = []
+        for group in groups:
+            if group & merged:
+                merged.update(group)
+            else:
+                remaining.append(group)
+        remaining.append(merged)
+
+        cleaned = [sorted(group) for group in remaining if len(group) >= 2]
+        cleaned.sort(key=lambda group: (group[0], len(group), group))
+        doc = self._get_guild_doc(guild_id)
+        doc["modo_censura_focus_sync_groups"] = cleaned
+        await self._save_guild_doc(guild_id, doc)
+        return sorted(merged)
 
     def get_guild_tts_defaults(self, guild_id: int) -> Dict[str, Any]:
         g = self.guild_cache.get(guild_id, {})

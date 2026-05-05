@@ -1630,12 +1630,85 @@ class GincanaBase:
         staff_role = self._get_staff_role(guild)
         return staff_role is not None and staff_role in getattr(member, "roles", [])
 
+    def _gincana_focus_sync_groups(self, guild_id: int) -> list[list[int]]:
+        getter = getattr(self.db, "get_gincana_focus_sync_groups", None)
+        if not callable(getter):
+            return []
+        try:
+            raw_groups = getter(int(guild_id)) or []
+        except Exception:
+            return []
+
+        groups: list[list[int]] = []
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, (list, tuple, set)):
+                continue
+            group: list[int] = []
+            seen: set[int] = set()
+            for raw_uid in raw_group:
+                try:
+                    uid = int(raw_uid)
+                except (TypeError, ValueError):
+                    continue
+                if uid <= 0 or uid in seen:
+                    continue
+                seen.add(uid)
+                group.append(uid)
+            if len(group) >= 2:
+                groups.append(group)
+        return groups
+
+    def _gincana_focus_sync_map(self, guild_id: int) -> dict[int, set[int]]:
+        sync_map: dict[int, set[int]] = {}
+        for group in self._gincana_focus_sync_groups(guild_id):
+            group_set = {int(uid) for uid in group if int(uid) > 0}
+            if len(group_set) < 2:
+                continue
+            for uid in group_set:
+                sync_map.setdefault(uid, set()).update(group_set)
+        return sync_map
+
+    def _expand_gincana_focus_ids(self, guild_id: int, user_ids) -> list[int]:
+        expanded: dict[int, None] = {}
+        sync_map = self._gincana_focus_sync_map(int(guild_id))
+        for raw_uid in user_ids or []:
+            try:
+                uid = int(raw_uid)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0:
+                continue
+            for candidate_id in sorted(sync_map.get(uid, {uid})):
+                expanded[int(candidate_id)] = None
+        return list(expanded.keys())
+
+    def _expand_gincana_target_members(self, guild: discord.Guild, members: list[discord.Member]) -> list[discord.Member]:
+        result: dict[int, discord.Member] = {}
+        seed_ids: list[int] = []
+        for member in members or []:
+            if member is None or getattr(member, "bot", False) or self._is_callkeeper_bot(member):
+                continue
+            result[int(member.id)] = member
+            seed_ids.append(int(member.id))
+
+        for uid in self._expand_gincana_focus_ids(guild.id, seed_ids):
+            if uid in result:
+                continue
+            member = guild.get_member(int(uid))
+            if member is None or getattr(member, "bot", False) or self._is_callkeeper_bot(member):
+                continue
+            result[int(member.id)] = member
+        return list(result.values())
+
     def _is_focused_non_staff_member(self, member: discord.Member) -> bool:
         guild = getattr(member, "guild", None)
         if guild is None or self._is_staff_member(member) or self._is_callkeeper_bot(member):
             return False
         focus_map = self.db.get_gincana_focus_map(guild.id)
-        return bool(focus_map and member.id in focus_map)
+        if not focus_map:
+            return False
+        focused_ids = set(self._expand_gincana_focus_ids(guild.id, focus_map.keys()))
+        return int(member.id) in focused_ids
 
     async def _set_gincana_only_kick_members(self, guild_id: int, value: bool):
         if hasattr(self.db, "_get_guild_doc") and hasattr(self.db, "_save_guild_doc"):
@@ -1680,19 +1753,20 @@ class GincanaBase:
         if not focus_map:
             return []
 
+        focused_ids = set(self._expand_gincana_focus_ids(guild.id, focus_map.keys()))
         targets: dict[int, discord.Member] = {}
         for member in voice_channel.members:
-            if self._is_callkeeper_bot(member):
+            if getattr(member, "bot", False) or self._is_callkeeper_bot(member):
                 continue
-            if member.id in focus_map:
+            if member.id in focused_ids:
                 targets[member.id] = member
         return list(targets.values())
 
     def _resolve_targets(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> list[discord.Member]:
         focused = self._iter_focused_members(guild, voice_channel)
         if focused:
-            return focused
-        return self._iter_target_members(guild, voice_channel)
+            return self._expand_gincana_target_members(guild, focused)
+        return self._expand_gincana_target_members(guild, self._iter_target_members(guild, voice_channel))
 
     async def _react_success_temporarily(self, message: discord.Message):
         try:

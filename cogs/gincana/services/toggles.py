@@ -138,7 +138,7 @@ class GincanaToggleMixin:
 
         members: list[discord.Member] = []
         seen: set[int] = set()
-        for user_id in sorted(focus_map):
+        for user_id in sorted(self._expand_gincana_focus_ids(guild.id, focus_map.keys())):
             try:
                 uid = int(user_id)
             except Exception:
@@ -152,7 +152,7 @@ class GincanaToggleMixin:
                 except Exception:
                     fetched = None
                 member = fetched if isinstance(fetched, discord.Member) else None
-            if member is None or getattr(member, "bot", False):
+            if member is None or getattr(member, "bot", False) or self._is_callkeeper_bot(member):
                 continue
             seen.add(uid)
             members.append(member)
