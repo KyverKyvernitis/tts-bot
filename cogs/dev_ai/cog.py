@@ -54,6 +54,15 @@ REVIEW_JSON_SCHEMA = """{
 }"""
 
 
+DEVAI_TRUNCATION_MARKERS = (
+    "=== ⚠️ DIFF TRUNCADO",
+    "=== ⚠️ TRECHO DO MEIO TRUNCADO",
+    "# ... trecho central omitido ...",
+    "<arquivo grande demais",
+    "<não consegui ler",
+)
+
+
 class DevAI(commands.Cog):
     """IA de manutenção: lê logs, pede correção para providers grátis e entrega zip no webhook."""
 
@@ -324,7 +333,16 @@ SCHEMA EXATO DO JSON:
         async with self._analysis_lock:
             try:
                 prompt = await asyncio.to_thread(self._build_prompt, event=event, comment=comment)
-                prompt = self._truncate_prompt_if_needed(prompt)
+                if self._contains_truncated_context(prompt):
+                    self._discard_devai_analysis(
+                        "contexto de correção contém arquivo/trecho truncado",
+                    )
+                    return
+                if self._prompt_would_be_truncated(prompt):
+                    self._discard_devai_analysis(
+                        "prompt de correção excederia o limite e seria truncado",
+                    )
+                    return
                 result, errors = await self.ai.generate_patch_json(prompt, system=SYSTEM_PROMPT_FIX)
                 if result is None:
                     await self._report_failure(event, errors, comment=comment)
@@ -440,6 +458,92 @@ SCHEMA EXATO DO JSON:
             if text:
                 values.append(f"• {text}")
         return "\n".join(values) if values else fallback
+
+    def _contains_truncated_context(self, value: Any) -> bool:
+        """True quando qualquer texto que seria enviado/analisado pela DevAI
+        contém marcador de corte. Nesses casos a regra é ficar em silêncio:
+        contexto incompleto não gera comentário público nem análise da IA.
+        """
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return any(marker in value for marker in DEVAI_TRUNCATION_MARKERS)
+        if isinstance(value, dict):
+            return any(
+                self._contains_truncated_context(k) or self._contains_truncated_context(v)
+                for k, v in value.items()
+            )
+        if isinstance(value, (list, tuple, set)):
+            return any(self._contains_truncated_context(item) for item in value)
+        return False
+
+    def _prompt_would_be_truncated(self, prompt: str) -> bool:
+        max_chars = int(getattr(config, "DEVAI_MAX_PROMPT_CHARS", 14000) or 14000)
+        return len(prompt or "") > max_chars
+
+    def _discard_devai_analysis(self, reason: str, *, commit_hash: str | None = None, zip_filename: str | None = None) -> None:
+        """Log interno apenas. Nunca posta no webhook quando o contexto ou
+        a análise não é confiável.
+        """
+        log.warning(
+            "DevAI: análise descartada sem comentário público: %s (commit=%s zip=%s)",
+            reason,
+            commit_hash or "-",
+            zip_filename or "-",
+        )
+
+    def _invalid_review_reason(self, data: dict[str, Any]) -> str | None:
+        """Valida o JSON da análise antes de mostrar ao dono.
+
+        Review vazia, genérica, contraditória ou dependente de contexto cortado
+        é descartada silenciosamente. Melhor não comentar nada do que publicar
+        uma análise errada.
+        """
+        if not isinstance(data, dict) or not data:
+            return "JSON de review vazio ou inválido"
+        if self._contains_truncated_context(data):
+            return "review menciona/depende de contexto truncado"
+        if self._is_empty_review(data):
+            return "review sem conteúdo útil"
+
+        summary = str(data.get("summary") or "").strip()
+        effect = str(data.get("effect") or data.get("what_it_does") or "").strip()
+        raw_changes = data.get("what_changed") or data.get("changes") or []
+        changes = [str(item).strip() for item in (raw_changes if isinstance(raw_changes, list) else [raw_changes]) if str(item).strip()]
+        if len(summary) < 20 or len(effect) < 20 or not changes:
+            return "campos essenciais insuficientes"
+
+        text = json.dumps(data, ensure_ascii=False).lower()
+        uncertainty_markers = (
+            "não foi possível",
+            "não posso afirmar",
+            "não consigo afirmar",
+            "não tenho contexto",
+            "contexto insuficiente",
+            "inconclusivo",
+            "sem evidência",
+            "não informado",
+            "truncad",
+        )
+        if any(marker in text for marker in uncertainty_markers):
+            return "review inconclusiva ou sem evidência suficiente"
+
+        risk = str(data.get("risk") or "").strip().lower()
+        if risk == "alto":
+            objective_terms = (
+                "syntaxerror",
+                "importerror",
+                "traceback",
+                "py_compile",
+                "compile",
+                "teste falhando",
+                "health",
+                "exception",
+            )
+            if not any(term in text for term in objective_terms):
+                return "risco alto sem evidência objetiva"
+
+        return None
 
     # ---------------------------------------------------- patch review (post-apply)
 
@@ -666,20 +770,11 @@ SCHEMA EXATO DO JSON:
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:
-            log.error(
-                "DevAI patch review: TIMEOUT após %ss (commit=%s zip=%s)",
-                timeout_s, commit_hash, zip_filename,
+            self._discard_devai_analysis(
+                f"review excedeu timeout de {timeout_s}s",
+                commit_hash=commit_hash,
+                zip_filename=zip_filename,
             )
-            try:
-                await self._report_patch_review_fallback(
-                    changed_files=changed_files,
-                    commit_hash=commit_hash,
-                    branch=branch,
-                    zip_filename=zip_filename,
-                    errors=[f"timeout após {timeout_s}s — provider muito lento ou travou"],
-                )
-            except Exception:
-                log.exception("DevAI patch review: nem o fallback pôde ser enviado")
 
     async def _run_patch_review_inner_locked(
         self,
@@ -704,6 +799,13 @@ SCHEMA EXATO DO JSON:
             if not zip_files:
                 zip_files = await asyncio.to_thread(self._read_files_from_disk, changed_files)
             log.info("DevAI patch review: zip_files=%d arquivos", len(zip_files))
+            if self._contains_truncated_context(zip_files):
+                self._discard_devai_analysis(
+                    "arquivo/contexto do ZIP foi truncado",
+                    commit_hash=commit_hash,
+                    zip_filename=zip_filename,
+                )
+                return
             # Diff: tenta o caminho normal (zip vs disco). Se vazio, recorre
             # ao git pra mostrar o que o commit mudou.
             diff_block = await asyncio.to_thread(self._make_diff_block, zip_files)
@@ -712,6 +814,14 @@ SCHEMA EXATO DO JSON:
                 if git_diff:
                     diff_block = git_diff
                     log.info("DevAI patch review: usando git diff (disco idêntico ao zip)")
+
+            if self._contains_truncated_context(diff_block):
+                self._discard_devai_analysis(
+                    "diff de review foi truncado",
+                    commit_hash=commit_hash,
+                    zip_filename=zip_filename,
+                )
+                return
 
             prompt = await asyncio.to_thread(
                 self._build_patch_review_prompt,
@@ -723,7 +833,20 @@ SCHEMA EXATO DO JSON:
                 zip_files=zip_files,
                 diff_block=diff_block,
             )
-            prompt = self._truncate_prompt_if_needed(prompt)
+            if self._contains_truncated_context(prompt):
+                self._discard_devai_analysis(
+                    "prompt de review contém contexto truncado",
+                    commit_hash=commit_hash,
+                    zip_filename=zip_filename,
+                )
+                return
+            if self._prompt_would_be_truncated(prompt):
+                self._discard_devai_analysis(
+                    "prompt de review excederia o limite e seria truncado",
+                    commit_hash=commit_hash,
+                    zip_filename=zip_filename,
+                )
+                return
             log.info("DevAI patch review: prompt montado (%d chars), chamando IA…", len(prompt))
             # Review usa cadeia restrita (sem modelos médios que alucinam
             # remoções). Veja `review_provider_order()` em ai_client.py.
@@ -733,16 +856,10 @@ SCHEMA EXATO DO JSON:
                 provider_order=self.ai.review_provider_order(),
             )
             if result is None:
-                log.warning(
-                    "DevAI patch review: NENHUM PROVIDER respondeu (errors=%s)",
-                    errors[-3:] if errors else "vazio",
-                )
-                await self._report_patch_review_fallback(
-                    changed_files=changed_files,
+                self._discard_devai_analysis(
+                    f"nenhum provider respondeu para review: {errors[-3:] if errors else 'vazio'}",
                     commit_hash=commit_hash,
-                    branch=branch,
                     zip_filename=zip_filename,
-                    errors=errors,
                 )
                 return
             log.info(
@@ -768,41 +885,35 @@ SCHEMA EXATO DO JSON:
                             result = repair_result
                             log.info("DevAI patch review: repair bem-sucedido via %s", result.provider)
                         except Exception as exc2:
-                            log.error("DevAI patch review: repair também devolveu JSON inválido: %s", exc2)
-                            await self._report_patch_review_fallback(
-                                changed_files=changed_files,
+                            self._discard_devai_analysis(
+                                f"JSON de review inválido; repair também falhou: {type(exc2).__name__}: {exc2}",
                                 commit_hash=commit_hash,
-                                branch=branch,
                                 zip_filename=zip_filename,
-                                errors=[
-                                    f"JSON inválido do provider {result.provider}: {type(exc).__name__}: {exc}",
-                                    f"repair também falhou: {type(exc2).__name__}: {exc2}",
-                                ],
                             )
                             return
                     else:
-                        log.error("DevAI patch review: repair não conseguiu chamar nenhum provider: %s", repair_errors[-3:])
-                        await self._report_patch_review_fallback(
-                            changed_files=changed_files,
+                        self._discard_devai_analysis(
+                            f"JSON de review inválido e repair sem provider: {repair_errors[-3:]}",
                             commit_hash=commit_hash,
-                            branch=branch,
                             zip_filename=zip_filename,
-                            errors=[
-                                f"JSON inválido do provider {result.provider}: {type(exc).__name__}: {exc}",
-                                *(f"repair: {e}" for e in repair_errors[-3:]),
-                            ],
                         )
                         return
                 else:
-                    log.error("DevAI patch review: JSON inválido e DEVAI_REPAIR_ENABLED=false")
-                    await self._report_patch_review_fallback(
-                        changed_files=changed_files,
+                    self._discard_devai_analysis(
+                        f"JSON de review inválido: {type(exc).__name__}: {exc}",
                         commit_hash=commit_hash,
-                        branch=branch,
                         zip_filename=zip_filename,
-                        errors=[f"JSON inválido do provider {result.provider}: {type(exc).__name__}: {exc}"],
                     )
                     return
+
+            invalid_reason = self._invalid_review_reason(data)
+            if invalid_reason:
+                self._discard_devai_analysis(
+                    invalid_reason,
+                    commit_hash=commit_hash,
+                    zip_filename=zip_filename,
+                )
+                return
 
             log.info("DevAI patch review: enviando comentário pro webhook…")
             try:
@@ -822,17 +933,6 @@ SCHEMA EXATO DO JSON:
                 log.info("DevAI patch review: COMENTÁRIO ENVIADO COM SUCESSO (commit=%s)", commit_hash)
             except Exception:
                 log.exception("DevAI patch review: falha enviando comentário pro webhook")
-                # Última cartada: tenta o fallback simples.
-                try:
-                    await self._report_patch_review_fallback(
-                        changed_files=changed_files,
-                        commit_hash=commit_hash,
-                        branch=branch,
-                        zip_filename=zip_filename,
-                        errors=["render do comentário falhou — veja bot.log"],
-                    )
-                except Exception:
-                    log.exception("DevAI patch review: nem o fallback funcionou")
 
     @staticmethod
     def _is_empty_review(data: dict[str, Any]) -> bool:
@@ -895,27 +995,10 @@ SCHEMA EXATO DO JSON:
         # tem conteúdo útil. Cor amarela igual ao fallback total.
         is_empty = self._is_empty_review(data)
         if is_empty:
-            short_hash = str(commit_hash or "desconhecido")[:7]
-            description = (
-                f"**Provider:** `{result.provider}` · `{result.model}` · `{result.elapsed_ms} ms`\n"
-                f"**ZIP:** `{redact_secrets(zip_filename, max_chars=120)}`\n"
-                f"**Branch:** `{branch}` · **Commit:** `{short_hash}`\n"
-                f"**Aplicação:** {'updater systemd deve aplicar automaticamente' if triggered_update else 'commit enviado, mas updater systemd não foi detectado'}\n\n"
-                f"**Por que isso aconteceu**\n"
-                f"O provider principal (Gemini Pro) provavelmente estava com rate limit ou 503, "
-                f"então o fallback caiu em `{result.provider}` (`{result.model}`) — modelo "
-                f"pequeno demais pra analisar diff complexo. Ele seguiu o system prompt "
-                f"anti-alucinação corretamente: em vez de inventar, devolveu campos vazios.\n\n"
-                f"**O que fazer**\n"
-                f"Quando o Gemini Pro estiver disponível novamente, rode no canal:\n"
-                f"```\n_devai review {short_hash}\n```\n"
-                f"para gerar uma análise completa do mesmo commit.\n\n"
-                f"**Arquivos alterados**\n{files}"
-            )
-            await self.reporter.send_report(
-                title="⚠️ DevAI registrou patch (modelo pequeno não analisou)",
-                description=description,
-                color=0xFEE75C,
+            self._discard_devai_analysis(
+                "review vazio ou genérico",
+                commit_hash=commit_hash,
+                zip_filename=zip_filename,
             )
             return
 
@@ -951,20 +1034,20 @@ SCHEMA EXATO DO JSON:
         zip_filename: str,
         errors: list[str],
     ) -> None:
-        if self.reporter is None or not self.reporter.available():
-            return
-        files = "\n".join(f"• `{p}`" for p in changed_files[:12])
-        err_text = "\n".join(f"• {redact_secrets(err, max_chars=450)}" for err in errors[-6:]) or "• nenhum detalhe"
-        await self.reporter.send_report(
-            title="🧠 DevAI registrou patch, mas não conseguiu comentar com IA",
-            description=(
-                f"**ZIP:** `{redact_secrets(zip_filename, max_chars=120)}`\n"
-                f"**Branch:** `{branch}` · **Commit:** `{str(commit_hash or 'desconhecido')[:7]}`\n\n"
-                f"**Arquivos alterados**\n{files}\n\n"
-                f"**Falhas dos providers**\n{err_text}\n\n"
-                "Recomendação padrão: revisar logs após o deploy e testar os fluxos dos arquivos alterados."
-            ),
-            color=0xFEE75C,
+        """Fallback interno do review.
+
+        A regra atual do projeto é não publicar mensagens de análise quando a
+        análise é inválida, incompleta ou indisponível. Então esse método só
+        registra em log local para diagnóstico e nunca envia webhook.
+        """
+        log.warning(
+            "DevAI patch review: fallback suprimido sem comentário público "
+            "(commit=%s zip=%s branch=%s files=%s errors=%s)",
+            commit_hash or "-",
+            zip_filename,
+            branch,
+            changed_files[:12],
+            errors[-6:] if errors else [],
         )
 
     # ----- persistência de reviews pendentes (sobrevive a restart) -----
@@ -1159,25 +1242,9 @@ SCHEMA EXATO DO JSON:
         idx = out.find("diff --git")
         if idx > 0:
             out = out[idx:]
-        out = redact_secrets(out, max_chars=max_diff_chars)
+        out = redact_secrets(out)
         if len(out) > max_diff_chars:
-            head_target = max_diff_chars // 2
-            tail_target = max_diff_chars // 2
-            head_end = out.rfind("\n", 0, head_target)
-            if head_end < head_target // 2:
-                head_end = head_target
-            else:
-                head_end += 1
-            tail_start = out.find("\n", len(out) - tail_target)
-            if tail_start < 0 or tail_start > len(out) - tail_target // 2:
-                tail_start = len(out) - tail_target
-            else:
-                tail_start += 1
-            out = (
-                out[:head_end]
-                + "\n=== ⚠️ DIFF TRUNCADO AQUI — NÃO INFIRA O QUE FOI CORTADO ===\n"
-                + out[tail_start:]
-            )
+            return "=== ⚠️ DIFF TRUNCADO AQUI — review ignorado porque o diff passou do limite seguro ==="
         return f"### diff reconstruído via `git show {commit[:12]}`\n```diff\n{out}\n```"
 
     # ---------------------------------------------------------- Discord listeners
