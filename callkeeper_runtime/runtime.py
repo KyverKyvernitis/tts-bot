@@ -32,9 +32,29 @@ class AuxVoiceClient(discord.Client):
         self.runtime = runtime
         self.ready_event = asyncio.Event()
 
+    async def _hide_status_dot(self) -> None:
+        """Deixa somente os bots auxiliares invisíveis na lista de membros.
+
+        Isso remove a bolinha verde dos CallKeepers sem mexer na presença do
+        bot principal. O estado de voz continua separado e pode seguir
+        aparecendo como "Em voz" quando o Discord exibir esse detalhe.
+        """
+        try:
+            await self.change_presence(status=discord.Status.invisible, activity=None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.slot.last_error = f"presence: {type(exc).__name__}: {exc}"
+            log.warning(
+                "[callkeeper] falha ocultando presença do aux %s: %s",
+                self.slot.index,
+                self.slot.last_error,
+            )
+
     async def on_ready(self):
         self.ready_event.set()
         self.slot.last_error = None
+        await self._hide_status_dot()
         user = self.user
         log.info(
             "[callkeeper] aux %s pronto: %s (%s)",
@@ -45,6 +65,7 @@ class AuxVoiceClient(discord.Client):
         self.runtime.schedule_reconcile("aux_ready", delay=0.05)
 
     async def on_resumed(self):
+        await self._hide_status_dot()
         self.runtime.schedule_reconcile("aux_resumed", delay=0.05)
 
     async def on_disconnect(self):
