@@ -31,30 +31,66 @@ class AuxVoiceClient(discord.Client):
         self.slot = slot
         self.runtime = runtime
         self.ready_event = asyncio.Event()
+        self._presence_task: Optional[asyncio.Task] = None
 
     async def _hide_status_dot(self) -> None:
-        """Deixa somente os bots auxiliares invisíveis na lista de membros.
+        """Força presença offline somente nos bots auxiliares.
 
-        Isso remove a bolinha verde dos CallKeepers sem mexer na presença do
-        bot principal. O estado de voz continua separado e pode seguir
-        aparecendo como "Em voz" quando o Discord exibir esse detalhe.
+        O discord.py converte `discord.Status.offline` para `invisible`. Aqui
+        usamos a string crua `offline` de propósito para testar o visual sem
+        indicador que alguns bots exibem no perfil/mobile. Se a lib/API rejeitar
+        em algum ambiente, caímos para `invisible` sem derrubar o serviço.
+        O estado de voz continua separado e pode seguir aparecendo como
+        "Em voz" quando o Discord exibir esse detalhe.
         """
         try:
-            await self.change_presence(status=discord.Status.invisible, activity=None)
+            await self.change_presence(status="offline", activity=None)  # type: ignore[arg-type]
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self.slot.last_error = f"presence: {type(exc).__name__}: {exc}"
+            self.slot.last_error = f"presence_offline: {type(exc).__name__}: {exc}"
             log.warning(
-                "[callkeeper] falha ocultando presença do aux %s: %s",
+                "[callkeeper] falha ocultando presença offline do aux %s: %s",
                 self.slot.index,
                 self.slot.last_error,
             )
+            try:
+                await self.change_presence(status=discord.Status.invisible, activity=None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as fallback_exc:
+                self.slot.last_error = f"presence_invisible: {type(fallback_exc).__name__}: {fallback_exc}"
+                log.warning(
+                    "[callkeeper] falha ocultando presença invisível do aux %s: %s",
+                    self.slot.index,
+                    self.slot.last_error,
+                )
+
+    def _schedule_hide_status_dot(self, *, delay: float = 2.0) -> None:
+        if self.is_closed():
+            return
+        if self._presence_task is not None and not self._presence_task.done():
+            self._presence_task.cancel()
+        self._presence_task = asyncio.create_task(
+            self._delayed_hide_status_dot(delay),
+            name=f"callkeeper-aux-{self.slot.index}-presence",
+        )
+
+    async def _delayed_hide_status_dot(self, delay: float) -> None:
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self._hide_status_dot()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("[callkeeper] erro reaplicando presença offline do aux %s", self.slot.index)
 
     async def on_ready(self):
         self.ready_event.set()
         self.slot.last_error = None
         await self._hide_status_dot()
+        self._schedule_hide_status_dot(delay=2.0)
         user = self.user
         log.info(
             "[callkeeper] aux %s pronto: %s (%s)",
@@ -66,6 +102,7 @@ class AuxVoiceClient(discord.Client):
 
     async def on_resumed(self):
         await self._hide_status_dot()
+        self._schedule_hide_status_dot(delay=2.0)
         self.runtime.schedule_reconcile("aux_resumed", delay=0.05)
 
     async def on_disconnect(self):
@@ -182,6 +219,8 @@ class AuxSlot:
     async def close(self) -> None:
         self.intentional_until = time.monotonic() + 10.0
         if self.client is not None:
+            if getattr(self.client, "_presence_task", None) is not None:
+                self.client._presence_task.cancel()
             with contextlib.suppress(Exception):
                 for voice_client in list(self.client.voice_clients):
                     await voice_client.disconnect(force=True)
