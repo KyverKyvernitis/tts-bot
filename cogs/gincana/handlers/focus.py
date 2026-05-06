@@ -278,16 +278,8 @@ class GincanaFocusMixin:
         guild = message.guild
         assert guild is not None
 
-        author_voice = getattr(message.author, "voice", None)
-        voice_channel = getattr(author_voice, "channel", None)
+        voice_channel = self._call_trigger_channel(message)
         if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
-            await self._send_focus_notice(
-                message,
-                title="Sem call",
-                lines=["Entre em uma call para focar todo mundo dela."],
-                ok=False,
-                show_current=False,
-            )
             return True
 
         call_ids: list[int] = []
@@ -403,6 +395,9 @@ class GincanaFocusMixin:
             return True
 
         if not self._is_staff_member(message.author):
+            return True
+
+        if not self._is_call_trigger_context(message):
             return True
 
         if _FOCUS_SYNC_RE.search(content):

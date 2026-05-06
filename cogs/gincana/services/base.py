@@ -334,6 +334,15 @@ class GincanaBase:
         view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(body)), accent_color=color))
         return view
 
+    def _call_trigger_channel(self, message: discord.Message) -> discord.VoiceChannel | discord.StageChannel | None:
+        channel = getattr(message, "channel", None)
+        if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            return channel
+        return None
+
+    def _is_call_trigger_context(self, message: discord.Message) -> bool:
+        return self._call_trigger_channel(message) is not None
+
     def _chip_text(self, amount: int | str, *, kind: str = "balance") -> str:
         emoji = self._CHIP_EMOJI
         if kind == "gain":
@@ -1737,7 +1746,7 @@ class GincanaBase:
                     upsert=True,
                 )
 
-    def _iter_target_members(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> list[discord.Member]:
+    def _iter_target_members(self, guild: discord.Guild, voice_channel: discord.VoiceChannel | discord.StageChannel) -> list[discord.Member]:
         targets: dict[int, discord.Member] = {}
         role_ids = set(self.db.get_gincana_role_ids(guild.id))
 
@@ -1753,7 +1762,7 @@ class GincanaBase:
 
         return list(targets.values())
 
-    def _iter_focused_members(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> list[discord.Member]:
+    def _iter_focused_members(self, guild: discord.Guild, voice_channel: discord.VoiceChannel | discord.StageChannel) -> list[discord.Member]:
         focus_map = self.db.get_gincana_focus_map(guild.id)
         if not focus_map:
             return []
@@ -1767,7 +1776,7 @@ class GincanaBase:
                 targets[member.id] = member
         return list(targets.values())
 
-    def _resolve_targets(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> list[discord.Member]:
+    def _resolve_targets(self, guild: discord.Guild, voice_channel: discord.VoiceChannel | discord.StageChannel) -> list[discord.Member]:
         focused = self._iter_focused_members(guild, voice_channel)
         if focused:
             return self._expand_gincana_target_members(guild, focused)

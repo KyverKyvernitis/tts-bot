@@ -277,6 +277,9 @@ class GincanaToggleMixin:
         if not self._matches_exact_trigger(content, "pica"):
             return False
 
+        if not self._is_call_trigger_context(message):
+            return True
+
         if not self.db.gincana_enabled(guild.id):
             return True
 
@@ -481,9 +484,8 @@ class GincanaToggleMixin:
         if self._is_focused_non_staff_member(message.author):
             return True
 
-        author_voice = getattr(message.author, "voice", None)
-        voice_channel = getattr(author_voice, "channel", None)
-        if not isinstance(voice_channel, discord.VoiceChannel):
+        voice_channel = self._call_trigger_channel(message)
+        if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
             return True
 
         own_bot_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
@@ -650,8 +652,7 @@ class GincanaToggleMixin:
         if self._gincana_only_kick_members(guild.id) and not self._is_staff_member(message.author):
             return True
 
-        author_voice = getattr(message.author, "voice", None)
-        voice_channel = getattr(author_voice, "channel", None)
+        voice_channel = self._call_trigger_channel(message)
         if not isinstance(voice_channel, discord.VoiceChannel):
             return True
 

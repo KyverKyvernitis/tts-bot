@@ -153,9 +153,8 @@ class GincanaMessageRouterMixin:
         if not TRIGGER_WORD and not MUTE_TOGGLE_WORD:
             return
 
-        author_voice = getattr(message.author, "voice", None)
-        voice_channel = getattr(author_voice, "channel", None)
-        if not isinstance(voice_channel, discord.VoiceChannel):
+        voice_channel = self._call_trigger_channel(message)
+        if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
             return
 
         content = message.content or ""
@@ -171,12 +170,7 @@ class GincanaMessageRouterMixin:
 
         if TRIGGER_WORD and normalized_content == TRIGGER_WORD.casefold():
             did_trigger_action = True
-            trigger_voice_channel = None
-            for target in targets:
-                target_channel = getattr(getattr(target, "voice", None), "channel", None)
-                if isinstance(target_channel, discord.VoiceChannel):
-                    trigger_voice_channel = target_channel
-                    break
+            trigger_voice_channel = voice_channel if isinstance(voice_channel, discord.VoiceChannel) else None
 
             if trigger_voice_channel is not None:
                 try:
