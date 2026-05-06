@@ -794,6 +794,22 @@ class BotLocal(commands.Bot):
         except Exception as e:
             print(f"[bot] falha ao processar comandos: {e!r}")
 
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.CommandNotFound):
+            return
+
+        if hasattr(ctx.command, "on_error"):
+            return
+
+        cog = ctx.cog
+        if cog is not None:
+            overridden = cog._get_overridden_method(cog.cog_command_error)
+            if overridden is not None:
+                return
+
+        logger = logging.getLogger("discord.ext.commands.bot")
+        logger.error("Ignoring exception in command %s", ctx.command, exc_info=error)
+
     async def on_app_command_error(
         self,
         interaction: discord.Interaction,
