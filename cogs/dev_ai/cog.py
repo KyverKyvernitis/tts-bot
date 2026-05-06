@@ -21,6 +21,7 @@ from .ai_client import DevAIClient, AIResult, SYSTEM_PROMPT_FIX, SYSTEM_PROMPT_R
 from .log_watcher import LogEvent, LogWatcher
 from .patch_builder import BuiltPatch, HistoryItem, PatchBuilder
 from .project_indexer import ProjectIndexer
+from .remote_cmd import DevAIRemoteCommandService
 from .safety import redact_secrets
 from .webhook_reporter import WebhookReporter
 
@@ -93,6 +94,10 @@ class DevAI(commands.Cog):
         self._report_message_ids: set[int] = set()
         self._chat_message_ids: set[int] = set()
         self._last_event_by_message: dict[int, LogEvent] = {}
+        self.remote_cmd = DevAIRemoteCommandService(
+            repo_root=self.repo_root,
+            chat_message_ids=self._chat_message_ids,
+        )
 
     def _enabled(self) -> bool:
         """A DevAI considera-se habilitada se:
@@ -126,6 +131,7 @@ class DevAI(commands.Cog):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.generated_dir.mkdir(parents=True, exist_ok=True)
         self.session = aiohttp.ClientSession()
+        self.remote_cmd.set_session(self.session)
         self.ai = DevAIClient(self.session, config)
         self.reporter = WebhookReporter(self.session, str(getattr(config, "DEVAI_WEBHOOK_URL", "") or ""))
 
@@ -152,6 +158,7 @@ class DevAI(commands.Cog):
     async def cog_unload(self):
         if self.worker_task:
             self.worker_task.cancel()
+        await self.remote_cmd.close()
         if self.session:
             await self.session.close()
 
@@ -1785,6 +1792,19 @@ Responda em texto puro (markdown leve permitido). Não devolva JSON.
             return False
         mid = int(getattr(ref, "message_id", 0) or 0)
         return mid in self._report_message_ids
+
+    # ---------------------------------------------------------- comando remoto VPS
+
+    @commands.command(name="cmd", hidden=True)
+    async def devai_remote_cmd(self, ctx: commands.Context, *, command: str = ""):
+        """Executa comandos na VPS pelo canal da DevAI: `_cmd <comando>`.
+
+        Não usa IA. A lógica fica modularizada em `remote_cmd/` e a resposta
+        sai pelo webhook da DevAI com stdout/stderr, código de saída e tempo.
+        """
+        if not await self._is_ownerish(ctx.author):
+            return
+        await self.remote_cmd.handle(ctx, command)
 
     # ---------------------------------------------------------- Discord commands
 
