@@ -159,12 +159,13 @@ class QueueView(discord.ui.View):
 
 
 class SearchSelect(discord.ui.Select):
-    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack]) -> None:
+    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack], requester_id: int | None = None) -> None:
         self.router = router
         self.guild_id = int(guild_id)
         self.voice_channel_id = int(voice_channel_id)
         self.text_channel_id = int(text_channel_id)
         self.tracks = tracks
+        self.requester_id = int(requester_id or 0)
         options = []
         for idx, track in enumerate(tracks[:10]):
             options.append(
@@ -178,6 +179,9 @@ class SearchSelect(discord.ui.Select):
         super().__init__(placeholder="Escolha o resultado para adicionar à fila", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if self.requester_id and interaction.user and interaction.user.id != self.requester_id:
+            await interaction.response.send_message("Só quem abriu essa busca pode escolher o resultado.", ephemeral=True)
+            return
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message("Guild não encontrada.", ephemeral=True)
@@ -197,9 +201,9 @@ class SearchSelect(discord.ui.Select):
 
 
 class SearchResultView(discord.ui.View):
-    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack]) -> None:
+    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack], requester_id: int | None = None) -> None:
         super().__init__(timeout=120)
-        self.add_item(SearchSelect(router, guild_id, voice_channel_id, text_channel_id, tracks))
+        self.add_item(SearchSelect(router, guild_id, voice_channel_id, text_channel_id, tracks, requester_id))
 
 
 class MusicPlayerView(discord.ui.View):

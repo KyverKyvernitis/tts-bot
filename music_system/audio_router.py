@@ -14,7 +14,7 @@ import discord
 
 import config
 from .extractor import MusicExtractor
-from .errors import MusicExtractionError
+from .errors import MusicExtractionError, MusicPlaybackError
 from .models import LoopMode, MusicTrack
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,7 @@ MUSIC_YTDLP_TIMEOUT_SECONDS = max(5.0, float(getattr(config, "MUSIC_YTDLP_TIMEOU
 MUSIC_RECONNECT_BEFORE_OPTIONS = str(getattr(config, "MUSIC_FFMPEG_BEFORE_OPTIONS", "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin") or "-nostdin")
 MUSIC_FFMPEG_OPTIONS = str(getattr(config, "MUSIC_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error")
 MUSIC_TTS_FFMPEG_OPTIONS = str(getattr(config, "MUSIC_TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error")
+MUSIC_PLAYBACK_START_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "MUSIC_PLAYBACK_START_TIMEOUT_SECONDS", 8.0)))
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
 
@@ -61,6 +62,8 @@ class MixedAudioSource(discord.AudioSource):
         self._overlay_lock = threading.RLock()
         self._closed = False
         self._music_ended = False
+        self._music_started = False
+        self.music_started_future = loop.create_future()
 
     def is_opus(self) -> bool:
         return False
@@ -69,6 +72,18 @@ class MixedAudioSource(discord.AudioSource):
     def has_overlays(self) -> bool:
         with self._overlay_lock:
             return bool(self._overlays)
+
+    def _mark_music_started(self) -> None:
+        if self._music_started:
+            return
+        self._music_started = True
+        if not self.music_started_future.done():
+            self.loop.call_soon_threadsafe(self.music_started_future.set_result, None)
+
+    def _mark_music_failed_before_start(self, message: str) -> None:
+        if self._music_started or self.music_started_future.done():
+            return
+        self.loop.call_soon_threadsafe(self.music_started_future.set_exception, MusicPlaybackError(message))
 
     def set_music_volume(self, volume: float) -> None:
         self.normal_music_volume = max(0.0, min(2.0, float(volume)))
@@ -147,8 +162,11 @@ class MixedAudioSource(discord.AudioSource):
         music_frame = b""
         if not self._music_ended:
             music_frame = self.music_source.read()
-            if not music_frame:
+            if music_frame:
+                self._mark_music_started()
+            else:
                 self._music_ended = True
+                self._mark_music_failed_before_start("FFmpeg encerrou antes de entregar áudio.")
                 with contextlib.suppress(Exception):
                     self.music_source.cleanup()
 
@@ -190,6 +208,7 @@ class MixedAudioSource(discord.AudioSource):
         if self._closed:
             return
         self._closed = True
+        self._mark_music_failed_before_start("Playback foi limpo antes do áudio iniciar.")
         with contextlib.suppress(Exception):
             self.music_source.cleanup()
         with self._overlay_lock:
@@ -291,19 +310,19 @@ class AudioRouter:
                     await self._maybe_disconnect_idle(guild, state)
                     return
 
-                state.current = track
+                played_ok = False
                 try:
-                    await self._play_track(guild, state, track)
+                    played_ok = await self._play_track(guild, state, track)
                 except Exception as exc:
                     logger.warning("[music] Falha ao tocar | guild=%s track=%r erro=%s", guild_id, track.title, exc)
                     await self._send_text(guild, state, f"⚠️ Não consegui tocar **{track.short_title}**. Pulando para a próxima.")
                 finally:
                     state.current_source = None
-                    if state.loop_mode is LoopMode.ONE and not state.stop_requested:
+                    if played_ok and state.loop_mode is LoopMode.ONE and not state.stop_requested:
                         with contextlib.suppress(Exception):
                             # Repetir a atual antes de qualquer item já presente na fila.
                             state.queue._queue.appendleft(track)
-                    elif state.loop_mode is LoopMode.ALL and not state.stop_requested:
+                    elif played_ok and state.loop_mode is LoopMode.ALL and not state.stop_requested:
                         with contextlib.suppress(Exception):
                             await state.queue.put(track)
                     state.current = None
@@ -315,7 +334,7 @@ class AudioRouter:
             if state.stop_requested or state.queue.empty():
                 state.current = None
 
-    async def _play_track(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> None:
+    async def _play_track(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> bool:
         if not state.last_voice_channel_id:
             raise RuntimeError("Canal de voz não definido.")
         channel = guild.get_channel(state.last_voice_channel_id) or self.bot.get_channel(state.last_voice_channel_id)
@@ -364,8 +383,34 @@ class AudioRouter:
                     vc.stop()
             vc.play(mixed_source, after=_after)
 
+        done, _pending = await asyncio.wait(
+            {mixed_source.music_started_future, finished},
+            timeout=MUSIC_PLAYBACK_START_TIMEOUT_SECONDS,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if mixed_source.music_started_future in done:
+            # Propaga erro amigável se o FFmpeg fechou antes de produzir PCM.
+            try:
+                mixed_source.music_started_future.result()
+            except Exception:
+                with contextlib.suppress(Exception):
+                    mixed_source.cleanup()
+                raise
+        elif finished in done:
+            with contextlib.suppress(Exception):
+                mixed_source.cleanup()
+            raise MusicPlaybackError("FFmpeg finalizou antes de iniciar o áudio. A URL recebida provavelmente não era um stream tocável.")
+        else:
+            with contextlib.suppress(Exception):
+                if vc.is_playing() or vc.is_paused():
+                    vc.stop()
+                mixed_source.cleanup()
+            raise MusicPlaybackError("FFmpeg demorou demais para iniciar o áudio.")
+
+        state.current = track
         await self._announce_now_playing(guild, state, track)
         await finished
+        return True
 
     async def _ensure_voice(self, guild: discord.Guild, channel: discord.abc.Connectable) -> Optional[discord.VoiceClient]:
         vc = guild.voice_client
@@ -508,12 +553,21 @@ class AudioRouter:
         return True
 
     async def skip(self, guild_id: int) -> bool:
+        state = self.get_state(guild_id)
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
-        if not vc or not (vc.is_playing() or vc.is_paused()):
-            return False
-        vc.stop()
-        return True
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+            return True
+        if state.current is not None or state.current_source is not None:
+            with contextlib.suppress(Exception):
+                if state.current_source is not None:
+                    state.current_source.cleanup()
+            state.current = None
+            state.current_source = None
+            state.paused = False
+            return True
+        return False
 
     async def stop(self, guild_id: int, *, disconnect: bool = True) -> bool:
         state = self.get_state(guild_id)

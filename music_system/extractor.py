@@ -168,12 +168,10 @@ class MusicExtractor:
 
     async def _extract_metadata_only(self, profile: UrlProfile, *, requester_id: int, requester_name: str = "") -> ExtractedBatch:
         # Spotify/Apple/Deezer não são tocados diretamente: vira metadata + busca.
+        # Não chamamos yt-dlp nesses links aqui, porque algumas plataformas disparam
+        # erro de DRM mesmo quando só queremos título público. Isso polui a log e
+        # não ajuda na reprodução.
         queries: list[str] = []
-
-        with_metadata = await self._try_extract_metadata(profile.canonical, requester_id=requester_id, requester_name=requester_name)
-        if with_metadata:
-            first = with_metadata.tracks[0]
-            queries.append(" ".join(part for part in (first.title, first.uploader) if part).strip())
 
         title = await self._metadata_title(profile.canonical)
         queries.append(title)
@@ -295,10 +293,15 @@ class MusicExtractor:
 
     async def resolve_stream(self, track: MusicTrack, *, force: bool = False) -> MusicTrack:
         age = time.monotonic() - float(track.resolved_at_monotonic or 0.0)
+        if track.stream_url and not self._is_probably_direct_stream_url(track.stream_url):
+            # Flat mode do yt-dlp pode colocar a página do YouTube em info["url"].
+            # FFmpeg não consegue tocar página HTML; ele precisa do stream real.
+            track.stream_url = ""
+            track.resolved_at_monotonic = 0.0
         if track.stream_url and not force and age < 20 * 60:
             return track
 
-        source = track.webpage_url or track.original_url or track.stream_url
+        source = track.webpage_url or (track.original_url if looks_like_url(track.original_url) else "") or track.stream_url
         if not source:
             raise MusicExtractionError("Música sem URL de origem.")
 
@@ -415,6 +418,8 @@ class MusicExtractor:
     def _friendly_yt_dlp_error(self, exc: Exception) -> str:
         text = str(exc)
         lower = text.lower()
+        if "drm" in lower:
+            return "Essa fonte usa DRM e não pode ser tocada diretamente. Tentei buscar uma alternativa tocável, mas essa tentativa falhou."
         if "unsupported url" in lower:
             return "Essa plataforma/link não foi reconhecida pelo yt-dlp. Vou precisar de outro link ou pesquisa por nome."
         if "private" in lower:
@@ -447,23 +452,25 @@ class MusicExtractor:
 
     def _track_from_info(self, info: dict[str, Any], *, requester_id: int, requester_name: str = "", original_url: str = "") -> MusicTrack:
         title = str(info.get("title") or info.get("fulltitle") or info.get("alt_title") or info.get("id") or "Música sem título").strip()
-        webpage_url = str(
-            info.get("webpage_url")
-            or info.get("original_url")
-            or info.get("url")
-            or info.get("webpage_url_basename")
-            or original_url
-            or ""
-        )
+        raw_info_url = str(info.get("url") or "").strip()
+        raw_webpage_url = str(info.get("webpage_url") or info.get("original_url") or "").strip()
+
+        webpage_url = raw_webpage_url
+        if not webpage_url and raw_info_url and not self._is_probably_direct_stream_url(raw_info_url, info):
+            # Resultado flat costuma guardar a página/ID em "url". Use isso como
+            # origem para resolver depois, não como stream do FFmpeg.
+            webpage_url = raw_info_url
+        if not webpage_url and looks_like_url(original_url):
+            webpage_url = original_url
         if webpage_url and not looks_like_url(webpage_url):
             # Flat entries do YouTube às vezes trazem só id/url parcial.
             extractor_key = str(info.get("extractor_key") or info.get("ie_key") or "").lower()
             if "youtube" in extractor_key or re.fullmatch(r"[A-Za-z0-9_-]{6,}", webpage_url):
                 webpage_url = f"https://www.youtube.com/watch?v={webpage_url}"
-        stream_url = str(info.get("url") or "")
-        if stream_url and not looks_like_url(stream_url):
-            # Em flat mode, url costuma ser id. Não trate como stream.
-            stream_url = ""
+            else:
+                webpage_url = ""
+
+        stream_url = raw_info_url if self._is_probably_direct_stream_url(raw_info_url, info) else ""
         duration_raw = info.get("duration")
         try:
             duration = float(duration_raw) if duration_raw is not None else None
@@ -491,6 +498,60 @@ class MusicExtractor:
         if stream_url:
             track.resolved_at_monotonic = time.monotonic()
         return track
+
+    def _is_known_webpage_url(self, url: str) -> bool:
+        if not looks_like_url(url):
+            return False
+        profile = describe_url(url)
+        if profile.is_direct_audio:
+            return False
+        if profile.is_youtube or profile.is_metadata_only:
+            return True
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").lower().removeprefix("www.")
+        webpage_domains = (
+            "soundcloud.com",
+            "bandcamp.com",
+            "vimeo.com",
+            "dailymotion.com",
+            "twitch.tv",
+            "twitter.com",
+            "x.com",
+            "facebook.com",
+            "instagram.com",
+            "tiktok.com",
+            "reddit.com",
+        )
+        return any(host == domain or host.endswith("." + domain) for domain in webpage_domains)
+
+    def _is_probably_direct_stream_url(self, url: str, info: dict[str, Any] | None = None) -> bool:
+        url = (url or "").strip()
+        if not looks_like_url(url):
+            return False
+        if self._is_known_webpage_url(url):
+            return False
+
+        info = info or {}
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").lower()
+        path = (parsed.path or "").lower()
+        protocol = str(info.get("protocol") or "").lower()
+        ext = str(info.get("ext") or "").lower()
+        acodec = str(info.get("acodec") or "").lower()
+
+        direct_protocols = {"http", "https", "m3u8", "m3u8_native", "http_dash_segments", "mhtml"}
+        stream_hosts = ("googlevideo.com", "sndcdn.com", "fbcdn.net", "cdninstagram.com", "akamaized.net", "cloudfront.net")
+        if any(token in host for token in stream_hosts):
+            return True
+        if path.endswith((".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac", ".webm", ".m3u8")):
+            return True
+        if protocol in direct_protocols and (acodec and acodec != "none"):
+            return True
+        if protocol in direct_protocols and ext in {"mp3", "m4a", "aac", "ogg", "opus", "wav", "flac", "webm", "m3u8"}:
+            return True
+        if protocol in direct_protocols and info.get("format_id") and not self._is_known_webpage_url(url):
+            return True
+        return False
 
     def _copy_resolved_fields(self, target: MusicTrack, source: MusicTrack) -> None:
         target.stream_url = source.stream_url or target.stream_url
