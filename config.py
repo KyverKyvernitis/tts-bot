@@ -188,6 +188,11 @@ MUSIC_YTDLP_FORMAT = (
 YOUTUBE_API_KEY = (os.getenv("YOUTUBE_API_KEY", os.getenv("GOOGLE_YOUTUBE_API_KEY", "")) or "").strip()
 SPOTIFY_CLIENT_ID = (os.getenv("SPOTIFY_CLIENT_ID", "") or "").strip()
 SPOTIFY_CLIENT_SECRET = (os.getenv("SPOTIFY_CLIENT_SECRET", "") or "").strip()
+# Refresh token de usuário para playlists/álbuns privados ou colaborativos do Spotify.
+# Client Credentials continua sendo usado para busca/faixas públicas quando não houver refresh token.
+SPOTIFY_REFRESH_TOKEN = (os.getenv("SPOTIFY_REFRESH_TOKEN", "") or "").strip()
+SPOTIFY_REDIRECT_URI = (os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback") or "http://127.0.0.1:8888/callback").strip()
+SPOTIFY_MARKET = (os.getenv("SPOTIFY_MARKET", "BR") or "BR").strip().upper()
 DEEZER_API_ENABLED = _parse_bool(os.getenv("DEEZER_API_ENABLED", "true"), True)
 SOUNDCLOUD_API_ENABLED = _parse_bool(os.getenv("SOUNDCLOUD_API_ENABLED", "false"), False)
 SOUNDCLOUD_API_TOKEN = (os.getenv("SOUNDCLOUD_API_TOKEN", "") or "").strip()

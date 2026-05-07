@@ -518,9 +518,11 @@ class MusicExtractor:
         do link for fraca demais, o bot recusa em vez de tocar uma música aleatória.
         """
         api_batch: ApiTrackBatch | None = None
+        api_error = ""
         try:
             api_batch = await self.api.metadata_batch_from_url(profile.canonical, limit=self.max_playlist_items)
-        except Exception:
+        except Exception as exc:
+            api_error = str(exc)
             logger.debug("[music] metadata batch API falhou | url=%s", profile.raw, exc_info=True)
 
         if api_batch and api_batch.tracks:
@@ -540,9 +542,27 @@ class MusicExtractor:
                 truncated=bool(api_batch.truncated),
             )
 
+        if profile.platform == "spotify" and profile.resource_type == "playlist":
+            if not getattr(self.api, "spotify_has_user_auth", False):
+                raise MusicExtractionError(
+                    "Não consegui abrir essa playlist do Spotify. A API do app está configurada, mas playlists exigem autorização de usuário. "
+                    "Gere e configure SPOTIFY_REFRESH_TOKEN ou envie uma música única.",
+                )
+            if "403" in api_error or "Forbidden" in api_error:
+                raise MusicExtractionError(
+                    "A Spotify API recusou essa playlist. O refresh token precisa ser da conta dona/colaboradora da playlist "
+                    "e ter os escopos playlist-read-private e playlist-read-collaborative.",
+                    detail=api_error,
+                )
+            raise MusicExtractionError(
+                "Não consegui ler essa playlist do Spotify mesmo com autorização. Verifique se o link é válido e se a conta autorizada tem acesso.",
+                detail=api_error,
+            )
+
         if profile.platform in {"spotify", "deezer"} and profile.resource_type in {"playlist", "album"}:
             raise MusicExtractionError(
                 "Não consegui ler essa playlist/álbum. Configure a API da plataforma ou envie uma pesquisa/link de música única.",
+                detail=api_error,
             )
 
         # Fallback de faixa única: tenta metadata pública/oEmbed. Se vier só o

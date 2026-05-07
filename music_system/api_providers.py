@@ -11,6 +11,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import config
@@ -169,6 +170,9 @@ class MusicApiProviders:
         self.youtube_api_key = _env("YOUTUBE_API_KEY") or _env("GOOGLE_YOUTUBE_API_KEY")
         self.spotify_client_id = _env("SPOTIFY_CLIENT_ID")
         self.spotify_client_secret = _env("SPOTIFY_CLIENT_SECRET")
+        self.spotify_refresh_token = _env("SPOTIFY_REFRESH_TOKEN")
+        self.spotify_redirect_uri = _env("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
+        self.spotify_market = (_env("SPOTIFY_MARKET", "BR") or "BR").upper()
         self.deezer_enabled = _env_bool("DEEZER_API_ENABLED", True)
         self.soundcloud_enabled = _env_bool("SOUNDCLOUD_API_ENABLED", False)
         self.soundcloud_token = _env("SOUNDCLOUD_API_TOKEN")
@@ -176,6 +180,8 @@ class MusicApiProviders:
         self.soundcloud_base_url = _env("SOUNDCLOUD_API_BASE_URL", "https://api.soundcloud.com/tracks")
         self._spotify_token = ""
         self._spotify_token_expires_at = 0.0
+        self._spotify_user_token = ""
+        self._spotify_user_token_expires_at = 0.0
 
     @property
     def has_any_provider(self) -> bool:
@@ -188,6 +194,10 @@ class MusicApiProviders:
                 or (self.soundcloud_enabled and (self.soundcloud_token or self.soundcloud_client_id))
             )
         )
+
+    @property
+    def spotify_has_user_auth(self) -> bool:
+        return bool(self.spotify_client_id and self.spotify_client_secret and self.spotify_refresh_token)
 
     async def metadata_from_url(self, url: str) -> ApiTrackCandidate | None:
         batch = await self.metadata_batch_from_url(url, limit=1)
@@ -361,9 +371,17 @@ class MusicApiProviders:
                     candidate.score -= 10
         return list(base.values())
 
-    async def spotify_token(self) -> str:
+    async def spotify_token(self, *, user: bool = False) -> str:
+        """Retorna token Spotify.
+
+        - user=False: Client Credentials para busca/faixas públicas.
+        - user=True: Refresh Token de usuário para playlists privadas/colaborativas
+          e endpoints que retornam 403 com token de app.
+        """
         if not (self.spotify_client_id and self.spotify_client_secret):
             return ""
+        if user:
+            return await self.spotify_user_token()
         if self._spotify_token and time.monotonic() < self._spotify_token_expires_at - 30:
             return self._spotify_token
         auth = base64.b64encode(f"{self.spotify_client_id}:{self.spotify_client_secret}".encode()).decode()
@@ -377,6 +395,25 @@ class MusicApiProviders:
         if token:
             self._spotify_token = token
             self._spotify_token_expires_at = time.monotonic() + float(data.get("expires_in") or 3600)
+        return token
+
+    async def spotify_user_token(self) -> str:
+        if not (self.spotify_client_id and self.spotify_client_secret and self.spotify_refresh_token):
+            return ""
+        if self._spotify_user_token and time.monotonic() < self._spotify_user_token_expires_at - 30:
+            return self._spotify_user_token
+        auth = base64.b64encode(f"{self.spotify_client_id}:{self.spotify_client_secret}".encode()).decode()
+        payload = urlencode({"grant_type": "refresh_token", "refresh_token": self.spotify_refresh_token}).encode()
+        data = await self._to_thread_json(
+            "https://accounts.spotify.com/api/token",
+            method="POST",
+            data=payload,
+            headers={"Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        token = str(data.get("access_token") or "")
+        if token:
+            self._spotify_user_token = token
+            self._spotify_user_token_expires_at = time.monotonic() + float(data.get("expires_in") or 3600)
         return token
 
     def _spotify_headers(self, token: str) -> dict[str, str]:
@@ -397,17 +434,22 @@ class MusicApiProviders:
         kind, item_id = self._spotify_resource(url)
         if not item_id or not (self.spotify_client_id and self.spotify_client_secret):
             return None
-        token = await self.spotify_token()
+        limit = max(1, min(100, int(limit)))
+        needs_user_token = kind == "playlist"
+        token = await self.spotify_token(user=needs_user_token)
+        if not token and needs_user_token:
+            # Playlists do Spotify podem exigir autorização de usuário. Sem refresh token
+            # não tentamos chutar os itens usando só o nome da playlist.
+            return None
         if not token:
             return None
-        limit = max(1, min(100, int(limit)))
         headers = self._spotify_headers(token)
         if kind == "track":
-            data = await self._to_thread_json(f"https://api.spotify.com/v1/tracks/{quote(item_id)}", headers=headers)
+            data = await self._to_thread_json(f"https://api.spotify.com/v1/tracks/{quote(item_id)}?market={quote(self.spotify_market)}", headers=headers)
             candidate = self._spotify_candidate(data, url=url)
             return ApiTrackBatch(tracks=[candidate] if candidate else [], title=candidate.title if candidate else "", is_playlist=False, source="Spotify API")
         if kind == "album":
-            data = await self._to_thread_json(f"https://api.spotify.com/v1/albums/{quote(item_id)}", headers=headers)
+            data = await self._to_thread_json(f"https://api.spotify.com/v1/albums/{quote(item_id)}?market={quote(self.spotify_market)}", headers=headers)
             album_title = str(data.get("name") or "Álbum Spotify")
             images = data.get("images") or []
             album_image = str((images[0] or {}).get("url") or "") if images else ""
@@ -427,7 +469,10 @@ class MusicApiProviders:
             total = int(((data.get("tracks") or {}).get("total")) or len(tracks))
             return ApiTrackBatch(tracks=tracks, title=album_title, is_playlist=True, truncated=total > len(tracks), source="Spotify API")
         if kind == "playlist":
-            meta = await self._to_thread_json(f"https://api.spotify.com/v1/playlists/{quote(item_id)}?fields=name,tracks.total", headers=headers)
+            meta = await self._to_thread_json(
+                f"https://api.spotify.com/v1/playlists/{quote(item_id)}?fields=name,tracks.total&market={quote(self.spotify_market)}",
+                headers=headers,
+            )
             playlist_title = str(meta.get("name") or "Playlist Spotify")
             total = int(((meta.get("tracks") or {}).get("total")) or 0)
             tracks: list[ApiTrackCandidate] = []
@@ -437,9 +482,15 @@ class MusicApiProviders:
                 params = urlencode({
                     "limit": page_limit,
                     "offset": offset,
-                    "fields": "items(track(name,artists(name),album(name,images),duration_ms,external_ids,external_urls)),next,total",
+                    "market": self.spotify_market,
+                    "fields": "items(track(name,artists(name),album(name,images),duration_ms,external_ids,external_urls,is_local)),next,total",
                 })
-                data = await self._to_thread_json(f"https://api.spotify.com/v1/playlists/{quote(item_id)}/tracks?{params}", headers=headers)
+                try:
+                    data = await self._to_thread_json(f"https://api.spotify.com/v1/playlists/{quote(item_id)}/tracks?{params}", headers=headers)
+                except HTTPError as exc:
+                    if exc.code == 403 and not needs_user_token:
+                        return None
+                    raise
                 items = data.get("items") or []
                 if not items:
                     break
@@ -465,14 +516,14 @@ class MusicApiProviders:
         token = await self.spotify_token()
         if not token:
             return None
-        data = await self._to_thread_json(f"https://api.spotify.com/v1/tracks/{quote(track_id)}", headers=self._spotify_headers(token))
+        data = await self._to_thread_json(f"https://api.spotify.com/v1/tracks/{quote(track_id)}?market={quote(self.spotify_market)}", headers=self._spotify_headers(token))
         return self._spotify_candidate(data, url=url)
 
     async def spotify_search(self, query: str, *, limit: int = 5) -> list[ApiTrackCandidate]:
         token = await self.spotify_token()
         if not token:
             return []
-        params = urlencode({"q": query, "type": "track", "limit": max(1, min(10, int(limit)))})
+        params = urlencode({"q": query, "type": "track", "limit": max(1, min(10, int(limit))), "market": self.spotify_market})
         data = await self._to_thread_json(f"https://api.spotify.com/v1/search?{params}", headers=self._spotify_headers(token))
         items = (((data.get("tracks") or {}).get("items")) or [])
         return [cand for cand in (self._spotify_candidate(item) for item in items) if cand]
