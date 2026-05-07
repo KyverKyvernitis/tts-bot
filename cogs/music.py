@@ -156,8 +156,8 @@ class Music(commands.Cog):
     @commands.command(name="stop", aliases=["pararmusica", "musicstop"])
     @commands.guild_only()
     async def stop(self, ctx: commands.Context):
-        await self.router.stop(ctx.guild.id, disconnect=True)
-        await self._reply(ctx, "`⏹️` Player parado e fila limpa. Se o TTS estiver mantendo a call, o bot permanece conectado.")
+        _ok, message = await self.router.request_stop(ctx.guild.id, ctx.author, disconnect=True)
+        await self._reply(ctx, message)
 
     @commands.command(name="queue", aliases=["fila", "q"])
     @commands.guild_only()

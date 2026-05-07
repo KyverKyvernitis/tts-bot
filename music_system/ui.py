@@ -692,9 +692,10 @@ class MusicPlayerView(discord.ui.View):
         paused = bool(getattr(state, "paused", False)) or str(getattr(state, "current_status", "")) == "paused"
         for item in self.children:
             if isinstance(item, discord.ui.Button):
-                callback_name = getattr(getattr(item, "callback", None), "__name__", "")
                 item.label = None
-                if callback_name == "pause_resume":
+                emoji_name = str(getattr(item, "emoji", "") or "")
+                custom_id = str(getattr(item, "custom_id", "") or "")
+                if emoji_name in {"⏸️", "▶️"} or custom_id.endswith(":pause_resume"):
                     item.emoji = "▶️" if paused else "⏸️"
                     item.style = discord.ButtonStyle.primary if paused else discord.ButtonStyle.secondary
         self.add_item(PlayerOptionsSelect(router, guild_id))
@@ -710,7 +711,7 @@ class MusicPlayerView(discord.ui.View):
         ok = await self.router.previous(self.guild_id)
         await self._ack(interaction, "`⏮️` Voltando para a música anterior." if ok else "Não há música anterior no histórico.")
 
-    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:pause_resume")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = self.router.get_state(self.guild_id)
         if state.paused:
@@ -725,10 +726,10 @@ class MusicPlayerView(discord.ui.View):
         _ok, message = await self.router.request_skip(self.guild_id, interaction.user)
         await self._ack(interaction, message)
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0, custom_id="music:stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.router.stop(self.guild_id, disconnect=True)
-        await self._ack(interaction, "`⏹️` Player parado e fila limpa.")
+        _ok, message = await self.router.request_stop(self.guild_id, interaction.user, disconnect=True)
+        await self._ack(interaction, message)
 
     @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, row=0)
     async def queue(self, interaction: discord.Interaction, button: discord.ui.Button):

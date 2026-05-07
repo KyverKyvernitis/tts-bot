@@ -388,7 +388,7 @@ class AudioRouter:
     def pending_vote_summary(self, guild_id: int) -> list[tuple[str, int, int]]:
         state = self.get_state(guild_id)
         self._prune_control_votes(state)
-        labels = {"skip": "Pular", "shuffle": "Shuffle", "loop": "Loop"}
+        labels = {"skip": "Pular", "stop": "Parar", "shuffle": "Shuffle", "loop": "Loop"}
         return [(labels.get(action, action), len(vote.voters), 2) for action, vote in state.control_votes.items() if vote.voters]
 
     def _schedule_vote_cleanup(self, guild_id: int, action: str) -> None:
@@ -439,7 +439,7 @@ class AudioRouter:
             return True, "", True
         self._schedule_vote_cleanup(guild_id, action)
         self._schedule_panel_update(guild_id, create=bool(state.now_message))
-        label = {"skip": "pular", "shuffle": "shuffle", "loop": "repetição"}.get(action, action)
+        label = {"skip": "pular", "stop": "parar", "shuffle": "shuffle", "loop": "repetição"}.get(action, action)
         return False, f"`🗳️` Voto registrado para **{label}**: `1/2`.", False
 
     def is_music_active(self, guild_id: int) -> bool:
@@ -1042,7 +1042,7 @@ class AudioRouter:
         vc.pause()
         state.paused = True
         state.current_status = "paused"
-        self._schedule_panel_update(guild_id, create=False)
+        await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 
     async def resume(self, guild_id: int) -> bool:
@@ -1054,7 +1054,7 @@ class AudioRouter:
         vc.resume()
         state.paused = False
         state.current_status = "playing"
-        self._schedule_panel_update(guild_id, create=False)
+        await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 
     async def skip(self, guild_id: int) -> bool:
@@ -1063,7 +1063,11 @@ class AudioRouter:
         vc = guild.voice_client if guild else None
         did_anything = False
         state.skip_requested = True
-        state.control_votes.pop("skip", None)
+        for _vote_action in ("skip", "stop"):
+            state.control_votes.pop(_vote_action, None)
+            _vote_task = state.control_vote_cleanup_tasks.pop(_vote_action, None)
+            if _vote_task is not None and not _vote_task.done():
+                _vote_task.cancel()
         if state.current_resolve_task is not None and not state.current_resolve_task.done():
             state.current_resolve_task.cancel()
             did_anything = True
@@ -1090,7 +1094,11 @@ class AudioRouter:
         state.stop_requested = True
         state.skip_requested = True
         self._set_idle_reason(state, "manual_stop")
-        state.control_votes.pop("skip", None)
+        for _vote_action in ("skip", "stop"):
+            state.control_votes.pop(_vote_action, None)
+            _vote_task = state.control_vote_cleanup_tasks.pop(_vote_action, None)
+            if _vote_task is not None and not _vote_task.done():
+                _vote_task.cancel()
         if state.current_resolve_task is not None and not state.current_resolve_task.done():
             state.current_resolve_task.cancel()
         while not state.queue.empty():
@@ -1118,6 +1126,10 @@ class AudioRouter:
         state.music_session_active = False
         self._cancel_music_idle_disconnect(state)
         state.control_votes.clear()
+        for _vote_task in list(state.control_vote_cleanup_tasks.values()):
+            if _vote_task is not None and not _vote_task.done():
+                _vote_task.cancel()
+        state.control_vote_cleanup_tasks.clear()
         await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 
@@ -1158,6 +1170,15 @@ class AudioRouter:
         if completed_by_vote:
             return ok, "`⏭️` Votação concluída: pulando música." if ok else "Não havia música para pular."
         return ok, "`⏭️` Pulando música." if ok else "Não havia música para pular."
+
+    async def request_stop(self, guild_id: int, member, *, disconnect: bool = True) -> tuple[bool, str]:
+        allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "stop")
+        if not allowed:
+            return False, pending_message
+        ok = await self.stop(guild_id, disconnect=disconnect)
+        if completed_by_vote:
+            return ok, "`⏹️` Votação concluída: player encerrado e fila limpa."
+        return ok, "`⏹️` Player encerrado e fila limpa."
 
     async def request_shuffle(self, guild_id: int, member) -> tuple[bool, str]:
         allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "shuffle")
