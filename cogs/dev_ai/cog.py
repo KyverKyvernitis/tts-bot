@@ -1797,10 +1797,10 @@ Responda em texto puro (markdown leve permitido). Não devolva JSON.
 
     @commands.command(name="cmd", hidden=True)
     async def devai_remote_cmd(self, ctx: commands.Context, *, command: str = ""):
-        """Executa comandos na VPS pelo canal da DevAI: `_cmd <comando>`.
+        """Executa comandos na VPS: `_cmd <comando>`.
 
-        Não usa IA. A lógica fica modularizada em `remote_cmd/` e a resposta
-        sai pelo webhook da DevAI com stdout/stderr, código de saída e tempo.
+        Não usa IA. A lógica fica modularizada em `remote_cmd/` e só o dono
+        ou IDs autorizados conseguem usar.
         """
         if not await self._is_ownerish(ctx.author):
             return

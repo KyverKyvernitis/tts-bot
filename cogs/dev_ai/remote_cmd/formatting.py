@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 
 MAX_OUTPUT_CHARS = 120_000
 CHUNK_SIZE = 1680
+MAX_TEXT_ATTACHMENT_BYTES = 24 * 1024 * 1024
+
+
+def _escape_code_fences(content: str) -> str:
+    return (content or "").replace("```", "`\u200b``")
 
 
 def chunk_text(content: str) -> list[str]:
     if not content:
         return []
-    safe = content.replace("```", "`\u200b``")
+    safe = _escape_code_fences(content)
     if len(safe) <= 1950:
         return [safe]
 
@@ -18,6 +25,53 @@ def chunk_text(content: str) -> list[str]:
     for index, part in enumerate(parts, start=1):
         chunks.append(f"🖥️ Resultado — parte {index}/{total}\n```txt\n{part}\n```")
     return chunks
+
+
+def build_full_result_text(
+    *,
+    command: str,
+    stdout: str,
+    stderr: str,
+    exit_code: int | None,
+    elapsed: float,
+    timed_out: bool = False,
+) -> str:
+    return (
+        f"Comando: {command}\n"
+        f"Código: {exit_code if exit_code is not None else 'sem código'}\n"
+        f"Tempo: {elapsed:.2f}s\n"
+        f"Timeout: {'sim' if timed_out else 'não'}\n"
+        "\n"
+        "----- STDOUT -----\n"
+        f"{stdout or '(sem saída)'}\n"
+        "\n"
+        "----- STDERR -----\n"
+        f"{stderr or '(sem saída)'}\n"
+    )
+
+
+def build_result_attachment(
+    *,
+    command: str,
+    stdout: str,
+    stderr: str,
+    exit_code: int | None,
+    elapsed: float,
+    timed_out: bool = False,
+) -> tuple[str, bytes] | None:
+    content = build_full_result_text(
+        command=command,
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=exit_code,
+        elapsed=elapsed,
+        timed_out=timed_out,
+    )
+    payload = content.encode("utf-8", errors="replace")
+    if len(payload) > MAX_TEXT_ATTACHMENT_BYTES:
+        return None
+    now = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"cmd_result_{now}.txt", payload
 
 
 def format_result(
@@ -41,5 +95,5 @@ def format_result(
         f"--- stderr ---\n{stderr.strip() or '(sem saída)'}"
     )
     if len(body) > MAX_OUTPUT_CHARS:
-        body = body[:MAX_OUTPUT_CHARS] + "\n\n[saída cortada pelo limite interno do _cmd]"
+        body = body[:MAX_OUTPUT_CHARS] + "\n\n[saída cortada na prévia; o .txt anexado contém o resultado completo]"
     return body
