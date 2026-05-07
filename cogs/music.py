@@ -111,7 +111,7 @@ class Music(commands.Cog):
 
         added, dropped = await self.router.enqueue(ctx.guild, voice_channel, ctx.channel, batch.tracks)
         if added <= 0:
-            await self._reply(ctx, "`⚠️` A fila está cheia. Use `_clearqueue` ou `_stop` antes de adicionar mais.")
+            await self._reply(ctx, "`⚠️` Não adicionei nada: a fila está cheia ou essa música já está na fila/tocando.")
             return
 
         if batch.is_playlist:
@@ -121,7 +121,7 @@ class Music(commands.Cog):
             if batch.truncated:
                 desc += "\n`⚠️` Playlist limitada para não pesar o bot."
             if dropped:
-                desc += f"\n`⚠️` `{dropped}` item(ns) não entraram porque a fila está cheia."
+                desc += f"\n`⚠️` `{dropped}` item(ns) não entraram por duplicata ou fila cheia."
             await self._reply(ctx, desc)
         else:
             track = batch.tracks[0]

@@ -14,6 +14,7 @@ from typing import Optional
 import discord
 
 import config
+from .api_providers import compact_key
 from .extractor import MusicExtractor
 from .errors import MusicExtractionError, MusicPlaybackError
 from .models import LoopMode, MusicTrack
@@ -293,17 +294,44 @@ class AudioRouter:
 
         added = 0
         dropped = 0
+        seen = self._current_track_keys(state)
         for track in tracks:
+            keys = self._track_keys(track)
+            if keys and any(key in seen for key in keys):
+                dropped += 1
+                continue
             if state.queue.full():
                 dropped += 1
                 continue
             await state.queue.put(track)
+            seen.update(keys)
             added += 1
         if added:
             state.stop_requested = False
             self.ensure_music_worker(guild.id)
             self._schedule_panel_update(guild.id, create=True)
         return added, dropped
+
+    def _track_keys(self, track: MusicTrack) -> set[str]:
+        keys: set[str] = set()
+        url = (track.webpage_url or track.original_url or "").strip().lower()
+        if url:
+            keys.add("url:" + url)
+        title_key = compact_key(track.title)
+        if title_key:
+            duration_bucket = ""
+            if track.duration is not None:
+                duration_bucket = str(int(max(0.0, float(track.duration)) // 8))
+            keys.add("title:" + title_key + ":" + duration_bucket)
+        return keys
+
+    def _current_track_keys(self, state: MusicGuildState) -> set[str]:
+        keys: set[str] = set()
+        if state.current is not None:
+            keys.update(self._track_keys(state.current))
+        for item in list(getattr(state.queue, "_queue", [])):
+            keys.update(self._track_keys(item))
+        return keys
 
     def ensure_music_worker(self, guild_id: int) -> None:
         state = self.get_state(guild_id)

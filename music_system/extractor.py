@@ -11,6 +11,7 @@ from urllib.parse import unquote, urlparse
 
 import config
 
+from .api_providers import ApiTrackCandidate, MusicApiProviders, compact_key, is_bad_match_title
 from .errors import MusicExtractionError
 from .models import ExtractedBatch, MusicTrack
 from .providers import (
@@ -54,6 +55,7 @@ class MusicExtractor:
         self.search_results = max(1, min(10, int(search_results)))
         self.timeout_seconds = max(5.0, float(timeout_seconds))
         self.cookies_file = self._resolve_cookies_file()
+        self.api = MusicApiProviders(timeout=min(8.0, self.timeout_seconds))
 
     def looks_like_url(self, query: str) -> bool:
         return looks_like_url(query)
@@ -139,6 +141,21 @@ class MusicExtractor:
             # Uma letra só costuma trazer resultado ruim; ainda tentamos, mas com mensagem melhor se falhar.
             logger.debug("[music] busca muito curta: %r", query)
 
+        # APIs opcionais entram antes do yt-dlp para busca manual: YouTube API
+        # devolve URLs de vídeo tocáveis de forma leve; Spotify/Deezer ajudam a
+        # ranquear metadata quando configurados. Se não houver key, cai no fluxo antigo.
+        try:
+            api_candidates = await self.api.search(query, limit=self.search_results, prefer_youtube=True)
+            playable = [candidate for candidate in api_candidates if self._candidate_is_playable_entry(candidate)]
+            if playable:
+                tracks = [
+                    self._track_from_api_candidate(candidate, requester_id=requester_id, requester_name=requester_name, original_url=query)
+                    for candidate in playable[: self.search_results]
+                ]
+                return ExtractedBatch(tracks=self._dedupe_tracks(tracks), query=query, is_playlist=False)
+        except Exception:
+            logger.debug("[music] busca via API falhou | query=%r", query, exc_info=True)
+
         last_error: Exception | None = None
         for extractor_query, flat in (
             (f"ytsearch{self.search_results}:{query}", True),
@@ -152,7 +169,7 @@ class MusicExtractor:
                     self._track_from_info(entry, requester_id=requester_id, requester_name=requester_name, original_url=query)
                     for entry in entries
                 ]
-                tracks = [track for track in tracks if track.webpage_url or track.stream_url]
+                tracks = self._dedupe_tracks([track for track in tracks if track.webpage_url or track.stream_url])
                 if tracks:
                     return ExtractedBatch(tracks=tracks[: self.search_results], query=query, is_playlist=False)
             except Exception as exc:
@@ -166,12 +183,55 @@ class MusicExtractor:
             ) from last_error
         raise MusicExtractionError("Não encontrei resultados tocáveis. Tente pesquisar com nome e artista.")
 
+    async def search_one(self, query: str, *, requester_id: int, requester_name: str = "", original_url: str = "") -> MusicTrack:
+        """Busca uma única faixa. Usado por links de track Spotify/Deezer/Apple.
+
+        Link de faixa única NUNCA deve enfileirar vários resultados alternativos.
+        """
+        query = re.sub(r"\s+", " ", (query or "").strip())
+        if not query:
+            raise MusicExtractionError("Pesquisa vazia.")
+
+        try:
+            api_candidates = await self.api.search(query, limit=max(3, self.search_results), prefer_youtube=True)
+            playable = [candidate for candidate in api_candidates if self._candidate_is_playable_entry(candidate)]
+            if playable:
+                candidate = playable[0]
+                track = self._track_from_api_candidate(candidate, requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
+                return track
+        except Exception:
+            logger.debug("[music] search_one via API falhou | query=%r", query, exc_info=True)
+
+        last_error: Exception | None = None
+        for extractor_query, flat in ((f"ytsearch1:{query}", True), (f"ytsearch1:{query}", False)):
+            try:
+                info = await self._run_extract(extractor_query, extract_flat=flat, playlist=True)
+                first = next((entry for entry in (info.get("entries") or []) if entry), None)
+                if first:
+                    track = self._track_from_info(first, requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
+                    if track.webpage_url or track.stream_url:
+                        return track
+            except Exception as exc:
+                last_error = exc
+                logger.debug("[music] search_one falhou | query=%r flat=%s", query, flat, exc_info=True)
+        raise MusicExtractionError("Não encontrei uma alternativa tocável para essa música.", detail=str(last_error or ""))
+
     async def _extract_metadata_only(self, profile: UrlProfile, *, requester_id: int, requester_name: str = "") -> ExtractedBatch:
-        # Spotify/Apple/Deezer não são tocados diretamente: vira metadata + busca.
-        # Não chamamos yt-dlp nesses links aqui, porque algumas plataformas disparam
-        # erro de DRM mesmo quando só queremos título público. Isso polui a log e
-        # não ajuda na reprodução.
+        # Spotify/Apple/Deezer não são tocados diretamente: viram metadata +
+        # melhor resultado tocável. Para link de track única, enfileira só UMA
+        # música; resultados alternativos ficam apenas como ranking interno.
         queries: list[str] = []
+        api_meta: ApiTrackCandidate | None = None
+
+        try:
+            api_meta = await self.api.metadata_from_url(profile.canonical)
+            if api_meta:
+                queries.append(api_meta.search_query)
+                if api_meta.isrc:
+                    queries.append(f"{api_meta.isrc} {api_meta.artist} {api_meta.title}")
+                queries.append(f"{api_meta.artist} {api_meta.title} official audio")
+        except Exception:
+            logger.debug("[music] metadata API falhou | url=%s", profile.raw, exc_info=True)
 
         title = await self._metadata_title(profile.canonical)
         queries.append(title)
@@ -179,11 +239,16 @@ class MusicExtractor:
 
         for query in unique_queries(*queries):
             try:
-                batch = await self.search(query, requester_id=requester_id, requester_name=requester_name)
-                # Mantém URL original para rastreabilidade.
-                for track in batch.tracks:
-                    track.original_url = profile.raw
-                return batch
+                track = await self.search_one(query, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
+                if api_meta:
+                    # Mantém metadata oficial da API no item que será tocado.
+                    track.title = self._prefer_clean_title(track.title, api_meta)
+                    track.duration = api_meta.duration or track.duration
+                    track.thumbnail = api_meta.thumbnail or track.thumbnail
+                    track.uploader = api_meta.artist or track.uploader
+                    track.source = f"{api_meta.source} → {track.source or 'YouTube'}"
+                track.original_url = profile.raw
+                return ExtractedBatch(tracks=[track], query=query, is_playlist=False)
             except Exception:
                 logger.debug("[music] fallback metadata-only falhou | query=%r url=%s", query, profile.raw, exc_info=True)
 
@@ -214,14 +279,14 @@ class MusicExtractor:
                 logger.debug("[music] youtube direct extraction failed | url=%s", url, exc_info=True)
 
         # Fallback leve: pega título público da página ou usa o ID como busca.
+        # URL de música única deve retornar apenas um resultado alternativo.
         title = await self._metadata_title(profile.canonical)
         search_queries = unique_queries(title, profile.youtube_video_id)
         for query in search_queries:
             try:
-                batch = await self.search(query, requester_id=requester_id, requester_name=requester_name)
-                for track in batch.tracks:
-                    track.original_url = profile.raw
-                return batch
+                track = await self.search_one(query, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
+                track.original_url = profile.raw
+                return ExtractedBatch(tracks=[track], query=query, is_playlist=False)
             except Exception as exc:
                 errors.append(str(exc))
 
@@ -240,10 +305,9 @@ class MusicExtractor:
             slug = slug_search_terms(profile.canonical)
             for query in unique_queries(title, slug):
                 try:
-                    batch = await self.search(query, requester_id=requester_id, requester_name=requester_name)
-                    for track in batch.tracks:
-                        track.original_url = profile.raw
-                    return batch
+                    track = await self.search_one(query, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
+                    track.original_url = profile.raw
+                    return ExtractedBatch(tracks=[track], query=query, is_playlist=False)
                 except Exception:
                     logger.debug("[music] generic URL search fallback failed | query=%r", query, exc_info=True)
             raise MusicExtractionError("Não consegui ler esse link nem encontrar uma fonte tocável equivalente.", detail=str(exc)) from exc
@@ -349,20 +413,15 @@ class MusicExtractor:
                 errors.append(str(exc))
                 logger.debug("[music] stream resolve failed | source=%s clients=%s", source, clients, exc_info=True)
 
-        # Último fallback: busca pelo título atual e resolve o primeiro resultado.
+        # Último fallback: busca pelo título atual e resolve o melhor resultado apenas uma vez.
         if track.title and not profile.is_metadata_only:
             try:
-                batch = await self.search(track.title, requester_id=track.requester_id, requester_name=track.requester_name)
-                for candidate in batch.tracks[:3]:
-                    if candidate.webpage_url == track.webpage_url:
-                        continue
-                    try:
-                        await self.resolve_stream(candidate, force=True)
-                        if candidate.stream_url:
-                            self._copy_resolved_fields(track, candidate)
-                            return track
-                    except Exception:
-                        continue
+                candidate = await self.search_one(track.title, requester_id=track.requester_id, requester_name=track.requester_name, original_url=track.original_url or source)
+                if candidate.webpage_url != track.webpage_url:
+                    await self.resolve_stream(candidate, force=True)
+                    if candidate.stream_url:
+                        self._copy_resolved_fields(track, candidate)
+                        return track
             except Exception as exc:
                 errors.append(str(exc))
 
@@ -442,6 +501,63 @@ class MusicExtractor:
         if "timed out" in lower or "timeout" in lower:
             return "A plataforma demorou demais para responder."
         return f"Não consegui extrair áudio desse link/pesquisa: {text[:180]}"
+
+    def _candidate_is_playable_entry(self, candidate: ApiTrackCandidate) -> bool:
+        url = (candidate.webpage_url or "").strip()
+        if not url:
+            return False
+        profile = describe_url(url)
+        if profile.is_metadata_only:
+            return False
+        return profile.is_youtube or profile.is_direct_audio or candidate.provider == "soundcloud"
+
+    def _track_from_api_candidate(
+        self,
+        candidate: ApiTrackCandidate,
+        *,
+        requester_id: int,
+        requester_name: str = "",
+        original_url: str = "",
+    ) -> MusicTrack:
+        track = MusicTrack(
+            title=candidate.title or candidate.search_query or "Música sem título",
+            webpage_url=candidate.webpage_url,
+            requester_id=int(requester_id),
+            requester_name=requester_name,
+            duration=candidate.duration,
+            uploader=candidate.artist,
+            thumbnail=candidate.thumbnail,
+            source=candidate.source or candidate.provider or "API",
+            original_url=original_url or candidate.webpage_url,
+            extractor=candidate.provider or "api",
+        )
+        return track
+
+    def _prefer_clean_title(self, current_title: str, api_meta: ApiTrackCandidate) -> str:
+        official = " - ".join(part for part in (api_meta.artist, api_meta.title) if part).strip()
+        if not official:
+            return current_title
+        # Se o resultado tocável veio como Lyrics/Slowed/Cover, mostra o nome oficial
+        # do Spotify/Deezer em vez de poluir o painel/fila com a versão alternativa.
+        if is_bad_match_title(current_title, query=official):
+            return official
+        return official if len(official) <= len(current_title or "") + 15 else current_title
+
+    def _dedupe_tracks(self, tracks: list[MusicTrack]) -> list[MusicTrack]:
+        seen: set[str] = set()
+        out: list[MusicTrack] = []
+        for track in tracks:
+            title_key = compact_key(track.title)
+            duration_bucket = ""
+            if track.duration is not None:
+                duration_bucket = str(int(max(0, track.duration) // 8))
+            url_key = (track.webpage_url or track.original_url or "").strip().lower()
+            keys = [key for key in (url_key, f"{title_key}:{duration_bucket}" if title_key else "") if key]
+            if any(key in seen for key in keys):
+                continue
+            seen.update(keys)
+            out.append(track)
+        return out
 
     def _direct_audio_track(self, profile: UrlProfile, *, requester_id: int, requester_name: str) -> MusicTrack:
         parsed = urlparse(profile.canonical)
