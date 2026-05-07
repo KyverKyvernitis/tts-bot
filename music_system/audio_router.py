@@ -7,6 +7,7 @@ import random
 import time
 import threading
 from array import array
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -20,7 +21,7 @@ from .models import LoopMode, MusicTrack
 logger = logging.getLogger(__name__)
 
 MUSIC_DEFAULT_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_DEFAULT_VOLUME", 0.55))))
-MUSIC_DUCK_VOLUME = max(0.0, min(1.0, float(getattr(config, "MUSIC_DUCK_VOLUME", 0.15))))
+MUSIC_DUCK_VOLUME = max(0.05, min(1.0, float(getattr(config, "MUSIC_DUCK_VOLUME", 0.15))))
 TTS_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_TTS_VOLUME", 1.0))))
 MUSIC_IDLE_DISCONNECT_SECONDS = max(30.0, float(getattr(config, "MUSIC_IDLE_DISCONNECT_SECONDS", 180)))
 MUSIC_QUEUE_MAXSIZE = max(1, int(getattr(config, "MUSIC_QUEUE_MAXSIZE", 50)))
@@ -31,6 +32,7 @@ MUSIC_RECONNECT_BEFORE_OPTIONS = str(getattr(config, "MUSIC_FFMPEG_BEFORE_OPTION
 MUSIC_FFMPEG_OPTIONS = str(getattr(config, "MUSIC_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error")
 MUSIC_TTS_FFMPEG_OPTIONS = str(getattr(config, "MUSIC_TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error")
 MUSIC_PLAYBACK_START_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "MUSIC_PLAYBACK_START_TIMEOUT_SECONDS", 8.0)))
+MUSIC_HISTORY_MAXSIZE = max(5, int(getattr(config, "MUSIC_HISTORY_MAXSIZE", 25)))
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
 
@@ -57,7 +59,7 @@ class MixedAudioSource(discord.AudioSource):
         self.music_volume = float(music_volume)
         self.normal_music_volume = float(music_volume)
         self.duck_volume = float(duck_volume)
-        self.duck_enabled = True
+        self.duck_enabled = True  # ducking é permanente; mantido só por compatibilidade interna
         self._overlays: list[TTSOverlay] = []
         self._overlay_lock = threading.RLock()
         self._closed = False
@@ -178,7 +180,7 @@ class MixedAudioSource(discord.AudioSource):
             return b""
 
         if music_frame:
-            target_music_volume = self.duck_volume if (self.duck_enabled and active_overlays) else self.normal_music_volume
+            target_music_volume = self.duck_volume if active_overlays else self.normal_music_volume
             base = self._apply_volume(music_frame, target_music_volume)
         else:
             # Música acabou no mesmo instante em que havia TTS por cima. Mantém silêncio
@@ -227,13 +229,14 @@ class MusicGuildState:
     last_voice_channel_id: Optional[int] = None
     volume: float = MUSIC_DEFAULT_VOLUME
     duck_volume: float = MUSIC_DUCK_VOLUME
-    duck_enabled: bool = True
+    duck_enabled: bool = True  # sempre True; não existe toggle público
     loop_mode: LoopMode = LoopMode.OFF
     shuffle: bool = False
     stop_requested: bool = False
     paused: bool = False
     current_source: Optional[MixedAudioSource] = None
     now_message: Optional[discord.Message] = None
+    history: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_HISTORY_MAXSIZE))
     voice_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def queue_size(self) -> int:
@@ -261,6 +264,8 @@ class AudioRouter:
         if state is None:
             state = MusicGuildState()
             self._states[int(guild_id)] = state
+        # O ducking do TTS é obrigatório e não pode ser desativado por comando/UI.
+        state.duck_enabled = True
         return state
 
     def is_music_active(self, guild_id: int) -> bool:
@@ -318,6 +323,8 @@ class AudioRouter:
                     await self._send_text(guild, state, f"⚠️ Não consegui tocar **{track.short_title}**. Pulando para a próxima.")
                 finally:
                     state.current_source = None
+                    if played_ok and not state.stop_requested:
+                        self._push_history(state, track)
                     if played_ok and state.loop_mode is LoopMode.ONE and not state.stop_requested:
                         with contextlib.suppress(Exception):
                             # Repetir a atual antes de qualquer item já presente na fila.
@@ -366,9 +373,9 @@ class AudioRouter:
             loop=loop,
             music_source=ffmpeg_source,
             music_volume=state.volume,
-            duck_volume=state.duck_volume if state.duck_enabled else state.volume,
+            duck_volume=state.duck_volume,
         )
-        mixed_source.duck_enabled = state.duck_enabled
+        mixed_source.duck_enabled = True
         state.current_source = mixed_source
 
         def _after(error: Exception | None) -> None:
@@ -460,15 +467,15 @@ class AudioRouter:
         if channel is None:
             return
         try:
-            from .ui import build_now_playing_embed, MusicPlayerView
+            from .ui import build_now_playing_embeds, MusicPlayerView
 
-            embed = build_now_playing_embed(state, track)
+            embeds = build_now_playing_embeds(state, track)
             view = MusicPlayerView(self, guild.id)
             if state.now_message:
                 with contextlib.suppress(Exception):
-                    await state.now_message.edit(embed=embed, view=view)
+                    await state.now_message.edit(embeds=embeds, view=view)
                     return
-            state.now_message = await channel.send(embed=embed, view=view)
+            state.now_message = await channel.send(embeds=embeds, view=view)
         except Exception:
             logger.debug("[music] falha ao anunciar now playing", exc_info=True)
 
@@ -600,18 +607,20 @@ class AudioRouter:
 
     async def set_duck_volume(self, guild_id: int, volume_percent: int) -> float:
         state = self.get_state(guild_id)
-        volume = max(0, min(100, int(volume_percent))) / 100.0
+        volume = max(5, min(100, int(volume_percent))) / 100.0
+        state.duck_enabled = True
         state.duck_volume = volume
         if state.current_source is not None:
             state.current_source.set_duck_volume(volume)
         return volume
 
     async def toggle_duck(self, guild_id: int) -> bool:
+        # Compatibilidade com código antigo: ducking agora é obrigatório.
         state = self.get_state(guild_id)
-        state.duck_enabled = not state.duck_enabled
+        state.duck_enabled = True
         if state.current_source is not None:
-            state.current_source.duck_enabled = state.duck_enabled
-        return state.duck_enabled
+            state.current_source.duck_enabled = True
+        return True
 
     async def toggle_shuffle(self, guild_id: int) -> bool:
         state = self.get_state(guild_id)
@@ -635,6 +644,78 @@ class AudioRouter:
     def snapshot_queue(self, guild_id: int) -> list[MusicTrack]:
         state = self.get_state(guild_id)
         return list(getattr(state.queue, "_queue", []))
+
+    def history_snapshot(self, guild_id: int) -> list[MusicTrack]:
+        state = self.get_state(guild_id)
+        return list(state.history)
+
+    def _push_history(self, state: MusicGuildState, track: MusicTrack) -> None:
+        # Evita duplicar a mesma música em sequência quando skip/loop dispara rápido.
+        try:
+            if state.history and state.history[-1].display_url == track.display_url and state.history[-1].title == track.title:
+                return
+            state.history.append(track)
+        except Exception:
+            logger.debug("[music] falha ao salvar histórico", exc_info=True)
+
+    def _prepend_queue(self, state: MusicGuildState, track: MusicTrack) -> bool:
+        try:
+            if state.queue.full():
+                return False
+            state.queue._queue.appendleft(track)
+            return True
+        except Exception:
+            logger.debug("[music] falha ao colocar música no começo da fila", exc_info=True)
+            return False
+
+    async def previous(self, guild_id: int) -> bool:
+        state = self.get_state(guild_id)
+        if not state.history:
+            return False
+        try:
+            previous_track = state.history.pop()
+        except IndexError:
+            return False
+        current = state.current
+        if current is not None:
+            self._prepend_queue(state, current)
+        if not self._prepend_queue(state, previous_track):
+            return False
+        skipped = await self.skip(guild_id)
+        self.ensure_music_worker(guild_id)
+        return True if skipped or previous_track else False
+
+    async def readd_history(self, guild_id: int, *, limit: int = 20) -> int:
+        state = self.get_state(guild_id)
+        items = list(state.history)[-max(1, int(limit)):]
+        if not items:
+            return 0
+        added = 0
+        for track in items:
+            if state.queue.full():
+                break
+            await state.queue.put(track)
+            added += 1
+        if added:
+            self.ensure_music_worker(guild_id)
+        return added
+
+    async def skip_to(self, guild_id: int, index_1based: int) -> bool:
+        state = self.get_state(guild_id)
+        items = self.snapshot_queue(guild_id)
+        idx = int(index_1based) - 1
+        if idx < 0 or idx >= len(items):
+            return False
+        selected = items.pop(idx)
+        items.insert(0, selected)
+        await self.replace_queue(guild_id, items)
+        guild = self.bot.get_guild(int(guild_id))
+        vc = guild.voice_client if guild else None
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+        else:
+            self.ensure_music_worker(guild_id)
+        return True
 
     async def replace_queue(self, guild_id: int, tracks: list[MusicTrack]) -> None:
         state = self.get_state(guild_id)

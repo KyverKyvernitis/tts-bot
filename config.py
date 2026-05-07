@@ -166,6 +166,7 @@ MUSIC_QUEUE_MAXSIZE = _parse_int(os.getenv("MUSIC_QUEUE_MAXSIZE", "50"), 50)
 MUSIC_MAX_PLAYLIST_ITEMS = _parse_int(os.getenv("MUSIC_MAX_PLAYLIST_ITEMS", "25"), 25)
 MUSIC_SEARCH_RESULTS = _parse_int(os.getenv("MUSIC_SEARCH_RESULTS", "5"), 5)
 MUSIC_YTDLP_TIMEOUT_SECONDS = _parse_float(os.getenv("MUSIC_YTDLP_TIMEOUT_SECONDS", "20"), 20.0)
+MUSIC_HISTORY_MAXSIZE = _parse_int(os.getenv("MUSIC_HISTORY_MAXSIZE", "25"), 25)
 MUSIC_YTDLP_COOKIES_FILE = (os.getenv("MUSIC_YTDLP_COOKIES_FILE", os.getenv("YTDLP_COOKIES_FILE", "")) or "").strip()
 MUSIC_FFMPEG_BEFORE_OPTIONS = (
     os.getenv("MUSIC_FFMPEG_BEFORE_OPTIONS", "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin")

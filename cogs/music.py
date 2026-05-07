@@ -9,8 +9,7 @@ from discord.ext import commands
 
 from music_system import AudioRouter
 from music_system.errors import MusicExtractionError
-from music_system.models import MusicTrack
-from music_system.ui import SearchResultView, QueueView, build_queue_embed
+from music_system.ui import SearchResultView, QueueView, build_queue_embed, build_now_playing_embeds
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +23,13 @@ def _get_router(bot) -> AudioRouter:
 
 
 class Music(commands.Cog):
-    """Player de música modular com integração TTS ducking."""
+    """Player de música modular com TTS ducking obrigatório."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.router = _get_router(bot)
 
     async def cog_unload(self) -> None:
-        # Não desconecta tudo no hot-reload normal do discord.py, mas garante que
-        # tasks órfãs não fiquem vivas se a extension for descarregada manualmente.
         with contextlib.suppress(Exception):
             await self.router.close()
 
@@ -47,6 +44,17 @@ class Music(commands.Cog):
             return await ctx.reply(content, mention_author=False, **kwargs)
         except Exception:
             return await ctx.send(content, **kwargs)
+
+    def _music_error_message(self, exc: Exception) -> str:
+        raw = str(exc)
+        lower = raw.lower()
+        if "sign in to confirm" in lower or "not a bot" in lower:
+            return "`⚠️` O YouTube bloqueou a extração pedindo login/cookies. Confira `cookies.txt`, Deno e `yt-dlp[default]`."
+        if "signature" in lower or "n challenge" in lower or "only images are available" in lower:
+            return "`⚠️` O YouTube recusou o stream de áudio. Atualize `yt-dlp[default]` e confirme se o Deno está instalado."
+        if "drm" in lower:
+            return "`⚠️` Essa fonte usa DRM. Tente outro link ou pesquise pelo nome da música."
+        return f"`⚠️` {raw}"
 
     @commands.command(name="play", aliases=["p", "tocar", "music", "musica"])
     @commands.guild_only()
@@ -71,18 +79,17 @@ class Music(commands.Cog):
                     requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
                 )
             except MusicExtractionError as exc:
-                await self._reply(ctx, f"⚠️ {exc}")
+                await self._reply(ctx, self._music_error_message(exc))
                 return
             except Exception as exc:
                 logger.exception("[music] erro inesperado na extração")
-                await self._reply(ctx, f"⚠️ Não consegui preparar essa música: `{exc}`")
+                await self._reply(ctx, self._music_error_message(exc))
                 return
 
         if not batch.tracks:
-            await self._reply(ctx, "Não encontrei nada tocável.")
+            await self._reply(ctx, "`📭` Não encontrei nada tocável.")
             return
 
-        # Pesquisa por texto: deixa o usuário escolher para não tocar resultado errado.
         if not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1:
             embed = discord.Embed(
                 title="🔎 Escolha a música",
@@ -104,49 +111,57 @@ class Music(commands.Cog):
 
         added, dropped = await self.router.enqueue(ctx.guild, voice_channel, ctx.channel, batch.tracks)
         if added <= 0:
-            await self._reply(ctx, "⚠️ A fila está cheia. Use `_clearqueue` ou `_stop` antes de adicionar mais.")
+            await self._reply(ctx, "`⚠️` A fila está cheia. Use `_clearqueue` ou `_stop` antes de adicionar mais.")
             return
 
         if batch.is_playlist:
-            desc = f"✅ Adicionei `{added}` música(s) da playlist **{batch.playlist_title or 'sem título'}**."
+            desc = f"`📑` **Playlist adicionada:** `{added}` música(s)"
+            if batch.playlist_title:
+                desc += f" de **{batch.playlist_title}**"
             if batch.truncated:
-                desc += "\n⚠️ Playlist limitada para não pesar o bot."
+                desc += "\n`⚠️` Playlist limitada para não pesar o bot."
             if dropped:
-                desc += f"\n⚠️ `{dropped}` item(ns) não entraram porque a fila está cheia."
+                desc += f"\n`⚠️` `{dropped}` item(ns) não entraram porque a fila está cheia."
             await self._reply(ctx, desc)
         else:
             track = batch.tracks[0]
-            await self._reply(ctx, f"✅ Adicionado à fila: **{track.short_title}** • `{track.duration_label}`")
+            await self._reply(ctx, f"`🎶` **Adicionada à fila:** {track.short_title} • `{track.duration_label}`")
 
     @commands.command(name="pause", aliases=["pausar"])
     @commands.guild_only()
     async def pause(self, ctx: commands.Context):
         ok = await self.router.pause(ctx.guild.id)
-        await self._reply(ctx, "⏸️ Música pausada." if ok else "Não há música tocando para pausar.")
+        await self._reply(ctx, "`⏸️` Música pausada." if ok else "Não há música tocando para pausar.")
 
     @commands.command(name="resume", aliases=["retomar", "continuar"])
     @commands.guild_only()
     async def resume(self, ctx: commands.Context):
         ok = await self.router.resume(ctx.guild.id)
-        await self._reply(ctx, "▶️ Música retomada." if ok else "Não há música pausada.")
+        await self._reply(ctx, "`▶️` Música retomada." if ok else "Não há música pausada.")
 
     @commands.command(name="skip", aliases=["s", "pular"])
     @commands.guild_only()
     async def skip(self, ctx: commands.Context):
         ok = await self.router.skip(ctx.guild.id)
-        await self._reply(ctx, "⏭️ Pulando música." if ok else "Não há música tocando.")
+        await self._reply(ctx, "`⏭️` Pulando música." if ok else "Não há música tocando.")
+
+    @commands.command(name="back", aliases=["previous", "voltar", "anterior"])
+    @commands.guild_only()
+    async def back(self, ctx: commands.Context):
+        ok = await self.router.previous(ctx.guild.id)
+        await self._reply(ctx, "`⏮️` Voltando para a música anterior." if ok else "Não há música anterior no histórico.")
 
     @commands.command(name="stop", aliases=["pararmusica", "musicstop"])
     @commands.guild_only()
     async def stop(self, ctx: commands.Context):
         await self.router.stop(ctx.guild.id, disconnect=True)
-        await self._reply(ctx, "⏹️ Player parado, fila limpa e bot desconectado da call.")
+        await self._reply(ctx, "`⏹️` Player parado, fila limpa e bot desconectado da call.")
 
     @commands.command(name="queue", aliases=["fila", "q"])
     @commands.guild_only()
     async def queue(self, ctx: commands.Context):
         state = self.router.get_state(ctx.guild.id)
-        await self._reply(ctx, embed=build_queue_embed(state, 0), view=QueueView(self.router, ctx.guild.id, 0))
+        await self._reply(ctx, embed=build_queue_embed(state, 0), view=QueueView(self.router, ctx.guild.id, 0, owner_id=ctx.author.id))
 
     @commands.command(name="np", aliases=["nowplaying", "tocando"])
     @commands.guild_only()
@@ -155,19 +170,19 @@ class Music(commands.Cog):
         if state.current is None:
             await self._reply(ctx, "Nada tocando agora.")
             return
-        from music_system.ui import build_now_playing_embed, MusicPlayerView
+        from music_system.ui import MusicPlayerView
 
-        await self._reply(ctx, embed=build_now_playing_embed(state, state.current), view=MusicPlayerView(self.router, ctx.guild.id))
+        await self._reply(ctx, embeds=build_now_playing_embeds(state, state.current), view=MusicPlayerView(self.router, ctx.guild.id))
 
     @commands.command(name="volume", aliases=["vol"])
     @commands.guild_only()
     async def volume(self, ctx: commands.Context, value: Optional[int] = None):
         state = self.router.get_state(ctx.guild.id)
         if value is None:
-            await self._reply(ctx, f"🔊 Volume atual: `{int(round(state.volume * 100))}%`.")
+            await self._reply(ctx, f"`🔊` Volume atual: `{int(round(state.volume * 100))}%`.")
             return
         volume = await self.router.set_volume(ctx.guild.id, value)
-        await self._reply(ctx, f"🔊 Volume da música ajustado para `{int(round(volume * 100))}%`.")
+        await self._reply(ctx, f"`🔊` Volume da música ajustado para `{int(round(volume * 100))}%`.")
 
     @commands.command(name="duck", aliases=["ttsduck", "ducking"])
     @commands.guild_only()
@@ -175,40 +190,34 @@ class Music(commands.Cog):
         state = self.router.get_state(ctx.guild.id)
         raw = (value or "").strip().lower()
         if not raw:
-            enabled = await self.router.toggle_duck(ctx.guild.id)
-            await self._reply(ctx, f"🎙️ Ducking do TTS {'ativado' if enabled else 'desativado'}.")
+            await self._reply(
+                ctx,
+                f"`🎙️` TTS ducking está **sempre ativo**. Volume da música durante TTS: `{int(round(state.duck_volume * 100))}%`.\n"
+                "Use `_duck <5-100>` para ajustar apenas o volume do ducking.",
+            )
             return
-        if raw in {"on", "true", "sim", "ativar", "ativo"}:
-            state.duck_enabled = True
-            if state.current_source:
-                state.current_source.duck_enabled = True
-            await self._reply(ctx, "🎙️ Ducking do TTS ativado.")
-            return
-        if raw in {"off", "false", "nao", "não", "desativar", "desligar"}:
-            state.duck_enabled = False
-            if state.current_source:
-                state.current_source.duck_enabled = False
-            await self._reply(ctx, "🎙️ Ducking do TTS desativado.")
+        if raw in {"on", "true", "sim", "ativar", "ativo", "off", "false", "nao", "não", "desativar", "desligar"}:
+            await self._reply(ctx, "`🎙️` O TTS ducking é sempre ativo por padrão e não pode ser desativado. Use `_duck <5-100>` para ajustar o volume.")
             return
         try:
             percent = int(raw.replace("%", ""))
         except Exception:
-            await self._reply(ctx, "Use `_duck`, `_duck on`, `_duck off` ou `_duck <0-100>`.")
+            await self._reply(ctx, "Use `_duck <5-100>`. O ducking não tem opção de desativar.")
             return
         volume = await self.router.set_duck_volume(ctx.guild.id, percent)
-        await self._reply(ctx, f"🎙️ Volume da música durante TTS ajustado para `{int(round(volume * 100))}%`.")
+        await self._reply(ctx, f"`🎙️` Ducking continua sempre ativo. Volume da música durante TTS: `{int(round(volume * 100))}%`.")
 
     @commands.command(name="shuffle", aliases=["embaralhar"])
     @commands.guild_only()
     async def shuffle(self, ctx: commands.Context):
         enabled = await self.router.toggle_shuffle(ctx.guild.id)
-        await self._reply(ctx, f"🔀 Shuffle {'ativado' if enabled else 'desativado'}.")
+        await self._reply(ctx, f"`🔀` Shuffle {'ativado' if enabled else 'desativado'}.")
 
     @commands.command(name="loop", aliases=["repeat", "repetir"])
     @commands.guild_only()
     async def loop(self, ctx: commands.Context):
         mode = await self.router.cycle_loop(ctx.guild.id)
-        await self._reply(ctx, f"🔁 Loop: `{mode.label}`.")
+        await self._reply(ctx, f"`🔁` Repetição: `{mode.label}`.")
 
     @commands.command(name="remove", aliases=["remover"])
     @commands.guild_only()
@@ -220,7 +229,7 @@ class Music(commands.Cog):
         if removed is None:
             await self._reply(ctx, "Essa posição não existe na fila.")
             return
-        await self._reply(ctx, f"🗑️ Removido da fila: **{removed.short_title}**.")
+        await self._reply(ctx, f"`🗑️` Removido da fila: **{removed.short_title}**.")
 
     @commands.command(name="move", aliases=["mover"])
     @commands.guild_only()
@@ -229,13 +238,42 @@ class Music(commands.Cog):
             await self._reply(ctx, "Use `_move <posição atual> <nova posição>`.")
             return
         ok = await self.router.move(ctx.guild.id, from_pos, to_pos)
-        await self._reply(ctx, "✅ Posição atualizada." if ok else "Não consegui mover: confira as posições da fila.")
+        await self._reply(ctx, "`↪️` Posição atualizada." if ok else "Não consegui mover: confira as posições da fila.")
+
+    @commands.command(name="skipto", aliases=["jump", "jumpto", "tocarfila"])
+    @commands.guild_only()
+    async def skipto(self, ctx: commands.Context, position: Optional[int] = None):
+        if position is None:
+            await self._reply(ctx, "Use `_skipto <posição>`.")
+            return
+        ok = await self.router.skip_to(ctx.guild.id, position)
+        await self._reply(ctx, "`▶️` Tocando a posição escolhida." if ok else "Não encontrei essa posição na fila.")
+
+    @commands.command(name="readd", aliases=["readicionar", "historicofila"])
+    @commands.guild_only()
+    async def readd(self, ctx: commands.Context):
+        added = await self.router.readd_history(ctx.guild.id)
+        await self._reply(ctx, f"`🎶` Readicionei `{added}` música(s) do histórico." if added else "O histórico está vazio.")
+
+    @commands.command(name="history", aliases=["historico", "played"])
+    @commands.guild_only()
+    async def history(self, ctx: commands.Context):
+        history = self.router.history_snapshot(ctx.guild.id)
+        if not history:
+            await self._reply(ctx, "Histórico vazio.")
+            return
+        lines = []
+        for idx, track in enumerate(reversed(history[-10:]), start=1):
+            lines.append(f"`{idx:02d}.` **{discord.utils.escape_markdown(track.short_title)}** • `{track.duration_label}`")
+        embed = discord.Embed(title="↩️ Histórico de músicas", description="\n".join(lines), color=discord.Color.blurple())
+        embed.set_footer(text="Use _readd para colocar o histórico de volta na fila.")
+        await self._reply(ctx, embed=embed)
 
     @commands.command(name="clearqueue", aliases=["limparfila", "clearq"])
     @commands.guild_only()
     async def clearqueue(self, ctx: commands.Context):
         await self.router.replace_queue(ctx.guild.id, [])
-        await self._reply(ctx, "🧹 Fila limpa.")
+        await self._reply(ctx, "`🧹` Fila limpa.")
 
     @play.error
     async def play_error(self, ctx: commands.Context, error: commands.CommandError):
@@ -246,5 +284,5 @@ class Music(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    router = _get_router(bot)
+    _get_router(bot)
     await bot.add_cog(Music(bot))
