@@ -7,3 +7,4 @@ gTTS
 psutil
 google-cloud-texttospeech
 pillow
+yt-dlp[default]

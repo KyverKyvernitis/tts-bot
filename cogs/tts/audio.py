@@ -1093,6 +1093,19 @@ class TTSAudioMixin:
                     loop.call_soon_threadsafe(finished.set_result, None)
 
         try:
+            router = getattr(getattr(self, "bot", None), "audio_router", None)
+            play_tts = getattr(router, "play_tts", None)
+            if callable(play_tts) and guild is not None:
+                return await play_tts(
+                    guild=guild,
+                    vc=vc,
+                    path=path,
+                    before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+                    options=TTS_FFMPEG_OPTIONS,
+                    timeout=self._estimate_playback_timeout(item),
+                    item=item,
+                )
+
             source_setup_started_at = time.monotonic()
             source = discord.FFmpegPCMAudio(
                 path,

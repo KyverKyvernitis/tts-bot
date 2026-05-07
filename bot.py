@@ -45,6 +45,7 @@ from discord.ext import commands
 import config
 from db import SettingsDB
 from webserver import run_webserver, set_health_provider
+from music_system import AudioRouter
 
 
 print("BOT.PY INICIOU")
@@ -106,6 +107,7 @@ class BotLocal(commands.Bot):
         self._zip_update_lock = asyncio.Lock()
         self._repo_root = Path(__file__).resolve().parent
         self._update_temp_root = Path("/tmp/discord-auto-update")
+        self.audio_router = AudioRouter(self)
         set_health_provider(self.get_health_snapshot)
 
     async def _cleanup_removed_slash_commands(self, guild_ids: set[int]) -> None:
@@ -767,6 +769,15 @@ class BotLocal(commands.Bot):
                     )
             finally:
                 shutil.rmtree(work_dir, ignore_errors=True)
+
+    async def close(self):
+        router = getattr(self, "audio_router", None)
+        if router is not None:
+            try:
+                await router.close()
+            except Exception as e:
+                print(f"[bot] falha ao fechar audio_router: {e!r}")
+        await super().close()
 
     async def on_ready(self):
         print(f"Logado como {self.user} (id: {self.user.id})")

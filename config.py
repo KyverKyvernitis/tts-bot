@@ -156,6 +156,24 @@ TTS_FFMPEG_BEFORE_OPTIONS = (os.getenv("TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin") 
 TTS_FFMPEG_OPTIONS = (os.getenv("TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error").strip()
 
 # -----------------------------------------------------------------------------
+# Música — player leve integrado ao TTS ducking
+# -----------------------------------------------------------------------------
+MUSIC_DEFAULT_VOLUME = _parse_float(os.getenv("MUSIC_DEFAULT_VOLUME", "0.55"), 0.55)
+MUSIC_DUCK_VOLUME = _parse_float(os.getenv("MUSIC_DUCK_VOLUME", "0.15"), 0.15)
+MUSIC_TTS_VOLUME = _parse_float(os.getenv("MUSIC_TTS_VOLUME", "1.0"), 1.0)
+MUSIC_IDLE_DISCONNECT_SECONDS = _parse_int(os.getenv("MUSIC_IDLE_DISCONNECT_SECONDS", "180"), 180)
+MUSIC_QUEUE_MAXSIZE = _parse_int(os.getenv("MUSIC_QUEUE_MAXSIZE", "50"), 50)
+MUSIC_MAX_PLAYLIST_ITEMS = _parse_int(os.getenv("MUSIC_MAX_PLAYLIST_ITEMS", "25"), 25)
+MUSIC_SEARCH_RESULTS = _parse_int(os.getenv("MUSIC_SEARCH_RESULTS", "5"), 5)
+MUSIC_YTDLP_TIMEOUT_SECONDS = _parse_float(os.getenv("MUSIC_YTDLP_TIMEOUT_SECONDS", "20"), 20.0)
+MUSIC_FFMPEG_BEFORE_OPTIONS = (
+    os.getenv("MUSIC_FFMPEG_BEFORE_OPTIONS", "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin")
+    or "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin"
+).strip()
+MUSIC_FFMPEG_OPTIONS = (os.getenv("MUSIC_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error").strip()
+MUSIC_TTS_FFMPEG_OPTIONS = (os.getenv("MUSIC_TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error").strip()
+
+# -----------------------------------------------------------------------------
 # DevAI — analisa logs, pede correção para providers gratuitos/fallbacks e
 # oferece patch .zip pelo webhook. Nunca aplica patch automaticamente.
 # -----------------------------------------------------------------------------
