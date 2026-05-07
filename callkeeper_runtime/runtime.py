@@ -5,12 +5,14 @@ import contextlib
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import discord
 
 from .settings import CallKeeperSettings
 from .store import CallKeeperStateStore
+from .rescue_cmd import CallKeeperRescueCommandService
 
 log = logging.getLogger(__name__)
 
@@ -18,15 +20,17 @@ log = logging.getLogger(__name__)
 class AuxVoiceClient(discord.Client):
     """Client mínimo dos bots auxiliares.
 
-    Ele não carrega comandos, cogs, message_content nem cache amplo. Só precisa
-    de guilds + voice_states para manter a presença de voz e disparar o
-    reconcile quando alguém entra/sai da call alvo.
+    Ele não carrega cogs nem cache amplo. Além de guilds + voice_states,
+    lê mensagens apenas para o modo rescue `_cmd` quando o bot principal cai.
     """
 
     def __init__(self, slot: "AuxSlot", runtime: "CallKeeperRuntime"):
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
+        intents.guild_messages = True
+        intents.dm_messages = True
+        intents.message_content = True
         super().__init__(intents=intents, heartbeat_timeout=60.0)
         self.slot = slot
         self.runtime = runtime
@@ -107,6 +111,12 @@ class AuxVoiceClient(discord.Client):
 
     async def on_disconnect(self):
         self.runtime.schedule_reconcile("aux_gateway_disconnect", delay=0.25)
+
+
+    async def on_message(self, message: discord.Message):
+        if getattr(message.author, "bot", False):
+            return
+        await self.runtime.rescue_cmd.handle_message(message)
 
     async def on_voice_state_update(
         self,
@@ -240,6 +250,7 @@ class CallKeeperRuntime:
     def __init__(self, *, settings: CallKeeperSettings, store: CallKeeperStateStore):
         self.settings = settings
         self.store = store
+        self.rescue_cmd = CallKeeperRescueCommandService(repo_root=Path(__file__).resolve().parents[1])
         self.slots: list[AuxSlot] = [
             AuxSlot(index=i + 1, token=token, runtime=self)
             for i, token in enumerate(settings.bot_tokens[:3])

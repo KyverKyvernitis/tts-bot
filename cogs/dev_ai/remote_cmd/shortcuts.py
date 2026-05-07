@@ -26,9 +26,10 @@ class ServiceShortcut:
     action: str
     alias: str
     unit: str
-    command: str
+    command: str | None
     pre_ack: str | None = None
     self_affecting: bool = False
+    blocked_message: str | None = None
 
 
 def resolve_service_shortcut(raw_command: str) -> ServiceShortcut | None:
@@ -45,6 +46,34 @@ def resolve_service_shortcut(raw_command: str) -> ServiceShortcut | None:
     if not unit:
         return None
 
+    # O bot principal não consegue se ligar de volta depois de parado, porque
+    # precisa estar online para ler `_cmd start bot`. O restart continua útil:
+    # responde antes e reinicia em background.
+    if unit == SELF_SERVICE and action == "start":
+        return ServiceShortcut(
+            action=action,
+            alias=alias,
+            unit=unit,
+            command=None,
+            blocked_message=(
+                "⚠️ Atalho inútil neste processo\n"
+                "`_cmd start bot` só funcionaria se o bot já estivesse online. "
+                "Para recuperar o bot parado, use o modo rescue dos CallKeepers ou a VPS."
+            ),
+        )
+    if unit == SELF_SERVICE and action == "stop":
+        return ServiceShortcut(
+            action=action,
+            alias=alias,
+            unit=unit,
+            command=None,
+            blocked_message=(
+                "⚠️ Parada do bot principal bloqueada\n"
+                "Se o bot principal parar, ele não consegue ler `_cmd start bot`. "
+                "Use `_cmd restart bot` quando quiser reiniciar."
+            ),
+        )
+
     if action == "status":
         command = f"sudo systemctl status {unit} --no-pager"
     elif action == "logs":
@@ -52,11 +81,10 @@ def resolve_service_shortcut(raw_command: str) -> ServiceShortcut | None:
     else:
         command = f"sudo systemctl {action} {unit}"
 
-    self_affecting = unit == SELF_SERVICE and action in {"stop", "restart"}
+    self_affecting = unit == SELF_SERVICE and action == "restart"
     pre_ack = None
     if self_affecting:
-        label = "reinício" if action == "restart" else "parada"
-        pre_ack = f"🖥️ {label.capitalize()} solicitado para `{unit}`."
+        pre_ack = f"🖥️ Reinício solicitado para `{unit}`."
 
     return ServiceShortcut(
         action=action,

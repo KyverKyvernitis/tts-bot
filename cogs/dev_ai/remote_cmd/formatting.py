@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from .redactor import redact_text
+
 
 MAX_OUTPUT_CHARS = 120_000
 CHUNK_SIZE = 1680
@@ -36,6 +38,9 @@ def build_full_result_text(
     elapsed: float,
     timed_out: bool = False,
 ) -> str:
+    command = redact_text(command)
+    stdout = redact_text(stdout or "")
+    stderr = redact_text(stderr or "")
     return (
         f"Comando: {command}\n"
         f"Código: {exit_code if exit_code is not None else 'sem código'}\n"
@@ -61,8 +66,8 @@ def build_result_attachment(
 ) -> tuple[str, bytes] | None:
     content = build_full_result_text(
         command=command,
-        stdout=stdout,
-        stderr=stderr,
+        stdout=redact_text(stdout),
+        stderr=redact_text(stderr),
         exit_code=exit_code,
         elapsed=elapsed,
         timed_out=timed_out,
@@ -83,8 +88,9 @@ def format_result(
     elapsed: float,
     timed_out: bool = False,
 ) -> str:
-    stdout = stdout or ""
-    stderr = stderr or ""
+    command = redact_text(command)
+    stdout = redact_text(stdout or "")
+    stderr = redact_text(stderr or "")
     body = (
         f"🖥️ Comando executado\n"
         f"Comando: {command}\n"

@@ -15,6 +15,7 @@ import config
 
 from .executor import run_shell
 from .formatting import build_result_attachment, chunk_text, format_result
+from .redactor import redact_bytes, redact_text
 from .security import is_destructive, is_non_emulable_interactive
 from .shortcuts import resolve_service_shortcut
 from .sessions import RemoteSessionManager
@@ -54,14 +55,16 @@ class DevAIRemoteCommandService:
         if not attachment:
             return None
         filename, payload = attachment
-        return discord.File(io.BytesIO(payload), filename=filename)
+        safe_payload = redact_bytes(payload)
+        return discord.File(io.BytesIO(safe_payload), filename=filename)
 
     async def send(self, ctx: commands.Context, content: str, *, attachment: tuple[str, bytes] | None = None) -> None:
-        """Envia pelo webhook da DevAI sem redigir segredos.
+        """Envia resposta do `_cmd` sem ping e sempre redigida.
 
-        O `WebhookReporter` normal redige secrets. O `_cmd` é terminal privado,
-        então aqui a saída é bruta e apenas bloqueia mentions para não pingar.
+        Como o comando pode ser usado fora do canal privado da DevAI, toda
+        mensagem e todo anexo passam pelo redactor antes de ir ao Discord.
         """
+        content = redact_text(content)
         chunks = chunk_text(content)
         use_attachment = attachment if len(chunks) > 1 else None
         webhook_url = str(getattr(config, "DEVAI_WEBHOOK_URL", "") or "")
@@ -166,6 +169,12 @@ class DevAIRemoteCommandService:
 
         shortcut = resolve_service_shortcut(command)
         if shortcut is not None:
+            if shortcut.blocked_message:
+                await self.send(ctx, shortcut.blocked_message)
+                return
+            if not shortcut.command:
+                await self.send(ctx, "⚠️ Atalho inválido.")
+                return
             if shortcut.self_affecting:
                 await self.send(ctx, shortcut.pre_ack or f"🖥️ Solicitação enviada para `{shortcut.unit}`.")
                 asyncio.create_task(self._run_self_affecting_shortcut(shortcut.command))

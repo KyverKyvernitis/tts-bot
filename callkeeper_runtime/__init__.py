@@ -9,6 +9,7 @@ os bots auxiliares.
 from .settings import CALLKEEPER_OWNER_USER_ID, CallKeeperSettings, load_settings
 from .store import CallKeeperStateStore
 from .runtime import CallKeeperRuntime
+from .rescue_cmd import CallKeeperRescueCommandService
 
 __all__ = [
     "CALLKEEPER_OWNER_USER_ID",
@@ -16,4 +17,5 @@ __all__ = [
     "load_settings",
     "CallKeeperStateStore",
     "CallKeeperRuntime",
+    "CallKeeperRescueCommandService",
 ]
