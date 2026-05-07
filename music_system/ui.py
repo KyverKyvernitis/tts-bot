@@ -94,7 +94,6 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
         duration_line,
         f"> -# 👤 **⠂** {_escape(source, limit=64)}",
         f"> -# ✋ **⠂** {requester}",
-        f"> -# 🔊 **⠂** `Volume: {volume_percent}%` `{_bar(min(float(getattr(state, 'volume', 0.55)), 1.0), size=10)}`",
     ])
 
     loop_mode = getattr(state, "loop_mode", None)
@@ -112,6 +111,9 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     history_count = len(list(getattr(state, "history", []) or []))
     if history_count:
         lines.append(f"> -# ↩️ **⠂** `{history_count} música{'s' if history_count != 1 else ''} no histórico`")
+
+    for label, count, needed in list(getattr(state, "panel_vote_summary", []) or []):
+        lines.append(f"> -# 🗳️ **⠂** `{label}: {count}/{needed}`")
 
     embed.description = "\n".join(lines)
     if track.thumbnail:
@@ -159,7 +161,6 @@ def build_player_embeds(state) -> list[discord.Embed]:
         lines = [
             f"> -# 🎶 **⠂** `{len(queue)} música{'s' if len(queue) != 1 else ''} aguardando`",
             f"> -# ⌛ **⠂** `Duração aproximada: {_queue_duration_label(queue)}`",
-            f"> -# 🔊 **⠂** `Volume: {volume_percent}%` `{_bar(min(float(getattr(state, 'volume', 0.55)), 1.0), size=10)}`",
         ]
         for n, item in enumerate(queue[:5], start=1):
             lines.append(f"-# `{n:02}) [{item.duration_label}]` {_track_link(item, title_limit=48)}")
@@ -247,6 +248,9 @@ class VolumeModal(discord.ui.Modal):
         self.add_item(self.value)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not self.router.is_music_staff(getattr(interaction, "user", None)):
+            await interaction.response.send_message("Apenas staff pode alterar volumes do player.", ephemeral=True)
+            return
         try:
             raw = str(self.value.value).strip().replace("%", "")
             value = int(raw)
@@ -595,6 +599,8 @@ class PlayerOptionsSelect(discord.ui.Select):
             discord.SelectOption(label=f"Volume: {volume_percent}%", emoji="🔊", value="volume", description="Ajustar volume da música."),
             discord.SelectOption(label="Adicionar histórico", emoji="↩️", value="readd", description="Readicionar músicas tocadas de volta na fila."),
             discord.SelectOption(label=f"Volume durante TTS: {duck_percent}%", emoji="🎙️", value="duck_volume", description="Ajustar quanto a música abaixa quando o TTS fala."),
+            discord.SelectOption(label="Repetição", emoji="🔁", value="loop", description="Alternar repetição da música/fila."),
+            discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Misturar a fila."),
         ]
         super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, row=2)
         self.router = router
@@ -614,14 +620,20 @@ class PlayerOptionsSelect(discord.ui.Select):
             )
             return
         if value == "volume":
+            if not self.router.is_music_staff(getattr(interaction, "user", None)):
+                await interaction.response.send_message("Apenas staff pode alterar o volume do player.", ephemeral=True)
+                return
             await interaction.response.send_modal(VolumeModal(self.router, self.guild_id, duck=False))
             return
         if value == "duck_volume":
+            if not self.router.is_music_staff(getattr(interaction, "user", None)):
+                await interaction.response.send_message("Apenas staff pode alterar o volume do player.", ephemeral=True)
+                return
             await interaction.response.send_modal(VolumeModal(self.router, self.guild_id, duck=True))
             return
         if value == "shuffle":
-            enabled = await self.router.toggle_shuffle(self.guild_id)
-            await interaction.response.send_message(f"`🔀` Shuffle {'ativado' if enabled else 'desativado'}.", ephemeral=True)
+            _ok, message = await self.router.request_shuffle(self.guild_id, interaction.user)
+            await interaction.response.send_message(message, ephemeral=True)
             return
         if value == "readd":
             added = await self.router.readd_history(self.guild_id)
@@ -631,8 +643,8 @@ class PlayerOptionsSelect(discord.ui.Select):
             )
             return
         if value == "loop":
-            mode = await self.router.cycle_loop(self.guild_id)
-            await interaction.response.send_message(f"`🔁` Repetição: `{mode.label}`.", ephemeral=True)
+            _ok, message = await self.router.request_loop(self.guild_id, interaction.user)
+            await interaction.response.send_message(message, ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
 
@@ -667,8 +679,8 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(label="Pular", emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
-        ok = await self.router.skip(self.guild_id)
-        await self._ack(interaction, "`⏭️` Pulando música." if ok else "Não havia música para pular.")
+        _ok, message = await self.router.request_skip(self.guild_id, interaction.user)
+        await self._ack(interaction, message)
 
     @discord.ui.button(label="Parar", emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -684,16 +696,3 @@ class MusicPlayerView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Volume", emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
-    async def volume(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(VolumeModal(self.router, self.guild_id, duck=False))
-
-    @discord.ui.button(label="Loop", emoji="🔁", style=discord.ButtonStyle.secondary, row=1)
-    async def loop(self, interaction: discord.Interaction, button: discord.ui.Button):
-        mode = await self.router.cycle_loop(self.guild_id)
-        await self._ack(interaction, f"`🔁` Repetição: `{mode.label}`.")
-
-    @discord.ui.button(label="Shuffle", emoji="🔀", style=discord.ButtonStyle.secondary, row=1)
-    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        enabled = await self.router.toggle_shuffle(self.guild_id)
-        await self._ack(interaction, f"`🔀` Shuffle {'ativado' if enabled else 'desativado'}.")

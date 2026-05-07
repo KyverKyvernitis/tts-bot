@@ -1276,6 +1276,16 @@ class TTSAudioMixin:
                     self._log_debug(f"[tts_voice] Idle timeout ignorado | player de música ativo | guild={guild.id}")
                     return False
 
+        should_defer = getattr(router, "should_defer_tts_auto_leave", None)
+        if callable(should_defer):
+            with contextlib.suppress(Exception):
+                if should_defer(guild.id):
+                    schedule_idle = getattr(router, "schedule_music_idle_disconnect", None)
+                    if callable(schedule_idle):
+                        await schedule_idle(guild.id)
+                    self._log_debug(f"[tts_voice] Idle timeout adiado | sessão de música aguardando timeout | guild={guild.id}")
+                    return False
+
         members = list(getattr(vc.channel, "members", []))
         humans = [m for m in members if not m.bot]
         if humans:

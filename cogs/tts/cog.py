@@ -1648,6 +1648,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if not auto_leave_enabled:
             return
 
+        router = getattr(getattr(self, "bot", None), "audio_router", None)
         if self._music_player_is_active(guild.id):
             print(f"[tts_voice] auto-leave ignorado | player de música ativo | guild={guild.id}")
             return
@@ -1656,6 +1657,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if vc is None or not vc.is_connected() or vc.channel is None:
             return
         if self._voice_channel_has_only_bots_or_is_empty(vc.channel):
+            should_defer = getattr(router, "should_defer_tts_auto_leave", None)
+            if callable(should_defer):
+                try:
+                    if should_defer(guild.id):
+                        schedule_idle = getattr(router, "schedule_music_idle_disconnect", None)
+                        if callable(schedule_idle):
+                            await schedule_idle(guild.id)
+                        print(f"[tts_voice] auto-leave instantâneo adiado | sessão de música aguardando timeout | guild={guild.id}")
+                        return
+                except Exception:
+                    pass
             print(f"[tts_voice] saindo da call | sozinho ou só com bots | guild={guild.id} channel={vc.channel.id}")
             await self._disconnect_and_clear(guild)
 

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 MUSIC_DEFAULT_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_DEFAULT_VOLUME", 0.55))))
 MUSIC_DUCK_VOLUME = max(0.05, min(1.0, float(getattr(config, "MUSIC_DUCK_VOLUME", 0.15))))
 TTS_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_TTS_VOLUME", 1.0))))
-MUSIC_IDLE_DISCONNECT_SECONDS = max(30.0, float(getattr(config, "MUSIC_IDLE_DISCONNECT_SECONDS", 180)))
+MUSIC_IDLE_DISCONNECT_SECONDS = max(15.0, float(getattr(config, "MUSIC_IDLE_DISCONNECT_SECONDS", 120)))
 MUSIC_QUEUE_MAXSIZE = max(1, int(getattr(config, "MUSIC_QUEUE_MAXSIZE", 50)))
 MUSIC_MAX_PLAYLIST_ITEMS = max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25)))
 MUSIC_SEARCH_RESULTS = max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5))))
@@ -34,6 +34,7 @@ MUSIC_FFMPEG_OPTIONS = str(getattr(config, "MUSIC_FFMPEG_OPTIONS", "-vn -logleve
 MUSIC_TTS_FFMPEG_OPTIONS = str(getattr(config, "MUSIC_TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error")
 MUSIC_PLAYBACK_START_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "MUSIC_PLAYBACK_START_TIMEOUT_SECONDS", 8.0)))
 MUSIC_HISTORY_MAXSIZE = max(5, int(getattr(config, "MUSIC_HISTORY_MAXSIZE", 25)))
+MUSIC_CONTROL_VOTE_SECONDS = max(10.0, float(getattr(config, "MUSIC_CONTROL_VOTE_SECONDS", 45)))
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
 
@@ -45,6 +46,16 @@ class TTSOverlay:
     future: asyncio.Future
     started_at: float = field(default_factory=time.monotonic)
     ended: bool = False
+
+
+@dataclass(slots=True)
+class ControlVote:
+    action: str
+    voters: set[int] = field(default_factory=set)
+    started_at: float = field(default_factory=time.monotonic)
+
+    def expired(self) -> bool:
+        return (time.monotonic() - self.started_at) > MUSIC_CONTROL_VOTE_SECONDS
 
 
 class MixedAudioSource(discord.AudioSource):
@@ -247,6 +258,11 @@ class MusicGuildState:
     music_owns_voice: bool = False
     tts_voice_touched: bool = False
     last_tts_activity_at: float = 0.0
+    music_session_active: bool = False
+    music_idle_disconnect_task: Optional[asyncio.Task] = None
+    control_votes: dict[str, ControlVote] = field(default_factory=dict)
+    control_vote_cleanup_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
+    volume_loaded: bool = False
 
     def queue_size(self) -> int:
         return self.queue.qsize()
@@ -275,11 +291,155 @@ class AudioRouter:
             self._states[int(guild_id)] = state
         # O ducking do TTS é obrigatório e não pode ser desativado por comando/UI.
         state.duck_enabled = True
+        self._load_persisted_volume(int(guild_id), state)
         return state
+
+    def _load_persisted_volume(self, guild_id: int, state: MusicGuildState) -> None:
+        if state.volume_loaded:
+            return
+        state.volume_loaded = True
+        settings_db = getattr(self.bot, "settings_db", None)
+        try:
+            raw = getattr(settings_db, "guild_cache", {}).get(int(guild_id), {}).get("music_volume") if settings_db is not None else None
+            if raw is None:
+                return
+            state.volume = max(0.0, min(1.5, float(raw)))
+        except Exception:
+            logger.debug("[music] falha ao carregar volume persistido", exc_info=True)
+
+    async def _persist_volume(self, guild_id: int, volume: float) -> None:
+        settings_db = getattr(self.bot, "settings_db", None)
+        if settings_db is None:
+            return
+        try:
+            get_doc = getattr(settings_db, "_get_guild_doc", None)
+            save_doc = getattr(settings_db, "_save_guild_doc", None)
+            if not callable(get_doc) or not callable(save_doc):
+                return
+            doc = get_doc(int(guild_id))
+            doc["music_volume"] = max(0.0, min(1.5, float(volume)))
+            await save_doc(int(guild_id), doc)
+        except Exception:
+            logger.debug("[music] falha ao salvar volume persistido", exc_info=True)
+
+    def is_music_staff(self, member) -> bool:
+        if member is None or getattr(member, "bot", False):
+            return False
+        guild = getattr(member, "guild", None)
+        if guild is not None and getattr(guild, "owner_id", None) == getattr(member, "id", None):
+            return True
+        perms = getattr(member, "guild_permissions", None)
+        return bool(
+            getattr(perms, "administrator", False)
+            or getattr(perms, "manage_guild", False)
+            or getattr(perms, "manage_channels", False)
+            or getattr(perms, "move_members", False)
+        )
+
+    def _is_current_requester(self, state: MusicGuildState, member) -> bool:
+        current = state.current
+        return bool(current is not None and member is not None and int(getattr(current, "requester_id", 0) or 0) == int(getattr(member, "id", 0) or 0))
+
+    def _prune_control_votes(self, state: MusicGuildState) -> None:
+        stale = [key for key, vote in state.control_votes.items() if vote.expired()]
+        for key in stale:
+            state.control_votes.pop(key, None)
+            task = state.control_vote_cleanup_tasks.pop(key, None)
+            if task is not None and not task.done():
+                task.cancel()
+
+    def pending_vote_summary(self, guild_id: int) -> list[tuple[str, int, int]]:
+        state = self.get_state(guild_id)
+        self._prune_control_votes(state)
+        labels = {"skip": "Pular", "shuffle": "Shuffle", "loop": "Loop"}
+        return [(labels.get(action, action), len(vote.voters), 2) for action, vote in state.control_votes.items() if vote.voters]
+
+    def _schedule_vote_cleanup(self, guild_id: int, action: str) -> None:
+        state = self.get_state(guild_id)
+        old = state.control_vote_cleanup_tasks.get(action)
+        if old is not None and not old.done():
+            old.cancel()
+
+        async def _cleanup() -> None:
+            try:
+                await asyncio.sleep(MUSIC_CONTROL_VOTE_SECONDS + 0.25)
+                st = self.get_state(guild_id)
+                vote = st.control_votes.get(action)
+                if vote is not None and vote.expired():
+                    st.control_votes.pop(action, None)
+                    await self.update_panel(guild_id, create=bool(st.now_message))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("[music] falha ao limpar votação", exc_info=True)
+
+        try:
+            state.control_vote_cleanup_tasks[action] = asyncio.create_task(_cleanup())
+        except RuntimeError:
+            pass
+
+    async def _control_or_vote(self, guild_id: int, member, action: str) -> tuple[bool, str, bool]:
+        state = self.get_state(guild_id)
+        self._prune_control_votes(state)
+        if member is None or getattr(member, "bot", False):
+            return False, "Bots não podem controlar essa ação.", False
+        if self.is_music_staff(member) or self._is_current_requester(state, member):
+            state.control_votes.pop(action, None)
+            task = state.control_vote_cleanup_tasks.pop(action, None)
+            if task is not None and not task.done():
+                task.cancel()
+            return True, "", False
+        vote = state.control_votes.get(action)
+        if vote is None or vote.expired():
+            vote = ControlVote(action=action)
+            state.control_votes[action] = vote
+        vote.voters.add(int(member.id))
+        if len(vote.voters) >= 2:
+            state.control_votes.pop(action, None)
+            task = state.control_vote_cleanup_tasks.pop(action, None)
+            if task is not None and not task.done():
+                task.cancel()
+            return True, "", True
+        self._schedule_vote_cleanup(guild_id, action)
+        self._schedule_panel_update(guild_id, create=bool(state.now_message))
+        label = {"skip": "pular", "shuffle": "shuffle", "loop": "repetição"}.get(action, action)
+        return False, f"`🗳️` Voto registrado para **{label}**: `1/2`.", False
 
     def is_music_active(self, guild_id: int) -> bool:
         state = self._states.get(int(guild_id))
         return bool(state and (state.current or not state.queue.empty() or (state.worker_task and not state.worker_task.done())))
+
+    def should_defer_tts_auto_leave(self, guild_id: int) -> bool:
+        state = self._states.get(int(guild_id))
+        if state is None:
+            return False
+        return bool(state.music_session_active or state.current or not state.queue.empty() or state.current_resolve_task or state.current_source)
+
+    async def schedule_music_idle_disconnect(self, guild_id: int, *, delay: float | None = None) -> None:
+        state = self.get_state(guild_id)
+        if state.music_idle_disconnect_task is not None and not state.music_idle_disconnect_task.done():
+            return
+        delay_seconds = MUSIC_IDLE_DISCONNECT_SECONDS if delay is None else max(0.0, float(delay))
+
+        async def _runner() -> None:
+            try:
+                await asyncio.sleep(delay_seconds)
+                guild = self.bot.get_guild(int(guild_id))
+                if guild is not None:
+                    await self._maybe_disconnect_idle(guild, self.get_state(guild_id))
+            finally:
+                st = self.get_state(guild_id)
+                if st.music_idle_disconnect_task is task:
+                    st.music_idle_disconnect_task = None
+
+        task = asyncio.create_task(_runner())
+        state.music_idle_disconnect_task = task
+
+    def _cancel_music_idle_disconnect(self, state: MusicGuildState) -> None:
+        task = state.music_idle_disconnect_task
+        if task is not None and not task.done():
+            task.cancel()
+        state.music_idle_disconnect_task = None
 
     async def close(self) -> None:
         for guild_id in list(self._states):
@@ -292,6 +452,8 @@ class AudioRouter:
         state = self.get_state(guild.id)
         state.last_text_channel_id = getattr(text_channel, "id", None)
         state.last_voice_channel_id = getattr(voice_channel, "id", None)
+        state.music_session_active = True
+        self._cancel_music_idle_disconnect(state)
 
         added = 0
         dropped = 0
@@ -369,6 +531,11 @@ class AudioRouter:
 
                 played_ok = False
                 state.skip_requested = False
+                state.control_votes.clear()
+                for task in list(state.control_vote_cleanup_tasks.values()):
+                    if task is not None and not task.done():
+                        task.cancel()
+                state.control_vote_cleanup_tasks.clear()
                 try:
                     played_ok = await self._play_track(guild, state, track)
                 except Exception as exc:
@@ -408,6 +575,8 @@ class AudioRouter:
             raise RuntimeError("Canal de voz não encontrado.")
 
         state.current = track
+        state.music_session_active = True
+        self._cancel_music_idle_disconnect(state)
         state.current_status = "resolving"
         state.paused = False
         # Cada música nova ganha um painel novo no fim do chat. Alterações da
@@ -526,21 +695,32 @@ class AudioRouter:
             return guild.voice_client if guild.voice_client and guild.voice_client.is_connected() else None
 
     async def _maybe_disconnect_idle(self, guild: discord.Guild, state: MusicGuildState) -> None:
-        # Sem modo 24/7 para música, mas a música não pode derrubar uma call mantida pelo TTS.
-        if state.tts_voice_touched or not state.music_owns_voice:
-            state.current_status = "idle"
+        # Sem modo 24/7 para música: quando a música/fila acabam e o bot fica
+        # sozinho ou só com bots, ele sai depois do timeout de música. Se ainda
+        # há humanos, a conexão pode continuar para o TTS usar.
+        state.current_status = "idle"
+        vc = guild.voice_client
+        if not vc or not vc.is_connected() or getattr(vc, "channel", None) is None:
+            state.music_session_active = False
+            state.music_owns_voice = False
             await self.update_panel(guild.id, create=False)
             return
-        vc = guild.voice_client
-        if not vc or not vc.is_connected():
+        if state.current or not state.queue.empty() or state.current_resolve_task or state.current_source:
+            return
+        # Se algum áudio direto do TTS ainda estiver tocando, não derruba a call.
+        if vc.is_playing() or vc.is_paused():
+            await self.schedule_music_idle_disconnect(guild.id, delay=15.0)
             return
         try:
             members = list(getattr(vc.channel, "members", []))
             humans = [m for m in members if not getattr(m, "bot", False)]
             if humans:
+                await self.update_panel(guild.id, create=False)
                 return
             await vc.disconnect(force=False)
             state.music_owns_voice = False
+            state.music_session_active = False
+            await self.update_panel(guild.id, create=False)
         except Exception:
             logger.debug("[music] idle disconnect falhou", exc_info=True)
 
@@ -578,6 +758,7 @@ class AudioRouter:
             from .ui import build_player_embeds, MusicPlayerView
 
             has_player_content = bool(state.current or not state.queue.empty())
+            state.panel_vote_summary = self.pending_vote_summary(guild_id)
             embeds = build_player_embeds(state)
             view = MusicPlayerView(self, guild_id) if has_player_content else None
             current_panel_key = self._panel_key_for_track(state.current)
@@ -707,6 +888,7 @@ class AudioRouter:
         vc = guild.voice_client if guild else None
         did_anything = False
         state.skip_requested = True
+        state.control_votes.pop("skip", None)
         if state.current_resolve_task is not None and not state.current_resolve_task.done():
             state.current_resolve_task.cancel()
             did_anything = True
@@ -732,6 +914,7 @@ class AudioRouter:
         state = self.get_state(guild_id)
         state.stop_requested = True
         state.skip_requested = True
+        state.control_votes.pop("skip", None)
         if state.current_resolve_task is not None and not state.current_resolve_task.done():
             state.current_resolve_task.cancel()
         while not state.queue.empty():
@@ -755,6 +938,9 @@ class AudioRouter:
         state.current_resolve_task = None
         state.current_status = "idle"
         state.paused = False
+        state.music_session_active = False
+        self._cancel_music_idle_disconnect(state)
+        state.control_votes.clear()
         await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 
@@ -762,6 +948,7 @@ class AudioRouter:
         state = self.get_state(guild_id)
         volume = max(0, min(150, int(volume_percent))) / 100.0
         state.volume = volume
+        await self._persist_volume(guild_id, volume)
         if state.current_source is not None:
             state.current_source.set_music_volume(volume)
         self._schedule_panel_update(guild_id, create=False)
@@ -786,9 +973,35 @@ class AudioRouter:
         self._schedule_panel_update(guild_id, create=False)
         return True
 
+    async def request_skip(self, guild_id: int, member) -> tuple[bool, str]:
+        allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "skip")
+        if not allowed:
+            return False, pending_message
+        ok = await self.skip(guild_id)
+        if completed_by_vote:
+            return ok, "`⏭️` Votação concluída: pulando música." if ok else "Não havia música para pular."
+        return ok, "`⏭️` Pulando música." if ok else "Não havia música para pular."
+
+    async def request_shuffle(self, guild_id: int, member) -> tuple[bool, str]:
+        allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "shuffle")
+        if not allowed:
+            return False, pending_message
+        enabled = await self.toggle_shuffle(guild_id)
+        prefix = "Votação concluída: " if completed_by_vote else ""
+        return True, f"`🔀` {prefix}Shuffle {'ativado' if enabled else 'desativado'}."
+
+    async def request_loop(self, guild_id: int, member) -> tuple[bool, str]:
+        allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "loop")
+        if not allowed:
+            return False, pending_message
+        mode = await self.cycle_loop(guild_id)
+        prefix = "Votação concluída: " if completed_by_vote else ""
+        return True, f"`🔁` {prefix}Repetição: `{mode.label}`."
+
     async def toggle_shuffle(self, guild_id: int) -> bool:
         state = self.get_state(guild_id)
         items = self.snapshot_queue(guild_id)
+        state.control_votes.pop("shuffle", None)
         state.shuffle = not state.shuffle
         if state.shuffle and len(items) > 1:
             random.shuffle(items)
@@ -799,6 +1012,7 @@ class AudioRouter:
 
     async def cycle_loop(self, guild_id: int) -> LoopMode:
         state = self.get_state(guild_id)
+        state.control_votes.pop("loop", None)
         if state.loop_mode is LoopMode.OFF:
             state.loop_mode = LoopMode.ONE
         elif state.loop_mode is LoopMode.ONE:
@@ -895,6 +1109,9 @@ class AudioRouter:
                 state.queue.task_done()
         for track in tracks[:MUSIC_QUEUE_MAXSIZE]:
             await state.queue.put(track)
+        if tracks:
+            state.music_session_active = True
+            self._cancel_music_idle_disconnect(state)
         self._schedule_panel_update(guild_id, create=bool(state.now_message or state.current or tracks))
 
     async def remove_at(self, guild_id: int, index_1based: int) -> Optional[MusicTrack]:

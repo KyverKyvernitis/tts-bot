@@ -144,8 +144,8 @@ class Music(commands.Cog):
     @commands.command(name="skip", aliases=["s", "pular"])
     @commands.guild_only()
     async def skip(self, ctx: commands.Context):
-        ok = await self.router.skip(ctx.guild.id)
-        await self._reply(ctx, "`⏭️` Pulando música." if ok else "Não há música tocando.")
+        _ok, message = await self.router.request_skip(ctx.guild.id, ctx.author)
+        await self._reply(ctx, message)
 
     @commands.command(name="back", aliases=["previous", "voltar", "anterior"])
     @commands.guild_only()
@@ -182,6 +182,9 @@ class Music(commands.Cog):
         if value is None:
             await self._reply(ctx, f"`🔊` Volume atual: `{int(round(state.volume * 100))}%`.")
             return
+        if not self.router.is_music_staff(ctx.author):
+            await self._reply(ctx, "Apenas staff pode alterar o volume do player.")
+            return
         volume = await self.router.set_volume(ctx.guild.id, value)
         await self._reply(ctx, f"`🔊` Volume da música ajustado para `{int(round(volume * 100))}%`.")
 
@@ -205,20 +208,23 @@ class Music(commands.Cog):
         except Exception:
             await self._reply(ctx, "Use `_duck <5-100>` para ajustar o volume da música durante TTS.")
             return
+        if not self.router.is_music_staff(ctx.author):
+            await self._reply(ctx, "Apenas staff pode alterar o volume do player.")
+            return
         volume = await self.router.set_duck_volume(ctx.guild.id, percent)
         await self._reply(ctx, f"`🎙️` Volume da música durante TTS ajustado para `{int(round(volume * 100))}%`.")
 
     @commands.command(name="shuffle", aliases=["embaralhar"])
     @commands.guild_only()
     async def shuffle(self, ctx: commands.Context):
-        enabled = await self.router.toggle_shuffle(ctx.guild.id)
-        await self._reply(ctx, f"`🔀` Shuffle {'ativado' if enabled else 'desativado'}.")
+        _ok, message = await self.router.request_shuffle(ctx.guild.id, ctx.author)
+        await self._reply(ctx, message)
 
     @commands.command(name="loop", aliases=["repeat", "repetir"])
     @commands.guild_only()
     async def loop(self, ctx: commands.Context):
-        mode = await self.router.cycle_loop(ctx.guild.id)
-        await self._reply(ctx, f"`🔁` Repetição: `{mode.label}`.")
+        _ok, message = await self.router.request_loop(ctx.guild.id, ctx.author)
+        await self._reply(ctx, message)
 
     @commands.command(name="remove", aliases=["remover"])
     @commands.guild_only()
