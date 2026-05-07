@@ -235,9 +235,16 @@ class MusicGuildState:
     stop_requested: bool = False
     paused: bool = False
     current_source: Optional[MixedAudioSource] = None
+    current_resolve_task: Optional[asyncio.Task] = None
+    current_status: str = "idle"
+    skip_requested: bool = False
     now_message: Optional[discord.Message] = None
     history: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_HISTORY_MAXSIZE))
     voice_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    panel_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    music_owns_voice: bool = False
+    tts_voice_touched: bool = False
+    last_tts_activity_at: float = 0.0
 
     def queue_size(self) -> int:
         return self.queue.qsize()
@@ -292,7 +299,10 @@ class AudioRouter:
                 continue
             await state.queue.put(track)
             added += 1
-        self.ensure_music_worker(guild.id)
+        if added:
+            state.stop_requested = False
+            self.ensure_music_worker(guild.id)
+            self._schedule_panel_update(guild.id, create=True)
         return added, dropped
 
     def ensure_music_worker(self, guild_id: int) -> None:
@@ -316,30 +326,37 @@ class AudioRouter:
                     return
 
                 played_ok = False
+                state.skip_requested = False
                 try:
                     played_ok = await self._play_track(guild, state, track)
                 except Exception as exc:
-                    logger.warning("[music] Falha ao tocar | guild=%s track=%r erro=%s", guild_id, track.title, exc)
-                    await self._send_text(guild, state, f"⚠️ Não consegui tocar **{track.short_title}**. Pulando para a próxima.")
+                    if not state.skip_requested and not state.stop_requested:
+                        logger.warning("[music] Falha ao tocar | guild=%s track=%r erro=%s", guild_id, track.title, exc)
+                        await self._send_text(guild, state, f"⚠️ Não consegui tocar **{track.short_title}**. Pulando para a próxima.")
                 finally:
                     state.current_source = None
-                    if played_ok and not state.stop_requested:
+                    state.current_resolve_task = None
+                    if played_ok and not state.stop_requested and not state.skip_requested:
                         self._push_history(state, track)
-                    if played_ok and state.loop_mode is LoopMode.ONE and not state.stop_requested:
+                    if played_ok and state.loop_mode is LoopMode.ONE and not state.stop_requested and not state.skip_requested:
                         with contextlib.suppress(Exception):
                             # Repetir a atual antes de qualquer item já presente na fila.
                             state.queue._queue.appendleft(track)
-                    elif played_ok and state.loop_mode is LoopMode.ALL and not state.stop_requested:
+                    elif played_ok and state.loop_mode is LoopMode.ALL and not state.stop_requested and not state.skip_requested:
                         with contextlib.suppress(Exception):
                             await state.queue.put(track)
                     state.current = None
                     state.paused = False
+                    state.current_status = "idle" if state.queue.empty() else "queued"
                     with contextlib.suppress(Exception):
                         state.queue.task_done()
+                    await self.update_panel(guild_id, create=bool(state.now_message))
         finally:
             state.worker_task = None
             if state.stop_requested or state.queue.empty():
                 state.current = None
+                state.current_status = "idle"
+                self._schedule_panel_update(guild_id, create=False)
 
     async def _play_track(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> bool:
         if not state.last_voice_channel_id:
@@ -348,18 +365,39 @@ class AudioRouter:
         if channel is None or not hasattr(channel, "connect"):
             raise RuntimeError("Canal de voz não encontrado.")
 
-        vc = await self._ensure_voice(guild, channel)
+        state.current = track
+        state.current_status = "resolving"
+        state.paused = False
+        await self.update_panel(guild.id, create=True)
+
+        vc = await self._ensure_voice(guild, channel, state=state)
         if vc is None:
             raise RuntimeError("Não consegui conectar ao canal de voz.")
 
-        await self.extractor.resolve_stream(track, force=False)
+        resolve_task = asyncio.create_task(self.extractor.resolve_stream(track, force=False))
+        state.current_resolve_task = resolve_task
+        try:
+            await resolve_task
+        except asyncio.CancelledError as exc:
+            raise MusicPlaybackError("Música pulada antes de iniciar o áudio.") from exc
+        finally:
+            if state.current_resolve_task is resolve_task:
+                state.current_resolve_task = None
+
+        if state.skip_requested or state.stop_requested:
+            raise MusicPlaybackError("Playback cancelado.")
         if not track.stream_url:
             raise MusicExtractionError("A música não retornou URL de stream.")
+
+        state.current_status = "starting"
+        await self.update_panel(guild.id, create=True)
 
         # Se um TTS direto ainda estiver tocando, espera acabar antes da música entrar.
         for _ in range(60):
             if not (vc.is_playing() or vc.is_paused()):
                 break
+            if state.skip_requested or state.stop_requested:
+                raise MusicPlaybackError("Playback cancelado.")
             await asyncio.sleep(0.1)
 
         loop = asyncio.get_running_loop()
@@ -414,12 +452,12 @@ class AudioRouter:
                 mixed_source.cleanup()
             raise MusicPlaybackError("FFmpeg demorou demais para iniciar o áudio.")
 
-        state.current = track
-        await self._announce_now_playing(guild, state, track)
+        state.current_status = "playing"
+        await self.update_panel(guild.id, create=True)
         await finished
-        return True
+        return not state.skip_requested and not state.stop_requested
 
-    async def _ensure_voice(self, guild: discord.Guild, channel: discord.abc.Connectable) -> Optional[discord.VoiceClient]:
+    async def _ensure_voice(self, guild: discord.Guild, channel: discord.abc.Connectable, *, state: MusicGuildState | None = None) -> Optional[discord.VoiceClient]:
         vc = guild.voice_client
         if vc and vc.is_connected():
             if getattr(getattr(vc, "channel", None), "id", None) != getattr(channel, "id", None):
@@ -431,14 +469,24 @@ class AudioRouter:
             if vc and vc.is_connected():
                 with contextlib.suppress(Exception):
                     await guild.change_voice_state(channel=channel, self_deaf=True)
+                if state is not None:
+                    state.music_owns_voice = False
                 return vc
         try:
-            return await channel.connect(self_deaf=True)
+            connected = await channel.connect(self_deaf=True)
+            if state is not None:
+                state.music_owns_voice = True
+            return connected
         except Exception as exc:
             logger.warning("[music] falha ao conectar | guild=%s channel=%s erro=%s", guild.id, getattr(channel, "id", None), exc)
             return guild.voice_client if guild.voice_client and guild.voice_client.is_connected() else None
 
     async def _maybe_disconnect_idle(self, guild: discord.Guild, state: MusicGuildState) -> None:
+        # Sem modo 24/7 para música, mas a música não pode derrubar uma call mantida pelo TTS.
+        if state.tts_voice_touched or not state.music_owns_voice:
+            state.current_status = "idle"
+            await self.update_panel(guild.id, create=False)
+            return
         vc = guild.voice_client
         if not vc or not vc.is_connected():
             return
@@ -448,6 +496,7 @@ class AudioRouter:
             if humans:
                 return
             await vc.disconnect(force=False)
+            state.music_owns_voice = False
         except Exception:
             logger.debug("[music] idle disconnect falhou", exc_info=True)
 
@@ -460,24 +509,46 @@ class AudioRouter:
         with contextlib.suppress(Exception):
             await channel.send(content)
 
-    async def _announce_now_playing(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> None:
+    def _schedule_panel_update(self, guild_id: int, *, create: bool = True) -> None:
+        async def _runner() -> None:
+            await asyncio.sleep(0.05)
+            await self.update_panel(guild_id, create=create)
+
+        try:
+            asyncio.create_task(_runner())
+        except RuntimeError:
+            pass
+
+    async def update_panel(self, guild_id: int, *, create: bool = True) -> None:
+        state = self.get_state(guild_id)
         if not state.last_text_channel_id:
             return
-        channel = guild.get_channel(state.last_text_channel_id) or self.bot.get_channel(state.last_text_channel_id)
+        guild = self.bot.get_guild(int(guild_id))
+        channel = None
+        if guild is not None:
+            channel = guild.get_channel(state.last_text_channel_id)
+        channel = channel or self.bot.get_channel(state.last_text_channel_id)
         if channel is None:
             return
         try:
-            from .ui import build_now_playing_embeds, MusicPlayerView
+            from .ui import build_player_embeds, MusicPlayerView
 
-            embeds = build_now_playing_embeds(state, track)
-            view = MusicPlayerView(self, guild.id)
-            if state.now_message:
-                with contextlib.suppress(Exception):
-                    await state.now_message.edit(embeds=embeds, view=view)
-                    return
-            state.now_message = await channel.send(embeds=embeds, view=view)
+            embeds = build_player_embeds(state)
+            view = MusicPlayerView(self, guild_id) if (state.current or not state.queue.empty()) else None
+            async with state.panel_lock:
+                if state.now_message is not None:
+                    try:
+                        await state.now_message.edit(content=None, embeds=embeds, view=view)
+                        return
+                    except Exception:
+                        state.now_message = None
+                if create:
+                    state.now_message = await channel.send(embeds=embeds, view=view)
         except Exception:
-            logger.debug("[music] falha ao anunciar now playing", exc_info=True)
+            logger.debug("[music] falha ao atualizar painel", exc_info=True)
+
+    async def _announce_now_playing(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> None:
+        await self.update_panel(guild.id, create=True)
 
     async def play_tts(
         self,
@@ -499,7 +570,10 @@ class AudioRouter:
         playback_started_at = time.monotonic()
 
         guild_id = getattr(guild, "id", None) or getattr(getattr(vc, "guild", None), "id", None)
-        state = self._states.get(int(guild_id)) if guild_id is not None else None
+        state = self.get_state(int(guild_id)) if guild_id is not None else None
+        if state is not None:
+            state.tts_voice_touched = True
+            state.last_tts_activity_at = time.monotonic()
         active_source = state.current_source if state is not None else None
 
         if active_source is not None and not getattr(active_source, "_closed", True) and (vc.is_playing() or vc.is_paused()):
@@ -544,28 +618,41 @@ class AudioRouter:
     async def pause(self, guild_id: int) -> bool:
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
-        if not vc or not vc.is_connected() or not vc.is_playing():
+        state = self.get_state(guild_id)
+        if not vc or not vc.is_connected() or not vc.is_playing() or (state.current is None and state.current_source is None):
             return False
         vc.pause()
-        self.get_state(guild_id).paused = True
+        state.paused = True
+        state.current_status = "paused"
+        self._schedule_panel_update(guild_id, create=False)
         return True
 
     async def resume(self, guild_id: int) -> bool:
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
-        if not vc or not vc.is_connected() or not vc.is_paused():
+        state = self.get_state(guild_id)
+        if not vc or not vc.is_connected() or not vc.is_paused() or (state.current is None and state.current_source is None):
             return False
         vc.resume()
-        self.get_state(guild_id).paused = False
+        state.paused = False
+        state.current_status = "playing"
+        self._schedule_panel_update(guild_id, create=False)
         return True
 
     async def skip(self, guild_id: int) -> bool:
         state = self.get_state(guild_id)
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
-        if vc and (vc.is_playing() or vc.is_paused()):
-            vc.stop()
-            return True
+        did_anything = False
+        state.skip_requested = True
+        if state.current_resolve_task is not None and not state.current_resolve_task.done():
+            state.current_resolve_task.cancel()
+            did_anything = True
+        music_audio_active = state.current is not None or state.current_source is not None or state.current_resolve_task is not None
+        if music_audio_active and vc and (vc.is_playing() or vc.is_paused()):
+            with contextlib.suppress(Exception):
+                vc.stop()
+            did_anything = True
         if state.current is not None or state.current_source is not None:
             with contextlib.suppress(Exception):
                 if state.current_source is not None:
@@ -573,12 +660,18 @@ class AudioRouter:
             state.current = None
             state.current_source = None
             state.paused = False
-            return True
-        return False
+            state.current_status = "queued" if not state.queue.empty() else "idle"
+            did_anything = True
+        self.ensure_music_worker(guild_id)
+        self._schedule_panel_update(guild_id, create=bool(state.now_message))
+        return did_anything
 
     async def stop(self, guild_id: int, *, disconnect: bool = True) -> bool:
         state = self.get_state(guild_id)
         state.stop_requested = True
+        state.skip_requested = True
+        if state.current_resolve_task is not None and not state.current_resolve_task.done():
+            state.current_resolve_task.cancel()
         while not state.queue.empty():
             with contextlib.suppress(Exception):
                 state.queue.get_nowait()
@@ -586,15 +679,21 @@ class AudioRouter:
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
         if vc:
-            with contextlib.suppress(Exception):
-                if vc.is_playing() or vc.is_paused():
-                    vc.stop()
-            if disconnect:
+            should_stop_audio = state.current is not None or state.current_source is not None or not state.tts_voice_touched
+            if should_stop_audio:
+                with contextlib.suppress(Exception):
+                    if vc.is_playing() or vc.is_paused():
+                        vc.stop()
+            if disconnect and not state.tts_voice_touched:
                 with contextlib.suppress(Exception):
                     await vc.disconnect(force=False)
+                state.music_owns_voice = False
         state.current = None
         state.current_source = None
+        state.current_resolve_task = None
+        state.current_status = "idle"
         state.paused = False
+        await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 
     async def set_volume(self, guild_id: int, volume_percent: int) -> float:
@@ -603,6 +702,7 @@ class AudioRouter:
         state.volume = volume
         if state.current_source is not None:
             state.current_source.set_music_volume(volume)
+        self._schedule_panel_update(guild_id, create=False)
         return volume
 
     async def set_duck_volume(self, guild_id: int, volume_percent: int) -> float:
@@ -612,6 +712,7 @@ class AudioRouter:
         state.duck_volume = volume
         if state.current_source is not None:
             state.current_source.set_duck_volume(volume)
+        self._schedule_panel_update(guild_id, create=False)
         return volume
 
     async def toggle_duck(self, guild_id: int) -> bool:
@@ -620,6 +721,7 @@ class AudioRouter:
         state.duck_enabled = True
         if state.current_source is not None:
             state.current_source.duck_enabled = True
+        self._schedule_panel_update(guild_id, create=False)
         return True
 
     async def toggle_shuffle(self, guild_id: int) -> bool:
@@ -629,6 +731,8 @@ class AudioRouter:
         if state.shuffle and len(items) > 1:
             random.shuffle(items)
             await self.replace_queue(guild_id, items)
+        else:
+            self._schedule_panel_update(guild_id, create=False)
         return state.shuffle
 
     async def cycle_loop(self, guild_id: int) -> LoopMode:
@@ -639,6 +743,7 @@ class AudioRouter:
             state.loop_mode = LoopMode.ALL
         else:
             state.loop_mode = LoopMode.OFF
+        self._schedule_panel_update(guild_id, create=False)
         return state.loop_mode
 
     def snapshot_queue(self, guild_id: int) -> list[MusicTrack]:
@@ -683,6 +788,7 @@ class AudioRouter:
             return False
         skipped = await self.skip(guild_id)
         self.ensure_music_worker(guild_id)
+        self._schedule_panel_update(guild_id, create=True)
         return True if skipped or previous_track else False
 
     async def readd_history(self, guild_id: int, *, limit: int = 20) -> int:
@@ -697,7 +803,9 @@ class AudioRouter:
             await state.queue.put(track)
             added += 1
         if added:
+            state.stop_requested = False
             self.ensure_music_worker(guild_id)
+            self._schedule_panel_update(guild_id, create=True)
         return added
 
     async def skip_to(self, guild_id: int, index_1based: int) -> bool:
@@ -709,12 +817,12 @@ class AudioRouter:
         selected = items.pop(idx)
         items.insert(0, selected)
         await self.replace_queue(guild_id, items)
-        guild = self.bot.get_guild(int(guild_id))
-        vc = guild.voice_client if guild else None
-        if vc and (vc.is_playing() or vc.is_paused()):
-            vc.stop()
+        state.stop_requested = False
+        if state.current is not None or state.current_source is not None or state.current_resolve_task is not None:
+            await self.skip(guild_id)
         else:
             self.ensure_music_worker(guild_id)
+        self._schedule_panel_update(guild_id, create=True)
         return True
 
     async def replace_queue(self, guild_id: int, tracks: list[MusicTrack]) -> None:
@@ -725,6 +833,7 @@ class AudioRouter:
                 state.queue.task_done()
         for track in tracks[:MUSIC_QUEUE_MAXSIZE]:
             await state.queue.put(track)
+        self._schedule_panel_update(guild_id, create=bool(state.now_message or state.current or tracks))
 
     async def remove_at(self, guild_id: int, index_1based: int) -> Optional[MusicTrack]:
         items = self.snapshot_queue(guild_id)

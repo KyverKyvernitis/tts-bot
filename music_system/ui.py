@@ -58,21 +58,29 @@ def _queue_duration_label(items: list[MusicTrack]) -> str:
 
 def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     """Painel inspirado no MuseHeart, adaptado para discord.py/FFmpeg."""
-    paused = bool(getattr(state, "paused", False))
-    color = discord.Color.gold() if paused else discord.Color.blurple()
+    status = str(getattr(state, "current_status", "playing") or "playing")
+    paused = bool(getattr(state, "paused", False)) or status == "paused"
+    loading = status in {"resolving", "starting"}
+    errored = status == "error"
+    color = discord.Color.gold() if paused or loading else discord.Color.red() if errored else discord.Color.blurple()
     queue = _queue_items(state)
     volume_percent = int(round(float(getattr(state, "volume", 0.55)) * 100))
     duck_percent = int(round(float(getattr(state, "duck_volume", 0.15)) * 100))
 
     embed = discord.Embed(color=color)
-    embed.set_author(
-        name="Em Pausa:" if paused else "Tocando Agora:",
-        icon_url=(
-            "https://cdn.discordapp.com/attachments/480195401543188483/896013933197013002/pause.png"
-            if paused
-            else "https://i.ibb.co/QXtk5VB/neon-circle.gif"
-        ),
-    )
+    if loading:
+        author_name = "Preparando áudio:"
+        author_icon = "https://i.ibb.co/QXtk5VB/neon-circle.gif"
+    elif paused:
+        author_name = "Em Pausa:"
+        author_icon = "https://cdn.discordapp.com/attachments/480195401543188483/896013933197013002/pause.png"
+    elif errored:
+        author_name = "Erro no player:"
+        author_icon = "https://cdn.discordapp.com/emojis/1215703754471268414.png"
+    else:
+        author_name = "Tocando Agora:"
+        author_icon = "https://i.ibb.co/QXtk5VB/neon-circle.gif"
+    embed.set_author(name=author_name, icon_url=author_icon)
 
     duration_line = "> -# 🔴 **⠂** `Livestream`" if track.is_live else f"> -# ⏰ **⠂** `{track.duration_label}`"
     requester = track.requester_name or f"<@{track.requester_id}>"
@@ -81,12 +89,16 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     lines = [
         f"-# {_track_link(track)}",
         "",
+    ]
+    if loading:
+        lines.append("> -# 🔄 **⠂** `Resolvendo stream de áudio...`")
+    lines.extend([
         duration_line,
         f"> -# 👤 **⠂** {_escape(source, limit=64)}",
         f"> -# ✋ **⠂** {requester}",
         f"> -# 🔊 **⠂** `Volume: {volume_percent}%` `{_bar(min(float(getattr(state, 'volume', 0.55)), 1.0), size=10)}`",
-        f"> -# 🎙️ **⠂** `TTS ducking sempre ativo: {duck_percent}%`",
-    ]
+        f"> -# 🎙️ **⠂** `TTS sobre música: reduz para {duck_percent}%`",
+    ])
 
     loop_mode = getattr(state, "loop_mode", None)
     loop_label = getattr(loop_mode, "label", "desligado")
@@ -128,6 +140,54 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
 
     embeds.append(embed)
     return embeds
+
+
+def build_player_embeds(state) -> list[discord.Embed]:
+    """Renderização central do painel fixo do player.
+
+    Deve ser usada sempre que fila/estado/música mudar, inclusive quando não há
+    música atual. Isso evita painel congelado com snapshot antigo.
+    """
+    current = getattr(state, "current", None)
+    if current is not None:
+        return build_now_playing_embeds(state, current)
+
+    queue = _queue_items(state)
+    volume_percent = int(round(float(getattr(state, "volume", 0.55)) * 100))
+    duck_percent = int(round(float(getattr(state, "duck_volume", 0.15)) * 100))
+    status = str(getattr(state, "current_status", "idle") or "idle")
+
+    embed = discord.Embed(color=discord.Color.dark_grey() if not queue else discord.Color.blurple())
+    if queue:
+        embed.set_author(name="Fila pronta:", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
+        lines = [
+            f"> -# 🎶 **⠂** `{len(queue)} música{'s' if len(queue) != 1 else ''} aguardando`",
+            f"> -# ⌛ **⠂** `Duração aproximada: {_queue_duration_label(queue)}`",
+            f"> -# 🔊 **⠂** `Volume: {volume_percent}%` `{_bar(min(float(getattr(state, 'volume', 0.55)), 1.0), size=10)}`",
+            f"> -# 🎙️ **⠂** `TTS sobre música: reduz para {duck_percent}%`",
+        ]
+        for n, item in enumerate(queue[:5], start=1):
+            lines.append(f"-# `{n:02}) [{item.duration_label}]` {_track_link(item, title_limit=48)}")
+        if len(queue) > 5:
+            lines.append(f"-# `+ {len(queue) - 5} restante(s)`")
+        embed.description = "\n".join(lines)
+        first = queue[0]
+        if first.thumbnail:
+            embed.set_thumbnail(url=first.thumbnail)
+        embed.set_footer(text="A próxima música será preparada automaticamente.")
+    else:
+        embed.set_author(name="Player parado:", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
+        if status == "idle":
+            embed.description = (
+                "> -# `📭` Nenhuma música na fila.\n"
+                f"> -# 🎙️ **⠂** `TTS sobre música sempre ativo: {duck_percent}%`"
+            )
+        else:
+            embed.description = "> -# `📭` Fila vazia."
+        embed.set_footer(text="Use _play <link ou pesquisa> para adicionar música.")
+
+    embed.set_image(url=PLAYER_BAR_URL)
+    return [embed]
 
 
 def build_now_playing_embed(state, track: MusicTrack) -> discord.Embed:
@@ -250,7 +310,9 @@ class SearchSelect(discord.ui.Select):
             await interaction.response.send_message("Canal não encontrado.", ephemeral=True)
             return
         added, dropped = await self.router.enqueue(guild, voice_channel, text_channel, [track])
-        msg = f"`🎶` **Adicionada à fila:** {track.short_title} • `{track.duration_label}`"
+        state = self.router.get_state(self.guild_id)
+        position = state.queue_size() + (1 if state.current else 0)
+        msg = f"`🎶` **Adicionada à fila:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`"
         if dropped:
             msg += "\n`⚠️` A fila está cheia; alguns itens não entraram."
         await interaction.response.edit_message(content=msg, embed=None, view=None)
@@ -344,7 +406,9 @@ class AddSongModal(discord.ui.Modal):
             if batch.truncated:
                 msg += "\n`⚠️` Playlist limitada para economizar RAM."
         else:
-            msg = f"`🎶` **Adicionada à fila:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}`"
+            state = self.router.get_state(self.guild_id)
+            position = state.queue_size() + (1 if state.current else 0)
+            msg = f"`🎶` **Adicionada à fila:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}` • posição `{max(1, position)}`"
         if dropped:
             msg += f"\n`⚠️` `{dropped}` item(ns) não entraram porque a fila está cheia."
         await interaction.followup.send(msg, ephemeral=True)
@@ -614,7 +678,7 @@ class MusicPlayerView(discord.ui.View):
     @discord.ui.button(label="Parar", emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.router.stop(self.guild_id, disconnect=True)
-        await self._ack(interaction, "`⏹️` Player parado, fila limpa e bot desconectado da call.")
+        await self._ack(interaction, "`⏹️` Player parado e fila limpa. Se o TTS estiver mantendo a call, o bot permanece conectado.")
 
     @discord.ui.button(label="Pular", emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):

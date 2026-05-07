@@ -125,7 +125,9 @@ class Music(commands.Cog):
             await self._reply(ctx, desc)
         else:
             track = batch.tracks[0]
-            await self._reply(ctx, f"`🎶` **Adicionada à fila:** {track.short_title} • `{track.duration_label}`")
+            state = self.router.get_state(ctx.guild.id)
+            position = state.queue_size() + (1 if state.current else 0)
+            await self._reply(ctx, f"`🎶` **Adicionada à fila:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`")
 
     @commands.command(name="pause", aliases=["pausar"])
     @commands.guild_only()
@@ -155,7 +157,7 @@ class Music(commands.Cog):
     @commands.guild_only()
     async def stop(self, ctx: commands.Context):
         await self.router.stop(ctx.guild.id, disconnect=True)
-        await self._reply(ctx, "`⏹️` Player parado, fila limpa e bot desconectado da call.")
+        await self._reply(ctx, "`⏹️` Player parado e fila limpa. Se o TTS estiver mantendo a call, o bot permanece conectado.")
 
     @commands.command(name="queue", aliases=["fila", "q"])
     @commands.guild_only()
@@ -167,12 +169,11 @@ class Music(commands.Cog):
     @commands.guild_only()
     async def now_playing(self, ctx: commands.Context):
         state = self.router.get_state(ctx.guild.id)
-        if state.current is None:
+        if state.current is None and state.queue.empty():
             await self._reply(ctx, "Nada tocando agora.")
             return
-        from music_system.ui import MusicPlayerView
-
-        await self._reply(ctx, embeds=build_now_playing_embeds(state, state.current), view=MusicPlayerView(self.router, ctx.guild.id))
+        state.last_text_channel_id = ctx.channel.id
+        await self.router.update_panel(ctx.guild.id, create=True)
 
     @commands.command(name="volume", aliases=["vol"])
     @commands.guild_only()

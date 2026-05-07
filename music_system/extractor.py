@@ -195,6 +195,17 @@ class MusicExtractor:
         errors: list[str] = []
         candidates = unique_queries(profile.canonical, profile.raw)
 
+        # Para _play <url do YouTube>, responda rápido: pegue apenas metadata leve
+        # e deixe a resolução pesada do stream para o momento real do playback.
+        for url in candidates:
+            metadata = await self._try_extract_metadata(url, requester_id=requester_id, requester_name=requester_name)
+            if metadata and metadata.tracks:
+                for track in metadata.tracks:
+                    track.original_url = profile.raw
+                    if not track.webpage_url:
+                        track.webpage_url = profile.canonical
+                return metadata
+
         for url in candidates:
             try:
                 return await self._extract_url(url, requester_id=requester_id, requester_name=requester_name, youtube=True)
