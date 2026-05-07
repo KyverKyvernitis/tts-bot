@@ -43,6 +43,9 @@ class UrlProfile:
     is_metadata_only: bool = False
     is_direct_audio: bool = False
     youtube_video_id: str = ""
+    platform: str = ""
+    resource_type: str = ""
+    resource_id: str = ""
 
 
 def looks_like_url(value: str) -> bool:
@@ -59,10 +62,23 @@ def describe_url(value: str) -> UrlProfile:
     path_lower = (parsed.path or "").lower()
     canonical = raw
     video_id = ""
+    resource_type = ""
+    resource_id = ""
+    platform = ""
 
     if host in _YOUTUBE_HOSTS or host.endswith(".youtube.com"):
+        platform = "youtube"
+        query = parse_qs(parsed.query or "")
+        playlist_id = (query.get("list") or [""])[0]
         video_id = extract_youtube_video_id(raw)
-        if video_id:
+        parts = [p for p in (parsed.path or "").split("/") if p]
+        if playlist_id or (parts and parts[0] == "playlist"):
+            resource_type = "playlist"
+            resource_id = playlist_id
+            canonical = raw
+        elif video_id:
+            resource_type = "track"
+            resource_id = video_id
             canonical = f"https://www.youtube.com/watch?v={video_id}"
         return UrlProfile(
             raw=raw,
@@ -73,20 +89,65 @@ def describe_url(value: str) -> UrlProfile:
             is_metadata_only=False,
             is_direct_audio=False,
             youtube_video_id=video_id,
+            platform=platform,
+            resource_type=resource_type,
+            resource_id=resource_id,
         )
 
-    metadata_only = bool(_SPOTIFY_RE.search(raw) or _APPLE_RE.search(raw) or _DEEZER_RE.search(raw))
     direct_audio = any(path_lower.endswith(ext) for ext in _DIRECT_AUDIO_EXTENSIONS)
+
+    if _SPOTIFY_RE.search(raw):
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 2:
+            resource_type, resource_id = parts[0].lower(), parts[1]
+        return UrlProfile(raw=raw, canonical=canonical, host=host, is_url=True, is_metadata_only=True,
+                          is_direct_audio=direct_audio, platform="spotify", resource_type=resource_type,
+                          resource_id=resource_id)
+
+    if _APPLE_RE.search(raw):
+        # Apple Music não tem API pública simples aqui; tratamos como metadata-only
+        # e usamos título público/oEmbed como fallback.
+        parts = [p for p in parsed.path.split("/") if p]
+        resource_type = "album" if "/album/" in path_lower else "track" if "?i=" in raw else ""
+        resource_id = (parse_qs(parsed.query or "").get("i") or [""])[0]
+        return UrlProfile(raw=raw, canonical=canonical, host=host, is_url=True, is_metadata_only=True,
+                          is_direct_audio=direct_audio, platform="apple", resource_type=resource_type,
+                          resource_id=resource_id)
+
+    if _DEEZER_RE.search(raw):
+        parts = [p for p in parsed.path.split("/") if p]
+        for kind in ("track", "album", "playlist"):
+            if kind in parts:
+                idx = parts.index(kind)
+                if idx + 1 < len(parts):
+                    resource_type, resource_id = kind, parts[idx + 1]
+                    break
+        return UrlProfile(raw=raw, canonical=canonical, host=host, is_url=True, is_metadata_only=True,
+                          is_direct_audio=direct_audio, platform="deezer", resource_type=resource_type,
+                          resource_id=resource_id)
+
+    if host == "soundcloud.com" or host.endswith(".soundcloud.com"):
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 3 and parts[-2].lower() in {"sets", "playlists"}:
+            resource_type = "playlist"
+        elif len(parts) >= 2:
+            resource_type = "track"
+        return UrlProfile(raw=raw, canonical=canonical, host=host, is_url=True, is_metadata_only=False,
+                          is_direct_audio=direct_audio, platform="soundcloud", resource_type=resource_type,
+                          resource_id="")
+
     return UrlProfile(
         raw=raw,
         canonical=canonical,
         host=host,
         is_url=True,
         is_youtube=False,
-        is_metadata_only=metadata_only,
+        is_metadata_only=False,
         is_direct_audio=direct_audio,
+        platform=platform,
+        resource_type=resource_type,
+        resource_id=resource_id,
     )
-
 
 def extract_youtube_video_id(url: str) -> str:
     parsed = urlparse(url)
