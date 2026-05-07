@@ -11,7 +11,7 @@ from urllib.parse import unquote, urlparse
 
 import config
 
-from .api_providers import ApiTrackCandidate, MusicApiProviders, compact_key, is_bad_match_title
+from .api_providers import ApiTrackCandidate, MusicApiProviders, compact_key, is_bad_match_title, normalize_text, title_quality_score
 from .errors import MusicExtractionError
 from .models import ExtractedBatch, MusicTrack
 from .providers import (
@@ -31,6 +31,11 @@ _YOUTUBE_CLIENT_SETS: tuple[tuple[str, ...], ...] = (
     ("ios", "web"),
     ("web",),
 )
+
+MUSIC_METADATA_CACHE_TTL_SECONDS = max(0, int(getattr(config, "MUSIC_METADATA_CACHE_TTL_SECONDS", 300)))
+MUSIC_STREAM_CACHE_TTL_SECONDS = max(30, int(getattr(config, "MUSIC_STREAM_CACHE_TTL_SECONDS", 480)))
+MUSIC_CACHE_MAX_ITEMS = max(20, int(getattr(config, "MUSIC_CACHE_MAX_ITEMS", 160)))
+MUSIC_YTDLP_FORMAT = str(getattr(config, "MUSIC_YTDLP_FORMAT", "") or "bestaudio[acodec=opus][asr=48000]/bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/best").strip()
 
 
 class MusicExtractor:
@@ -56,12 +61,139 @@ class MusicExtractor:
         self.timeout_seconds = max(5.0, float(timeout_seconds))
         self.cookies_file = self._resolve_cookies_file()
         self.api = MusicApiProviders(timeout=min(8.0, self.timeout_seconds))
+        self._search_cache: dict[str, tuple[float, list[MusicTrack]]] = {}
+        self._single_cache: dict[str, tuple[float, MusicTrack]] = {}
+        self._stream_cache: dict[str, tuple[float, MusicTrack]] = {}
 
     def looks_like_url(self, query: str) -> bool:
         return looks_like_url(query)
 
     def is_metadata_only_platform(self, query: str) -> bool:
         return describe_url(query).is_metadata_only
+
+    def _clone_track(self, track: MusicTrack, *, requester_id: int | None = None, requester_name: str | None = None, original_url: str | None = None) -> MusicTrack:
+        clone = MusicTrack(
+            title=track.title,
+            webpage_url=track.webpage_url,
+            requester_id=int(track.requester_id if requester_id is None else requester_id),
+            requester_name=track.requester_name if requester_name is None else requester_name,
+            stream_url=track.stream_url,
+            duration=track.duration,
+            uploader=track.uploader,
+            thumbnail=track.thumbnail,
+            source=track.source,
+            original_url=track.original_url if original_url is None else original_url,
+            extractor=track.extractor,
+            is_live=track.is_live,
+        )
+        clone.resolved_at_monotonic = track.resolved_at_monotonic
+        return clone
+
+    def _cache_get_tracks(self, cache: dict[str, tuple[float, list[MusicTrack]]], key: str, *, requester_id: int, requester_name: str, original_url: str = "") -> list[MusicTrack] | None:
+        if MUSIC_METADATA_CACHE_TTL_SECONDS <= 0:
+            return None
+        item = cache.get(key)
+        if not item:
+            return None
+        created, tracks = item
+        if time.monotonic() - created > MUSIC_METADATA_CACHE_TTL_SECONDS:
+            cache.pop(key, None)
+            return None
+        return [self._clone_track(track, requester_id=requester_id, requester_name=requester_name, original_url=original_url or track.original_url) for track in tracks]
+
+    def _cache_put_tracks(self, cache: dict[str, tuple[float, list[MusicTrack]]], key: str, tracks: list[MusicTrack]) -> None:
+        if MUSIC_METADATA_CACHE_TTL_SECONDS <= 0 or not key or not tracks:
+            return
+        if len(cache) >= MUSIC_CACHE_MAX_ITEMS:
+            oldest = sorted(cache.items(), key=lambda item: item[1][0])[: max(1, len(cache) // 8)]
+            for old_key, _ in oldest:
+                cache.pop(old_key, None)
+        cache[key] = (time.monotonic(), [self._clone_track(track, requester_id=track.requester_id, requester_name=track.requester_name) for track in tracks])
+
+    def _cache_get_single(self, key: str, *, requester_id: int, requester_name: str, original_url: str = "") -> MusicTrack | None:
+        item = self._single_cache.get(key)
+        if not item or MUSIC_METADATA_CACHE_TTL_SECONDS <= 0:
+            return None
+        created, track = item
+        if time.monotonic() - created > MUSIC_METADATA_CACHE_TTL_SECONDS:
+            self._single_cache.pop(key, None)
+            return None
+        return self._clone_track(track, requester_id=requester_id, requester_name=requester_name, original_url=original_url or track.original_url)
+
+    def _cache_put_single(self, key: str, track: MusicTrack) -> None:
+        if MUSIC_METADATA_CACHE_TTL_SECONDS <= 0 or not key:
+            return
+        if len(self._single_cache) >= MUSIC_CACHE_MAX_ITEMS:
+            oldest = sorted(self._single_cache.items(), key=lambda item: item[1][0])[: max(1, len(self._single_cache) // 8)]
+            for old_key, _ in oldest:
+                self._single_cache.pop(old_key, None)
+        self._single_cache[key] = (time.monotonic(), self._clone_track(track, requester_id=track.requester_id, requester_name=track.requester_name))
+
+    def _stream_cache_key(self, source: str) -> str:
+        return (source or "").strip().lower()
+
+    def _apply_stream_cache(self, track: MusicTrack, key: str) -> bool:
+        item = self._stream_cache.get(key)
+        if not item:
+            return False
+        created, cached = item
+        if time.monotonic() - created > MUSIC_STREAM_CACHE_TTL_SECONDS:
+            self._stream_cache.pop(key, None)
+            return False
+        if not cached.stream_url:
+            return False
+        self._copy_resolved_fields(track, cached)
+        return True
+
+    def _put_stream_cache(self, key: str, track: MusicTrack) -> None:
+        if not key or not track.stream_url:
+            return
+        if len(self._stream_cache) >= MUSIC_CACHE_MAX_ITEMS:
+            oldest = sorted(self._stream_cache.items(), key=lambda item: item[1][0])[: max(1, len(self._stream_cache) // 8)]
+            for old_key, _ in oldest:
+                self._stream_cache.pop(old_key, None)
+        self._stream_cache[key] = (time.monotonic(), self._clone_track(track, requester_id=track.requester_id, requester_name=track.requester_name))
+
+    def _score_candidate_against_metadata(self, candidate: ApiTrackCandidate, meta: ApiTrackCandidate) -> float:
+        wanted = normalize_text(f"{meta.artist} {meta.title}")
+        combined = normalize_text(f"{candidate.artist} {candidate.title}")
+        score = float(candidate.score)
+        if wanted and wanted in combined:
+            score += 50
+        elif wanted:
+            wanted_words = set(wanted.split())
+            candidate_words = set(combined.split())
+            if wanted_words:
+                score += 35 * (len(wanted_words & candidate_words) / len(wanted_words))
+        score += title_quality_score(candidate.title, query=wanted, channel=candidate.artist)
+        if meta.duration and candidate.duration:
+            diff = abs(float(meta.duration) - float(candidate.duration))
+            if diff <= 2:
+                score += 24
+            elif diff <= 5:
+                score += 18
+            elif diff <= 10:
+                score += 10
+            elif diff > 25:
+                score -= 18
+        return score
+
+    async def _search_one_for_metadata(self, meta: ApiTrackCandidate, *, requester_id: int, requester_name: str = "", original_url: str = "") -> MusicTrack:
+        query = " ".join(part for part in (meta.artist, meta.title, "official audio") if part).strip()
+        if not query:
+            raise MusicExtractionError("Metadata vazia.")
+        candidates = await self.api.search(query, limit=max(5, self.search_results), prefer_youtube=True)
+        playable = [candidate for candidate in candidates if self._candidate_is_playable_entry(candidate)]
+        if not playable:
+            return await self.search_one(query, requester_id=requester_id, requester_name=requester_name, original_url=original_url)
+        playable.sort(key=lambda candidate: self._score_candidate_against_metadata(candidate, meta), reverse=True)
+        track = self._track_from_api_candidate(playable[0], requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
+        track.title = self._prefer_clean_title(track.title, meta)
+        track.duration = meta.duration or track.duration
+        track.thumbnail = meta.thumbnail or track.thumbnail
+        track.uploader = meta.artist or track.uploader
+        track.source = f"{meta.source} → {track.source or 'YouTube'}"
+        return track
 
     def _resolve_cookies_file(self) -> str:
         value = str(
@@ -97,8 +229,8 @@ class MusicExtractor:
             "geo_bypass": True,
             "cachedir": False,
             "playlistend": self.max_playlist_items if playlist else None,
-            "format": "bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio/best",
-            "format_sort": ["acodec:opus", "ext:webm:m4a", "abr", "asr", "proto"],
+            "format": MUSIC_YTDLP_FORMAT,
+            "format_sort": ["acodec:opus", "asr:48000", "ext:webm:m4a", "abr", "proto"],
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -141,6 +273,11 @@ class MusicExtractor:
             # Uma letra só costuma trazer resultado ruim; ainda tentamos, mas com mensagem melhor se falhar.
             logger.debug("[music] busca muito curta: %r", query)
 
+        cache_key = "search:" + compact_key(query)
+        cached = self._cache_get_tracks(self._search_cache, cache_key, requester_id=requester_id, requester_name=requester_name, original_url=query)
+        if cached:
+            return ExtractedBatch(tracks=cached[: self.search_results], query=query, is_playlist=False)
+
         # APIs opcionais entram antes do yt-dlp para busca manual: YouTube API
         # devolve URLs de vídeo tocáveis de forma leve; Spotify/Deezer ajudam a
         # ranquear metadata quando configurados. Se não houver key, cai no fluxo antigo.
@@ -152,7 +289,9 @@ class MusicExtractor:
                     self._track_from_api_candidate(candidate, requester_id=requester_id, requester_name=requester_name, original_url=query)
                     for candidate in playable[: self.search_results]
                 ]
-                return ExtractedBatch(tracks=self._dedupe_tracks(tracks), query=query, is_playlist=False)
+                tracks = self._dedupe_tracks(tracks)
+                self._cache_put_tracks(self._search_cache, cache_key, tracks)
+                return ExtractedBatch(tracks=tracks, query=query, is_playlist=False)
         except Exception:
             logger.debug("[music] busca via API falhou | query=%r", query, exc_info=True)
 
@@ -171,7 +310,9 @@ class MusicExtractor:
                 ]
                 tracks = self._dedupe_tracks([track for track in tracks if track.webpage_url or track.stream_url])
                 if tracks:
-                    return ExtractedBatch(tracks=tracks[: self.search_results], query=query, is_playlist=False)
+                    tracks = tracks[: self.search_results]
+                    self._cache_put_tracks(self._search_cache, cache_key, tracks)
+                    return ExtractedBatch(tracks=tracks, query=query, is_playlist=False)
             except Exception as exc:
                 last_error = exc
                 logger.debug("[music] busca falhou | query=%r flat=%s", query, flat, exc_info=True)
@@ -192,12 +333,18 @@ class MusicExtractor:
         if not query:
             raise MusicExtractionError("Pesquisa vazia.")
 
+        cache_key = "one:" + compact_key(query)
+        cached_one = self._cache_get_single(cache_key, requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
+        if cached_one is not None:
+            return cached_one
+
         try:
             api_candidates = await self.api.search(query, limit=max(3, self.search_results), prefer_youtube=True)
             playable = [candidate for candidate in api_candidates if self._candidate_is_playable_entry(candidate)]
             if playable:
                 candidate = playable[0]
                 track = self._track_from_api_candidate(candidate, requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
+                self._cache_put_single(cache_key, track)
                 return track
         except Exception:
             logger.debug("[music] search_one via API falhou | query=%r", query, exc_info=True)
@@ -210,6 +357,7 @@ class MusicExtractor:
                 if first:
                     track = self._track_from_info(first, requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
                     if track.webpage_url or track.stream_url:
+                        self._cache_put_single(cache_key, track)
                         return track
             except Exception as exc:
                 last_error = exc
@@ -236,6 +384,14 @@ class MusicExtractor:
         title = await self._metadata_title(profile.canonical)
         queries.append(title)
         queries.append(slug_search_terms(profile.canonical))
+
+        if api_meta:
+            try:
+                track = await self._search_one_for_metadata(api_meta, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
+                track.original_url = profile.raw
+                return ExtractedBatch(tracks=[track], query=api_meta.search_query, is_playlist=False)
+            except Exception:
+                logger.debug("[music] busca ranqueada por metadata falhou | url=%s", profile.raw, exc_info=True)
 
         for query in unique_queries(*queries):
             try:
@@ -380,12 +536,17 @@ class MusicExtractor:
         if not source:
             raise MusicExtractionError("Música sem URL de origem.")
 
+        stream_cache_key = self._stream_cache_key(source)
+        if not force and self._apply_stream_cache(track, stream_cache_key):
+            return track
+
         profile = describe_url(source)
         if profile.is_direct_audio:
             track.stream_url = profile.canonical
             if not track.webpage_url:
                 track.webpage_url = profile.canonical
             track.resolved_at_monotonic = time.monotonic()
+            self._put_stream_cache(stream_cache_key, track)
             return track
 
         errors: list[str] = []
@@ -408,6 +569,7 @@ class MusicExtractor:
                 )
                 if updated.stream_url:
                     self._copy_resolved_fields(track, updated)
+                    self._put_stream_cache(stream_cache_key, track)
                     return track
             except Exception as exc:
                 errors.append(str(exc))
@@ -421,6 +583,7 @@ class MusicExtractor:
                     await self.resolve_stream(candidate, force=True)
                     if candidate.stream_url:
                         self._copy_resolved_fields(track, candidate)
+                        self._put_stream_cache(stream_cache_key, track)
                         return track
             except Exception as exc:
                 errors.append(str(exc))

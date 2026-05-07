@@ -171,6 +171,20 @@ MUSIC_CONTROL_VOTE_SECONDS = _parse_int(os.getenv("MUSIC_CONTROL_VOTE_SECONDS", 
 MUSIC_YTDLP_COOKIES_FILE = (os.getenv("MUSIC_YTDLP_COOKIES_FILE", os.getenv("YTDLP_COOKIES_FILE", "")) or "").strip()
 MUSIC_API_SEARCH_ENABLED = _parse_bool(os.getenv("MUSIC_API_SEARCH_ENABLED", "true"), True)
 MUSIC_API_TIMEOUT_SECONDS = _parse_float(os.getenv("MUSIC_API_TIMEOUT_SECONDS", "5.0"), 5.0)
+MUSIC_METADATA_CACHE_TTL_SECONDS = _parse_int(os.getenv("MUSIC_METADATA_CACHE_TTL_SECONDS", "300"), 300)
+MUSIC_STREAM_CACHE_TTL_SECONDS = _parse_int(os.getenv("MUSIC_STREAM_CACHE_TTL_SECONDS", "480"), 480)
+MUSIC_CACHE_MAX_ITEMS = _parse_int(os.getenv("MUSIC_CACHE_MAX_ITEMS", "160"), 160)
+MUSIC_PREFETCH_NEXT = _parse_bool(os.getenv("MUSIC_PREFETCH_NEXT", "true"), True)
+MUSIC_DUCK_FADE_DOWN_MS = _parse_int(os.getenv("MUSIC_DUCK_FADE_DOWN_MS", "150"), 150)
+MUSIC_DUCK_FADE_UP_MS = _parse_int(os.getenv("MUSIC_DUCK_FADE_UP_MS", "550"), 550)
+MUSIC_LIMITER_ENABLED = _parse_bool(os.getenv("MUSIC_LIMITER_ENABLED", "true"), True)
+MUSIC_YTDLP_FORMAT = (
+    os.getenv(
+        "MUSIC_YTDLP_FORMAT",
+        "bestaudio[acodec=opus][asr=48000]/bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/best",
+    )
+    or "bestaudio/best"
+).strip()
 YOUTUBE_API_KEY = (os.getenv("YOUTUBE_API_KEY", os.getenv("GOOGLE_YOUTUBE_API_KEY", "")) or "").strip()
 SPOTIFY_CLIENT_ID = (os.getenv("SPOTIFY_CLIENT_ID", "") or "").strip()
 SPOTIFY_CLIENT_SECRET = (os.getenv("SPOTIFY_CLIENT_SECRET", "") or "").strip()
@@ -183,7 +197,10 @@ MUSIC_FFMPEG_BEFORE_OPTIONS = (
     os.getenv("MUSIC_FFMPEG_BEFORE_OPTIONS", "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin")
     or "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin"
 ).strip()
-MUSIC_FFMPEG_OPTIONS = (os.getenv("MUSIC_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error").strip()
+MUSIC_FFMPEG_OPTIONS = (
+    os.getenv("MUSIC_FFMPEG_OPTIONS", "-vn -loglevel error -ar 48000 -ac 2")
+    or "-vn -loglevel error -ar 48000 -ac 2"
+).strip()
 MUSIC_TTS_FFMPEG_OPTIONS = (os.getenv("MUSIC_TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error").strip()
 
 # -----------------------------------------------------------------------------

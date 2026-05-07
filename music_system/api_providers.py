@@ -48,14 +48,62 @@ def compact_key(value: str) -> str:
     return re.sub(r"\s+", " ", normalize_text(value)).strip()
 
 
+BAD_VERSION_WORDS = {
+    "slowed",
+    "slow",
+    "nightcore",
+    "speed up",
+    "sped up",
+    "8d",
+    "karaoke",
+    "instrumental",
+    "cover",
+    "remix",
+    "live",
+    "lyrics",
+    "lyric",
+    "bass boosted",
+    "extended",
+    "edit",
+    "reverb",
+}
+
+GOOD_VERSION_PHRASES = (
+    "official audio",
+    "official video",
+    "official music video",
+    "audio oficial",
+    "video oficial",
+)
+
+OFFICIAL_CHANNEL_HINTS = ("official", "vevo", "topic", "records", "music")
+
+
 def is_bad_match_title(title: str, *, query: str = "") -> bool:
+    raw = re.sub(r"[^a-z0-9]+", " ", unicodedata.normalize("NFKD", title or "").lower())
     normalized = normalize_text(title)
+    q_raw = re.sub(r"[^a-z0-9]+", " ", unicodedata.normalize("NFKD", query or "").lower())
     q = normalize_text(query)
-    bad_words = {"slowed", "nightcore", "speed up", "sped up", "8d", "karaoke", "instrumental", "cover", "remix", "live"}
-    if not q:
-        return any(word in normalized for word in bad_words)
+    if not q and not q_raw:
+        return any(word in normalized or word in raw for word in BAD_VERSION_WORDS)
     # Só penaliza versões alteradas quando o usuário não pediu essa versão.
-    return any(word in normalized and word not in q for word in bad_words)
+    return any((word in normalized or word in raw) and word not in q and word not in q_raw for word in BAD_VERSION_WORDS)
+
+
+def title_quality_score(title: str, *, query: str = "", channel: str = "") -> float:
+    raw_title = re.sub(r"\s+", " ", (title or "").lower())
+    raw_channel = re.sub(r"\s+", " ", (channel or "").lower())
+    score = 0.0
+    if any(phrase in raw_title for phrase in GOOD_VERSION_PHRASES):
+        score += 16
+    if any(hint in raw_channel for hint in OFFICIAL_CHANNEL_HINTS):
+        score += 5
+    if is_bad_match_title(title, query=query):
+        score -= 26
+    # Lyrics é aceitável como fallback, mas não deve vencer áudio/vídeo oficial.
+    if "lyrics" in raw_title or "lyric" in raw_title:
+        score -= 8
+    return score
 
 
 def parse_iso8601_duration(value: str) -> float | None:
@@ -191,10 +239,10 @@ class MusicApiProviders:
     def _candidate_score(self, candidate: ApiTrackCandidate, normalized_query: str) -> float:
         score = 0.0
         title_norm = normalize_text(candidate.title)
-        artist_norm = normalize_text(candidate.artist)
+        channel_norm = normalize_text(candidate.artist)
         combined = normalize_text(f"{candidate.artist} {candidate.title}")
         if candidate.provider == "youtube":
-            score += 30
+            score += 32
         elif candidate.provider == "soundcloud":
             score += 14
         elif candidate.provider == "spotify":
@@ -202,23 +250,28 @@ class MusicApiProviders:
         elif candidate.provider == "deezer":
             score += 10
         if normalized_query and normalized_query in combined:
-            score += 35
+            score += 38
         elif normalized_query:
             q_words = set(normalized_query.split())
             c_words = set(combined.split())
             if q_words:
-                score += 25 * (len(q_words & c_words) / len(q_words))
-        if artist_norm and artist_norm in combined:
-            score += 4
-        lowered_title = title_norm
-        if "official audio" in lowered_title or "official video" in lowered_title:
-            score += 8
-        if is_bad_match_title(candidate.title, query=normalized_query):
-            score -= 18
+                score += 28 * (len(q_words & c_words) / len(q_words))
+        if channel_norm and any(word in channel_norm for word in ("official", "vevo", "topic")):
+            score += 6
+        if normalized_query and channel_norm:
+            q_words = set(normalized_query.split())
+            c_words = set(channel_norm.split())
+            if q_words and len(q_words & c_words) >= 1:
+                score += 4
+        score += title_quality_score(candidate.title, query=normalized_query, channel=candidate.artist)
         if candidate.duration and 40 <= candidate.duration <= 900:
             score += 4
+        elif candidate.duration and candidate.duration > 1200:
+            score -= 8
         if candidate.thumbnail:
             score += 1
+        if title_norm and normalized_query and title_norm == normalized_query:
+            score += 4
         return score
 
     def _request_json(self, url: str, *, method: str = "GET", data: bytes | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:

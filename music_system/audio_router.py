@@ -36,8 +36,14 @@ MUSIC_TTS_FFMPEG_OPTIONS = str(getattr(config, "MUSIC_TTS_FFMPEG_OPTIONS", "-vn 
 MUSIC_PLAYBACK_START_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "MUSIC_PLAYBACK_START_TIMEOUT_SECONDS", 8.0)))
 MUSIC_HISTORY_MAXSIZE = max(5, int(getattr(config, "MUSIC_HISTORY_MAXSIZE", 25)))
 MUSIC_CONTROL_VOTE_SECONDS = max(10.0, float(getattr(config, "MUSIC_CONTROL_VOTE_SECONDS", 45)))
+MUSIC_PREFETCH_NEXT = bool(getattr(config, "MUSIC_PREFETCH_NEXT", True))
+MUSIC_DUCK_FADE_DOWN_MS = max(20.0, float(getattr(config, "MUSIC_DUCK_FADE_DOWN_MS", 150)))
+MUSIC_DUCK_FADE_UP_MS = max(20.0, float(getattr(config, "MUSIC_DUCK_FADE_UP_MS", 550)))
+MUSIC_LIMITER_ENABLED = bool(getattr(config, "MUSIC_LIMITER_ENABLED", True))
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
+PCM_FRAME_MS = 20.0
+PCM_LIMITER_THRESHOLD = 30000
 
 
 @dataclass(slots=True, eq=False)
@@ -72,6 +78,7 @@ class MixedAudioSource(discord.AudioSource):
         self.music_volume = float(music_volume)
         self.normal_music_volume = float(music_volume)
         self.duck_volume = float(duck_volume)
+        self._current_music_volume = float(music_volume)
         self.duck_enabled = True  # ducking é permanente; mantido só por compatibilidade interna
         self._overlays: list[TTSOverlay] = []
         self._overlay_lock = threading.RLock()
@@ -105,6 +112,39 @@ class MixedAudioSource(discord.AudioSource):
 
     def set_duck_volume(self, volume: float) -> None:
         self.duck_volume = max(0.0, min(1.0, float(volume)))
+
+    def _step_music_volume(self, target: float) -> float:
+        target = max(0.0, min(2.0, float(target)))
+        current = float(self._current_music_volume)
+        if abs(current - target) < 0.001:
+            self._current_music_volume = target
+            return target
+        fade_ms = MUSIC_DUCK_FADE_DOWN_MS if target < current else MUSIC_DUCK_FADE_UP_MS
+        frames = max(1.0, fade_ms / PCM_FRAME_MS)
+        span = max(0.01, abs(float(self.normal_music_volume) - float(self.duck_volume)))
+        step = max(0.005, span / frames)
+        if target > current:
+            current = min(target, current + step)
+        else:
+            current = max(target, current - step)
+        self._current_music_volume = current
+        return current
+
+    def _limit_sample(self, value: int) -> int:
+        if not MUSIC_LIMITER_ENABLED:
+            return max(-32768, min(32767, int(value)))
+        value = int(value)
+        if value > PCM_LIMITER_THRESHOLD:
+            value = int(PCM_LIMITER_THRESHOLD + (value - PCM_LIMITER_THRESHOLD) * 0.35)
+        elif value < -PCM_LIMITER_THRESHOLD:
+            value = int(-PCM_LIMITER_THRESHOLD + (value + PCM_LIMITER_THRESHOLD) * 0.35)
+        return max(-32768, min(32767, value))
+
+    def _limit_samples(self, samples: array) -> None:
+        if not MUSIC_LIMITER_ENABLED:
+            return
+        for i, sample in enumerate(samples):
+            samples[i] = self._limit_sample(int(sample))
 
     def add_tts(self, source: discord.AudioSource, *, volume: float) -> asyncio.Future:
         future = self.loop.create_future()
@@ -146,12 +186,7 @@ class MixedAudioSource(discord.AudioSource):
         samples.frombytes(frame)
         if volume != 1.0:
             for i, sample in enumerate(samples):
-                mixed = int(sample * volume)
-                if mixed > 32767:
-                    mixed = 32767
-                elif mixed < -32768:
-                    mixed = -32768
-                samples[i] = mixed
+                samples[i] = self._limit_sample(int(sample * volume))
         return samples
 
     def _mix_into(self, base: array, frame: bytes, volume: float) -> None:
@@ -163,12 +198,7 @@ class MixedAudioSource(discord.AudioSource):
         elif len(other) > len(base):
             del other[len(base):]
         for i, sample in enumerate(other):
-            mixed = int(base[i]) + int(sample)
-            if mixed > 32767:
-                mixed = 32767
-            elif mixed < -32768:
-                mixed = -32768
-            base[i] = mixed
+            base[i] = self._limit_sample(int(base[i]) + int(sample))
 
     def read(self) -> bytes:
         if self._closed:
@@ -194,7 +224,7 @@ class MixedAudioSource(discord.AudioSource):
 
         if music_frame:
             target_music_volume = self.duck_volume if active_overlays else self.normal_music_volume
-            base = self._apply_volume(music_frame, target_music_volume)
+            base = self._apply_volume(music_frame, self._step_music_volume(target_music_volume))
         else:
             # Música acabou no mesmo instante em que havia TTS por cima. Mantém silêncio
             # como base para não cortar o TTS no meio da frase.
@@ -217,6 +247,7 @@ class MixedAudioSource(discord.AudioSource):
                 with self._overlay_lock:
                     self._overlays = [ov for ov in self._overlays if ov not in ended]
 
+        self._limit_samples(base)
         return base.tobytes()
 
     def cleanup(self) -> None:
@@ -249,6 +280,8 @@ class MusicGuildState:
     paused: bool = False
     current_source: Optional[MixedAudioSource] = None
     current_resolve_task: Optional[asyncio.Task] = None
+    next_resolve_task: Optional[asyncio.Task] = None
+    next_resolve_key: str = ""
     current_status: str = "idle"
     skip_requested: bool = False
     now_message: Optional[discord.Message] = None
@@ -510,6 +543,8 @@ class AudioRouter:
         if added:
             state.stop_requested = False
             self.ensure_music_worker(guild.id)
+            if state.current is not None or state.current_source is not None:
+                self._start_prefetch_next(guild.id, state)
             self._schedule_panel_update(guild.id, create=True)
         return added, dropped
 
@@ -546,6 +581,83 @@ class AudioRouter:
             with contextlib.suppress(Exception):
                 duration = str(int(max(0.0, float(track.duration))))
         return f"title:{title_key}:{duration}" if title_key else None
+
+    def _track_resolve_key(self, track: MusicTrack | None) -> str:
+        if track is None:
+            return ""
+        url = (track.webpage_url or track.original_url or track.stream_url or "").strip().lower()
+        if url:
+            return "url:" + url
+        title_key = compact_key(track.title)
+        duration = ""
+        if track.duration is not None:
+            with contextlib.suppress(Exception):
+                duration = str(int(max(0.0, float(track.duration))))
+        return f"title:{title_key}:{duration}" if title_key else ""
+
+    def _cancel_next_prefetch(self, state: MusicGuildState) -> None:
+        task = state.next_resolve_task
+        if task is not None and not task.done():
+            task.cancel()
+        state.next_resolve_task = None
+        state.next_resolve_key = ""
+
+    def _start_prefetch_next(self, guild_id: int, state: MusicGuildState) -> None:
+        if not MUSIC_PREFETCH_NEXT or state.queue.empty():
+            return
+        try:
+            next_track = list(getattr(state.queue, "_queue", []))[0]
+        except Exception:
+            return
+        if next_track is None or next_track.stream_url:
+            return
+        key = self._track_resolve_key(next_track)
+        task = state.next_resolve_task
+        if task is not None and not task.done() and state.next_resolve_key == key:
+            return
+        if task is not None and not task.done():
+            task.cancel()
+
+        async def _prefetch() -> None:
+            try:
+                await self.extractor.resolve_stream(next_track, force=False)
+                logger.debug("[music] próxima música pré-resolvida | guild=%s track=%r", guild_id, next_track.title)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("[music] pré-resolução da próxima música falhou | guild=%s track=%r", guild_id, getattr(next_track, "title", ""), exc_info=True)
+
+        state.next_resolve_key = key
+        state.next_resolve_task = asyncio.create_task(_prefetch())
+
+    async def _resolve_current_track(self, state: MusicGuildState, track: MusicTrack) -> None:
+        key = self._track_resolve_key(track)
+        task = state.next_resolve_task if state.next_resolve_key == key else None
+        if task is not None:
+            state.next_resolve_task = None
+            state.next_resolve_key = ""
+            if task.done():
+                # Propaga exceção caso a pré-resolução tenha falhado; o fallback abaixo tenta de novo.
+                with contextlib.suppress(Exception):
+                    task.result()
+                if track.stream_url:
+                    return
+            else:
+                state.current_resolve_task = task
+                try:
+                    await task
+                    if track.stream_url:
+                        return
+                finally:
+                    if state.current_resolve_task is task:
+                        state.current_resolve_task = None
+        resolve_task = asyncio.create_task(self.extractor.resolve_stream(track, force=False))
+        state.current_resolve_task = resolve_task
+        try:
+            await resolve_task
+        finally:
+            if state.current_resolve_task is resolve_task:
+                state.current_resolve_task = None
 
     def ensure_music_worker(self, guild_id: int) -> None:
         state = self.get_state(guild_id)
@@ -628,15 +740,10 @@ class AudioRouter:
         if vc is None:
             raise RuntimeError("Não consegui conectar ao canal de voz.")
 
-        resolve_task = asyncio.create_task(self.extractor.resolve_stream(track, force=False))
-        state.current_resolve_task = resolve_task
         try:
-            await resolve_task
+            await self._resolve_current_track(state, track)
         except asyncio.CancelledError as exc:
             raise MusicPlaybackError("Música pulada antes de iniciar o áudio.") from exc
-        finally:
-            if state.current_resolve_task is resolve_task:
-                state.current_resolve_task = None
 
         if state.skip_requested or state.stop_requested:
             raise MusicPlaybackError("Playback cancelado.")
@@ -708,6 +815,7 @@ class AudioRouter:
 
         state.current_status = "playing"
         await self.update_panel(guild.id, create=True)
+        self._start_prefetch_next(guild.id, state)
         await finished
         return not state.skip_requested and not state.stop_requested
 
@@ -1096,6 +1204,7 @@ class AudioRouter:
         state = self.get_state(guild_id)
         state.stop_requested = True
         state.skip_requested = True
+        self._cancel_next_prefetch(state)
         self._set_idle_reason(state, "manual_stop")
         for _vote_action in ("skip", "stop"):
             state.control_votes.pop(_vote_action, None)
@@ -1304,6 +1413,7 @@ class AudioRouter:
 
     async def replace_queue(self, guild_id: int, tracks: list[MusicTrack]) -> None:
         state = self.get_state(guild_id)
+        self._cancel_next_prefetch(state)
         while not state.queue.empty():
             with contextlib.suppress(Exception):
                 state.queue.get_nowait()
@@ -1313,6 +1423,8 @@ class AudioRouter:
         if tracks:
             state.music_session_active = True
             self._cancel_music_idle_disconnect(state)
+            if state.current is not None or state.current_source is not None:
+                self._start_prefetch_next(guild_id, state)
         self._schedule_panel_update(guild_id, create=bool(state.now_message or state.current or tracks))
 
     async def remove_at(self, guild_id: int, index_1based: int) -> Optional[MusicTrack]:
