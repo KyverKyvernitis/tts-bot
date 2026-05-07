@@ -64,7 +64,6 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     errored = status == "error"
     color = discord.Color.gold() if paused or loading else discord.Color.red() if errored else discord.Color.blurple()
     queue = _queue_items(state)
-    volume_percent = int(round(float(getattr(state, "volume", 0.55)) * 100))
     embed = discord.Embed(color=color)
     if loading:
         author_name = "Preparando áudio:"
@@ -152,7 +151,6 @@ def build_player_embeds(state) -> list[discord.Embed]:
         return build_now_playing_embeds(state, current)
 
     queue = _queue_items(state)
-    volume_percent = int(round(float(getattr(state, "volume", 0.55)) * 100))
     status = str(getattr(state, "current_status", "idle") or "idle")
 
     embed = discord.Embed(color=discord.Color.dark_grey() if not queue else discord.Color.blurple())
@@ -172,12 +170,48 @@ def build_player_embeds(state) -> list[discord.Embed]:
             embed.set_thumbnail(url=first.thumbnail)
         embed.set_footer(text="A próxima música será preparada automaticamente.")
     else:
-        embed.set_author(name="Player parado:", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
-        if status == "idle":
-            embed.description = "> -# `📭` Nenhuma música na fila."
+        reason = str(getattr(state, "idle_reason", "idle") or "idle")
+        actor_id = getattr(state, "idle_actor_id", None)
+        actor_name = getattr(state, "idle_actor_name", "") or ""
+        channel_name = getattr(state, "idle_channel_name", "") or ""
+        if reason == "queue_finished":
+            embed.set_author(name="As músicas acabaram", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
+            embed.description = (
+                "A fila terminou e não tem mais nada para tocar.\n"
+                "Use `_play <link ou pesquisa>` para adicionar outra música."
+            )
+        elif reason == "manual_stop":
+            embed.set_author(name="Player encerrado", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
+            embed.description = (
+                "A reprodução foi parada e a fila foi limpa.\n"
+                "Use `_play <link ou pesquisa>` quando quiser tocar algo de novo."
+            )
+        elif reason == "external_disconnect":
+            embed.set_author(name="Player interrompido", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
+            if actor_id:
+                who = f"<@{int(actor_id)}>"
+            elif actor_name:
+                who = _escape(actor_name, limit=48)
+            else:
+                who = "alguém"
+            where = f" de **{_escape(channel_name, limit=48)}**" if channel_name else ""
+            embed.description = (
+                f"O bot foi desconectado{where} por {who}.\n"
+                "Use `_play <link ou pesquisa>` para iniciar novamente."
+            )
+        elif reason == "external_move":
+            embed.set_author(name="Player movido", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
+            if actor_id:
+                who = f" por <@{int(actor_id)}>"
+            elif actor_name:
+                who = f" por {_escape(actor_name, limit=48)}"
+            else:
+                who = ""
+            where = f" para **{_escape(channel_name, limit=48)}**" if channel_name else ""
+            embed.description = f"O bot foi movido{where}{who}."
         else:
-            embed.description = "> -# `📭` Fila vazia."
-        embed.set_footer(text="Use _play <link ou pesquisa> para adicionar música.")
+            embed.set_author(name="Nada tocando agora", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
+            embed.description = "Use `_play <link ou pesquisa>` para adicionar uma música."
 
     embed.set_image(url=PLAYER_BAR_URL)
     return [embed]
@@ -602,7 +636,7 @@ class PlayerOptionsSelect(discord.ui.Select):
             discord.SelectOption(label="Repetição", emoji="🔁", value="loop", description="Alternar repetição da música/fila."),
             discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Misturar a fila."),
         ]
-        super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, row=2)
+        super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, row=1)
         self.router = router
         self.guild_id = int(guild_id)
 
@@ -654,6 +688,15 @@ class MusicPlayerView(discord.ui.View):
         super().__init__(timeout=None)
         self.router = router
         self.guild_id = int(guild_id)
+        state = router.get_state(guild_id)
+        paused = bool(getattr(state, "paused", False)) or str(getattr(state, "current_status", "")) == "paused"
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                callback_name = getattr(getattr(item, "callback", None), "__name__", "")
+                item.label = None
+                if callback_name == "pause_resume":
+                    item.emoji = "▶️" if paused else "⏸️"
+                    item.style = discord.ButtonStyle.primary if paused else discord.ButtonStyle.secondary
         self.add_item(PlayerOptionsSelect(router, guild_id))
 
     async def _ack(self, interaction: discord.Interaction, message: str) -> None:
@@ -662,12 +705,12 @@ class MusicPlayerView(discord.ui.View):
         else:
             await interaction.response.send_message(message, ephemeral=True)
 
-    @discord.ui.button(label="Voltar", emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         ok = await self.router.previous(self.guild_id)
         await self._ack(interaction, "`⏮️` Voltando para a música anterior." if ok else "Não há música anterior no histórico.")
 
-    @discord.ui.button(label="Pausar/Retomar", emoji="⏯️", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, row=0)
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = self.router.get_state(self.guild_id)
         if state.paused:
@@ -677,17 +720,17 @@ class MusicPlayerView(discord.ui.View):
             ok = await self.router.pause(self.guild_id)
             await self._ack(interaction, "`⏸️` Música pausada." if ok else "Não havia música tocando.")
 
-    @discord.ui.button(label="Pular", emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         _ok, message = await self.router.request_skip(self.guild_id, interaction.user)
         await self._ack(interaction, message)
 
-    @discord.ui.button(label="Parar", emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.router.stop(self.guild_id, disconnect=True)
         await self._ack(interaction, "`⏹️` Player parado e fila limpa.")
 
-    @discord.ui.button(label="Fila", emoji="📜", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, row=0)
     async def queue(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = self.router.get_state(self.guild_id)
         await interaction.response.send_message(

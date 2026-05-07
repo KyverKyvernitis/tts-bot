@@ -6,6 +6,7 @@ import logging
 import random
 import time
 import threading
+from datetime import datetime, timezone
 from array import array
 from collections import deque
 from dataclasses import dataclass, field
@@ -263,6 +264,11 @@ class MusicGuildState:
     control_votes: dict[str, ControlVote] = field(default_factory=dict)
     control_vote_cleanup_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     volume_loaded: bool = False
+    idle_reason: str = "idle"
+    idle_actor_id: Optional[int] = None
+    idle_actor_name: str = ""
+    idle_channel_name: str = ""
+    internal_voice_disconnect_until: float = 0.0
 
     def queue_size(self) -> int:
         return self.queue.qsize()
@@ -321,6 +327,37 @@ class AudioRouter:
             await save_doc(int(guild_id), doc)
         except Exception:
             logger.debug("[music] falha ao salvar volume persistido", exc_info=True)
+
+    def _clear_idle_reason(self, state: MusicGuildState) -> None:
+        state.idle_reason = "idle"
+        state.idle_actor_id = None
+        state.idle_actor_name = ""
+        state.idle_channel_name = ""
+
+    def _set_idle_reason(
+        self,
+        state: MusicGuildState,
+        reason: str,
+        *,
+        actor: discord.abc.User | discord.Member | None = None,
+        actor_name: str = "",
+        channel_name: str = "",
+    ) -> None:
+        state.idle_reason = (reason or "idle").strip() or "idle"
+        if actor is not None:
+            state.idle_actor_id = int(getattr(actor, "id", 0) or 0) or None
+            state.idle_actor_name = getattr(actor, "display_name", None) or getattr(actor, "name", None) or str(actor)
+        else:
+            state.idle_actor_id = None
+            state.idle_actor_name = actor_name or ""
+        state.idle_channel_name = channel_name or ""
+
+    def _mark_internal_voice_disconnect(self, guild_id: int, *, seconds: float = 8.0) -> None:
+        state = self.get_state(guild_id)
+        state.internal_voice_disconnect_until = max(state.internal_voice_disconnect_until, time.monotonic() + max(0.0, float(seconds)))
+
+    def _is_internal_voice_disconnect_recent(self, state: MusicGuildState) -> bool:
+        return time.monotonic() < float(getattr(state, "internal_voice_disconnect_until", 0.0) or 0.0)
 
     def is_music_staff(self, member) -> bool:
         if member is None or getattr(member, "bot", False):
@@ -453,6 +490,7 @@ class AudioRouter:
         state.last_text_channel_id = getattr(text_channel, "id", None)
         state.last_voice_channel_id = getattr(voice_channel, "id", None)
         state.music_session_active = True
+        self._clear_idle_reason(state)
         self._cancel_music_idle_disconnect(state)
 
         added = 0
@@ -563,6 +601,8 @@ class AudioRouter:
         finally:
             state.worker_task = None
             if state.stop_requested or state.queue.empty():
+                if not state.stop_requested and state.queue.empty():
+                    self._set_idle_reason(state, "queue_finished")
                 state.current = None
                 state.current_status = "idle"
                 self._schedule_panel_update(guild_id, create=False)
@@ -576,6 +616,7 @@ class AudioRouter:
 
         state.current = track
         state.music_session_active = True
+        self._clear_idle_reason(state)
         self._cancel_music_idle_disconnect(state)
         state.current_status = "resolving"
         state.paused = False
@@ -675,8 +716,10 @@ class AudioRouter:
         if vc and vc.is_connected():
             if getattr(getattr(vc, "channel", None), "id", None) != getattr(channel, "id", None):
                 try:
+                    self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
                     await vc.move_to(channel)
                 except Exception:
+                    self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
                     await vc.disconnect(force=True)
                     vc = None
             if vc and vc.is_connected():
@@ -699,6 +742,8 @@ class AudioRouter:
         # sozinho ou só com bots, ele sai depois do timeout de música. Se ainda
         # há humanos, a conexão pode continuar para o TTS usar.
         state.current_status = "idle"
+        if not state.current and state.queue.empty() and state.idle_reason == "idle":
+            self._set_idle_reason(state, "queue_finished")
         vc = guild.voice_client
         if not vc or not vc.is_connected() or getattr(vc, "channel", None) is None:
             state.music_session_active = False
@@ -717,12 +762,142 @@ class AudioRouter:
             if humans:
                 await self.update_panel(guild.id, create=False)
                 return
+            self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
             await vc.disconnect(force=False)
             state.music_owns_voice = False
             state.music_session_active = False
             await self.update_panel(guild.id, create=False)
         except Exception:
             logger.debug("[music] idle disconnect falhou", exc_info=True)
+
+    def _voice_channel_has_music_state(self, state: MusicGuildState) -> bool:
+        return bool(state.music_session_active or state.current or not state.queue.empty() or state.current_source or state.current_resolve_task)
+
+    async def _find_recent_voice_audit_actor(
+        self,
+        guild: discord.Guild,
+        *,
+        disconnected: bool,
+        before_channel_id: int | None = None,
+        after_channel_id: int | None = None,
+    ) -> discord.User | discord.Member | None:
+        if guild is None:
+            return None
+        actions: list[discord.AuditLogAction] = []
+        with contextlib.suppress(Exception):
+            if disconnected and hasattr(discord.AuditLogAction, "member_disconnect"):
+                actions.append(discord.AuditLogAction.member_disconnect)
+            if hasattr(discord.AuditLogAction, "member_move"):
+                actions.append(discord.AuditLogAction.member_move)
+        if not actions:
+            return None
+        now = datetime.now(timezone.utc)
+        for action in actions:
+            try:
+                async for entry in guild.audit_logs(limit=8, action=action):
+                    created_at = getattr(entry, "created_at", None)
+                    if created_at is not None:
+                        if created_at.tzinfo is None:
+                            created_at = created_at.replace(tzinfo=timezone.utc)
+                        if abs((now - created_at).total_seconds()) > 12:
+                            continue
+                    extra = getattr(entry, "extra", None)
+                    channel = getattr(extra, "channel", None)
+                    channel_id = int(getattr(channel, "id", 0) or 0)
+                    if before_channel_id and channel_id and channel_id != int(before_channel_id):
+                        # Em member_move, alguns clients registram o canal de origem/destino de forma diferente.
+                        if not after_channel_id or channel_id != int(after_channel_id):
+                            continue
+                    return getattr(entry, "user", None)
+            except (discord.Forbidden, discord.HTTPException):
+                return None
+            except Exception:
+                logger.debug("[music] falha ao consultar audit log de voz", exc_info=True)
+                return None
+        return None
+
+    async def handle_bot_voice_disconnect(
+        self,
+        guild: discord.Guild,
+        before_channel: discord.abc.GuildChannel | None,
+        after_channel: discord.abc.GuildChannel | None = None,
+    ) -> None:
+        if guild is None:
+            return
+        state = self.get_state(guild.id)
+        if self._is_internal_voice_disconnect_recent(state):
+            return
+        if not self._voice_channel_has_music_state(state):
+            return
+
+        actor = await self._find_recent_voice_audit_actor(
+            guild,
+            disconnected=True,
+            before_channel_id=int(getattr(before_channel, "id", 0) or 0) or None,
+            after_channel_id=int(getattr(after_channel, "id", 0) or 0) or None,
+        )
+        if state.current_source is not None:
+            with contextlib.suppress(Exception):
+                state.current_source.cleanup()
+        if state.current_resolve_task is not None and not state.current_resolve_task.done():
+            state.current_resolve_task.cancel()
+        while not state.queue.empty():
+            with contextlib.suppress(Exception):
+                state.queue.get_nowait()
+                state.queue.task_done()
+        state.current = None
+        state.current_source = None
+        state.current_resolve_task = None
+        state.paused = False
+        state.stop_requested = True
+        state.skip_requested = True
+        state.current_status = "idle"
+        state.music_session_active = False
+        state.music_owns_voice = False
+        state.control_votes.clear()
+        self._cancel_music_idle_disconnect(state)
+        self._set_idle_reason(
+            state,
+            "external_disconnect",
+            actor=actor,
+            channel_name=getattr(before_channel, "name", "") or "",
+        )
+        await self.update_panel(guild.id, create=True)
+
+    async def handle_bot_voice_move(
+        self,
+        guild: discord.Guild,
+        before_channel: discord.abc.GuildChannel | None,
+        after_channel: discord.abc.GuildChannel | None,
+    ) -> None:
+        if guild is None or before_channel is None or after_channel is None:
+            return
+        state = self.get_state(guild.id)
+        if self._is_internal_voice_disconnect_recent(state):
+            return
+        if not self._voice_channel_has_music_state(state):
+            return
+        actor = await self._find_recent_voice_audit_actor(
+            guild,
+            disconnected=False,
+            before_channel_id=int(getattr(before_channel, "id", 0) or 0) or None,
+            after_channel_id=int(getattr(after_channel, "id", 0) or 0) or None,
+        )
+        state.last_voice_channel_id = int(getattr(after_channel, "id", 0) or 0) or state.last_voice_channel_id
+        self._set_idle_reason(
+            state,
+            "external_move",
+            actor=actor,
+            channel_name=getattr(after_channel, "name", "") or "",
+        )
+        await self._send_text(
+            guild,
+            state,
+            f"`🔀` O player foi movido para **{discord.utils.escape_markdown(getattr(after_channel, 'name', 'outro canal'))}**"
+            + (f" por <@{getattr(actor, 'id', 0)}>" if actor else "")
+            + ".",
+        )
+        await self.update_panel(guild.id, create=bool(state.now_message))
 
     async def _send_text(self, guild: discord.Guild, state: MusicGuildState, content: str) -> None:
         if not state.last_text_channel_id:
@@ -914,6 +1089,7 @@ class AudioRouter:
         state = self.get_state(guild_id)
         state.stop_requested = True
         state.skip_requested = True
+        self._set_idle_reason(state, "manual_stop")
         state.control_votes.pop("skip", None)
         if state.current_resolve_task is not None and not state.current_resolve_task.done():
             state.current_resolve_task.cancel()
@@ -931,6 +1107,7 @@ class AudioRouter:
                         vc.stop()
             if disconnect and not state.tts_voice_touched:
                 with contextlib.suppress(Exception):
+                    self._mark_internal_voice_disconnect(guild_id, seconds=8.0)
                     await vc.disconnect(force=False)
                 state.music_owns_voice = False
         state.current = None

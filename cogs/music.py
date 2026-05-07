@@ -282,6 +282,21 @@ class Music(commands.Cog):
         await self.router.replace_queue(ctx.guild.id, [])
         await self._reply(ctx, "`🧹` Fila limpa.")
 
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        guild = getattr(member, "guild", None)
+        bot_user = getattr(self.bot, "user", None)
+        if guild is None or bot_user is None or int(getattr(member, "id", 0) or 0) != int(getattr(bot_user, "id", 0) or 0):
+            return
+        before_channel = getattr(before, "channel", None)
+        after_channel = getattr(after, "channel", None)
+        if before_channel is not None and after_channel is None:
+            await self.router.handle_bot_voice_disconnect(guild, before_channel, after_channel)
+            return
+        if before_channel is not None and after_channel is not None and getattr(before_channel, "id", None) != getattr(after_channel, "id", None):
+            await self.router.handle_bot_voice_move(guild, before_channel, after_channel)
+
     @play.error
     async def play_error(self, ctx: commands.Context, error: commands.CommandError):
         if isinstance(error, commands.CommandOnCooldown):
