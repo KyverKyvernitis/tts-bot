@@ -8,7 +8,7 @@ import discord
 from discord.ext import commands
 
 from music_system import AudioRouter
-from music_system.extractor import MusicExtractionError
+from music_system.errors import MusicExtractionError
 from music_system.models import MusicTrack
 from music_system.ui import SearchResultView, QueueView, build_queue_embed
 
@@ -98,7 +98,7 @@ class Music(commands.Cog):
             await self._reply(
                 ctx,
                 embed=embed,
-                view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:5]),
+                view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:5], ctx.author.id),
             )
             return
 

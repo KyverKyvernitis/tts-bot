@@ -13,7 +13,8 @@ from typing import Optional
 import discord
 
 import config
-from .extractor import MusicExtractor, MusicExtractionError
+from .extractor import MusicExtractor
+from .errors import MusicExtractionError
 from .models import LoopMode, MusicTrack
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ class MixedAudioSource(discord.AudioSource):
         self._overlays: list[TTSOverlay] = []
         self._overlay_lock = threading.RLock()
         self._closed = False
+        self._music_ended = False
 
     def is_opus(self) -> bool:
         return False
@@ -80,6 +82,22 @@ class MixedAudioSource(discord.AudioSource):
         with self._overlay_lock:
             self._overlays.append(overlay)
         return future
+
+
+    def cancel_tts(self, future: asyncio.Future) -> None:
+        target = None
+        with self._overlay_lock:
+            for overlay in self._overlays:
+                if overlay.future is future:
+                    target = overlay
+                    break
+            if target is not None:
+                self._overlays = [ov for ov in self._overlays if ov is not target]
+        if target is not None:
+            with contextlib.suppress(Exception):
+                target.source.cleanup()
+        if not future.done():
+            self.loop.call_soon_threadsafe(future.cancel)
 
     def _finish_overlay(self, overlay: TTSOverlay, error: Exception | None = None) -> None:
         if overlay.ended:
@@ -126,15 +144,28 @@ class MixedAudioSource(discord.AudioSource):
         if self._closed:
             return b""
 
-        music_frame = self.music_source.read()
-        if not music_frame:
-            self.cleanup()
-            return b""
+        music_frame = b""
+        if not self._music_ended:
+            music_frame = self.music_source.read()
+            if not music_frame:
+                self._music_ended = True
+                with contextlib.suppress(Exception):
+                    self.music_source.cleanup()
 
         with self._overlay_lock:
             active_overlays = list(self._overlays)
-        target_music_volume = self.duck_volume if (self.duck_enabled and active_overlays) else self.normal_music_volume
-        base = self._apply_volume(music_frame, target_music_volume)
+
+        if not music_frame and not active_overlays:
+            self.cleanup()
+            return b""
+
+        if music_frame:
+            target_music_volume = self.duck_volume if (self.duck_enabled and active_overlays) else self.normal_music_volume
+            base = self._apply_volume(music_frame, target_music_volume)
+        else:
+            # Música acabou no mesmo instante em que havia TTS por cima. Mantém silêncio
+            # como base para não cortar o TTS no meio da frase.
+            base = array("h", [0] * (PCM_FRAME_BYTES // 2))
 
         if active_overlays:
             ended: list[TTSOverlay] = []
@@ -421,7 +452,11 @@ class AudioRouter:
 
         if active_source is not None and not getattr(active_source, "_closed", True) and (vc.is_playing() or vc.is_paused()):
             future = active_source.add_tts(source, volume=TTS_VOLUME)
-            await asyncio.wait_for(future, timeout=max(1.0, float(timeout)))
+            try:
+                await asyncio.wait_for(future, timeout=max(1.0, float(timeout)))
+            except asyncio.TimeoutError as exc:
+                active_source.cancel_tts(future)
+                raise RuntimeError(f"Playback TTS em overlay excedeu {float(timeout):.1f}s") from exc
             playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
             return {
                 "source_setup_ms": source_setup_ms,
