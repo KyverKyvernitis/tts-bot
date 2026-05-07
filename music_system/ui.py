@@ -688,23 +688,50 @@ class MusicPlayerView(discord.ui.View):
         super().__init__(timeout=None)
         self.router = router
         self.guild_id = int(guild_id)
-        state = router.get_state(guild_id)
-        paused = bool(getattr(state, "paused", False)) or str(getattr(state, "current_status", "")) == "paused"
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.label = None
-                emoji_name = str(getattr(item, "emoji", "") or "")
-                custom_id = str(getattr(item, "custom_id", "") or "")
-                if emoji_name in {"⏸️", "▶️"} or custom_id.endswith(":pause_resume"):
-                    item.emoji = "▶️" if paused else "⏸️"
-                    item.style = discord.ButtonStyle.primary if paused else discord.ButtonStyle.secondary
         self.add_item(PlayerOptionsSelect(router, guild_id))
+        self._sync_components()
+
+    def _emoji_name(self, item) -> str:
+        emoji = getattr(item, "emoji", None)
+        return str(getattr(emoji, "name", None) or emoji or "")
+
+    def _sync_components(self) -> None:
+        state = self.router.get_state(self.guild_id)
+        status = str(getattr(state, "current_status", "") or "")
+        paused = bool(getattr(state, "paused", False)) or status == "paused"
+        has_current = bool(getattr(state, "current", None) or getattr(state, "current_source", None) or status in {"resolving", "starting", "playing", "paused"})
+        has_queue = not getattr(state, "queue", None).empty() if getattr(state, "queue", None) is not None else False
+        has_history = bool(list(getattr(state, "history", []) or []))
+        has_session = bool(getattr(state, "music_session_active", False) or has_current or has_queue)
+
+        for item in self.children:
+            if not isinstance(item, discord.ui.Button):
+                continue
+            item.label = None
+            emoji_name = self._emoji_name(item)
+            custom_id = str(getattr(item, "custom_id", "") or "")
+            if custom_id.endswith(":pause_resume") or emoji_name in {"⏸️", "▶️"}:
+                item.emoji = "▶️" if paused else "⏸️"
+                item.style = discord.ButtonStyle.primary if paused else discord.ButtonStyle.secondary
+                item.disabled = not has_current
+            elif emoji_name == "⏮️":
+                item.disabled = not has_history
+            elif emoji_name == "⏭️":
+                item.disabled = not (has_current or has_queue)
+            elif custom_id.endswith(":stop") or emoji_name == "⏹️":
+                item.disabled = not has_session
+            elif emoji_name == "📜":
+                item.disabled = False
 
     async def _ack(self, interaction: discord.Interaction, message: str) -> None:
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
         else:
             await interaction.response.send_message(message, ephemeral=True)
+
+    async def _defer_control(self, interaction: discord.Interaction) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
 
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -716,10 +743,16 @@ class MusicPlayerView(discord.ui.View):
         state = self.router.get_state(self.guild_id)
         if state.paused:
             ok = await self.router.resume(self.guild_id)
-            await self._ack(interaction, "`▶️` Música retomada." if ok else "Não havia música pausada.")
+            if ok:
+                await self._defer_control(interaction)
+            else:
+                await self._ack(interaction, "Não havia música pausada.")
         else:
             ok = await self.router.pause(self.guild_id)
-            await self._ack(interaction, "`⏸️` Música pausada." if ok else "Não havia música tocando.")
+            if ok:
+                await self._defer_control(interaction)
+            else:
+                await self._ack(interaction, "Não havia música tocando.")
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):

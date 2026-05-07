@@ -4,6 +4,7 @@ import contextlib
 import logging
 from typing import Optional
 
+import config
 import discord
 from discord.ext import commands
 
@@ -40,6 +41,8 @@ class Music(commands.Cog):
         return None
 
     async def _reply(self, ctx: commands.Context, content: str | None = None, **kwargs):
+        # Todas as mensagens novas da música são silenciosas por padrão para não notificar o servidor.
+        kwargs.setdefault("silent", True)
         try:
             return await ctx.reply(content, mention_author=False, **kwargs)
         except Exception:
@@ -56,11 +59,8 @@ class Music(commands.Cog):
             return "`⚠️` Essa fonte usa DRM. Tente outro link ou pesquise pelo nome da música."
         return f"`⚠️` {raw}"
 
-    @commands.command(name="play", aliases=["p", "tocar", "music", "musica"])
-    @commands.guild_only()
-    @commands.cooldown(1, 3.0, commands.BucketType.user)
-    async def play(self, ctx: commands.Context, *, query: str = ""):
-        """Toca link ou pesquisa música por texto."""
+    async def _run_play(self, ctx: commands.Context, query: str) -> None:
+        """Implementação compartilhada de `_play` e da alias roteada `_p <música>`."""
         query = (query or "").strip()
         if not query:
             await self._reply(ctx, "Use `_play <link ou pesquisa>`.")
@@ -129,17 +129,26 @@ class Music(commands.Cog):
             position = state.queue_size() + (1 if state.current else 0)
             await self._reply(ctx, f"`🎶` **Adicionada à fila:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`")
 
-    @commands.command(name="pause", aliases=["pausar"])
+    @commands.command(name="play", aliases=["tocar", "music", "musica"])
+    @commands.guild_only()
+    @commands.cooldown(1, 3.0, commands.BucketType.user)
+    async def play(self, ctx: commands.Context, *, query: str = ""):
+        """Toca link ou pesquisa música por texto."""
+        await self._run_play(ctx, query)
+
+    @commands.command(name="pause", aliases=["pausar", "pa"])
     @commands.guild_only()
     async def pause(self, ctx: commands.Context):
         ok = await self.router.pause(ctx.guild.id)
-        await self._reply(ctx, "`⏸️` Música pausada." if ok else "Não há música tocando para pausar.")
+        if not ok:
+            await self._reply(ctx, "Não há música tocando para pausar.")
 
-    @commands.command(name="resume", aliases=["retomar", "continuar"])
+    @commands.command(name="resume", aliases=["retomar", "continuar", "r"])
     @commands.guild_only()
     async def resume(self, ctx: commands.Context):
         ok = await self.router.resume(ctx.guild.id)
-        await self._reply(ctx, "`▶️` Música retomada." if ok else "Não há música pausada.")
+        if not ok:
+            await self._reply(ctx, "Não há música pausada.")
 
     @commands.command(name="skip", aliases=["s", "pular"])
     @commands.guild_only()
@@ -147,13 +156,13 @@ class Music(commands.Cog):
         _ok, message = await self.router.request_skip(ctx.guild.id, ctx.author)
         await self._reply(ctx, message)
 
-    @commands.command(name="back", aliases=["previous", "voltar", "anterior"])
+    @commands.command(name="back", aliases=["b", "previous", "voltar", "anterior"])
     @commands.guild_only()
     async def back(self, ctx: commands.Context):
         ok = await self.router.previous(ctx.guild.id)
         await self._reply(ctx, "`⏮️` Voltando para a música anterior." if ok else "Não há música anterior no histórico.")
 
-    @commands.command(name="stop", aliases=["pararmusica", "musicstop"])
+    @commands.command(name="stop", aliases=["st", "pararmusica", "musicstop"])
     @commands.guild_only()
     async def stop(self, ctx: commands.Context):
         _ok, message = await self.router.request_stop(ctx.guild.id, ctx.author, disconnect=True)
@@ -165,7 +174,7 @@ class Music(commands.Cog):
         state = self.router.get_state(ctx.guild.id)
         await self._reply(ctx, embed=build_queue_embed(state, 0), view=QueueView(self.router, ctx.guild.id, 0, owner_id=ctx.author.id))
 
-    @commands.command(name="np", aliases=["nowplaying", "tocando"])
+    @commands.command(name="np", aliases=["now", "nowplaying", "tocando"])
     @commands.guild_only()
     async def now_playing(self, ctx: commands.Context):
         state = self.router.get_state(ctx.guild.id)
@@ -175,7 +184,7 @@ class Music(commands.Cog):
         state.last_text_channel_id = ctx.channel.id
         await self.router.update_panel(ctx.guild.id, create=True)
 
-    @commands.command(name="volume", aliases=["vol"])
+    @commands.command(name="volume", aliases=["v", "vol"])
     @commands.guild_only()
     async def volume(self, ctx: commands.Context, value: Optional[int] = None):
         state = self.router.get_state(ctx.guild.id)
@@ -188,7 +197,7 @@ class Music(commands.Cog):
         volume = await self.router.set_volume(ctx.guild.id, value)
         await self._reply(ctx, f"`🔊` Volume da música ajustado para `{int(round(volume * 100))}%`.")
 
-    @commands.command(name="duck", aliases=["ttsduck", "ducking"])
+    @commands.command(name="duck", aliases=["dv", "ttsduck", "ducking"])
     @commands.guild_only()
     async def duck(self, ctx: commands.Context, value: str = ""):
         state = self.router.get_state(ctx.guild.id)
@@ -214,19 +223,19 @@ class Music(commands.Cog):
         volume = await self.router.set_duck_volume(ctx.guild.id, percent)
         await self._reply(ctx, f"`🎙️` Volume da música durante TTS ajustado para `{int(round(volume * 100))}%`.")
 
-    @commands.command(name="shuffle", aliases=["embaralhar"])
+    @commands.command(name="shuffle", aliases=["sh", "embaralhar"])
     @commands.guild_only()
     async def shuffle(self, ctx: commands.Context):
         _ok, message = await self.router.request_shuffle(ctx.guild.id, ctx.author)
         await self._reply(ctx, message)
 
-    @commands.command(name="loop", aliases=["repeat", "repetir"])
+    @commands.command(name="loop", aliases=["l", "repeat", "repetir"])
     @commands.guild_only()
     async def loop(self, ctx: commands.Context):
         _ok, message = await self.router.request_loop(ctx.guild.id, ctx.author)
         await self._reply(ctx, message)
 
-    @commands.command(name="remove", aliases=["remover"])
+    @commands.command(name="remove", aliases=["rm", "remover"])
     @commands.guild_only()
     async def remove(self, ctx: commands.Context, position: Optional[int] = None):
         if position is None:
@@ -238,7 +247,7 @@ class Music(commands.Cog):
             return
         await self._reply(ctx, f"`🗑️` Removido da fila: **{removed.short_title}**.")
 
-    @commands.command(name="move", aliases=["mover"])
+    @commands.command(name="move", aliases=["mv", "mover"])
     @commands.guild_only()
     async def move(self, ctx: commands.Context, from_pos: Optional[int] = None, to_pos: Optional[int] = None):
         if from_pos is None or to_pos is None:
@@ -247,7 +256,7 @@ class Music(commands.Cog):
         ok = await self.router.move(ctx.guild.id, from_pos, to_pos)
         await self._reply(ctx, "`↪️` Posição atualizada." if ok else "Não consegui mover: confira as posições da fila.")
 
-    @commands.command(name="skipto", aliases=["jump", "jumpto", "tocarfila"])
+    @commands.command(name="skipto", aliases=["goto", "jump", "jumpto", "tocarfila"])
     @commands.guild_only()
     async def skipto(self, ctx: commands.Context, position: Optional[int] = None):
         if position is None:
@@ -256,13 +265,13 @@ class Music(commands.Cog):
         ok = await self.router.skip_to(ctx.guild.id, position)
         await self._reply(ctx, "`▶️` Tocando a posição escolhida." if ok else "Não encontrei essa posição na fila.")
 
-    @commands.command(name="readd", aliases=["readicionar", "historicofila"])
+    @commands.command(name="readd", aliases=["ra", "readicionar", "historicofila"])
     @commands.guild_only()
     async def readd(self, ctx: commands.Context):
         added = await self.router.readd_history(ctx.guild.id)
         await self._reply(ctx, f"`🎶` Readicionei `{added}` música(s) do histórico." if added else "O histórico está vazio.")
 
-    @commands.command(name="history", aliases=["historico", "played"])
+    @commands.command(name="history", aliases=["h", "historico", "played"])
     @commands.guild_only()
     async def history(self, ctx: commands.Context):
         history = self.router.history_snapshot(ctx.guild.id)
@@ -276,11 +285,39 @@ class Music(commands.Cog):
         embed.set_footer(text="Use _readd para colocar o histórico de volta na fila.")
         await self._reply(ctx, embed=embed)
 
-    @commands.command(name="clearqueue", aliases=["limparfila", "clearq"])
+    @commands.command(name="clearqueue", aliases=["cq", "limparfila", "clearq"])
     @commands.guild_only()
     async def clearqueue(self, ctx: commands.Context):
         await self.router.replace_queue(ctx.guild.id, [])
         await self._reply(ctx, "`🧹` Fila limpa.")
+
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if getattr(getattr(message, "author", None), "bot", False) or message.guild is None:
+            return
+
+        raw = str(getattr(message, "content", "") or "").strip()
+        if not raw:
+            return
+
+        prefixes = []
+        for value in (getattr(config, "BOT_PREFIX", "_"), getattr(config, "PREFIX", "_"), "_"):
+            value = str(value or "_").strip() or "_"
+            if value not in prefixes:
+                prefixes.append(value)
+
+        lowered = raw.lower()
+        for prefix in prefixes:
+            alias = f"{prefix}p"
+            # `_p` sozinho é reservado para o painel do TTS. Música só assume `_p <busca/link>`.
+            if lowered.startswith(alias.lower() + " "):
+                query = raw[len(alias):].strip()
+                if not query:
+                    return
+                ctx = await self.bot.get_context(message)
+                await self._run_play(ctx, query)
+                return
 
 
     @commands.Cog.listener()

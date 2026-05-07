@@ -906,7 +906,7 @@ class AudioRouter:
         if channel is None:
             return
         with contextlib.suppress(Exception):
-            await channel.send(content)
+            await channel.send(content, silent=True)
 
     def _schedule_panel_update(self, guild_id: int, *, create: bool = True) -> None:
         async def _runner() -> None:
@@ -935,7 +935,10 @@ class AudioRouter:
             has_player_content = bool(state.current or not state.queue.empty())
             state.panel_vote_summary = self.pending_vote_summary(guild_id)
             embeds = build_player_embeds(state)
-            view = MusicPlayerView(self, guild_id) if has_player_content else None
+            # O painel mantém a mesma estrutura de controles mesmo quando a música acaba,
+            # é parada ou o bot é desconectado. Os botões ficam visíveis e a view decide
+            # quais ações ainda fazem sentido.
+            view = MusicPlayerView(self, guild_id)
             current_panel_key = self._panel_key_for_track(state.current)
 
             async with state.panel_lock:
@@ -960,7 +963,7 @@ class AudioRouter:
                         state.panel_track_key = None
 
                 if create:
-                    state.now_message = await channel.send(embeds=embeds, view=view)
+                    state.now_message = await channel.send(embeds=embeds, view=view, silent=True)
                     state.panel_track_key = current_panel_key
         except Exception:
             logger.debug("[music] falha ao atualizar painel", exc_info=True)
