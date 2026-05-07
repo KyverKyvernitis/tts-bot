@@ -1586,6 +1586,16 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         # Legacy toggle removed: nunca mais bloquear o TTS por presença de outro bot na call.
         return False
 
+    def _music_player_is_active(self, guild_id: int) -> bool:
+        router = getattr(getattr(self, "bot", None), "audio_router", None)
+        is_music_active = getattr(router, "is_music_active", None)
+        if not callable(is_music_active):
+            return False
+        try:
+            return bool(is_music_active(int(guild_id)))
+        except Exception:
+            return False
+
     async def _disconnect_and_clear(self, guild: discord.Guild):
         self._mark_manual_voice_disconnect(guild.id, seconds=60.0)
         self._suppress_runtime_voice_restore(guild.id, seconds=60.0)
@@ -1599,6 +1609,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         except Exception:
             pass
         self._last_announced_author_by_guild.pop(int(guild.id), None)
+        if self._music_player_is_active(guild.id):
+            print(f"[tts_voice] desconexão do TTS ignorada | player de música ativo | guild={guild.id}")
+            return
         vc = self._get_voice_client_for_guild(guild)
         disconnected = False
         if vc and vc.is_connected():
@@ -1633,6 +1646,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             default=True,
         )
         if not auto_leave_enabled:
+            return
+
+        if self._music_player_is_active(guild.id):
+            print(f"[tts_voice] auto-leave ignorado | player de música ativo | guild={guild.id}")
             return
 
         vc = self._get_voice_client_for_guild(guild)

@@ -1268,6 +1268,14 @@ class TTSAudioMixin:
         if vc is None or not vc.is_connected() or vc.channel is None:
             return True
 
+        router = getattr(getattr(self, "bot", None), "audio_router", None)
+        is_music_active = getattr(router, "is_music_active", None)
+        if callable(is_music_active):
+            with contextlib.suppress(Exception):
+                if is_music_active(guild.id):
+                    self._log_debug(f"[tts_voice] Idle timeout ignorado | player de música ativo | guild={guild.id}")
+                    return False
+
         members = list(getattr(vc.channel, "members", []))
         humans = [m for m in members if not m.bot]
         if humans:

@@ -193,20 +193,20 @@ class Music(commands.Cog):
         if not raw:
             await self._reply(
                 ctx,
-                f"`🎙️` TTS ducking está **sempre ativo**. Volume da música durante TTS: `{int(round(state.duck_volume * 100))}%`.\n"
-                "Use `_duck <5-100>` para ajustar apenas o volume do ducking.",
+                f"`🎙️` Volume da música durante TTS: `{int(round(state.duck_volume * 100))}%`.\n"
+                "Use `_duck <5-100>` para ajustar esse volume.",
             )
             return
         if raw in {"on", "true", "sim", "ativar", "ativo", "off", "false", "nao", "não", "desativar", "desligar"}:
-            await self._reply(ctx, "`🎙️` O TTS ducking é sempre ativo por padrão e não pode ser desativado. Use `_duck <5-100>` para ajustar o volume.")
+            await self._reply(ctx, "`🎙️` Esse comando só ajusta o volume da música durante TTS. Use `_duck <5-100>`.")
             return
         try:
             percent = int(raw.replace("%", ""))
         except Exception:
-            await self._reply(ctx, "Use `_duck <5-100>`. O ducking não tem opção de desativar.")
+            await self._reply(ctx, "Use `_duck <5-100>` para ajustar o volume da música durante TTS.")
             return
         volume = await self.router.set_duck_volume(ctx.guild.id, percent)
-        await self._reply(ctx, f"`🎙️` Ducking continua sempre ativo. Volume da música durante TTS: `{int(round(volume * 100))}%`.")
+        await self._reply(ctx, f"`🎙️` Volume da música durante TTS ajustado para `{int(round(volume * 100))}%`.")
 
     @commands.command(name="shuffle", aliases=["embaralhar"])
     @commands.guild_only()

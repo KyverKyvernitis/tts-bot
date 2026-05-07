@@ -240,6 +240,7 @@ class MusicGuildState:
     current_status: str = "idle"
     skip_requested: bool = False
     now_message: Optional[discord.Message] = None
+    panel_track_key: Optional[str] = None
     history: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_HISTORY_MAXSIZE))
     voice_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     panel_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -333,6 +334,19 @@ class AudioRouter:
             keys.update(self._track_keys(item))
         return keys
 
+    def _panel_key_for_track(self, track: MusicTrack | None) -> str | None:
+        if track is None:
+            return None
+        url = (track.display_url or track.webpage_url or track.original_url or "").strip().lower()
+        if url:
+            return "url:" + url
+        title_key = compact_key(track.title)
+        duration = ""
+        if track.duration is not None:
+            with contextlib.suppress(Exception):
+                duration = str(int(max(0.0, float(track.duration))))
+        return f"title:{title_key}:{duration}" if title_key else None
+
     def ensure_music_worker(self, guild_id: int) -> None:
         state = self.get_state(guild_id)
         if state.worker_task is None or state.worker_task.done():
@@ -396,7 +410,9 @@ class AudioRouter:
         state.current = track
         state.current_status = "resolving"
         state.paused = False
-        await self.update_panel(guild.id, create=True)
+        # Cada música nova ganha um painel novo no fim do chat. Alterações da
+        # mesma música continuam editando esse painel.
+        await self.update_panel(guild.id, create=True, repost=True)
 
         vc = await self._ensure_voice(guild, channel, state=state)
         if vc is None:
@@ -547,7 +563,7 @@ class AudioRouter:
         except RuntimeError:
             pass
 
-    async def update_panel(self, guild_id: int, *, create: bool = True) -> None:
+    async def update_panel(self, guild_id: int, *, create: bool = True, repost: bool = False) -> None:
         state = self.get_state(guild_id)
         if not state.last_text_channel_id:
             return
@@ -561,17 +577,35 @@ class AudioRouter:
         try:
             from .ui import build_player_embeds, MusicPlayerView
 
+            has_player_content = bool(state.current or not state.queue.empty())
             embeds = build_player_embeds(state)
-            view = MusicPlayerView(self, guild_id) if (state.current or not state.queue.empty()) else None
+            view = MusicPlayerView(self, guild_id) if has_player_content else None
+            current_panel_key = self._panel_key_for_track(state.current)
+
             async with state.panel_lock:
-                if state.now_message is not None:
+                should_repost = bool(repost and has_player_content)
+                if should_repost and state.now_message is not None:
+                    old_message = state.now_message
+                    state.now_message = None
+                    with contextlib.suppress(Exception):
+                        await old_message.delete()
+                    # Se não deu para apagar, pelo menos tenta matar os componentes
+                    # antigos para evitar dois painéis controlando o player.
+                    with contextlib.suppress(Exception):
+                        await old_message.edit(view=None)
+
+                if state.now_message is not None and not should_repost:
                     try:
                         await state.now_message.edit(content=None, embeds=embeds, view=view)
+                        state.panel_track_key = current_panel_key
                         return
                     except Exception:
                         state.now_message = None
+                        state.panel_track_key = None
+
                 if create:
                     state.now_message = await channel.send(embeds=embeds, view=view)
+                    state.panel_track_key = current_panel_key
         except Exception:
             logger.debug("[music] falha ao atualizar painel", exc_info=True)
 
