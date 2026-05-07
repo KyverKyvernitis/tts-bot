@@ -550,8 +550,8 @@ class MusicExtractor:
                 )
             if "403" in api_error or "Forbidden" in api_error:
                 raise MusicExtractionError(
-                    "A Spotify API recusou essa playlist. O refresh token precisa ser da conta dona/colaboradora da playlist "
-                    "e ter os escopos playlist-read-private e playlist-read-collaborative.",
+                    "A Spotify API recusou essa playlist. Gere novamente o SPOTIFY_REFRESH_TOKEN com a conta que tem acesso à playlist "
+                    "e com os escopos playlist-read-private, playlist-read-collaborative e user-read-private.",
                     detail=api_error,
                 )
             raise MusicExtractionError(

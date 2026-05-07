@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-SCOPES = "playlist-read-private playlist-read-collaborative"
+SCOPES = "playlist-read-private playlist-read-collaborative user-read-private"
 DEFAULT_REDIRECT_URI = "http://127.0.0.1:8888/callback"
 
 
