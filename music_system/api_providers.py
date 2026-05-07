@@ -535,7 +535,7 @@ class MusicApiProviders:
             for key in ("url", "src"):
                 if value.get(key):
                     return str(value.get(key) or "")
-            for key in ("images", "sources"):
+            for key in ("images", "sources", "coverArt", "albumOfTrack", "album"):
                 found = self._spotify_public_images(value.get(key))
                 if found:
                     return found
@@ -546,25 +546,220 @@ class MusicApiProviders:
                     return found
         return ""
 
+    def _spotify_public_text(self, value: Any, *, preferred_keys: tuple[str, ...] = ("name", "title", "text"), depth: int = 0) -> str:
+        """Extrai texto útil de payloads públicos/GraphQL do Spotify.
+
+        O web player muda bastante o formato. Em alguns payloads `name` vem
+        como string simples; em outros vem dentro de `profile.name`,
+        `data.name`, `transformedLabel`, etc. Mantemos a extração conservadora
+        para não confundir ids/URLs com nomes de música/artista.
+        """
+        if value is None or depth > 7:
+            return ""
+        if isinstance(value, str):
+            clean = html.unescape(value).strip()
+            if not clean:
+                return ""
+            low = clean.lower()
+            if low in {"spotify", "track", "playlist", "album", "music"}:
+                return ""
+            if low.startswith(("spotify:", "http://", "https://")):
+                return ""
+            return clean
+        if isinstance(value, (int, float, bool)):
+            return ""
+        if isinstance(value, list):
+            for item in value:
+                found = self._spotify_public_text(item, preferred_keys=preferred_keys, depth=depth + 1)
+                if found:
+                    return found
+            return ""
+        if isinstance(value, dict):
+            for key in preferred_keys:
+                if key in value:
+                    found = self._spotify_public_text(value.get(key), preferred_keys=preferred_keys, depth=depth + 1)
+                    if found:
+                        return found
+            for key in ("profile", "data", "entity", "item", "content", "label", "transformedLabel"):
+                if key in value:
+                    found = self._spotify_public_text(value.get(key), preferred_keys=preferred_keys, depth=depth + 1)
+                    if found:
+                        return found
+        return ""
+
+    def _spotify_public_duration_any(self, data: dict[str, Any]) -> float | None:
+        for key in (
+            "duration_ms",
+            "durationMs",
+            "duration",
+            "trackDuration",
+            "totalMilliseconds",
+            "milliseconds",
+            "length",
+        ):
+            if key in data:
+                parsed = self._spotify_public_duration(data.get(key))
+                if parsed:
+                    return parsed
+        for key in ("duration", "trackDuration", "audio", "track"):
+            nested = data.get(key)
+            if isinstance(nested, dict):
+                parsed = self._spotify_public_duration_any(nested)
+                if parsed:
+                    return parsed
+        return None
+
+    def _spotify_public_external_url(self, data: dict[str, Any], *, fallback_url: str = "") -> str:
+        for key in ("external_urls", "externalUrls", "sharingInfo", "shareUrl", "uri"):
+            value = data.get(key)
+            if isinstance(value, str):
+                if value.startswith("http"):
+                    return value
+                if value.startswith("spotify:track:"):
+                    return f"https://open.spotify.com/track/{value.split(':')[-1]}"
+            elif isinstance(value, dict):
+                for sub_key in ("spotify", "url", "shareUrl"):
+                    raw = str(value.get(sub_key) or "").strip()
+                    if raw.startswith("http"):
+                        return raw
+        item_id = str(data.get("id") or data.get("trackId") or data.get("gid") or "").strip()
+        uri = str(data.get("uri") or data.get("playableUri") or "")
+        if uri.startswith("spotify:track:"):
+            item_id = uri.split(":")[-1]
+        if item_id and re.fullmatch(r"[A-Za-z0-9]{16,32}", item_id):
+            return f"https://open.spotify.com/track/{item_id}"
+        return fallback_url
+
+    def _spotify_track_id_from_candidate(self, candidate: ApiTrackCandidate) -> str:
+        for raw in (candidate.webpage_url, candidate.extra.get("uri", "") if isinstance(candidate.extra, dict) else ""):
+            text = str(raw or "")
+            if "open.spotify.com/track/" in text:
+                kind, item_id = self._spotify_resource(text)
+                if kind == "track" and item_id:
+                    return item_id
+            if text.startswith("spotify:track:"):
+                return text.split(":")[-1]
+        return ""
+
+    def _spotify_candidate_metadata_ok(self, candidate: ApiTrackCandidate) -> bool:
+        return bool((candidate.title or "").strip() and (candidate.artist or "").strip())
+
+    async def _spotify_enrich_candidate(self, candidate: ApiTrackCandidate) -> ApiTrackCandidate:
+        """Completa artista/duração de um item público do Spotify.
+
+        O fallback HTML às vezes só encontra o título. Se houver track id/URL,
+        usa a Web API de faixa, que normalmente funciona mesmo quando playlist
+        pública retorna 403 para apps novos. Se não houver id, tenta uma busca
+        curta no Spotify e aceita só um título bem parecido.
+        """
+        if self._spotify_candidate_metadata_ok(candidate) and candidate.duration:
+            return candidate
+        if not (self.spotify_client_id and self.spotify_client_secret):
+            return candidate
+        token = ""
+        try:
+            token = await self.spotify_token()
+        except Exception:
+            logger.debug("[music-api] token Spotify para enrich falhou", exc_info=True)
+        if not token:
+            return candidate
+
+        track_id = self._spotify_track_id_from_candidate(candidate)
+        if track_id:
+            try:
+                data = await self._to_thread_json(
+                    f"https://api.spotify.com/v1/tracks/{quote(track_id)}?market={quote(self.spotify_market)}",
+                    headers=self._spotify_headers(token),
+                )
+                enriched = self._spotify_candidate(data, url=candidate.webpage_url)
+                if enriched:
+                    enriched.source = candidate.source or "Spotify público"
+                    enriched.score = max(candidate.score, enriched.score)
+                    return enriched
+            except Exception:
+                logger.debug("[music-api] enrich Spotify por track id falhou | id=%s", track_id, exc_info=True)
+
+        title_norm = normalize_text(candidate.title)
+        if not title_norm:
+            return candidate
+        try:
+            params = urlencode({"q": candidate.title, "type": "track", "limit": 5, "market": self.spotify_market})
+            data = await self._to_thread_json(f"https://api.spotify.com/v1/search?{params}", headers=self._spotify_headers(token))
+            items = (((data.get("tracks") or {}).get("items")) or [])
+            best: ApiTrackCandidate | None = None
+            best_score = -999.0
+            for item in items:
+                found = self._spotify_candidate(item)
+                if not found:
+                    continue
+                found_norm = normalize_text(found.title)
+                if not found_norm:
+                    continue
+                # Exige título muito próximo quando não há artista para comparar.
+                title_words = set(title_norm.split())
+                found_words = set(found_norm.split())
+                overlap = len(title_words & found_words) / max(1, len(title_words))
+                score = overlap * 100
+                if found_norm == title_norm:
+                    score += 60
+                if candidate.duration and found.duration:
+                    diff = abs(float(candidate.duration) - float(found.duration))
+                    score += 30 if diff <= 5 else 15 if diff <= 15 else -30
+                if score > best_score:
+                    best_score = score
+                    best = found
+            if best and best_score >= 95:
+                best.source = candidate.source or "Spotify público"
+                return best
+        except Exception:
+            logger.debug("[music-api] enrich Spotify por search falhou | title=%r", candidate.title, exc_info=True)
+        return candidate
+
+    async def _spotify_enrich_candidates(self, candidates: list[ApiTrackCandidate], *, limit: int) -> list[ApiTrackCandidate]:
+        if not candidates:
+            return []
+        enriched: list[ApiTrackCandidate] = []
+        # Serial para não abrir rajada de requests quando playlist pública vier grande.
+        for candidate in candidates[:limit]:
+            item = await self._spotify_enrich_candidate(candidate)
+            if self._spotify_candidate_metadata_ok(item):
+                enriched.append(item)
+            else:
+                logger.debug(
+                    "[music-api] faixa Spotify pública ignorada por metadata fraca | title=%r artist=%r url=%r",
+                    item.title,
+                    item.artist,
+                    item.webpage_url,
+                )
+        return self.rank_and_dedupe(enriched, query=" ".join(c.title for c in enriched[:5]), limit=limit) if enriched else []
+
     def _spotify_public_artist_names(self, data: dict[str, Any]) -> str:
-        def names_from(value: Any) -> list[str]:
+        def names_from(value: Any, depth: int = 0) -> list[str]:
+            if value is None or depth > 8:
+                return []
             names: list[str] = []
             if isinstance(value, str):
-                clean = value.strip()
-                if clean and clean.lower() not in {"spotify"}:
+                clean = html.unescape(value).strip()
+                if clean and clean.lower() not in {"spotify", "various artists"} and not clean.startswith(("spotify:", "http")):
                     names.append(clean)
             elif isinstance(value, dict):
-                for key in ("name", "title", "text"):
-                    clean = str(value.get(key) or "").strip()
+                # Formatos modernos do web player: {items:[{profile:{name}}]},
+                # {profile:{name}}, {name}, {displayName}, etc.
+                for key in ("name", "displayName", "title", "text"):
+                    clean = self._spotify_public_text(value.get(key))
                     if clean:
                         names.append(clean)
                         break
+                for key in ("profile", "data", "artist", "artists", "items", "nodes", "edges"):
+                    nested = value.get(key)
+                    if nested is not None:
+                        names.extend(names_from(nested, depth + 1))
             elif isinstance(value, list):
                 for item in value:
-                    names.extend(names_from(item))
+                    names.extend(names_from(item, depth + 1))
             return names
 
-        for key in ("artists", "artist", "byArtist", "creator", "authors", "owner"):
+        for key in ("artists", "artist", "byArtist", "firstArtist", "creator", "authors", "owner"):
             result = names_from(data.get(key))
             if result:
                 # Remove duplicatas mantendo a ordem.
@@ -572,7 +767,7 @@ class MusicApiProviders:
                 unique: list[str] = []
                 for name in result:
                     marker = normalize_text(name)
-                    if marker and marker not in seen:
+                    if marker and marker not in seen and marker not in {"spotify", "track", "playlist"}:
                         seen.add(marker)
                         unique.append(name)
                 if unique:
@@ -582,39 +777,41 @@ class MusicApiProviders:
     def _spotify_public_candidate_from_obj(self, data: dict[str, Any], *, url: str = "") -> ApiTrackCandidate | None:
         if not isinstance(data, dict):
             return None
-        uri = str(data.get("uri") or data.get("playableUri") or "")
-        item_type = str(data.get("type") or data.get("__typename") or data.get("contentType") or "").lower()
+        if isinstance(data.get("track"), dict):
+            nested = self._spotify_public_candidate_from_obj(data["track"], url=url)
+            if nested:
+                return nested
+
+        uri = str(data.get("uri") or data.get("playableUri") or data.get("playUri") or "")
+        item_type = str(data.get("type") or data.get("__typename") or data.get("contentType") or data.get("typename") or "").lower()
+        has_artistish = bool(
+            data.get("artists")
+            or data.get("artist")
+            or data.get("byArtist")
+            or data.get("firstArtist")
+            or (isinstance(data.get("albumOfTrack"), dict) and data.get("albumOfTrack"))
+        )
+        duration = self._spotify_public_duration_any(data)
         is_trackish = (
             uri.startswith("spotify:track:")
-            or item_type in {"track", "trackresponsewrapper", "playlisttrack"}
-            or bool(data.get("duration_ms") or data.get("durationMs") or data.get("duration")) and bool(data.get("artists") or data.get("artist") or data.get("byArtist"))
+            or item_type in {"track", "trackresponsewrapper", "playlisttrack", "trackentity", "trackv2"}
+            or (bool(duration) and has_artistish)
         )
         if not is_trackish:
             return None
 
-        title = str(data.get("name") or data.get("title") or data.get("trackName") or "").strip()
-        if not title and isinstance(data.get("track"), dict):
-            return self._spotify_public_candidate_from_obj(data["track"], url=url)
+        title = self._spotify_public_text(data.get("name") or data.get("title") or data.get("trackName"))
+        if not title:
+            title = self._spotify_public_text(data, preferred_keys=("name", "title", "trackName", "text"))
         if not title:
             return None
+
         artist = self._spotify_public_artist_names(data)
-        album_data = data.get("album") if isinstance(data.get("album"), dict) else {}
-        album = str((album_data or {}).get("name") or (album_data or {}).get("title") or "")
-        images = data.get("images") or data.get("image") or data.get("coverArt") or data.get("albumOfTrack") or album_data
+        album_source = data.get("album") if isinstance(data.get("album"), dict) else data.get("albumOfTrack") if isinstance(data.get("albumOfTrack"), dict) else {}
+        album = self._spotify_public_text(album_source, preferred_keys=("name", "title")) if isinstance(album_source, dict) else ""
+        images = data.get("images") or data.get("image") or data.get("coverArt") or data.get("albumOfTrack") or album_source
         thumbnail = self._spotify_public_images(images)
-        duration = self._spotify_public_duration(data.get("duration_ms") or data.get("durationMs") or data.get("duration"))
-        external_urls = data.get("external_urls") or data.get("externalUrls") or {}
-        webpage_url = ""
-        if isinstance(external_urls, dict):
-            webpage_url = str(external_urls.get("spotify") or external_urls.get("url") or "")
-        if not webpage_url:
-            item_id = str(data.get("id") or data.get("trackId") or "").strip()
-            if uri.startswith("spotify:track:"):
-                item_id = uri.split(":")[-1]
-            if item_id:
-                webpage_url = f"https://open.spotify.com/track/{item_id}"
-        if not webpage_url:
-            webpage_url = url
+        webpage_url = self._spotify_public_external_url(data, fallback_url=url)
         isrc = ""
         external_ids = data.get("external_ids") or data.get("externalIds") or {}
         if isinstance(external_ids, dict):
@@ -631,6 +828,7 @@ class MusicApiProviders:
             isrc=isrc,
             query=" ".join(part for part in (artist, title, "official audio") if part),
             score=30,
+            extra={"uri": uri} if uri else {},
         )
 
     def _spotify_public_candidates_from_json(self, data: Any, *, url: str, limit: int) -> list[ApiTrackCandidate]:
@@ -711,13 +909,18 @@ class MusicApiProviders:
                 if len(tracks) >= limit:
                     break
             if tracks:
-                return ApiTrackBatch(
-                    tracks=self.rank_and_dedupe(tracks, query=last_title or original_url, limit=limit),
-                    title=last_title or (tracks[0].album if kind == "album" else "Spotify"),
-                    is_playlist=kind in {"album", "playlist"} or len(tracks) > 1,
-                    truncated=len(tracks) >= limit,
-                    source="Spotify público",
+                tracks = await self._spotify_enrich_candidates(
+                    self.rank_and_dedupe(tracks, query=last_title or original_url, limit=limit),
+                    limit=limit,
                 )
+                if tracks:
+                    return ApiTrackBatch(
+                        tracks=tracks,
+                        title=last_title or (tracks[0].album if kind == "album" else "Spotify"),
+                        is_playlist=kind in {"album", "playlist"} or len(tracks) > 1,
+                        truncated=len(tracks) >= limit,
+                        source="Spotify público",
+                    )
         return None
 
     async def spotify_public_batch_from_url(self, url: str, *, limit: int = 25) -> ApiTrackBatch | None:
@@ -755,7 +958,9 @@ class MusicApiProviders:
                             tracks.append(candidate)
                     total = int(((data.get("tracks") or {}).get("total")) or len(tracks))
                     if tracks:
-                        return ApiTrackBatch(tracks=tracks, title=album_title, is_playlist=True, truncated=total > len(tracks), source="Spotify público")
+                        tracks = await self._spotify_enrich_candidates(tracks, limit=limit)
+                        if tracks:
+                            return ApiTrackBatch(tracks=tracks, title=album_title, is_playlist=True, truncated=total > len(tracks), source="Spotify público")
             elif kind == "playlist":
                 tracks: list[ApiTrackCandidate] = []
                 offset = 0
@@ -799,7 +1004,9 @@ class MusicApiProviders:
                         break
                     offset += len(items)
                 if tracks:
-                    return ApiTrackBatch(tracks=tracks, title=playlist_title, is_playlist=True, truncated=bool((total or 0) and total > len(tracks)), source="Spotify público")
+                    tracks = await self._spotify_enrich_candidates(tracks, limit=limit)
+                    if tracks:
+                        return ApiTrackBatch(tracks=tracks, title=playlist_title, is_playlist=True, truncated=bool((total or 0) and total > len(tracks)), source="Spotify público")
         except Exception as exc:
             last_error = exc
             logger.debug("[music-api] fallback público Spotify API falhou | kind=%s id=%s", kind, item_id, exc_info=True)

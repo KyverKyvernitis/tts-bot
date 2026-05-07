@@ -529,10 +529,12 @@ class MusicExtractor:
             tracks = [
                 self._metadata_track_from_candidate(candidate, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
                 for candidate in api_batch.tracks[: self.max_playlist_items]
-                if self._metadata_is_safe_for_autosearch(candidate) or bool(api_batch.is_playlist)
+                if self._metadata_is_safe_for_autosearch(candidate)
             ]
             tracks = self._dedupe_tracks(tracks)
             if not tracks:
+                if api_batch.is_playlist:
+                    raise MusicExtractionError("Consegui ler a playlist, mas nenhuma música veio com artista/duração confiável o suficiente para tocar com segurança.")
                 raise MusicExtractionError("Li esse link, mas nenhum item trouxe artista/duração confiável o suficiente.")
             return ExtractedBatch(
                 tracks=tracks,
