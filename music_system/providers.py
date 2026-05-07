@@ -190,8 +190,13 @@ def spotify_oembed_url(url: str) -> str:
     return "https://open.spotify.com/oembed?url=" + quote(url, safe="")
 
 
-def fetch_metadata_title(url: str, *, timeout: float = 6.0) -> str:
-    """Busca título público sem API key. Usado só como fallback."""
+def fetch_public_metadata(url: str, *, timeout: float = 6.0) -> dict[str, str]:
+    """Busca metadata pública leve sem API key.
+
+    Retorna apenas dados confiáveis o suficiente para montar uma busca. Quando
+    uma plataforma só retorna título sem artista/duração, o extractor bloqueia
+    a reprodução automática para não tocar resultado aleatório.
+    """
     candidates = []
     if _SPOTIFY_RE.search(url or ""):
         candidates.append((spotify_oembed_url(url), True))
@@ -207,29 +212,57 @@ def fetch_metadata_title(url: str, *, timeout: float = 6.0) -> str:
                 },
             )
             with urlopen(request, timeout=timeout) as response:  # noqa: S310 - URL do usuário, usado só para metadata pública
-                raw = response.read(256_000)
+                raw = response.read(384_000)
                 content = raw.decode("utf-8", errors="ignore")
         except Exception:
-            logger.debug("metadata title fetch failed for %s", candidate_url, exc_info=True)
+            logger.debug("metadata public fetch failed for %s", candidate_url, exc_info=True)
             continue
 
         if is_json:
             try:
                 data = json.loads(content)
                 title = clean_metadata_title(str(data.get("title") or ""))
+                artist = clean_metadata_title(str(data.get("author_name") or data.get("provider_name") or ""))
+                thumbnail = str(data.get("thumbnail_url") or "").strip()
                 if title:
-                    return title
+                    # provider_name=Spotify não é artista. Mantém vazio nesses casos.
+                    if artist.lower() in {"spotify", "deezer", "apple music", "soundcloud"}:
+                        artist = ""
+                    return {"title": title, "artist": artist, "thumbnail": thumbnail}
             except Exception:
-                logger.debug("metadata json parse failed for %s", candidate_url, exc_info=True)
+                logger.debug("metadata public json parse failed for %s", candidate_url, exc_info=True)
 
+        title = ""
         for pattern in _METADATA_TITLE_PATTERNS:
             match = pattern.search(content)
             if not match:
                 continue
             title = clean_metadata_title(match.group(1))
             if title:
-                return title
-    return ""
+                break
+        artist = ""
+        artist_patterns = (
+            re.compile(r'<meta[^>]+property=["\']music:musician["\'][^>]+content=["\']([^"\']+)', re.IGNORECASE),
+            re.compile(r'<meta[^>]+name=["\']music:artist["\'][^>]+content=["\']([^"\']+)', re.IGNORECASE),
+            re.compile(r'<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']+)', re.IGNORECASE),
+        )
+        for pattern in artist_patterns:
+            match = pattern.search(content)
+            if match:
+                artist = clean_metadata_title(match.group(1))
+                break
+        thumbnail = ""
+        thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', content, re.IGNORECASE)
+        if thumb_match:
+            thumbnail = html.unescape(thumb_match.group(1)).strip()
+        if title:
+            return {"title": title, "artist": artist, "thumbnail": thumbnail}
+    return {}
+
+
+def fetch_metadata_title(url: str, *, timeout: float = 6.0) -> str:
+    """Busca título público sem API key. Usado só como fallback."""
+    return fetch_public_metadata(url, timeout=timeout).get("title", "")
 
 
 def slug_search_terms(url: str) -> str:

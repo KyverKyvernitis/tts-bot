@@ -40,6 +40,9 @@ MUSIC_PREFETCH_NEXT = bool(getattr(config, "MUSIC_PREFETCH_NEXT", True))
 MUSIC_DUCK_FADE_DOWN_MS = max(20.0, float(getattr(config, "MUSIC_DUCK_FADE_DOWN_MS", 150)))
 MUSIC_DUCK_FADE_UP_MS = max(20.0, float(getattr(config, "MUSIC_DUCK_FADE_UP_MS", 550)))
 MUSIC_LIMITER_ENABLED = bool(getattr(config, "MUSIC_LIMITER_ENABLED", True))
+MUSIC_MAX_GLOBAL_PREFETCH = max(0, int(getattr(config, "MUSIC_MAX_GLOBAL_PREFETCH", 1)))
+MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS = max(0, int(getattr(config, "MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS", 2)))
+MUSIC_PANEL_UPDATE_THROTTLE_SECONDS = max(0.05, float(getattr(config, "MUSIC_PANEL_UPDATE_THROTTLE_SECONDS", 2.0)))
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
 PCM_FRAME_MS = 20.0
@@ -302,6 +305,9 @@ class MusicGuildState:
     idle_actor_name: str = ""
     idle_channel_name: str = ""
     internal_voice_disconnect_until: float = 0.0
+    panel_update_task: Optional[asyncio.Task] = None
+    panel_update_create: bool = True
+    panel_update_requested_at: float = 0.0
 
     def queue_size(self) -> int:
         return self.queue.qsize()
@@ -322,6 +328,7 @@ class AudioRouter:
             timeout_seconds=MUSIC_YTDLP_TIMEOUT_SECONDS,
         )
         self._states: dict[int, MusicGuildState] = {}
+        self._global_prefetch_active = 0
 
     def get_state(self, guild_id: int) -> MusicGuildState:
         state = self._states.get(int(guild_id))
@@ -602,8 +609,21 @@ class AudioRouter:
         state.next_resolve_task = None
         state.next_resolve_key = ""
 
+    def _active_player_count(self) -> int:
+        total = 0
+        for st in self._states.values():
+            if st.current or st.current_source or st.current_status in {"resolving", "starting", "playing", "paused"}:
+                total += 1
+        return total
+
     def _start_prefetch_next(self, guild_id: int, state: MusicGuildState) -> None:
         if not MUSIC_PREFETCH_NEXT or state.queue.empty():
+            return
+        if MUSIC_MAX_GLOBAL_PREFETCH <= 0:
+            return
+        if MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS and self._active_player_count() > MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS:
+            return
+        if self._global_prefetch_active >= MUSIC_MAX_GLOBAL_PREFETCH:
             return
         try:
             next_track = list(getattr(state.queue, "_queue", []))[0]
@@ -619,13 +639,20 @@ class AudioRouter:
             task.cancel()
 
         async def _prefetch() -> None:
+            self._global_prefetch_active += 1
             try:
+                # Baixa prioridade: dá tempo ao player atual e cancela se a carga subir.
+                await asyncio.sleep(0.75)
+                if MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS and self._active_player_count() > MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS:
+                    return
                 await self.extractor.resolve_stream(next_track, force=False)
                 logger.debug("[music] próxima música pré-resolvida | guild=%s track=%r", guild_id, next_track.title)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.debug("[music] pré-resolução da próxima música falhou | guild=%s track=%r", guild_id, getattr(next_track, "title", ""), exc_info=True)
+            finally:
+                self._global_prefetch_active = max(0, self._global_prefetch_active - 1)
 
         state.next_resolve_key = key
         state.next_resolve_task = asyncio.create_task(_prefetch())
@@ -1017,12 +1044,26 @@ class AudioRouter:
             await channel.send(content, silent=True)
 
     def _schedule_panel_update(self, guild_id: int, *, create: bool = True) -> None:
+        state = self.get_state(guild_id)
+        state.panel_update_create = bool(state.panel_update_create or create)
+        if state.panel_update_task is not None and not state.panel_update_task.done():
+            return
+
         async def _runner() -> None:
-            await asyncio.sleep(0.05)
-            await self.update_panel(guild_id, create=create)
+            try:
+                await asyncio.sleep(MUSIC_PANEL_UPDATE_THROTTLE_SECONDS)
+                st = self.get_state(guild_id)
+                create_flag = bool(st.panel_update_create)
+                st.panel_update_create = False
+                await self.update_panel(guild_id, create=create_flag)
+            finally:
+                st = self.get_state(guild_id)
+                if st.panel_update_task is task:
+                    st.panel_update_task = None
 
         try:
-            asyncio.create_task(_runner())
+            task = asyncio.create_task(_runner())
+            state.panel_update_task = task
         except RuntimeError:
             pass
 

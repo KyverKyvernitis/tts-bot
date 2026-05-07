@@ -19,6 +19,7 @@ from .providers import (
     clean_metadata_title,
     describe_url,
     fetch_metadata_title,
+    fetch_public_metadata,
     looks_like_url,
     slug_search_terms,
     unique_queries,
@@ -36,6 +37,48 @@ MUSIC_METADATA_CACHE_TTL_SECONDS = max(0, int(getattr(config, "MUSIC_METADATA_CA
 MUSIC_STREAM_CACHE_TTL_SECONDS = max(30, int(getattr(config, "MUSIC_STREAM_CACHE_TTL_SECONDS", 480)))
 MUSIC_CACHE_MAX_ITEMS = max(20, int(getattr(config, "MUSIC_CACHE_MAX_ITEMS", 160)))
 MUSIC_YTDLP_FORMAT = str(getattr(config, "MUSIC_YTDLP_FORMAT", "") or "bestaudio[acodec=opus][asr=48000]/bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/best").strip()
+MUSIC_MIN_LINK_METADATA_CONFIDENCE = str(getattr(config, "MUSIC_MIN_LINK_METADATA_CONFIDENCE", "medium") or "medium").strip().lower()
+MUSIC_REJECT_WEAK_LINK_MATCHES = bool(getattr(config, "MUSIC_REJECT_WEAK_LINK_MATCHES", True))
+MUSIC_MAX_DURATION_MISMATCH_SECONDS = max(0.0, float(getattr(config, "MUSIC_MAX_DURATION_MISMATCH_SECONDS", 45.0)))
+MUSIC_MAX_DURATION_MISMATCH_RATIO = max(0.0, float(getattr(config, "MUSIC_MAX_DURATION_MISMATCH_RATIO", 0.25)))
+MUSIC_MAX_GLOBAL_EXTRACTORS = max(1, int(getattr(config, "MUSIC_MAX_GLOBAL_EXTRACTORS", 1)))
+_GLOBAL_YTDLP_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def _metadata_confidence_rank(value: str) -> int:
+    value = (value or "").strip().lower()
+    if value == "high":
+        return 3
+    if value == "medium":
+        return 2
+    if value == "low":
+        return 1
+    return 0
+
+
+def _metadata_confidence(candidate: ApiTrackCandidate | None) -> str:
+    if candidate is None or not (candidate.title or "").strip():
+        return "none"
+    has_artist = bool((candidate.artist or "").strip())
+    has_duration = candidate.duration is not None and float(candidate.duration or 0) > 0
+    if has_artist and has_duration:
+        return "high"
+    if has_artist:
+        return "medium"
+    return "low"
+
+
+def _duration_tolerance(expected: float | None) -> float:
+    if not expected or expected <= 0:
+        return 0.0
+    return max(MUSIC_MAX_DURATION_MISMATCH_SECONDS, float(expected) * MUSIC_MAX_DURATION_MISMATCH_RATIO)
+
+
+def _get_global_ytdlp_semaphore() -> asyncio.Semaphore:
+    global _GLOBAL_YTDLP_SEMAPHORE
+    if _GLOBAL_YTDLP_SEMAPHORE is None:
+        _GLOBAL_YTDLP_SEMAPHORE = asyncio.Semaphore(MUSIC_MAX_GLOBAL_EXTRACTORS)
+    return _GLOBAL_YTDLP_SEMAPHORE
 
 
 class MusicExtractor:
@@ -174,20 +217,123 @@ class MusicExtractor:
                 score += 18
             elif diff <= 10:
                 score += 10
-            elif diff > 25:
-                score -= 18
+            elif diff > _duration_tolerance(float(meta.duration)):
+                score -= 40
         return score
 
+    def _metadata_is_safe_for_autosearch(self, meta: ApiTrackCandidate | None) -> bool:
+        if not MUSIC_REJECT_WEAK_LINK_MATCHES:
+            return bool(meta and meta.title)
+        return _metadata_confidence_rank(_metadata_confidence(meta)) >= _metadata_confidence_rank(MUSIC_MIN_LINK_METADATA_CONFIDENCE)
+
+    def _metadata_error_message(self, platform: str, meta: ApiTrackCandidate | None = None) -> str:
+        title = (getattr(meta, "title", "") or "").strip()
+        platform_label = {
+            "spotify": "Spotify",
+            "deezer": "Deezer",
+            "apple": "Apple Music",
+            "soundcloud": "SoundCloud",
+        }.get((platform or "").lower(), "link")
+        if title:
+            return (
+                f"Não consegui confirmar essa faixa do {platform_label}. O link só retornou `{title}` sem artista/duração confiável. "
+                "Para evitar tocar uma música errada, não adicionei nada à fila."
+            )
+        return (
+            f"Não consegui ler artista/duração confiável desse link do {platform_label}. "
+            "Tente configurar a API da plataforma ou pesquise por `nome da música artista`."
+        )
+
+    def _candidate_matches_metadata(self, candidate: ApiTrackCandidate, meta: ApiTrackCandidate) -> bool:
+        if not (meta.title or "").strip():
+            return False
+        title_words = set(normalize_text(meta.title).split())
+        artist_words = set(normalize_text(meta.artist).split())
+        combined_words = set(normalize_text(f"{candidate.artist} {candidate.title}").split())
+
+        if title_words:
+            title_hits = len(title_words & combined_words) / max(1, len(title_words))
+            if title_hits < 0.65:
+                return False
+
+        if artist_words:
+            artist_hits = len(artist_words & combined_words) / max(1, len(artist_words))
+            if artist_hits < 0.45:
+                return False
+        elif MUSIC_REJECT_WEAK_LINK_MATCHES:
+            return False
+
+        if meta.duration and candidate.duration:
+            diff = abs(float(meta.duration) - float(candidate.duration))
+            if diff > _duration_tolerance(float(meta.duration)):
+                return False
+        elif not meta.duration and candidate.duration and candidate.duration > 600:
+            title_norm = normalize_text(meta.title)
+            if not any(word in title_norm for word in ("mix", "live", "extended", "set", "podcast")):
+                return False
+
+        wanted_query = normalize_text(f"{meta.artist} {meta.title}")
+        if is_bad_match_title(candidate.title, query=wanted_query):
+            return False
+        return True
+
+    async def _ytdlp_candidates_for_metadata(self, query: str, *, limit: int, requester_id: int, requester_name: str, original_url: str) -> list[ApiTrackCandidate]:
+        candidates: list[ApiTrackCandidate] = []
+        for flat in (True, False):
+            try:
+                info = await self._run_extract(f"ytsearch{max(1, min(8, int(limit)))}:{query}", extract_flat=flat, playlist=True)
+            except Exception:
+                logger.debug("[music] busca validada via yt-dlp falhou | query=%r flat=%s", query, flat, exc_info=True)
+                continue
+            for entry in (info.get("entries") or []):
+                if not entry:
+                    continue
+                track = self._track_from_info(entry, requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
+                if not (track.webpage_url or track.stream_url):
+                    continue
+                candidates.append(ApiTrackCandidate(
+                    title=track.title,
+                    artist=track.uploader,
+                    duration=track.duration,
+                    thumbnail=track.thumbnail,
+                    webpage_url=track.webpage_url or track.stream_url,
+                    source=track.source or "yt-dlp",
+                    provider="youtube" if "youtu" in (track.webpage_url or "") or "youtube" in (track.extractor or "").lower() else "yt-dlp",
+                    query=query,
+                    score=20 + title_quality_score(track.title, query=query, channel=track.uploader),
+                ))
+            if candidates:
+                break
+        return candidates
+
     async def _search_one_for_metadata(self, meta: ApiTrackCandidate, *, requester_id: int, requester_name: str = "", original_url: str = "") -> MusicTrack:
+        if not self._metadata_is_safe_for_autosearch(meta):
+            raise MusicExtractionError(self._metadata_error_message("link", meta))
         query = " ".join(part for part in (meta.artist, meta.title, "official audio") if part).strip()
         if not query:
             raise MusicExtractionError("Metadata vazia.")
-        candidates = await self.api.search(query, limit=max(5, self.search_results), prefer_youtube=True)
+
+        candidates: list[ApiTrackCandidate] = []
+        try:
+            candidates.extend(await self.api.search(query, limit=max(5, self.search_results), prefer_youtube=True))
+        except Exception:
+            logger.debug("[music] busca API validada falhou | query=%r", query, exc_info=True)
+
         playable = [candidate for candidate in candidates if self._candidate_is_playable_entry(candidate)]
-        if not playable:
-            return await self.search_one(query, requester_id=requester_id, requester_name=requester_name, original_url=original_url)
-        playable.sort(key=lambda candidate: self._score_candidate_against_metadata(candidate, meta), reverse=True)
-        track = self._track_from_api_candidate(playable[0], requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
+        valid = [candidate for candidate in playable if self._candidate_matches_metadata(candidate, meta)]
+        if not valid:
+            valid = [candidate for candidate in await self._ytdlp_candidates_for_metadata(
+                query,
+                limit=max(5, self.search_results),
+                requester_id=requester_id,
+                requester_name=requester_name,
+                original_url=original_url or query,
+            ) if self._candidate_matches_metadata(candidate, meta)]
+        if not valid:
+            raise MusicExtractionError("Encontrei resultados parecidos, mas nenhum confirmou essa música. Não adicionei nada para evitar tocar uma versão errada.")
+
+        valid.sort(key=lambda candidate: self._score_candidate_against_metadata(candidate, meta), reverse=True)
+        track = self._track_from_api_candidate(valid[0], requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
         track.title = self._prefer_clean_title(track.title, meta)
         track.duration = meta.duration or track.duration
         track.thumbnail = meta.thumbnail or track.thumbnail
@@ -368,8 +514,8 @@ class MusicExtractor:
         """Lê links Spotify/Deezer/Apple como metadata oficial.
 
         Faixa única retorna 1 item. Playlist/álbum retorna vários itens leves e
-        deixa a resolução do stream para o momento da reprodução, evitando _play
-        lento e resultados duplicados/errados.
+        deixa a resolução do stream para o momento da reprodução. Se a metadata
+        do link for fraca demais, o bot recusa em vez de tocar uma música aleatória.
         """
         api_batch: ApiTrackBatch | None = None
         try:
@@ -381,10 +527,11 @@ class MusicExtractor:
             tracks = [
                 self._metadata_track_from_candidate(candidate, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
                 for candidate in api_batch.tracks[: self.max_playlist_items]
+                if self._metadata_is_safe_for_autosearch(candidate) or bool(api_batch.is_playlist)
             ]
             tracks = self._dedupe_tracks(tracks)
             if not tracks:
-                raise MusicExtractionError("Li esse link, mas nenhum item válido foi encontrado.")
+                raise MusicExtractionError("Li esse link, mas nenhum item trouxe artista/duração confiável o suficiente.")
             return ExtractedBatch(
                 tracks=tracks,
                 query=profile.raw,
@@ -398,42 +545,55 @@ class MusicExtractor:
                 "Não consegui ler essa playlist/álbum. Configure a API da plataforma ou envie uma pesquisa/link de música única.",
             )
 
-        # Fallback de faixa única: usa o título público/oEmbed e pesquisa uma fonte tocável.
-        queries: list[str] = []
-        api_meta: ApiTrackCandidate | None = None
+        # Fallback de faixa única: tenta metadata pública/oEmbed. Se vier só o
+        # título, não pesquisa automaticamente para evitar resultados aleatórios.
+        public_meta: ApiTrackCandidate | None = None
+        try:
+            raw_meta = await asyncio.wait_for(
+                asyncio.to_thread(fetch_public_metadata, profile.canonical, timeout=min(6.0, self.timeout_seconds)),
+                timeout=min(8.0, self.timeout_seconds + 1.0),
+            )
+            if raw_meta.get("title"):
+                title = raw_meta.get("title", "")
+                artist = raw_meta.get("artist", "")
+                # Se o título público vier no formato "Artista - Música", usa isso
+                # como metadata média mesmo sem API oficial.
+                if not artist and " - " in title:
+                    left, right = title.split(" - ", 1)
+                    if left.strip() and right.strip():
+                        artist, title = left.strip(), right.strip()
+                public_meta = ApiTrackCandidate(
+                    title=title,
+                    artist=artist,
+                    thumbnail=raw_meta.get("thumbnail", ""),
+                    webpage_url=profile.raw,
+                    source=f"{profile.platform or 'link'} metadata pública",
+                    provider=profile.platform or "metadata",
+                    query=" ".join(part for part in (artist, title, "official audio") if part),
+                    score=25,
+                )
+        except Exception:
+            logger.debug("[music] metadata pública falhou | url=%s", profile.raw, exc_info=True)
 
+        if public_meta is not None:
+            if not self._metadata_is_safe_for_autosearch(public_meta):
+                raise MusicExtractionError(self._metadata_error_message(profile.platform, public_meta))
+            track = self._metadata_track_from_candidate(public_meta, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
+            return ExtractedBatch(tracks=[track], query=public_meta.search_query, is_playlist=False)
+
+        # Última tentativa: metadata API unitária, se alguma integração conseguir responder.
+        api_meta: ApiTrackCandidate | None = None
         try:
             api_meta = await self.api.metadata_from_url(profile.canonical)
-            if api_meta:
-                queries.append(api_meta.search_query)
-                if api_meta.isrc:
-                    queries.append(f"{api_meta.isrc} {api_meta.artist} {api_meta.title}")
-                queries.append(f"{api_meta.artist} {api_meta.title} official audio")
         except Exception:
-            logger.debug("[music] metadata API falhou | url=%s", profile.raw, exc_info=True)
+            logger.debug("[music] metadata API unitária falhou | url=%s", profile.raw, exc_info=True)
+        if api_meta is not None:
+            if not self._metadata_is_safe_for_autosearch(api_meta):
+                raise MusicExtractionError(self._metadata_error_message(profile.platform, api_meta))
+            track = self._metadata_track_from_candidate(api_meta, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
+            return ExtractedBatch(tracks=[track], query=api_meta.search_query, is_playlist=False)
 
-        title = await self._metadata_title(profile.canonical)
-        queries.append(title)
-        queries.append(slug_search_terms(profile.canonical))
-
-        if api_meta:
-            try:
-                track = self._metadata_track_from_candidate(api_meta, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
-                return ExtractedBatch(tracks=[track], query=api_meta.search_query, is_playlist=False)
-            except Exception:
-                logger.debug("[music] metadata track build falhou | url=%s", profile.raw, exc_info=True)
-
-        for query in unique_queries(*queries):
-            try:
-                track = await self.search_one(query, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
-                track.original_url = profile.raw
-                return ExtractedBatch(tracks=[track], query=query, is_playlist=False)
-            except Exception:
-                logger.debug("[music] fallback metadata-only falhou | query=%r url=%s", query, profile.raw, exc_info=True)
-
-        raise MusicExtractionError(
-            "Não consegui ler o nome/artista desse link. Tente configurar a API da plataforma ou pesquisar por `nome da música artista`.",
-        )
+        raise MusicExtractionError(self._metadata_error_message(profile.platform, None))
 
     async def _extract_youtube(self, profile: UrlProfile, *, requester_id: int, requester_name: str = "") -> ExtractedBatch:
         errors: list[str] = []
@@ -694,7 +854,8 @@ class MusicExtractor:
                 return result or {}
 
         try:
-            return await asyncio.wait_for(asyncio.to_thread(_work), timeout=self.timeout_seconds + 5.0)
+            async with _get_global_ytdlp_semaphore():
+                return await asyncio.wait_for(asyncio.to_thread(_work), timeout=self.timeout_seconds + 5.0)
         except asyncio.TimeoutError as exc:
             raise MusicExtractionError("A extração demorou demais e foi cancelada.") from exc
         except MusicExtractionError:
