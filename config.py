@@ -193,6 +193,10 @@ SPOTIFY_CLIENT_SECRET = (os.getenv("SPOTIFY_CLIENT_SECRET", "") or "").strip()
 SPOTIFY_REFRESH_TOKEN = (os.getenv("SPOTIFY_REFRESH_TOKEN", "") or "").strip()
 SPOTIFY_REDIRECT_URI = (os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback") or "http://127.0.0.1:8888/callback").strip()
 SPOTIFY_MARKET = (os.getenv("SPOTIFY_MARKET", "BR") or "BR").strip().upper()
+# Fallback público/não oficial para ler metadata de links públicos do Spotify
+# quando a Web API oficial retornar 403 para playlists públicas em apps novos.
+SPOTIFY_PUBLIC_FALLBACK_ENABLED = _parse_bool(os.getenv("SPOTIFY_PUBLIC_FALLBACK_ENABLED", "true"), True)
+SPOTIFY_PUBLIC_FALLBACK_MAX_TRACKS = max(1, _parse_int(os.getenv("SPOTIFY_PUBLIC_FALLBACK_MAX_TRACKS", "100"), 100))
 DEEZER_API_ENABLED = _parse_bool(os.getenv("DEEZER_API_ENABLED", "true"), True)
 SOUNDCLOUD_API_ENABLED = _parse_bool(os.getenv("SOUNDCLOUD_API_ENABLED", "false"), False)
 SOUNDCLOUD_API_TOKEN = (os.getenv("SOUNDCLOUD_API_TOKEN", "") or "").strip()
