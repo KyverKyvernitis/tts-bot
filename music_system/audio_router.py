@@ -42,11 +42,35 @@ MUSIC_DUCK_FADE_UP_MS = max(20.0, float(getattr(config, "MUSIC_DUCK_FADE_UP_MS",
 MUSIC_LIMITER_ENABLED = bool(getattr(config, "MUSIC_LIMITER_ENABLED", True))
 MUSIC_MAX_GLOBAL_PREFETCH = max(0, int(getattr(config, "MUSIC_MAX_GLOBAL_PREFETCH", 1)))
 MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS = max(0, int(getattr(config, "MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS", 2)))
+MUSIC_PREFETCH_MIN_DELAY_SECONDS = max(0.0, float(getattr(config, "MUSIC_PREFETCH_MIN_DELAY_SECONDS", 18.0)))
+MUSIC_PREFETCH_BEFORE_END_SECONDS = max(5.0, float(getattr(config, "MUSIC_PREFETCH_BEFORE_END_SECONDS", 45.0)))
 MUSIC_PANEL_UPDATE_THROTTLE_SECONDS = max(0.05, float(getattr(config, "MUSIC_PANEL_UPDATE_THROTTLE_SECONDS", 2.0)))
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
 PCM_FRAME_MS = 20.0
 PCM_LIMITER_THRESHOLD = 30000
+
+
+def _ffmpeg_options_with_base_volume(options: str, volume: float) -> tuple[str, float]:
+    """Aplica volume base no FFmpeg para reduzir trabalho Python por frame.
+
+    Sem TTS por cima, o áudio pode sair quase em passthrough. Quando há TTS
+    ou ajuste de volume durante a música, o mixer Python aplica apenas o fator
+    restante em cima do volume base já feito em C pelo FFmpeg.
+    """
+    raw_options = str(options or "").strip()
+    try:
+        base_volume = max(0.0, min(2.0, float(volume)))
+    except Exception:
+        base_volume = 1.0
+    # Não injeta filtro se já há filtro customizado, se volume zero impediria
+    # aumentar a música atual depois, ou se o volume acima de 100% precisaria
+    # do limiter Python para evitar distorção.
+    normalized = f" {raw_options} "
+    has_filter = " -af " in normalized or " -filter:a " in normalized or " -filter_complex " in normalized
+    if has_filter or base_volume <= 0.001 or base_volume > 1.0 or abs(base_volume - 1.0) < 0.001:
+        return raw_options, 1.0
+    return f"{raw_options} -filter:a volume={base_volume:.4f}".strip(), base_volume
 
 
 def _consume_expected_music_exception(done: asyncio.Future) -> None:
@@ -93,12 +117,13 @@ class MixedAudioSource(discord.AudioSource):
     resolvida com call_soon_threadsafe no loop principal.
     """
 
-    def __init__(self, *, loop: asyncio.AbstractEventLoop, music_source: discord.AudioSource, music_volume: float, duck_volume: float) -> None:
+    def __init__(self, *, loop: asyncio.AbstractEventLoop, music_source: discord.AudioSource, music_volume: float, duck_volume: float, source_base_volume: float = 1.0) -> None:
         self.loop = loop
         self.music_source = music_source
         self.music_volume = float(music_volume)
         self.normal_music_volume = float(music_volume)
         self.duck_volume = float(duck_volume)
+        self.source_base_volume = max(0.001, min(2.0, float(source_base_volume or 1.0)))
         self._current_music_volume = float(music_volume)
         self.duck_enabled = True  # ducking é permanente; mantido só por compatibilidade interna
         self._overlays: list[TTSOverlay] = []
@@ -202,10 +227,14 @@ class MixedAudioSource(discord.AudioSource):
             else:
                 self.loop.call_soon_threadsafe(overlay.future.set_exception, error)
 
+    def _effective_music_scale(self, target_volume: float) -> float:
+        # music_source pode já vir com volume base aplicado pelo FFmpeg.
+        return max(0.0, min(4.0, float(target_volume) / self.source_base_volume))
+
     def _apply_volume(self, frame: bytes, volume: float) -> array:
         samples = array("h")
         samples.frombytes(frame)
-        if volume != 1.0:
+        if abs(float(volume) - 1.0) > 0.001:
             for i, sample in enumerate(samples):
                 samples[i] = self._limit_sample(int(sample * volume))
         return samples
@@ -245,7 +274,14 @@ class MixedAudioSource(discord.AudioSource):
 
         if music_frame:
             target_music_volume = self.duck_volume if active_overlays else self.normal_music_volume
-            base = self._apply_volume(music_frame, self._step_music_volume(target_music_volume))
+            stepped_volume = self._step_music_volume(target_music_volume)
+            scale = self._effective_music_scale(stepped_volume)
+            if not active_overlays and abs(scale - 1.0) <= 0.001:
+                # Caminho crítico: sem TTS e sem ajuste dinâmico, não processa
+                # 96k samples/s em Python. Isso reduz cortes quando yt-dlp/FFmpeg
+                # prepara a próxima música em VPS fraca.
+                return music_frame
+            base = self._apply_volume(music_frame, scale)
         else:
             # Música acabou no mesmo instante em que havia TTS por cima. Mantém silêncio
             # como base para não cortar o TTS no meio da frase.
@@ -303,6 +339,7 @@ class MusicGuildState:
     current_resolve_task: Optional[asyncio.Task] = None
     next_resolve_task: Optional[asyncio.Task] = None
     next_resolve_key: str = ""
+    next_resolve_active_key: str = ""
     current_status: str = "idle"
     skip_requested: bool = False
     now_message: Optional[discord.Message] = None
@@ -326,6 +363,7 @@ class MusicGuildState:
     panel_update_task: Optional[asyncio.Task] = None
     panel_update_create: bool = True
     panel_update_requested_at: float = 0.0
+    current_started_at_monotonic: float = 0.0
 
     def queue_size(self) -> int:
         return self.queue.qsize()
@@ -627,6 +665,7 @@ class AudioRouter:
             task.cancel()
         state.next_resolve_task = None
         state.next_resolve_key = ""
+        state.next_resolve_active_key = ""
 
     def _active_player_count(self) -> int:
         total = 0
@@ -634,6 +673,18 @@ class AudioRouter:
             if st.current or st.current_source or st.current_status in {"resolving", "starting", "playing", "paused"}:
                 total += 1
         return total
+
+    def _prefetch_delay_for_current(self, state: MusicGuildState) -> float:
+        delay = float(MUSIC_PREFETCH_MIN_DELAY_SECONDS)
+        current = state.current
+        if current is None or current.is_live or current.duration is None:
+            return delay
+        started_at = float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0)
+        elapsed = max(0.0, time.monotonic() - started_at) if started_at else 0.0
+        remaining = max(0.0, float(current.duration) - elapsed)
+        if remaining <= MUSIC_PREFETCH_BEFORE_END_SECONDS:
+            return delay
+        return max(delay, remaining - MUSIC_PREFETCH_BEFORE_END_SECONDS)
 
     def _start_prefetch_next(self, guild_id: int, state: MusicGuildState) -> None:
         if not MUSIC_PREFETCH_NEXT or state.queue.empty():
@@ -658,12 +709,20 @@ class AudioRouter:
             task.cancel()
 
         async def _prefetch() -> None:
-            self._global_prefetch_active += 1
+            counted_active = False
             try:
-                # Baixa prioridade: dá tempo ao player atual e cancela se a carga subir.
-                await asyncio.sleep(0.75)
+                # Baixa prioridade: dá tempo ao player atual e evita resolver a próxima
+                # música logo no início da faixa, que era quando mais causava cortes.
+                await asyncio.sleep(self._prefetch_delay_for_current(state))
+                if state.next_resolve_key != key:
+                    return
                 if MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS and self._active_player_count() > MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS:
                     return
+                if self._global_prefetch_active >= MUSIC_MAX_GLOBAL_PREFETCH:
+                    return
+                self._global_prefetch_active += 1
+                counted_active = True
+                state.next_resolve_active_key = key
                 await self.extractor.resolve_stream(next_track, force=False)
                 logger.debug("[music] próxima música pré-resolvida | guild=%s track=%r", guild_id, next_track.title)
             except asyncio.CancelledError:
@@ -671,7 +730,10 @@ class AudioRouter:
             except Exception:
                 logger.debug("[music] pré-resolução da próxima música falhou | guild=%s track=%r", guild_id, getattr(next_track, "title", ""), exc_info=True)
             finally:
-                self._global_prefetch_active = max(0, self._global_prefetch_active - 1)
+                if state.next_resolve_active_key == key:
+                    state.next_resolve_active_key = ""
+                if counted_active:
+                    self._global_prefetch_active = max(0, self._global_prefetch_active - 1)
 
         state.next_resolve_key = key
         state.next_resolve_task = asyncio.create_task(_prefetch())
@@ -690,14 +752,21 @@ class AudioRouter:
                 if track.stream_url:
                     return
             else:
-                state.current_resolve_task = task
-                try:
-                    await task
-                    if track.stream_url:
-                        return
-                finally:
-                    if state.current_resolve_task is task:
-                        state.current_resolve_task = None
+                if state.next_resolve_active_key != key:
+                    # A pré-resolução ainda estava apenas aguardando o momento certo.
+                    # Quando a música virou atual por fim/skip, cancela o atraso e
+                    # resolve imediatamente para não criar pausa gigante entre faixas.
+                    task.cancel()
+                    state.next_resolve_key = ""
+                else:
+                    state.current_resolve_task = task
+                    try:
+                        await task
+                        if track.stream_url:
+                            return
+                    finally:
+                        if state.current_resolve_task is task:
+                            state.current_resolve_task = None
         resolve_task = asyncio.create_task(self.extractor.resolve_stream(track, force=False))
         resolve_task.add_done_callback(_consume_expected_music_exception)
         state.current_resolve_task = resolve_task
@@ -754,6 +823,7 @@ class AudioRouter:
                         with contextlib.suppress(Exception):
                             await state.queue.put(track)
                     state.current = None
+                    state.current_started_at_monotonic = 0.0
                     state.paused = False
                     state.current_status = "idle" if state.queue.empty() else "queued"
                     with contextlib.suppress(Exception):
@@ -765,6 +835,7 @@ class AudioRouter:
                 if not state.stop_requested and state.queue.empty():
                     self._set_idle_reason(state, "queue_finished")
                 state.current = None
+                state.current_started_at_monotonic = 0.0
                 state.current_status = "idle"
                 self._schedule_panel_update(guild_id, create=False)
 
@@ -812,16 +883,18 @@ class AudioRouter:
 
         loop = asyncio.get_running_loop()
         finished = loop.create_future()
+        ffmpeg_options, source_base_volume = _ffmpeg_options_with_base_volume(MUSIC_FFMPEG_OPTIONS, state.volume)
         ffmpeg_source = discord.FFmpegPCMAudio(
             track.stream_url,
             before_options=MUSIC_RECONNECT_BEFORE_OPTIONS,
-            options=MUSIC_FFMPEG_OPTIONS,
+            options=ffmpeg_options,
         )
         mixed_source = MixedAudioSource(
             loop=loop,
             music_source=ffmpeg_source,
             music_volume=state.volume,
             duck_volume=state.duck_volume,
+            source_base_volume=source_base_volume,
         )
         mixed_source.duck_enabled = True
         state.current_source = mixed_source
@@ -864,6 +937,7 @@ class AudioRouter:
             raise MusicPlaybackError("FFmpeg demorou demais para iniciar o áudio.")
 
         state.current_status = "playing"
+        state.current_started_at_monotonic = time.monotonic()
         await self.update_panel(guild.id, create=True)
         self._start_prefetch_next(guild.id, state)
         await finished
@@ -1004,6 +1078,7 @@ class AudioRouter:
                 state.queue.get_nowait()
                 state.queue.task_done()
         state.current = None
+        state.current_started_at_monotonic = 0.0
         state.current_source = None
         state.current_resolve_task = None
         state.paused = False
@@ -1257,6 +1332,7 @@ class AudioRouter:
                 if state.current_source is not None:
                     state.current_source.cleanup()
             state.current = None
+            state.current_started_at_monotonic = 0.0
             state.current_source = None
             state.paused = False
             state.current_status = "queued" if not state.queue.empty() else "idle"
@@ -1296,6 +1372,7 @@ class AudioRouter:
                     await vc.disconnect(force=False)
                 state.music_owns_voice = False
         state.current = None
+        state.current_started_at_monotonic = 0.0
         state.current_source = None
         state.current_resolve_task = None
         state.current_status = "idle"

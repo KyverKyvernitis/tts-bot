@@ -175,6 +175,11 @@ MUSIC_METADATA_CACHE_TTL_SECONDS = _parse_int(os.getenv("MUSIC_METADATA_CACHE_TT
 MUSIC_STREAM_CACHE_TTL_SECONDS = _parse_int(os.getenv("MUSIC_STREAM_CACHE_TTL_SECONDS", "480"), 480)
 MUSIC_CACHE_MAX_ITEMS = _parse_int(os.getenv("MUSIC_CACHE_MAX_ITEMS", "160"), 160)
 MUSIC_PREFETCH_NEXT = _parse_bool(os.getenv("MUSIC_PREFETCH_NEXT", "true"), True)
+# Em VPS fraca, pré-resolver a próxima música imediatamente pode disputar CPU
+# com o áudio atual. Por padrão, o prefetch só roda depois de alguns segundos
+# e, em músicas com duração conhecida, perto do fim.
+MUSIC_PREFETCH_MIN_DELAY_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_PREFETCH_MIN_DELAY_SECONDS", "18"), 18.0))
+MUSIC_PREFETCH_BEFORE_END_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_PREFETCH_BEFORE_END_SECONDS", "45"), 45.0))
 MUSIC_DUCK_FADE_DOWN_MS = _parse_int(os.getenv("MUSIC_DUCK_FADE_DOWN_MS", "150"), 150)
 MUSIC_DUCK_FADE_UP_MS = _parse_int(os.getenv("MUSIC_DUCK_FADE_UP_MS", "550"), 550)
 MUSIC_LIMITER_ENABLED = _parse_bool(os.getenv("MUSIC_LIMITER_ENABLED", "true"), True)
