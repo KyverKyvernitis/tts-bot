@@ -71,20 +71,21 @@ class Music(commands.Cog):
             await self._reply(ctx, "Entre em um canal de voz primeiro.")
             return
 
-        async with ctx.typing():
-            try:
-                batch = await self.router.extractor.extract(
-                    query,
-                    requester_id=ctx.author.id,
-                    requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
-                )
-            except MusicExtractionError as exc:
-                await self._reply(ctx, self._music_error_message(exc))
-                return
-            except Exception as exc:
-                logger.exception("[music] erro inesperado na extração")
-                await self._reply(ctx, self._music_error_message(exc))
-                return
+        # Evita derrubar o comando quando o Discord aplica rate limit no endpoint de typing.
+        # A extração pode demorar, mas o indicador de "digitando..." não é essencial.
+        try:
+            batch = await self.router.extractor.extract(
+                query,
+                requester_id=ctx.author.id,
+                requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
+            )
+        except MusicExtractionError as exc:
+            await self._reply(ctx, self._music_error_message(exc))
+            return
+        except Exception as exc:
+            logger.exception("[music] erro inesperado na extração")
+            await self._reply(ctx, self._music_error_message(exc))
+            return
 
         if not batch.tracks:
             await self._reply(ctx, "`📭` Não encontrei nada tocável.")
