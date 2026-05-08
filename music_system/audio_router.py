@@ -50,6 +50,7 @@ MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS = max(1, int(getattr(config, "MUSIC_HIGH_QU
 MUSIC_HIGH_QUALITY_MAX_ABR = max(96, int(getattr(config, "MUSIC_HIGH_QUALITY_MAX_ABR", 256)))
 MUSIC_MAX_AUDIO_BITRATE_STABLE = max(64, int(getattr(config, "MUSIC_MAX_AUDIO_BITRATE_STABLE", 160)))
 MUSIC_HEAVY_LOAD_MAX_ABR = max(64, int(getattr(config, "MUSIC_HEAVY_LOAD_MAX_ABR", 128)))
+MUSIC_STREAM_START_RETRIES = max(0, int(getattr(config, "MUSIC_STREAM_START_RETRIES", 1)))
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
 PCM_FRAME_MS = 20.0
@@ -669,18 +670,25 @@ class AudioRouter:
                 duration = str(int(max(0.0, float(track.duration))))
         return f"title:{title_key}:{duration}" if title_key else None
 
-    def _track_resolve_key(self, track: MusicTrack | None) -> str:
+    def _track_resolve_key(self, track: MusicTrack | None, audio_max_abr: int | None = None) -> str:
         if track is None:
             return ""
         url = (track.webpage_url or track.original_url or track.stream_url or "").strip().lower()
-        if url:
-            return "url:" + url
-        title_key = compact_key(track.title)
-        duration = ""
-        if track.duration is not None:
-            with contextlib.suppress(Exception):
-                duration = str(int(max(0.0, float(track.duration))))
-        return f"title:{title_key}:{duration}" if title_key else ""
+        base = "url:" + url if url else ""
+        if not base:
+            title_key = compact_key(track.title)
+            duration = ""
+            if track.duration is not None:
+                with contextlib.suppress(Exception):
+                    duration = str(int(max(0.0, float(track.duration))))
+            base = f"title:{title_key}:{duration}" if title_key else ""
+        if not base:
+            return ""
+        try:
+            max_abr = int(audio_max_abr or 0)
+        except Exception:
+            max_abr = 0
+        return f"{base}|abr:{max_abr}"
 
     def _cancel_next_prefetch(self, state: MusicGuildState) -> None:
         task = state.next_resolve_task
@@ -715,6 +723,17 @@ class AudioRouter:
             return MUSIC_HEAVY_LOAD_MAX_ABR
         return MUSIC_MAX_AUDIO_BITRATE_STABLE
 
+    def _track_stream_matches_quality(self, track: MusicTrack | None, audio_max_abr: int | None) -> bool:
+        if track is None or not track.stream_url:
+            return False
+        try:
+            requested_abr = int(audio_max_abr or 0)
+        except Exception:
+            requested_abr = 0
+        resolved_abr = int(getattr(track, "resolved_audio_max_abr", 0) or 0)
+        is_direct_track = str(getattr(track, "extractor", "") or "").lower() == "direct"
+        return not requested_abr or is_direct_track or (resolved_abr and requested_abr == resolved_abr)
+
     def _prefetch_delay_for_current(self, state: MusicGuildState) -> float:
         delay = float(MUSIC_PREFETCH_MIN_DELAY_SECONDS)
         current = state.current
@@ -740,9 +759,10 @@ class AudioRouter:
             next_track = list(getattr(state.queue, "_queue", []))[0]
         except Exception:
             return
-        if next_track is None or next_track.stream_url:
+        target_abr = self._audio_max_abr_for_load()
+        if next_track is None or self._track_stream_matches_quality(next_track, target_abr):
             return
-        key = self._track_resolve_key(next_track)
+        key = self._track_resolve_key(next_track, target_abr)
         task = state.next_resolve_task
         if task is not None and not task.done() and state.next_resolve_key == key:
             return
@@ -764,7 +784,7 @@ class AudioRouter:
                 self._global_prefetch_active += 1
                 counted_active = True
                 state.next_resolve_active_key = key
-                await self.extractor.resolve_stream(next_track, force=False, audio_max_abr=self._audio_max_abr_for_load())
+                await self.extractor.resolve_stream(next_track, force=False, audio_max_abr=target_abr)
                 logger.debug("[music] próxima música pré-resolvida | guild=%s track=%r", guild_id, next_track.title)
             except asyncio.CancelledError:
                 raise
@@ -781,7 +801,8 @@ class AudioRouter:
         state.next_resolve_task.add_done_callback(_consume_expected_music_exception)
 
     async def _resolve_current_track(self, state: MusicGuildState, track: MusicTrack) -> None:
-        key = self._track_resolve_key(track)
+        target_abr = self._audio_max_abr_for_load()
+        key = self._track_resolve_key(track, target_abr)
         task = state.next_resolve_task if state.next_resolve_key == key else None
         if task is not None:
             state.next_resolve_task = None
@@ -808,7 +829,7 @@ class AudioRouter:
                     finally:
                         if state.current_resolve_task is task:
                             state.current_resolve_task = None
-        resolve_task = asyncio.create_task(self.extractor.resolve_stream(track, force=False, audio_max_abr=self._audio_max_abr_for_load()))
+        resolve_task = asyncio.create_task(self.extractor.resolve_stream(track, force=False, audio_max_abr=target_abr))
         resolve_task.add_done_callback(_consume_expected_music_exception)
         state.current_resolve_task = resolve_task
         try:
@@ -923,63 +944,85 @@ class AudioRouter:
             await asyncio.sleep(0.1)
 
         loop = asyncio.get_running_loop()
-        finished = loop.create_future()
-        ffmpeg_options, source_base_volume = _ffmpeg_options_with_base_volume(MUSIC_FFMPEG_OPTIONS, state.volume)
-        ffmpeg_source = discord.FFmpegPCMAudio(
-            track.stream_url,
-            before_options=MUSIC_RECONNECT_BEFORE_OPTIONS,
-            options=ffmpeg_options,
-        )
-        mixed_source = MixedAudioSource(
-            loop=loop,
-            music_source=ffmpeg_source,
-            music_volume=state.volume,
-            duck_volume=state.duck_volume,
-            source_base_volume=source_base_volume,
-        )
-        mixed_source.duck_enabled = True
-        state.current_source = mixed_source
-        mixed_source.music_started_future.add_done_callback(_consume_expected_music_exception)
+        finished: asyncio.Future | None = None
+        mixed_source: MixedAudioSource | None = None
+        last_start_error: Exception | None = None
+        max_attempts = 1 + max(0, MUSIC_STREAM_START_RETRIES)
 
-        def _after(error: Exception | None) -> None:
-            if error:
-                logger.warning("[music] after playback error | guild=%s erro=%s", guild.id, error)
-            if not finished.done():
-                loop.call_soon_threadsafe(finished.set_result, None)
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                if state.skip_requested or state.stop_requested:
+                    raise MusicPlaybackError("Playback cancelado.")
+                # URL de stream pode expirar/403 antes do FFmpeg produzir áudio.
+                # Força uma nova resolução uma única vez, sem loop infinito.
+                track.stream_url = ""
+                track.resolved_at_monotonic = 0.0
+                track.resolved_audio_max_abr = 0
+                await self.extractor.resolve_stream(track, force=True, audio_max_abr=self._audio_max_abr_for_load())
+                if not track.stream_url:
+                    raise MusicExtractionError("A música não retornou URL de stream.")
 
-        async with state.voice_lock:
-            if vc.is_playing() or vc.is_paused():
-                with contextlib.suppress(Exception):
-                    vc.stop()
-            vc.play(mixed_source, after=_after)
+            finished = loop.create_future()
+            ffmpeg_options, source_base_volume = _ffmpeg_options_with_base_volume(MUSIC_FFMPEG_OPTIONS, state.volume)
+            ffmpeg_source = discord.FFmpegPCMAudio(
+                track.stream_url,
+                before_options=MUSIC_RECONNECT_BEFORE_OPTIONS,
+                options=ffmpeg_options,
+            )
+            mixed_source = MixedAudioSource(
+                loop=loop,
+                music_source=ffmpeg_source,
+                music_volume=state.volume,
+                duck_volume=state.duck_volume,
+                source_base_volume=source_base_volume,
+            )
+            mixed_source.duck_enabled = True
+            state.current_source = mixed_source
+            mixed_source.music_started_future.add_done_callback(_consume_expected_music_exception)
 
-        done, _pending = await asyncio.wait(
-            {mixed_source.music_started_future, finished},
-            timeout=MUSIC_PLAYBACK_START_TIMEOUT_SECONDS,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if mixed_source.music_started_future in done:
-            # Propaga erro amigável se o FFmpeg fechou antes de produzir PCM.
-            try:
-                mixed_source.music_started_future.result()
-            except Exception:
-                with contextlib.suppress(Exception):
-                    mixed_source.cleanup()
-                raise
-        elif finished in done:
-            with contextlib.suppress(Exception):
-                mixed_source.cleanup()
-            raise MusicPlaybackError("FFmpeg finalizou antes de iniciar o áudio. A URL recebida provavelmente não era um stream tocável.")
-        else:
+            def _after(error: Exception | None, finished_ref: asyncio.Future = finished) -> None:
+                if error:
+                    logger.warning("[music] after playback error | guild=%s erro=%s", guild.id, error)
+                if not finished_ref.done():
+                    loop.call_soon_threadsafe(finished_ref.set_result, None)
+
+            async with state.voice_lock:
+                if vc.is_playing() or vc.is_paused():
+                    with contextlib.suppress(Exception):
+                        vc.stop()
+                vc.play(mixed_source, after=_after)
+
+            done, _pending = await asyncio.wait(
+                {mixed_source.music_started_future, finished},
+                timeout=MUSIC_PLAYBACK_START_TIMEOUT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if mixed_source.music_started_future in done:
+                try:
+                    mixed_source.music_started_future.result()
+                    last_start_error = None
+                    break
+                except Exception as exc:
+                    last_start_error = exc
+            elif finished in done:
+                last_start_error = MusicPlaybackError("FFmpeg finalizou antes de iniciar o áudio. A URL recebida provavelmente não era um stream tocável.")
+            else:
+                last_start_error = MusicPlaybackError("FFmpeg demorou demais para iniciar o áudio.")
+
             with contextlib.suppress(Exception):
                 if vc.is_playing() or vc.is_paused():
                     vc.stop()
                 mixed_source.cleanup()
-            raise MusicPlaybackError("FFmpeg demorou demais para iniciar o áudio.")
+            state.current_source = None
+            if attempt + 1 >= max_attempts:
+                raise last_start_error
+
+        if mixed_source is None or finished is None:
+            raise last_start_error or MusicPlaybackError("Não consegui iniciar o áudio.")
 
         state.current_status = "playing"
         state.current_started_at_monotonic = time.monotonic()
-        await self.update_panel(guild.id, create=True)
+        self._schedule_panel_update(guild.id, create=True)
         self._start_prefetch_next(guild.id, state)
         await finished
         return not state.skip_requested and not state.stop_requested

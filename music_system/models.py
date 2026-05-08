@@ -36,6 +36,7 @@ class MusicTrack:
     is_live: bool = False
     added_at_monotonic: float = field(default_factory=time.monotonic)
     resolved_at_monotonic: float = 0.0
+    resolved_audio_max_abr: int = 0
 
     @property
     def display_url(self) -> str:

@@ -35,8 +35,13 @@ _YOUTUBE_CLIENT_SETS: tuple[tuple[str, ...], ...] = (
 
 MUSIC_METADATA_CACHE_TTL_SECONDS = max(0, int(getattr(config, "MUSIC_METADATA_CACHE_TTL_SECONDS", 300)))
 MUSIC_STREAM_CACHE_TTL_SECONDS = max(30, int(getattr(config, "MUSIC_STREAM_CACHE_TTL_SECONDS", 480)))
+MUSIC_EXTRACT_SOCKET_TIMEOUT_SECONDS = max(3.0, float(getattr(config, "MUSIC_EXTRACT_SOCKET_TIMEOUT_SECONDS", 8.0)))
+MUSIC_YTDLP_RETRIES = max(0, int(getattr(config, "MUSIC_YTDLP_RETRIES", 1)))
+MUSIC_FRAGMENT_RETRIES = max(0, int(getattr(config, "MUSIC_FRAGMENT_RETRIES", 1)))
+MUSIC_EXTRACTOR_RETRIES = max(0, int(getattr(config, "MUSIC_EXTRACTOR_RETRIES", 1)))
+MUSIC_PLAYLIST_LAZY_LOAD = bool(getattr(config, "MUSIC_PLAYLIST_LAZY_LOAD", True))
 MUSIC_CACHE_MAX_ITEMS = max(20, int(getattr(config, "MUSIC_CACHE_MAX_ITEMS", 160)))
-MUSIC_YTDLP_FORMAT = str(getattr(config, "MUSIC_YTDLP_FORMAT", "") or "bestaudio[acodec=opus][asr=48000]/bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/best").strip()
+MUSIC_YTDLP_FORMAT = str(getattr(config, "MUSIC_YTDLP_FORMAT", "") or "bestaudio[vcodec=none][acodec=opus][asr=48000]/bestaudio[vcodec=none][acodec=opus]/bestaudio[vcodec=none][ext=m4a]/bestaudio[vcodec=none]/bestaudio").strip()
 MUSIC_HIGH_QUALITY_MAX_ABR = max(96, int(getattr(config, "MUSIC_HIGH_QUALITY_MAX_ABR", 256)))
 MUSIC_MAX_AUDIO_BITRATE_STABLE = max(64, int(getattr(config, "MUSIC_MAX_AUDIO_BITRATE_STABLE", 160)))
 MUSIC_HEAVY_LOAD_MAX_ABR = max(64, int(getattr(config, "MUSIC_HEAVY_LOAD_MAX_ABR", 128)))
@@ -133,6 +138,7 @@ class MusicExtractor:
             is_live=track.is_live,
         )
         clone.resolved_at_monotonic = track.resolved_at_monotonic
+        clone.resolved_audio_max_abr = int(getattr(track, "resolved_audio_max_abr", 0) or 0)
         return clone
 
     def _cache_get_tracks(self, cache: dict[str, tuple[float, list[MusicTrack]]], key: str, *, requester_id: int, requester_name: str, original_url: str = "") -> list[MusicTrack] | None:
@@ -379,11 +385,11 @@ class MusicExtractor:
         if max_abr <= 0:
             return MUSIC_YTDLP_FORMAT
         return (
-            f"bestaudio[abr<={max_abr}][acodec=opus][asr=48000]/"
-            f"bestaudio[abr<={max_abr}][acodec=opus]/"
-            f"bestaudio[abr<={max_abr}][ext=m4a]/"
-            f"bestaudio[abr<={max_abr}]/"
-            "bestaudio[acodec=opus][asr=48000]/bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/best"
+            f"bestaudio[vcodec=none][abr<={max_abr}][acodec=opus][asr=48000]/"
+            f"bestaudio[vcodec=none][abr<={max_abr}][acodec=opus]/"
+            f"bestaudio[vcodec=none][abr<={max_abr}][ext=m4a]/"
+            f"bestaudio[vcodec=none][abr<={max_abr}]/"
+            "bestaudio[vcodec=none][acodec=opus][asr=48000]/bestaudio[vcodec=none][acodec=opus]/bestaudio[vcodec=none][ext=m4a]/bestaudio[vcodec=none]/bestaudio"
         )
 
     def _base_opts(self, *, extract_flat: bool | str = False, playlist: bool = False, youtube_clients: tuple[str, ...] | None = None, audio_max_abr: int | None = None) -> dict[str, Any]:
@@ -395,15 +401,17 @@ class MusicExtractor:
             "extract_flat": extract_flat,
             "default_search": "ytsearch",
             "source_address": "0.0.0.0",
-            "socket_timeout": self.timeout_seconds,
-            "retries": 3,
-            "fragment_retries": 3,
-            "extractor_retries": 2,
+            "socket_timeout": min(self.timeout_seconds, MUSIC_EXTRACT_SOCKET_TIMEOUT_SECONDS),
+            "retries": MUSIC_YTDLP_RETRIES,
+            "fragment_retries": MUSIC_FRAGMENT_RETRIES,
+            "extractor_retries": MUSIC_EXTRACTOR_RETRIES,
             "ignoreerrors": playlist,
             "nocheckcertificate": True,
             "geo_bypass": True,
             "cachedir": False,
             "playlistend": self.max_playlist_items if playlist else None,
+            "lazy_playlist": MUSIC_PLAYLIST_LAZY_LOAD and bool(playlist),
+            "concurrent_fragment_downloads": 1,
             "format": self._format_for_quality(audio_max_abr),
             "format_sort": ["acodec:opus", "asr:48000", "ext:webm:m4a", "abr", "proto"],
             "http_headers": {
@@ -784,13 +792,23 @@ class MusicExtractor:
 
     async def resolve_stream(self, track: MusicTrack, *, force: bool = False, audio_max_abr: int | None = None) -> MusicTrack:
         age = time.monotonic() - float(track.resolved_at_monotonic or 0.0)
+        try:
+            requested_abr = int(audio_max_abr or 0)
+        except Exception:
+            requested_abr = 0
+        resolved_abr = int(getattr(track, "resolved_audio_max_abr", 0) or 0)
         if track.stream_url and not self._is_probably_direct_stream_url(track.stream_url):
             # Flat mode do yt-dlp pode colocar a página do YouTube em info["url"].
             # FFmpeg não consegue tocar página HTML; ele precisa do stream real.
             track.stream_url = ""
             track.resolved_at_monotonic = 0.0
-        if track.stream_url and not force and age < 20 * 60:
-            return track
+        if track.stream_url and not force and age < MUSIC_STREAM_CACHE_TTL_SECONDS:
+            # Reusa stream só quando a qualidade resolvida combina com a qualidade atual.
+            # Assim, com 1 servidor o bot pode voltar para qualidade alta; com carga alta,
+            # ele não reaproveita stream pesado antigo. Links diretos não têm teto de abr.
+            is_direct_track = str(track.extractor or "").lower() == "direct"
+            if not requested_abr or is_direct_track or (resolved_abr and requested_abr == resolved_abr):
+                return track
 
         if str(track.extractor or "").lower() == "metadata":
             return await self._resolve_metadata_track(track, force=force, audio_max_abr=audio_max_abr)
@@ -812,6 +830,7 @@ class MusicExtractor:
             if not track.webpage_url:
                 track.webpage_url = profile.canonical
             track.resolved_at_monotonic = time.monotonic()
+            track.resolved_audio_max_abr = 0
             self._put_stream_cache(stream_cache_key, track)
             return track
 
@@ -834,6 +853,7 @@ class MusicExtractor:
                     original_url=track.original_url or source,
                 )
                 if updated.stream_url:
+                    updated.resolved_audio_max_abr = requested_abr
                     self._copy_resolved_fields(track, updated)
                     self._put_stream_cache(stream_cache_key, track)
                     return track
@@ -1125,6 +1145,7 @@ class MusicExtractor:
         )
         if stream_url:
             track.resolved_at_monotonic = time.monotonic()
+            track.resolved_audio_max_abr = 0
         return track
 
     def _is_known_webpage_url(self, url: str) -> bool:
@@ -1191,3 +1212,4 @@ class MusicExtractor:
         target.extractor = source.extractor or target.extractor
         target.is_live = bool(source.is_live)
         target.resolved_at_monotonic = time.monotonic()
+        target.resolved_audio_max_abr = int(getattr(source, "resolved_audio_max_abr", 0) or 0)
