@@ -45,6 +45,11 @@ MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS = max(0, int(getattr(config, "MUSIC_DISABLE
 MUSIC_PREFETCH_MIN_DELAY_SECONDS = max(0.0, float(getattr(config, "MUSIC_PREFETCH_MIN_DELAY_SECONDS", 18.0)))
 MUSIC_PREFETCH_BEFORE_END_SECONDS = max(5.0, float(getattr(config, "MUSIC_PREFETCH_BEFORE_END_SECONDS", 45.0)))
 MUSIC_PANEL_UPDATE_THROTTLE_SECONDS = max(0.05, float(getattr(config, "MUSIC_PANEL_UPDATE_THROTTLE_SECONDS", 2.0)))
+MUSIC_AUDIO_MODE = str(getattr(config, "MUSIC_AUDIO_MODE", "auto") or "auto").strip().lower()
+MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS = max(1, int(getattr(config, "MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS", 1)))
+MUSIC_HIGH_QUALITY_MAX_ABR = max(96, int(getattr(config, "MUSIC_HIGH_QUALITY_MAX_ABR", 256)))
+MUSIC_MAX_AUDIO_BITRATE_STABLE = max(64, int(getattr(config, "MUSIC_MAX_AUDIO_BITRATE_STABLE", 160)))
+MUSIC_HEAVY_LOAD_MAX_ABR = max(64, int(getattr(config, "MUSIC_HEAVY_LOAD_MAX_ABR", 128)))
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
 PCM_FRAME_MS = 20.0
@@ -402,12 +407,15 @@ class AudioRouter:
         state.volume_loaded = True
         settings_db = getattr(self.bot, "settings_db", None)
         try:
-            raw = getattr(settings_db, "guild_cache", {}).get(int(guild_id), {}).get("music_volume") if settings_db is not None else None
-            if raw is None:
-                return
-            state.volume = max(0.0, min(1.5, float(raw)))
+            guild_doc = getattr(settings_db, "guild_cache", {}).get(int(guild_id), {}) if settings_db is not None else {}
+            raw_volume = guild_doc.get("music_volume")
+            if raw_volume is not None:
+                state.volume = max(0.0, min(1.5, float(raw_volume)))
+            raw_duck = guild_doc.get("music_duck_volume")
+            if raw_duck is not None:
+                state.duck_volume = max(0.05, min(1.0, float(raw_duck)))
         except Exception:
-            logger.debug("[music] falha ao carregar volume persistido", exc_info=True)
+            logger.debug("[music] falha ao carregar volume/ducking persistido", exc_info=True)
 
     async def _persist_volume(self, guild_id: int, volume: float) -> None:
         settings_db = getattr(self.bot, "settings_db", None)
@@ -423,6 +431,21 @@ class AudioRouter:
             await save_doc(int(guild_id), doc)
         except Exception:
             logger.debug("[music] falha ao salvar volume persistido", exc_info=True)
+
+    async def _persist_duck_volume(self, guild_id: int, volume: float) -> None:
+        settings_db = getattr(self.bot, "settings_db", None)
+        if settings_db is None:
+            return
+        try:
+            get_doc = getattr(settings_db, "_get_guild_doc", None)
+            save_doc = getattr(settings_db, "_save_guild_doc", None)
+            if not callable(get_doc) or not callable(save_doc):
+                return
+            doc = get_doc(int(guild_id))
+            doc["music_duck_volume"] = max(0.05, min(1.0, float(volume)))
+            await save_doc(int(guild_id), doc)
+        except Exception:
+            logger.debug("[music] falha ao salvar ducking persistido", exc_info=True)
 
     def _clear_idle_reason(self, state: MusicGuildState) -> None:
         state.idle_reason = "idle"
@@ -674,6 +697,24 @@ class AudioRouter:
                 total += 1
         return total
 
+    def _audio_max_abr_for_load(self) -> int | None:
+        """Escolhe qualidade por carga sem aumentar RAM.
+
+        Com um único servidor ativo, mantém teto alto. Quando há mais guilds
+        tocando, limita bitrate para reduzir trabalho do yt-dlp/FFmpeg/rede.
+        """
+        mode = MUSIC_AUDIO_MODE
+        active = max(1, self._active_player_count())
+        if mode in {"high", "alta", "quality"}:
+            return MUSIC_HIGH_QUALITY_MAX_ABR
+        if mode in {"low", "economy", "economico", "econômico", "stable"}:
+            return MUSIC_MAX_AUDIO_BITRATE_STABLE
+        if active <= MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS:
+            return MUSIC_HIGH_QUALITY_MAX_ABR
+        if active >= 3:
+            return MUSIC_HEAVY_LOAD_MAX_ABR
+        return MUSIC_MAX_AUDIO_BITRATE_STABLE
+
     def _prefetch_delay_for_current(self, state: MusicGuildState) -> float:
         delay = float(MUSIC_PREFETCH_MIN_DELAY_SECONDS)
         current = state.current
@@ -723,7 +764,7 @@ class AudioRouter:
                 self._global_prefetch_active += 1
                 counted_active = True
                 state.next_resolve_active_key = key
-                await self.extractor.resolve_stream(next_track, force=False)
+                await self.extractor.resolve_stream(next_track, force=False, audio_max_abr=self._audio_max_abr_for_load())
                 logger.debug("[music] próxima música pré-resolvida | guild=%s track=%r", guild_id, next_track.title)
             except asyncio.CancelledError:
                 raise
@@ -767,7 +808,7 @@ class AudioRouter:
                     finally:
                         if state.current_resolve_task is task:
                             state.current_resolve_task = None
-        resolve_task = asyncio.create_task(self.extractor.resolve_stream(track, force=False))
+        resolve_task = asyncio.create_task(self.extractor.resolve_stream(track, force=False, audio_max_abr=self._audio_max_abr_for_load()))
         resolve_task.add_done_callback(_consume_expected_music_exception)
         state.current_resolve_task = resolve_task
         try:
@@ -1402,6 +1443,7 @@ class AudioRouter:
         volume = max(5, min(100, int(volume_percent))) / 100.0
         state.duck_enabled = True
         state.duck_volume = volume
+        await self._persist_duck_volume(guild_id, volume)
         if state.current_source is not None:
             state.current_source.set_duck_volume(volume)
         self._schedule_panel_update(guild_id, create=False)

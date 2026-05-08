@@ -219,8 +219,13 @@ MUSIC_TTS_FFMPEG_OPTIONS = (os.getenv("MUSIC_TTS_FFMPEG_OPTIONS", "-vn -loglevel
 MUSIC_MAX_GLOBAL_EXTRACTORS = max(1, _parse_int(os.getenv("MUSIC_MAX_GLOBAL_EXTRACTORS", "1"), 1))
 MUSIC_MAX_GLOBAL_PREFETCH = max(0, _parse_int(os.getenv("MUSIC_MAX_GLOBAL_PREFETCH", "1"), 1))
 MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS = max(0, _parse_int(os.getenv("MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS", "2"), 2))
-MUSIC_AUDIO_MODE = (os.getenv("MUSIC_AUDIO_MODE", "adaptive") or "adaptive").strip().lower()
-MUSIC_MAX_AUDIO_BITRATE_STABLE = max(64, _parse_int(os.getenv("MUSIC_MAX_AUDIO_BITRATE_STABLE", "128"), 128))
+# Qualidade dinâmica: com só 1 servidor tocando, mantém áudio alto; com 2+
+# servidores, limita bitrate para poupar CPU/rede da VPS.
+MUSIC_AUDIO_MODE = (os.getenv("MUSIC_AUDIO_MODE", "auto") or "auto").strip().lower()
+MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS = max(1, _parse_int(os.getenv("MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS", "1"), 1))
+MUSIC_HIGH_QUALITY_MAX_ABR = max(96, _parse_int(os.getenv("MUSIC_HIGH_QUALITY_MAX_ABR", "256"), 256))
+MUSIC_MAX_AUDIO_BITRATE_STABLE = max(64, _parse_int(os.getenv("MUSIC_MAX_AUDIO_BITRATE_STABLE", "160"), 160))
+MUSIC_HEAVY_LOAD_MAX_ABR = max(64, _parse_int(os.getenv("MUSIC_HEAVY_LOAD_MAX_ABR", "128"), 128))
 MUSIC_PANEL_UPDATE_THROTTLE_SECONDS = max(0.05, _parse_float(os.getenv("MUSIC_PANEL_UPDATE_THROTTLE_SECONDS", "2.0"), 2.0))
 MUSIC_MIN_LINK_METADATA_CONFIDENCE = (os.getenv("MUSIC_MIN_LINK_METADATA_CONFIDENCE", "medium") or "medium").strip().lower()
 MUSIC_MAX_DURATION_MISMATCH_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_MAX_DURATION_MISMATCH_SECONDS", "45"), 45.0))

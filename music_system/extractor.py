@@ -37,6 +37,9 @@ MUSIC_METADATA_CACHE_TTL_SECONDS = max(0, int(getattr(config, "MUSIC_METADATA_CA
 MUSIC_STREAM_CACHE_TTL_SECONDS = max(30, int(getattr(config, "MUSIC_STREAM_CACHE_TTL_SECONDS", 480)))
 MUSIC_CACHE_MAX_ITEMS = max(20, int(getattr(config, "MUSIC_CACHE_MAX_ITEMS", 160)))
 MUSIC_YTDLP_FORMAT = str(getattr(config, "MUSIC_YTDLP_FORMAT", "") or "bestaudio[acodec=opus][asr=48000]/bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/best").strip()
+MUSIC_HIGH_QUALITY_MAX_ABR = max(96, int(getattr(config, "MUSIC_HIGH_QUALITY_MAX_ABR", 256)))
+MUSIC_MAX_AUDIO_BITRATE_STABLE = max(64, int(getattr(config, "MUSIC_MAX_AUDIO_BITRATE_STABLE", 160)))
+MUSIC_HEAVY_LOAD_MAX_ABR = max(64, int(getattr(config, "MUSIC_HEAVY_LOAD_MAX_ABR", 128)))
 MUSIC_MIN_LINK_METADATA_CONFIDENCE = str(getattr(config, "MUSIC_MIN_LINK_METADATA_CONFIDENCE", "medium") or "medium").strip().lower()
 MUSIC_REJECT_WEAK_LINK_MATCHES = bool(getattr(config, "MUSIC_REJECT_WEAK_LINK_MATCHES", True))
 MUSIC_MAX_DURATION_MISMATCH_SECONDS = max(0.0, float(getattr(config, "MUSIC_MAX_DURATION_MISMATCH_SECONDS", 45.0)))
@@ -172,8 +175,13 @@ class MusicExtractor:
                 self._single_cache.pop(old_key, None)
         self._single_cache[key] = (time.monotonic(), self._clone_track(track, requester_id=track.requester_id, requester_name=track.requester_name))
 
-    def _stream_cache_key(self, source: str) -> str:
-        return (source or "").strip().lower()
+    def _stream_cache_key(self, source: str, audio_max_abr: int | None = None) -> str:
+        base = (source or "").strip().lower()
+        try:
+            max_abr = int(audio_max_abr or 0)
+        except Exception:
+            max_abr = 0
+        return f"{base}|abr:{max_abr}" if max_abr > 0 else base
 
     def _apply_stream_cache(self, track: MusicTrack, key: str) -> bool:
         item = self._stream_cache.get(key)
@@ -357,7 +365,28 @@ class MusicExtractor:
         except Exception:
             return ""
 
-    def _base_opts(self, *, extract_flat: bool | str = False, playlist: bool = False, youtube_clients: tuple[str, ...] | None = None) -> dict[str, Any]:
+    def _format_for_quality(self, audio_max_abr: int | None = None) -> str:
+        """Formato yt-dlp adaptado à carga atual do player.
+
+        `audio_max_abr` limita bitrate quando há vários servidores tocando.
+        Com um único servidor, o router passa um teto alto para preservar qualidade
+        sem pedir vídeo ou formatos absurdamente pesados.
+        """
+        try:
+            max_abr = int(audio_max_abr or 0)
+        except Exception:
+            max_abr = 0
+        if max_abr <= 0:
+            return MUSIC_YTDLP_FORMAT
+        return (
+            f"bestaudio[abr<={max_abr}][acodec=opus][asr=48000]/"
+            f"bestaudio[abr<={max_abr}][acodec=opus]/"
+            f"bestaudio[abr<={max_abr}][ext=m4a]/"
+            f"bestaudio[abr<={max_abr}]/"
+            "bestaudio[acodec=opus][asr=48000]/bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio/best"
+        )
+
+    def _base_opts(self, *, extract_flat: bool | str = False, playlist: bool = False, youtube_clients: tuple[str, ...] | None = None, audio_max_abr: int | None = None) -> dict[str, Any]:
         opts: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -375,7 +404,7 @@ class MusicExtractor:
             "geo_bypass": True,
             "cachedir": False,
             "playlistend": self.max_playlist_items if playlist else None,
-            "format": MUSIC_YTDLP_FORMAT,
+            "format": self._format_for_quality(audio_max_abr),
             "format_sort": ["acodec:opus", "asr:48000", "ext:webm:m4a", "abr", "proto"],
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -753,7 +782,7 @@ class MusicExtractor:
             raise MusicExtractionError("O link foi lido, mas não retornou áudio tocável.")
         return ExtractedBatch(tracks=[track], query=url, is_playlist=False)
 
-    async def resolve_stream(self, track: MusicTrack, *, force: bool = False) -> MusicTrack:
+    async def resolve_stream(self, track: MusicTrack, *, force: bool = False, audio_max_abr: int | None = None) -> MusicTrack:
         age = time.monotonic() - float(track.resolved_at_monotonic or 0.0)
         if track.stream_url and not self._is_probably_direct_stream_url(track.stream_url):
             # Flat mode do yt-dlp pode colocar a página do YouTube em info["url"].
@@ -764,17 +793,17 @@ class MusicExtractor:
             return track
 
         if str(track.extractor or "").lower() == "metadata":
-            return await self._resolve_metadata_track(track, force=force)
+            return await self._resolve_metadata_track(track, force=force, audio_max_abr=audio_max_abr)
 
         source = track.webpage_url or (track.original_url if looks_like_url(track.original_url) else "") or track.stream_url
         if not source:
-            return await self._resolve_metadata_track(track, force=force)
+            return await self._resolve_metadata_track(track, force=force, audio_max_abr=audio_max_abr)
 
         profile = describe_url(source)
         if profile.is_metadata_only:
-            return await self._resolve_metadata_track(track, force=force)
+            return await self._resolve_metadata_track(track, force=force, audio_max_abr=audio_max_abr)
 
-        stream_cache_key = self._stream_cache_key(source)
+        stream_cache_key = self._stream_cache_key(source, audio_max_abr)
         if not force and self._apply_stream_cache(track, stream_cache_key):
             return track
 
@@ -793,7 +822,7 @@ class MusicExtractor:
 
         for flat, playlist, clients in runs:
             try:
-                info = await self._run_extract(source, extract_flat=flat, playlist=playlist, youtube_clients=clients)
+                info = await self._run_extract(source, extract_flat=flat, playlist=playlist, youtube_clients=clients, audio_max_abr=audio_max_abr)
                 if info.get("entries"):
                     first = next((entry for entry in info.get("entries") or [] if entry), None)
                     if first:
@@ -817,7 +846,7 @@ class MusicExtractor:
             try:
                 candidate = await self.search_one(track.title, requester_id=track.requester_id, requester_name=track.requester_name, original_url=track.original_url or source)
                 if candidate.webpage_url != track.webpage_url:
-                    await self.resolve_stream(candidate, force=True)
+                    await self.resolve_stream(candidate, force=True, audio_max_abr=audio_max_abr)
                     if candidate.stream_url:
                         self._copy_resolved_fields(track, candidate)
                         self._put_stream_cache(stream_cache_key, track)
@@ -862,13 +891,14 @@ class MusicExtractor:
         extract_flat: bool | str = False,
         playlist: bool = False,
         youtube_clients: tuple[str, ...] | None = None,
+        audio_max_abr: int | None = None,
     ) -> dict[str, Any]:
         try:
             import yt_dlp  # import tardio para não pesar o boot quando música não é usada
         except Exception as exc:  # pragma: no cover
             raise MusicExtractionError("Dependência yt-dlp não está instalada no venv.") from exc
 
-        opts = self._base_opts(extract_flat=extract_flat, playlist=playlist, youtube_clients=youtube_clients)
+        opts = self._base_opts(extract_flat=extract_flat, playlist=playlist, youtube_clients=youtube_clients, audio_max_abr=audio_max_abr)
 
         def _work() -> dict[str, Any]:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -960,7 +990,7 @@ class MusicExtractor:
             score=35,
         )
 
-    async def _resolve_metadata_track(self, track: MusicTrack, *, force: bool = False) -> MusicTrack:
+    async def _resolve_metadata_track(self, track: MusicTrack, *, force: bool = False, audio_max_abr: int | None = None) -> MusicTrack:
         meta = self._metadata_candidate_from_track(track)
         candidate = await self._search_one_for_metadata(
             meta,
@@ -968,7 +998,7 @@ class MusicExtractor:
             requester_name=track.requester_name,
             original_url=track.original_url or meta.search_query,
         )
-        await self.resolve_stream(candidate, force=force)
+        await self.resolve_stream(candidate, force=force, audio_max_abr=audio_max_abr)
         if candidate.stream_url:
             official_title = " - ".join(part for part in (meta.artist, meta.title) if part).strip()
             self._copy_resolved_fields(track, candidate)

@@ -636,9 +636,6 @@ class QueueView(discord.ui.View):
             clear = discord.ui.Button(label="Limpar queue", emoji="🧹", style=discord.ButtonStyle.danger, row=row)
             clear.callback = self.clear_queue
             self.add_item(clear)
-        close = discord.ui.Button(label="Fechar", emoji="❌", style=discord.ButtonStyle.secondary, row=row)
-        close.callback = self.close_view
-        self.add_item(close)
 
     async def _redraw(self, interaction: discord.Interaction) -> None:
         self._refresh_components()
@@ -654,10 +651,6 @@ class QueueView(discord.ui.View):
         self.page = min(self._max_page(), self.page + 1)
         self.selected_position = None
         await self._redraw(interaction)
-
-    async def close_view(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(content="Queue fechado.", embed=None, view=None)
-        self.stop()
 
     async def cancel_selection(self, interaction: discord.Interaction):
         self.selected_position = None
@@ -762,7 +755,7 @@ class PlayerOptionsSelect(discord.ui.Select):
             return
         if value == "duck_volume":
             if not self.router.is_music_staff(getattr(interaction, "user", None)):
-                await interaction.response.send_message("Apenas staff pode alterar o volume do player.", ephemeral=True)
+                await interaction.response.send_message("Apenas staff pode alterar o volume durante TTS.", ephemeral=True)
                 return
             await interaction.response.send_modal(VolumeModal(self.router, self.guild_id, duck=True))
             return

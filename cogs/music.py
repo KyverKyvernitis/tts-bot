@@ -219,7 +219,7 @@ class Music(commands.Cog):
             await self._reply(ctx, "Use `_duck <5-100>` para ajustar o volume da música durante TTS.")
             return
         if not self.router.is_music_staff(ctx.author):
-            await self._reply(ctx, "Apenas staff pode alterar o volume do player.")
+            await self._reply(ctx, "Apenas staff pode alterar o volume durante TTS.")
             return
         volume = await self.router.set_duck_volume(ctx.guild.id, percent)
         await self._reply(ctx, f"`🎙️` Volume da música durante TTS ajustado para `{int(round(volume * 100))}%`.")
