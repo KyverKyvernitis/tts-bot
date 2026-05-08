@@ -41,7 +41,7 @@ MUSIC_FRAGMENT_RETRIES = max(0, int(getattr(config, "MUSIC_FRAGMENT_RETRIES", 1)
 MUSIC_EXTRACTOR_RETRIES = max(0, int(getattr(config, "MUSIC_EXTRACTOR_RETRIES", 1)))
 MUSIC_PLAYLIST_LAZY_LOAD = bool(getattr(config, "MUSIC_PLAYLIST_LAZY_LOAD", True))
 MUSIC_CACHE_MAX_ITEMS = max(20, int(getattr(config, "MUSIC_CACHE_MAX_ITEMS", 160)))
-MUSIC_YTDLP_FORMAT = str(getattr(config, "MUSIC_YTDLP_FORMAT", "") or "bestaudio[vcodec=none][acodec=opus][asr=48000]/bestaudio[vcodec=none][acodec=opus]/bestaudio[vcodec=none][ext=m4a]/bestaudio[vcodec=none]/bestaudio").strip()
+MUSIC_YTDLP_FORMAT = str(getattr(config, "MUSIC_YTDLP_FORMAT", "") or "bestaudio[vcodec=none]/bestaudio/best").strip()
 MUSIC_HIGH_QUALITY_MAX_ABR = max(96, int(getattr(config, "MUSIC_HIGH_QUALITY_MAX_ABR", 256)))
 MUSIC_MAX_AUDIO_BITRATE_STABLE = max(64, int(getattr(config, "MUSIC_MAX_AUDIO_BITRATE_STABLE", 160)))
 MUSIC_HEAVY_LOAD_MAX_ABR = max(64, int(getattr(config, "MUSIC_HEAVY_LOAD_MAX_ABR", 128)))
@@ -375,8 +375,8 @@ class MusicExtractor:
         """Formato yt-dlp adaptado à carga atual do player.
 
         `audio_max_abr` limita bitrate quando há vários servidores tocando.
-        Com um único servidor, o router passa um teto alto para preservar qualidade
-        sem pedir vídeo ou formatos absurdamente pesados.
+        Com um único servidor, o router passa None/0 para usar o melhor áudio-only
+        disponível, sem teto de abr.
         """
         try:
             max_abr = int(audio_max_abr or 0)
@@ -413,7 +413,6 @@ class MusicExtractor:
             "lazy_playlist": MUSIC_PLAYLIST_LAZY_LOAD and bool(playlist),
             "concurrent_fragment_downloads": 1,
             "format": self._format_for_quality(audio_max_abr),
-            "format_sort": ["acodec:opus", "asr:48000", "ext:webm:m4a", "abr", "proto"],
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -422,6 +421,15 @@ class MusicExtractor:
         }
         if opts["playlistend"] is None:
             opts.pop("playlistend", None)
+        try:
+            capped_abr = int(audio_max_abr or 0)
+        except Exception:
+            capped_abr = 0
+        if capped_abr > 0:
+            # Modo econômico/estável: prefere Opus/WebM quando estiver dentro do teto,
+            # porque costuma ser leve para stream. Alta qualidade não define sort
+            # customizado para deixar o yt-dlp escolher o melhor áudio-only real.
+            opts["format_sort"] = ["acodec:opus", "asr:48000", "ext:webm:m4a", "abr", "proto"]
         if self.cookies_file:
             opts["cookiefile"] = self.cookies_file
         if youtube_clients:
@@ -804,10 +812,10 @@ class MusicExtractor:
             track.resolved_at_monotonic = 0.0
         if track.stream_url and not force and age < MUSIC_STREAM_CACHE_TTL_SECONDS:
             # Reusa stream só quando a qualidade resolvida combina com a qualidade atual.
-            # Assim, com 1 servidor o bot pode voltar para qualidade alta; com carga alta,
-            # ele não reaproveita stream pesado antigo. Links diretos não têm teto de abr.
+            # Com 1 servidor, requested_abr=0 significa alta qualidade sem teto; nesse
+            # caso não pode reaproveitar stream capado resolvido antes em modo econômico.
             is_direct_track = str(track.extractor or "").lower() == "direct"
-            if not requested_abr or is_direct_track or (resolved_abr and requested_abr == resolved_abr):
+            if is_direct_track or (not requested_abr and not resolved_abr) or (requested_abr and resolved_abr == requested_abr):
                 return track
 
         if str(track.extractor or "").lower() == "metadata":

@@ -47,9 +47,12 @@ MUSIC_PREFETCH_BEFORE_END_SECONDS = max(5.0, float(getattr(config, "MUSIC_PREFET
 MUSIC_PANEL_UPDATE_THROTTLE_SECONDS = max(0.05, float(getattr(config, "MUSIC_PANEL_UPDATE_THROTTLE_SECONDS", 2.0)))
 MUSIC_AUDIO_MODE = str(getattr(config, "MUSIC_AUDIO_MODE", "auto") or "auto").strip().lower()
 MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS = max(1, int(getattr(config, "MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS", 1)))
-MUSIC_HIGH_QUALITY_MAX_ABR = max(96, int(getattr(config, "MUSIC_HIGH_QUALITY_MAX_ABR", 256)))
+MUSIC_HIGH_QUALITY_MAX_ABR = max(96, int(getattr(config, "MUSIC_HIGH_QUALITY_MAX_ABR", 256)))  # compat/env antigo
 MUSIC_MAX_AUDIO_BITRATE_STABLE = max(64, int(getattr(config, "MUSIC_MAX_AUDIO_BITRATE_STABLE", 160)))
 MUSIC_HEAVY_LOAD_MAX_ABR = max(64, int(getattr(config, "MUSIC_HEAVY_LOAD_MAX_ABR", 128)))
+MUSIC_AUTO_BITRATE_ENABLED = bool(getattr(config, "MUSIC_AUTO_BITRATE_ENABLED", True))
+MUSIC_AUTO_BITRATE_MAX = max(8000, int(getattr(config, "MUSIC_AUTO_BITRATE_MAX", 384000)))
+MUSIC_AUTO_BITRATE_MIN_GAIN = max(0, int(getattr(config, "MUSIC_AUTO_BITRATE_MIN_GAIN", 16000)))
 MUSIC_STREAM_START_RETRIES = max(0, int(getattr(config, "MUSIC_STREAM_START_RETRIES", 1)))
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
@@ -370,6 +373,9 @@ class MusicGuildState:
     panel_update_create: bool = True
     panel_update_requested_at: float = 0.0
     current_started_at_monotonic: float = 0.0
+    auto_bitrate_channel_id: Optional[int] = None
+    auto_bitrate_original: Optional[int] = None
+    auto_bitrate_boosted: Optional[int] = None
 
     def queue_size(self) -> int:
         return self.queue.qsize()
@@ -447,6 +453,214 @@ class AudioRouter:
             await save_doc(int(guild_id), doc)
         except Exception:
             logger.debug("[music] falha ao salvar ducking persistido", exc_info=True)
+
+    def _auto_bitrate_record_from_doc(self, guild_id: int) -> dict | None:
+        settings_db = getattr(self.bot, "settings_db", None)
+        if settings_db is None:
+            return None
+        try:
+            doc = getattr(settings_db, "guild_cache", {}).get(int(guild_id), {}) or {}
+            raw = doc.get("music_auto_bitrate")
+            if isinstance(raw, dict):
+                return dict(raw)
+        except Exception:
+            logger.debug("[music] falha ao ler auto bitrate persistido", exc_info=True)
+        return None
+
+    async def _save_auto_bitrate_record(self, guild_id: int, record: dict) -> bool:
+        settings_db = getattr(self.bot, "settings_db", None)
+        if settings_db is None:
+            return False
+        try:
+            get_doc = getattr(settings_db, "_get_guild_doc", None)
+            save_doc = getattr(settings_db, "_save_guild_doc", None)
+            if not callable(get_doc) or not callable(save_doc):
+                return False
+            doc = get_doc(int(guild_id))
+            doc["music_auto_bitrate"] = dict(record)
+            await save_doc(int(guild_id), doc)
+            return True
+        except Exception:
+            logger.debug("[music] falha ao salvar auto bitrate", exc_info=True)
+            return False
+
+    async def _clear_auto_bitrate_record(self, guild_id: int) -> None:
+        settings_db = getattr(self.bot, "settings_db", None)
+        if settings_db is None:
+            return
+        try:
+            get_doc = getattr(settings_db, "_get_guild_doc", None)
+            save_doc = getattr(settings_db, "_save_guild_doc", None)
+            if not callable(get_doc) or not callable(save_doc):
+                return
+            doc = get_doc(int(guild_id))
+            doc.pop("music_auto_bitrate", None)
+            await save_doc(int(guild_id), doc)
+        except Exception:
+            logger.debug("[music] falha ao limpar auto bitrate", exc_info=True)
+
+    def _load_auto_bitrate_record_into_state(self, guild_id: int, state: MusicGuildState) -> dict | None:
+        record = self._auto_bitrate_record_from_doc(guild_id)
+        if not record:
+            return None
+        try:
+            state.auto_bitrate_channel_id = int(record.get("channel_id") or 0) or None
+            state.auto_bitrate_original = int(record.get("original_bitrate") or 0) or None
+            state.auto_bitrate_boosted = int(record.get("boosted_bitrate") or 0) or None
+        except Exception:
+            state.auto_bitrate_channel_id = None
+            state.auto_bitrate_original = None
+            state.auto_bitrate_boosted = None
+            return None
+        return record
+
+    def _is_normal_voice_channel(self, channel) -> bool:
+        if channel is None:
+            return False
+        stage_type = getattr(discord, "StageChannel", None)
+        if stage_type is not None and isinstance(channel, stage_type):
+            return False
+        return bool(hasattr(channel, "edit") and hasattr(channel, "bitrate") and hasattr(channel, "permissions_for"))
+
+    def _bot_can_manage_voice_channel(self, guild: discord.Guild, channel) -> bool:
+        member = getattr(guild, "me", None) or getattr(guild, "self_role", None)
+        if member is None:
+            return False
+        try:
+            perms = channel.permissions_for(member)
+            return bool(getattr(perms, "manage_channels", False))
+        except Exception:
+            return False
+
+    def _target_auto_bitrate(self, guild: discord.Guild, channel) -> int:
+        current = int(getattr(channel, "bitrate", 0) or 0)
+        guild_limit = int(getattr(guild, "bitrate_limit", 0) or 0)
+        if guild_limit <= 0:
+            guild_limit = max(current, 96000)
+        return max(8000, min(int(MUSIC_AUTO_BITRATE_MAX), guild_limit))
+
+    async def _boost_auto_bitrate_for_music(self, guild: discord.Guild, channel, state: MusicGuildState) -> None:
+        if not MUSIC_AUTO_BITRATE_ENABLED or guild is None or channel is None:
+            return
+        if not self._is_normal_voice_channel(channel):
+            return
+        if not self._bot_can_manage_voice_channel(guild, channel):
+            return
+
+        # Se a sessão anterior marcou outro canal, restaura antes de mexer no novo.
+        if state.auto_bitrate_channel_id and int(state.auto_bitrate_channel_id) != int(getattr(channel, "id", 0) or 0):
+            await self._restore_auto_bitrate_for_state(guild, state, reason="channel_change")
+
+        current = int(getattr(channel, "bitrate", 0) or 0)
+        target = self._target_auto_bitrate(guild, channel)
+        if target <= current + MUSIC_AUTO_BITRATE_MIN_GAIN:
+            return
+
+        if state.auto_bitrate_channel_id == int(getattr(channel, "id", 0) or 0) and state.auto_bitrate_boosted == target:
+            return
+
+        record = {
+            "channel_id": int(getattr(channel, "id", 0) or 0),
+            "original_bitrate": current,
+            "boosted_bitrate": target,
+            "started_at": time.time(),
+            "reason": "music_player",
+        }
+        # Sem persistência, não altera para evitar canal preso após restart/crash.
+        if not await self._save_auto_bitrate_record(guild.id, record):
+            return
+
+        try:
+            await channel.edit(bitrate=target, reason="Aumentar bitrate temporariamente enquanto o player de música toca")
+        except (discord.Forbidden, discord.HTTPException):
+            await self._clear_auto_bitrate_record(guild.id)
+            logger.debug("[music] auto bitrate não pôde editar canal | guild=%s channel=%s", guild.id, getattr(channel, "id", None), exc_info=True)
+            return
+        except Exception:
+            await self._clear_auto_bitrate_record(guild.id)
+            logger.debug("[music] auto bitrate falhou", exc_info=True)
+            return
+
+        state.auto_bitrate_channel_id = record["channel_id"]
+        state.auto_bitrate_original = record["original_bitrate"]
+        state.auto_bitrate_boosted = record["boosted_bitrate"]
+
+    async def _restore_auto_bitrate_for_state(
+        self,
+        guild: discord.Guild | None,
+        state: MusicGuildState,
+        *,
+        reason: str = "music_finished",
+        channel_hint=None,
+    ) -> None:
+        if not MUSIC_AUTO_BITRATE_ENABLED:
+            return
+        if guild is None:
+            return
+
+        record = None
+        if state.auto_bitrate_channel_id and state.auto_bitrate_original and state.auto_bitrate_boosted:
+            record = {
+                "channel_id": int(state.auto_bitrate_channel_id),
+                "original_bitrate": int(state.auto_bitrate_original),
+                "boosted_bitrate": int(state.auto_bitrate_boosted),
+            }
+        else:
+            record = self._load_auto_bitrate_record_into_state(guild.id, state)
+        if not record:
+            return
+
+        try:
+            channel_id = int(record.get("channel_id") or 0)
+            original = int(record.get("original_bitrate") or 0)
+            boosted = int(record.get("boosted_bitrate") or 0)
+        except Exception:
+            await self._clear_auto_bitrate_record(guild.id)
+            return
+        if channel_id <= 0 or original <= 0 or boosted <= 0:
+            await self._clear_auto_bitrate_record(guild.id)
+            return
+
+        channel = channel_hint if channel_hint is not None and int(getattr(channel_hint, "id", 0) or 0) == channel_id else None
+        channel = channel or guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+        if channel is None or not self._is_normal_voice_channel(channel):
+            await self._clear_auto_bitrate_record(guild.id)
+        else:
+            current = int(getattr(channel, "bitrate", 0) or 0)
+            # Não briga com staff: se alguém alterou manualmente, só limpa a marcação.
+            if current == boosted:
+                if not self._bot_can_manage_voice_channel(guild, channel):
+                    return
+                try:
+                    await channel.edit(bitrate=original, reason=f"Restaurar bitrate após música ({reason})")
+                except (discord.Forbidden, discord.HTTPException):
+                    logger.debug("[music] não consegui restaurar bitrate | guild=%s channel=%s", guild.id, channel_id, exc_info=True)
+                    return
+                except Exception:
+                    logger.debug("[music] restauração de bitrate falhou", exc_info=True)
+                    return
+            await self._clear_auto_bitrate_record(guild.id)
+
+        state.auto_bitrate_channel_id = None
+        state.auto_bitrate_original = None
+        state.auto_bitrate_boosted = None
+
+    async def reconcile_auto_bitrate_records(self) -> None:
+        """Restaura bitrates temporários pendentes após restart do bot."""
+        if not MUSIC_AUTO_BITRATE_ENABLED:
+            return
+        settings_db = getattr(self.bot, "settings_db", None)
+        docs = getattr(settings_db, "guild_cache", {}) if settings_db is not None else {}
+        for guild_id, doc in list(docs.items()):
+            if not isinstance(doc, dict) or not isinstance(doc.get("music_auto_bitrate"), dict):
+                continue
+            guild = self.bot.get_guild(int(guild_id))
+            if guild is None:
+                await self._clear_auto_bitrate_record(int(guild_id))
+                continue
+            state = self.get_state(int(guild_id))
+            self._load_auto_bitrate_record_into_state(int(guild_id), state)
+            await self._restore_auto_bitrate_for_state(guild, state, reason="restart")
 
     def _clear_idle_reason(self, state: MusicGuildState) -> None:
         state.idle_reason = "idle"
@@ -708,17 +922,18 @@ class AudioRouter:
     def _audio_max_abr_for_load(self) -> int | None:
         """Escolhe qualidade por carga sem aumentar RAM.
 
-        Com um único servidor ativo, mantém teto alto. Quando há mais guilds
-        tocando, limita bitrate para reduzir trabalho do yt-dlp/FFmpeg/rede.
+        Com um único servidor ativo, retorna None para usar o melhor áudio-only
+        disponível, sem teto de abr. Quando há mais guilds tocando, limita
+        bitrate para reduzir trabalho do yt-dlp/FFmpeg/rede.
         """
         mode = MUSIC_AUDIO_MODE
         active = max(1, self._active_player_count())
         if mode in {"high", "alta", "quality"}:
-            return MUSIC_HIGH_QUALITY_MAX_ABR
+            return None
         if mode in {"low", "economy", "economico", "econômico", "stable"}:
             return MUSIC_MAX_AUDIO_BITRATE_STABLE
         if active <= MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS:
-            return MUSIC_HIGH_QUALITY_MAX_ABR
+            return None
         if active >= 3:
             return MUSIC_HEAVY_LOAD_MAX_ABR
         return MUSIC_MAX_AUDIO_BITRATE_STABLE
@@ -732,7 +947,7 @@ class AudioRouter:
             requested_abr = 0
         resolved_abr = int(getattr(track, "resolved_audio_max_abr", 0) or 0)
         is_direct_track = str(getattr(track, "extractor", "") or "").lower() == "direct"
-        return not requested_abr or is_direct_track or (resolved_abr and requested_abr == resolved_abr)
+        return bool(is_direct_track or (not requested_abr and not resolved_abr) or (requested_abr and resolved_abr == requested_abr))
 
     def _prefetch_delay_for_current(self, state: MusicGuildState) -> float:
         delay = float(MUSIC_PREFETCH_MIN_DELAY_SECONDS)
@@ -899,6 +1114,8 @@ class AudioRouter:
                 state.current = None
                 state.current_started_at_monotonic = 0.0
                 state.current_status = "idle"
+                guild = self.bot.get_guild(int(guild_id))
+                await self._restore_auto_bitrate_for_state(guild, state, reason="queue_finished" if state.queue.empty() else "stop_requested")
                 self._schedule_panel_update(guild_id, create=False)
 
     async def _play_track(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> bool:
@@ -921,6 +1138,7 @@ class AudioRouter:
         vc = await self._ensure_voice(guild, channel, state=state)
         if vc is None:
             raise RuntimeError("Não consegui conectar ao canal de voz.")
+        await self._boost_auto_bitrate_for_music(guild, channel, state)
 
         try:
             await self._resolve_current_track(state, track)
@@ -1171,6 +1389,7 @@ class AudioRouter:
         state.current_status = "idle"
         state.music_session_active = False
         state.music_owns_voice = False
+        await self._restore_auto_bitrate_for_state(guild, state, reason="external_disconnect", channel_hint=before_channel)
         state.control_votes.clear()
         self._cancel_music_idle_disconnect(state)
         self._set_idle_reason(
@@ -1200,7 +1419,9 @@ class AudioRouter:
             before_channel_id=int(getattr(before_channel, "id", 0) or 0) or None,
             after_channel_id=int(getattr(after_channel, "id", 0) or 0) or None,
         )
+        await self._restore_auto_bitrate_for_state(guild, state, reason="external_move", channel_hint=before_channel)
         state.last_voice_channel_id = int(getattr(after_channel, "id", 0) or 0) or state.last_voice_channel_id
+        await self._boost_auto_bitrate_for_music(guild, after_channel, state)
         self._set_idle_reason(
             state,
             "external_move",
@@ -1468,6 +1689,7 @@ class AudioRouter:
             if _vote_task is not None and not _vote_task.done():
                 _vote_task.cancel()
         state.control_vote_cleanup_tasks.clear()
+        await self._restore_auto_bitrate_for_state(guild, state, reason="manual_stop")
         await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 

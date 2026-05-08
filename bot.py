@@ -149,6 +149,7 @@ class BotLocal(commands.Bot):
         self._repo_root = Path(__file__).resolve().parent
         self._update_temp_root = Path("/tmp/discord-auto-update")
         self.audio_router = AudioRouter(self)
+        self._music_bitrate_reconciled = False
         set_health_provider(self.get_health_snapshot)
 
     async def _cleanup_removed_slash_commands(self, guild_ids: set[int]) -> None:
@@ -779,6 +780,14 @@ class BotLocal(commands.Bot):
             )
         except Exception as e:
             print(f"[bot] falha ao aplicar presence: {e!r}")
+        if not self._music_bitrate_reconciled:
+            self._music_bitrate_reconciled = True
+            router = getattr(self, "audio_router", None)
+            if router is not None and hasattr(router, "reconcile_auto_bitrate_records"):
+                try:
+                    await router.reconcile_auto_bitrate_records()
+                except Exception as e:
+                    logging.getLogger("music").debug("reconciliação de bitrate automático falhou: %r", e, exc_info=True)
         if self._health_task is None or self._health_task.done():
             self._health_task = asyncio.create_task(self._health_monitor_loop())
 
