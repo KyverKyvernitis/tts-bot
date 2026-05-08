@@ -237,7 +237,7 @@ class MusicExtractor:
         if title:
             return (
                 f"Não consegui confirmar essa faixa do {platform_label}. O link só retornou `{title}` sem artista/duração confiável. "
-                "Para evitar tocar uma música errada, não adicionei nada à fila."
+                "Para evitar tocar uma música errada, não adicionei nada ao queue."
             )
         return (
             f"Não consegui ler artista/duração confiável desse link do {platform_label}. "

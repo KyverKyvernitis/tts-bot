@@ -93,7 +93,7 @@ class Music(commands.Cog):
         if not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1:
             embed = discord.Embed(
                 title="🔎 Escolha a música",
-                description="Selecione um dos resultados abaixo para adicionar à fila.",
+                description="Selecione um dos resultados abaixo para adicionar ao queue.",
                 color=discord.Color.blurple(),
             )
             for idx, track in enumerate(batch.tracks[:5], start=1):
@@ -111,7 +111,7 @@ class Music(commands.Cog):
 
         added, dropped = await self.router.enqueue(ctx.guild, voice_channel, ctx.channel, batch.tracks)
         if added <= 0:
-            await self._reply(ctx, "`⚠️` Não adicionei nada: a fila está cheia ou essa música já está na fila/tocando.")
+            await self._reply(ctx, "`⚠️` Não adicionei nada: o queue está cheio ou essa música já está no queue/tocando.")
             return
 
         if batch.is_playlist:
@@ -121,13 +121,13 @@ class Music(commands.Cog):
             if batch.truncated:
                 desc += "\n`⚠️` Playlist limitada para não pesar o bot."
             if dropped:
-                desc += f"\n`⚠️` `{dropped}` item(ns) não entraram por duplicata ou fila cheia."
+                desc += f"\n`⚠️` `{dropped}` item(ns) não entraram por duplicata ou queue cheio."
             await self._reply(ctx, desc)
         else:
             track = batch.tracks[0]
             state = self.router.get_state(ctx.guild.id)
             position = state.queue_size() + (1 if state.current else 0)
-            await self._reply(ctx, f"`🎶` **Adicionada à fila:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`")
+            await self._reply(ctx, f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`")
 
     @commands.command(name="play", aliases=["tocar", "music", "musica"])
     @commands.guild_only()
@@ -243,9 +243,9 @@ class Music(commands.Cog):
             return
         removed = await self.router.remove_at(ctx.guild.id, position)
         if removed is None:
-            await self._reply(ctx, "Essa posição não existe na fila.")
+            await self._reply(ctx, "Essa posição não existe no queue.")
             return
-        await self._reply(ctx, f"`🗑️` Removido da fila: **{removed.short_title}**.")
+        await self._reply(ctx, f"`🗑️` Removido do queue: **{removed.short_title}**.")
 
     @commands.command(name="move", aliases=["mv", "mover"])
     @commands.guild_only()
@@ -254,7 +254,7 @@ class Music(commands.Cog):
             await self._reply(ctx, "Use `_move <posição atual> <nova posição>`.")
             return
         ok = await self.router.move(ctx.guild.id, from_pos, to_pos)
-        await self._reply(ctx, "`↪️` Posição atualizada." if ok else "Não consegui mover: confira as posições da fila.")
+        await self._reply(ctx, "`↪️` Posição atualizada." if ok else "Não consegui mover: confira as posições do queue.")
 
     @commands.command(name="skipto", aliases=["goto", "jump", "jumpto", "tocarfila"])
     @commands.guild_only()
@@ -263,9 +263,9 @@ class Music(commands.Cog):
             await self._reply(ctx, "Use `_skipto <posição>`.")
             return
         ok = await self.router.skip_to(ctx.guild.id, position)
-        await self._reply(ctx, "`▶️` Tocando a posição escolhida." if ok else "Não encontrei essa posição na fila.")
+        await self._reply(ctx, "`▶️` Tocando a posição escolhida." if ok else "Não encontrei essa posição no queue.")
 
-    @commands.command(name="readd", aliases=["ra", "readicionar", "historicofila"])
+    @commands.command(name="readd", aliases=["ra", "readicionar", "historicofila", "historicoqueue"])
     @commands.guild_only()
     async def readd(self, ctx: commands.Context):
         added = await self.router.readd_history(ctx.guild.id)
@@ -282,14 +282,14 @@ class Music(commands.Cog):
         for idx, track in enumerate(reversed(history[-10:]), start=1):
             lines.append(f"`{idx:02d}.` **{discord.utils.escape_markdown(track.short_title)}** • `{track.duration_label}`")
         embed = discord.Embed(title="↩️ Histórico de músicas", description="\n".join(lines), color=discord.Color.blurple())
-        embed.set_footer(text="Use _readd para colocar o histórico de volta na fila.")
+        embed.set_footer(text="Use _readd para colocar o histórico de volta no queue.")
         await self._reply(ctx, embed=embed)
 
-    @commands.command(name="clearqueue", aliases=["cq", "limparfila", "clearq"])
+    @commands.command(name="clearqueue", aliases=["cq", "limparfila", "limparqueue", "clearq"])
     @commands.guild_only()
     async def clearqueue(self, ctx: commands.Context):
         await self.router.replace_queue(ctx.guild.id, [])
-        await self._reply(ctx, "`🧹` Fila limpa.")
+        await self._reply(ctx, "`🧹` Queue limpo.")
 
 
     @commands.Cog.listener()

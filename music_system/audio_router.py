@@ -1330,8 +1330,8 @@ class AudioRouter:
             return False, pending_message
         ok = await self.stop(guild_id, disconnect=disconnect)
         if completed_by_vote:
-            return ok, "`⏹️` Votação concluída: player encerrado e fila limpa."
-        return ok, "`⏹️` Player encerrado e fila limpa."
+            return ok, "`⏹️` Votação concluída: player encerrado e queue limpo."
+        return ok, "`⏹️` Player encerrado e queue limpo."
 
     async def request_shuffle(self, guild_id: int, member) -> tuple[bool, str]:
         allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "shuffle")

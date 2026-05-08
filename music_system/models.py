@@ -16,7 +16,7 @@ class LoopMode(str, Enum):
         if self is LoopMode.ONE:
             return "música atual"
         if self is LoopMode.ALL:
-            return "fila"
+            return "queue"
         return "desligado"
 
 
