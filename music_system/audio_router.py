@@ -49,6 +49,24 @@ PCM_FRAME_MS = 20.0
 PCM_LIMITER_THRESHOLD = 30000
 
 
+def _consume_expected_music_exception(done: asyncio.Future) -> None:
+    """Consome cancelamentos esperados para não gerar "exception was never retrieved"."""
+    try:
+        done.result()
+    except asyncio.CancelledError:
+        return
+    except MusicPlaybackError as exc:
+        message = str(exc)
+        if message in {"Música pulada antes de iniciar o áudio.", "Playback cancelado."}:
+            return
+        logger.warning("[music] task/future terminou com erro de playback: %s", exc)
+    except Exception as exc:
+        logger.warning(
+            "[music] task/future terminou com exceção inesperada",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
 @dataclass(slots=True, eq=False)
 class TTSOverlay:
     source: discord.AudioSource
@@ -510,6 +528,7 @@ class AudioRouter:
                     st.music_idle_disconnect_task = None
 
         task = asyncio.create_task(_runner())
+        task.add_done_callback(_consume_expected_music_exception)
         state.music_idle_disconnect_task = task
 
     def _cancel_music_idle_disconnect(self, state: MusicGuildState) -> None:
@@ -656,6 +675,7 @@ class AudioRouter:
 
         state.next_resolve_key = key
         state.next_resolve_task = asyncio.create_task(_prefetch())
+        state.next_resolve_task.add_done_callback(_consume_expected_music_exception)
 
     async def _resolve_current_track(self, state: MusicGuildState, track: MusicTrack) -> None:
         key = self._track_resolve_key(track)
@@ -679,6 +699,7 @@ class AudioRouter:
                     if state.current_resolve_task is task:
                         state.current_resolve_task = None
         resolve_task = asyncio.create_task(self.extractor.resolve_stream(track, force=False))
+        resolve_task.add_done_callback(_consume_expected_music_exception)
         state.current_resolve_task = resolve_task
         try:
             await resolve_task
@@ -691,6 +712,7 @@ class AudioRouter:
         if state.worker_task is None or state.worker_task.done():
             state.stop_requested = False
             state.worker_task = asyncio.create_task(self._music_worker_loop(int(guild_id)))
+            state.worker_task.add_done_callback(_consume_expected_music_exception)
 
     async def _music_worker_loop(self, guild_id: int) -> None:
         state = self.get_state(guild_id)
@@ -803,6 +825,7 @@ class AudioRouter:
         )
         mixed_source.duck_enabled = True
         state.current_source = mixed_source
+        mixed_source.music_started_future.add_done_callback(_consume_expected_music_exception)
 
         def _after(error: Exception | None) -> None:
             if error:
@@ -1063,6 +1086,7 @@ class AudioRouter:
 
         try:
             task = asyncio.create_task(_runner())
+            task.add_done_callback(_consume_expected_music_exception)
             state.panel_update_task = task
         except RuntimeError:
             pass

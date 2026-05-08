@@ -21,6 +21,44 @@ from pathlib import Path, PurePosixPath
 _LOG_DIR = Path(__file__).resolve().parent / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+class _LowValueNoiseFilter(logging.Filter):
+    """Remove ruído conhecido sem esconder erro real do bot.
+
+    - voice WebSocket 1006 do discord.py costuma ser reconexão rotineira;
+    - cancelamentos esperados do player não devem virar traceback do asyncio.
+    """
+
+    _VOICE_LOGGERS = ("discord.voice", "discord.gateway", "discord.player")
+    _EXPECTED_MUSIC_CANCELS = (
+        "MusicPlaybackError: Música pulada antes de iniciar o áudio.",
+        "MusicPlaybackError: Playback cancelado.",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            logger_name = str(record.name or "")
+            message = record.getMessage()
+            lowered = message.lower()
+
+            if logger_name.startswith(self._VOICE_LOGGERS):
+                exc_text = ""
+                if record.exc_info:
+                    exc_text = "".join(traceback.format_exception_only(record.exc_info[0], record.exc_info[1]))
+                combined = f"{message}\n{exc_text}".lower()
+                if "1006" in combined and ("websocket" in combined or "voice" in combined or "closed" in combined):
+                    return False
+
+            if logger_name == "asyncio" and "exception was never retrieved" in lowered:
+                exc_text = ""
+                if record.exc_info:
+                    exc_text = "".join(traceback.format_exception_only(record.exc_info[0], record.exc_info[1]))
+                if any(marker in exc_text for marker in self._EXPECTED_MUSIC_CANCELS):
+                    return False
+        except Exception:
+            return True
+        return True
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -35,6 +73,9 @@ logging.basicConfig(
         ),
     ],
 )
+_noise_filter = _LowValueNoiseFilter()
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_noise_filter)
 logging.getLogger("discord.gateway").setLevel(logging.WARNING)
 logging.getLogger("discord.voice_client").setLevel(logging.WARNING)
 logging.getLogger("discord.player").setLevel(logging.WARNING)
@@ -603,55 +644,9 @@ class BotLocal(commands.Bot):
         branch: object,
         triggered_update: bool,
     ) -> None:
-        devai = self.get_cog("DevAI")
-        review = getattr(devai, "review_successful_patch", None)
-        if not callable(review):
-            return
-
-        review_zip_path: Path | None = None
-        try:
-            review_dir = self._repo_root / "data" / "dev_ai" / "patch_reviews"
-            review_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = "".join(ch if ch.isalnum() or ch in {".", "-", "_"} else "_" for ch in zip_path.name)[:120] or "patch.zip"
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            review_zip_path = review_dir / f"{stamp}_{safe_name}"
-            shutil.copy2(zip_path, review_zip_path)
-        except Exception as e:
-            logging.getLogger("zip_update").error(
-                "DevAI não conseguiu copiar zip para comentário: %r", e
-            )
-            return
-
-        async def _runner() -> None:
-            try:
-                await review(
-                    changed_files=[str(path) for path in changed_files],
-                    commit_hash=str(commit_hash or "") or None,
-                    branch=str(branch or "main"),
-                    zip_filename=zip_path.name,
-                    zip_path=review_zip_path,
-                    triggered_update=triggered_update,
-                )
-            except Exception as e:
-                logging.getLogger("zip_update").error(
-                    "DevAI falhou ao comentar patch: %r", e
-                )
-            finally:
-                try:
-                    if review_zip_path is not None:
-                        review_zip_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-        # IMPORTANTE: awaited (não mais fire-and-forget). Antes era
-        # `asyncio.create_task(_runner())` mas isso fazia o review ser
-        # cancelado quando o systemd updater reiniciava o bot ~60s depois
-        # do push (o updater detecta novo commit no minuto seguinte e
-        # roda `systemctl restart tts-bot.service`). Agora aguardamos:
-        # se o review demorar mais que isso, a DevAI também persistiu o
-        # pedido em `data/dev_ai/pending_reviews.jsonl` e vai retomar no
-        # próximo startup com diff reconstruído via git.
-        await _runner()
+        # Economia de CPU/API: patch aplicado com sucesso não dispara DevAI.
+        # Falhas continuam sendo enviadas pelo fluxo de exceção do auto-update.
+        return
 
     async def _handle_zip_update_message(self, message: discord.Message):
         zip_attachment = None
@@ -714,15 +709,8 @@ class BotLocal(commands.Bot):
                 await self._send_zip_update_message(
                     message,
                     "✅ Update enviado para o GitHub",
-                    f"Branch: **{branch}**\nCommit: **{short_hash}**\nArquivos alterados: **{len(changed_files)}**\n\n{preview_files}\n\n{update_line}\n\n🧠 A DevAI vai tentar comentar esse patch no webhook configurado.",
+                    f"Branch: **{branch}**\nCommit: **{short_hash}**\nArquivos alterados: **{len(changed_files)}**\n\n{preview_files}\n\n{update_line}",
                     discord.Color.green(),
-                )
-                await self._schedule_devai_patch_review(
-                    zip_path=zip_path,
-                    changed_files=changed_files,
-                    commit_hash=commit_hash,
-                    branch=branch,
-                    triggered_update=triggered_update,
                 )
             except zipfile.BadZipFile:
                 await self._send_zip_update_message(

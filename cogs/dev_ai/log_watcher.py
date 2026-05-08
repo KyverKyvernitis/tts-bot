@@ -13,6 +13,14 @@ ERROR_LINE_RE = re.compile(r"(?i)(ERROR|CRITICAL|Exception|Traceback|discord\.er
 PYERR_END_RE = re.compile(r"^[A-Za-z_][\w.]*?(Error|Exception|Warning):\s+.+")
 FILE_LINE_RE = re.compile(r'File "([^"]+)", line (\d+), in ([\w_<>]+)')
 
+IGNORED_EVENT_PATTERNS = (
+    re.compile(r"(?is)discord\.(?:voice_client|gateway).*?(?:websocket|voice).*?1006"),
+    re.compile(r"(?is)(?:websocket|voice).*?1006.*?(?:discord\.(?:voice_client|gateway)|reconnect|reconect)"),
+    re.compile(r"(?is)Task exception was never retrieved.*?MusicPlaybackError: (?:Música pulada antes de iniciar o áudio|Playback cancelado)\."),
+    re.compile(r"(?is)Future exception was never retrieved.*?MusicPlaybackError: (?:Música pulada antes de iniciar o áudio|Playback cancelado)\."),
+)
+
+
 
 @dataclass
 class LogEvent:
@@ -98,6 +106,8 @@ class LogWatcher:
             raw_text = "\n".join(block[-self.max_lines:]).strip()
             if not raw_text:
                 continue
+            if self._is_ignored_noise(raw_text):
+                continue
             clean = redact_secrets(raw_text, max_chars=18000)
             signature = hashlib.sha256(self._normalize_for_signature(clean).encode("utf-8", errors="replace")).hexdigest()[:16]
             now = time.time()
@@ -113,6 +123,9 @@ class LogWatcher:
                 created_at=now,
             ))
         return events
+
+    def _is_ignored_noise(self, text: str) -> bool:
+        return any(pattern.search(text or "") for pattern in IGNORED_EVENT_PATTERNS)
 
     def _normalize_for_signature(self, text: str) -> str:
         value = re.sub(r"\bline \d+\b", "line N", text)

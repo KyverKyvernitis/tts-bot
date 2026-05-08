@@ -148,10 +148,7 @@ class DevAI(commands.Cog):
             self.worker_task = asyncio.create_task(self._watch_loop())
             log.info("DevAI habilitada. Logs monitoradas: %s", ", ".join(p.as_posix() for p in self._configured_log_paths()))
 
-            # Verifica se há reviews pendentes que ficaram interrompidos por
-            # restart do systemd. Se houver, retoma em background — não trava
-            # o startup do bot.
-            asyncio.create_task(self._resume_pending_reviews())
+            # Reviews automáticos de patch bem-sucedido ficam desativados para economizar CPU/API.
         else:
             log.info("DevAI carregada, mas desabilitada. Defina DEVAI_ENABLED=true para ativar.")
 
@@ -489,15 +486,8 @@ SCHEMA EXATO DO JSON:
         return len(prompt or "") > max_chars
 
     def _discard_devai_analysis(self, reason: str, *, commit_hash: str | None = None, zip_filename: str | None = None) -> None:
-        """Log interno apenas. Nunca posta no webhook quando o contexto ou
-        a análise não é confiável.
-        """
-        log.warning(
-            "DevAI: análise descartada sem comentário público: %s (commit=%s zip=%s)",
-            reason,
-            commit_hash or "-",
-            zip_filename or "-",
-        )
+        """Descarta silenciosamente análises inválidas/incompletas."""
+        return
 
     def _invalid_review_reason(self, data: dict[str, Any]) -> str | None:
         """Valida o JSON da análise antes de mostrar ao dono.
@@ -716,39 +706,9 @@ SCHEMA EXATO DO JSON:
         zip_path: Path | None = None,
         triggered_update: bool = False,
     ) -> None:
-        if not self._enabled() or not bool(getattr(config, "DEVAI_PATCH_REVIEW_ENABLED", True)):
-            return
-        if self.ai is None or self.reporter is None or not self.reporter.available():
-            return
-        if not changed_files:
-            return
-
-        # Persiste o pedido ANTES de fazer o trabalho. Se o bot for morto pelo
-        # systemd updater no meio do review, o próximo startup vê esta entrada
-        # e retoma (usando git pra reconstruir o diff).
-        pending_id = self._persist_pending_review(
-            changed_files=changed_files,
-            commit_hash=commit_hash,
-            branch=branch,
-            zip_filename=zip_filename,
-            triggered_update=triggered_update,
-        )
-
-        try:
-            await self._run_patch_review_inner(
-                changed_files=changed_files,
-                commit_hash=commit_hash,
-                branch=branch,
-                zip_filename=zip_filename,
-                zip_path=zip_path,
-                triggered_update=triggered_update,
-            )
-        finally:
-            # Remove a entrada se o review terminou (com sucesso ou com
-            # _report_patch_review_fallback). Só fica pendente se o bot foi
-            # KILLED no meio (sem chance de chegar até o finally).
-            if pending_id:
-                self._remove_pending_review(pending_id)
+        # Economia de CPU/API: patch aplicado com sucesso não recebe review automático.
+        # A DevAI continua ativa para falhas reais via LogWatcher/notify_external_event.
+        return
 
     async def _run_patch_review_inner(
         self,
@@ -1041,21 +1001,7 @@ SCHEMA EXATO DO JSON:
         zip_filename: str,
         errors: list[str],
     ) -> None:
-        """Fallback interno do review.
-
-        A regra atual do projeto é não publicar mensagens de análise quando a
-        análise é inválida, incompleta ou indisponível. Então esse método só
-        registra em log local para diagnóstico e nunca envia webhook.
-        """
-        log.warning(
-            "DevAI patch review: fallback suprimido sem comentário público "
-            "(commit=%s zip=%s branch=%s files=%s errors=%s)",
-            commit_hash or "-",
-            zip_filename,
-            branch,
-            changed_files[:12],
-            errors[-6:] if errors else [],
-        )
+        return
 
     # ----- persistência de reviews pendentes (sobrevive a restart) -----
 
@@ -1130,74 +1076,9 @@ SCHEMA EXATO DO JSON:
             log.warning("DevAI: falha ao remover review pendente %s", entry_id, exc_info=True)
 
     async def _resume_pending_reviews(self) -> None:
-        """Lê pending_reviews.jsonl e roda cada review remanescente.
-
-        Chamado uma vez no `cog_load`. Reviews antigas (>24h) são descartadas
-        pra não enviar comentário sobre patch que o dono já esqueceu. Cada
-        review usa `git show` pra reconstruir o diff já que o ZIP original
-        foi apagado pelo finally do bot.py.
-        """
-        path = self._pending_reviews_path
-        if not path.exists():
-            return
-        # Pequeno delay pra dar tempo do bot conectar ao Discord — sem isso,
-        # a primeira chamada ao webhook pode falhar com "session not started".
-        await asyncio.sleep(8)
-        try:
-            lines = path.read_text("utf-8", errors="replace").splitlines()
-        except OSError:
-            return
-
-        import time as _time
-        cutoff = _time.time() - 24 * 3600  # 24h
-        pending: list[dict[str, Any]] = []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if float(rec.get("created_at") or 0) < cutoff:
-                continue  # muito velho — descarta
-            pending.append(rec)
-
-        if not pending:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            return
-
-        log.info("DevAI: retomando %d review(s) pendente(s) após restart", len(pending))
-        for rec in pending:
-            entry_id = str(rec.get("id") or "")
-            try:
-                # Avisa no webhook que esta é uma retomada — útil pra debug.
-                if self.reporter is not None and self.reporter.available():
-                    try:
-                        await self.reporter.send_plain(
-                            f"🔄 DevAI retomando review do commit `{str(rec.get('commit_hash') or '?')[:7]}` "
-                            f"(interrompido por restart)",
-                            username="DevAI",
-                        )
-                    except Exception:
-                        pass
-
-                await self._run_patch_review_inner(
-                    changed_files=list(rec.get("changed_files") or []),
-                    commit_hash=str(rec.get("commit_hash") or "") or None,
-                    branch=str(rec.get("branch") or "main"),
-                    zip_filename=str(rec.get("zip_filename") or "patch.zip"),
-                    zip_path=None,  # sem ZIP — vai cair no path do git diff
-                    triggered_update=bool(rec.get("triggered_update")),
-                )
-            except Exception:
-                log.exception("DevAI: falha retomando review pendente %s", entry_id)
-            finally:
-                if entry_id:
-                    self._remove_pending_review(entry_id)
+        """Reviews automáticos pendentes foram desativados; limpa fila antiga em silêncio."""
+        with contextlib.suppress(OSError):
+            self._pending_reviews_path.unlink(missing_ok=True)
 
     # ----- leitura alternativa: do disco e via git ---------------------
 
@@ -1315,120 +1196,47 @@ SCHEMA EXATO DO JSON:
         if not self._enabled():
             return
 
-        # Owner check tem nuance: se a mensagem está no canal de comentário
-        # configurado (que normalmente é privado/restrito ao dono), aceitamos
-        # sem checar bot.is_owner — porque is_owner pode falhar se a
-        # application info ainda não foi carregada (dá False silenciosamente
-        # logo depois do startup) OU se OWNER_ID estiver vazio no .env.
-        # Em qualquer outro canal, a checagem é estrita.
         channel_id_cfg = int(getattr(config, "DEVAI_COMMENT_CHANNEL_ID", 0) or 0)
         msg_channel_id = int(getattr(message.channel, "id", 0) or 0)
-        in_comment_channel = channel_id_cfg != 0 and msg_channel_id == channel_id_cfg
-
-        if not in_comment_channel:
-            if not await self._is_ownerish(message.author):
-                return
-
-        content = (message.content or "").strip()
-        if not content:
+        if not channel_id_cfg or msg_channel_id != channel_id_cfg:
             return
-        lower = content.lower()
+        if not await self._is_ownerish(message.author):
+            return
 
-        # ---- detecção de gatilhos ---------------------------------------
-        # 1) Mention real do bot (autocompletada pelo Discord como <@id>).
-        bot_user = getattr(self.bot, "user", None)
-        bot_mentioned = bool(bot_user) and bot_user in (message.mentions or [])
-
-        # 2) Reply pra alguma mensagem da DevAI. Detecção em 3 camadas
-        #    (cada uma cobre o gap da anterior):
-        #    (a) `message.reference.resolved` — populado pelo gateway, zero
-        #        API calls, sobrevive a restart do bot. Verifica `webhook_id`
-        #        contra o ID extraído de DEVAI_WEBHOOK_URL.
-        #    (b) sets em RAM (`_chat_message_ids`/`_report_message_ids`) —
-        #        cobre o caso raro do gateway não enviar `resolved`.
-        #    (c) fetch_message ativo — último recurso, requer Read Message
-        #        History no canal.
         ref = getattr(message, "reference", None)
         ref_id = int(getattr(ref, "message_id", 0) or 0) if ref is not None else 0
-        is_reply_to_report = False
-        is_reply_to_chat = False
-        reply_diag = "no-ref"
-        if ref_id:
-            classification = self._classify_reply_via_resolved(message)
-            if classification == "report":
-                is_reply_to_report = True
-                reply_diag = "resolved-report"
-            elif classification == "chat":
-                is_reply_to_chat = True
-                reply_diag = "resolved-chat"
-            # Camada (b): sets em RAM.
-            if not (is_reply_to_report or is_reply_to_chat):
-                if ref_id in self._report_message_ids:
-                    is_reply_to_report = True
-                    reply_diag = "ram-report"
-                elif ref_id in self._chat_message_ids:
-                    is_reply_to_chat = True
-                    reply_diag = "ram-chat"
-            # Camada (c): fetch ativo — só vai aqui se as outras falharam.
-            if not (is_reply_to_report or is_reply_to_chat):
-                classification = await self._classify_reply_via_webhook(message, ref_id)
-                if classification == "report":
-                    is_reply_to_report = True
-                    reply_diag = "fetch-report"
-                elif classification == "chat":
-                    is_reply_to_chat = True
-                    reply_diag = "fetch-chat"
-                else:
-                    reply_diag = "ref-not-devai"
-
-        # 3) Prefixo textual ou @DevAI literal — só conta no canal de
-        #    comentário pra não vazar pra outros canais.
-        text_prefix = (
-            lower.startswith("devai")
-            or lower.startswith("@devai")
-            or lower.startswith("@dev ai")  # tolera quebra natural
-            or lower.startswith("ia ")
-            or lower == "ia"
-        ) and in_comment_channel
-
-        triggered = bot_mentioned or is_reply_to_report or is_reply_to_chat or text_prefix
-
-        # Logging de diagnóstico — sempre que está no canal de comentário,
-        # registra o que o listener viu. Você vê em logs/bot.log e o LogWatcher
-        # da DevAI também pode ver. Isso é a chave pra debugar mensagens
-        # ignoradas: se você manda algo e nada acontece, esse log conta o porquê.
-        if in_comment_channel or bot_mentioned:
-            log.info(
-                "DevAI listener: ch=%s author=%s wh_id=%s ref_id=%s reply_diag=%s "
-                "mentioned=%s prefix=%s triggered=%s | %r",
-                msg_channel_id,
-                int(getattr(message.author, "id", 0) or 0),
-                self._devai_webhook_id(),
-                ref_id,
-                reply_diag,
-                bot_mentioned,
-                text_prefix,
-                triggered,
-                content[:80],
-            )
-
-        if not triggered:
+        if not ref_id:
             return
 
-        # Limpa prefixo/mention pra deixar só a pergunta/comentário.
-        cleaned = self._strip_prefix_and_mentions(content)
-        if not cleaned and not (is_reply_to_report or is_reply_to_chat):
-            cleaned = content  # fallback
+        is_reply_to_report = False
+        is_reply_to_chat = False
+        classification = self._classify_reply_via_resolved(message)
+        if classification == "report":
+            is_reply_to_report = True
+        elif classification == "chat":
+            is_reply_to_chat = True
 
-        # ---- decisão de modo --------------------------------------------
-        # Reply em RELATÓRIO de erro/patch → modo re-analyze (gera ZIP novo).
-        # SÓ vai pra esse caminho se ainda temos o LogEvent associado em RAM.
-        # Se perdemos (restart), cai pro modo chat — usuário ainda recebe
-        # uma resposta útil em vez de silêncio.
+        if not (is_reply_to_report or is_reply_to_chat):
+            if ref_id in self._report_message_ids:
+                is_reply_to_report = True
+            elif ref_id in self._chat_message_ids:
+                is_reply_to_chat = True
+
+        if not (is_reply_to_report or is_reply_to_chat):
+            classification = await self._classify_reply_via_webhook(message, ref_id)
+            if classification == "report":
+                is_reply_to_report = True
+            elif classification == "chat":
+                is_reply_to_chat = True
+
+        if not (is_reply_to_report or is_reply_to_chat):
+            return
+
+        cleaned = (message.content or "").strip()
+        cleaned = self._strip_prefix_and_mentions(cleaned) or cleaned
+
         if is_reply_to_report:
             event = self._last_event_by_message.get(ref_id)
-            if event is None and self._last_event_by_message:
-                event = list(self._last_event_by_message.values())[-1]
             if event is not None:
                 try:
                     await message.add_reaction("🧠")
@@ -1436,10 +1244,7 @@ SCHEMA EXATO DO JSON:
                     pass
                 asyncio.create_task(self._analyze_event(event, comment=cleaned))
                 return
-            # Sem evento associado (reinício do bot, p.ex.) — cai pro chat.
 
-        # Caso contrário (mention, prefixo, ou reply em CHAT/qualquer DevAI):
-        # conversa livre. A reação entra/sai dentro de `_chat_with_owner`.
         asyncio.create_task(self._chat_with_owner(message, cleaned))
 
     def _classify_reply_via_resolved(self, message: discord.Message) -> str:
