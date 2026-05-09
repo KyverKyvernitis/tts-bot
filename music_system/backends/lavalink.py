@@ -799,17 +799,51 @@ class LavalinkBackend:
 
             return wavelink, node
 
+    def _append_unique_candidate(self, candidates: list[str], value: object) -> None:
+        text = str(value or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    def _is_youtube_value(self, value: object) -> bool:
+        text = str(value or "").strip().lower()
+        return "youtube.com" in text or "youtu.be" in text or text.startswith(("ytsearch:", "ytmsearch:"))
+
+    def _soundcloud_fallback_query(self, track: Any, *, fallback_query: str = "") -> str:
+        title = str(getattr(track, "title", "") or "").strip()
+        author = str(getattr(track, "uploader", "") or getattr(track, "author", "") or "").strip()
+        query = " ".join(part for part in (author, title) if part).strip()
+        if not query:
+            query = str(fallback_query or "").strip()
+        if not query:
+            return ""
+        return query if query.lower().startswith("scsearch:") else f"scsearch:{query}"
+
     def _playable_candidates(self, track: Any, *, fallback_query: str = "") -> list[str]:
         candidates: list[str] = []
-        for value in (
-            getattr(track, "original_url", ""),
-            getattr(track, "webpage_url", ""),
-            fallback_query,
-            getattr(track, "title", ""),
-        ):
-            value = str(value or "").strip()
-            if value and value not in candidates:
-                candidates.append(value)
+        original_url = str(getattr(track, "original_url", "") or "").strip()
+        webpage_url = str(getattr(track, "webpage_url", "") or "").strip()
+        source = str(getattr(track, "source", "") or getattr(track, "extractor", "") or "").strip().lower()
+        title = str(getattr(track, "title", "") or "").strip()
+        is_youtube_track = (
+            source in {"youtube", "yt", "ytsearch", "ytmsearch"}
+            or self._is_youtube_value(original_url)
+            or self._is_youtube_value(webpage_url)
+            or self._is_youtube_value(fallback_query)
+        )
+        sc_fallback = self._soundcloud_fallback_query(track, fallback_query=fallback_query)
+
+        if is_youtube_track and sc_fallback:
+            # O youtube-source pode retornar TrackException/cipher/login mesmo com
+            # OAuth. Em modo Lavalink-only, tente SoundCloud antes de aceitar o
+            # YouTube como playable para não quebrar painel/player.
+            self._append_unique_candidate(candidates, sc_fallback)
+
+        for value in (original_url, webpage_url, fallback_query):
+            self._append_unique_candidate(candidates, value)
+
+        if not is_youtube_track and sc_fallback:
+            self._append_unique_candidate(candidates, sc_fallback)
+        self._append_unique_candidate(candidates, title)
         return candidates
 
     def _looks_like_playable(self, value: Any) -> bool:
@@ -1172,6 +1206,7 @@ class LavalinkBackend:
         candidates: list[str],
         volume: float = 1.0,
         resume_volume: float = 1.0,
+        resume_playable: Any | None = None,
         timeout: float = 120.0,
         should_resume=None,
     ) -> dict[str, Any]:
@@ -1195,7 +1230,7 @@ class LavalinkBackend:
             getattr(player, "channel", None) or getattr(guild, "voice_client", None),
             timeout=6.0,
         )
-        previous_playable = self._player_current_track(player)
+        previous_playable = self._player_current_track(player) or resume_playable
         previous_position = self._player_position_ms(player)
         was_paused = self._player_bool(player, "paused", "is_paused")
         music_volume = self._player_volume_percent(player, resume_volume)
@@ -1214,11 +1249,18 @@ class LavalinkBackend:
                 if current is not None and not self._same_playable(current, tts_playable):
                     break
                 active = self._player_bool(player, "playing", "is_playing")
-                if active:
+                rest_active = False
+                with contextlib.suppress(Exception):
+                    rest_payload = await self._get_rest_player(player, guild)
+                    rest_state = (rest_payload or {}).get("state") or {}
+                    rest_position = int(float(rest_state.get("position") or 0)) if isinstance(rest_state, dict) else 0
+                    rest_connected = bool(rest_state.get("connected")) if isinstance(rest_state, dict) else False
+                    rest_active = bool(rest_connected and (rest_position > 0 or time.monotonic() - playback_started_at < 1.0))
+                if active or rest_active:
                     last_active = time.monotonic()
-                elif time.monotonic() - last_active > 0.45:
+                elif time.monotonic() - last_active > 0.85:
                     break
-                await asyncio.sleep(0.08)
+                await asyncio.sleep(0.10)
             else:
                 raise RuntimeError(f"Playback TTS via Lavalink excedeu {float(timeout or 120.0):.1f}s")
             playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
@@ -1243,6 +1285,12 @@ class LavalinkBackend:
                         start=max(0, int(previous_position)),
                         volume=music_volume,
                         add_history=False,
+                    )
+                    await self._wait_for_rest_voice_connected(
+                        player,
+                        guild,
+                        getattr(player, "channel", None) or getattr(guild, "voice_client", None),
+                        timeout=6.0,
                     )
                     if was_paused:
                         await self._pause_player(player, True)

@@ -362,6 +362,8 @@ class MusicGuildState:
     music_owns_voice: bool = False
     tts_voice_touched: bool = False
     last_tts_activity_at: float = 0.0
+    lavalink_tts_until: float = 0.0
+    lavalink_resume_grace_until: float = 0.0
     music_session_active: bool = False
     music_idle_disconnect_task: Optional[asyncio.Task] = None
     control_votes: dict[str, ControlVote] = field(default_factory=dict)
@@ -522,7 +524,17 @@ class AudioRouter:
                     return True
             except Exception:
                 continue
-        return False
+        # Em Wavelink/Lavalink 4.2, alguns players seguem com áudio real
+        # enquanto ``playing`` oscila falso. Se há faixa atual e a conexão de voz
+        # existe, ainda trate como ativo para não limpar o painel/queue cedo.
+        current = getattr(vc, "current", None)
+        return bool(current is not None and self._vc_is_connected(vc))
+
+    def _lavalink_tts_active(self, state: MusicGuildState) -> bool:
+        return time.monotonic() < float(getattr(state, "lavalink_tts_until", 0.0) or 0.0)
+
+    def _lavalink_resume_grace_active(self, state: MusicGuildState) -> bool:
+        return time.monotonic() < float(getattr(state, "lavalink_resume_grace_until", 0.0) or 0.0)
 
     async def _vc_stop_audio(self, vc: Any) -> None:
         if vc is None:
@@ -2223,7 +2235,13 @@ class AudioRouter:
                 last_explicit_active_at = now
                 await asyncio.sleep(0.35)
                 continue
-            if has_current and (now - started_at < 2.5 or now - last_explicit_active_at < 1.25):
+            if self._lavalink_tts_active(state) or self._lavalink_resume_grace_active(state):
+                # Durante TTS via Lavalink, o player troca temporariamente a faixa
+                # e ``playing`` pode cair falso na janela de restauração. Não trate
+                # isso como fim natural da música.
+                await asyncio.sleep(0.20)
+                continue
+            if has_current and (now - started_at < 4.0 or now - last_explicit_active_at < 3.0):
                 await asyncio.sleep(0.20)
                 continue
             break
@@ -2810,15 +2828,18 @@ class AudioRouter:
                     "tts_lavalink_failed": True,
                     "tts_lavalink_missing_source": True,
                 }
+            tts_window = max(8.0, float(timeout or 120.0) + 6.0)
             try:
                 async with state.voice_lock:
-                    self._mark_lavalink_transition(state, seconds=max(8.0, float(timeout or 120.0) + 4.0))
-                    self._mark_internal_voice_disconnect(int(guild_id), seconds=max(8.0, float(timeout or 120.0) + 4.0))
+                    state.lavalink_tts_until = max(float(getattr(state, "lavalink_tts_until", 0.0) or 0.0), time.monotonic() + tts_window)
+                    self._mark_lavalink_transition(state, seconds=tts_window)
+                    self._mark_internal_voice_disconnect(int(guild_id), seconds=tts_window)
                     result = await self.backends.play_lavalink_tts(
                         guild,
                         candidates=candidates,
                         volume=TTS_VOLUME,
                         resume_volume=state.volume,
+                        resume_playable=state.current_lavalink_playable,
                         timeout=max(1.0, float(timeout or 120.0)),
                         should_resume=lambda: bool(
                             state.current_backend == "lavalink"
@@ -2832,11 +2853,15 @@ class AudioRouter:
                 result.setdefault("playback_started_at", playback_started_at)
                 result.setdefault("playback_ms", max(0.0, (time.monotonic() - playback_started_at) * 1000.0))
                 state.last_tts_activity_at = time.monotonic()
+                state.lavalink_resume_grace_until = time.monotonic() + 4.0
+                state.lavalink_tts_until = min(float(getattr(state, "lavalink_tts_until", 0.0) or 0.0), state.lavalink_resume_grace_until)
                 self._mark_lavalink_transition(state, seconds=4.0)
                 self._mark_internal_voice_disconnect(int(guild_id), seconds=4.0)
                 return result
             except Exception as exc:
                 logger.warning("[music/lavalink] TTS via Lavalink falhou; música deve continuar/resumir | guild=%s erro=%s", guild_id, exc)
+                state.lavalink_resume_grace_until = time.monotonic() + 6.0
+                state.lavalink_tts_until = min(float(getattr(state, "lavalink_tts_until", 0.0) or 0.0), state.lavalink_resume_grace_until)
                 self._mark_lavalink_transition(state, seconds=6.0)
                 self._mark_internal_voice_disconnect(int(guild_id), seconds=6.0)
                 return {

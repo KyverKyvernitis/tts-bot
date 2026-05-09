@@ -236,10 +236,9 @@ class MusicBackendManager:
         lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=getattr(guild, "id", None)))
         try:
             return await lavalink_backend.play_track(self.bot, guild, voice_channel, track, volume=volume)
-        except Exception:
+        finally:
             with contextlib.suppress(Exception):
                 await lavalink_backend.close()
-            raise
 
 
     async def play_lavalink_tts(
@@ -249,6 +248,7 @@ class MusicBackendManager:
         candidates: list[str],
         volume: float = 1.0,
         resume_volume: float = 1.0,
+        resume_playable: Any | None = None,
         timeout: float = 120.0,
         should_resume=None,
     ) -> dict[str, Any]:
@@ -262,13 +262,13 @@ class MusicBackendManager:
                 candidates=candidates,
                 volume=volume,
                 resume_volume=resume_volume,
+                resume_playable=resume_playable,
                 timeout=timeout,
                 should_resume=should_resume,
             )
-        except Exception:
+        finally:
             with contextlib.suppress(Exception):
                 await lavalink_backend.close()
-            raise
 
     async def set_lavalink_player_volume(self, guild_id: int, volume_percent: int) -> bool:
         if not self.lavalink._wavelink_installed():
