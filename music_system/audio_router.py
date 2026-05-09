@@ -1308,8 +1308,14 @@ class AudioRouter:
         current_key = self._voice_status_track_key(current_track) if current_track is not None else ""
         now = time.monotonic()
         sync_key = f"{current_key}:{reason}"
+        # Trocas reais de faixa precisam passar imediatamente, inclusive quando
+        # o usuário alterna rápido A → B → A. O cooldown antigo podia bloquear
+        # a segunda atualização legítima e deixar o status preso na música
+        # anterior até o refresh tardio.
+        high_priority_reason = reason in {"playback_started", "lavalink_track_started", "skip", "previous"}
         if (
-            sync_key
+            not high_priority_reason
+            and sync_key
             and sync_key == str(getattr(state, "voice_status_last_sync_request_key", "") or "")
             and now - float(getattr(state, "voice_status_last_sync_request_at", 0.0) or 0.0) < 1.75
         ):
@@ -1863,13 +1869,28 @@ class AudioRouter:
         """Obtém a próxima música e informa se veio do asyncio.Queue.
 
         Músicas do ``forward_queue`` não podem chamar ``queue.task_done()``.
+
+        O ``forward_queue`` não acorda tasks bloqueadas em ``asyncio.Queue.get``.
+        Isso quebrava o botão ⏮️ quando o player já estava em "Nada tocando":
+        a música anterior era colocada na frente, o painel mostrava "Queue
+        pronto", mas o worker seguia dormindo no queue normal. Por isso fazemos
+        pequenas esperas periódicas, preservando o timeout total de idle.
         """
-        if getattr(state, "forward_queue", None):
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        poll_interval = 0.35
+        while True:
+            if getattr(state, "forward_queue", None):
+                try:
+                    return state.forward_queue.popleft(), False
+                except IndexError:
+                    pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
             try:
-                return state.forward_queue.popleft(), False
-            except IndexError:
-                pass
-        return await asyncio.wait_for(state.queue.get(), timeout=timeout), True
+                return await asyncio.wait_for(state.queue.get(), timeout=min(poll_interval, remaining)), True
+            except asyncio.TimeoutError:
+                continue
 
     def _panel_key_for_track(self, track: MusicTrack | None) -> str | None:
         if track is None:
@@ -2208,7 +2229,7 @@ class AudioRouter:
         state.current_started_at_monotonic = time.monotonic()
         state.current_quality_label = "Alta"
         state.current_quality_kbps = MUSIC_HIGH_QUALITY_MAX_ABR
-        self._schedule_voice_status_track_sync(guild.id, repeat_after=0.0, reason="lavalink_track_started")
+        self._schedule_voice_status_track_sync(guild.id, repeat_after=1.0, reason="lavalink_track_started")
         self._schedule_panel_update(guild.id, create=True)
 
         # Polling simples e seguro enquanto o backend real ainda não usa eventos
@@ -2411,7 +2432,7 @@ class AudioRouter:
         state.current_status = "playing"
         state.current_started_at_monotonic = time.monotonic()
         self._refresh_quality_state(state, track)
-        self._schedule_voice_status_track_sync(guild.id, repeat_after=0.0, reason="playback_started")
+        self._schedule_voice_status_track_sync(guild.id, repeat_after=1.0, reason="playback_started")
         self._schedule_panel_update(guild.id, create=True)
         self._start_prefetch_next(guild.id, state)
         await finished
@@ -3107,8 +3128,9 @@ class AudioRouter:
         # música anterior precisa entrar nela ANTES da música atual. O fluxo
         # correto com duas músicas é:
         # A tocando → ⏭️ B → ⏮️ A → ⏭️ B.
-        # Se colocarmos B no forward_queue e A no queue normal, o worker toca B
-        # de novo, que era o bug onde ⏮️ só reiniciava a faixa atual.
+        # Quando o player já está em "Nada tocando", current é None; nesse caso
+        # o ⏮️ precisa acordar o worker e tocar o histórico imediatamente, não
+        # apenas mostrar "Queue pronto" parado.
         try:
             if current is not None:
                 state.forward_queue.appendleft(current)
@@ -3118,6 +3140,15 @@ class AudioRouter:
             return False
 
         skipped = await self.skip(guild_id, add_current_to_history=False) if current is not None else False
+        if current is None:
+            state.stop_requested = False
+            state.skip_requested = False
+            state.skip_transition_active = True
+            state.skip_history_suppressed_once = False
+            state.current_status = "skipping"
+            self._clear_idle_reason(state)
+            self._cancel_music_idle_disconnect(state)
+            state.music_session_active = True
         self.ensure_music_worker(guild_id)
         self._schedule_panel_update(guild_id, create=True)
         return True if skipped or previous_track else False
