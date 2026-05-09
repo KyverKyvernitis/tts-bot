@@ -35,7 +35,12 @@ def _track_link(track: MusicTrack, *, title_limit: int = 82) -> str:
 
 
 def _queue_items(state) -> list[MusicTrack]:
-    return list(getattr(state.queue, "_queue", []))
+    items: list[MusicTrack] = []
+    with contextlib.suppress(Exception):
+        items.extend(list(getattr(state, "forward_queue", []) or []))
+    with contextlib.suppress(Exception):
+        items.extend(list(getattr(state.queue, "_queue", [])))
+    return items
 
 
 def _queue_duration_label(items: list[MusicTrack]) -> str:
@@ -970,7 +975,7 @@ class MusicPlayerView(discord.ui.View):
         status = str(getattr(state, "current_status", "") or "")
         paused = bool(getattr(state, "paused", False)) or status == "paused"
         has_current = bool(getattr(state, "current", None) or getattr(state, "current_source", None) or status in {"resolving", "starting", "skipping", "playing", "paused"})
-        has_queue = not getattr(state, "queue", None).empty() if getattr(state, "queue", None) is not None else False
+        has_queue = bool(_queue_items(state))
         has_history = bool(list(getattr(state, "history", []) or []))
         has_session = bool(getattr(state, "music_session_active", False) or has_current or has_queue)
 

@@ -376,6 +376,7 @@ class MusicGuildState:
     now_message: Optional[discord.Message] = None
     panel_track_key: Optional[str] = None
     history: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_HISTORY_MAXSIZE))
+    forward_queue: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_HISTORY_MAXSIZE))
     voice_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     panel_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     music_owns_voice: bool = False
@@ -411,7 +412,7 @@ class MusicGuildState:
     voice_status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def queue_size(self) -> int:
-        return self.queue.qsize()
+        return self.queue.qsize() + len(self.forward_queue)
 
 
 class AudioRouter:
@@ -1521,13 +1522,13 @@ class AudioRouter:
 
     def is_music_active(self, guild_id: int) -> bool:
         state = self._states.get(int(guild_id))
-        return bool(state and (state.current or not state.queue.empty() or (state.worker_task and not state.worker_task.done())))
+        return bool(state and (state.current or self._has_pending_track(state) or (state.worker_task and not state.worker_task.done())))
 
     def should_defer_tts_auto_leave(self, guild_id: int) -> bool:
         state = self._states.get(int(guild_id))
         if state is None:
             return False
-        return bool(state.music_session_active or state.current or not state.queue.empty() or state.current_resolve_task or state.current_source)
+        return bool(state.music_session_active or state.current or self._has_pending_track(state) or state.current_resolve_task or state.current_source)
 
     async def schedule_music_idle_disconnect(self, guild_id: int, *, delay: float | None = None) -> None:
         state = self.get_state(guild_id)
@@ -1711,9 +1712,40 @@ class AudioRouter:
         keys: set[str] = set()
         if state.current is not None:
             keys.update(self._track_keys(state.current))
+        for item in list(getattr(state, "forward_queue", []) or []):
+            keys.update(self._track_keys(item))
         for item in list(getattr(state.queue, "_queue", [])):
             keys.update(self._track_keys(item))
         return keys
+
+    def _pending_items(self, state: MusicGuildState) -> list[MusicTrack]:
+        """Retorna próximas músicas na ordem real de avanço.
+
+        ``forward_queue`` guarda músicas que ficaram à frente quando o usuário
+        voltou no histórico. Ela precisa ter prioridade sobre o queue normal para
+        que o fluxo A → B → voltar A → avançar B funcione mesmo com só 2 músicas.
+        """
+        items: list[MusicTrack] = []
+        with contextlib.suppress(Exception):
+            items.extend(list(getattr(state, "forward_queue", []) or []))
+        with contextlib.suppress(Exception):
+            items.extend(list(getattr(state.queue, "_queue", [])))
+        return items
+
+    def _has_pending_track(self, state: MusicGuildState) -> bool:
+        return bool(self._pending_items(state))
+
+    async def _get_next_worker_track(self, state: MusicGuildState, *, timeout: float) -> tuple[MusicTrack, bool]:
+        """Obtém a próxima música e informa se veio do asyncio.Queue.
+
+        Músicas do ``forward_queue`` não podem chamar ``queue.task_done()``.
+        """
+        if getattr(state, "forward_queue", None):
+            try:
+                return state.forward_queue.popleft(), False
+            except IndexError:
+                pass
+        return await asyncio.wait_for(state.queue.get(), timeout=timeout), True
 
     def _panel_key_for_track(self, track: MusicTrack | None) -> str | None:
         if track is None:
@@ -1806,7 +1838,7 @@ class AudioRouter:
         return max(delay, remaining - MUSIC_PREFETCH_BEFORE_END_SECONDS)
 
     def _start_prefetch_next(self, guild_id: int, state: MusicGuildState) -> None:
-        if not MUSIC_PREFETCH_NEXT or state.queue.empty():
+        if not MUSIC_PREFETCH_NEXT or not self._has_pending_track(state):
             return
         if MUSIC_MAX_GLOBAL_PREFETCH <= 0:
             return
@@ -1815,7 +1847,7 @@ class AudioRouter:
         if self._global_prefetch_active >= MUSIC_MAX_GLOBAL_PREFETCH:
             return
         try:
-            next_track = list(getattr(state.queue, "_queue", []))[0]
+            next_track = self._pending_items(state)[0]
         except Exception:
             return
         target_abr = self._audio_max_abr_for_load()
@@ -1915,8 +1947,12 @@ class AudioRouter:
                 if guild is None:
                     return
 
+                track_from_queue = False
                 try:
-                    track = await asyncio.wait_for(state.queue.get(), timeout=MUSIC_IDLE_DISCONNECT_SECONDS)
+                    track, track_from_queue = await self._get_next_worker_track(
+                        state,
+                        timeout=MUSIC_IDLE_DISCONNECT_SECONDS,
+                    )
                 except asyncio.TimeoutError:
                     await self._maybe_disconnect_idle(guild, state)
                     return
@@ -1963,7 +1999,7 @@ class AudioRouter:
                     elif played_ok and state.loop_mode is LoopMode.ALL and not state.stop_requested and not state.skip_requested:
                         with contextlib.suppress(Exception):
                             await state.queue.put(track)
-                    skip_to_next = bool(state.skip_requested and not state.stop_requested and not state.queue.empty())
+                    skip_to_next = bool(state.skip_requested and not state.stop_requested and self._has_pending_track(state))
                     state.current = None
                     state.current_started_at_monotonic = 0.0
                     state.current_backend = "local"
@@ -1972,9 +2008,10 @@ class AudioRouter:
                     state.paused = False
                     state.skip_history_suppressed_once = False
                     state.skip_transition_active = skip_to_next
-                    state.current_status = "skipping" if skip_to_next else ("idle" if state.queue.empty() else "queued")
-                    with contextlib.suppress(Exception):
-                        state.queue.task_done()
+                    state.current_status = "skipping" if skip_to_next else ("idle" if not self._has_pending_track(state) else "queued")
+                    if track_from_queue:
+                        with contextlib.suppress(Exception):
+                            state.queue.task_done()
                     # Durante um skip com próxima música no queue, não renderiza um
                     # estado intermediário vazio/queued. A próxima iteração já vai
                     # definir current e redesenhar o painel como preparando/tocando.
@@ -1982,8 +2019,8 @@ class AudioRouter:
                         await self.update_panel(guild_id, create=bool(state.now_message))
         finally:
             state.worker_task = None
-            if state.stop_requested or state.queue.empty():
-                if not state.stop_requested and state.queue.empty():
+            if state.stop_requested or not self._has_pending_track(state):
+                if not state.stop_requested and not self._has_pending_track(state):
                     self._set_idle_reason(state, "queue_finished")
                 state.current = None
                 state.current_started_at_monotonic = 0.0
@@ -1994,8 +2031,8 @@ class AudioRouter:
                 state.skip_history_suppressed_once = False
                 state.current_status = "idle"
                 guild = self.bot.get_guild(int(guild_id))
-                await self._restore_auto_bitrate_for_state(guild, state, reason="queue_finished" if state.queue.empty() else "stop_requested")
-                await self._restore_voice_status_for_state(guild, state, reason="queue_finished" if state.queue.empty() else "stop_requested")
+                await self._restore_auto_bitrate_for_state(guild, state, reason="queue_finished" if not self._has_pending_track(state) else "stop_requested")
+                await self._restore_voice_status_for_state(guild, state, reason="queue_finished" if not self._has_pending_track(state) else "stop_requested")
                 self._schedule_panel_update(guild_id, create=False)
 
     async def _play_track_lavalink(
@@ -2251,7 +2288,7 @@ class AudioRouter:
         # sozinho ou só com bots, ele sai depois do timeout de música. Se ainda
         # há humanos, a conexão pode continuar para o TTS usar.
         state.current_status = "idle"
-        if not state.current and state.queue.empty() and state.idle_reason == "idle":
+        if not state.current and not self._has_pending_track(state) and state.idle_reason == "idle":
             self._set_idle_reason(state, "queue_finished")
         vc = guild.voice_client
         if not vc or not self._vc_is_connected(vc) or getattr(vc, "channel", None) is None:
@@ -2259,7 +2296,7 @@ class AudioRouter:
             state.music_owns_voice = False
             await self.update_panel(guild.id, create=False)
             return
-        if state.current or not state.queue.empty() or state.current_resolve_task or state.current_source:
+        if state.current or self._has_pending_track(state) or state.current_resolve_task or state.current_source:
             return
         # Se algum áudio direto do TTS ainda estiver tocando, não derruba a call.
         if self._vc_is_playing_or_paused(vc):
@@ -2280,7 +2317,7 @@ class AudioRouter:
             logger.debug("[music] idle disconnect falhou", exc_info=True)
 
     def _voice_channel_has_music_state(self, state: MusicGuildState) -> bool:
-        return bool(state.music_session_active or state.current or not state.queue.empty() or state.current_source or state.current_resolve_task or state.current_lavalink_player)
+        return bool(state.music_session_active or state.current or self._has_pending_track(state) or state.current_source or state.current_resolve_task or state.current_lavalink_player)
 
     async def _find_recent_voice_audit_actor(
         self,
@@ -2354,6 +2391,7 @@ class AudioRouter:
             with contextlib.suppress(Exception):
                 state.queue.get_nowait()
                 state.queue.task_done()
+        state.forward_queue.clear()
         state.current = None
         state.current_started_at_monotonic = 0.0
         state.current_source = None
@@ -2467,7 +2505,7 @@ class AudioRouter:
         try:
             from .ui import build_player_embeds, MusicPlayerView
 
-            has_player_content = bool(state.current or not state.queue.empty())
+            has_player_content = bool(state.current or self._has_pending_track(state))
             state.panel_vote_summary = self.pending_vote_summary(guild_id)
             embeds = build_player_embeds(state)
             # O painel mantém a mesma estrutura de controles mesmo quando a música acaba,
@@ -2664,7 +2702,13 @@ class AudioRouter:
             state.current_status = "skipping"
             did_anything = True
         else:
-            state.current_status = "queued" if not state.queue.empty() else "idle"
+            state.current_status = "queued" if self._has_pending_track(state) else "idle"
+            if self._has_pending_track(state):
+                # Pode acontecer durante uma transição rápida de anterior/avançar:
+                # não há faixa ativa no instante do clique, mas ainda existe uma
+                # próxima música pronta. Nesse caso ⏭️ deve avançar/iniciar, não
+                # responder "não havia música".
+                did_anything = True
             if not did_anything:
                 state.skip_transition_active = False
                 state.skip_history_suppressed_once = False
@@ -2689,6 +2733,7 @@ class AudioRouter:
             with contextlib.suppress(Exception):
                 state.queue.get_nowait()
                 state.queue.task_done()
+        state.forward_queue.clear()
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
         if vc:
@@ -2817,7 +2862,7 @@ class AudioRouter:
 
     def snapshot_queue(self, guild_id: int) -> list[MusicTrack]:
         state = self.get_state(guild_id)
-        return list(getattr(state.queue, "_queue", []))
+        return self._pending_items(state)
 
     def history_snapshot(self, guild_id: int) -> list[MusicTrack]:
         state = self.get_state(guild_id)
@@ -2852,10 +2897,14 @@ class AudioRouter:
             return False
         current = state.current
         if current is not None:
-            self._prepend_queue(state, current)
+            # Quando o usuário volta, a faixa atual fica "à frente". Assim, com
+            # apenas duas músicas, A → B → ⏮️ volta para A e ⏭️ volta para B em
+            # vez de aparecer que não há próxima música.
+            with contextlib.suppress(Exception):
+                state.forward_queue.appendleft(current)
         if not self._prepend_queue(state, previous_track):
             return False
-        skipped = await self.skip(guild_id, add_current_to_history=False)
+        skipped = await self.skip(guild_id, add_current_to_history=False) if current is not None else False
         self.ensure_music_worker(guild_id)
         self._schedule_panel_update(guild_id, create=True)
         return True if skipped or previous_track else False
@@ -2901,6 +2950,7 @@ class AudioRouter:
             with contextlib.suppress(Exception):
                 state.queue.get_nowait()
                 state.queue.task_done()
+        state.forward_queue.clear()
         for track in tracks[:MUSIC_QUEUE_MAXSIZE]:
             await state.queue.put(track)
         if tracks:
