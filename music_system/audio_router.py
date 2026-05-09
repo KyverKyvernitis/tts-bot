@@ -371,6 +371,8 @@ class MusicGuildState:
     next_resolve_active_key: str = ""
     current_status: str = "idle"
     skip_requested: bool = False
+    skip_transition_active: bool = False
+    skip_history_suppressed_once: bool = False
     now_message: Optional[discord.Message] = None
     panel_track_key: Optional[str] = None
     history: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_HISTORY_MAXSIZE))
@@ -1919,6 +1921,15 @@ class AudioRouter:
                     await self._maybe_disconnect_idle(guild, state)
                     return
 
+                # Assim que o worker retira a próxima música do queue, ela já vira
+                # a música atual do estado. Isso evita uma janela visual durante skip
+                # onde o painel via queue vazio + current vazio e mostrava
+                # "Nada tocando agora" antes da próxima faixa começar.
+                state.current = track
+                state.current_status = "resolving"
+                state.current_backend = "local"
+                state.skip_transition_active = False
+
                 played_ok = False
                 state.skip_requested = False
                 state.control_votes.clear()
@@ -1935,7 +1946,15 @@ class AudioRouter:
                 finally:
                     state.current_source = None
                     state.current_resolve_task = None
-                    if played_ok and not state.stop_requested and not state.skip_requested:
+                    started_before_finish = bool(float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0) > 0.0)
+                    should_history_natural = bool(played_ok and not state.stop_requested and not state.skip_requested)
+                    should_history_skip = bool(
+                        state.skip_requested
+                        and not state.stop_requested
+                        and started_before_finish
+                        and not state.skip_history_suppressed_once
+                    )
+                    if should_history_natural or should_history_skip:
                         self._push_history(state, track)
                     if played_ok and state.loop_mode is LoopMode.ONE and not state.stop_requested and not state.skip_requested:
                         with contextlib.suppress(Exception):
@@ -1944,16 +1963,23 @@ class AudioRouter:
                     elif played_ok and state.loop_mode is LoopMode.ALL and not state.stop_requested and not state.skip_requested:
                         with contextlib.suppress(Exception):
                             await state.queue.put(track)
+                    skip_to_next = bool(state.skip_requested and not state.stop_requested and not state.queue.empty())
                     state.current = None
                     state.current_started_at_monotonic = 0.0
                     state.current_backend = "local"
                     state.current_lavalink_player = None
                     state.current_lavalink_playable = None
                     state.paused = False
-                    state.current_status = "idle" if state.queue.empty() else "queued"
+                    state.skip_history_suppressed_once = False
+                    state.skip_transition_active = skip_to_next
+                    state.current_status = "skipping" if skip_to_next else ("idle" if state.queue.empty() else "queued")
                     with contextlib.suppress(Exception):
                         state.queue.task_done()
-                    await self.update_panel(guild_id, create=bool(state.now_message))
+                    # Durante um skip com próxima música no queue, não renderiza um
+                    # estado intermediário vazio/queued. A próxima iteração já vai
+                    # definir current e redesenhar o painel como preparando/tocando.
+                    if not skip_to_next:
+                        await self.update_panel(guild_id, create=bool(state.now_message))
         finally:
             state.worker_task = None
             if state.stop_requested or state.queue.empty():
@@ -1964,6 +1990,8 @@ class AudioRouter:
                 state.current_backend = "local"
                 state.current_lavalink_player = None
                 state.current_lavalink_playable = None
+                state.skip_transition_active = False
+                state.skip_history_suppressed_once = False
                 state.current_status = "idle"
                 guild = self.bot.get_guild(int(guild_id))
                 await self._restore_auto_bitrate_for_state(guild, state, reason="queue_finished" if state.queue.empty() else "stop_requested")
@@ -2602,12 +2630,14 @@ class AudioRouter:
         await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 
-    async def skip(self, guild_id: int) -> bool:
+    async def skip(self, guild_id: int, *, add_current_to_history: bool = True) -> bool:
         state = self.get_state(guild_id)
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
         did_anything = False
         state.skip_requested = True
+        state.skip_transition_active = True
+        state.skip_history_suppressed_once = not bool(add_current_to_history)
         for _vote_action in ("skip", "stop"):
             state.control_votes.pop(_vote_action, None)
             _vote_task = state.control_vote_cleanup_tasks.pop(_vote_action, None)
@@ -2625,15 +2655,19 @@ class AudioRouter:
             with contextlib.suppress(Exception):
                 if state.current_source is not None:
                     state.current_source.cleanup()
-            state.current = None
-            state.current_started_at_monotonic = 0.0
+            # Não apaga state.current aqui. O worker ainda precisa saber qual faixa
+            # foi pulada para salvar histórico e para o painel não piscar como
+            # "Nada tocando agora" enquanto a próxima música está sendo preparada.
             state.current_source = None
-            state.current_backend = "local"
-            state.current_lavalink_player = None
             state.current_lavalink_playable = None
             state.paused = False
-            state.current_status = "queued" if not state.queue.empty() else "idle"
+            state.current_status = "skipping"
             did_anything = True
+        else:
+            state.current_status = "queued" if not state.queue.empty() else "idle"
+            if not did_anything:
+                state.skip_transition_active = False
+                state.skip_history_suppressed_once = False
         self.ensure_music_worker(guild_id)
         self._schedule_panel_update(guild_id, create=bool(state.now_message))
         return did_anything
@@ -2675,6 +2709,8 @@ class AudioRouter:
         state.current_backend = "local"
         state.current_lavalink_player = None
         state.current_lavalink_playable = None
+        state.skip_transition_active = False
+        state.skip_history_suppressed_once = False
         state.current_status = "idle"
         state.paused = False
         state.music_session_active = False
@@ -2819,7 +2855,7 @@ class AudioRouter:
             self._prepend_queue(state, current)
         if not self._prepend_queue(state, previous_track):
             return False
-        skipped = await self.skip(guild_id)
+        skipped = await self.skip(guild_id, add_current_to_history=False)
         self.ensure_music_worker(guild_id)
         self._schedule_panel_update(guild_id, create=True)
         return True if skipped or previous_track else False

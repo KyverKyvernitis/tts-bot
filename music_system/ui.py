@@ -60,12 +60,16 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     """Painel inspirado no MuseHeart, adaptado para discord.py/FFmpeg."""
     status = str(getattr(state, "current_status", "playing") or "playing")
     paused = bool(getattr(state, "paused", False)) or status == "paused"
-    loading = status in {"resolving", "starting"}
+    skipping = status == "skipping"
+    loading = status in {"resolving", "starting", "skipping"}
     errored = status == "error"
     color = discord.Color.gold() if paused or loading else discord.Color.red() if errored else discord.Color.blurple()
     queue = _queue_items(state)
     embed = discord.Embed(color=color)
-    if loading:
+    if skipping:
+        author_name = "Pulando música:"
+        author_icon = "https://i.ibb.co/QXtk5VB/neon-circle.gif"
+    elif loading:
         author_name = "Preparando áudio:"
         author_icon = "https://i.ibb.co/QXtk5VB/neon-circle.gif"
     elif paused:
@@ -87,7 +91,12 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
         f"-# {_track_link(track)}",
         "",
     ]
-    if loading:
+    if skipping:
+        if queue:
+            lines.append("> -# ⏭️ **⠂** `Pulando... preparando a próxima música do queue.`")
+        else:
+            lines.append("> -# ⏭️ **⠂** `Pulando... encerrando a música atual.`")
+    elif loading:
         lines.append("> -# 🔄 **⠂** `Resolvendo stream de áudio...`")
     lines.extend([
         duration_line,
@@ -157,8 +166,20 @@ def build_player_embeds(state) -> list[discord.Embed]:
     queue = _queue_items(state)
     status = str(getattr(state, "current_status", "idle") or "idle")
 
-    embed = discord.Embed(color=discord.Color.dark_grey() if not queue else discord.Color.blurple())
-    if queue:
+    embed = discord.Embed(color=discord.Color.gold() if status == "skipping" else (discord.Color.dark_grey() if not queue else discord.Color.blurple()))
+    if status == "skipping":
+        embed.set_author(name="Pulando música...", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
+        if queue:
+            first = queue[0]
+            embed.description = (
+                "A música atual foi pulada e a próxima já está sendo preparada.\n"
+                f"Próxima: {_track_link(first, title_limit=60)}"
+            )
+            if first.thumbnail:
+                embed.set_thumbnail(url=first.thumbnail)
+        else:
+            embed.description = "A música atual foi pulada. O player está finalizando a transição."
+    elif queue:
         embed.set_author(name="Queue pronto:", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
         lines = [
             f"> -# 🎶 **⠂** `{len(queue)} música{'s' if len(queue) != 1 else ''} aguardando`",
@@ -948,7 +969,7 @@ class MusicPlayerView(discord.ui.View):
         state = self.router.get_state(self.guild_id)
         status = str(getattr(state, "current_status", "") or "")
         paused = bool(getattr(state, "paused", False)) or status == "paused"
-        has_current = bool(getattr(state, "current", None) or getattr(state, "current_source", None) or status in {"resolving", "starting", "playing", "paused"})
+        has_current = bool(getattr(state, "current", None) or getattr(state, "current_source", None) or status in {"resolving", "starting", "skipping", "playing", "paused"})
         has_queue = not getattr(state, "queue", None).empty() if getattr(state, "queue", None) is not None else False
         has_history = bool(list(getattr(state, "history", []) or []))
         has_session = bool(getattr(state, "music_session_active", False) or has_current or has_queue)
