@@ -617,9 +617,6 @@ class QueueView(discord.ui.View):
             remove = discord.ui.Button(label="Remover", emoji="🗑️", style=discord.ButtonStyle.danger, row=row)
             remove.callback = self.remove_selected
             self.add_item(remove)
-            cancel = discord.ui.Button(label="Cancelar", emoji="❌", style=discord.ButtonStyle.secondary, row=row)
-            cancel.callback = self.cancel_selection
-            self.add_item(cancel)
             row += 1
 
         if max_page > 0:
@@ -633,9 +630,6 @@ class QueueView(discord.ui.View):
             self.add_item(next_button)
             row += 1
 
-        reload_button = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.secondary, row=row)
-        reload_button.callback = self.reload
-        self.add_item(reload_button)
         if items:
             clear = discord.ui.Button(label="Limpar queue", emoji="🧹", style=discord.ButtonStyle.danger, row=row)
             clear.callback = self.clear_queue

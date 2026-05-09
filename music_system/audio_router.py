@@ -1075,8 +1075,12 @@ class AudioRouter:
             # que não havia status original conhecido para não inventar restauração.
             current_status = ""
         if state.voice_status_channel_id == channel_id and state.voice_status_last_bot:
-            if known and current_status != state.voice_status_last_bot:
-                # Staff mudou manualmente; não briga com a alteração.
+            if known and current_status != state.voice_status_last_bot and not force:
+                # Staff mudou manualmente; não briga com a alteração em
+                # atualizações periódicas. Trocas reais de faixa usam
+                # force=True porque o status lido pelo discord.py/REST pode vir
+                # vazio/desatualizado e isso não pode impedir a nova música de
+                # sincronizar o status do canal.
                 await self._clear_voice_status_record(guild.id)
                 state.voice_status_channel_id = None
                 state.voice_status_had_original = False
@@ -1145,7 +1149,7 @@ class AudioRouter:
                     if guild is None or state.current is None or not state.last_voice_channel_id:
                         return
                     channel = guild.get_channel(int(state.last_voice_channel_id)) or self.bot.get_channel(int(state.last_voice_channel_id))
-                    await self._apply_voice_status_for_music(guild, channel, state, state.current, force=True)
+                    await self._apply_voice_status_for_music(guild, channel, state, state.current, force=False)
             except asyncio.CancelledError:
                 raise
             except Exception:
