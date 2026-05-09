@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
 import config
+
+LAVALINK_REAL_TEST_GUILD_ID = 927002914449424404
 
 from .base import BackendHealth, BackendSearchResult, LocalPlaybackBackend
 from .lavalink import LavalinkBackend, LavalinkConfig
@@ -15,9 +18,8 @@ logger = logging.getLogger(__name__)
 class MusicBackendManager:
     """Gerenciador dos backends de música.
 
-    Patch atual mantém o backend real como local. Lavalink pode ser configurado
-    pelo painel `_musicnode` e fica disponível apenas para diagnóstico/teste,
-    preparando a migração sem alterar o fluxo atual de playback.
+    O backend local continua padrão. Playback real via Lavalink só é liberado
+    em guilds de teste explicitamente permitidas, mantendo fallback local.
     """
 
     def __init__(self, bot, extractor) -> None:
@@ -40,6 +42,45 @@ class MusicBackendManager:
         except Exception:
             return 0
 
+    def _real_lavalink_guild_ids(self) -> set[int]:
+        raw = getattr(config, "MUSIC_LAVALINK_REAL_GUILD_IDS", None)
+        if raw is None:
+            raw = [LAVALINK_REAL_TEST_GUILD_ID]
+        if isinstance(raw, (str, int)):
+            raw = [raw]
+        ids: set[int] = set()
+        for value in raw or []:
+            try:
+                guild_id = int(str(value).strip())
+            except Exception:
+                continue
+            if guild_id > 0:
+                ids.add(guild_id)
+        return ids or {LAVALINK_REAL_TEST_GUILD_ID}
+
+    def is_lavalink_real_allowed_guild(self, guild_id: int | None) -> bool:
+        return self._guild_key(guild_id) in self._real_lavalink_guild_ids()
+
+    def should_use_lavalink_real(self, guild_id: int | None = None) -> bool:
+        """Ativa playback real via Lavalink somente em guilds de teste liberadas.
+
+        Mesmo que alguém coloque modo Lavalink em outro servidor, o backend real
+        continua local. Isso evita ativação global acidental durante a migração.
+        """
+        if not self.is_lavalink_real_allowed_guild(guild_id):
+            return False
+        try:
+            cfg = self.lavalink_store.load(guild_id=guild_id)
+        except Exception:
+            logger.debug("[music/lavalink] falha ao ler config real", exc_info=True)
+            return False
+        if not (cfg.enabled and cfg.configured and cfg.mode in {"lavalink", "auto"}):
+            return False
+        return bool(self.lavalink._wavelink_installed())
+
+    def playback_backend_for_guild(self, guild_id: int | None = None) -> str:
+        return "lavalink" if self.should_use_lavalink_real(guild_id) else "local"
+
     def should_shadow_lavalink(self, guild_id: int | None = None) -> bool:
         """Retorna se o Lavalink deve ser consultado em paralelo ao player local.
 
@@ -59,6 +100,7 @@ class MusicBackendManager:
 
     async def close(self) -> None:
         await self.lavalink.close()
+        await self.lavalink.close_wavelink_pool()
         await self.local.close()
 
     async def _replace_lavalink(self, cfg: LavalinkConfig) -> None:
@@ -66,6 +108,7 @@ class MusicBackendManager:
         self.lavalink = LavalinkBackend.from_config(cfg)
         try:
             await old.close()
+            await old.close_wavelink_pool()
         except Exception:
             logger.debug("[music/lavalink] falha ao fechar sessão antiga do backend", exc_info=True)
 
@@ -173,16 +216,45 @@ class MusicBackendManager:
         finally:
             await lavalink_backend.close()
 
+    async def play_lavalink_track(self, guild, voice_channel, track, *, volume: float = 1.0):
+        if not self.should_use_lavalink_real(getattr(guild, "id", None)):
+            raise RuntimeError("Playback real via Lavalink não está liberado para este servidor.")
+        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=getattr(guild, "id", None)))
+        try:
+            return await lavalink_backend.play_track(self.bot, guild, voice_channel, track, volume=volume)
+        except Exception:
+            with contextlib.suppress(Exception):
+                await lavalink_backend.close()
+            raise
+
+    async def set_lavalink_player_volume(self, guild_id: int, volume_percent: int) -> bool:
+        if not self.lavalink._wavelink_installed():
+            return False
+        try:
+            import wavelink
+            guild = self.bot.get_guild(int(guild_id))
+            player = getattr(guild, "voice_client", None) if guild else None
+            if player is None or not isinstance(player, wavelink.Player):
+                return False
+            await player.set_volume(max(0, min(150, int(volume_percent))))
+            return True
+        except Exception:
+            logger.debug("[music/lavalink] falha ao ajustar volume do player", exc_info=True)
+            return False
+
     def compact_runtime_summary(self, guild_id: int | None = None) -> dict[str, Any]:
         cfg_summary = self.lavalink_config_summary(guild_id=guild_id)
         cfg = self.lavalink_store.load(guild_id=guild_id)
         return {
             "configured_backend": self.mode,
-            "active_backend": self.active_backend_name,
+            "active_backend": self.playback_backend_for_guild(guild_id),
             "lavalink_mode": cfg.mode,
             "lavalink_enabled": cfg.enabled,
             "lavalink_configured": cfg.configured,
             "lavalink_config_source": cfg_summary.get("source", "padrão"),
             "lavalink_guild_override": bool(cfg_summary.get("guild_override")),
             "lavalink_shadow_active": self.should_shadow_lavalink(guild_id),
+            "lavalink_real_allowed_guild": self.is_lavalink_real_allowed_guild(guild_id),
+            "lavalink_real_active": self.should_use_lavalink_real(guild_id),
+            "lavalink_real_test_guild_id": LAVALINK_REAL_TEST_GUILD_ID,
         }

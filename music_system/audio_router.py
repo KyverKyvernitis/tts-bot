@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from array import array
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Any
 
 import discord
 
@@ -362,6 +362,9 @@ class MusicGuildState:
     stop_requested: bool = False
     paused: bool = False
     current_source: Optional[MixedAudioSource] = None
+    current_backend: str = "local"
+    current_lavalink_player: Any = None
+    current_lavalink_playable: Any = None
     current_resolve_task: Optional[asyncio.Task] = None
     next_resolve_task: Optional[asyncio.Task] = None
     next_resolve_key: str = ""
@@ -453,6 +456,64 @@ class AudioRouter:
                 state.duck_volume = max(0.05, min(1.0, float(raw_duck)))
         except Exception:
             logger.debug("[music] falha ao carregar volume/ducking persistido", exc_info=True)
+
+    def _is_lavalink_voice_client(self, vc: Any) -> bool:
+        if vc is None:
+            return False
+        module = str(getattr(type(vc), "__module__", "") or "")
+        return module.startswith("wavelink")
+
+    def _vc_is_connected(self, vc: Any) -> bool:
+        if vc is None:
+            return False
+        if self._is_lavalink_voice_client(vc):
+            return bool(getattr(vc, "connected", False))
+        checker = getattr(vc, "is_connected", None)
+        return bool(checker() if callable(checker) else getattr(vc, "connected", False))
+
+    def _vc_is_playing(self, vc: Any) -> bool:
+        if vc is None:
+            return False
+        if self._is_lavalink_voice_client(vc):
+            return bool(getattr(vc, "playing", False))
+        checker = getattr(vc, "is_playing", None)
+        return bool(checker() if callable(checker) else getattr(vc, "playing", False))
+
+    def _vc_is_paused(self, vc: Any) -> bool:
+        if vc is None:
+            return False
+        if self._is_lavalink_voice_client(vc):
+            return bool(getattr(vc, "paused", False))
+        checker = getattr(vc, "is_paused", None)
+        return bool(checker() if callable(checker) else getattr(vc, "paused", False))
+
+    def _vc_is_playing_or_paused(self, vc: Any) -> bool:
+        return self._vc_is_playing(vc) or self._vc_is_paused(vc)
+
+    async def _vc_stop_audio(self, vc: Any) -> None:
+        if vc is None:
+            return
+        if self._is_lavalink_voice_client(vc):
+            skipper = getattr(vc, "skip", None)
+            if callable(skipper):
+                with contextlib.suppress(TypeError):
+                    result = skipper(force=True)
+                    if asyncio.iscoroutine(result):
+                        await result
+                    return
+                result = skipper()
+                if asyncio.iscoroutine(result):
+                    await result
+                return
+            stopper = getattr(vc, "stop", None)
+            if callable(stopper):
+                result = stopper()
+                if asyncio.iscoroutine(result):
+                    await result
+            return
+        stopper = getattr(vc, "stop", None)
+        if callable(stopper):
+            stopper()
 
     async def _persist_volume(self, guild_id: int, volume: float) -> None:
         settings_db = getattr(self.bot, "settings_db", None)
@@ -1885,6 +1946,9 @@ class AudioRouter:
                             await state.queue.put(track)
                     state.current = None
                     state.current_started_at_monotonic = 0.0
+                    state.current_backend = "local"
+                    state.current_lavalink_player = None
+                    state.current_lavalink_playable = None
                     state.paused = False
                     state.current_status = "idle" if state.queue.empty() else "queued"
                     with contextlib.suppress(Exception):
@@ -1897,11 +1961,66 @@ class AudioRouter:
                     self._set_idle_reason(state, "queue_finished")
                 state.current = None
                 state.current_started_at_monotonic = 0.0
+                state.current_backend = "local"
+                state.current_lavalink_player = None
+                state.current_lavalink_playable = None
                 state.current_status = "idle"
                 guild = self.bot.get_guild(int(guild_id))
                 await self._restore_auto_bitrate_for_state(guild, state, reason="queue_finished" if state.queue.empty() else "stop_requested")
                 await self._restore_voice_status_for_state(guild, state, reason="queue_finished" if state.queue.empty() else "stop_requested")
                 self._schedule_panel_update(guild_id, create=False)
+
+    async def _play_track_lavalink(
+        self,
+        guild: discord.Guild,
+        state: MusicGuildState,
+        track: MusicTrack,
+        channel: discord.abc.Connectable,
+    ) -> bool:
+        """Toca uma faixa pelo Lavalink real, limitado ao servidor de teste.
+
+        A queue, painel e status continuam no AudioRouter. Se algo falhar antes
+        de iniciar, o caller cai para o backend local sem afetar o usuário.
+        """
+        state.current_backend = "lavalink"
+        state.current_source = None
+        state.current_lavalink_player = None
+        state.current_lavalink_playable = None
+        state.current_status = "starting"
+        await self.update_panel(guild.id, create=True)
+
+        player, playable, meta = await self.backends.play_lavalink_track(
+            guild,
+            channel,
+            track,
+            volume=state.volume,
+        )
+        state.current_lavalink_player = player
+        state.current_lavalink_playable = playable
+        # Usa metadados reais do node para painel/status quando disponíveis.
+        if meta:
+            track.title = str(meta.get("title") or track.title or "Música sem título")
+            track.uploader = str(meta.get("author") or track.uploader or "")
+            track.source = str(meta.get("source") or track.source or "lavalink")
+            artwork = str(meta.get("artwork") or "")
+            if artwork:
+                track.thumbnail = artwork
+        state.current_status = "playing"
+        state.current_started_at_monotonic = time.monotonic()
+        state.current_quality_label = "Alta"
+        state.current_quality_kbps = MUSIC_HIGH_QUALITY_MAX_ABR
+        self._schedule_voice_status_track_sync(guild.id, repeat_after=0.0, reason="lavalink_track_started")
+        self._schedule_panel_update(guild.id, create=True)
+
+        # Polling simples e seguro para o patch de teste. Eventos Wavelink podem
+        # ser adicionados depois, mas isso evita acoplar o Cog agora.
+        while not state.stop_requested and not state.skip_requested:
+            if not self._vc_is_connected(player):
+                raise MusicPlaybackError("Player Lavalink desconectou durante a música.")
+            if not self._vc_is_playing_or_paused(player):
+                break
+            await asyncio.sleep(0.35)
+        return not state.stop_requested and not state.skip_requested
 
     async def _play_track(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> bool:
         if not state.last_voice_channel_id:
@@ -1916,9 +2035,36 @@ class AudioRouter:
         self._cancel_music_idle_disconnect(state)
         state.current_status = "resolving"
         state.paused = False
+        state.current_backend = "local"
+        state.current_lavalink_player = None
+        state.current_lavalink_playable = None
         # Cada música nova ganha um painel novo no fim do chat. Alterações da
         # mesma música continuam editando esse painel.
         await self.update_panel(guild.id, create=True, repost=True)
+
+        if self.backends.should_use_lavalink_real(guild.id):
+            try:
+                return await self._play_track_lavalink(guild, state, track, channel)
+            except Exception as exc:
+                # Fallback seguro: se o Lavalink falhar antes de tocar, o player
+                # local assume a mesma faixa. Não há loop de reconexão.
+                logger.warning(
+                    "[music/lavalink] playback real falhou antes/durante teste | guild=%s track=%r erro=%s; fallback local",
+                    guild.id,
+                    getattr(track, "title", ""),
+                    exc,
+                )
+                state.current_backend = "local"
+                state.current_lavalink_player = None
+                state.current_lavalink_playable = None
+                state.current_status = "resolving"
+                # Se o Wavelink deixou um VoiceProtocol conectado sem tocar, limpa
+                # para o discord.py local poder assumir.
+                current_vc = guild.voice_client
+                if self._is_lavalink_voice_client(current_vc) and not self._vc_is_playing_or_paused(current_vc):
+                    with contextlib.suppress(Exception):
+                        self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
+                        await current_vc.disconnect(force=False)
 
         vc = await self._ensure_voice(guild, channel, state=state)
         if vc is None:
@@ -1940,7 +2086,7 @@ class AudioRouter:
 
         # Se um TTS direto ainda estiver tocando, espera acabar antes da música entrar.
         for _ in range(60):
-            if not (vc.is_playing() or vc.is_paused()):
+            if not self._vc_is_playing_or_paused(vc):
                 break
             if state.skip_requested or state.stop_requested:
                 raise MusicPlaybackError("Playback cancelado.")
@@ -1995,7 +2141,7 @@ class AudioRouter:
                     loop.call_soon_threadsafe(finished_ref.set_result, None)
 
             async with state.voice_lock:
-                if vc.is_playing() or vc.is_paused():
+                if self._vc_is_playing_or_paused(vc):
                     with contextlib.suppress(Exception):
                         vc.stop()
                 vc.play(mixed_source, after=_after)
@@ -2018,7 +2164,7 @@ class AudioRouter:
                 last_start_error = MusicPlaybackError("FFmpeg demorou demais para iniciar o áudio.")
 
             with contextlib.suppress(Exception):
-                if vc.is_playing() or vc.is_paused():
+                if self._vc_is_playing_or_paused(vc):
                     vc.stop()
                 mixed_source.cleanup()
             state.current_source = None
@@ -2039,7 +2185,16 @@ class AudioRouter:
 
     async def _ensure_voice(self, guild: discord.Guild, channel: discord.abc.Connectable, *, state: MusicGuildState | None = None) -> Optional[discord.VoiceClient]:
         vc = guild.voice_client
-        if vc and vc.is_connected():
+        if vc and self._is_lavalink_voice_client(vc):
+            # O backend local não consegue usar o VoiceProtocol do Wavelink.
+            # Desconecta apenas quando não está tocando para evitar leave/join em loop.
+            if self._vc_is_playing_or_paused(vc):
+                raise RuntimeError("Player Lavalink ainda está ativo; não vou roubar a conexão local.")
+            with contextlib.suppress(Exception):
+                self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
+                await vc.disconnect(force=False)
+            vc = None
+        if vc and self._vc_is_connected(vc):
             if getattr(getattr(vc, "channel", None), "id", None) != getattr(channel, "id", None):
                 try:
                     self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
@@ -2048,7 +2203,7 @@ class AudioRouter:
                     self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
                     await vc.disconnect(force=True)
                     vc = None
-            if vc and vc.is_connected():
+            if vc and self._vc_is_connected(vc):
                 with contextlib.suppress(Exception):
                     await guild.change_voice_state(channel=channel, self_deaf=True)
                 if state is not None:
@@ -2061,7 +2216,7 @@ class AudioRouter:
             return connected
         except Exception as exc:
             logger.warning("[music] falha ao conectar | guild=%s channel=%s erro=%s", guild.id, getattr(channel, "id", None), exc)
-            return guild.voice_client if guild.voice_client and guild.voice_client.is_connected() else None
+            return guild.voice_client if guild.voice_client and self._vc_is_connected(guild.voice_client) else None
 
     async def _maybe_disconnect_idle(self, guild: discord.Guild, state: MusicGuildState) -> None:
         # Sem modo 24/7 para música: quando a música/fila acabam e o bot fica
@@ -2071,7 +2226,7 @@ class AudioRouter:
         if not state.current and state.queue.empty() and state.idle_reason == "idle":
             self._set_idle_reason(state, "queue_finished")
         vc = guild.voice_client
-        if not vc or not vc.is_connected() or getattr(vc, "channel", None) is None:
+        if not vc or not self._vc_is_connected(vc) or getattr(vc, "channel", None) is None:
             state.music_session_active = False
             state.music_owns_voice = False
             await self.update_panel(guild.id, create=False)
@@ -2079,7 +2234,7 @@ class AudioRouter:
         if state.current or not state.queue.empty() or state.current_resolve_task or state.current_source:
             return
         # Se algum áudio direto do TTS ainda estiver tocando, não derruba a call.
-        if vc.is_playing() or vc.is_paused():
+        if self._vc_is_playing_or_paused(vc):
             await self.schedule_music_idle_disconnect(guild.id, delay=15.0)
             return
         try:
@@ -2097,7 +2252,7 @@ class AudioRouter:
             logger.debug("[music] idle disconnect falhou", exc_info=True)
 
     def _voice_channel_has_music_state(self, state: MusicGuildState) -> bool:
-        return bool(state.music_session_active or state.current or not state.queue.empty() or state.current_source or state.current_resolve_task)
+        return bool(state.music_session_active or state.current or not state.queue.empty() or state.current_source or state.current_resolve_task or state.current_lavalink_player)
 
     async def _find_recent_voice_audit_actor(
         self,
@@ -2175,6 +2330,9 @@ class AudioRouter:
         state.current_started_at_monotonic = 0.0
         state.current_source = None
         state.current_resolve_task = None
+        state.current_backend = "local"
+        state.current_lavalink_player = None
+        state.current_lavalink_playable = None
         state.paused = False
         state.stop_requested = True
         state.skip_requested = True
@@ -2346,7 +2504,23 @@ class AudioRouter:
             state.last_tts_activity_at = time.monotonic()
         active_source = state.current_source if state is not None else None
 
-        if active_source is not None and not getattr(active_source, "_closed", True) and (vc.is_playing() or vc.is_paused()):
+        if state is not None and (state.current_backend == "lavalink" or self._is_lavalink_voice_client(vc)):
+            # Lavalink externo ocupa o VoiceProtocol; áudio local de TTS não pode
+            # ser injetado neste mesmo client sem um bot/voice client auxiliar.
+            # Cancela apenas este TTS e mantém música/call estáveis durante o teste.
+            with contextlib.suppress(Exception):
+                source.cleanup()
+            logger.warning("[music/lavalink] TTS local ignorado durante playback Lavalink real | guild=%s", guild_id)
+            playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
+            return {
+                "source_setup_ms": source_setup_ms,
+                "play_call_ms": 0.0,
+                "playback_ms": playback_ms,
+                "playback_started_at": playback_started_at,
+                "tts_lavalink_skipped": True,
+            }
+
+        if active_source is not None and not getattr(active_source, "_closed", True) and (self._vc_is_playing_or_paused(vc)):
             future = active_source.add_tts(source, volume=TTS_VOLUME)
             try:
                 await asyncio.wait_for(future, timeout=max(1.0, float(timeout)))
@@ -2402,9 +2576,12 @@ class AudioRouter:
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
         state = self.get_state(guild_id)
-        if not vc or not vc.is_connected() or not vc.is_playing() or (state.current is None and state.current_source is None):
+        if not vc or not self._vc_is_connected(vc) or not self._vc_is_playing(vc) or (state.current is None and state.current_source is None):
             return False
-        vc.pause()
+        if self._is_lavalink_voice_client(vc):
+            await vc.pause(True)
+        else:
+            vc.pause()
         state.paused = True
         state.current_status = "paused"
         await self.update_panel(guild_id, create=bool(state.now_message))
@@ -2414,9 +2591,12 @@ class AudioRouter:
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
         state = self.get_state(guild_id)
-        if not vc or not vc.is_connected() or not vc.is_paused() or (state.current is None and state.current_source is None):
+        if not vc or not self._vc_is_connected(vc) or not self._vc_is_paused(vc) or (state.current is None and state.current_source is None):
             return False
-        vc.resume()
+        if self._is_lavalink_voice_client(vc):
+            await vc.pause(False)
+        else:
+            vc.resume()
         state.paused = False
         state.current_status = "playing"
         await self.update_panel(guild_id, create=bool(state.now_message))
@@ -2436,18 +2616,21 @@ class AudioRouter:
         if state.current_resolve_task is not None and not state.current_resolve_task.done():
             state.current_resolve_task.cancel()
             did_anything = True
-        music_audio_active = state.current is not None or state.current_source is not None or state.current_resolve_task is not None
-        if music_audio_active and vc and (vc.is_playing() or vc.is_paused()):
+        music_audio_active = state.current is not None or state.current_source is not None or state.current_resolve_task is not None or state.current_lavalink_player is not None
+        if music_audio_active and vc and self._vc_is_playing_or_paused(vc):
             with contextlib.suppress(Exception):
-                vc.stop()
+                await self._vc_stop_audio(vc)
             did_anything = True
-        if state.current is not None or state.current_source is not None:
+        if state.current is not None or state.current_source is not None or state.current_lavalink_player is not None:
             with contextlib.suppress(Exception):
                 if state.current_source is not None:
                     state.current_source.cleanup()
             state.current = None
             state.current_started_at_monotonic = 0.0
             state.current_source = None
+            state.current_backend = "local"
+            state.current_lavalink_player = None
+            state.current_lavalink_playable = None
             state.paused = False
             state.current_status = "queued" if not state.queue.empty() else "idle"
             did_anything = True
@@ -2475,11 +2658,11 @@ class AudioRouter:
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
         if vc:
-            should_stop_audio = state.current is not None or state.current_source is not None or not state.tts_voice_touched
+            should_stop_audio = state.current is not None or state.current_source is not None or state.current_lavalink_player is not None or not state.tts_voice_touched
             if should_stop_audio:
                 with contextlib.suppress(Exception):
-                    if vc.is_playing() or vc.is_paused():
-                        vc.stop()
+                    if self._vc_is_playing_or_paused(vc):
+                        await self._vc_stop_audio(vc)
             if disconnect and not state.tts_voice_touched:
                 with contextlib.suppress(Exception):
                     self._mark_internal_voice_disconnect(guild_id, seconds=8.0)
@@ -2489,6 +2672,9 @@ class AudioRouter:
         state.current_started_at_monotonic = 0.0
         state.current_source = None
         state.current_resolve_task = None
+        state.current_backend = "local"
+        state.current_lavalink_player = None
+        state.current_lavalink_playable = None
         state.current_status = "idle"
         state.paused = False
         state.music_session_active = False
@@ -2510,6 +2696,8 @@ class AudioRouter:
         await self._persist_volume(guild_id, volume)
         if state.current_source is not None:
             state.current_source.set_music_volume(volume)
+        if state.current_backend == "lavalink":
+            await self.backends.set_lavalink_player_volume(guild_id, int(round(volume * 100)))
         self._schedule_panel_update(guild_id, create=False)
         return volume
 

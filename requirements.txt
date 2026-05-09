@@ -8,3 +8,4 @@ psutil
 google-cloud-texttospeech
 pillow
 yt-dlp[default]
+wavelink>=3.4,<3.6

@@ -509,16 +509,16 @@ class MusicNodePanelView(discord.ui.LayoutView):
         version = str(extra.get("version") or "")
         lines = [
             "## 🧪 Último teste",
-            f"**Origem:** `{origin_label}`",
-            f"**Resultado:** `{'🟢' if getattr(result, 'ok', False) else '🔴'} {status}`",
-            f"**Tracks:** `{int(getattr(result, 'tracks_found', 0) or 0)}` • **Fonte:** `{_escape(source, limit=40)}`",
-            f"**Primeira:** {_escape(title, limit=110)}",
-            f"**Latência:** `{latency} ms`" if latency is not None else "**Latência:** `—`",
+            f"Origem: `{origin_label}`",
+            f"Resultado: `{'🟢' if getattr(result, 'ok', False) else '🔴'} {status}`",
+            f"Tracks: `{int(getattr(result, 'tracks_found', 0) or 0)}` • Fonte: `{_escape(source, limit=40)}`",
+            f"Primeira: {_escape(title, limit=110)}",
+            f"Latência: `{latency} ms`" if latency is not None else "Latência: `—`",
         ]
         if endpoint:
-            lines.append(f"**Endpoint:** `{_escape(endpoint, limit=60)}`")
+            lines.append(f"Endpoint: `{_escape(endpoint, limit=60)}`")
         if version:
-            lines.append(f"**Versão:** `{_escape(version, limit=60)}`")
+            lines.append(f"Versão: `{_escape(version, limit=60)}`")
         return lines
 
     def _make_control_row(self) -> discord.ui.ActionRow:
@@ -555,7 +555,7 @@ class MusicNodePanelView(discord.ui.LayoutView):
             "# 🔌 Lavalink Node Manager",
             f"**Modo:** {mode_text} — {_mode_hint(mode)}",
             f"**Backend real:** `{backend_real}` • **Node configurado:** `{'sim' if configured else 'não'}`",
-            "-# O player real segue local; em Shadow o `_play` também consulta o Lavalink em paralelo.",
+            "-# Local continua padrão. Playback Lavalink real só fica liberado no servidor de teste configurado.",
         ]
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(header)),
@@ -573,6 +573,8 @@ class MusicNodePanelView(discord.ui.LayoutView):
             f"**Local:** {_escape(local_msg, limit=160)}",
             "**Fallback:** FFmpeg/yt-dlp continua intacto.",
             f"**Shadow real:** `{'ativo' if runtime.get('lavalink_shadow_active') else 'inativo'}`",
+            f"**Lavalink real:** `{'ativo neste servidor' if runtime.get('lavalink_real_active') else ('liberado para teste' if runtime.get('lavalink_real_allowed_guild') else 'bloqueado fora do servidor de teste')}`",
+            f"**Servidor de teste:** `{runtime.get('lavalink_real_test_guild_id') or 927002914449424404}`",
             "**Senha:** nunca aparece no painel; fica salva só no DB separado `data/musicnode/musicnode.db`.",
         ]
         options = summary.get("options", {}) or {}

@@ -283,7 +283,7 @@ class LavalinkBackend:
                 configured=True,
                 available=True,
                 mode=self.cfg.mode,
-                message="Node Lavalink respondeu. Nenhuma música real foi roteada por ele neste patch.",
+                message="Node Lavalink respondeu. Playback real só é liberado no servidor de teste e no modo Lavalink/Auto.",
                 latency_ms=latency_ms,
                 version=version,
                 players=players,
@@ -423,6 +423,153 @@ class LavalinkBackend:
                 latency_ms=latency_ms,
                 message=str(exc) or exc.__class__.__name__,
             )
+
+
+
+    def _import_wavelink(self):
+        try:
+            return importlib.import_module("wavelink")
+        except Exception as exc:  # pragma: no cover - depende da VPS
+            raise RuntimeError("Wavelink não está instalado. Atualize o ambiente com `pip install -r requirements.txt`.") from exc
+
+    async def close_wavelink_pool(self) -> None:
+        """Fecha conexões Wavelink globais quando o node é reconfigurado."""
+        if not self._wavelink_installed():
+            return
+        try:
+            wavelink = self._import_wavelink()
+            close = getattr(getattr(wavelink, "Pool", None), "close", None)
+            if callable(close):
+                result = close()
+                if asyncio.iscoroutine(result):
+                    await result
+        except Exception:
+            logger.debug("[music/lavalink] falha ao fechar pool Wavelink", exc_info=True)
+
+    async def ensure_wavelink_pool(self, bot, *, force_reconnect: bool = False):
+        """Garante que o Pool do Wavelink está conectado ao node configurado."""
+        if not self.cfg.enabled or self.cfg.mode == "off":
+            raise RuntimeError("Lavalink está desativado para este servidor.")
+        if not self.cfg.configured:
+            raise RuntimeError("Lavalink não configurado: defina host, porta e senha no painel `_musicnode`.")
+        wavelink = self._import_wavelink()
+        pool = getattr(wavelink, "Pool", None)
+        if pool is None:
+            raise RuntimeError("Wavelink instalado não expõe Pool compatível.")
+
+        if not force_reconnect:
+            with contextlib.suppress(Exception):
+                existing = pool.get_node(self.cfg.node_name)
+                if existing is not None:
+                    return wavelink, existing
+
+        if force_reconnect:
+            await self.close_wavelink_pool()
+
+        node_cls = getattr(wavelink, "Node", None)
+        if node_cls is None:
+            raise RuntimeError("Wavelink instalado não expõe Node compatível.")
+        try:
+            node = node_cls(uri=self.cfg.base_url, password=self.cfg.password, identifier=self.cfg.node_name)
+        except TypeError:
+            node = node_cls(uri=self.cfg.base_url, password=self.cfg.password)
+        kwargs = {"nodes": [node], "client": bot}
+        # Wavelink 3 recomenda cache pequeno/experimental. Se a assinatura local não aceitar,
+        # o fallback sem cache mantém compatibilidade.
+        try:
+            await pool.connect(**kwargs, cache_capacity=100)
+        except TypeError:
+            await pool.connect(**kwargs)
+        return wavelink, node
+
+    def _playable_candidates(self, track: Any, *, fallback_query: str = "") -> list[str]:
+        candidates: list[str] = []
+        for value in (
+            getattr(track, "original_url", ""),
+            getattr(track, "webpage_url", ""),
+            fallback_query,
+            getattr(track, "title", ""),
+        ):
+            value = str(value or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
+        return candidates
+
+    async def find_playable(self, bot, track: Any, *, fallback_query: str = "") -> tuple[Any, dict[str, Any]]:
+        """Resolve um MusicTrack atual para um Playable do Wavelink.
+
+        Tenta URL original, URL resolvida pelo extrator local e por fim título.
+        Isso preserva Spotify/Deezer via plugin quando o node suporta, mas mantém
+        fallback para YouTube quando o extrator local já encontrou um equivalente.
+        """
+        wavelink, _node = await self.ensure_wavelink_pool(bot)
+        last_error: Exception | None = None
+        for candidate in self._playable_candidates(track, fallback_query=fallback_query):
+            try:
+                search = await wavelink.Playable.search(candidate)
+                playable = None
+                tracks = getattr(search, "tracks", None)
+                if tracks:
+                    playable = list(tracks)[0]
+                elif isinstance(search, list) and search:
+                    playable = search[0]
+                elif hasattr(search, "__iter__"):
+                    found = list(search)
+                    if found:
+                        playable = found[0]
+                if playable is None:
+                    continue
+                meta = {
+                    "query": candidate,
+                    "title": str(getattr(playable, "title", "") or getattr(track, "title", "") or ""),
+                    "author": str(getattr(playable, "author", "") or getattr(track, "uploader", "") or ""),
+                    "source": str(getattr(playable, "source", "") or getattr(track, "source", "") or ""),
+                    "duration": getattr(playable, "length", None) or getattr(playable, "duration", None),
+                    "artwork": str(getattr(playable, "artwork", "") or getattr(track, "thumbnail", "") or ""),
+                }
+                return playable, meta
+            except Exception as exc:
+                last_error = exc
+                logger.debug("[music/lavalink] falha ao resolver playable | query=%r", candidate, exc_info=True)
+        if last_error is not None:
+            raise RuntimeError(f"Lavalink não resolveu a música: {last_error.__class__.__name__}: {last_error}") from last_error
+        raise RuntimeError("Lavalink não encontrou uma faixa tocável para esta música.")
+
+    async def connect_player(self, bot, guild: Any, channel: Any, *, force_reconnect: bool = False):
+        wavelink, _node = await self.ensure_wavelink_pool(bot, force_reconnect=force_reconnect)
+        player_cls = getattr(wavelink, "Player", None)
+        player = getattr(guild, "voice_client", None)
+        if player_cls is None:
+            raise RuntimeError("Wavelink instalado não expõe Player compatível.")
+        if player is not None and not isinstance(player, player_cls):
+            # Se houver TTS/local audio ativo, não rouba a conexão; deixa o fallback local tocar.
+            local_active = False
+            with contextlib.suppress(Exception):
+                local_active = bool(player.is_playing() or player.is_paused())
+            if local_active:
+                raise RuntimeError("Voice client local/TTS ainda está ativo; mantendo fallback local para não derrubar a call.")
+            with contextlib.suppress(Exception):
+                await player.disconnect(force=False)
+            player = None
+        if player is None or not bool(getattr(player, "connected", False)):
+            player = await channel.connect(cls=player_cls, self_deaf=True)
+        elif getattr(getattr(player, "channel", None), "id", None) != getattr(channel, "id", None):
+            await player.move_to(channel)
+        with contextlib.suppress(Exception):
+            await guild.change_voice_state(channel=channel, self_deaf=True)
+        return player
+
+    async def play_track(self, bot, guild: Any, channel: Any, track: Any, *, volume: float = 1.0) -> tuple[Any, Any, dict[str, Any]]:
+        player = await self.connect_player(bot, guild, channel)
+        playable, meta = await self.find_playable(bot, track)
+        target_volume = max(0, min(150, int(round(float(volume or 1.0) * 100))))
+        with contextlib.suppress(Exception):
+            await player.set_volume(target_volume)
+        try:
+            await player.play(playable, add_history=False)
+        except TypeError:
+            await player.play(playable)
+        return player, playable, meta
 
     async def close(self) -> None:
         session = self._session
