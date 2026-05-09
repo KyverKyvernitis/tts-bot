@@ -139,6 +139,9 @@ class MusicExtractor:
         )
         clone.resolved_at_monotonic = track.resolved_at_monotonic
         clone.resolved_audio_max_abr = int(getattr(track, "resolved_audio_max_abr", 0) or 0)
+        clone.resolved_audio_abr = int(getattr(track, "resolved_audio_abr", 0) or 0)
+        clone.resolved_audio_ext = str(getattr(track, "resolved_audio_ext", "") or "")
+        clone.resolved_audio_codec = str(getattr(track, "resolved_audio_codec", "") or "")
         return clone
 
     def _cache_get_tracks(self, cache: dict[str, tuple[float, list[MusicTrack]]], key: str, *, requester_id: int, requester_name: str, original_url: str = "") -> list[MusicTrack] | None:
@@ -839,6 +842,9 @@ class MusicExtractor:
                 track.webpage_url = profile.canonical
             track.resolved_at_monotonic = time.monotonic()
             track.resolved_audio_max_abr = 0
+            track.resolved_audio_abr = 0
+            track.resolved_audio_ext = (urlparse(profile.canonical).path.rsplit(".", 1)[-1].lower() if "." in urlparse(profile.canonical).path else "")
+            track.resolved_audio_codec = "direct"
             self._put_stream_cache(stream_cache_key, track)
             return track
 
@@ -1137,6 +1143,16 @@ class MusicExtractor:
         extractor = str(info.get("extractor_key") or info.get("extractor") or info.get("ie_key") or "")
         source = extractor or (urlparse(webpage_url).netloc if webpage_url else "")
         is_live = bool(info.get("is_live") or info.get("live_status") == "is_live")
+        audio_abr = 0
+        for _abr_key in ("abr", "tbr"):
+            with contextlib.suppress(Exception):
+                raw_abr = info.get(_abr_key)
+                if raw_abr is not None:
+                    audio_abr = max(0, int(round(float(raw_abr))))
+                    if audio_abr:
+                        break
+        audio_ext = str(info.get("ext") or "").strip()
+        audio_codec = str(info.get("acodec") or "").strip()
         track = MusicTrack(
             title=title,
             webpage_url=webpage_url,
@@ -1151,6 +1167,9 @@ class MusicExtractor:
             extractor=extractor,
             is_live=is_live,
         )
+        track.resolved_audio_abr = audio_abr
+        track.resolved_audio_ext = audio_ext
+        track.resolved_audio_codec = audio_codec
         if stream_url:
             track.resolved_at_monotonic = time.monotonic()
             track.resolved_audio_max_abr = 0
@@ -1221,3 +1240,6 @@ class MusicExtractor:
         target.is_live = bool(source.is_live)
         target.resolved_at_monotonic = time.monotonic()
         target.resolved_audio_max_abr = int(getattr(source, "resolved_audio_max_abr", 0) or 0)
+        target.resolved_audio_abr = int(getattr(source, "resolved_audio_abr", 0) or 0)
+        target.resolved_audio_ext = str(getattr(source, "resolved_audio_ext", "") or "")
+        target.resolved_audio_codec = str(getattr(source, "resolved_audio_codec", "") or "")

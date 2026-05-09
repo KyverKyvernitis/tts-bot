@@ -94,6 +94,10 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
         f"> -# 👤 **⠂** {_escape(source, limit=64)}",
         f"> -# ✋ **⠂** {requester}",
     ])
+    quality_label = str(getattr(state, "current_quality_label", "") or "").strip()
+    quality_kbps = int(getattr(state, "current_quality_kbps", 0) or 0)
+    if quality_label and quality_kbps > 0:
+        lines.append(f"> -# 🎧 **⠂** `{quality_label} • {quality_kbps} kbps`")
 
     loop_mode = getattr(state, "loop_mode", None)
     loop_label = getattr(loop_mode, "label", "desligado")
@@ -716,6 +720,163 @@ class QueueView(discord.ui.View):
             ephemeral=True,
         )
 
+
+
+class VoiceStatusTemplateModal(discord.ui.Modal):
+    def __init__(self, parent: "VoiceStatusSettingsView") -> None:
+        super().__init__(title="Editar status enquanto toca")
+        self.parent = parent
+        settings = parent.router.get_voice_status_settings(parent.guild_id)
+        self.template = discord.ui.TextInput(
+            label="Modelo do status do canal",
+            placeholder="{source_emoji} {title}, {author} ({requester})",
+            default=str(settings.get("template") or "")[:500],
+            style=discord.TextStyle.paragraph,
+            min_length=1,
+            max_length=500,
+            required=True,
+        )
+        self.add_item(self.template)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not self.parent.router.is_music_staff(getattr(interaction, "user", None)):
+            await interaction.response.send_message("Apenas staff pode configurar o status do canal de voz.", ephemeral=True)
+            return
+        await self.parent.router.set_voice_status_template(self.parent.guild_id, str(self.template.value or ""))
+        view = VoiceStatusSettingsView(self.parent.router, self.parent.guild_id, owner_id=self.parent.owner_id)
+        await interaction.response.edit_message(view=view)
+
+
+class VoiceStatusIdleModal(discord.ui.Modal):
+    def __init__(self, parent: "VoiceStatusSettingsView") -> None:
+        super().__init__(title="Editar status parado")
+        self.parent = parent
+        settings = parent.router.get_voice_status_settings(parent.guild_id)
+        self.idle = discord.ui.TextInput(
+            label="Status quando não tiver música",
+            placeholder="Deixe vazio para restaurar o status anterior do canal",
+            default=str(settings.get("idle") or "")[:500],
+            style=discord.TextStyle.paragraph,
+            min_length=0,
+            max_length=500,
+            required=False,
+        )
+        self.add_item(self.idle)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not self.parent.router.is_music_staff(getattr(interaction, "user", None)):
+            await interaction.response.send_message("Apenas staff pode configurar o status do canal de voz.", ephemeral=True)
+            return
+        await self.parent.router.set_voice_status_idle(self.parent.guild_id, str(self.idle.value or ""))
+        view = VoiceStatusSettingsView(self.parent.router, self.parent.guild_id, owner_id=self.parent.owner_id)
+        await interaction.response.edit_message(view=view)
+
+
+class VoiceStatusPreviewView(discord.ui.LayoutView):
+    def __init__(self, router, guild_id: int) -> None:
+        super().__init__(timeout=120)
+        preview = router.preview_voice_status(guild_id)
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay("# 👁️ Pré-visualização do status"),
+                discord.ui.TextDisplay(
+                    "É assim que o canal de voz vai aparecer quando uma música estiver tocando:\n\n"
+                    f"> {preview or 'sem status'}"
+                ),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("-# A prévia usa a música atual quando existe; caso contrário, usa um exemplo."),
+                accent_color=discord.Color.blurple(),
+            )
+        )
+
+
+class VoiceStatusSettingsView(discord.ui.LayoutView):
+    def __init__(self, router, guild_id: int, *, owner_id: int | None = None) -> None:
+        super().__init__(timeout=300)
+        self.router = router
+        self.guild_id = int(guild_id)
+        self.owner_id = int(owner_id or 0)
+        self._build()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id and interaction.user and int(interaction.user.id) != self.owner_id:
+            await interaction.response.send_message(f"Apenas <@{self.owner_id}> pode usar este painel de configuração.", ephemeral=True)
+            return False
+        if not self.router.is_music_staff(getattr(interaction, "user", None)):
+            await interaction.response.send_message("Apenas staff pode configurar o status do canal de voz.", ephemeral=True)
+            return False
+        return True
+
+    def _settings_lines(self) -> list[str]:
+        settings = self.router.get_voice_status_settings(self.guild_id)
+        enabled = bool(settings.get("enabled", True))
+        template = str(settings.get("template") or "")
+        idle = str(settings.get("idle") or "")
+        preview = self.router.preview_voice_status(self.guild_id)
+        idle_text = idle if idle else "restaurar o status anterior do canal"
+        return [
+            "# 🎙️ Status automático do canal de voz",
+            "Configure como o bot mostra a música atual diretamente no status do canal de voz.",
+            "",
+            f"**Status:** {'ativado' if enabled else 'desativado'}",
+            f"**Modelo tocando:** `{template}`",
+            f"**Quando parar:** `{idle_text}`",
+            "",
+            "**Prévia:**",
+            f"> {preview or 'sem status'}",
+            "",
+            "-# Variáveis: `{source_emoji}`, `{title}`, `{author}`, `{requester}`, `{elapsed}`, `{duration}`, `{remaining}`, `{queue}`, `{quality}`, `{kbps}`.",
+            "-# O bot salva o status antigo do canal e restaura depois que a música terminar, parar, mover ou após restart.",
+        ]
+
+    def _build(self) -> None:
+        self.clear_items()
+        settings = self.router.get_voice_status_settings(self.guild_id)
+        enabled = bool(settings.get("enabled", True))
+        toggle = discord.ui.Button(
+            label="Desativar" if enabled else "Ativar",
+            emoji="🟢" if enabled else "⚪",
+            style=discord.ButtonStyle.success if not enabled else discord.ButtonStyle.secondary,
+        )
+        toggle.callback = self.toggle_enabled
+        edit_template = discord.ui.Button(label="Editar modelo", emoji="📝", style=discord.ButtonStyle.primary)
+        edit_template.callback = self.edit_template
+        edit_idle = discord.ui.Button(label="Status parado", emoji="💤", style=discord.ButtonStyle.secondary)
+        edit_idle.callback = self.edit_idle
+        preview = discord.ui.Button(label="Pré-visualizar", emoji="👁️", style=discord.ButtonStyle.secondary)
+        preview.callback = self.preview
+        reset = discord.ui.Button(label="Restaurar padrão", emoji="🔄", style=discord.ButtonStyle.danger)
+        reset.callback = self.reset
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay("\n".join(self._settings_lines())),
+                discord.ui.ActionRow(toggle, edit_template, edit_idle),
+                discord.ui.ActionRow(preview, reset),
+                accent_color=discord.Color.green() if enabled else discord.Color.dark_grey(),
+            )
+        )
+
+    async def _redraw(self, interaction: discord.Interaction) -> None:
+        self._build()
+        await interaction.response.edit_message(view=self)
+
+    async def toggle_enabled(self, interaction: discord.Interaction) -> None:
+        settings = self.router.get_voice_status_settings(self.guild_id)
+        await self.router.set_voice_status_enabled(self.guild_id, not bool(settings.get("enabled", True)))
+        await self._redraw(interaction)
+
+    async def edit_template(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(VoiceStatusTemplateModal(self))
+
+    async def edit_idle(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(VoiceStatusIdleModal(self))
+
+    async def preview(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(view=VoiceStatusPreviewView(self.router, self.guild_id), ephemeral=True)
+
+    async def reset(self, interaction: discord.Interaction) -> None:
+        await self.router.reset_voice_status_settings(self.guild_id)
+        await self._redraw(interaction)
 
 class PlayerOptionsSelect(discord.ui.Select):
     def __init__(self, router, guild_id: int) -> None:

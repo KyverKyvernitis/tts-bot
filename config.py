@@ -239,6 +239,16 @@ MUSIC_AUTO_BITRATE_ENABLED = _parse_bool(os.getenv("MUSIC_AUTO_BITRATE_ENABLED",
 MUSIC_AUTO_BITRATE_MAX = max(8000, _parse_int(os.getenv("MUSIC_AUTO_BITRATE_MAX", "384000"), 384000))
 MUSIC_AUTO_BITRATE_MIN_GAIN = max(0, _parse_int(os.getenv("MUSIC_AUTO_BITRATE_MIN_GAIN", "16000"), 16000))
 MUSIC_PANEL_UPDATE_THROTTLE_SECONDS = max(0.05, _parse_float(os.getenv("MUSIC_PANEL_UPDATE_THROTTLE_SECONDS", "2.0"), 2.0))
+MUSIC_VOICE_STATUS_ENABLED = _parse_bool(os.getenv("MUSIC_VOICE_STATUS_ENABLED", "true"), True)
+MUSIC_VOICE_STATUS_TEMPLATE = (
+    os.getenv(
+        "MUSIC_VOICE_STATUS_TEMPLATE",
+        "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})",
+    )
+    or "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})"
+).strip()
+MUSIC_VOICE_STATUS_IDLE = (os.getenv("MUSIC_VOICE_STATUS_IDLE", "") or "").strip()
+MUSIC_VOICE_STATUS_UPDATE_INTERVAL_SECONDS = max(15.0, _parse_float(os.getenv("MUSIC_VOICE_STATUS_UPDATE_INTERVAL_SECONDS", "60"), 60.0))
 MUSIC_MIN_LINK_METADATA_CONFIDENCE = (os.getenv("MUSIC_MIN_LINK_METADATA_CONFIDENCE", "medium") or "medium").strip().lower()
 MUSIC_MAX_DURATION_MISMATCH_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_MAX_DURATION_MISMATCH_SECONDS", "45"), 45.0))
 MUSIC_MAX_DURATION_MISMATCH_RATIO = max(0.0, _parse_float(os.getenv("MUSIC_MAX_DURATION_MISMATCH_RATIO", "0.25"), 0.25))
