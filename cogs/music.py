@@ -11,6 +11,7 @@ from discord.ext import commands
 from music_system import AudioRouter
 from music_system.errors import MusicExtractionError
 from music_system.ui import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
+from music_system.musicnode_ui import MusicNodePanelView
 
 logger = logging.getLogger(__name__)
 
@@ -296,9 +297,8 @@ class Music(commands.Cog):
 
     async def _can_use_musicnode(self, ctx: commands.Context) -> bool:
         with contextlib.suppress(Exception):
-            if await self.bot.is_owner(ctx.author):
-                return True
-        return self.router.is_music_staff(ctx.author)
+            return bool(await self.bot.is_owner(ctx.author))
+        return False
 
     def _format_backend_status(self, health, *, runtime: dict | None = None) -> str:
         icon = "🟢" if getattr(health, "available", False) else ("🟡" if getattr(health, "configured", False) else "🔴")
@@ -362,46 +362,19 @@ class Music(commands.Cog):
             lines.append(f"• detalhe: {discord.utils.escape_markdown(str(message)[:240])}")
         return "\n".join(lines)
 
-    @commands.command(name="musicnode", aliases=["lavalink", "llnode", "node"])
+    @commands.command(name="musicnode")
     @commands.guild_only()
-    async def musicnode(self, ctx: commands.Context, action: str = "status", *, query: str = ""):
-        """Diagnóstico seguro do suporte Lavalink sem alterar o player real."""
+    async def musicnode(self, ctx: commands.Context, *, _ignored: str = ""):
+        """Abre a central técnica do Lavalink com painel, botões e modals."""
         if not await self._can_use_musicnode(ctx):
-            await self._reply(ctx, "Apenas staff pode consultar o diagnóstico do node de música.")
+            await self._reply(ctx, "Esse painel técnico do Lavalink é exclusivo do dono do bot.")
             return
 
-        action_norm = (action or "status").strip().lower()
-        if action_norm in {"status", "state", "info", "s"}:
-            statuses = await self.router.backend_status()
-            runtime = self.router.backend_runtime_summary()
-            lines = [
-                "`🧪` **Diagnóstico do backend de música**",
-                f"Backend configurado: `{runtime.get('configured_backend', 'local')}`",
-                f"Backend real deste patch: `{runtime.get('active_backend', 'local')}`",
-                "",
-                self._format_backend_status(statuses.get("local"), runtime=runtime),
-                "",
-                self._format_backend_status(statuses.get("lavalink"), runtime=runtime),
-                "",
-                "Obs.: neste patch o Lavalink é só diagnóstico/estrutura; o player real continua local.",
-            ]
-            await self._reply(ctx, "\n".join(lines))
-            return
+        view = MusicNodePanelView(self.router, self.bot, owner_id=ctx.author.id)
+        embed = await view.build_embed()
+        message = await self._reply(ctx, embed=embed, view=view)
+        view.message = message
 
-        if action_norm in {"test", "teste", "load", "buscar", "search"}:
-            query = (query or "").strip()
-            if not query:
-                await self._reply(ctx, "Use `_musicnode test <busca ou link>`.")
-                return
-            result = await self.router.test_lavalink_backend(
-                query,
-                requester_id=ctx.author.id,
-                requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
-            )
-            await self._reply(ctx, self._format_lavalink_test(result))
-            return
-
-        await self._reply(ctx, "Use `_musicnode status` ou `_musicnode test <busca/link>`.")
 
     @commands.command(name="voicestatus", aliases=["voice_status", "vstatus", "statusvoz", "canalstatus", "setvoicestatus"])
     @commands.guild_only()

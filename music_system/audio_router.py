@@ -1505,6 +1505,24 @@ class AudioRouter:
     async def test_lavalink_backend(self, query: str, *, requester_id: int = 0, requester_name: str = ""):
         return await self.backends.test_lavalink(query, requester_id=requester_id, requester_name=requester_name)
 
+    async def update_lavalink_node_config(self, *, node_name: str, host: str, port: int, password: str | None, secure: bool):
+        return await self.backends.update_lavalink_node(
+            node_name=node_name,
+            host=host,
+            port=port,
+            password=password,
+            secure=secure,
+        )
+
+    async def set_lavalink_mode(self, mode: str):
+        return await self.backends.set_lavalink_mode(mode)
+
+    async def clear_lavalink_config(self):
+        return await self.backends.clear_lavalink_config()
+
+    def lavalink_config_summary(self) -> dict:
+        return self.backends.lavalink_config_summary()
+
     def backend_runtime_summary(self) -> dict:
         return self.backends.compact_runtime_summary()
 

@@ -34,7 +34,7 @@ def _normalize_mode(value: object) -> str:
     if raw in {"shadow", "test", "diagnostic", "diagnóstico", "diagnostico"}:
         return "shadow"
     if raw in {"real", "lavalink", "active", "ativo", "on"}:
-        return "real"
+        return "lavalink"
     if raw in {"auto", "fallback"}:
         return "auto"
     return "off"
@@ -93,17 +93,18 @@ class LavalinkBackend:
         self._session_lock = asyncio.Lock()
 
     @classmethod
-    def from_config(cls) -> "LavalinkBackend":
-        cfg = LavalinkConfig(
-            enabled=_as_bool(getattr(config, "LAVALINK_ENABLED", False), False),
-            mode=_normalize_mode(getattr(config, "LAVALINK_MODE", "off")),
-            host=str(getattr(config, "LAVALINK_HOST", "") or "").strip(),
-            port=max(1, _safe_int(getattr(config, "LAVALINK_PORT", 2333), 2333)),
-            password=str(getattr(config, "LAVALINK_PASSWORD", "") or "").strip(),
-            secure=_as_bool(getattr(config, "LAVALINK_SECURE", False), False),
-            node_name=str(getattr(config, "LAVALINK_NODE_NAME", "main") or "main").strip() or "main",
-            timeout_seconds=max(2.0, float(getattr(config, "LAVALINK_TIMEOUT_SECONDS", 8.0) or 8.0)),
-        )
+    def from_config(cls, cfg: LavalinkConfig | None = None) -> "LavalinkBackend":
+        if cfg is None:
+            cfg = LavalinkConfig(
+                enabled=_as_bool(getattr(config, "LAVALINK_ENABLED", False), False),
+                mode=_normalize_mode(getattr(config, "LAVALINK_MODE", "off")),
+                host=str(getattr(config, "LAVALINK_HOST", "") or "").strip(),
+                port=max(1, _safe_int(getattr(config, "LAVALINK_PORT", 2333), 2333)),
+                password=str(getattr(config, "LAVALINK_PASSWORD", "") or "").strip(),
+                secure=_as_bool(getattr(config, "LAVALINK_SECURE", False), False),
+                node_name=str(getattr(config, "LAVALINK_NODE_NAME", "main") or "main").strip() or "main",
+                timeout_seconds=max(2.0, float(getattr(config, "LAVALINK_TIMEOUT_SECONDS", 8.0) or 8.0)),
+            )
         return cls(cfg)
 
     def _headers(self) -> dict[str, str]:
@@ -131,7 +132,7 @@ class LavalinkBackend:
 
     async def _request_json(self, path: str, *, fallback_path: str | None = None) -> tuple[Any, int]:
         if not self.cfg.configured:
-            raise RuntimeError("Lavalink não configurado: defina host, porta e senha no .env.")
+            raise RuntimeError("Lavalink não configurado: defina host, porta e senha no painel `_musicnode`.")
         session = await self._get_session()
         paths = [path]
         if fallback_path:
@@ -176,7 +177,7 @@ class LavalinkBackend:
                 configured=False,
                 available=False,
                 mode=self.cfg.mode,
-                message="Lavalink ativado, mas faltam LAVALINK_HOST/LAVALINK_PORT/LAVALINK_PASSWORD.",
+                message="Lavalink ativado, mas faltam host, porta ou senha no painel `_musicnode`.",
                 extra={"node": self.cfg.node_name, "host": self.cfg.safe_host_label, "wavelink_installed": self._wavelink_installed()},
             )
 
