@@ -1520,6 +1520,9 @@ class AudioRouter:
     async def clear_lavalink_config(self):
         return await self.backends.clear_lavalink_config()
 
+    async def update_lavalink_panel_options(self, **options):
+        return await self.backends.update_lavalink_panel_options(**options)
+
     def lavalink_config_summary(self) -> dict:
         return self.backends.lavalink_config_summary()
 

@@ -290,7 +290,9 @@ class LavalinkBackend:
         if not self.cfg.configured:
             return BackendSearchResult(backend=self.name, ok=False, query=query, message="Lavalink não configurado.")
 
-        identifier = query if "://" in query else f"ytsearch:{query}"
+        lower_query = query.lower()
+        known_prefixes = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
+        identifier = query if "://" in query or lower_query.startswith(known_prefixes) else f"ytsearch:{query}"
         start = time.perf_counter()
         try:
             payload, _ = await self._request_json(

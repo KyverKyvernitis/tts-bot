@@ -371,8 +371,8 @@ class Music(commands.Cog):
             return
 
         view = MusicNodePanelView(self.router, self.bot, owner_id=ctx.author.id)
-        embed = await view.build_embed()
-        message = await self._reply(ctx, embed=embed, view=view)
+        await view.prepare()
+        message = await self._reply(ctx, view=view, allowed_mentions=discord.AllowedMentions.none())
         view.message = message
 
 

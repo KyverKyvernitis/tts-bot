@@ -5,7 +5,6 @@ import contextlib
 import logging
 import os
 import tempfile
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LAVALINK_CONFIG_PATH = Path(getattr(config, "BASE_DIR", ".")).resolve() / "data" / "music" / "lavalink_config.json"
 _ALLOWED_MODES = {"off", "shadow", "lavalink", "auto"}
+_DEFAULT_OPTIONS = {"hide_host_in_panel": True, "test_after_save": False}
 
 
 def _safe_float(value: object, default: float = 8.0) -> float:
@@ -43,6 +43,19 @@ def _env_config() -> LavalinkConfig:
         node_name=str(getattr(config, "LAVALINK_NODE_NAME", "main") or "main").strip() or "main",
         timeout_seconds=max(2.0, _safe_float(getattr(config, "LAVALINK_TIMEOUT_SECONDS", 8.0), 8.0)),
     )
+
+
+def _options_from_mapping(raw: dict[str, Any] | None, *, fallback: dict[str, Any] | None = None) -> dict[str, bool]:
+    base = dict(_DEFAULT_OPTIONS)
+    if fallback:
+        for key in _DEFAULT_OPTIONS:
+            if key in fallback:
+                base[key] = _as_bool(fallback.get(key), base[key])
+    if isinstance(raw, dict):
+        for key in _DEFAULT_OPTIONS:
+            if key in raw:
+                base[key] = _as_bool(raw.get(key), base[key])
+    return base
 
 
 def _config_from_mapping(raw: dict[str, Any], *, fallback: LavalinkConfig | None = None) -> LavalinkConfig:
@@ -72,6 +85,7 @@ def _config_to_payload(cfg: LavalinkConfig, *, source: str = "panel") -> dict[st
         "mode": _normalize_mode(cfg.mode),
         "timeout_seconds": float(cfg.timeout_seconds or 8.0),
         "updated_at": _utc_now_iso(),
+        "options": dict(_DEFAULT_OPTIONS),
         "node": {
             "name": str(cfg.node_name or "main"),
             "host": str(cfg.host or ""),
@@ -115,8 +129,11 @@ class LavalinkConfigStore:
             return "env" if _env_config().configured else "padrão"
         return str(payload.get("source") or "painel")
 
-    def save(self, cfg: LavalinkConfig, *, source: str = "panel") -> LavalinkConfig:
+    def save(self, cfg: LavalinkConfig, *, source: str = "panel", options: dict[str, Any] | None = None) -> LavalinkConfig:
+        current_payload = self._read_payload() or {}
+        current_options = _options_from_mapping(current_payload.get("options") if isinstance(current_payload, dict) else None)
         payload = _config_to_payload(cfg, source=source)
+        payload["options"] = _options_from_mapping(options, fallback=current_options)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
         try:
@@ -171,6 +188,16 @@ class LavalinkConfigStore:
         )
         return self.save(cfg, source="panel")
 
+    def update_options(self, **options: Any) -> dict[str, bool]:
+        current = self.load()
+        payload = self._read_payload() or {}
+        merged = _options_from_mapping(payload.get("options") if isinstance(payload, dict) else None)
+        for key in _DEFAULT_OPTIONS:
+            if key in options:
+                merged[key] = _as_bool(options.get(key), merged[key])
+        self.save(current, source="panel", options=merged)
+        return merged
+
     def clear(self) -> LavalinkConfig:
         cfg = LavalinkConfig(
             enabled=False,
@@ -182,19 +209,22 @@ class LavalinkConfigStore:
             node_name="main",
             timeout_seconds=max(2.0, _safe_float(getattr(config, "LAVALINK_TIMEOUT_SECONDS", 8.0), 8.0)),
         )
-        return self.save(cfg, source="panel")
+        return self.save(cfg, source="panel", options=dict(_DEFAULT_OPTIONS))
 
     def summary(self) -> dict[str, Any]:
         cfg = self.load()
+        payload = self._read_payload() or {}
         return {
             "source": self.source_label(),
             "enabled": bool(cfg.enabled),
             "mode": cfg.mode,
             "configured": bool(cfg.configured),
             "host_defined": bool(cfg.host),
+            "host_label": cfg.safe_host_label,
             "port": int(cfg.port or 2333),
             "password_defined": bool(cfg.password),
             "secure": bool(cfg.secure),
             "node_name": cfg.node_name or "main",
             "config_path": str(self.path),
+            "options": _options_from_mapping(payload.get("options") if isinstance(payload, dict) else None),
         }

@@ -74,6 +74,9 @@ class MusicBackendManager:
         await self._replace_lavalink(cfg)
         return cfg
 
+    async def update_lavalink_panel_options(self, **options: Any) -> dict[str, bool]:
+        return self.lavalink_store.update_options(**options)
+
     def lavalink_config_summary(self) -> dict[str, Any]:
         return self.lavalink_store.summary()
 
