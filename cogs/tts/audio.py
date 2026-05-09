@@ -98,6 +98,7 @@ class GuildTTSState:
     cache_order: OrderedDict[str, float] = field(default_factory=OrderedDict)
     pending_signatures: dict[str, int] = field(default_factory=dict)
     last_hard_reset_at: float = 0.0
+    lavalink_ignore_logged_until: float = 0.0
 
 
 class TTSAudioMixin:
@@ -1340,7 +1341,10 @@ class TTSAudioMixin:
 
         vc = self._get_voice_client_for_guild(guild)
         if getattr(self, "_is_lavalink_voice_client", lambda _vc: False)(vc):
-            logger.info("[tts_voice] TTS ignorado porque o player Lavalink está ativo | guild=%s", guild.id)
+            now = time.monotonic()
+            if now >= float(getattr(state, "lavalink_ignore_logged_until", 0.0) or 0.0):
+                logger.info("[tts_voice] TTS ignorado porque o player Lavalink está ativo | guild=%s", guild.id)
+                state.lavalink_ignore_logged_until = now + 20.0
             return None
         is_receive_client = bool(vc is not None and hasattr(vc, "listen") and hasattr(vc, "is_listening"))
         if vc is not None and self._voice_client_is_connected(vc):
@@ -1464,7 +1468,8 @@ class TTSAudioMixin:
                             own_audio_task.cancel()
                             with contextlib.suppress(BaseException):
                                 await own_audio_task
-                        logger.warning("[tts_voice] Worker não conseguiu conectar | guild=%s channel=%s", guild_id, item.channel_id)
+                        if time.monotonic() >= float(getattr(state, "lavalink_ignore_logged_until", 0.0) or 0.0):
+                            logger.warning("[tts_voice] Worker não conseguiu conectar | guild=%s channel=%s", guild_id, item.channel_id)
                         continue
 
                     current_path, should_cleanup = await active_audio_task

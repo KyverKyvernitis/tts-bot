@@ -408,6 +408,11 @@ class MusicGuildState:
     voice_status_update_task: Optional[asyncio.Task] = None
     voice_status_last_update_at: float = 0.0
     voice_status_last_track_key: str = ""
+    voice_status_last_applied_key: str = ""
+    voice_status_last_sync_request_key: str = ""
+    voice_status_last_sync_request_at: float = 0.0
+    voice_status_last_restore_key: str = ""
+    voice_status_last_restore_at: float = 0.0
     voice_status_force_task: Optional[asyncio.Task] = None
     voice_status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -491,7 +496,23 @@ class AudioRouter:
         if vc is None:
             return False
         if self._is_lavalink_voice_client(vc):
-            return bool(getattr(vc, "playing", False))
+            # Wavelink 3 usa propriedades ``playing``/``current`` em vez dos
+            # métodos do discord.VoiceClient. Alguns nodes públicos demoram um
+            # pouco para atualizar ``playing``; se há ``current`` carregado e o
+            # player segue conectado, ainda há uma faixa ativa. Sem isso, o
+            # worker achava que a faixa acabou logo após player.play() e pulava
+            # várias músicas/status em sequência.
+            for attr in ("playing", "is_playing"):
+                value = getattr(vc, attr, None)
+                try:
+                    if callable(value):
+                        value = value()
+                    if bool(value):
+                        return True
+                except Exception:
+                    continue
+            current = getattr(vc, "current", None)
+            return bool(current is not None and self._vc_is_connected(vc))
         checker = getattr(vc, "is_playing", None)
         return bool(checker() if callable(checker) else getattr(vc, "playing", False))
 
@@ -499,7 +520,13 @@ class AudioRouter:
         if vc is None:
             return False
         if self._is_lavalink_voice_client(vc):
-            return bool(getattr(vc, "paused", False))
+            value = getattr(vc, "paused", False)
+            try:
+                if callable(value):
+                    value = value()
+            except Exception:
+                return False
+            return bool(value)
         checker = getattr(vc, "is_paused", None)
         return bool(checker() if callable(checker) else getattr(vc, "paused", False))
 
@@ -1174,6 +1201,18 @@ class AudioRouter:
             return
 
         track_key = self._voice_status_track_key(track)
+        desired = self.render_voice_status(guild.id, track, template=settings.get("template"))
+        if not desired:
+            return
+        desired_key = f"{channel_id}:{track_key}:{desired}"
+        # Dedup barato antes de chamar REST: se o status renderizado já é o
+        # último aplicado para essa faixa/canal, não faça nova chamada nem log.
+        if (
+            int(getattr(state, "voice_status_channel_id", 0) or 0) == channel_id
+            and str(getattr(state, "voice_status_last_track_key", "") or "") == track_key
+            and str(getattr(state, "voice_status_last_bot", "") or "") == desired
+        ):
+            return
         # Troca de faixa é uma atualização forçada e não deve ser bloqueada
         # pela checagem anti-staff. Porém, se a task antiga terminar depois de
         # a música já ter mudado, ela não pode sobrescrever o status novo.
@@ -1221,10 +1260,9 @@ class AudioRouter:
                 state.voice_status_last_bot = ""
                 state.voice_status_last_track_key = ""
 
-            desired = self.render_voice_status(guild.id, track, template=settings.get("template"))
-            if desired == state.voice_status_last_bot:
+            if desired == state.voice_status_last_bot and track_key == state.voice_status_last_track_key:
                 return
-            if not desired:
+            if desired_key == str(getattr(state, "voice_status_last_applied_key", "") or ""):
                 return
             if force and not self._voice_status_track_is_current(state, track, track_key):
                 return
@@ -1240,6 +1278,7 @@ class AudioRouter:
             logger.info("[music] status do canal aplicado | guild=%s channel=%s", guild.id, channel_id)
             state.voice_status_last_bot = desired
             state.voice_status_last_track_key = track_key
+            state.voice_status_last_applied_key = desired_key
             state.voice_status_last_update_at = time.monotonic()
             await self._save_voice_status_record(
                 guild.id,
@@ -1263,6 +1302,18 @@ class AudioRouter:
         retries atrasados só devem acontecer quando o chamador pedir explicitamente.
         """
         state = self.get_state(guild_id)
+        current_track = getattr(state, "current", None)
+        current_key = self._voice_status_track_key(current_track) if current_track is not None else ""
+        now = time.monotonic()
+        sync_key = f"{current_key}:{reason}"
+        if (
+            sync_key
+            and sync_key == str(getattr(state, "voice_status_last_sync_request_key", "") or "")
+            and now - float(getattr(state, "voice_status_last_sync_request_at", 0.0) or 0.0) < 1.75
+        ):
+            return
+        state.voice_status_last_sync_request_key = sync_key
+        state.voice_status_last_sync_request_at = now
         old_task = state.voice_status_force_task
         if old_task is not None and not old_task.done():
             old_task.cancel()
@@ -1392,6 +1443,15 @@ class AudioRouter:
                     logger.warning("[music] não consegui restaurar status do canal: permissão ausente")
                     return
                 target_status = original_status if had_original else str(self._voice_status_settings_from_doc(guild.id).get("idle") or "")
+                restore_key = f"{channel_id}:{target_status}:{reason}"
+                now = time.monotonic()
+                if (
+                    restore_key == str(getattr(state, "voice_status_last_restore_key", "") or "")
+                    and now - float(getattr(state, "voice_status_last_restore_at", 0.0) or 0.0) < 4.0
+                ):
+                    return
+                state.voice_status_last_restore_key = restore_key
+                state.voice_status_last_restore_at = now
                 logger.info("[music] restaurando status do canal | guild=%s channel=%s reason=%s", guild.id, channel_id, reason)
                 ok = await self._set_voice_channel_status(channel, target_status, reason=f"Restaurar status do canal após música ({reason})")
                 if not ok:
@@ -1402,6 +1462,9 @@ class AudioRouter:
         state.voice_status_original = ""
         state.voice_status_last_bot = ""
         state.voice_status_last_track_key = ""
+        state.voice_status_last_applied_key = ""
+        state.voice_status_last_sync_request_key = ""
+        state.voice_status_last_sync_request_at = 0.0
         state.voice_status_last_update_at = 0.0
 
     async def reconcile_voice_status_records(self) -> None:
@@ -2044,8 +2107,13 @@ class AudioRouter:
                 state.skip_history_suppressed_once = False
                 state.current_status = "idle"
                 guild = self.bot.get_guild(int(guild_id))
-                await self._restore_auto_bitrate_for_state(guild, state, reason="queue_finished" if not self._has_pending_track(state) else "stop_requested")
-                await self._restore_voice_status_for_state(guild, state, reason="queue_finished" if not self._has_pending_track(state) else "stop_requested")
+                restore_reason = "queue_finished" if not self._has_pending_track(state) else "stop_requested"
+                if state.stop_requested and str(getattr(state, "idle_reason", "") or "") == "manual_stop":
+                    restore_reason = "manual_stop"
+                elif state.stop_requested:
+                    restore_reason = "stop_requested"
+                await self._restore_auto_bitrate_for_state(guild, state, reason=restore_reason)
+                await self._restore_voice_status_for_state(guild, state, reason=restore_reason)
                 self._schedule_panel_update(guild_id, create=False)
 
     async def _play_track_lavalink(
@@ -2090,14 +2158,25 @@ class AudioRouter:
         self._schedule_voice_status_track_sync(guild.id, repeat_after=0.0, reason="lavalink_track_started")
         self._schedule_panel_update(guild.id, create=True)
 
-        # Polling simples e seguro para o patch de teste. Eventos Wavelink podem
-        # ser adicionados depois, mas isso evita acoplar o Cog agora.
+        # Polling simples e seguro enquanto o backend real ainda não usa eventos
+        # Wavelink dedicados no Cog. Em Wavelink 3, ``playing`` pode oscilar logo
+        # após play/skip, então usamos ``current`` + uma pequena janela de graça
+        # para não concluir a faixa cedo e avançar várias músicas/status em loop.
+        started_at = time.monotonic()
+        last_active_at = started_at
         while not state.stop_requested and not state.skip_requested:
             if not self._vc_is_connected(player):
                 raise MusicPlaybackError("Player Lavalink desconectou durante a música.")
-            if not self._vc_is_playing_or_paused(player):
+            active = self._vc_is_playing_or_paused(player)
+            if active:
+                last_active_at = time.monotonic()
+            else:
+                now = time.monotonic()
+                if now - started_at < 2.5 or now - last_active_at < 1.25:
+                    await asyncio.sleep(0.25)
+                    continue
                 break
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.45)
         return not state.stop_requested and not state.skip_requested
 
     async def _play_track(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> bool:

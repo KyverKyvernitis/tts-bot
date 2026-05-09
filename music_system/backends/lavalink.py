@@ -80,6 +80,12 @@ def _format_http_attempt(path: str, status: int, body: str) -> str:
         return f"{path} -> HTTP 404: endpoint não encontrado neste node. Resposta: {body_label}"
     if status == 400:
         return f"{path} -> HTTP 400: requisição inválida para o Lavalink. Resposta: {body_label}"
+    if status in {500, 502, 503, 504}:
+        return (
+            f"{path} -> HTTP {status}: node Lavalink público/externo indisponível ou sobrecarregado. "
+            "O bot deve cair para o player local; tente outro node se isso repetir. "
+            f"Resposta: {body_label}"
+        )
     return f"{path} -> HTTP {status}: {body_label}"
 
 
