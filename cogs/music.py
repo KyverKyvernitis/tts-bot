@@ -120,7 +120,7 @@ class Music(commands.Cog):
             if batch.playlist_title:
                 desc += f" de **{batch.playlist_title}**"
             if batch.truncated:
-                desc += "\n`⚠️` Playlist limitada para não pesar o bot."
+                desc += f"\n`⚠️` Playlist limitada aos primeiros `{getattr(config, 'MUSIC_MAX_PLAYLIST_ITEMS', 100)}` itens para não pesar o bot."
             if dropped:
                 desc += f"\n`⚠️` `{dropped}` item(ns) não entraram por duplicata ou queue cheio."
             await self._reply(ctx, desc)

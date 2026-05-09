@@ -108,11 +108,11 @@ class MusicExtractor:
     def __init__(
         self,
         *,
-        max_playlist_items: int = 25,
+        max_playlist_items: int = 100,
         search_results: int = 5,
         timeout_seconds: float = 20.0,
     ) -> None:
-        self.max_playlist_items = max(1, int(max_playlist_items))
+        self.max_playlist_items = min(100, max(1, int(max_playlist_items)))
         self.search_results = max(1, min(10, int(search_results)))
         self.timeout_seconds = max(5.0, float(timeout_seconds))
         self.cookies_file = self._resolve_cookies_file()

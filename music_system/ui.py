@@ -442,7 +442,7 @@ class AddSongModal(discord.ui.Modal):
             if batch.playlist_title:
                 msg += f" de **{batch.playlist_title}**"
             if batch.truncated:
-                msg += "\n`⚠️` Playlist limitada para economizar RAM."
+                msg += f"\n`⚠️` Playlist limitada aos primeiros `{getattr(config, 'MUSIC_MAX_PLAYLIST_ITEMS', 100)}` itens para economizar RAM."
         else:
             state = self.router.get_state(self.guild_id)
             position = state.queue_size() + (1 if state.current else 0)
