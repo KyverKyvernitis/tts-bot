@@ -58,6 +58,13 @@ MUSIC_VOICE_STATUS_ENABLED = bool(getattr(config, "MUSIC_VOICE_STATUS_ENABLED", 
 MUSIC_VOICE_STATUS_TEMPLATE = str(getattr(config, "MUSIC_VOICE_STATUS_TEMPLATE", "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})") or "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})").strip()
 MUSIC_VOICE_STATUS_IDLE = str(getattr(config, "MUSIC_VOICE_STATUS_IDLE", "") or "").strip()
 MUSIC_VOICE_STATUS_UPDATE_INTERVAL_SECONDS = max(15.0, float(getattr(config, "MUSIC_VOICE_STATUS_UPDATE_INTERVAL_SECONDS", 60.0)))
+MUSIC_SOURCE_EMOJIS = {
+    "youtube": "<:YouTube:1502490543891021827>",
+    "spotify": "<:Spotify:1502490573205016676>",
+    "deezer": "<:Deezer:1502490958997094420>",
+    "soundcloud": "<:SoundCloud:1502491211485675631>",
+}
+MUSIC_SOURCE_EMOJI_FALLBACK = "🎵"
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
 PCM_FRAME_MS = 20.0
@@ -826,25 +833,32 @@ class AudioRouter:
         status = " ".join(str(status or "").replace("\n", " ").split())
         return status[:500]
 
-    def _source_emoji_for_track(self, track: MusicTrack | None) -> str:
-        text = " ".join(
-            str(getattr(track, attr, "") or "").lower()
-            for attr in ("source", "extractor", "webpage_url", "original_url", "display_url")
-            if track is not None
-        )
+    def _source_key_for_track(self, track: MusicTrack | None) -> str:
+        if track is None:
+            return ""
+        fields = []
+        for attr in ("source", "extractor", "original_url", "webpage_url", "display_url", "stream_url"):
+            with contextlib.suppress(Exception):
+                value = str(getattr(track, attr, "") or "").strip().lower()
+                if value:
+                    fields.append(value)
+        text = " ".join(fields)
+        # Prioridade nos links/fontes originais: quando um link Spotify/Deezer
+        # cai em fallback tocável do YouTube, o status ainda deve mostrar o
+        # emoji da plataforma que o usuário pediu, não um ícone genérico.
         if "spotify" in text:
-            return "🟢"
-        if "soundcloud" in text:
-            return "🟠"
+            return "spotify"
+        if "soundcloud" in text or "sound cloud" in text:
+            return "soundcloud"
         if "deezer" in text:
-            return "🎶"
-        if "apple" in text:
-            return "🍎"
-        if "youtube" in text or "youtu.be" in text:
-            return "▶️"
-        if "direct" in text or "http" in text:
-            return "🔗"
-        return "🎵"
+            return "deezer"
+        if "youtube" in text or "youtu.be" in text or "ytmusic" in text or "yt-dlp" in text:
+            return "youtube"
+        return ""
+
+    def _source_emoji_for_track(self, track: MusicTrack | None) -> str:
+        source_key = self._source_key_for_track(track)
+        return MUSIC_SOURCE_EMOJIS.get(source_key) or MUSIC_SOURCE_EMOJI_FALLBACK
 
     def _quality_label_for_cap(self, cap: int | None) -> str:
         if cap is None:
@@ -964,7 +978,13 @@ class AudioRouter:
         for attr in ("status", "voice_status"):
             if hasattr(channel, attr):
                 value = getattr(channel, attr, None)
-                return True, str(value or "")
+                if value:
+                    return True, str(value or "")
+                # Em versões atuais do discord.py, esses atributos podem existir
+                # mas vir vazios/desatualizados mesmo quando o endpoint de
+                # voice-status está funcionando. Tratar vazio como "conhecido"
+                # fazia o bot achar que staff mudou manualmente e impedia a
+                # troca de status quando a próxima música começava.
         try:
             http = getattr(self.bot, "http", None)
             data = None
@@ -977,9 +997,9 @@ class AudioRouter:
                 if callable(request):
                     data = await request(Route("GET", "/channels/{channel_id}", channel_id=int(getattr(channel, "id", 0))))
             if isinstance(data, dict):
-                if "status" in data:
+                if data.get("status"):
                     return True, str(data.get("status") or "")
-                if "voice_status" in data:
+                if data.get("voice_status"):
                     return True, str(data.get("voice_status") or "")
         except (discord.Forbidden, discord.HTTPException):
             return False, ""
