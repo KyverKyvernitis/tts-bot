@@ -100,6 +100,13 @@ tmp_audio/
 # Config local sensível do painel Lavalink
 data/music/lavalink_config.json
 
+# DB local sensível do painel Lavalink/MusicNode
+data/musicnode/*.db
+data/musicnode/*.db-shm
+data/musicnode/*.db-wal
+data/musicnode/*.sqlite
+data/musicnode/*.sqlite3
+
 # =========================
 # OS / editor
 # =========================

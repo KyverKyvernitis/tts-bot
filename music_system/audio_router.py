@@ -1499,35 +1499,57 @@ class AudioRouter:
         with contextlib.suppress(Exception):
             await self.backends.close()
 
-    async def backend_status(self):
-        return await self.backends.status()
+    async def backend_status(self, guild_id: int | None = None):
+        return await self.backends.status(guild_id=guild_id)
 
-    async def test_lavalink_backend(self, query: str, *, requester_id: int = 0, requester_name: str = ""):
-        return await self.backends.test_lavalink(query, requester_id=requester_id, requester_name=requester_name)
+    async def test_lavalink_backend(
+        self,
+        query: str,
+        *,
+        requester_id: int = 0,
+        requester_name: str = "",
+        guild_id: int | None = None,
+    ):
+        return await self.backends.test_lavalink(
+            query,
+            requester_id=requester_id,
+            requester_name=requester_name,
+            guild_id=guild_id,
+        )
 
-    async def update_lavalink_node_config(self, *, node_name: str, host: str, port: int, password: str | None, secure: bool):
+    async def update_lavalink_node_config(
+        self,
+        *,
+        node_name: str,
+        host: str,
+        port: int,
+        password: str | None,
+        secure: bool,
+        guild_id: int | None = None,
+    ):
         return await self.backends.update_lavalink_node(
             node_name=node_name,
             host=host,
             port=port,
             password=password,
             secure=secure,
+            guild_id=guild_id,
         )
 
-    async def set_lavalink_mode(self, mode: str):
-        return await self.backends.set_lavalink_mode(mode)
+    async def set_lavalink_mode(self, mode: str, *, guild_id: int | None = None):
+        return await self.backends.set_lavalink_mode(mode, guild_id=guild_id)
 
-    async def clear_lavalink_config(self):
-        return await self.backends.clear_lavalink_config()
+    async def clear_lavalink_config(self, *, guild_id: int | None = None):
+        return await self.backends.clear_lavalink_config(guild_id=guild_id)
 
     async def update_lavalink_panel_options(self, **options):
         return await self.backends.update_lavalink_panel_options(**options)
 
-    def lavalink_config_summary(self) -> dict:
-        return self.backends.lavalink_config_summary()
+    def lavalink_config_summary(self, guild_id: int | None = None) -> dict:
+        return self.backends.lavalink_config_summary(guild_id=guild_id)
 
-    def backend_runtime_summary(self) -> dict:
-        return self.backends.compact_runtime_summary()
+    def backend_runtime_summary(self, guild_id: int | None = None) -> dict:
+        return self.backends.compact_runtime_summary(guild_id=guild_id)
 
     async def enqueue(self, guild: discord.Guild, voice_channel: discord.abc.Connectable, text_channel: discord.abc.Messageable, tracks: list[MusicTrack]) -> tuple[int, int]:
         if not tracks:

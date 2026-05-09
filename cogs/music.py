@@ -370,7 +370,7 @@ class Music(commands.Cog):
             await self._reply(ctx, "Esse painel técnico do Lavalink é exclusivo do dono do bot.")
             return
 
-        view = MusicNodePanelView(self.router, self.bot, owner_id=ctx.author.id)
+        view = MusicNodePanelView(self.router, self.bot, owner_id=ctx.author.id, guild_id=ctx.guild.id)
         await view.prepare()
         message = await self._reply(ctx, view=view, allowed_mentions=discord.AllowedMentions.none())
         view.message = message

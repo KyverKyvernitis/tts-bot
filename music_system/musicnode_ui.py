@@ -190,7 +190,7 @@ class MusicNodeConfigModal(discord.ui.Modal):
         if not _modal_v2_available():
             raise RuntimeError("discord.py 2.7+ é necessário para os modals novos do `_musicnode`.")
         self.panel = panel
-        summary = panel.router.lavalink_config_summary()
+        summary = panel.router.lavalink_config_summary(panel.guild_id)
         host_default = str(summary.get("host_label") or "") if summary.get("host_defined") else ""
         self.node_name = discord.ui.TextInput(
             label="Nome do node",
@@ -237,7 +237,7 @@ class MusicNodeConfigModal(discord.ui.Modal):
             if not host:
                 raise ValueError("Host não pode ficar vazio.")
             password_value = str(self.password.value or "").strip()
-            summary = self.panel.router.lavalink_config_summary()
+            summary = self.panel.router.lavalink_config_summary(self.panel.guild_id)
             if not password_value and not summary.get("password_defined"):
                 raise ValueError("Senha não pode ficar vazia na primeira configuração.")
         except Exception as exc:
@@ -251,11 +251,12 @@ class MusicNodeConfigModal(discord.ui.Modal):
             port=port,
             password=password_value if password_value else None,
             secure=secure,
+            guild_id=self.panel.guild_id,
         )
         await self.panel.safe_refresh()
-        options = self.panel.router.lavalink_config_summary().get("options", {}) or {}
+        options = self.panel.router.lavalink_config_summary(self.panel.guild_id).get("options", {}) or {}
         if bool(options.get("test_after_save")):
-            statuses = await self.panel.router.backend_status()
+            statuses = await self.panel.router.backend_status(self.panel.guild_id)
             health = statuses.get("lavalink")
             await interaction.followup.send(
                 "`✅` Node salvo e testado. "
@@ -304,6 +305,7 @@ class MusicNodeTestModal(discord.ui.Modal):
             query,
             requester_id=int(getattr(getattr(interaction, "user", None), "id", 0) or 0),
             requester_name=getattr(getattr(interaction, "user", None), "display_name", str(getattr(interaction, "user", ""))),
+            guild_id=self.panel.guild_id,
         )
         self.panel.last_test_result = result
         await self.panel.safe_refresh()
@@ -316,7 +318,7 @@ class MusicNodeModeOptionsModal(discord.ui.Modal):
         if not _modal_v2_available():
             raise RuntimeError("discord.py 2.7+ é necessário para os modals novos do `_musicnode`.")
         self.panel = panel
-        summary = panel.router.lavalink_config_summary()
+        summary = panel.router.lavalink_config_summary(panel.guild_id)
         current = str(summary.get("mode") or "off")
         options = summary.get("options", {}) or {}
         self.mode_group = _make_mode_radio_group(current)
@@ -351,7 +353,7 @@ class MusicNodeModeOptionsModal(discord.ui.Modal):
             await interaction.response.send_message("`⚠️` Escolha um modo válido.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await self.panel.router.set_lavalink_mode(mode)
+        await self.panel.router.set_lavalink_mode(mode, guild_id=self.panel.guild_id)
         await self.panel.router.update_lavalink_panel_options(
             hide_host_in_panel="hide_host_in_panel" in flags,
             test_after_save="test_after_save" in flags,
@@ -382,17 +384,18 @@ class MusicNodeClearModal(discord.ui.Modal):
             await interaction.response.send_message("`⚠️` Limpeza cancelada; a caixa de confirmação não foi marcada.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await self.panel.router.clear_lavalink_config()
+        await self.panel.router.clear_lavalink_config(guild_id=self.panel.guild_id)
         await self.panel.safe_refresh()
         await interaction.followup.send("`🧹` Configuração Lavalink limpa e modo voltou para `off`.", ephemeral=True)
 
 
 class MusicNodePanelView(discord.ui.LayoutView):
-    def __init__(self, router, bot, owner_id: int) -> None:
+    def __init__(self, router, bot, owner_id: int, guild_id: int | None = None) -> None:
         super().__init__(timeout=600)
         self.router = router
         self.bot = bot
         self.owner_id = int(owner_id or 0)
+        self.guild_id = int(guild_id) if guild_id is not None else None
         self.message: discord.Message | None = None
         self.last_test_result: Any | None = None
         self._statuses: dict[str, Any] = {}
@@ -426,9 +429,9 @@ class MusicNodePanelView(discord.ui.LayoutView):
         ))
 
     async def prepare(self) -> None:
-        self._statuses = await self.router.backend_status()
-        self._runtime = self.router.backend_runtime_summary()
-        self._summary = self.router.lavalink_config_summary()
+        self._statuses = await self.router.backend_status(self.guild_id)
+        self._runtime = self.router.backend_runtime_summary(self.guild_id)
+        self._summary = self.router.lavalink_config_summary(self.guild_id)
         self._rebuild_layout()
 
     def _node_lines(self, lavalink: Any) -> list[str]:
@@ -445,6 +448,7 @@ class MusicNodePanelView(discord.ui.LayoutView):
             f"**Senha:** `{'definida ••••••••' if summary.get('password_defined') else 'não definida'}`",
             f"**SSL/Secure:** `{'sim' if summary.get('secure') else 'não'}`",
             f"**Config:** `{_escape(summary.get('source'), limit=30)}`",
+            f"**Escopo:** `{'este servidor' if summary.get('guild_override') else 'padrão global'}`",
         ]
 
     def _diagnostic_lines(self, lavalink: Any) -> list[str]:
@@ -538,7 +542,7 @@ class MusicNodePanelView(discord.ui.LayoutView):
             "## 🛡️ Segurança da migração",
             f"**Local:** {_escape(local_msg, limit=160)}",
             "**Fallback:** FFmpeg/yt-dlp continua intacto.",
-            "**Senha:** nunca aparece no painel; fica salva só em `data/music/lavalink_config.json`.",
+            "**Senha:** nunca aparece no painel; fica salva só no DB separado `data/musicnode/musicnode.db`.",
         ]
         options = summary.get("options", {}) or {}
         if bool(options.get("test_after_save")):
