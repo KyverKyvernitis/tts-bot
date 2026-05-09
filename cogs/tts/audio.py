@@ -1137,6 +1137,15 @@ class TTSAudioMixin:
         finally:
             pass
 
+    def _is_music_active_for_guild(self, guild_id: int) -> bool:
+        router = getattr(getattr(self, "bot", None), "audio_router", None)
+        is_music_active = getattr(router, "is_music_active", None)
+        if not callable(is_music_active):
+            return False
+        with contextlib.suppress(Exception):
+            return bool(is_music_active(int(guild_id)))
+        return False
+
     async def _reset_voice_client(self, guild: discord.Guild, *, reason: str = "unknown") -> None:
         lock_getter = getattr(self, "_get_voice_connect_lock", None)
         lock = lock_getter(guild.id) if callable(lock_getter) else None
@@ -1175,6 +1184,23 @@ class TTSAudioMixin:
                 return await self._play_file(current_vc, path, item=item)
             except Exception as exc:
                 last_error = exc
+                music_active = self._is_music_active_for_guild(guild.id)
+                if music_active:
+                    logger.warning(
+                        "[tts_voice] Falha no playback do TTS com música ativa; descartando só este TTS sem resetar a call | guild=%s channel=%s erro=%s",
+                        guild.id,
+                        item.channel_id,
+                        exc,
+                    )
+                    now = time.monotonic()
+                    return {
+                        "source_setup_ms": 0.0,
+                        "play_call_ms": 0.0,
+                        "playback_ms": 0.0,
+                        "playback_started_at": now,
+                        "tts_discarded": True,
+                    }
+
                 logger.warning(
                     "[tts_voice] Falha no playback, tentando recuperar | guild=%s channel=%s tentativa=%s erro=%s",
                     guild.id,

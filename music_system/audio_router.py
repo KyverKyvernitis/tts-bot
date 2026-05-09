@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 MUSIC_DEFAULT_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_DEFAULT_VOLUME", 0.55))))
 MUSIC_DUCK_VOLUME = max(0.05, min(1.0, float(getattr(config, "MUSIC_DUCK_VOLUME", 0.15))))
 TTS_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_TTS_VOLUME", 1.0))))
+MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL = bool(getattr(config, "MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL", True))
 MUSIC_IDLE_DISCONNECT_SECONDS = max(15.0, float(getattr(config, "MUSIC_IDLE_DISCONNECT_SECONDS", 120)))
 MUSIC_QUEUE_MAXSIZE = min(100, max(1, int(getattr(config, "MUSIC_QUEUE_MAXSIZE", 100))))
 MUSIC_MAX_PLAYLIST_ITEMS = min(100, max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 100))))
@@ -1141,7 +1142,7 @@ class AudioRouter:
                 state.voice_status_last_track_key = ""
 
             desired = self.render_voice_status(guild.id, track, template=settings.get("template"))
-            if not force and desired == state.voice_status_last_bot:
+            if desired == state.voice_status_last_bot:
                 return
             if not desired:
                 return
@@ -1178,8 +1179,8 @@ class AudioRouter:
         """Sincroniza status do canal para a faixa atual sem bloquear o player.
 
         Troca real de faixa não usa o mesmo cooldown do refresh periódico.
-        O segundo envio curto cobre o atraso visual do Discord e garante que
-        atualizações antigas não fiquem presas quando várias faixas mudam rápido.
+        O status só deve ser aplicado depois que o playback começou de verdade;
+        retries atrasados só devem acontecer quando o chamador pedir explicitamente.
         """
         state = self.get_state(guild_id)
         old_task = state.voice_status_force_task
@@ -1819,7 +1820,6 @@ class AudioRouter:
         if vc is None:
             raise RuntimeError("Não consegui conectar ao canal de voz.")
         await self._boost_auto_bitrate_for_music(guild, channel, state)
-        self._schedule_voice_status_track_sync(guild.id, repeat_after=2.0, reason="track_change")
 
         try:
             await self._resolve_current_track(state, track)
@@ -1927,7 +1927,7 @@ class AudioRouter:
         state.current_status = "playing"
         state.current_started_at_monotonic = time.monotonic()
         self._refresh_quality_state(state, track)
-        self._schedule_voice_status_track_sync(guild.id, repeat_after=2.0, reason="playback_started")
+        self._schedule_voice_status_track_sync(guild.id, repeat_after=0.0, reason="playback_started")
         self._schedule_panel_update(guild.id, create=True)
         self._start_prefetch_next(guild.id, state)
         await finished
@@ -2246,9 +2246,22 @@ class AudioRouter:
             future = active_source.add_tts(source, volume=TTS_VOLUME)
             try:
                 await asyncio.wait_for(future, timeout=max(1.0, float(timeout)))
-            except asyncio.TimeoutError as exc:
+            except asyncio.TimeoutError:
                 active_source.cancel_tts(future)
-                raise RuntimeError(f"Playback TTS em overlay excedeu {float(timeout):.1f}s") from exc
+                playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
+                if MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL:
+                    logger.warning(
+                        "[music] TTS overlay excedeu %.1fs; cancelando apenas este TTS e mantendo a música/call",
+                        float(timeout),
+                    )
+                    return {
+                        "source_setup_ms": source_setup_ms,
+                        "play_call_ms": play_call_ms,
+                        "playback_ms": playback_ms,
+                        "playback_started_at": playback_started_at,
+                        "tts_overlay_cancelled": True,
+                    }
+                raise RuntimeError(f"Playback TTS em overlay excedeu {float(timeout):.1f}s")
             playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
             return {
                 "source_setup_ms": source_setup_ms,
