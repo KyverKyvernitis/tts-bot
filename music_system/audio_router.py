@@ -392,6 +392,8 @@ class MusicGuildState:
     idle_actor_name: str = ""
     idle_channel_name: str = ""
     internal_voice_disconnect_until: float = 0.0
+    lavalink_transition_until: float = 0.0
+    last_lavalink_error: str = ""
     panel_update_task: Optional[asyncio.Task] = None
     panel_update_create: bool = True
     panel_update_requested_at: float = 0.0
@@ -1513,6 +1515,35 @@ class AudioRouter:
     def _is_internal_voice_disconnect_recent(self, state: MusicGuildState) -> bool:
         return time.monotonic() < float(getattr(state, "internal_voice_disconnect_until", 0.0) or 0.0)
 
+    def _mark_lavalink_transition(self, state: MusicGuildState, *, seconds: float = 12.0) -> None:
+        state.lavalink_transition_until = max(
+            float(getattr(state, "lavalink_transition_until", 0.0) or 0.0),
+            time.monotonic() + max(0.0, float(seconds)),
+        )
+
+    def _is_lavalink_transition_recent(self, state: MusicGuildState) -> bool:
+        return time.monotonic() < float(getattr(state, "lavalink_transition_until", 0.0) or 0.0)
+
+    def _is_lavalink_strict_mode(self, guild_id: int | None) -> bool:
+        mode_getter = getattr(self.backends, "lavalink_mode_for_guild", None)
+        if not callable(mode_getter):
+            return False
+        try:
+            return str(mode_getter(guild_id) or "").lower() == "lavalink"
+        except Exception:
+            return False
+
+    def is_lavalink_active_for_guild(self, guild_id: int | None) -> bool:
+        try:
+            state = self.get_state(int(guild_id or 0))
+        except Exception:
+            return False
+        return bool(
+            state.current_backend == "lavalink"
+            or state.current_lavalink_player is not None
+            or self._is_lavalink_transition_recent(state)
+        )
+
     def is_music_staff(self, member) -> bool:
         if member is None or getattr(member, "bot", False):
             return False
@@ -1598,13 +1629,30 @@ class AudioRouter:
 
     def is_music_active(self, guild_id: int) -> bool:
         state = self._states.get(int(guild_id))
-        return bool(state and (state.current or self._has_pending_track(state) or (state.worker_task and not state.worker_task.done())))
+        return bool(
+            state
+            and (
+                state.current
+                or self._has_pending_track(state)
+                or state.current_lavalink_player is not None
+                or self._is_lavalink_transition_recent(state)
+                or (state.worker_task and not state.worker_task.done())
+            )
+        )
 
     def should_defer_tts_auto_leave(self, guild_id: int) -> bool:
         state = self._states.get(int(guild_id))
         if state is None:
             return False
-        return bool(state.music_session_active or state.current or self._has_pending_track(state) or state.current_resolve_task or state.current_source)
+        return bool(
+            state.music_session_active
+            or state.current
+            or self._has_pending_track(state)
+            or state.current_resolve_task
+            or state.current_source
+            or state.current_lavalink_player is not None
+            or self._is_lavalink_transition_recent(state)
+        )
 
     async def schedule_music_idle_disconnect(self, guild_id: int, *, delay: float | None = None) -> None:
         state = self.get_state(guild_id)
@@ -2132,7 +2180,10 @@ class AudioRouter:
         state.current_source = None
         state.current_lavalink_player = None
         state.current_lavalink_playable = None
+        state.last_lavalink_error = ""
         state.current_status = "starting"
+        self._mark_lavalink_transition(state, seconds=18.0)
+        self._mark_internal_voice_disconnect(guild.id, seconds=18.0)
         await self.update_panel(guild.id, create=True)
 
         player, playable, meta = await self.backends.play_lavalink_track(
@@ -2143,6 +2194,8 @@ class AudioRouter:
         )
         state.current_lavalink_player = player
         state.current_lavalink_playable = playable
+        self._mark_lavalink_transition(state, seconds=8.0)
+        self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
         # Usa metadados reais do node para painel/status quando disponíveis.
         if meta:
             track.title = str(meta.get("title") or track.title or "Música sem título")
@@ -2203,10 +2256,36 @@ class AudioRouter:
             try:
                 return await self._play_track_lavalink(guild, state, track, channel)
             except Exception as exc:
-                # Fallback seguro: se o Lavalink falhar antes de tocar, o player
-                # local assume a mesma faixa. Não há loop de reconexão.
+                allow_local_fallback = False
+                fallback_getter = getattr(self.backends, "should_lavalink_fallback_to_local", None)
+                if callable(fallback_getter):
+                    with contextlib.suppress(Exception):
+                        allow_local_fallback = bool(fallback_getter(guild.id))
+                state.last_lavalink_error = f"{exc.__class__.__name__}: {exc}"
+                if not allow_local_fallback:
+                    # Modo Lavalink é lavalink-only. Não misture com voice client local
+                    # no mesmo fluxo, porque isso causa handshake/local fallback e painel
+                    # falso de external_disconnect.
+                    logger.warning(
+                        "[music/lavalink] playback real falhou em modo lavalink-only | guild=%s track=%r erro=%s",
+                        guild.id,
+                        getattr(track, "title", ""),
+                        exc,
+                    )
+                    self._mark_lavalink_transition(state, seconds=10.0)
+                    self._mark_internal_voice_disconnect(guild.id, seconds=10.0)
+                    state.current_status = "queued" if self._has_pending_track(state) else "idle"
+                    await self._send_text(
+                        guild,
+                        state,
+                        "⚠️ Lavalink não conseguiu iniciar essa música agora. O node pode estar reconectando/sobrecarregado; tente novamente ou troque o node em `_musicnode`.",
+                    )
+                    raise MusicPlaybackError(f"Lavalink indisponível em modo lavalink-only: {exc}") from exc
+
+                # Modo auto: fallback local permitido, mas limpo e sem marcar como
+                # desconexão externa.
                 logger.warning(
-                    "[music/lavalink] playback real falhou antes/durante teste | guild=%s track=%r erro=%s; fallback local",
+                    "[music/lavalink] playback real falhou antes/durante teste | guild=%s track=%r erro=%s; fallback local(auto)",
                     guild.id,
                     getattr(track, "title", ""),
                     exc,
@@ -2215,8 +2294,6 @@ class AudioRouter:
                 state.current_lavalink_player = None
                 state.current_lavalink_playable = None
                 state.current_status = "resolving"
-                # Se o Wavelink deixou um VoiceProtocol conectado sem tocar, limpa
-                # para o discord.py local poder assumir.
                 current_vc = guild.voice_client
                 if self._is_lavalink_voice_client(current_vc) and not self._vc_is_playing_or_paused(current_vc):
                     with contextlib.suppress(Exception):
@@ -2476,6 +2553,18 @@ class AudioRouter:
             logger.debug(
                 "[music/lavalink] voice_state disconnect ignorado porque o Player Wavelink ainda está ativo | guild=%s",
                 guild.id,
+            )
+            return
+        if (
+            self._is_lavalink_strict_mode(guild.id)
+            and (state.current_backend == "lavalink" or state.current is not None or self._has_pending_track(state))
+            and self._is_lavalink_transition_recent(state)
+        ):
+            logger.info(
+                "[music/lavalink] voice_state disconnect ignorado durante transição Lavalink | guild=%s current=%r pending=%s",
+                guild.id,
+                getattr(getattr(state, "current", None), "title", None),
+                self._has_pending_track(state),
             )
             return
 

@@ -254,7 +254,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             current_channel = getattr(current_vc, "channel", None) if current_vc is not None else None
             already_in_target = bool(
                 current_vc is not None
-                and getattr(current_vc, "is_connected", lambda: False)()
+                and self._voice_client_is_connected(current_vc)
                 and getattr(current_channel, "id", None) == getattr(voice_channel, "id", None)
             )
             user_limit = int(getattr(voice_channel, "user_limit", 0) or 0)
@@ -615,7 +615,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         notify_owner_on_failure=(attempt == 0),
                         failure_context="primeira tentativa automática após reinício",
                     )
-                    if vc is not None and getattr(vc, "is_connected", lambda: False)():
+                    if vc is not None and self._voice_client_is_connected(vc):
                         self._remember_expected_voice_channel(guild_id, channel_id)
                         self._runtime_voice_restore_failures[guild_id] = 0
                         self._runtime_voice_restore_next_allowed_at[guild_id] = 0.0
@@ -859,7 +859,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                             notify_owner_on_failure=(attempt == 0),
                             failure_context=f"primeira tentativa de restore em runtime ({reason})",
                         )
-                        if vc is not None and getattr(vc, "is_connected", lambda: False)() and getattr(getattr(vc, "channel", None), "id", None) == desired_channel_id:
+                        if vc is not None and self._voice_client_is_connected(vc) and getattr(getattr(vc, "channel", None), "id", None) == desired_channel_id:
                             self._runtime_voice_restore_failures[guild_id] = 0
                             self._runtime_voice_restore_next_allowed_at[guild_id] = time.monotonic() + 10.0
                             print(f"[tts_voice] call restaurada em runtime | guild={guild_id} channel={desired_channel_id} reason={reason}")
@@ -1675,7 +1675,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if vc and self._voice_client_is_connected(vc):
             try:
                 if self._voice_client_is_playing(vc):
-                    vc.stop()
+                    stopper = getattr(vc, "stop", None)
+                    if callable(stopper):
+                        result = stopper()
+                        if asyncio.iscoroutine(result):
+                            await result
             except Exception:
                 pass
             try:
@@ -3300,7 +3304,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     async def _leave_from_panel(self, interaction: discord.Interaction):
         vc = self._get_voice_client_for_guild(interaction.guild)
         actual_channel = self._get_bot_voice_state_channel(interaction.guild)
-        active_channel = getattr(vc, "channel", None) if vc and getattr(vc, "is_connected", lambda: False)() else actual_channel
+        active_channel = getattr(vc, "channel", None) if vc and self._voice_client_is_connected(vc) else actual_channel
         if active_channel is None:
             await interaction.response.send_message(
                 embed=self._make_embed("Nada para desconectar", "O bot não está conectado em nenhum canal de voz agora.", ok=False),

@@ -19,7 +19,7 @@ class MusicBackendManager:
     """Gerenciador dos backends de música.
 
     O backend local continua padrão. Playback real via Lavalink só é liberado
-    em guilds de teste explicitamente permitidas, mantendo fallback local.
+    em guilds de teste explicitamente permitidas. O fallback local fica reservado ao modo auto.
     """
 
     def __init__(self, bot, extractor) -> None:
@@ -33,8 +33,7 @@ class MusicBackendManager:
 
     @property
     def active_backend_name(self) -> str:
-        # Segurança deste patch: reprodução real continua sempre local.
-        return "local"
+        return self.playback_backend_for_guild(None)
 
     def _guild_key(self, guild_id: int | None) -> int:
         try:
@@ -80,6 +79,19 @@ class MusicBackendManager:
 
     def playback_backend_for_guild(self, guild_id: int | None = None) -> str:
         return "lavalink" if self.should_use_lavalink_real(guild_id) else "local"
+
+    def lavalink_mode_for_guild(self, guild_id: int | None = None) -> str:
+        try:
+            cfg = self.lavalink_store.load(guild_id=guild_id)
+            return str(getattr(cfg, "mode", "off") or "off").strip().lower()
+        except Exception:
+            logger.debug("[music/lavalink] falha ao ler modo da guild", exc_info=True)
+            return "off"
+
+    def should_lavalink_fallback_to_local(self, guild_id: int | None = None) -> bool:
+        # Modo lavalink é lavalink-only: se o node falhar, não mistura com voice client local.
+        # Modo auto pode cair para o backend local antes de iniciar áudio real.
+        return self.lavalink_mode_for_guild(guild_id) == "auto"
 
     def should_shadow_lavalink(self, guild_id: int | None = None) -> bool:
         """Retorna se o Lavalink deve ser consultado em paralelo ao player local.

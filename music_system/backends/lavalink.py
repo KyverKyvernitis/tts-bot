@@ -475,10 +475,10 @@ class LavalinkBackend:
                     return bool(value)
             except Exception:
                 continue
-        # Alguns builds antigos não expõem status de forma pública. Nesses casos,
-        # preferimos reutilizar o node existente e deixar a próxima chamada do
-        # Wavelink decidir, em vez de reconectar agressivamente.
-        return True
+        # Se não há indicador público confiável, prefira reconectar. Em Wavelink 3
+        # alguns nodes ficam no Pool mas não estão atribuídos/CONNECTED; reutilizar
+        # cegamente gera "No nodes are currently assigned..." no primeiro play.
+        return False
 
     async def ensure_wavelink_pool(self, bot, *, force_reconnect: bool = False):
         """Garante que o Pool do Wavelink está conectado ao node configurado."""
@@ -521,6 +521,19 @@ class LavalinkBackend:
             await pool.connect(**kwargs, cache_capacity=100)
         except TypeError:
             await pool.connect(**kwargs)
+        # Dá um pequeno tempo para o Pool atualizar o estado interno antes do
+        # primeiro Player.connect/play. Em nodes públicos isso evita uma corrida
+        # onde REST responde OK, mas o Pool ainda não está CONNECTED.
+        await asyncio.sleep(0.35)
+        with contextlib.suppress(Exception):
+            refreshed = pool.get_node(self.cfg.node_name)
+            if refreshed is not None:
+                node = refreshed
+        if not self._node_is_connected(node):
+            logger.warning(
+                "[music/lavalink] Pool conectado, mas node ainda não está CONNECTED | node=%s",
+                self.cfg.node_name,
+            )
         return wavelink, node
 
     def _playable_candidates(self, track: Any, *, fallback_query: str = "") -> list[str]:
@@ -597,12 +610,14 @@ class LavalinkBackend:
         if player_cls is None:
             raise RuntimeError("Wavelink instalado não expõe Player compatível.")
         if player is not None and not isinstance(player, player_cls):
-            # Se houver TTS/local audio ativo, não rouba a conexão; deixa o fallback local tocar.
+            # Em modo Lavalink real não misture dois donos de voz. Se houver áudio
+            # local/TTS ativo, falha de forma controlada; se estiver ocioso, limpa o
+            # voice client local antes do Wavelink assumir.
             local_active = False
             with contextlib.suppress(Exception):
                 local_active = bool(player.is_playing() or player.is_paused())
             if local_active:
-                raise RuntimeError("Voice client local/TTS ainda está ativo; mantendo fallback local para não derrubar a call.")
+                raise RuntimeError("Voice client local/TTS ainda está ativo; aguarde ele terminar antes de usar Lavalink real.")
             with contextlib.suppress(Exception):
                 await player.disconnect(force=False)
             player = None
@@ -615,8 +630,20 @@ class LavalinkBackend:
         return player
 
     async def play_track(self, bot, guild: Any, channel: Any, track: Any, *, volume: float = 1.0) -> tuple[Any, Any, dict[str, Any]]:
-        player = await self.connect_player(bot, guild, channel)
+        # Primeiro resolve a faixa. Isso força/valida o Pool antes de abrir a
+        # conexão de voz, evitando cair para voice local quando o Pool ainda não
+        # terminou de conectar.
         playable, meta = await self.find_playable(bot, track)
+        try:
+            player = await self.connect_player(bot, guild, channel)
+        except Exception as exc:
+            message = str(exc).lower()
+            if "no nodes" in message or "connected state" in message or "pool" in message:
+                logger.info("[music/lavalink] Pool sem node no connect_player; reconectando uma vez | guild=%s", getattr(guild, "id", None))
+                await self.ensure_wavelink_pool(bot, force_reconnect=True)
+                player = await self.connect_player(bot, guild, channel, force_reconnect=False)
+            else:
+                raise
         target_volume = max(0, min(150, int(round(float(volume or 1.0) * 100))))
         with contextlib.suppress(Exception):
             await player.set_volume(target_volume)
