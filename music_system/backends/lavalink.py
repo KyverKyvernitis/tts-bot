@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -55,6 +56,55 @@ def _parse_lavalink_major_version(value: object) -> int | None:
     with contextlib.suppress(Exception):
         return int("".join(digits))
     return None
+
+
+def _normalize_response_text(value: object, *, limit: int = 220) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "sem corpo"
+    text = " ".join(text.split())
+    if len(text) > limit:
+        return text[: max(0, limit - 3)].rstrip() + "..."
+    return text
+
+
+def _format_http_attempt(path: str, status: int, body: str) -> str:
+    body_label = _normalize_response_text(body)
+    if status in {401, 403}:
+        return (
+            f"{path} -> HTTP {status}: autorização recusada pelo node. "
+            "Confira senha, porta e Secure/SSL no painel `_musicnode`. "
+            f"Resposta: {body_label}"
+        )
+    if status == 404:
+        return f"{path} -> HTTP 404: endpoint não encontrado neste node. Resposta: {body_label}"
+    if status == 400:
+        return f"{path} -> HTTP 400: requisição inválida para o Lavalink. Resposta: {body_label}"
+    return f"{path} -> HTTP {status}: {body_label}"
+
+
+def _decode_lavalink_response(body: str, content_type: str) -> Any:
+    text = str(body or "").strip()
+    # Lavalink `/version` retorna texto puro, mas alguns nodes públicos enviam
+    # Content-Type incorreto como JSON. Tentar JSON cegamente gera erros como
+    # "Extra data: line 1 column 4" em versões tipo "4.2.2".
+    if not text:
+        return ""
+    if "json" not in str(content_type or "").lower():
+        return text
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _coerce_version_text(payload: Any) -> str:
+    if isinstance(payload, dict):
+        for key in ("version", "semver", "lavalinkVersion"):
+            value = payload.get(key)
+            if value:
+                return str(value).strip()
+    return str(payload or "").strip()
 
 
 @dataclass(slots=True)
@@ -162,13 +212,11 @@ class LavalinkBackend:
             try:
                 async with session.get(url) as resp:
                     status = int(getattr(resp, "status", 0) or 0)
+                    ctype = str(resp.headers.get("Content-Type", "") or "")
+                    body = await resp.text()
                     if 200 <= status < 300:
-                        ctype = str(resp.headers.get("Content-Type", "") or "").lower()
-                        if "json" in ctype:
-                            return await resp.json(), status, item
-                        return await resp.text(), status, item
-                    body = (await resp.text())[:220]
-                    attempts.append(f"{item} -> HTTP {status}: {body or 'sem corpo'}")
+                        return _decode_lavalink_response(body, ctype), status, item
+                    attempts.append(_format_http_attempt(item, status, body))
                     if fallback_only_on_not_found and index < len(paths) - 1 and status not in {404, 405}:
                         break
             except Exception as exc:
@@ -187,7 +235,7 @@ class LavalinkBackend:
 
     async def _detect_api_version(self) -> tuple[str, int | None]:
         version_raw, _, _ = await self._request_json_any(["/version"], fallback_only_on_not_found=False)
-        version = str(version_raw or "").strip()
+        version = _coerce_version_text(version_raw)
         return version, _parse_lavalink_major_version(version)
 
     def _wavelink_installed(self) -> bool:
