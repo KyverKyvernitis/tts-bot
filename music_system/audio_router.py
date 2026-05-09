@@ -3094,20 +3094,29 @@ class AudioRouter:
     async def previous(self, guild_id: int) -> bool:
         state = self.get_state(guild_id)
         if not state.history:
+            # Sem histórico, o botão de voltar não reinicia a faixa atual.
+            # Ele apenas informa que não existe música anterior.
             return False
         try:
             previous_track = state.history.pop()
         except IndexError:
             return False
+
         current = state.current
-        if current is not None:
-            # Quando o usuário volta, a faixa atual fica "à frente". Assim, com
-            # apenas duas músicas, A → B → ⏮️ volta para A e ⏭️ volta para B em
-            # vez de aparecer que não há próxima música.
-            with contextlib.suppress(Exception):
+        # ``forward_queue`` tem prioridade sobre o queue normal. Por isso a
+        # música anterior precisa entrar nela ANTES da música atual. O fluxo
+        # correto com duas músicas é:
+        # A tocando → ⏭️ B → ⏮️ A → ⏭️ B.
+        # Se colocarmos B no forward_queue e A no queue normal, o worker toca B
+        # de novo, que era o bug onde ⏮️ só reiniciava a faixa atual.
+        try:
+            if current is not None:
                 state.forward_queue.appendleft(current)
-        if not self._prepend_queue(state, previous_track):
+            state.forward_queue.appendleft(previous_track)
+        except Exception:
+            logger.debug("[music] falha ao preparar histórico/avanço", exc_info=True)
             return False
+
         skipped = await self.skip(guild_id, add_current_to_history=False) if current is not None else False
         self.ensure_music_worker(guild_id)
         self._schedule_panel_update(guild_id, create=True)
