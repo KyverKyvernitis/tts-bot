@@ -1124,7 +1124,7 @@ class TTSAudioMixin:
                 await asyncio.wait_for(finished, timeout=playback_timeout)
             except asyncio.TimeoutError as exc:
                 with contextlib.suppress(Exception):
-                    if vc.is_playing() or vc.is_paused():
+                    if self._voice_client_is_playing_or_paused(vc):
                         vc.stop()
                 raise RuntimeError(f"Playback timeout após {playback_timeout:.1f}s") from exc
             playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
@@ -1154,8 +1154,11 @@ class TTSAudioMixin:
             vc = self._get_voice_client_for_guild(guild)
             if vc is None:
                 return
+            if getattr(self, "_is_lavalink_voice_client", lambda _vc: False)(vc):
+                logger.info("[tts_voice] reset de voice client ignorado | player Lavalink ativo | guild=%s reason=%s", guild.id, reason)
+                return
             try:
-                if vc.is_playing() or vc.is_paused():
+                if self._voice_client_is_playing_or_paused(vc):
                     vc.stop()
             except Exception:
                 pass
@@ -1291,7 +1294,7 @@ class TTSAudioMixin:
                 return False
 
         vc = self._get_voice_client_for_guild(guild)
-        if vc is None or not vc.is_connected() or vc.channel is None:
+        if vc is None or not self._voice_client_is_connected(vc) or self._voice_client_channel(vc) is None:
             return True
 
         router = getattr(getattr(self, "bot", None), "audio_router", None)
@@ -1312,7 +1315,7 @@ class TTSAudioMixin:
                     self._log_debug(f"[tts_voice] Idle timeout adiado | sessão de música aguardando timeout | guild={guild.id}")
                     return False
 
-        members = list(getattr(vc.channel, "members", []))
+        members = list(getattr(self._voice_client_channel(vc), "members", []))
         humans = [m for m in members if not m.bot]
         if humans:
             self._log_debug(f"[tts_voice] Idle timeout ignorado | ainda há humanos na call | guild={guild.id}")
@@ -1336,13 +1339,16 @@ class TTSAudioMixin:
             return None
 
         vc = self._get_voice_client_for_guild(guild)
+        if getattr(self, "_is_lavalink_voice_client", lambda _vc: False)(vc):
+            logger.info("[tts_voice] TTS ignorado porque o player Lavalink está ativo | guild=%s", guild.id)
+            return None
         is_receive_client = bool(vc is not None and hasattr(vc, "listen") and hasattr(vc, "is_listening"))
-        if vc is not None and vc.is_connected():
+        if vc is not None and self._voice_client_is_connected(vc):
             if is_receive_client:
                 with contextlib.suppress(Exception):
                     await vc.disconnect(force=True)
                 vc = None
-            elif vc.channel is not None and vc.channel.id == item.channel_id:
+            elif self._voice_client_channel(vc) is not None and self._voice_client_channel(vc).id == item.channel_id:
                 await self._ensure_self_deaf_fast(guild, target_channel)
                 state.last_channel_id = item.channel_id
                 return vc
@@ -1363,13 +1369,13 @@ class TTSAudioMixin:
         ))
         if vc is None:
             current = self._get_voice_client_for_guild(guild)
-            if current is not None and current.is_connected():
-                if current.channel is not None and current.channel.id == item.channel_id:
+            if current is not None and self._voice_client_is_connected(current):
+                if self._voice_client_channel(current) is not None and self._voice_client_channel(current).id == item.channel_id:
                     state.last_channel_id = item.channel_id
                     return current
             return None
 
-        if vc.is_connected():
+        if self._voice_client_is_connected(vc):
             await self._ensure_self_deaf_fast(guild, target_channel)
             state.last_channel_id = item.channel_id
         return vc

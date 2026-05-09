@@ -446,6 +446,34 @@ class LavalinkBackend:
         except Exception:
             logger.debug("[music/lavalink] falha ao fechar pool Wavelink", exc_info=True)
 
+
+    def _node_is_connected(self, node: Any) -> bool:
+        """Best-effort status check compatible with multiple Wavelink 3.x builds."""
+        if node is None:
+            return False
+        for attr in ("status", "state"):
+            value = getattr(node, attr, None)
+            if value is None:
+                continue
+            name = str(getattr(value, "name", value) or "").upper()
+            if "CONNECTED" in name and "DISCONNECTED" not in name:
+                return True
+            if name in {"CONNECTING", "DISCONNECTED", "DISCONNECTING"}:
+                return False
+        for attr in ("available", "connected", "is_connected"):
+            value = getattr(node, attr, None)
+            try:
+                if callable(value):
+                    value = value()
+                if value is not None:
+                    return bool(value)
+            except Exception:
+                continue
+        # Alguns builds antigos não expõem status de forma pública. Nesses casos,
+        # preferimos reutilizar o node existente e deixar a próxima chamada do
+        # Wavelink decidir, em vez de reconectar agressivamente.
+        return True
+
     async def ensure_wavelink_pool(self, bot, *, force_reconnect: bool = False):
         """Garante que o Pool do Wavelink está conectado ao node configurado."""
         if not self.cfg.enabled or self.cfg.mode == "off":
@@ -457,13 +485,20 @@ class LavalinkBackend:
         if pool is None:
             raise RuntimeError("Wavelink instalado não expõe Pool compatível.")
 
+        stale_existing = False
         if not force_reconnect:
             with contextlib.suppress(Exception):
                 existing = pool.get_node(self.cfg.node_name)
                 if existing is not None:
-                    return wavelink, existing
+                    if self._node_is_connected(existing):
+                        return wavelink, existing
+                    stale_existing = True
+                    logger.info(
+                        "[music/lavalink] node Wavelink existe, mas não está CONNECTED; reconectando pool | node=%s",
+                        self.cfg.node_name,
+                    )
 
-        if force_reconnect:
+        if force_reconnect or stale_existing:
             await self.close_wavelink_pool()
 
         node_cls = getattr(wavelink, "Node", None)
@@ -504,9 +539,23 @@ class LavalinkBackend:
         """
         wavelink, _node = await self.ensure_wavelink_pool(bot)
         last_error: Exception | None = None
+        reconnected_after_pool_error = False
         for candidate in self._playable_candidates(track, fallback_query=fallback_query):
             try:
-                search = await wavelink.Playable.search(candidate)
+                try:
+                    search = await wavelink.Playable.search(candidate)
+                except Exception as pool_exc:
+                    message = str(pool_exc).lower()
+                    if (not reconnected_after_pool_error) and ("no nodes" in message or "connected state" in message or "pool" in message):
+                        reconnected_after_pool_error = True
+                        logger.info(
+                            "[music/lavalink] Pool Wavelink sem node conectado durante busca; reconectando uma vez | query=%r",
+                            candidate,
+                        )
+                        wavelink, _node = await self.ensure_wavelink_pool(bot, force_reconnect=True)
+                        search = await wavelink.Playable.search(candidate)
+                    else:
+                        raise
                 playable = None
                 tracks = getattr(search, "tracks", None)
                 if tracks:

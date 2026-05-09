@@ -464,13 +464,26 @@ class AudioRouter:
         if vc is None:
             return False
         module = str(getattr(type(vc), "__module__", "") or "")
-        return module.startswith("wavelink")
+        qualname = str(getattr(type(vc), "__qualname__", "") or getattr(type(vc), "__name__", "") or "")
+        return module.startswith("wavelink") or (qualname == "Player" and hasattr(vc, "node") and hasattr(vc, "play"))
 
     def _vc_is_connected(self, vc: Any) -> bool:
         if vc is None:
             return False
         if self._is_lavalink_voice_client(vc):
-            return bool(getattr(vc, "connected", False))
+            for attr in ("connected", "is_connected"):
+                value = getattr(vc, attr, None)
+                try:
+                    if callable(value):
+                        value = value()
+                    if value is not None:
+                        return bool(value)
+                except Exception:
+                    continue
+            # Wavelink Player não expõe is_connected em todas as versões. Se ele
+            # ainda tem canal/guild, trate como ativo para não disparar falso
+            # external_disconnect durante troca de faixa/eventos internos.
+            return bool(getattr(vc, "channel", None) is not None or getattr(vc, "guild", None) is not None)
         checker = getattr(vc, "is_connected", None)
         return bool(checker() if callable(checker) else getattr(vc, "connected", False))
 
@@ -2375,6 +2388,17 @@ class AudioRouter:
             return
         if not self._voice_channel_has_music_state(state):
             return
+        # Wavelink pode emitir transições de voice state enquanto o Player ainda
+        # está vivo/tocando. Não trate isso como desconexão externa, senão o
+        # painel limpa o queue/status mesmo com a música seguindo.
+        current_vc = getattr(guild, "voice_client", None)
+        lavalink_player = state.current_lavalink_player or current_vc
+        if self._is_lavalink_voice_client(lavalink_player) and self._vc_is_connected(lavalink_player):
+            logger.debug(
+                "[music/lavalink] voice_state disconnect ignorado porque o Player Wavelink ainda está ativo | guild=%s",
+                guild.id,
+            )
+            return
 
         actor = await self._find_recent_voice_audit_actor(
             guild,
@@ -2429,6 +2453,18 @@ class AudioRouter:
         if self._is_internal_voice_disconnect_recent(state):
             return
         if not self._voice_channel_has_music_state(state):
+            return
+        current_vc = getattr(guild, "voice_client", None)
+        lavalink_player = state.current_lavalink_player or current_vc
+        if self._is_lavalink_voice_client(lavalink_player) and self._vc_is_connected(lavalink_player):
+            # Se o Wavelink moveu/atualizou voice state internamente, sincroniza o
+            # canal conhecido sem marcar external_move nem restaurar status.
+            state.last_voice_channel_id = int(getattr(after_channel, "id", 0) or 0) or state.last_voice_channel_id
+            logger.debug(
+                "[music/lavalink] voice_state move tratado como interno | guild=%s channel=%s",
+                guild.id,
+                getattr(after_channel, "id", None),
+            )
             return
         actor = await self._find_recent_voice_audit_actor(
             guild,
