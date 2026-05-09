@@ -549,6 +549,68 @@ class LavalinkBackend:
                 candidates.append(value)
         return candidates
 
+    def _looks_like_playable(self, value: Any) -> bool:
+        if value is None or isinstance(value, (str, bytes, bytearray, dict)):
+            return False
+        # Wavelink 3.x pode retornar um Playable direto para URLs HTTP/MP3,
+        # enquanto buscas normais retornam Search/Playlist/list. O fluxo antigo
+        # só aceitava contêineres iteráveis; com TTS curto via URL pública o
+        # Lavalink fazia o probe HEAD 206, mas o bot descartava o Playable direto
+        # e registrava falso "não encontrou fonte tocável" antes de tocar.
+        for attr in ("encoded", "identifier", "uri"):
+            if getattr(value, attr, None):
+                return True
+        if getattr(value, "title", None) and (getattr(value, "length", None) is not None or getattr(value, "duration", None) is not None):
+            return True
+        return False
+
+    def _first_playable_from_search(self, search: Any) -> Any | None:
+        if self._looks_like_playable(search):
+            return search
+        tracks = getattr(search, "tracks", None)
+        if tracks:
+            try:
+                items = list(tracks)
+            except Exception:
+                items = []
+            for item in items:
+                if self._looks_like_playable(item):
+                    return item
+            return items[0] if items else None
+        data = getattr(search, "data", None)
+        if data:
+            if self._looks_like_playable(data):
+                return data
+            if isinstance(data, (list, tuple)) and data:
+                return data[0]
+        if isinstance(search, (list, tuple)) and search:
+            return search[0]
+        if isinstance(search, dict):
+            return None
+        try:
+            iterator = iter(search)
+        except TypeError:
+            return None
+        except Exception:
+            return None
+        for item in iterator:
+            return item
+        return None
+
+    def _playable_debug_shape(self, value: Any) -> str:
+        try:
+            cls = f"{type(value).__module__}.{type(value).__qualname__}"
+        except Exception:
+            cls = type(value).__name__
+        attrs: list[str] = []
+        for attr in ("load_type", "loadType", "tracks", "data", "encoded", "identifier", "uri", "title", "length", "duration"):
+            try:
+                if getattr(value, attr, None) is not None:
+                    attrs.append(attr)
+            except Exception:
+                continue
+        return f"{cls} attrs={','.join(attrs) or '-'}"
+
     async def find_playable(self, bot, track: Any, *, fallback_query: str = "") -> tuple[Any, dict[str, Any]]:
         """Resolve um MusicTrack atual para um Playable do Wavelink.
 
@@ -575,17 +637,13 @@ class LavalinkBackend:
                         search = await wavelink.Playable.search(candidate)
                     else:
                         raise
-                playable = None
-                tracks = getattr(search, "tracks", None)
-                if tracks:
-                    playable = list(tracks)[0]
-                elif isinstance(search, list) and search:
-                    playable = search[0]
-                elif hasattr(search, "__iter__"):
-                    found = list(search)
-                    if found:
-                        playable = found[0]
+                playable = self._first_playable_from_search(search)
                 if playable is None:
+                    logger.debug(
+                        "[music/lavalink] busca sem playable extraível | query=%r shape=%s",
+                        candidate,
+                        self._playable_debug_shape(search),
+                    )
                     continue
                 meta = {
                     "query": candidate,
@@ -788,23 +846,33 @@ class LavalinkBackend:
     async def find_first_playable_from_candidates(self, bot, candidates: list[str]) -> tuple[Any, dict[str, Any]]:
         wavelink, _node = await self.ensure_wavelink_pool(bot)
         last_error: Exception | None = None
+        reconnected_after_pool_error = False
         for candidate in candidates:
             candidate = str(candidate or "").strip()
             if not candidate:
                 continue
             try:
-                search = await wavelink.Playable.search(candidate)
-                playable = None
-                tracks = getattr(search, "tracks", None)
-                if tracks:
-                    playable = list(tracks)[0]
-                elif isinstance(search, list) and search:
-                    playable = search[0]
-                elif hasattr(search, "__iter__"):
-                    found = list(search)
-                    if found:
-                        playable = found[0]
+                try:
+                    search = await wavelink.Playable.search(candidate)
+                except Exception as pool_exc:
+                    message = str(pool_exc).lower()
+                    if (not reconnected_after_pool_error) and ("no nodes" in message or "connected state" in message or "pool" in message):
+                        reconnected_after_pool_error = True
+                        logger.info(
+                            "[music/lavalink] Pool Wavelink sem node conectado durante TTS; reconectando uma vez | query=%r",
+                            candidate,
+                        )
+                        wavelink, _node = await self.ensure_wavelink_pool(bot, force_reconnect=True)
+                        search = await wavelink.Playable.search(candidate)
+                    else:
+                        raise
+                playable = self._first_playable_from_search(search)
                 if playable is None:
+                    logger.debug(
+                        "[music/lavalink] busca sem playable extraível | query=%r shape=%s",
+                        candidate,
+                        self._playable_debug_shape(search),
+                    )
                     continue
                 meta = {
                     "query": candidate,
