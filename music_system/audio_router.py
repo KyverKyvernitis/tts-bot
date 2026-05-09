@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import random
 import time
 import threading
@@ -11,6 +12,7 @@ from array import array
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Any
+from urllib.parse import quote
 
 import discord
 
@@ -24,7 +26,6 @@ from .backends import MusicBackendManager
 logger = logging.getLogger(__name__)
 
 MUSIC_DEFAULT_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_DEFAULT_VOLUME", 0.55))))
-MUSIC_DUCK_VOLUME = max(0.05, min(1.0, float(getattr(config, "MUSIC_DUCK_VOLUME", 0.15))))
 TTS_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_TTS_VOLUME", 1.0))))
 MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL = bool(getattr(config, "MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL", True))
 MUSIC_IDLE_DISCONNECT_SECONDS = max(15.0, float(getattr(config, "MUSIC_IDLE_DISCONNECT_SECONDS", 120)))
@@ -39,8 +40,6 @@ MUSIC_PLAYBACK_START_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "MUSIC_PLA
 MUSIC_HISTORY_MAXSIZE = max(5, int(getattr(config, "MUSIC_HISTORY_MAXSIZE", 25)))
 MUSIC_CONTROL_VOTE_SECONDS = max(10.0, float(getattr(config, "MUSIC_CONTROL_VOTE_SECONDS", 45)))
 MUSIC_PREFETCH_NEXT = bool(getattr(config, "MUSIC_PREFETCH_NEXT", True))
-MUSIC_DUCK_FADE_DOWN_MS = max(20.0, float(getattr(config, "MUSIC_DUCK_FADE_DOWN_MS", 150)))
-MUSIC_DUCK_FADE_UP_MS = max(20.0, float(getattr(config, "MUSIC_DUCK_FADE_UP_MS", 550)))
 MUSIC_LIMITER_ENABLED = bool(getattr(config, "MUSIC_LIMITER_ENABLED", True))
 MUSIC_MAX_GLOBAL_PREFETCH = max(0, int(getattr(config, "MUSIC_MAX_GLOBAL_PREFETCH", 1)))
 MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS = max(0, int(getattr(config, "MUSIC_DISABLE_PREFETCH_ABOVE_PLAYERS", 2)))
@@ -77,8 +76,8 @@ def _ffmpeg_options_with_base_volume(options: str, volume: float) -> tuple[str, 
     """Aplica volume base no FFmpeg para reduzir trabalho Python por frame.
 
     Sem TTS por cima, o áudio pode sair quase em passthrough. Quando há TTS
-    ou ajuste de volume durante a música, o mixer Python aplica apenas o fator
-    restante em cima do volume base já feito em C pelo FFmpeg.
+    o mixer Python aplica apenas o fator restante em cima do volume base já
+    feito em C pelo FFmpeg.
     """
     raw_options = str(options or "").strip()
     try:
@@ -143,15 +142,13 @@ class MixedAudioSource(discord.AudioSource):
     resolvida com call_soon_threadsafe no loop principal.
     """
 
-    def __init__(self, *, loop: asyncio.AbstractEventLoop, music_source: discord.AudioSource, music_volume: float, duck_volume: float, source_base_volume: float = 1.0) -> None:
+    def __init__(self, *, loop: asyncio.AbstractEventLoop, music_source: discord.AudioSource, music_volume: float, source_base_volume: float = 1.0) -> None:
         self.loop = loop
         self.music_source = music_source
         self.music_volume = float(music_volume)
         self.normal_music_volume = float(music_volume)
-        self.duck_volume = float(duck_volume)
         self.source_base_volume = max(0.001, min(2.0, float(source_base_volume or 1.0)))
         self._current_music_volume = float(music_volume)
-        self.duck_enabled = True  # ducking é permanente; mantido só por compatibilidade interna
         self._overlays: list[TTSOverlay] = []
         self._overlay_lock = threading.RLock()
         self._closed = False
@@ -182,25 +179,10 @@ class MixedAudioSource(discord.AudioSource):
     def set_music_volume(self, volume: float) -> None:
         self.normal_music_volume = max(0.0, min(2.0, float(volume)))
 
-    def set_duck_volume(self, volume: float) -> None:
-        self.duck_volume = max(0.0, min(1.0, float(volume)))
-
     def _step_music_volume(self, target: float) -> float:
         target = max(0.0, min(2.0, float(target)))
-        current = float(self._current_music_volume)
-        if abs(current - target) < 0.001:
-            self._current_music_volume = target
-            return target
-        fade_ms = MUSIC_DUCK_FADE_DOWN_MS if target < current else MUSIC_DUCK_FADE_UP_MS
-        frames = max(1.0, fade_ms / PCM_FRAME_MS)
-        span = max(0.01, abs(float(self.normal_music_volume) - float(self.duck_volume)))
-        step = max(0.005, span / frames)
-        if target > current:
-            current = min(target, current + step)
-        else:
-            current = max(target, current - step)
-        self._current_music_volume = current
-        return current
+        self._current_music_volume = target
+        return target
 
     def _limit_sample(self, value: int) -> int:
         if not MUSIC_LIMITER_ENABLED:
@@ -299,7 +281,7 @@ class MixedAudioSource(discord.AudioSource):
             return b""
 
         if music_frame:
-            target_music_volume = self.duck_volume if active_overlays else self.normal_music_volume
+            target_music_volume = self.normal_music_volume
             stepped_volume = self._step_music_volume(target_music_volume)
             scale = self._effective_music_scale(stepped_volume)
             if not active_overlays and abs(scale - 1.0) <= 0.001:
@@ -355,8 +337,6 @@ class MusicGuildState:
     last_text_channel_id: Optional[int] = None
     last_voice_channel_id: Optional[int] = None
     volume: float = MUSIC_DEFAULT_VOLUME
-    duck_volume: float = MUSIC_DUCK_VOLUME
-    duck_enabled: bool = True  # sempre True; não existe toggle público
     loop_mode: LoopMode = LoopMode.OFF
     shuffle: bool = False
     stop_requested: bool = False
@@ -446,8 +426,6 @@ class AudioRouter:
         if state is None:
             state = MusicGuildState()
             self._states[int(guild_id)] = state
-        # O ducking do TTS é obrigatório e não pode ser desativado por comando/UI.
-        state.duck_enabled = True
         self._load_persisted_volume(int(guild_id), state)
         return state
 
@@ -461,11 +439,8 @@ class AudioRouter:
             raw_volume = guild_doc.get("music_volume")
             if raw_volume is not None:
                 state.volume = max(0.0, min(1.5, float(raw_volume)))
-            raw_duck = guild_doc.get("music_duck_volume")
-            if raw_duck is not None:
-                state.duck_volume = max(0.05, min(1.0, float(raw_duck)))
         except Exception:
-            logger.debug("[music] falha ao carregar volume/ducking persistido", exc_info=True)
+            logger.debug("[music] falha ao carregar volume persistido", exc_info=True)
 
     def _is_lavalink_voice_client(self, vc: Any) -> bool:
         if vc is None:
@@ -535,6 +510,20 @@ class AudioRouter:
     def _vc_is_playing_or_paused(self, vc: Any) -> bool:
         return self._vc_is_playing(vc) or self._vc_is_paused(vc)
 
+    def _vc_lavalink_explicit_playing_or_paused(self, vc: Any) -> bool:
+        if vc is None or not self._is_lavalink_voice_client(vc):
+            return False
+        for attr in ("playing", "is_playing", "paused", "is_paused"):
+            value = getattr(vc, attr, None)
+            try:
+                if callable(value):
+                    value = value()
+                if bool(value):
+                    return True
+            except Exception:
+                continue
+        return False
+
     async def _vc_stop_audio(self, vc: Any) -> None:
         if vc is None:
             return
@@ -574,21 +563,6 @@ class AudioRouter:
             await save_doc(int(guild_id), doc)
         except Exception:
             logger.debug("[music] falha ao salvar volume persistido", exc_info=True)
-
-    async def _persist_duck_volume(self, guild_id: int, volume: float) -> None:
-        settings_db = getattr(self.bot, "settings_db", None)
-        if settings_db is None:
-            return
-        try:
-            get_doc = getattr(settings_db, "_get_guild_doc", None)
-            save_doc = getattr(settings_db, "_save_guild_doc", None)
-            if not callable(get_doc) or not callable(save_doc):
-                return
-            doc = get_doc(int(guild_id))
-            doc["music_duck_volume"] = max(0.05, min(1.0, float(volume)))
-            await save_doc(int(guild_id), doc)
-        except Exception:
-            logger.debug("[music] falha ao salvar ducking persistido", exc_info=True)
 
     def _auto_bitrate_record_from_doc(self, guild_id: int) -> dict | None:
         settings_db = getattr(self.bot, "settings_db", None)
@@ -2205,6 +2179,7 @@ class AudioRouter:
         state.current_status = "starting"
         self._mark_lavalink_transition(state, seconds=18.0)
         self._mark_internal_voice_disconnect(guild.id, seconds=18.0)
+        await self._boost_auto_bitrate_for_music(guild, channel, state)
         await self.update_panel(guild.id, create=True)
 
         player, playable, meta = await self.backends.play_lavalink_track(
@@ -2237,20 +2212,21 @@ class AudioRouter:
         # após play/skip, então usamos ``current`` + uma pequena janela de graça
         # para não concluir a faixa cedo e avançar várias músicas/status em loop.
         started_at = time.monotonic()
-        last_active_at = started_at
+        last_explicit_active_at = started_at
         while not state.stop_requested and not state.skip_requested:
             if not self._vc_is_connected(player):
                 raise MusicPlaybackError("Player Lavalink desconectou durante a música.")
-            active = self._vc_is_playing_or_paused(player)
-            if active:
-                last_active_at = time.monotonic()
-            else:
-                now = time.monotonic()
-                if now - started_at < 2.5 or now - last_active_at < 1.25:
-                    await asyncio.sleep(0.25)
-                    continue
-                break
-            await asyncio.sleep(0.45)
+            now = time.monotonic()
+            explicit_active = self._vc_lavalink_explicit_playing_or_paused(player)
+            has_current = getattr(player, "current", None) is not None
+            if explicit_active:
+                last_explicit_active_at = now
+                await asyncio.sleep(0.35)
+                continue
+            if has_current and (now - started_at < 2.5 or now - last_explicit_active_at < 1.25):
+                await asyncio.sleep(0.20)
+                continue
+            break
         return not state.stop_requested and not state.skip_requested
 
     async def _play_track(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> bool:
@@ -2382,10 +2358,8 @@ class AudioRouter:
                 loop=loop,
                 music_source=ffmpeg_source,
                 music_volume=state.volume,
-                duck_volume=state.duck_volume,
                 source_base_volume=source_base_volume,
             )
-            mixed_source.duck_enabled = True
             state.current_source = mixed_source
             mixed_source.music_started_future.add_done_callback(_consume_expected_music_exception)
 
@@ -2769,6 +2743,30 @@ class AudioRouter:
     async def _announce_now_playing(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> None:
         await self.update_panel(guild.id, create=True)
 
+
+    def _lavalink_tts_candidates_for_path(self, path: str, *, timeout: float = 120.0) -> list[str]:
+        candidates: list[str] = []
+        public_base = str(getattr(config, "MUSIC_TTS_PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+        if public_base:
+            try:
+                from webserver import register_tts_audio_file
+
+                token = register_tts_audio_file(
+                    path,
+                    ttl_seconds=max(float(timeout or 120.0) + 90.0, float(getattr(config, "MUSIC_LAVALINK_TTS_URL_TTL_SECONDS", 240))),
+                )
+                if token:
+                    candidates.append(f"{public_base}/tts-audio/{token}.mp3")
+            except Exception:
+                logger.debug("[music/lavalink] falha ao registrar URL temporária do TTS", exc_info=True)
+
+        if bool(getattr(config, "MUSIC_LAVALINK_TTS_FILE_FALLBACK", False)):
+            with contextlib.suppress(Exception):
+                abs_path = os.path.abspath(str(path or ""))
+                candidates.append("file://" + quote(abs_path))
+                candidates.append(abs_path)
+        return [candidate for candidate in candidates if str(candidate or "").strip()]
+
     async def play_tts(
         self,
         *,
@@ -2779,14 +2777,12 @@ class AudioRouter:
         options: str = MUSIC_TTS_FFMPEG_OPTIONS,
         timeout: float = 120.0,
         item=None,
-    ) -> dict[str, float]:
-        """Toca TTS. Se música estiver ativa, mistura por cima com ducking."""
+    ) -> dict[str, Any]:
+        """Toca TTS integrado ao player de música mantendo o volume normal da música."""
         loop = asyncio.get_running_loop()
-        source_setup_started_at = time.monotonic()
-        source = discord.FFmpegPCMAudio(path, before_options=before_options, options=options)
-        source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
-        play_call_ms = 0.0
         playback_started_at = time.monotonic()
+        source_setup_started_at = time.monotonic()
+        play_call_ms = 0.0
 
         guild_id = getattr(guild, "id", None) or getattr(getattr(vc, "guild", None), "id", None)
         state = self.get_state(int(guild_id)) if guild_id is not None else None
@@ -2795,21 +2791,64 @@ class AudioRouter:
             state.last_tts_activity_at = time.monotonic()
         active_source = state.current_source if state is not None else None
 
-        if state is not None and (state.current_backend == "lavalink" or self._is_lavalink_voice_client(vc)):
-            # Lavalink externo ocupa o VoiceProtocol; áudio local de TTS não pode
-            # ser injetado neste mesmo client sem um bot/voice client auxiliar.
-            # Cancela apenas este TTS e mantém música/call estáveis durante o teste.
-            with contextlib.suppress(Exception):
-                source.cleanup()
-            logger.warning("[music/lavalink] TTS local ignorado durante playback Lavalink real | guild=%s", guild_id)
-            playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
-            return {
-                "source_setup_ms": source_setup_ms,
-                "play_call_ms": 0.0,
-                "playback_ms": playback_ms,
-                "playback_started_at": playback_started_at,
-                "tts_lavalink_skipped": True,
-            }
+        if state is not None and guild is not None and (state.current_backend == "lavalink" or self._is_lavalink_voice_client(vc)):
+            # O arquivo já foi gerado pelo TTS antes de chegar aqui. Só agora o
+            # Lavalink resolve uma fonte tocável e substitui temporariamente a
+            # música; se qualquer etapa falhar, a faixa atual continua/resume.
+            candidates = self._lavalink_tts_candidates_for_path(path, timeout=timeout)
+            source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
+            if not candidates:
+                logger.warning(
+                    "[music/lavalink] TTS via Lavalink sem URL pública configurada | guild=%s",
+                    guild_id,
+                )
+                return {
+                    "source_setup_ms": source_setup_ms,
+                    "play_call_ms": 0.0,
+                    "playback_ms": max(0.0, (time.monotonic() - playback_started_at) * 1000.0),
+                    "playback_started_at": playback_started_at,
+                    "tts_lavalink_failed": True,
+                    "tts_lavalink_missing_source": True,
+                }
+            try:
+                async with state.voice_lock:
+                    self._mark_lavalink_transition(state, seconds=max(8.0, float(timeout or 120.0) + 4.0))
+                    self._mark_internal_voice_disconnect(int(guild_id), seconds=max(8.0, float(timeout or 120.0) + 4.0))
+                    result = await self.backends.play_lavalink_tts(
+                        guild,
+                        candidates=candidates,
+                        volume=TTS_VOLUME,
+                        resume_volume=state.volume,
+                        timeout=max(1.0, float(timeout or 120.0)),
+                        should_resume=lambda: bool(
+                            state.current_backend == "lavalink"
+                            and not state.skip_requested
+                            and not state.stop_requested
+                            and state.current is not None
+                        ),
+                    )
+                result.setdefault("source_setup_ms", source_setup_ms)
+                result.setdefault("play_call_ms", 0.0)
+                result.setdefault("playback_started_at", playback_started_at)
+                result.setdefault("playback_ms", max(0.0, (time.monotonic() - playback_started_at) * 1000.0))
+                state.last_tts_activity_at = time.monotonic()
+                self._mark_lavalink_transition(state, seconds=4.0)
+                self._mark_internal_voice_disconnect(int(guild_id), seconds=4.0)
+                return result
+            except Exception as exc:
+                logger.warning("[music/lavalink] TTS via Lavalink falhou; música deve continuar/resumir | guild=%s erro=%s", guild_id, exc)
+                self._mark_lavalink_transition(state, seconds=6.0)
+                self._mark_internal_voice_disconnect(int(guild_id), seconds=6.0)
+                return {
+                    "source_setup_ms": source_setup_ms,
+                    "play_call_ms": 0.0,
+                    "playback_ms": max(0.0, (time.monotonic() - playback_started_at) * 1000.0),
+                    "playback_started_at": playback_started_at,
+                    "tts_lavalink_failed": True,
+                }
+
+        source = discord.FFmpegPCMAudio(path, before_options=before_options, options=options)
+        source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
 
         if active_source is not None and not getattr(active_source, "_closed", True) and (self._vc_is_playing_or_paused(vc)):
             future = active_source.add_tts(source, volume=TTS_VOLUME)
@@ -3006,26 +3045,6 @@ class AudioRouter:
             await self.backends.set_lavalink_player_volume(guild_id, int(round(volume * 100)))
         self._schedule_panel_update(guild_id, create=False)
         return volume
-
-    async def set_duck_volume(self, guild_id: int, volume_percent: int) -> float:
-        state = self.get_state(guild_id)
-        volume = max(5, min(100, int(volume_percent))) / 100.0
-        state.duck_enabled = True
-        state.duck_volume = volume
-        await self._persist_duck_volume(guild_id, volume)
-        if state.current_source is not None:
-            state.current_source.set_duck_volume(volume)
-        self._schedule_panel_update(guild_id, create=False)
-        return volume
-
-    async def toggle_duck(self, guild_id: int) -> bool:
-        # Compatibilidade com código antigo: ducking agora é obrigatório.
-        state = self.get_state(guild_id)
-        state.duck_enabled = True
-        if state.current_source is not None:
-            state.current_source.duck_enabled = True
-        self._schedule_panel_update(guild_id, create=False)
-        return True
 
     async def request_skip(self, guild_id: int, member) -> tuple[bool, str]:
         allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "skip")

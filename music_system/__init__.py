@@ -1,4 +1,4 @@
-"""Sistema modular de música + TTS ducking.
+"""Sistema modular de música + TTS.
 
 Este pacote fica fora de cogs/ para não ser carregado como extension.
 """

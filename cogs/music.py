@@ -25,7 +25,7 @@ def _get_router(bot) -> AudioRouter:
 
 
 class Music(commands.Cog):
-    """Player de música modular com TTS ducking obrigatório."""
+    """Player de música modular integrado ao TTS."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -208,32 +208,6 @@ class Music(commands.Cog):
             return
         volume = await self.router.set_volume(ctx.guild.id, value)
         await self._reply(ctx, f"`🔊` Volume da música ajustado para `{int(round(volume * 100))}%`.")
-
-    @commands.command(name="duck", aliases=["dv", "ttsduck", "ducking"])
-    @commands.guild_only()
-    async def duck(self, ctx: commands.Context, value: str = ""):
-        state = self.router.get_state(ctx.guild.id)
-        raw = (value or "").strip().lower()
-        if not raw:
-            await self._reply(
-                ctx,
-                f"`🎙️` Volume da música durante TTS: `{int(round(state.duck_volume * 100))}%`.\n"
-                "Use `_duck <5-100>` para ajustar esse volume.",
-            )
-            return
-        if raw in {"on", "true", "sim", "ativar", "ativo", "off", "false", "nao", "não", "desativar", "desligar"}:
-            await self._reply(ctx, "`🎙️` Esse comando só ajusta o volume da música durante TTS. Use `_duck <5-100>`.")
-            return
-        try:
-            percent = int(raw.replace("%", ""))
-        except Exception:
-            await self._reply(ctx, "Use `_duck <5-100>` para ajustar o volume da música durante TTS.")
-            return
-        if not self.router.is_music_staff(ctx.author):
-            await self._reply(ctx, "Apenas staff pode alterar o volume durante TTS.")
-            return
-        volume = await self.router.set_duck_volume(ctx.guild.id, percent)
-        await self._reply(ctx, f"`🎙️` Volume da música durante TTS ajustado para `{int(round(volume * 100))}%`.")
 
     @commands.command(name="shuffle", aliases=["sh", "embaralhar"])
     @commands.guild_only()

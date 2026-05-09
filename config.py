@@ -156,11 +156,16 @@ TTS_FFMPEG_BEFORE_OPTIONS = (os.getenv("TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin") 
 TTS_FFMPEG_OPTIONS = (os.getenv("TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error").strip()
 
 # -----------------------------------------------------------------------------
-# Música — player leve integrado ao TTS ducking
+# Música — player leve integrado ao TTS
 # -----------------------------------------------------------------------------
 MUSIC_DEFAULT_VOLUME = _parse_float(os.getenv("MUSIC_DEFAULT_VOLUME", "0.55"), 0.55)
-MUSIC_DUCK_VOLUME = _parse_float(os.getenv("MUSIC_DUCK_VOLUME", "0.15"), 0.15)
 MUSIC_TTS_VOLUME = _parse_float(os.getenv("MUSIC_TTS_VOLUME", "1.0"), 1.0)
+MUSIC_TTS_PUBLIC_BASE_URL = (
+    os.getenv("MUSIC_TTS_PUBLIC_BASE_URL", os.getenv("PUBLIC_BASE_URL", os.getenv("WEB_PUBLIC_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", ""))))
+    or ""
+).strip().rstrip("/")
+MUSIC_LAVALINK_TTS_FILE_FALLBACK = _parse_bool(os.getenv("MUSIC_LAVALINK_TTS_FILE_FALLBACK", "false"), False)
+MUSIC_LAVALINK_TTS_URL_TTL_SECONDS = max(30, _parse_int(os.getenv("MUSIC_LAVALINK_TTS_URL_TTL_SECONDS", "240"), 240))
 MUSIC_IDLE_DISCONNECT_SECONDS = _parse_int(os.getenv("MUSIC_IDLE_DISCONNECT_SECONDS", "120"), 120)
 MUSIC_QUEUE_MAXSIZE = min(100, max(1, _parse_int(os.getenv("MUSIC_QUEUE_MAXSIZE", "100"), 100)))
 MUSIC_MAX_PLAYLIST_ITEMS = min(100, max(1, _parse_int(os.getenv("MUSIC_MAX_PLAYLIST_ITEMS", "100"), 100)))
@@ -186,8 +191,6 @@ MUSIC_PREFETCH_NEXT = _parse_bool(os.getenv("MUSIC_PREFETCH_NEXT", "true"), True
 # e, em músicas com duração conhecida, perto do fim.
 MUSIC_PREFETCH_MIN_DELAY_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_PREFETCH_MIN_DELAY_SECONDS", "18"), 18.0))
 MUSIC_PREFETCH_BEFORE_END_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_PREFETCH_BEFORE_END_SECONDS", "45"), 45.0))
-MUSIC_DUCK_FADE_DOWN_MS = _parse_int(os.getenv("MUSIC_DUCK_FADE_DOWN_MS", "150"), 150)
-MUSIC_DUCK_FADE_UP_MS = _parse_int(os.getenv("MUSIC_DUCK_FADE_UP_MS", "550"), 550)
 MUSIC_LIMITER_ENABLED = _parse_bool(os.getenv("MUSIC_LIMITER_ENABLED", "true"), True)
 MUSIC_YTDLP_FORMAT = (
     os.getenv(

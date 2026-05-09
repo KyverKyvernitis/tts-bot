@@ -11,7 +11,6 @@ from .models import MusicTrack
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
 QUEUE_PAGE_SIZE = 8
-MIN_DUCK_PERCENT = 5
 
 
 def _bar(percent: float, *, size: int = 12) -> str:
@@ -108,10 +107,9 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
         f"> -# 👤 **⠂** {_escape(source, limit=64)}",
         f"> -# ✋ **⠂** {requester}",
     ])
-    quality_label = str(getattr(state, "current_quality_label", "") or "").strip()
-    quality_kbps = int(getattr(state, "current_quality_kbps", 0) or 0)
-    if quality_label and quality_kbps > 0:
-        lines.append(f"> -# 🎧 **⠂** `{quality_label} • {quality_kbps} kbps`")
+    backend = str(getattr(state, "current_backend", "local") or "local").lower()
+    backend_label = "Reprodução via Lavalink" if backend == "lavalink" else "Reprodução local"
+    lines.append(f"> -# 🎧 **⠂** `{backend_label}`")
 
     loop_mode = getattr(state, "loop_mode", None)
     loop_label = getattr(loop_mode, "label", "desligado")
@@ -301,14 +299,13 @@ def build_queue_embed(state, page: int = 0, *, selected_position: int | None = N
 
 
 class VolumeModal(discord.ui.Modal):
-    def __init__(self, router, guild_id: int, *, duck: bool = False) -> None:
-        super().__init__(title="Volume do ducking" if duck else "Volume da música")
+    def __init__(self, router, guild_id: int) -> None:
+        super().__init__(title="Volume da música")
         self.router = router
         self.guild_id = int(guild_id)
-        self.duck = duck
         self.value = discord.ui.TextInput(
             label="Volume em %",
-            placeholder="Exemplo: 55" if not duck else "Exemplo: 15",
+            placeholder="Exemplo: 55",
             min_length=1,
             max_length=3,
             required=True,
@@ -325,17 +322,9 @@ class VolumeModal(discord.ui.Modal):
         except Exception:
             await interaction.response.send_message("Envie apenas um número válido.", ephemeral=True)
             return
-        if self.duck:
-            value = max(MIN_DUCK_PERCENT, min(100, value))
-            await self.router.set_duck_volume(self.guild_id, value)
-            await interaction.response.send_message(
-                f"🎙️ Volume da música durante o TTS: `{value}%`.",
-                ephemeral=True,
-            )
-        else:
-            value = max(0, min(150, value))
-            await self.router.set_volume(self.guild_id, value)
-            await interaction.response.send_message(f"🔊 Volume da música: `{value}%`.", ephemeral=True)
+        value = max(0, min(150, value))
+        await self.router.set_volume(self.guild_id, value)
+        await interaction.response.send_message(f"🔊 Volume da música: `{value}%`.", ephemeral=True)
 
 
 class SearchSelect(discord.ui.Select):
@@ -902,12 +891,10 @@ class PlayerOptionsSelect(discord.ui.Select):
     def __init__(self, router, guild_id: int) -> None:
         state = router.get_state(guild_id)
         volume_percent = int(round(float(getattr(state, "volume", 0.55)) * 100))
-        duck_percent = int(round(float(getattr(state, "duck_volume", 0.15)) * 100))
         options = [
             discord.SelectOption(label="Adicionar música", emoji="🎶", value="add_song", description="Adicionar uma música ou playlist no queue."),
             discord.SelectOption(label=f"Volume: {volume_percent}%", emoji="🔊", value="volume", description="Ajustar volume da música."),
             discord.SelectOption(label="Adicionar histórico", emoji="↩️", value="readd", description="Readicionar músicas tocadas de volta no queue."),
-            discord.SelectOption(label=f"Volume durante TTS: {duck_percent}%", emoji="🎙️", value="duck_volume", description="Ajustar quanto a música abaixa quando o TTS fala."),
             discord.SelectOption(label="Repetição", emoji="🔁", value="loop", description="Alternar repetição da música/queue."),
             discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Misturar o queue."),
         ]
@@ -932,13 +919,7 @@ class PlayerOptionsSelect(discord.ui.Select):
             if not self.router.is_music_staff(getattr(interaction, "user", None)):
                 await interaction.response.send_message("Apenas staff pode alterar o volume do player.", ephemeral=True)
                 return
-            await interaction.response.send_modal(VolumeModal(self.router, self.guild_id, duck=False))
-            return
-        if value == "duck_volume":
-            if not self.router.is_music_staff(getattr(interaction, "user", None)):
-                await interaction.response.send_message("Apenas staff pode alterar o volume durante TTS.", ephemeral=True)
-                return
-            await interaction.response.send_modal(VolumeModal(self.router, self.guild_id, duck=True))
+            await interaction.response.send_modal(VolumeModal(self.router, self.guild_id))
             return
         if value == "shuffle":
             _ok, message = await self.router.request_shuffle(self.guild_id, interaction.user)

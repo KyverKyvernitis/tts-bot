@@ -653,6 +653,260 @@ class LavalinkBackend:
             await player.play(playable)
         return player, playable, meta
 
+
+    def _is_wavelink_player(self, player: Any) -> bool:
+        if player is None:
+            return False
+        try:
+            wavelink = self._import_wavelink()
+            player_cls = getattr(wavelink, "Player", None)
+            if player_cls is not None and isinstance(player, player_cls):
+                return True
+        except Exception:
+            pass
+        module = str(getattr(type(player), "__module__", "") or "")
+        qualname = str(getattr(type(player), "__qualname__", "") or getattr(type(player), "__name__", "") or "")
+        return module.startswith("wavelink") or (qualname == "Player" and hasattr(player, "node") and hasattr(player, "play"))
+
+    def _player_current_track(self, player: Any) -> Any:
+        for attr in ("current", "track", "playing"):
+            value = getattr(player, attr, None)
+            if value is not None and not isinstance(value, bool):
+                return value
+        return None
+
+    def _player_position_ms(self, player: Any) -> int:
+        for attr in ("position", "last_position"):
+            value = getattr(player, attr, None)
+            try:
+                if callable(value):
+                    value = value()
+                if value is not None:
+                    return max(0, int(float(value)))
+            except Exception:
+                continue
+        state = getattr(player, "state", None)
+        if isinstance(state, dict):
+            with contextlib.suppress(Exception):
+                return max(0, int(float(state.get("position") or 0)))
+        return 0
+
+    def _player_volume_percent(self, player: Any, fallback: float) -> int:
+        value = getattr(player, "volume", None)
+        try:
+            if callable(value):
+                value = value()
+            if value is not None:
+                return max(0, min(150, int(float(value))))
+        except Exception:
+            pass
+        return max(0, min(150, int(round(float(fallback or 1.0) * 100))))
+
+    def _same_playable(self, a: Any, b: Any) -> bool:
+        if a is None or b is None:
+            return False
+        if a is b:
+            return True
+        for attr in ("encoded", "identifier", "uri", "title"):
+            av = str(getattr(a, attr, "") or "")
+            bv = str(getattr(b, attr, "") or "")
+            if av and bv and av == bv:
+                return True
+        return False
+
+    def _player_bool(self, player: Any, *attrs: str) -> bool:
+        for attr in attrs:
+            value = getattr(player, attr, None)
+            try:
+                if callable(value):
+                    value = value()
+                if bool(value):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _pause_player(self, player: Any, paused: bool) -> None:
+        if paused:
+            pause = getattr(player, "pause", None)
+            if callable(pause):
+                try:
+                    result = pause(True)
+                except TypeError:
+                    result = pause()
+                if asyncio.iscoroutine(result):
+                    await result
+            return
+        resume = getattr(player, "resume", None)
+        if callable(resume):
+            result = resume()
+            if asyncio.iscoroutine(result):
+                await result
+            return
+        pause = getattr(player, "pause", None)
+        if callable(pause):
+            try:
+                result = pause(False)
+            except TypeError:
+                return
+            if asyncio.iscoroutine(result):
+                await result
+
+    async def _play_with_compat(
+        self,
+        player: Any,
+        playable: Any,
+        *,
+        start: int | None = None,
+        volume: int | None = None,
+        add_history: bool | None = None,
+    ) -> Any:
+        kwargs: dict[str, Any] = {"replace": True}
+        if start is not None:
+            kwargs["start"] = max(0, int(start))
+        if volume is not None:
+            kwargs["volume"] = max(0, min(150, int(volume)))
+        if add_history is not None:
+            kwargs["add_history"] = bool(add_history)
+        try:
+            return await player.play(playable, **kwargs)
+        except TypeError:
+            kwargs.pop("add_history", None)
+            try:
+                return await player.play(playable, **kwargs)
+            except TypeError:
+                kwargs.pop("volume", None)
+                try:
+                    result = await player.play(playable, **kwargs)
+                except TypeError:
+                    result = await player.play(playable)
+                if volume is not None:
+                    with contextlib.suppress(Exception):
+                        await player.set_volume(max(0, min(150, int(volume))))
+                return result
+
+    async def find_first_playable_from_candidates(self, bot, candidates: list[str]) -> tuple[Any, dict[str, Any]]:
+        wavelink, _node = await self.ensure_wavelink_pool(bot)
+        last_error: Exception | None = None
+        for candidate in candidates:
+            candidate = str(candidate or "").strip()
+            if not candidate:
+                continue
+            try:
+                search = await wavelink.Playable.search(candidate)
+                playable = None
+                tracks = getattr(search, "tracks", None)
+                if tracks:
+                    playable = list(tracks)[0]
+                elif isinstance(search, list) and search:
+                    playable = search[0]
+                elif hasattr(search, "__iter__"):
+                    found = list(search)
+                    if found:
+                        playable = found[0]
+                if playable is None:
+                    continue
+                meta = {
+                    "query": candidate,
+                    "title": str(getattr(playable, "title", "") or "TTS"),
+                    "author": str(getattr(playable, "author", "") or "TTS"),
+                    "source": str(getattr(playable, "source", "") or "http"),
+                    "duration": getattr(playable, "length", None) or getattr(playable, "duration", None),
+                    "uri": str(getattr(playable, "uri", "") or candidate),
+                }
+                return playable, meta
+            except Exception as exc:
+                last_error = exc
+                logger.debug("[music/lavalink] falha ao resolver TTS no Lavalink | query=%r", candidate, exc_info=True)
+        if last_error is not None:
+            raise RuntimeError(f"Lavalink não resolveu o TTS: {last_error.__class__.__name__}: {last_error}") from last_error
+        raise RuntimeError("Lavalink não encontrou fonte tocável para o TTS.")
+
+    async def play_tts_interrupt(
+        self,
+        bot,
+        guild: Any,
+        *,
+        candidates: list[str],
+        volume: float = 1.0,
+        resume_volume: float = 1.0,
+        timeout: float = 120.0,
+        should_resume=None,
+    ) -> dict[str, Any]:
+        """Toca um TTS curto pelo próprio Lavalink e restaura a música atual.
+
+        O playable do TTS é resolvido antes de substituir a faixa atual. Assim, se
+        o node não conseguir acessar o arquivo/URL, a música não é pausada nem
+        substituída.
+        """
+        started_at = time.monotonic()
+        tts_playable, meta = await self.find_first_playable_from_candidates(bot, candidates)
+        resolved_ms = max(0.0, (time.monotonic() - started_at) * 1000.0)
+
+        player = getattr(guild, "voice_client", None)
+        if player is None or not self._is_wavelink_player(player):
+            raise RuntimeError("Player Lavalink não está conectado para tocar TTS.")
+
+        previous_playable = self._player_current_track(player)
+        previous_position = self._player_position_ms(player)
+        was_paused = self._player_bool(player, "paused", "is_paused")
+        music_volume = self._player_volume_percent(player, resume_volume)
+        tts_volume = max(0, min(150, int(round(float(volume or 1.0) * 100))))
+        play_call_started_at = time.monotonic()
+        restored = False
+        restore_error: Exception | None = None
+        try:
+            await self._play_with_compat(player, tts_playable, start=0, volume=tts_volume, add_history=False)
+            play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
+            playback_started_at = time.monotonic()
+            deadline = playback_started_at + max(1.0, float(timeout or 120.0))
+            last_active = playback_started_at
+            while time.monotonic() < deadline:
+                current = self._player_current_track(player)
+                if current is not None and not self._same_playable(current, tts_playable):
+                    break
+                active = self._player_bool(player, "playing", "is_playing")
+                if active:
+                    last_active = time.monotonic()
+                elif time.monotonic() - last_active > 0.45:
+                    break
+                await asyncio.sleep(0.08)
+            else:
+                raise RuntimeError(f"Playback TTS via Lavalink excedeu {float(timeout or 120.0):.1f}s")
+            playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
+            return {
+                "source_setup_ms": resolved_ms,
+                "play_call_ms": play_call_ms,
+                "playback_ms": playback_ms,
+                "playback_started_at": playback_started_at,
+                "tts_lavalink": True,
+                "tts_lavalink_query": meta.get("query", ""),
+            }
+        finally:
+            allowed = True
+            if callable(should_resume):
+                with contextlib.suppress(Exception):
+                    allowed = bool(should_resume())
+            if previous_playable is not None and allowed:
+                try:
+                    await self._play_with_compat(
+                        player,
+                        previous_playable,
+                        start=max(0, int(previous_position)),
+                        volume=music_volume,
+                        add_history=False,
+                    )
+                    if was_paused:
+                        await self._pause_player(player, True)
+                    restored = True
+                except Exception as exc:
+                    restore_error = exc
+                    logger.warning("[music/lavalink] falha ao restaurar música após TTS", exc_info=True)
+            if restore_error is not None:
+                raise RuntimeError(f"TTS Lavalink terminou, mas a restauração da música falhou: {restore_error}") from restore_error
+            if previous_playable is not None and not restored and allowed:
+                logger.warning("[music/lavalink] TTS Lavalink terminou sem restaurar faixa anterior")
+
     async def close(self) -> None:
         session = self._session
         self._session = None

@@ -105,7 +105,9 @@ class MusicBackendManager:
         except Exception:
             logger.debug("[music/lavalink-shadow] falha ao ler config", exc_info=True)
             return False
-        return bool(cfg.enabled and cfg.configured and cfg.mode in {"shadow", "lavalink", "auto"})
+        if self.should_use_lavalink_real(guild_id):
+            return False
+        return bool(cfg.enabled and cfg.configured and cfg.mode == "shadow")
 
     def last_lavalink_shadow_result(self, guild_id: int | None = None) -> BackendSearchResult | None:
         return getattr(self, "_last_lavalink_shadow", {}).get(self._guild_key(guild_id))
@@ -234,6 +236,35 @@ class MusicBackendManager:
         lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=getattr(guild, "id", None)))
         try:
             return await lavalink_backend.play_track(self.bot, guild, voice_channel, track, volume=volume)
+        except Exception:
+            with contextlib.suppress(Exception):
+                await lavalink_backend.close()
+            raise
+
+
+    async def play_lavalink_tts(
+        self,
+        guild,
+        *,
+        candidates: list[str],
+        volume: float = 1.0,
+        resume_volume: float = 1.0,
+        timeout: float = 120.0,
+        should_resume=None,
+    ) -> dict[str, Any]:
+        if not self.should_use_lavalink_real(getattr(guild, "id", None)):
+            raise RuntimeError("Playback real via Lavalink não está liberado para este servidor.")
+        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=getattr(guild, "id", None)))
+        try:
+            return await lavalink_backend.play_tts_interrupt(
+                self.bot,
+                guild,
+                candidates=candidates,
+                volume=volume,
+                resume_volume=resume_volume,
+                timeout=timeout,
+                should_resume=should_resume,
+            )
         except Exception:
             with contextlib.suppress(Exception):
                 await lavalink_backend.close()

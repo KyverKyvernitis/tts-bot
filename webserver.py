@@ -1,18 +1,54 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, abort, send_file
 from waitress import serve
 import os
+import threading
+import time
+import uuid
 
 app = Flask(__name__)
 
 _health_provider = None
+_tts_audio_lock = threading.RLock()
+_tts_audio_files: dict[str, tuple[str, float]] = {}
+
 
 def set_health_provider(provider):
     global _health_provider
     _health_provider = provider
 
+
+def _purge_expired_tts_audio(now: float | None = None) -> None:
+    now = time.time() if now is None else float(now)
+    with _tts_audio_lock:
+        expired = [token for token, (_path, expires_at) in _tts_audio_files.items() if expires_at <= now]
+        for token in expired:
+            _tts_audio_files.pop(token, None)
+
+
+def register_tts_audio_file(path: str, *, ttl_seconds: float = 240.0) -> str | None:
+    """Registra um MP3 temporário para o Lavalink buscar via HTTP.
+
+    O token é aleatório e expira rápido. O arquivo não é copiado para evitar RAM/IO
+    extra; o endpoint apenas faz streaming do caminho já gerado pelo TTS.
+    """
+    try:
+        abs_path = os.path.abspath(str(path or ""))
+        if not os.path.isfile(abs_path):
+            return None
+        _purge_expired_tts_audio()
+        token = uuid.uuid4().hex
+        ttl = max(30.0, min(900.0, float(ttl_seconds or 240.0)))
+        with _tts_audio_lock:
+            _tts_audio_files[token] = (abs_path, time.time() + ttl)
+        return token
+    except Exception:
+        return None
+
+
 @app.get("/")
 def index():
     return "ok", 200
+
 
 @app.get("/health")
 def health():
@@ -26,6 +62,28 @@ def health():
                 "error": str(e),
             }), 500
     return jsonify({"ok": True}), 200
+
+
+@app.get("/tts-audio/<token>.mp3")
+def tts_audio(token: str):
+    token = str(token or "").strip()
+    if not token:
+        abort(404)
+    now = time.time()
+    with _tts_audio_lock:
+        record = _tts_audio_files.get(token)
+        if not record:
+            abort(404)
+        path, expires_at = record
+        if expires_at <= now:
+            _tts_audio_files.pop(token, None)
+            abort(404)
+    if not os.path.isfile(path):
+        with _tts_audio_lock:
+            _tts_audio_files.pop(token, None)
+        abort(404)
+    return send_file(path, mimetype="audio/mpeg", conditional=True, max_age=0)
+
 
 def run_webserver():
     port = int(os.getenv("PORT", "10000"))
