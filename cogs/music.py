@@ -72,6 +72,16 @@ class Music(commands.Cog):
             await self._reply(ctx, "Entre em um canal de voz primeiro.")
             return
 
+        # Shadow mode Lavalink: consulta o node em paralelo, mas mantém o áudio real
+        # no player local atual. Se o node público falhar/atrasar, o usuário não é afetado.
+        self.router.schedule_lavalink_shadow_search(
+            ctx.guild.id,
+            query,
+            requester_id=ctx.author.id,
+            requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
+            reason="play_command",
+        )
+
         # Evita derrubar o comando quando o Discord aplica rate limit no endpoint de typing.
         # A extração pode demorar, mas o indicador de "digitando..." não é essencial.
         try:

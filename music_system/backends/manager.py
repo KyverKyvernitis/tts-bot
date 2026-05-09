@@ -27,11 +27,35 @@ class MusicBackendManager:
         self.lavalink_store = LavalinkConfigStore()
         self.lavalink = LavalinkBackend.from_config(self.lavalink_store.load())
         self.mode = str(getattr(config, "MUSIC_BACKEND", "local") or "local").strip().lower()
+        self._last_lavalink_shadow: dict[int, BackendSearchResult] = {}
 
     @property
     def active_backend_name(self) -> str:
         # Segurança deste patch: reprodução real continua sempre local.
         return "local"
+
+    def _guild_key(self, guild_id: int | None) -> int:
+        try:
+            return int(guild_id or 0)
+        except Exception:
+            return 0
+
+    def should_shadow_lavalink(self, guild_id: int | None = None) -> bool:
+        """Retorna se o Lavalink deve ser consultado em paralelo ao player local.
+
+        Mesmo quando o modo escolhido é ``lavalink`` ou ``auto``, este patch
+        ainda mantém o áudio real no backend local. Por isso esses modos também
+        são tratados como shadow para diagnóstico seguro até a ativação real.
+        """
+        try:
+            cfg = self.lavalink_store.load(guild_id=guild_id)
+        except Exception:
+            logger.debug("[music/lavalink-shadow] falha ao ler config", exc_info=True)
+            return False
+        return bool(cfg.enabled and cfg.configured and cfg.mode in {"shadow", "lavalink", "auto"})
+
+    def last_lavalink_shadow_result(self, guild_id: int | None = None) -> BackendSearchResult | None:
+        return getattr(self, "_last_lavalink_shadow", {}).get(self._guild_key(guild_id))
 
     async def close(self) -> None:
         await self.lavalink.close()
@@ -101,7 +125,51 @@ class MusicBackendManager:
     ) -> BackendSearchResult:
         lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=guild_id))
         try:
-            return await lavalink_backend.search(query, requester_id=requester_id, requester_name=requester_name)
+            result = await lavalink_backend.search(query, requester_id=requester_id, requester_name=requester_name)
+            result.extra.setdefault("origin", "manual")
+            return result
+        finally:
+            await lavalink_backend.close()
+
+    async def shadow_lavalink_search(
+        self,
+        query: str,
+        *,
+        requester_id: int = 0,
+        requester_name: str = "",
+        guild_id: int | None = None,
+        reason: str = "play",
+    ) -> BackendSearchResult | None:
+        if not self.should_shadow_lavalink(guild_id):
+            return None
+        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=guild_id))
+        try:
+            result = await lavalink_backend.search(query, requester_id=requester_id, requester_name=requester_name)
+            result.extra.setdefault("origin", "shadow")
+            result.extra.setdefault("reason", str(reason or "play"))
+            result.extra.setdefault("guild_id", self._guild_key(guild_id))
+            self._last_lavalink_shadow[self._guild_key(guild_id)] = result
+            if result.ok:
+                logger.info(
+                    "[music/lavalink-shadow] OK | guild=%s query=%r tracks=%s fonte=%s latencia=%sms",
+                    guild_id,
+                    query,
+                    result.tracks_found,
+                    result.first_source or "-",
+                    result.latency_ms,
+                )
+            else:
+                logger.info(
+                    "[music/lavalink-shadow] falhou | guild=%s query=%r detalhe=%s latencia=%sms",
+                    guild_id,
+                    query,
+                    result.message,
+                    result.latency_ms,
+                )
+            return result
+        except Exception:
+            logger.debug("[music/lavalink-shadow] busca paralela falhou", exc_info=True)
+            return None
         finally:
             await lavalink_backend.close()
 
@@ -116,4 +184,5 @@ class MusicBackendManager:
             "lavalink_configured": cfg.configured,
             "lavalink_config_source": cfg_summary.get("source", "padrão"),
             "lavalink_guild_override": bool(cfg_summary.get("guild_override")),
+            "lavalink_shadow_active": self.should_shadow_lavalink(guild_id),
         }

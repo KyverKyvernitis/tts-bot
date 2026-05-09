@@ -407,6 +407,7 @@ class MusicNodePanelView(discord.ui.LayoutView):
         self.guild_id = int(guild_id) if guild_id is not None else None
         self.message: discord.Message | None = None
         self.last_test_result: Any | None = None
+        self._shadow_test_result: Any | None = None
         self._statuses: dict[str, Any] = {}
         self._runtime: dict[str, Any] = {}
         self._summary: dict[str, Any] = {}
@@ -441,6 +442,8 @@ class MusicNodePanelView(discord.ui.LayoutView):
         self._statuses = await self.router.backend_status(self.guild_id)
         self._runtime = self.router.backend_runtime_summary(self.guild_id)
         self._summary = self.router.lavalink_config_summary(self.guild_id)
+        with contextlib.suppress(Exception):
+            self._shadow_test_result = self.router.last_lavalink_shadow_result(self.guild_id)
         self._rebuild_layout()
 
     def _node_lines(self, lavalink: Any) -> list[str]:
@@ -487,13 +490,16 @@ class MusicNodePanelView(discord.ui.LayoutView):
         return lines
 
     def _last_test_lines(self) -> list[str]:
-        result = self.last_test_result
+        result = self.last_test_result or self._shadow_test_result
         if result is None:
             return [
                 "## 🧪 Último teste",
                 "Nenhuma busca testada nesta sessão.",
-                "-# Use **Testar busca** para validar YouTube, SoundCloud ou link direto.",
+                "-# Use **Testar busca** ou toque uma música com modo Shadow para validar o node.",
             ]
+        extra_meta = getattr(result, "extra", {}) or {}
+        origin = str(extra_meta.get("origin") or "manual")
+        origin_label = "Shadow do `_play`" if origin == "shadow" else "Teste manual"
         status = "OK" if getattr(result, "ok", False) else "falhou"
         source = getattr(result, "first_source", "") or "—"
         title = getattr(result, "first_title", "") or "—"
@@ -503,6 +509,7 @@ class MusicNodePanelView(discord.ui.LayoutView):
         version = str(extra.get("version") or "")
         lines = [
             "## 🧪 Último teste",
+            f"**Origem:** `{origin_label}`",
             f"**Resultado:** `{'🟢' if getattr(result, 'ok', False) else '🔴'} {status}`",
             f"**Tracks:** `{int(getattr(result, 'tracks_found', 0) or 0)}` • **Fonte:** `{_escape(source, limit=40)}`",
             f"**Primeira:** {_escape(title, limit=110)}",
@@ -548,7 +555,7 @@ class MusicNodePanelView(discord.ui.LayoutView):
             "# 🔌 Lavalink Node Manager",
             f"**Modo:** {mode_text} — {_mode_hint(mode)}",
             f"**Backend real:** `{backend_real}` • **Node configurado:** `{'sim' if configured else 'não'}`",
-            "-# O player real segue local neste patch; esta central só configura e testa o node.",
+            "-# O player real segue local; em Shadow o `_play` também consulta o Lavalink em paralelo.",
         ]
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(header)),
@@ -565,6 +572,7 @@ class MusicNodePanelView(discord.ui.LayoutView):
             "## 🛡️ Segurança da migração",
             f"**Local:** {_escape(local_msg, limit=160)}",
             "**Fallback:** FFmpeg/yt-dlp continua intacto.",
+            f"**Shadow real:** `{'ativo' if runtime.get('lavalink_shadow_active') else 'inativo'}`",
             "**Senha:** nunca aparece no painel; fica salva só no DB separado `data/musicnode/musicnode.db`.",
         ]
         options = summary.get("options", {}) or {}

@@ -426,6 +426,7 @@ class AudioRouter:
         self._states: dict[int, MusicGuildState] = {}
         self._global_prefetch_active = 0
         self.backends = MusicBackendManager(bot, self.extractor)
+        self._lavalink_shadow_tasks: dict[int, asyncio.Task] = {}
 
     def get_state(self, guild_id: int) -> MusicGuildState:
         state = self._states.get(int(guild_id))
@@ -1493,6 +1494,10 @@ class AudioRouter:
         state.music_idle_disconnect_task = None
 
     async def close(self) -> None:
+        for task in list(getattr(self, "_lavalink_shadow_tasks", {}).values()):
+            if task is not None and not task.done():
+                task.cancel()
+        self._lavalink_shadow_tasks.clear()
         for guild_id in list(self._states):
             with contextlib.suppress(Exception):
                 await self.stop(guild_id, disconnect=False)
@@ -1550,6 +1555,49 @@ class AudioRouter:
 
     def backend_runtime_summary(self, guild_id: int | None = None) -> dict:
         return self.backends.compact_runtime_summary(guild_id=guild_id)
+
+    def last_lavalink_shadow_result(self, guild_id: int | None = None):
+        return self.backends.last_lavalink_shadow_result(guild_id=guild_id)
+
+    def should_run_lavalink_shadow(self, guild_id: int | None = None) -> bool:
+        return self.backends.should_shadow_lavalink(guild_id=guild_id)
+
+    def schedule_lavalink_shadow_search(
+        self,
+        guild_id: int,
+        query: str,
+        *,
+        requester_id: int = 0,
+        requester_name: str = "",
+        reason: str = "play",
+    ) -> bool:
+        query = str(query or "").strip()
+        if not query or not self.should_run_lavalink_shadow(guild_id):
+            return False
+        guild_key = int(guild_id)
+        current = self._lavalink_shadow_tasks.get(guild_key)
+        if current is not None and not current.done():
+            logger.debug("[music/lavalink-shadow] já existe teste ativo | guild=%s", guild_id)
+            return False
+
+        async def _runner() -> None:
+            try:
+                await self.backends.shadow_lavalink_search(
+                    query,
+                    requester_id=requester_id,
+                    requester_name=requester_name,
+                    guild_id=guild_key,
+                    reason=reason,
+                )
+            finally:
+                if self._lavalink_shadow_tasks.get(guild_key) is task:
+                    self._lavalink_shadow_tasks.pop(guild_key, None)
+
+        task = asyncio.create_task(_runner())
+        task.add_done_callback(_consume_expected_music_exception)
+        self._lavalink_shadow_tasks[guild_key] = task
+        logger.debug("[music/lavalink-shadow] teste paralelo agendado | guild=%s query=%r", guild_id, query)
+        return True
 
     async def enqueue(self, guild: discord.Guild, voice_channel: discord.abc.Connectable, text_channel: discord.abc.Messageable, tracks: list[MusicTrack]) -> tuple[int, int]:
         if not tracks:
