@@ -588,6 +588,149 @@ class LavalinkBackend:
         value = getattr(node, "status", None) or getattr(node, "state", None)
         return str(getattr(value, "name", value) or "desconhecido")
 
+    def _player_node(self, player: Any) -> Any | None:
+        for attr in ("node", "_node"):
+            with contextlib.suppress(Exception):
+                node = getattr(player, attr, None)
+                if node is not None:
+                    return node
+        return None
+
+    async def _player_session_id(self, player: Any) -> str:
+        """Retorna a sessionId REST do node Wavelink atual."""
+        deadline = asyncio.get_running_loop().time() + max(3.0, min(12.0, float(self.cfg.timeout_seconds or 8.0)))
+        while True:
+            node = self._player_node(player)
+            for attr in ("session_id", "sessionId", "_session_id", "_sessionId"):
+                with contextlib.suppress(Exception):
+                    value = getattr(node, attr, None) if node is not None else None
+                    if callable(value):
+                        value = value()
+                    if value:
+                        return str(value)
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.20)
+        raise RuntimeError("Wavelink conectou ao node, mas não expôs session_id do Lavalink.")
+
+    async def _rest_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: Any | None = None,
+        ok_statuses: set[int] | None = None,
+    ) -> tuple[Any, int]:
+        if not self.cfg.configured:
+            raise RuntimeError("Lavalink não configurado: defina host, porta e senha no painel `_musicnode`.")
+        ok_statuses = ok_statuses or {200}
+        session = await self._get_session()
+        url = f"{self.cfg.base_url}{path}"
+        async with session.request(str(method or "GET").upper(), url, json=payload) as resp:
+            status = int(getattr(resp, "status", 0) or 0)
+            ctype = str(resp.headers.get("Content-Type", "") or "")
+            body = await resp.text()
+            if status in ok_statuses:
+                return _decode_lavalink_response(body, ctype), status
+            raise RuntimeError(_format_http_attempt(path, status, body))
+
+    async def _get_rest_player(self, player: Any, guild: Any) -> dict[str, Any] | None:
+        session_id = await self._player_session_id(player)
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        if guild_id <= 0:
+            raise RuntimeError("Guild inválida para consultar player Lavalink.")
+        try:
+            payload, _ = await self._rest_json("GET", f"/v4/sessions/{session_id}/players/{guild_id}")
+        except RuntimeError as exc:
+            if "HTTP 404" in str(exc):
+                return None
+            raise
+        return payload if isinstance(payload, dict) else None
+
+    def _lavalink_state_connected(self, payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        state = payload.get("state") or {}
+        if isinstance(state, dict):
+            return bool(state.get("connected"))
+        return False
+
+    async def _patch_voice_channel_id(self, player: Any, guild: Any, channel: Any, payload: dict[str, Any]) -> bool:
+        """Reenvia o voice update incluindo channelId para Lavalink 4.x novo.
+
+        Wavelink 3.5 pode enviar apenas token/endpoint/sessionId. Em builds novas
+        do Lavalink, channelId também é necessário para completar a conexão de voz;
+        sem ele o REST mostra track carregada, paused=false, mas state.connected=false
+        e a música nunca fica verde no Discord.
+        """
+        voice = payload.get("voice") if isinstance(payload, dict) else None
+        if not isinstance(voice, dict):
+            return False
+        token = str(voice.get("token") or "").strip()
+        endpoint = str(voice.get("endpoint") or "").strip()
+        session_id_voice = str(voice.get("sessionId") or voice.get("session_id") or "").strip()
+        channel_id = str(getattr(channel, "id", "") or "").strip()
+        if not token or not endpoint or not session_id_voice or not channel_id:
+            return False
+        desired = dict(voice)
+        desired["token"] = token
+        desired["endpoint"] = endpoint
+        desired["sessionId"] = session_id_voice
+        desired["channelId"] = channel_id
+        if str(voice.get("channelId") or "") == channel_id:
+            return False
+        session_id = await self._player_session_id(player)
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        await self._rest_json(
+            "PATCH",
+            f"/v4/sessions/{session_id}/players/{guild_id}?noReplace=true",
+            payload={"voice": desired},
+        )
+        logger.info(
+            "[music/lavalink] voice update reenviado com channelId | guild=%s channel=%s",
+            guild_id,
+            channel_id,
+        )
+        return True
+
+    async def _wait_for_rest_voice_connected(
+        self,
+        player: Any,
+        guild: Any,
+        channel: Any,
+        *,
+        timeout: float = 10.0,
+        allow_channel_patch: bool = True,
+    ) -> dict[str, Any] | None:
+        deadline = asyncio.get_running_loop().time() + max(2.0, float(timeout or 10.0))
+        last_payload: dict[str, Any] | None = None
+        patched = False
+        while True:
+            payload = await self._get_rest_player(player, guild)
+            if payload is not None:
+                last_payload = payload
+                if self._lavalink_state_connected(payload):
+                    return payload
+                if allow_channel_patch and not patched:
+                    try:
+                        patched = await self._patch_voice_channel_id(player, guild, channel, payload)
+                        if patched:
+                            await asyncio.sleep(0.75)
+                            continue
+                    except Exception:
+                        logger.debug("[music/lavalink] falha ao reenviar voice update com channelId", exc_info=True)
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.35)
+
+        state = (last_payload or {}).get("state") if isinstance(last_payload, dict) else None
+        voice = (last_payload or {}).get("voice") if isinstance(last_payload, dict) else None
+        voice_keys = sorted([str(k) for k in voice.keys()]) if isinstance(voice, dict) else []
+        raise RuntimeError(
+            "Lavalink recebeu a música, mas não conectou à voz do Discord "
+            f"(state={state!r}, voice_keys={voice_keys})."
+        )
+
     async def ensure_wavelink_pool(self, bot, *, force_reconnect: bool = False):
         """Garante que o Pool do Wavelink está conectado ao node configurado.
 
@@ -826,9 +969,20 @@ class LavalinkBackend:
         with contextlib.suppress(Exception):
             await player.set_volume(target_volume)
         try:
-            await player.play(playable, add_history=False)
-        except TypeError:
-            await player.play(playable)
+            await self._play_with_compat(player, playable, volume=target_volume, add_history=False)
+            # Não aceite falso positivo: Lavalink pode receber track/voice e
+            # mesmo assim ficar state.connected=false. Nesse caso o painel dizia
+            # "tocando", mas nenhum áudio saía no Discord. Aguarde a conexão REST
+            # real e reenvie channelId quando o Wavelink antigo não enviar.
+            await self._wait_for_rest_voice_connected(player, guild, channel, timeout=12.0)
+        except Exception:
+            with contextlib.suppress(Exception):
+                stop = getattr(player, "stop", None)
+                if callable(stop):
+                    result = stop()
+                    if asyncio.iscoroutine(result):
+                        await result
+            raise
         return player, playable, meta
 
 
@@ -1035,6 +1189,12 @@ class LavalinkBackend:
         if player is None or not self._is_wavelink_player(player):
             raise RuntimeError("Player Lavalink não está conectado para tocar TTS.")
 
+        await self._wait_for_rest_voice_connected(
+            player,
+            guild,
+            getattr(player, "channel", None) or getattr(guild, "voice_client", None),
+            timeout=6.0,
+        )
         previous_playable = self._player_current_track(player)
         previous_position = self._player_position_ms(player)
         was_paused = self._player_bool(player, "paused", "is_paused")
