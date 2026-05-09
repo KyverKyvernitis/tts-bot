@@ -1726,7 +1726,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         return
                 except Exception:
                     pass
-            print(f"[tts_voice] saindo da call | sozinho ou só com bots | guild={guild.id} channel={getattr(self._voice_client_channel(vc), "id", None)}")
+            print(f"[tts_voice] saindo da call | sozinho ou só com bots | guild={guild.id} channel={getattr(self._voice_client_channel(vc), 'id', None)}")
             await self._disconnect_and_clear(guild)
 
     async def _ensure_connected(
