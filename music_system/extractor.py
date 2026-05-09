@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -26,6 +27,10 @@ from .providers import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Sentinela interna: remove a opção format e deixa o yt-dlp escolher sozinho.
+# Usada apenas como último recurso quando seletores explícitos de áudio falham.
+_AUTO_FORMAT_SENTINEL = "__yt_dlp_auto_format__"
 
 _YOUTUBE_CLIENT_SETS: tuple[tuple[str, ...], ...] = (
     ("android", "web"),
@@ -419,22 +424,22 @@ class MusicExtractor:
     def _format_for_quality(self, audio_max_abr: int | None = None) -> str:
         """Formato yt-dlp adaptado à carga atual do player.
 
-        `audio_max_abr` limita bitrate quando há vários servidores tocando.
-        Com um único servidor, o router passa None/0 para usar o melhor áudio-only
-        disponível, sem teto de abr.
+        Em modo alta qualidade, o seletor precisa ser amplo. Filtros rígidos
+        como ``[vcodec=none]`` ou ``[acodec=opus]`` podem fazer o YouTube
+        responder "Requested format is not available" mesmo havendo áudio
+        tocável. Por isso o modo principal prefere o melhor áudio e deixa
+        fallbacks seguros cuidarem dos casos estranhos.
         """
         try:
             max_abr = int(audio_max_abr or 0)
         except Exception:
             max_abr = 0
         if max_abr <= 0:
-            return MUSIC_YTDLP_FORMAT
+            return MUSIC_YTDLP_FORMAT or "bestaudio/best"
         return (
-            f"bestaudio[vcodec=none][abr<={max_abr}][acodec=opus][asr=48000]/"
-            f"bestaudio[vcodec=none][abr<={max_abr}][acodec=opus]/"
-            f"bestaudio[vcodec=none][abr<={max_abr}][ext=m4a]/"
-            f"bestaudio[vcodec=none][abr<={max_abr}]/"
-            "bestaudio[vcodec=none][acodec=opus][asr=48000]/bestaudio[vcodec=none][acodec=opus]/bestaudio[vcodec=none][ext=m4a]/bestaudio[vcodec=none]/bestaudio"
+            f"bestaudio[abr<={max_abr}]/"
+            f"ba[abr<={max_abr}]/"
+            "bestaudio/best"
         )
 
     def _safe_format_fallbacks(self, audio_max_abr: int | None = None) -> list[tuple[str, int | None]]:
@@ -451,15 +456,19 @@ class MusicExtractor:
             max_abr = 0
         requested_cap = max_abr if max_abr > 0 else None
         candidates: list[tuple[str, int | None]] = [(self._format_for_quality(audio_max_abr), requested_cap)]
-        # Fallback seguro: aceita qualquer áudio-only. Não usa bestvideo+bestaudio.
-        candidates.append(("bestaudio[vcodec=none]/bestaudio/ba", None))
+        # Fallbacks largos: primeiro mantém áudio preferencial, depois abre mão de
+        # qualquer filtro. Isso corrige vídeos em que o YouTube/yt-dlp recusa o
+        # seletor anterior com "Requested format is not available".
+        candidates.append(("bestaudio/best", None))
+        candidates.append(("ba/b", None))
         if max_abr > 0:
-            # Em modo econômico, se o teto falhar, tenta tocar com o melhor áudio-only
-            # em vez de quebrar o player. O painel vai mostrar o bitrate real depois.
-            candidates.append((MUSIC_YTDLP_FORMAT, None))
-        # Último recurso: deixa o yt-dlp escolher áudio/"best". O FFmpeg ignora vídeo
-        # com -vn, mas este caminho só é usado se todos os áudio-only falharem.
-        candidates.append(("ba/bestaudio/best", None))
+            # Em modo econômico, se o teto falhar, tenta tocar com o seletor de alta
+            # qualidade configurado em vez de quebrar o player.
+            candidates.append((MUSIC_YTDLP_FORMAT or "bestaudio/best", None))
+        # Últimos recursos: aceitar o best genérico e, se até isso falhar, remover
+        # totalmente a opção format para deixar o yt-dlp escolher o que conseguir.
+        candidates.append(("best/bestaudio", None))
+        candidates.append((_AUTO_FORMAT_SENTINEL, None))
         seen: set[str] = set()
         unique: list[tuple[str, int | None]] = []
         for fmt, cap in candidates:
@@ -562,13 +571,15 @@ class MusicExtractor:
             "playlistend": self.max_playlist_items if playlist else None,
             "lazy_playlist": MUSIC_PLAYLIST_LAZY_LOAD and bool(playlist),
             "concurrent_fragment_downloads": 1,
-            "format": str(format_override or self._format_for_quality(audio_max_abr)),
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
                 "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
             },
         }
+        format_value = str(format_override or self._format_for_quality(audio_max_abr) or "").strip()
+        if format_value and format_value != _AUTO_FORMAT_SENTINEL:
+            opts["format"] = format_value
         if opts["playlistend"] is None:
             opts.pop("playlistend", None)
         try:
@@ -1150,6 +1161,8 @@ class MusicExtractor:
             return "Esse conteúdo precisa de login/cookies para ser lido."
         if "copyright" in lower or "blocked" in lower or "unavailable" in lower:
             return "Esse conteúdo está indisponível, bloqueado ou removido para o bot."
+        if "requested format is not available" in lower or "no video formats found" in lower:
+            return "O formato de áudio solicitado não estava disponível; tentei os fallbacks seguros."
         if "timed out" in lower or "timeout" in lower:
             return "A plataforma demorou demais para responder."
         return f"Não consegui extrair áudio desse link/pesquisa: {text[:180]}"

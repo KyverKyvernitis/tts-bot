@@ -194,9 +194,9 @@ MUSIC_YTDLP_FORMAT = (
         "MUSIC_YTDLP_FORMAT",
         # Alta qualidade real: melhor áudio-only disponível, sem teto de abr.
         # O modo econômico ainda aplica teto dinamicamente no extractor.
-        "bestaudio[vcodec=none]/bestaudio/best",
+        "bestaudio/best",
     )
-    or "bestaudio[vcodec=none]/bestaudio/best"
+    or "bestaudio/best"
 ).strip()
 YOUTUBE_API_KEY = (os.getenv("YOUTUBE_API_KEY", os.getenv("GOOGLE_YOUTUBE_API_KEY", "")) or "").strip()
 SPOTIFY_CLIENT_ID = (os.getenv("SPOTIFY_CLIENT_ID", "") or "").strip()
