@@ -254,6 +254,18 @@ MUSIC_MAX_DURATION_MISMATCH_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_MAX
 MUSIC_MAX_DURATION_MISMATCH_RATIO = max(0.0, _parse_float(os.getenv("MUSIC_MAX_DURATION_MISMATCH_RATIO", "0.25"), 0.25))
 MUSIC_REJECT_WEAK_LINK_MATCHES = _parse_bool(os.getenv("MUSIC_REJECT_WEAK_LINK_MATCHES", "true"), True)
 
+# Lavalink — suporte invisível/diagnóstico para migração futura do player.
+# Patch atual NÃO troca o player real: MUSIC_BACKEND permanece local por padrão.
+MUSIC_BACKEND = (os.getenv("MUSIC_BACKEND", "local") or "local").strip().lower()
+LAVALINK_ENABLED = _parse_bool(os.getenv("LAVALINK_ENABLED", "false"), False)
+LAVALINK_MODE = (os.getenv("LAVALINK_MODE", "off") or "off").strip().lower()
+LAVALINK_HOST = (os.getenv("LAVALINK_HOST", "") or "").strip()
+LAVALINK_PORT = _parse_int(os.getenv("LAVALINK_PORT", "2333"), 2333)
+LAVALINK_PASSWORD = (os.getenv("LAVALINK_PASSWORD", "") or "").strip()
+LAVALINK_SECURE = _parse_bool(os.getenv("LAVALINK_SECURE", "false"), False)
+LAVALINK_NODE_NAME = (os.getenv("LAVALINK_NODE_NAME", "main") or "main").strip() or "main"
+LAVALINK_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("LAVALINK_TIMEOUT_SECONDS", "8.0"), 8.0))
+
 # -----------------------------------------------------------------------------
 # DevAI — analisa logs, pede correção para providers gratuitos/fallbacks e
 # oferece patch .zip pelo webhook. Nunca aplica patch automaticamente.

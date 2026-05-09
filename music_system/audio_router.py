@@ -19,6 +19,7 @@ from .api_providers import compact_key
 from .extractor import MusicExtractor
 from .errors import MusicExtractionError, MusicPlaybackError
 from .models import LoopMode, MusicTrack
+from .backends import MusicBackendManager
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +425,7 @@ class AudioRouter:
         )
         self._states: dict[int, MusicGuildState] = {}
         self._global_prefetch_active = 0
+        self.backends = MusicBackendManager(bot, self.extractor)
 
     def get_state(self, guild_id: int) -> MusicGuildState:
         state = self._states.get(int(guild_id))
@@ -1494,6 +1496,17 @@ class AudioRouter:
         for guild_id in list(self._states):
             with contextlib.suppress(Exception):
                 await self.stop(guild_id, disconnect=False)
+        with contextlib.suppress(Exception):
+            await self.backends.close()
+
+    async def backend_status(self):
+        return await self.backends.status()
+
+    async def test_lavalink_backend(self, query: str, *, requester_id: int = 0, requester_name: str = ""):
+        return await self.backends.test_lavalink(query, requester_id=requester_id, requester_name=requester_name)
+
+    def backend_runtime_summary(self) -> dict:
+        return self.backends.compact_runtime_summary()
 
     async def enqueue(self, guild: discord.Guild, voice_channel: discord.abc.Connectable, text_channel: discord.abc.Messageable, tracks: list[MusicTrack]) -> tuple[int, int]:
         if not tracks:

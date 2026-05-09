@@ -293,6 +293,116 @@ class Music(commands.Cog):
         await self._reply(ctx, "`🧹` Queue limpo.")
 
 
+
+    async def _can_use_musicnode(self, ctx: commands.Context) -> bool:
+        with contextlib.suppress(Exception):
+            if await self.bot.is_owner(ctx.author):
+                return True
+        return self.router.is_music_staff(ctx.author)
+
+    def _format_backend_status(self, health, *, runtime: dict | None = None) -> str:
+        icon = "🟢" if getattr(health, "available", False) else ("🟡" if getattr(health, "configured", False) else "🔴")
+        enabled = "sim" if getattr(health, "enabled", False) else "não"
+        configured = "sim" if getattr(health, "configured", False) else "não"
+        mode = getattr(health, "mode", "off") or "off"
+        lines = [
+            f"{icon} **{getattr(health, 'name', 'backend')}**",
+            f"• ativado: `{enabled}` • configurado: `{configured}` • modo: `{mode}`",
+        ]
+        version = getattr(health, "version", "") or ""
+        latency = getattr(health, "latency_ms", None)
+        if version:
+            lines.append(f"• versão: `{discord.utils.escape_markdown(str(version))}`")
+        if latency is not None:
+            lines.append(f"• latência: `{latency} ms`")
+        players = getattr(health, "players", None)
+        playing = getattr(health, "playing_players", None)
+        if players is not None:
+            lines.append(f"• players: `{players}` • tocando: `{playing if playing is not None else '?'}`")
+        extra = getattr(health, "extra", {}) or {}
+        if extra.get("host"):
+            lines.append(f"• host: `{discord.utils.escape_markdown(str(extra.get('host'))[:80])}`")
+        if "wavelink_installed" in extra:
+            lines.append(f"• wavelink instalado: `{'sim' if extra.get('wavelink_installed') else 'não'}`")
+        message = getattr(health, "message", "") or ""
+        if message:
+            lines.append(f"• detalhe: {discord.utils.escape_markdown(str(message)[:220])}")
+        return "\n".join(lines)
+
+    def _format_lavalink_test(self, result) -> str:
+        icon = "🟢" if getattr(result, "ok", False) else "🔴"
+        lines = [
+            f"{icon} **Teste Lavalink**",
+            f"• query: `{discord.utils.escape_markdown(str(getattr(result, 'query', '') or '')[:160])}`",
+            f"• resultado: `{'OK' if getattr(result, 'ok', False) else 'falhou'}`",
+        ]
+        latency = getattr(result, "latency_ms", None)
+        if latency is not None:
+            lines.append(f"• latência: `{latency} ms`")
+        load_type = getattr(result, "load_type", "") or ""
+        if load_type:
+            lines.append(f"• loadType: `{discord.utils.escape_markdown(str(load_type))}`")
+        lines.append(f"• tracks encontradas: `{int(getattr(result, 'tracks_found', 0) or 0)}`")
+        playlist = getattr(result, "playlist_name", "") or ""
+        if playlist:
+            lines.append(f"• playlist: `{discord.utils.escape_markdown(str(playlist)[:120])}`")
+        title = getattr(result, "first_title", "") or ""
+        if title:
+            author = getattr(result, "first_author", "") or ""
+            source = getattr(result, "first_source", "") or ""
+            suffix = []
+            if author:
+                suffix.append(str(author)[:80])
+            if source:
+                suffix.append(str(source)[:40])
+            tail = f" • {' • '.join(discord.utils.escape_markdown(x) for x in suffix)}" if suffix else ""
+            lines.append(f"• primeira: **{discord.utils.escape_markdown(str(title)[:120])}**{tail}")
+        message = getattr(result, "message", "") or ""
+        if message:
+            lines.append(f"• detalhe: {discord.utils.escape_markdown(str(message)[:240])}")
+        return "\n".join(lines)
+
+    @commands.command(name="musicnode", aliases=["lavalink", "llnode", "node"])
+    @commands.guild_only()
+    async def musicnode(self, ctx: commands.Context, action: str = "status", *, query: str = ""):
+        """Diagnóstico seguro do suporte Lavalink sem alterar o player real."""
+        if not await self._can_use_musicnode(ctx):
+            await self._reply(ctx, "Apenas staff pode consultar o diagnóstico do node de música.")
+            return
+
+        action_norm = (action or "status").strip().lower()
+        if action_norm in {"status", "state", "info", "s"}:
+            statuses = await self.router.backend_status()
+            runtime = self.router.backend_runtime_summary()
+            lines = [
+                "`🧪` **Diagnóstico do backend de música**",
+                f"Backend configurado: `{runtime.get('configured_backend', 'local')}`",
+                f"Backend real deste patch: `{runtime.get('active_backend', 'local')}`",
+                "",
+                self._format_backend_status(statuses.get("local"), runtime=runtime),
+                "",
+                self._format_backend_status(statuses.get("lavalink"), runtime=runtime),
+                "",
+                "Obs.: neste patch o Lavalink é só diagnóstico/estrutura; o player real continua local.",
+            ]
+            await self._reply(ctx, "\n".join(lines))
+            return
+
+        if action_norm in {"test", "teste", "load", "buscar", "search"}:
+            query = (query or "").strip()
+            if not query:
+                await self._reply(ctx, "Use `_musicnode test <busca ou link>`.")
+                return
+            result = await self.router.test_lavalink_backend(
+                query,
+                requester_id=ctx.author.id,
+                requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
+            )
+            await self._reply(ctx, self._format_lavalink_test(result))
+            return
+
+        await self._reply(ctx, "Use `_musicnode status` ou `_musicnode test <busca/link>`.")
+
     @commands.command(name="voicestatus", aliases=["voice_status", "vstatus", "statusvoz", "canalstatus", "setvoicestatus"])
     @commands.guild_only()
     async def voicestatus(self, ctx: commands.Context, action: str = "", *, value: str = ""):
