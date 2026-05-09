@@ -935,14 +935,28 @@ class AudioRouter:
         return f"{minutes}:{seconds:02d}"
 
     def _bot_can_set_voice_status(self, guild: discord.Guild, channel) -> bool:
+        """Best-effort permission check for Discord's voice-status endpoint.
+
+        Older discord.py builds may not expose the newer
+        ``set_voice_channel_status`` permission flag yet. In that case we do
+        not block the feature here; the raw REST endpoint will be the source of
+        truth and will return Forbidden if the bot really lacks permission.
+        """
         member = getattr(guild, "me", None)
         if member is None or channel is None:
             return False
         try:
             perms = channel.permissions_for(member)
-            return bool(getattr(perms, "set_voice_channel_status", False) or getattr(perms, "manage_channels", False))
+            if bool(getattr(perms, "manage_channels", False)):
+                return True
+            voice_status_perm = getattr(perms, "set_voice_channel_status", None)
+            if voice_status_perm is None:
+                return True
+            return bool(voice_status_perm)
         except Exception:
-            return False
+            # If the library cannot evaluate the new permission, still try the
+            # endpoint and let Discord answer with 403 when needed.
+            return True
 
     async def _fetch_voice_channel_status(self, channel) -> tuple[bool, str]:
         if channel is None:
@@ -979,23 +993,44 @@ class AudioRouter:
             http = getattr(self.bot, "http", None)
             request = getattr(http, "request", None)
             if not callable(request):
+                logger.warning("[music] não consegui alterar status do canal: cliente HTTP indisponível")
                 return False
             channel_id = int(getattr(channel, "id", 0) or 0)
             if channel_id <= 0:
+                logger.warning("[music] não consegui alterar status do canal: canal inválido")
                 return False
-            if status:
-                await request(Route("PUT", "/channels/{channel_id}/voice-status", channel_id=channel_id), json={"status": self._trim_voice_status(status)}, reason=reason or None)
+            payload_status = self._trim_voice_status(status)
+            if payload_status:
+                await request(
+                    Route("PUT", "/channels/{channel_id}/voice-status", channel_id=channel_id),
+                    json={"status": payload_status},
+                    reason=reason or None,
+                )
             else:
+                # O endpoint de status de voz usa PUT. Enviar string vazia é
+                # aceito pelo cliente oficial para limpar o status; caso o
+                # Discord mude o contrato, tentamos null como fallback.
                 try:
-                    await request(Route("DELETE", "/channels/{channel_id}/voice-status", channel_id=channel_id), reason=reason or None)
+                    await request(
+                        Route("PUT", "/channels/{channel_id}/voice-status", channel_id=channel_id),
+                        json={"status": ""},
+                        reason=reason or None,
+                    )
                 except discord.HTTPException:
-                    await request(Route("PUT", "/channels/{channel_id}/voice-status", channel_id=channel_id), json={"status": None}, reason=reason or None)
+                    await request(
+                        Route("PUT", "/channels/{channel_id}/voice-status", channel_id=channel_id),
+                        json={"status": None},
+                        reason=reason or None,
+                    )
             return True
-        except (discord.Forbidden, discord.HTTPException):
-            logger.debug("[music] não consegui alterar status do canal de voz", exc_info=True)
+        except discord.Forbidden:
+            logger.warning("[music] não consegui alterar status do canal: permissão ausente")
+            return False
+        except discord.HTTPException as exc:
+            logger.warning("[music] não consegui alterar status do canal: HTTP %s", getattr(exc, "status", "?"))
             return False
         except Exception:
-            logger.debug("[music] falha inesperada ao alterar status do canal de voz", exc_info=True)
+            logger.warning("[music] falha inesperada ao alterar status do canal", exc_info=True)
             return False
 
     async def _apply_voice_status_for_music(self, guild: discord.Guild, channel, state: MusicGuildState, track: MusicTrack, *, force: bool = False) -> None:
@@ -1005,6 +1040,7 @@ class AudioRouter:
         if not bool(settings.get("enabled", True)):
             return
         if not self._bot_can_set_voice_status(guild, channel):
+            logger.warning("[music] não consegui alterar status do canal: permissão ausente")
             return
         channel_id = int(getattr(channel, "id", 0) or 0)
         if channel_id <= 0:
@@ -1014,10 +1050,12 @@ class AudioRouter:
 
         known, current_status = await self._fetch_voice_channel_status(channel)
         if not known:
-            # Não altera se não conseguir salvar/restaurar o estado anterior com segurança.
-            return
+            # O status atual do canal nem sempre vem no objeto/REST comum do
+            # discord.py. Ainda assim aplicamos o status da música; só marcamos
+            # que não havia status original conhecido para não inventar restauração.
+            current_status = ""
         if state.voice_status_channel_id == channel_id and state.voice_status_last_bot:
-            if current_status != state.voice_status_last_bot:
+            if known and current_status != state.voice_status_last_bot:
                 # Staff mudou manualmente; não briga com a alteração.
                 await self._clear_voice_status_record(guild.id)
                 state.voice_status_channel_id = None
@@ -1046,8 +1084,15 @@ class AudioRouter:
             return
         if not desired:
             return
+        logger.info("[music] aplicando status do canal | guild=%s channel=%s", guild.id, channel_id)
         if not await self._set_voice_channel_status(channel, desired, reason="Atualizar status do canal enquanto a música toca"):
+            await self._clear_voice_status_record(guild.id)
+            state.voice_status_channel_id = None
+            state.voice_status_had_original = False
+            state.voice_status_original = ""
+            state.voice_status_last_bot = ""
             return
+        logger.info("[music] status do canal aplicado | guild=%s channel=%s", guild.id, channel_id)
         state.voice_status_last_bot = desired
         state.voice_status_last_update_at = time.monotonic()
         await self._save_voice_status_record(
@@ -1143,8 +1188,10 @@ class AudioRouter:
                 await self._clear_voice_status_record(guild.id)
             else:
                 if not self._bot_can_set_voice_status(guild, channel):
+                    logger.warning("[music] não consegui restaurar status do canal: permissão ausente")
                     return
                 target_status = original_status if had_original else str(self._voice_status_settings_from_doc(guild.id).get("idle") or "")
+                logger.info("[music] restaurando status do canal | guild=%s channel=%s reason=%s", guild.id, channel_id, reason)
                 ok = await self._set_voice_channel_status(channel, target_status, reason=f"Restaurar status do canal após música ({reason})")
                 if not ok:
                     return

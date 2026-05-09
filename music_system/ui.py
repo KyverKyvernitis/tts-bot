@@ -1021,10 +1021,18 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, row=0)
     async def queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         state = self.router.get_state(self.guild_id)
-        await interaction.response.send_message(
-            embed=build_queue_embed(state, 0),
-            view=QueueView(self.router, self.guild_id, 0, owner_id=getattr(interaction.user, "id", None)),
-            ephemeral=True,
-        )
+        try:
+            await interaction.followup.send(
+                embed=build_queue_embed(state, 0),
+                view=QueueView(self.router, self.guild_id, 0, owner_id=getattr(interaction.user, "id", None)),
+                ephemeral=True,
+            )
+        except discord.NotFound:
+            return
 
