@@ -399,6 +399,9 @@ class MusicGuildState:
     voice_status_last_bot: str = ""
     voice_status_update_task: Optional[asyncio.Task] = None
     voice_status_last_update_at: float = 0.0
+    voice_status_last_track_key: str = ""
+    voice_status_force_task: Optional[asyncio.Task] = None
+    voice_status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def queue_size(self) -> int:
         return self.queue.qsize()
@@ -739,11 +742,13 @@ class AudioRouter:
             state.voice_status_had_original = bool(record.get("had_original_status"))
             state.voice_status_original = str(record.get("original_status") or "")
             state.voice_status_last_bot = str(record.get("last_bot_status") or "")
+            state.voice_status_last_track_key = str(record.get("last_track_key") or "")
         except Exception:
             state.voice_status_channel_id = None
             state.voice_status_had_original = False
             state.voice_status_original = ""
             state.voice_status_last_bot = ""
+            state.voice_status_last_track_key = ""
             return None
         return record
 
@@ -859,6 +864,27 @@ class AudioRouter:
     def _source_emoji_for_track(self, track: MusicTrack | None) -> str:
         source_key = self._source_key_for_track(track)
         return MUSIC_SOURCE_EMOJIS.get(source_key) or MUSIC_SOURCE_EMOJI_FALLBACK
+
+    def _voice_status_track_key(self, track: MusicTrack | None) -> str:
+        if track is None:
+            return ""
+        parts: list[str] = []
+        for attr in ("webpage_url", "original_url", "display_url", "title", "uploader", "duration"):
+            with contextlib.suppress(Exception):
+                value = str(getattr(track, attr, "") or "").strip()
+                if value:
+                    parts.append(value)
+        if not parts:
+            return str(id(track))
+        return "|".join(parts)
+
+    def _voice_status_track_is_current(self, state: MusicGuildState, track: MusicTrack | None, track_key: str) -> bool:
+        current = state.current
+        if current is None or track is None:
+            return False
+        if current is track:
+            return True
+        return bool(track_key and self._voice_status_track_key(current) == track_key)
 
     def _quality_label_for_cap(self, cap: int | None) -> str:
         if cap is None:
@@ -1065,72 +1091,136 @@ class AudioRouter:
         channel_id = int(getattr(channel, "id", 0) or 0)
         if channel_id <= 0:
             return
-        if state.voice_status_channel_id and int(state.voice_status_channel_id) != channel_id:
-            await self._restore_voice_status_for_state(guild, state, reason="channel_change")
 
-        known, current_status = await self._fetch_voice_channel_status(channel)
-        if not known:
-            # O status atual do canal nem sempre vem no objeto/REST comum do
-            # discord.py. Ainda assim aplicamos o status da música; só marcamos
-            # que não havia status original conhecido para não inventar restauração.
-            current_status = ""
-        if state.voice_status_channel_id == channel_id and state.voice_status_last_bot:
-            if known and current_status != state.voice_status_last_bot and not force:
-                # Staff mudou manualmente; não briga com a alteração em
-                # atualizações periódicas. Trocas reais de faixa usam
-                # force=True porque o status lido pelo discord.py/REST pode vir
-                # vazio/desatualizado e isso não pode impedir a nova música de
-                # sincronizar o status do canal.
+        track_key = self._voice_status_track_key(track)
+        # Troca de faixa é uma atualização forçada e não deve ser bloqueada
+        # pela checagem anti-staff. Porém, se a task antiga terminar depois de
+        # a música já ter mudado, ela não pode sobrescrever o status novo.
+        if force and not self._voice_status_track_is_current(state, track, track_key):
+            return
+
+        async with state.voice_status_lock:
+            if force and not self._voice_status_track_is_current(state, track, track_key):
+                return
+            if state.voice_status_channel_id and int(state.voice_status_channel_id) != channel_id:
+                await self._restore_voice_status_for_state(guild, state, reason="channel_change")
+
+            known, current_status = await self._fetch_voice_channel_status(channel)
+            if not known:
+                # O status atual do canal nem sempre vem no objeto/REST comum do
+                # discord.py. Ainda assim aplicamos o status da música; só marcamos
+                # que não havia status original conhecido para não inventar restauração.
+                current_status = ""
+            if state.voice_status_channel_id == channel_id and state.voice_status_last_bot:
+                if known and current_status != state.voice_status_last_bot and not force:
+                    # Staff mudou manualmente; não briga com a alteração em
+                    # atualizações periódicas. Trocas reais de faixa usam force=True.
+                    await self._clear_voice_status_record(guild.id)
+                    state.voice_status_channel_id = None
+                    state.voice_status_had_original = False
+                    state.voice_status_original = ""
+                    state.voice_status_last_bot = ""
+                    state.voice_status_last_track_key = ""
+                    return
+            else:
+                record = {
+                    "channel_id": channel_id,
+                    "had_original_status": bool(current_status),
+                    "original_status": current_status,
+                    "last_bot_status": "",
+                    "last_track_key": "",
+                    "started_at": time.time(),
+                    "reason": "music_player",
+                }
+                if not await self._save_voice_status_record(guild.id, record):
+                    return
+                state.voice_status_channel_id = channel_id
+                state.voice_status_had_original = bool(current_status)
+                state.voice_status_original = current_status
+                state.voice_status_last_bot = ""
+                state.voice_status_last_track_key = ""
+
+            desired = self.render_voice_status(guild.id, track, template=settings.get("template"))
+            if not force and desired == state.voice_status_last_bot:
+                return
+            if not desired:
+                return
+            if force and not self._voice_status_track_is_current(state, track, track_key):
+                return
+            logger.info("[music] aplicando status do canal | guild=%s channel=%s track=%r", guild.id, channel_id, getattr(track, "title", ""))
+            if not await self._set_voice_channel_status(channel, desired, reason="Atualizar status do canal enquanto a música toca"):
                 await self._clear_voice_status_record(guild.id)
                 state.voice_status_channel_id = None
                 state.voice_status_had_original = False
                 state.voice_status_original = ""
                 state.voice_status_last_bot = ""
+                state.voice_status_last_track_key = ""
                 return
-        else:
-            record = {
-                "channel_id": channel_id,
-                "had_original_status": bool(current_status),
-                "original_status": current_status,
-                "last_bot_status": "",
-                "started_at": time.time(),
-                "reason": "music_player",
-            }
-            if not await self._save_voice_status_record(guild.id, record):
-                return
-            state.voice_status_channel_id = channel_id
-            state.voice_status_had_original = bool(current_status)
-            state.voice_status_original = current_status
-            state.voice_status_last_bot = ""
+            logger.info("[music] status do canal aplicado | guild=%s channel=%s", guild.id, channel_id)
+            state.voice_status_last_bot = desired
+            state.voice_status_last_track_key = track_key
+            state.voice_status_last_update_at = time.monotonic()
+            await self._save_voice_status_record(
+                guild.id,
+                {
+                    "channel_id": channel_id,
+                    "had_original_status": bool(state.voice_status_had_original),
+                    "original_status": state.voice_status_original,
+                    "last_bot_status": desired,
+                    "last_track_key": track_key,
+                    "started_at": time.time(),
+                    "reason": "music_player",
+                },
+            )
+            self._schedule_voice_status_refresh(guild.id, state)
 
-        desired = self.render_voice_status(guild.id, track, template=settings.get("template"))
-        if not force and desired == state.voice_status_last_bot:
-            return
-        if not desired:
-            return
-        logger.info("[music] aplicando status do canal | guild=%s channel=%s", guild.id, channel_id)
-        if not await self._set_voice_channel_status(channel, desired, reason="Atualizar status do canal enquanto a música toca"):
-            await self._clear_voice_status_record(guild.id)
-            state.voice_status_channel_id = None
-            state.voice_status_had_original = False
-            state.voice_status_original = ""
-            state.voice_status_last_bot = ""
-            return
-        logger.info("[music] status do canal aplicado | guild=%s channel=%s", guild.id, channel_id)
-        state.voice_status_last_bot = desired
-        state.voice_status_last_update_at = time.monotonic()
-        await self._save_voice_status_record(
-            guild.id,
-            {
-                "channel_id": channel_id,
-                "had_original_status": bool(state.voice_status_had_original),
-                "original_status": state.voice_status_original,
-                "last_bot_status": desired,
-                "started_at": time.time(),
-                "reason": "music_player",
-            },
-        )
-        self._schedule_voice_status_refresh(guild.id, state)
+    def _schedule_voice_status_track_sync(self, guild_id: int, *, repeat_after: float = 2.0, reason: str = "track_change") -> None:
+        """Sincroniza status do canal para a faixa atual sem bloquear o player.
+
+        Troca real de faixa não usa o mesmo cooldown do refresh periódico.
+        O segundo envio curto cobre o atraso visual do Discord e garante que
+        atualizações antigas não fiquem presas quando várias faixas mudam rápido.
+        """
+        state = self.get_state(guild_id)
+        old_task = state.voice_status_force_task
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+
+        async def _runner() -> None:
+            try:
+                guild = self.bot.get_guild(int(guild_id))
+                if guild is None or state.current is None or not state.last_voice_channel_id:
+                    return
+                channel = guild.get_channel(int(state.last_voice_channel_id)) or self.bot.get_channel(int(state.last_voice_channel_id))
+                if channel is None:
+                    return
+                track_key = self._voice_status_track_key(state.current)
+                logger.info(
+                    "[music] atualizando status do canal por %s | guild=%s track=%r",
+                    reason,
+                    guild_id,
+                    getattr(state.current, "title", ""),
+                )
+                await self._apply_voice_status_for_music(guild, channel, state, state.current, force=True)
+                if repeat_after <= 0:
+                    return
+                await asyncio.sleep(max(0.0, float(repeat_after)))
+                if state.current is None or self._voice_status_track_key(state.current) != track_key:
+                    return
+                channel = guild.get_channel(int(state.last_voice_channel_id)) or self.bot.get_channel(int(state.last_voice_channel_id))
+                if channel is None:
+                    return
+                await self._apply_voice_status_for_music(guild, channel, state, state.current, force=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("[music] sincronização forçada de status de voz falhou", exc_info=True)
+            finally:
+                if state.voice_status_force_task is asyncio.current_task():
+                    state.voice_status_force_task = None
+
+        state.voice_status_force_task = asyncio.create_task(_runner())
+        state.voice_status_force_task.add_done_callback(_consume_expected_music_exception)
 
     def _schedule_voice_status_refresh(self, guild_id: int, state: MusicGuildState) -> None:
         settings = self._voice_status_settings_from_doc(guild_id)
@@ -1166,6 +1256,12 @@ class AudioRouter:
         if task is not None and not task.done():
             task.cancel()
         state.voice_status_update_task = None
+        force_task = state.voice_status_force_task
+        current_task = asyncio.current_task()
+        if force_task is not None and not force_task.done() and force_task is not current_task:
+            force_task.cancel()
+        if force_task is not current_task:
+            state.voice_status_force_task = None
 
     async def _restore_voice_status_for_state(
         self,
@@ -1224,6 +1320,7 @@ class AudioRouter:
         state.voice_status_had_original = False
         state.voice_status_original = ""
         state.voice_status_last_bot = ""
+        state.voice_status_last_track_key = ""
         state.voice_status_last_update_at = 0.0
 
     async def reconcile_voice_status_records(self) -> None:
@@ -1722,6 +1819,7 @@ class AudioRouter:
         if vc is None:
             raise RuntimeError("Não consegui conectar ao canal de voz.")
         await self._boost_auto_bitrate_for_music(guild, channel, state)
+        self._schedule_voice_status_track_sync(guild.id, repeat_after=2.0, reason="track_change")
 
         try:
             await self._resolve_current_track(state, track)
@@ -1829,7 +1927,7 @@ class AudioRouter:
         state.current_status = "playing"
         state.current_started_at_monotonic = time.monotonic()
         self._refresh_quality_state(state, track)
-        await self._apply_voice_status_for_music(guild, channel, state, track, force=True)
+        self._schedule_voice_status_track_sync(guild.id, repeat_after=2.0, reason="playback_started")
         self._schedule_panel_update(guild.id, create=True)
         self._start_prefetch_next(guild.id, state)
         await finished
