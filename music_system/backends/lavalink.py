@@ -159,11 +159,26 @@ class LavalinkBackend:
     """
 
     name = "lavalink"
+    _shared_pool_locks: dict[int, asyncio.Lock] = {}
 
     def __init__(self, cfg: LavalinkConfig) -> None:
         self.cfg = cfg
         self._session = None
         self._session_lock = asyncio.Lock()
+        self._pool_lock = asyncio.Lock()
+
+    def _shared_pool_lock(self) -> asyncio.Lock:
+        """Retorna uma trava global do Pool para todas as instâncias no loop atual."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return self._pool_lock
+        key = id(loop)
+        lock = self.__class__._shared_pool_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.__class__._shared_pool_locks[key] = lock
+        return lock
 
     @classmethod
     def from_config(cls, cfg: LavalinkConfig | None = None) -> "LavalinkBackend":
@@ -438,19 +453,76 @@ class LavalinkBackend:
         except Exception as exc:  # pragma: no cover - depende da VPS
             raise RuntimeError("Wavelink não está instalado. Atualize o ambiente com `pip install -r requirements.txt`.") from exc
 
+    def _pool_private_nodes(self, pool: Any) -> dict[str, Any] | None:
+        """Acessa o mapa interno do Wavelink 3.x para ejetar nodes quebrados.
+
+        Wavelink 3.5 mantém nodes fechados em ``Pool._Pool__nodes`` quando
+        ``Pool.close()`` chama ``Node.close()`` sem ``eject=True``. Se o bot
+        tenta reconectar depois disso, o Wavelink registra "already have a node
+        with identifier" e o Pool fica sem node CONNECTED.
+        """
+        with contextlib.suppress(Exception):
+            nodes = getattr(pool, "_Pool__nodes", None)
+            if isinstance(nodes, dict):
+                return nodes
+        return None
+
+    async def _close_wavelink_node(self, node: Any, *, pool: Any | None = None, eject: bool = True) -> None:
+        if node is None:
+            return
+        identifier = str(getattr(node, "identifier", "") or "")
+        close = getattr(node, "close", None)
+        if callable(close):
+            try:
+                result = close(eject=eject)
+            except TypeError:
+                result = close()
+            if asyncio.iscoroutine(result):
+                with contextlib.suppress(Exception):
+                    await result
+        if eject and pool is not None and identifier:
+            nodes = self._pool_private_nodes(pool)
+            if nodes is not None:
+                nodes.pop(identifier, None)
+
     async def close_wavelink_pool(self) -> None:
-        """Fecha conexões Wavelink globais quando o node é reconfigurado."""
+        """Fecha e remove nodes Wavelink globais quando o node é reconfigurado.
+
+        Em Wavelink 3.x, ``Pool.close()`` fecha os nodes, mas não remove os
+        identificadores do Pool. O patch precisa ejetar/limpar o mapa interno
+        para evitar duplicidade de identifier e estado preso em DISCONNECTED.
+        """
         if not self._wavelink_installed():
             return
         try:
             wavelink = self._import_wavelink()
-            close = getattr(getattr(wavelink, "Pool", None), "close", None)
-            if callable(close):
-                result = close()
-                if asyncio.iscoroutine(result):
-                    await result
+            pool = getattr(wavelink, "Pool", None)
+            if pool is None:
+                return
+            nodes: dict[str, Any] = {}
+            with contextlib.suppress(Exception):
+                raw_nodes = getattr(pool, "nodes", {})
+                if isinstance(raw_nodes, dict):
+                    nodes = dict(raw_nodes)
+            if nodes:
+                for node in nodes.values():
+                    await self._close_wavelink_node(node, pool=pool, eject=True)
+            else:
+                close = getattr(pool, "close", None)
+                if callable(close):
+                    result = close()
+                    if asyncio.iscoroutine(result):
+                        with contextlib.suppress(Exception):
+                            await result
+            private_nodes = self._pool_private_nodes(pool)
+            if private_nodes is not None:
+                private_nodes.clear()
+            cache = getattr(pool, "cache", None)
+            if callable(cache):
+                with contextlib.suppress(Exception):
+                    cache(None)
         except Exception:
-            logger.debug("[music/lavalink] falha ao fechar pool Wavelink", exc_info=True)
+            logger.debug("[music/lavalink] falha ao fechar/ejetar pool Wavelink", exc_info=True)
 
 
     def _node_is_connected(self, node: Any) -> bool:
@@ -480,61 +552,109 @@ class LavalinkBackend:
         # cegamente gera "No nodes are currently assigned..." no primeiro play.
         return False
 
+    def _node_matches_config(self, node: Any) -> bool:
+        try:
+            node_uri = str(getattr(node, "uri", "") or "").rstrip("/")
+            cfg_uri = str(self.cfg.base_url or "").rstrip("/")
+            if node_uri and cfg_uri and node_uri != cfg_uri:
+                return False
+        except Exception:
+            pass
+        try:
+            password = str(getattr(node, "password", "") or "")
+            if password and self.cfg.password and password != self.cfg.password:
+                return False
+        except Exception:
+            pass
+        return True
+
+    async def _wait_for_connected_node(self, pool: Any, node: Any) -> Any:
+        deadline = asyncio.get_running_loop().time() + max(3.0, min(15.0, float(self.cfg.timeout_seconds or 8.0)))
+        current = node
+        while True:
+            with contextlib.suppress(Exception):
+                refreshed = pool.get_node(self.cfg.node_name)
+                if refreshed is not None:
+                    current = refreshed
+            if self._node_is_connected(current):
+                return current
+            if asyncio.get_running_loop().time() >= deadline:
+                return current
+            await asyncio.sleep(0.25)
+
+    def _node_status_label(self, node: Any) -> str:
+        if node is None:
+            return "ausente"
+        value = getattr(node, "status", None) or getattr(node, "state", None)
+        return str(getattr(value, "name", value) or "desconhecido")
+
     async def ensure_wavelink_pool(self, bot, *, force_reconnect: bool = False):
-        """Garante que o Pool do Wavelink está conectado ao node configurado."""
+        """Garante que o Pool do Wavelink está conectado ao node configurado.
+
+        O Pool do Wavelink é global. Sem trava, dois comandos simultâneos podem
+        tentar criar o mesmo ``identifier`` e deixar o Pool preso sem node
+        CONNECTED. Também é necessário ejetar nodes antigos porque ``Pool.close``
+        não remove o identificador em algumas versões 3.x.
+        """
         if not self.cfg.enabled or self.cfg.mode == "off":
             raise RuntimeError("Lavalink está desativado para este servidor.")
         if not self.cfg.configured:
             raise RuntimeError("Lavalink não configurado: defina host, porta e senha no painel `_musicnode`.")
-        wavelink = self._import_wavelink()
-        pool = getattr(wavelink, "Pool", None)
-        if pool is None:
-            raise RuntimeError("Wavelink instalado não expõe Pool compatível.")
 
-        stale_existing = False
-        if not force_reconnect:
+        async with self._shared_pool_lock():
+            wavelink = self._import_wavelink()
+            pool = getattr(wavelink, "Pool", None)
+            if pool is None:
+                raise RuntimeError("Wavelink instalado não expõe Pool compatível.")
+
+            existing = None
             with contextlib.suppress(Exception):
                 existing = pool.get_node(self.cfg.node_name)
-                if existing is not None:
-                    if self._node_is_connected(existing):
-                        return wavelink, existing
-                    stale_existing = True
-                    logger.info(
-                        "[music/lavalink] node Wavelink existe, mas não está CONNECTED; reconectando pool | node=%s",
-                        self.cfg.node_name,
-                    )
 
-        if force_reconnect or stale_existing:
-            await self.close_wavelink_pool()
+            if existing is not None and not force_reconnect:
+                if self._node_is_connected(existing) and self._node_matches_config(existing):
+                    return wavelink, existing
+                logger.info(
+                    "[music/lavalink] node Wavelink existente será ejetado antes de reconectar | node=%s status=%s",
+                    self.cfg.node_name,
+                    self._node_status_label(existing),
+                )
 
-        node_cls = getattr(wavelink, "Node", None)
-        if node_cls is None:
-            raise RuntimeError("Wavelink instalado não expõe Node compatível.")
-        try:
-            node = node_cls(uri=self.cfg.base_url, password=self.cfg.password, identifier=self.cfg.node_name)
-        except TypeError:
-            node = node_cls(uri=self.cfg.base_url, password=self.cfg.password)
-        kwargs = {"nodes": [node], "client": bot}
-        # Wavelink 3 recomenda cache pequeno/experimental. Se a assinatura local não aceitar,
-        # o fallback sem cache mantém compatibilidade.
-        try:
-            await pool.connect(**kwargs, cache_capacity=100)
-        except TypeError:
-            await pool.connect(**kwargs)
-        # Dá um pequeno tempo para o Pool atualizar o estado interno antes do
-        # primeiro Player.connect/play. Em nodes públicos isso evita uma corrida
-        # onde REST responde OK, mas o Pool ainda não está CONNECTED.
-        await asyncio.sleep(0.35)
-        with contextlib.suppress(Exception):
-            refreshed = pool.get_node(self.cfg.node_name)
-            if refreshed is not None:
-                node = refreshed
-        if not self._node_is_connected(node):
-            logger.warning(
-                "[music/lavalink] Pool conectado, mas node ainda não está CONNECTED | node=%s",
-                self.cfg.node_name,
-            )
-        return wavelink, node
+            if existing is not None or force_reconnect:
+                # Fecha todos os nodes do Pool para evitar seleção do "best" node
+                # em estado velho e para limpar cache de busca ligado ao node antigo.
+                await self.close_wavelink_pool()
+
+            node_cls = getattr(wavelink, "Node", None)
+            if node_cls is None:
+                raise RuntimeError("Wavelink instalado não expõe Node compatível.")
+            try:
+                node = node_cls(uri=self.cfg.base_url, password=self.cfg.password, identifier=self.cfg.node_name)
+            except TypeError:
+                node = node_cls(uri=self.cfg.base_url, password=self.cfg.password)
+
+            kwargs = {"nodes": [node], "client": bot}
+            try:
+                await pool.connect(**kwargs, cache_capacity=100)
+            except TypeError:
+                await pool.connect(**kwargs)
+
+            node = await self._wait_for_connected_node(pool, node)
+            if not self._node_is_connected(node):
+                status = self._node_status_label(node)
+                logger.warning(
+                    "[music/lavalink] node não ficou CONNECTED após conectar o Pool | node=%s status=%s uri=%s",
+                    self.cfg.node_name,
+                    status,
+                    self.cfg.base_url,
+                )
+                await self._close_wavelink_node(node, pool=pool, eject=True)
+                raise RuntimeError(
+                    "Lavalink ainda não está pronto/conectado. "
+                    f"Node `{self.cfg.node_name}` ficou em `{status}`; tente novamente em alguns segundos."
+                )
+
+            return wavelink, node
 
     def _playable_candidates(self, track: Any, *, fallback_query: str = "") -> list[str]:
         candidates: list[str] = []
