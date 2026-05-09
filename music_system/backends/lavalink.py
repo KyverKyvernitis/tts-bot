@@ -151,11 +151,10 @@ class LavalinkConfig:
 
 
 class LavalinkBackend:
-    """Backend Lavalink em modo diagnóstico.
+    """Backend Lavalink real usado pelo player de música.
 
-    Este patch não usa Lavalink para tocar música. Ele só valida configuração,
-    saúde do node e carregamento de tracks via REST para preparar a migração
-    sem risco para o player FFmpeg/yt-dlp atual.
+    Valida o node via REST, resolve faixas pelo Wavelink e mantém fallbacks
+    controlados para fontes tocáveis, priorizando estabilidade no Discord.
     """
 
     name = "lavalink"
@@ -304,7 +303,7 @@ class LavalinkBackend:
                 configured=True,
                 available=True,
                 mode=self.cfg.mode,
-                message="Node Lavalink respondeu. Playback real só é liberado no servidor de teste e no modo Lavalink/Auto.",
+                message="Node Lavalink respondeu. Playback real disponível para servidores em modo Lavalink/Auto.",
                 latency_ms=latency_ms,
                 version=version,
                 players=players,
@@ -413,7 +412,10 @@ class LavalinkBackend:
 
         lower_query = query.lower()
         known_prefixes = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
-        identifier = query if "://" in query or lower_query.startswith(known_prefixes) else f"ytsearch:{query}"
+        # YouTube ficou instável com cipher/login; para busca textual direta no
+        # node, SoundCloud é o primeiro alvo porque tem sido a fonte tocável mais
+        # estável. Links e prefixos explícitos continuam intactos.
+        identifier = query if "://" in query or lower_query.startswith(known_prefixes) else f"scsearch:{query}"
         start = time.perf_counter()
         try:
             version, api_major = await self._detect_api_version()
@@ -808,6 +810,10 @@ class LavalinkBackend:
         text = str(value or "").strip().lower()
         return "youtube.com" in text or "youtu.be" in text or text.startswith(("ytsearch:", "ytmsearch:"))
 
+    def _is_spotify_value(self, value: object) -> bool:
+        text = str(value or "").strip().lower()
+        return "open.spotify.com" in text or text.startswith(("spotify:", "spsearch:"))
+
     def _soundcloud_fallback_query(self, track: Any, *, fallback_query: str = "") -> str:
         title = str(getattr(track, "title", "") or "").strip()
         author = str(getattr(track, "uploader", "") or getattr(track, "author", "") or "").strip()
@@ -830,6 +836,12 @@ class LavalinkBackend:
             or self._is_youtube_value(webpage_url)
             or self._is_youtube_value(fallback_query)
         )
+        is_spotify_track = (
+            source in {"spotify", "spsearch"}
+            or self._is_spotify_value(original_url)
+            or self._is_spotify_value(webpage_url)
+            or self._is_spotify_value(fallback_query)
+        )
         sc_fallback = self._soundcloud_fallback_query(track, fallback_query=fallback_query)
 
         if is_youtube_track and sc_fallback:
@@ -838,10 +850,13 @@ class LavalinkBackend:
             # YouTube como playable para não quebrar painel/player.
             self._append_unique_candidate(candidates, sc_fallback)
 
+        # Links Spotify diretos devem passar primeiro pelo LavaSrc para usar
+        # metadata/ISRC corretos. Para resultados vindos de busca YouTube, o
+        # SoundCloud já foi inserido antes.
         for value in (original_url, webpage_url, fallback_query):
             self._append_unique_candidate(candidates, value)
 
-        if not is_youtube_track and sc_fallback:
+        if (not is_youtube_track or is_spotify_track) and sc_fallback:
             self._append_unique_candidate(candidates, sc_fallback)
         self._append_unique_candidate(candidates, title)
         return candidates

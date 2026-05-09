@@ -659,7 +659,19 @@ class AudioRouter:
         guild_limit = int(getattr(guild, "bitrate_limit", 0) or 0)
         if guild_limit <= 0:
             guild_limit = max(current, 96000)
-        return max(8000, min(int(MUSIC_AUTO_BITRATE_MAX), guild_limit))
+
+        # Quando só uma guild está tocando, usa o máximo permitido pelo servidor.
+        # Com várias guilds tocando, mantém bitrate alto o bastante para música,
+        # mas evita forçar todos os canais no teto ao mesmo tempo.
+        active = max(1, self._active_player_count())
+        hard_limit = min(int(MUSIC_AUTO_BITRATE_MAX), guild_limit)
+        if active <= MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS:
+            target = hard_limit
+        elif active >= 3:
+            target = min(hard_limit, max(64000, int(MUSIC_HEAVY_LOAD_MAX_ABR) * 1000))
+        else:
+            target = min(hard_limit, max(64000, int(MUSIC_MAX_AUDIO_BITRATE_STABLE) * 1000))
+        return max(8000, int(target))
 
     async def _boost_auto_bitrate_for_music(self, guild: discord.Guild, channel, state: MusicGuildState) -> None:
         if not MUSIC_AUTO_BITRATE_ENABLED or guild is None or channel is None:
@@ -687,6 +699,7 @@ class AudioRouter:
             "boosted_bitrate": target,
             "started_at": time.time(),
             "reason": "music_player",
+            "active_players": self._active_player_count(),
         }
         # Sem persistência, não altera para evitar canal preso após restart/crash.
         if not await self._save_auto_bitrate_record(guild.id, record):
@@ -2178,10 +2191,11 @@ class AudioRouter:
         track: MusicTrack,
         channel: discord.abc.Connectable,
     ) -> bool:
-        """Toca uma faixa pelo Lavalink real, limitado ao servidor de teste.
+        """Toca uma faixa pelo Lavalink real.
 
-        A queue, painel e status continuam no AudioRouter. Se algo falhar antes
-        de iniciar, o caller cai para o backend local sem afetar o usuário.
+        A queue, painel e status continuam no AudioRouter. Em modo Lavalink o
+        erro é tratado sem cair para voice local; em modo Auto, o caller ainda
+        pode usar fallback local.
         """
         state.current_backend = "lavalink"
         state.current_source = None

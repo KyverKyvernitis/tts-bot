@@ -301,11 +301,19 @@ class MusicExtractor:
 
     async def _ytdlp_candidates_for_metadata(self, query: str, *, limit: int, requester_id: int, requester_name: str, original_url: str) -> list[ApiTrackCandidate]:
         candidates: list[ApiTrackCandidate] = []
-        for flat in (True, False):
+        # Prioriza SoundCloud como fonte realmente tocável na VPS atual. YouTube
+        # fica como fallback final por causa dos erros recentes de cipher/login.
+        search_size = max(1, min(8, int(limit)))
+        for extractor_prefix, flat in (
+            (f"scsearch{search_size}:", True),
+            (f"scsearch{search_size}:", False),
+            (f"ytsearch{search_size}:", True),
+            (f"ytsearch{search_size}:", False),
+        ):
             try:
-                info = await self._run_extract(f"ytsearch{max(1, min(8, int(limit)))}:{query}", extract_flat=flat, playlist=True)
+                info = await self._run_extract(f"{extractor_prefix}{query}", extract_flat=flat, playlist=True)
             except Exception:
-                logger.debug("[music] busca validada via yt-dlp falhou | query=%r flat=%s", query, flat, exc_info=True)
+                logger.debug("[music] busca validada via yt-dlp falhou | query=%r prefix=%s flat=%s", query, extractor_prefix, flat, exc_info=True)
                 continue
             for entry in (info.get("entries") or []):
                 if not entry:
@@ -354,7 +362,7 @@ class MusicExtractor:
         for query in queries:
             candidates: list[ApiTrackCandidate] = []
             try:
-                candidates.extend(await self.api.search(query, limit=max(5, self.search_results), prefer_youtube=True))
+                candidates.extend(await self.api.search(query, limit=max(5, self.search_results), prefer_youtube=False))
             except Exception:
                 logger.debug("[music] busca API validada falhou | query=%r", query, exc_info=True)
 
@@ -558,7 +566,7 @@ class MusicExtractor:
             "skip_download": True,
             "noplaylist": not playlist,
             "extract_flat": extract_flat,
-            "default_search": "ytsearch",
+            "default_search": "scsearch",
             "source_address": "0.0.0.0",
             "socket_timeout": min(self.timeout_seconds, MUSIC_EXTRACT_SOCKET_TIMEOUT_SECONDS),
             "retries": MUSIC_YTDLP_RETRIES,
@@ -634,7 +642,7 @@ class MusicExtractor:
         # devolve URLs de vídeo tocáveis de forma leve; Spotify/Deezer ajudam a
         # ranquear metadata quando configurados. Se não houver key, cai no fluxo antigo.
         try:
-            api_candidates = await self.api.search(query, limit=self.search_results, prefer_youtube=True)
+            api_candidates = await self.api.search(query, limit=self.search_results, prefer_youtube=False)
             playable = [candidate for candidate in api_candidates if self._candidate_is_playable_entry(candidate)]
             if playable:
                 tracks = [
@@ -649,6 +657,8 @@ class MusicExtractor:
 
         last_error: Exception | None = None
         for extractor_query, flat in (
+            (f"scsearch{self.search_results}:{query}", True),
+            (f"scsearch{self.search_results}:{query}", False),
             (f"ytsearch{self.search_results}:{query}", True),
             (f"ytsearch{self.search_results}:{query}", False),
             (f"ytsearch1:{query}", True),
@@ -691,7 +701,7 @@ class MusicExtractor:
             return cached_one
 
         try:
-            api_candidates = await self.api.search(query, limit=max(3, self.search_results), prefer_youtube=True)
+            api_candidates = await self.api.search(query, limit=max(3, self.search_results), prefer_youtube=False)
             playable = [candidate for candidate in api_candidates if self._candidate_is_playable_entry(candidate)]
             if playable:
                 candidate = playable[0]
@@ -702,7 +712,12 @@ class MusicExtractor:
             logger.debug("[music] search_one via API falhou | query=%r", query, exc_info=True)
 
         last_error: Exception | None = None
-        for extractor_query, flat in ((f"ytsearch1:{query}", True), (f"ytsearch1:{query}", False)):
+        for extractor_query, flat in (
+            (f"scsearch1:{query}", True),
+            (f"scsearch1:{query}", False),
+            (f"ytsearch1:{query}", True),
+            (f"ytsearch1:{query}", False),
+        ):
             try:
                 info = await self._run_extract(extractor_query, extract_flat=flat, playlist=True)
                 first = next((entry for entry in (info.get("entries") or []) if entry), None)

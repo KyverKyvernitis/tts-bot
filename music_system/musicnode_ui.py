@@ -156,8 +156,8 @@ def _make_mode_radio_group(current: str):
     for value, label, description in (
         ("off", "Desativado", "Não consulta o node Lavalink."),
         ("shadow", "Shadow/teste", "Testa Lavalink sem trocar o player atual."),
-        ("lavalink", "Lavalink real", "Reservado para ativação real futura."),
-        ("auto", "Auto/fallback", "Reservado para fallback futuro."),
+        ("lavalink", "Lavalink real", "Usa Lavalink como player principal neste servidor."),
+        ("auto", "Auto/fallback", "Tenta Lavalink e cai para local se o node falhar."),
     ):
         group.add_option(label=label, value=value, description=description, default=(value == current))
     return group
@@ -169,7 +169,7 @@ def _make_search_type_radio_group(current: str = "auto"):
         current = "auto"
     group = discord.ui.RadioGroup(required=True)
     for value, label, description in (
-        ("auto", "Auto", "Link direto ou YouTube search para texto."),
+        ("auto", "Auto", "Link direto ou SoundCloud search para texto."),
         ("youtube", "YouTube", "Força ytsearch para texto."),
         ("soundcloud", "SoundCloud", "Força scsearch para texto."),
         ("raw", "Sem prefixo extra", "Não força YouTube/SoundCloud; o backend decide."),
@@ -260,7 +260,7 @@ class MusicNodeConfigModal(discord.ui.Modal):
             port=port,
             password=password_value if password_value else None,
             secure=secure,
-            guild_id=self.panel.guild_id,
+            guild_id=None,
         )
         await self.panel.safe_refresh()
         options = self.panel.router.lavalink_config_summary(self.panel.guild_id).get("options", {}) or {}
@@ -270,13 +270,13 @@ class MusicNodeConfigModal(discord.ui.Modal):
             await interaction.followup.send(
                 "`✅` Node salvo e testado. "
                 f"Resultado: `{_status_icon(health)} {_available_label(health)}`. "
-                "O player real ainda continua local neste patch.",
+                "Em modo Lavalink/Auto, o player real usará o node em todos os servidores configurados.",
                 ephemeral=True,
             )
             return
         await interaction.followup.send(
-            "`✅` Node Lavalink salvo. Se o modo estava desligado, ele foi colocado em `shadow` para teste seguro.\n"
-            "O player real ainda continua local neste patch.",
+            "`✅` Node Lavalink salvo globalmente. Se o modo estava desligado, ele foi colocado em `shadow` para teste seguro.\n"
+            "Para migrar todos os servidores, altere o modo para **Lavalink real** ou **Auto/fallback**.",
             ephemeral=True,
         )
 
@@ -346,7 +346,7 @@ class MusicNodeModeOptionsModal(discord.ui.Modal):
         )
         self.add_item(discord.ui.Label(
             text="Modo de operação",
-            description="Shadow é o modo seguro: testa Lavalink sem trocar o player local.",
+            description="Lavalink real/Auto vale como padrão global para todos os servidores sem override.",
             component=self.mode_group,
         ))
         self.add_item(discord.ui.Label(
@@ -362,15 +362,15 @@ class MusicNodeModeOptionsModal(discord.ui.Modal):
             await interaction.response.send_message("`⚠️` Escolha um modo válido.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await self.panel.router.set_lavalink_mode(mode, guild_id=self.panel.guild_id)
+        await self.panel.router.set_lavalink_mode(mode, guild_id=None)
         await self.panel.router.update_lavalink_panel_options(
             hide_host_in_panel="hide_host_in_panel" in flags,
             test_after_save="test_after_save" in flags,
         )
         await self.panel.safe_refresh()
         await interaction.followup.send(
-            f"`✅` Modo alterado para **{_mode_label(mode)}**. {_mode_hint(mode).capitalize()}.\n"
-            "Neste patch o player real ainda continua local.",
+            f"`✅` Modo global alterado para **{_mode_label(mode)}**. {_mode_hint(mode).capitalize()}.\n"
+            "Servidores sem override agora herdam esse modo.",
             ephemeral=True,
         )
 
@@ -555,7 +555,7 @@ class MusicNodePanelView(discord.ui.LayoutView):
             "# 🔌 Lavalink Node Manager",
             f"**Modo:** {mode_text} — {_mode_hint(mode)}",
             f"**Backend real:** `{backend_real}` • **Node configurado:** `{'sim' if configured else 'não'}`",
-            "-# Local continua padrão. Playback Lavalink real só fica liberado no servidor de teste configurado.",
+            "-# Em modo Lavalink/Auto, o player real usa Lavalink em qualquer servidor configurado.",
         ]
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(header)),
@@ -571,10 +571,10 @@ class MusicNodePanelView(discord.ui.LayoutView):
         safety_lines = [
             "## 🛡️ Segurança da migração",
             f"**Local:** {_escape(local_msg, limit=160)}",
-            "**Fallback:** FFmpeg/yt-dlp continua intacto.",
+            "**Fallback:** FFmpeg/yt-dlp continua intacto para o modo Auto.",
             f"**Shadow real:** `{'ativo' if runtime.get('lavalink_shadow_active') else 'inativo'}`",
-            f"**Lavalink real:** `{'ativo neste servidor' if runtime.get('lavalink_real_active') else ('liberado para teste' if runtime.get('lavalink_real_allowed_guild') else 'bloqueado fora do servidor de teste')}`",
-            f"**Servidor de teste:** `{runtime.get('lavalink_real_test_guild_id') or 927002914449424404}`",
+            f"**Lavalink real:** `{'ativo neste servidor' if runtime.get('lavalink_real_active') else 'inativo neste servidor'}`",
+            f"**Escopo real:** `{'allowlist' if runtime.get('lavalink_real_scope') == 'allowlist' else 'todos os servidores configurados'}`",
             "**Senha:** nunca aparece no painel; fica salva só no DB separado `data/musicnode/musicnode.db`.",
         ]
         options = summary.get("options", {}) or {}

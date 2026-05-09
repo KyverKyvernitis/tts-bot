@@ -83,6 +83,25 @@ def _legacy_config_from_mapping(raw: dict[str, Any], *, fallback: LavalinkConfig
     )
 
 
+
+
+def _enable_lavalink_for_all_guilds() -> bool:
+    """Migração atual: servidores sem override herdam Lavalink real por padrão.
+
+    O dono ainda pode desligar definindo MUSIC_LAVALINK_ENABLE_ALL_GUILDS=false
+    ou colocando um override off no `_musicnode`.
+    """
+    return _as_bool(getattr(config, "MUSIC_LAVALINK_ENABLE_ALL_GUILDS", True), True)
+
+
+def _row_has_usable_node(row: sqlite3.Row | dict[str, Any] | None) -> bool:
+    if row is None:
+        return False
+    try:
+        return bool(_as_bool(row["enabled"], False) and str(row["host"] or "").strip() and str(row["password"] or "").strip())
+    except Exception:
+        return False
+
 def _normalize_options_from_row(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, bool]:
     if row is None:
         return dict(_DEFAULT_OPTIONS)
@@ -306,6 +325,29 @@ class LavalinkConfigStore:
         mode = _normalize_mode(row["mode"])
         return mode if mode in _ALLOWED_MODES else "off"
 
+    def _guild_has_override(self, conn: sqlite3.Connection, guild_id: int | None) -> bool:
+        if guild_id is None:
+            return False
+        return conn.execute(
+            "SELECT 1 FROM lavalink_guild_settings WHERE guild_id = ?",
+            (int(guild_id),),
+        ).fetchone() is not None
+
+    def _effective_mode_for_row(self, conn: sqlite3.Connection, row: sqlite3.Row, guild_id: int | None) -> str:
+        mode = self._guild_mode(conn, guild_id)
+        if (
+            guild_id is not None
+            and mode == "off"
+            and not self._guild_has_override(conn, guild_id)
+            and _enable_lavalink_for_all_guilds()
+            and _row_has_usable_node(row)
+        ):
+            # Após a migração, outras guilds sem configuração própria passam a
+            # herdar Lavalink real automaticamente. Guilds com override off não
+            # são forçadas.
+            return "lavalink"
+        return mode
+
     def _config_from_row(self, row: sqlite3.Row, *, mode: str) -> LavalinkConfig:
         mode = _normalize_mode(mode)
         if mode not in _ALLOWED_MODES:
@@ -326,7 +368,7 @@ class LavalinkConfigStore:
         self._ensure_ready()
         with self._lock, self._connection() as conn:
             row = self._node_row(conn)
-            mode = self._guild_mode(conn, guild_id)
+            mode = self._effective_mode_for_row(conn, row, guild_id)
             return self._config_from_row(row, mode=mode)
 
     def source_label(self) -> str:
@@ -365,8 +407,8 @@ class LavalinkConfigStore:
             )
             current_mode = self._guild_mode(conn, guild_id)
             if current_mode == "off":
-                self._set_mode_locked(conn, "shadow", guild_id=guild_id)
-                current_mode = "shadow"
+                current_mode = "lavalink" if _enable_lavalink_for_all_guilds() else "shadow"
+                self._set_mode_locked(conn, current_mode, guild_id=guild_id)
             conn.commit()
             row = self._node_row(conn)
             return self._config_from_row(row, mode=current_mode)
@@ -456,7 +498,7 @@ class LavalinkConfigStore:
         self._ensure_ready()
         with self._lock, self._connection() as conn:
             row = self._node_row(conn)
-            mode = self._guild_mode(conn, guild_id)
+            mode = self._effective_mode_for_row(conn, row, guild_id)
             cfg = self._config_from_row(row, mode=mode)
             migrated = conn.execute(
                 "SELECT value FROM lavalink_meta WHERE key = 'legacy_json_migrated'"
@@ -483,5 +525,6 @@ class LavalinkConfigStore:
                 "legacy_json_migrated": bool(migrated and str(migrated["value"]) == "1"),
                 "guild_id": int(guild_id) if guild_id is not None else None,
                 "guild_override": has_guild_override,
+                "global_lavalink_default": bool(_enable_lavalink_for_all_guilds()),
                 "options": _normalize_options_from_row(row),
             }
