@@ -40,6 +40,23 @@ def _normalize_mode(value: object) -> str:
     return "off"
 
 
+def _parse_lavalink_major_version(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    digits = []
+    for char in text:
+        if char.isdigit():
+            digits.append(char)
+            continue
+        break
+    if not digits:
+        return None
+    with contextlib.suppress(Exception):
+        return int("".join(digits))
+    return None
+
+
 @dataclass(slots=True)
 class LavalinkConfig:
     enabled: bool
@@ -130,31 +147,48 @@ class LavalinkBackend:
             self._session = aiohttp.ClientSession(timeout=timeout, headers=self._headers())
             return self._session
 
-    async def _request_json(self, path: str, *, fallback_path: str | None = None) -> tuple[Any, int]:
+    async def _request_json_any(
+        self,
+        paths: list[str],
+        *,
+        fallback_only_on_not_found: bool = True,
+    ) -> tuple[Any, int, str]:
         if not self.cfg.configured:
             raise RuntimeError("Lavalink não configurado: defina host, porta e senha no painel `_musicnode`.")
         session = await self._get_session()
-        paths = [path]
-        if fallback_path:
-            paths.append(fallback_path)
-        last_status = 0
-        last_text = ""
-        for item in paths:
+        attempts: list[str] = []
+        for index, item in enumerate(paths):
             url = f"{self.cfg.base_url}{item}"
             try:
                 async with session.get(url) as resp:
-                    last_status = int(getattr(resp, "status", 0) or 0)
-                    if 200 <= last_status < 300:
+                    status = int(getattr(resp, "status", 0) or 0)
+                    if 200 <= status < 300:
                         ctype = str(resp.headers.get("Content-Type", "") or "").lower()
                         if "json" in ctype:
-                            return await resp.json(), last_status
-                        return await resp.text(), last_status
-                    last_text = (await resp.text())[:240]
-            except Exception:
-                if item == paths[-1]:
+                            return await resp.json(), status, item
+                        return await resp.text(), status, item
+                    body = (await resp.text())[:220]
+                    attempts.append(f"{item} -> HTTP {status}: {body or 'sem corpo'}")
+                    if fallback_only_on_not_found and index < len(paths) - 1 and status not in {404, 405}:
+                        break
+            except Exception as exc:
+                attempts.append(f"{item} -> {exc.__class__.__name__}: {exc}")
+                if index == len(paths) - 1:
                     raise
-                continue
-        raise RuntimeError(f"HTTP {last_status}: {last_text or 'sem resposta útil'}")
+        detail = " | ".join(attempts) if attempts else "sem resposta útil"
+        raise RuntimeError(detail[:520])
+
+    async def _request_json(self, path: str, *, fallback_path: str | None = None) -> tuple[Any, int]:
+        paths = [path]
+        if fallback_path:
+            paths.append(fallback_path)
+        payload, status, _ = await self._request_json_any(paths)
+        return payload, status
+
+    async def _detect_api_version(self) -> tuple[str, int | None]:
+        version_raw, _, _ = await self._request_json_any(["/version"], fallback_only_on_not_found=False)
+        version = str(version_raw or "").strip()
+        return version, _parse_lavalink_major_version(version)
 
     def _wavelink_installed(self) -> bool:
         return importlib.util.find_spec("wavelink") is not None
@@ -183,11 +217,12 @@ class LavalinkBackend:
 
         start = time.perf_counter()
         try:
-            version_raw, _ = await self._request_json("/version")
-            version = str(version_raw or "").strip()
+            version, api_major = await self._detect_api_version()
             stats = None
+            stats_endpoint = ""
             with contextlib.suppress(Exception):
-                stats, _ = await self._request_json("/v4/stats", fallback_path="/stats")
+                stat_paths = ["/v4/stats"] if api_major and api_major >= 4 else (["/stats"] if api_major and api_major < 4 else ["/v4/stats", "/stats"])
+                stats, _, stats_endpoint = await self._request_json_any(stat_paths)
             latency_ms = int((time.perf_counter() - start) * 1000)
             players = None
             playing_players = None
@@ -205,7 +240,13 @@ class LavalinkBackend:
                 version=version,
                 players=players,
                 playing_players=playing_players,
-                extra={"node": self.cfg.node_name, "host": self.cfg.safe_host_label, "wavelink_installed": self._wavelink_installed()},
+                extra={
+                    "node": self.cfg.node_name,
+                    "host": self.cfg.safe_host_label,
+                    "wavelink_installed": self._wavelink_installed(),
+                    "api_major": api_major,
+                    "stats_endpoint": stats_endpoint,
+                },
             )
         except Exception as exc:
             latency_ms = int((time.perf_counter() - start) * 1000)
@@ -229,7 +270,16 @@ class LavalinkBackend:
             return info
         return raw
 
-    def _summarize_loadtracks(self, payload: Any, query: str, latency_ms: int) -> BackendSearchResult:
+    def _summarize_loadtracks(
+        self,
+        payload: Any,
+        query: str,
+        latency_ms: int,
+        *,
+        endpoint: str = "",
+        version: str = "",
+        api_major: int | None = None,
+    ) -> BackendSearchResult:
         if not isinstance(payload, dict):
             return BackendSearchResult(
                 backend=self.name,
@@ -237,6 +287,7 @@ class LavalinkBackend:
                 query=query,
                 latency_ms=latency_ms,
                 message="Resposta inesperada do Lavalink.",
+                extra={"endpoint": endpoint, "version": version, "api_major": api_major},
             )
 
         load_type = str(payload.get("loadType") or payload.get("load_type") or "unknown")
@@ -279,6 +330,7 @@ class LavalinkBackend:
             first_source=source,
             latency_ms=latency_ms,
             message="OK" if ok else (error_message or "Nenhuma música encontrada pelo Lavalink."),
+            extra={"endpoint": endpoint, "version": version, "api_major": api_major},
         )
 
     async def search(self, query: str, *, requester_id: int = 0, requester_name: str = "") -> BackendSearchResult:
@@ -295,12 +347,24 @@ class LavalinkBackend:
         identifier = query if "://" in query or lower_query.startswith(known_prefixes) else f"ytsearch:{query}"
         start = time.perf_counter()
         try:
-            payload, _ = await self._request_json(
-                f"/v4/loadtracks?identifier={quote(identifier, safe='')}",
-                fallback_path=f"/loadtracks?identifier={quote(identifier, safe='')}",
-            )
+            version, api_major = await self._detect_api_version()
+            encoded_identifier = quote(identifier, safe="")
+            if api_major and api_major >= 4:
+                paths = [f"/v4/loadtracks?identifier={encoded_identifier}"]
+            elif api_major and api_major < 4:
+                paths = [f"/loadtracks?identifier={encoded_identifier}"]
+            else:
+                paths = [f"/v4/loadtracks?identifier={encoded_identifier}", f"/loadtracks?identifier={encoded_identifier}"]
+            payload, _, endpoint = await self._request_json_any(paths)
             latency_ms = int((time.perf_counter() - start) * 1000)
-            return self._summarize_loadtracks(payload, query, latency_ms)
+            return self._summarize_loadtracks(
+                payload,
+                query,
+                latency_ms,
+                endpoint=endpoint.split("?", 1)[0],
+                version=version,
+                api_major=api_major,
+            )
         except Exception as exc:
             latency_ms = int((time.perf_counter() - start) * 1000)
             logger.debug("[music/lavalink] teste de loadtracks falhou", exc_info=True)

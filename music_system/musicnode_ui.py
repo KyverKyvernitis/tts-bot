@@ -117,6 +117,15 @@ def _format_test_result(result: Any) -> str:
     latency = getattr(result, "latency_ms", None)
     if latency is not None:
         lines.append(f"• latência: `{latency} ms`")
+    extra = getattr(result, "extra", {}) or {}
+    endpoint = str(extra.get("endpoint") or "")
+    api_major = extra.get("api_major")
+    version = str(extra.get("version") or "")
+    if endpoint:
+        lines.append(f"• endpoint: `{_escape(endpoint, limit=60)}`")
+    if version or api_major:
+        version_label = _escape(version, limit=40) if version else f"v{api_major}"
+        lines.append(f"• API: `{version_label}`")
     load_type = getattr(result, "load_type", "") or ""
     if load_type:
         lines.append(f"• loadType: `{_escape(load_type, limit=40)}`")
@@ -464,6 +473,12 @@ class MusicNodePanelView(discord.ui.LayoutView):
         if players is not None:
             lines.append(f"**Players:** `{players}` • **tocando:** `{playing if playing is not None else '?'}`")
         extra = getattr(lavalink, "extra", {}) or {}
+        api_major = extra.get("api_major")
+        stats_endpoint = str(extra.get("stats_endpoint") or "")
+        if api_major:
+            lines.append(f"**API REST:** `v{api_major}`")
+        if stats_endpoint:
+            lines.append(f"**Stats:** `{_escape(stats_endpoint, limit=40)}`")
         if "wavelink_installed" in extra:
             lines.append(f"**Wavelink:** `{'instalado' if extra.get('wavelink_installed') else 'não instalado'}`")
         message = getattr(lavalink, "message", "") or ""
@@ -483,13 +498,21 @@ class MusicNodePanelView(discord.ui.LayoutView):
         source = getattr(result, "first_source", "") or "—"
         title = getattr(result, "first_title", "") or "—"
         latency = getattr(result, "latency_ms", None)
-        return [
+        extra = getattr(result, "extra", {}) or {}
+        endpoint = str(extra.get("endpoint") or "")
+        version = str(extra.get("version") or "")
+        lines = [
             "## 🧪 Último teste",
             f"**Resultado:** `{'🟢' if getattr(result, 'ok', False) else '🔴'} {status}`",
             f"**Tracks:** `{int(getattr(result, 'tracks_found', 0) or 0)}` • **Fonte:** `{_escape(source, limit=40)}`",
             f"**Primeira:** {_escape(title, limit=110)}",
             f"**Latência:** `{latency} ms`" if latency is not None else "**Latência:** `—`",
         ]
+        if endpoint:
+            lines.append(f"**Endpoint:** `{_escape(endpoint, limit=60)}`")
+        if version:
+            lines.append(f"**Versão:** `{_escape(version, limit=60)}`")
+        return lines
 
     def _make_control_row(self) -> discord.ui.ActionRow:
         config = discord.ui.Button(label="Configurar", emoji="⚙️", style=discord.ButtonStyle.primary)
