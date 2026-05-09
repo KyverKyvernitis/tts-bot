@@ -323,40 +323,82 @@ class MusicExtractor:
                 break
         return candidates
 
-    async def _search_one_for_metadata(self, meta: ApiTrackCandidate, *, requester_id: int, requester_name: str = "", original_url: str = "") -> MusicTrack:
+    def _search_queries_for_metadata(self, meta: ApiTrackCandidate) -> list[str]:
+        title = (meta.title or "").strip()
+        artist = (meta.artist or "").strip()
+        simplified_title = re.sub(r"[\[\(].*?[\]\)]", " ", title)
+        simplified_title = re.sub(r"\s+", " ", simplified_title).strip()
+        queries = [
+            " ".join(part for part in (artist, title, "official audio") if part),
+            " ".join(part for part in (artist, title) if part),
+            " ".join(part for part in (title, artist) if part),
+            " ".join(part for part in (artist, simplified_title) if part),
+            simplified_title or title,
+        ]
+        return unique_queries(*queries)
+
+    async def _search_tracks_for_metadata(self, meta: ApiTrackCandidate, *, requester_id: int, requester_name: str = "", original_url: str = "") -> list[MusicTrack]:
         if not self._metadata_is_safe_for_autosearch(meta):
             raise MusicExtractionError(self._metadata_error_message("link", meta))
-        query = " ".join(part for part in (meta.artist, meta.title, "official audio") if part).strip()
-        if not query:
+        queries = self._search_queries_for_metadata(meta)
+        if not queries:
             raise MusicExtractionError("Metadata vazia.")
 
-        candidates: list[ApiTrackCandidate] = []
-        try:
-            candidates.extend(await self.api.search(query, limit=max(5, self.search_results), prefer_youtube=True))
-        except Exception:
-            logger.debug("[music] busca API validada falhou | query=%r", query, exc_info=True)
+        valid: list[ApiTrackCandidate] = []
+        seen: set[str] = set()
+        for query in queries:
+            candidates: list[ApiTrackCandidate] = []
+            try:
+                candidates.extend(await self.api.search(query, limit=max(5, self.search_results), prefer_youtube=True))
+            except Exception:
+                logger.debug("[music] busca API validada falhou | query=%r", query, exc_info=True)
 
-        playable = [candidate for candidate in candidates if self._candidate_is_playable_entry(candidate)]
-        valid = [candidate for candidate in playable if self._candidate_matches_metadata(candidate, meta)]
-        if not valid:
-            valid = [candidate for candidate in await self._ytdlp_candidates_for_metadata(
-                query,
-                limit=max(5, self.search_results),
-                requester_id=requester_id,
-                requester_name=requester_name,
-                original_url=original_url or query,
-            ) if self._candidate_matches_metadata(candidate, meta)]
+            playable = [candidate for candidate in candidates if self._candidate_is_playable_entry(candidate)]
+            matching_playable = [candidate for candidate in playable if self._candidate_matches_metadata(candidate, meta)]
+            ytdlp_candidates: list[ApiTrackCandidate] = []
+            # Mesmo quando a API retorna um match bom, a URL pode ficar indisponível
+            # para o yt-dlp. Mantém alguns candidatos vindos do próprio yt-dlp como
+            # fallback sem resolver stream ainda.
+            if not playable or len(matching_playable) < min(2, max(1, self.search_results)):
+                try:
+                    ytdlp_candidates = await self._ytdlp_candidates_for_metadata(
+                        query,
+                        limit=max(5, self.search_results),
+                        requester_id=requester_id,
+                        requester_name=requester_name,
+                        original_url=original_url or query,
+                    )
+                except Exception:
+                    logger.debug("[music] busca yt-dlp validada falhou | query=%r", query, exc_info=True)
+
+            for candidate in [*matching_playable, *ytdlp_candidates]:
+                if not self._candidate_matches_metadata(candidate, meta):
+                    continue
+                key = compact_key(f"{candidate.provider} {candidate.webpage_url} {candidate.artist} {candidate.title}")
+                if key in seen:
+                    continue
+                seen.add(key)
+                valid.append(candidate)
+
         if not valid:
             raise MusicExtractionError("Encontrei resultados parecidos, mas nenhum confirmou essa música. Não adicionei nada para evitar tocar uma versão errada.")
 
         valid.sort(key=lambda candidate: self._score_candidate_against_metadata(candidate, meta), reverse=True)
-        track = self._track_from_api_candidate(valid[0], requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
-        track.title = self._prefer_clean_title(track.title, meta)
-        track.duration = meta.duration or track.duration
-        track.thumbnail = meta.thumbnail or track.thumbnail
-        track.uploader = meta.artist or track.uploader
-        track.source = f"{meta.source} → {track.source or 'YouTube'}"
-        return track
+        tracks: list[MusicTrack] = []
+        for candidate in valid[: max(1, self.search_results)]:
+            query = candidate.query or " ".join(part for part in (meta.artist, meta.title) if part).strip()
+            track = self._track_from_api_candidate(candidate, requester_id=requester_id, requester_name=requester_name, original_url=original_url or query)
+            track.title = self._prefer_clean_title(track.title, meta)
+            track.duration = meta.duration or track.duration
+            track.thumbnail = meta.thumbnail or track.thumbnail
+            track.uploader = meta.artist or track.uploader
+            track.source = f"{meta.source} → {track.source or 'YouTube'}"
+            tracks.append(track)
+        return tracks
+
+    async def _search_one_for_metadata(self, meta: ApiTrackCandidate, *, requester_id: int, requester_name: str = "", original_url: str = "") -> MusicTrack:
+        tracks = await self._search_tracks_for_metadata(meta, requester_id=requester_id, requester_name=requester_name, original_url=original_url)
+        return tracks[0]
 
     def _resolve_cookies_file(self) -> str:
         value = str(
@@ -395,7 +437,112 @@ class MusicExtractor:
             "bestaudio[vcodec=none][acodec=opus][asr=48000]/bestaudio[vcodec=none][acodec=opus]/bestaudio[vcodec=none][ext=m4a]/bestaudio[vcodec=none]/bestaudio"
         )
 
-    def _base_opts(self, *, extract_flat: bool | str = False, playlist: bool = False, youtube_clients: tuple[str, ...] | None = None, audio_max_abr: int | None = None) -> dict[str, Any]:
+    def _safe_format_fallbacks(self, audio_max_abr: int | None = None) -> list[tuple[str, int | None]]:
+        """Seletores progressivamente mais permissivos.
+
+        O primeiro seletor preserva a qualidade dinâmica atual. Se o yt-dlp/YouTube
+        devolver só metadata ou recusar o formato, os seguintes priorizam tocar a
+        música em vez de pular imediatamente. O modo de alta qualidade continua
+        sem teto quando `audio_max_abr` é None/0.
+        """
+        try:
+            max_abr = int(audio_max_abr or 0)
+        except Exception:
+            max_abr = 0
+        requested_cap = max_abr if max_abr > 0 else None
+        candidates: list[tuple[str, int | None]] = [(self._format_for_quality(audio_max_abr), requested_cap)]
+        # Fallback seguro: aceita qualquer áudio-only. Não usa bestvideo+bestaudio.
+        candidates.append(("bestaudio[vcodec=none]/bestaudio/ba", None))
+        if max_abr > 0:
+            # Em modo econômico, se o teto falhar, tenta tocar com o melhor áudio-only
+            # em vez de quebrar o player. O painel vai mostrar o bitrate real depois.
+            candidates.append((MUSIC_YTDLP_FORMAT, None))
+        # Último recurso: deixa o yt-dlp escolher áudio/"best". O FFmpeg ignora vídeo
+        # com -vn, mas este caminho só é usado se todos os áudio-only falharem.
+        candidates.append(("ba/bestaudio/best", None))
+        seen: set[str] = set()
+        unique: list[tuple[str, int | None]] = []
+        for fmt, cap in candidates:
+            fmt = str(fmt or "").strip()
+            if not fmt or fmt in seen:
+                continue
+            seen.add(fmt)
+            unique.append((fmt, cap))
+        return unique
+
+    def _extract_stream_url_from_info(self, info: dict[str, Any]) -> tuple[str, int, str, str]:
+        """Extrai uma URL de áudio real mesmo quando o yt-dlp retorna formatos.
+
+        Algumas respostas de busca/metadata não colocam o stream final em info["url"],
+        mas deixam a URL dentro de requested_downloads/requested_formats/formats.
+        Sem esse fallback o player pula a música apesar de haver formato tocável.
+        """
+        def _info_abr(item: dict[str, Any]) -> int:
+            for key in ("abr", "tbr"):
+                with contextlib.suppress(Exception):
+                    value = item.get(key)
+                    if value is not None:
+                        parsed = max(0, int(round(float(value))))
+                        if parsed:
+                            return parsed
+            return 0
+
+        def _candidate_tuple(item: dict[str, Any]) -> tuple[str, int, str, str] | None:
+            url = str(item.get("url") or "").strip()
+            if not url or not self._is_probably_direct_stream_url(url, item):
+                return None
+            codec = str(item.get("acodec") or "").strip()
+            ext = str(item.get("ext") or "").strip()
+            return url, _info_abr(item), ext, codec
+
+        for key in ("requested_downloads", "requested_formats"):
+            raw = info.get(key)
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict):
+                        found = _candidate_tuple(item)
+                        if found:
+                            return found
+
+        direct = _candidate_tuple(info)
+        if direct:
+            return direct
+
+        formats = [item for item in (info.get("formats") or []) if isinstance(item, dict)]
+        best: tuple[str, int, str, str] | None = None
+        best_score = -1
+        for item in formats:
+            found = _candidate_tuple(item)
+            if not found:
+                continue
+            _url, abr, ext, codec = found
+            vcodec = str(item.get("vcodec") or "").lower()
+            acodec = str(item.get("acodec") or "").lower()
+            score = abr
+            if acodec and acodec != "none":
+                score += 1000
+            if vcodec in {"", "none"}:
+                score += 500
+            if ext in {"webm", "m4a", "opus", "mp3"}:
+                score += 100
+            if score > best_score:
+                best_score = score
+                best = found
+        return best or ("", 0, "", "")
+
+    def _apply_stream_info_to_track(self, track: MusicTrack, info: dict[str, Any], *, requested_abr: int = 0) -> bool:
+        stream_url, audio_abr, audio_ext, audio_codec = self._extract_stream_url_from_info(info)
+        if not stream_url:
+            return False
+        track.stream_url = stream_url
+        track.resolved_at_monotonic = time.monotonic()
+        track.resolved_audio_max_abr = int(requested_abr or 0)
+        track.resolved_audio_abr = int(audio_abr or 0)
+        track.resolved_audio_ext = audio_ext
+        track.resolved_audio_codec = audio_codec
+        return True
+
+    def _base_opts(self, *, extract_flat: bool | str = False, playlist: bool = False, youtube_clients: tuple[str, ...] | None = None, audio_max_abr: int | None = None, format_override: str | None = None) -> dict[str, Any]:
         opts: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -415,7 +562,7 @@ class MusicExtractor:
             "playlistend": self.max_playlist_items if playlist else None,
             "lazy_playlist": MUSIC_PLAYLIST_LAZY_LOAD and bool(playlist),
             "concurrent_fragment_downloads": 1,
-            "format": self._format_for_quality(audio_max_abr),
+            "format": str(format_override or self._format_for_quality(audio_max_abr)),
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -853,42 +1000,81 @@ class MusicExtractor:
         if profile.is_youtube:
             runs.extend((False, False, clients) for clients in _YOUTUBE_CLIENT_SETS)
 
-        for flat, playlist, clients in runs:
-            try:
-                info = await self._run_extract(source, extract_flat=flat, playlist=playlist, youtube_clients=clients, audio_max_abr=audio_max_abr)
-                if info.get("entries"):
-                    first = next((entry for entry in info.get("entries") or [] if entry), None)
-                    if first:
-                        info = first
-                updated = self._track_from_info(
-                    info,
-                    requester_id=track.requester_id,
-                    requester_name=track.requester_name,
-                    original_url=track.original_url or source,
-                )
-                if updated.stream_url:
-                    updated.resolved_audio_max_abr = requested_abr
-                    self._copy_resolved_fields(track, updated)
-                    self._put_stream_cache(stream_cache_key, track)
-                    return track
-            except Exception as exc:
-                errors.append(str(exc))
-                logger.debug("[music] stream resolve failed | source=%s clients=%s", source, clients, exc_info=True)
-
-        # Último fallback: busca pelo título atual e resolve o melhor resultado apenas uma vez.
-        if track.title and not profile.is_metadata_only:
-            try:
-                candidate = await self.search_one(track.title, requester_id=track.requester_id, requester_name=track.requester_name, original_url=track.original_url or source)
-                if candidate.webpage_url != track.webpage_url:
-                    await self.resolve_stream(candidate, force=True, audio_max_abr=audio_max_abr)
-                    if candidate.stream_url:
-                        self._copy_resolved_fields(track, candidate)
+        for format_selector, format_cap in self._safe_format_fallbacks(audio_max_abr):
+            for flat, playlist, clients in runs:
+                try:
+                    info = await self._run_extract(
+                        source,
+                        extract_flat=flat,
+                        playlist=playlist,
+                        youtube_clients=clients,
+                        audio_max_abr=format_cap,
+                        format_override=format_selector,
+                    )
+                    if info.get("entries"):
+                        first = next((entry for entry in info.get("entries") or [] if entry), None)
+                        if first:
+                            info = first
+                    updated = self._track_from_info(
+                        info,
+                        requester_id=track.requester_id,
+                        requester_name=track.requester_name,
+                        original_url=track.original_url or source,
+                    )
+                    if updated.stream_url:
+                        updated.resolved_audio_max_abr = int(format_cap or 0)
+                        self._copy_resolved_fields(track, updated)
                         self._put_stream_cache(stream_cache_key, track)
                         return track
-            except Exception as exc:
-                errors.append(str(exc))
+                    if self._apply_stream_info_to_track(updated, info, requested_abr=int(format_cap or 0)):
+                        self._copy_resolved_fields(track, updated)
+                        self._put_stream_cache(stream_cache_key, track)
+                        return track
+                    errors.append(f"sem stream direto com formato {format_selector}")
+                except Exception as exc:
+                    errors.append(str(exc))
+                    logger.debug(
+                        "[music] stream resolve failed | source=%s clients=%s format=%s",
+                        source,
+                        clients,
+                        format_selector,
+                        exc_info=True,
+                    )
 
-        detail = " | ".join(errors)[-500:]
+        # Último fallback: busca pelo título atual e resolve candidatos alternativos.
+        if track.title and not profile.is_metadata_only:
+            fallback_queries = self._search_queries_for_metadata(
+                ApiTrackCandidate(
+                    title=track.title,
+                    artist=track.uploader,
+                    duration=track.duration,
+                    thumbnail=track.thumbnail,
+                    webpage_url=track.webpage_url or track.original_url,
+                    source=track.source,
+                    provider=track.extractor or "metadata",
+                    query=track.title,
+                    score=20,
+                )
+            )
+            for query in fallback_queries:
+                try:
+                    batch = await self.search(query, requester_id=track.requester_id, requester_name=track.requester_name)
+                    for candidate in batch.tracks[: max(1, self.search_results)]:
+                        if candidate.webpage_url == track.webpage_url and candidate.stream_url == track.stream_url:
+                            continue
+                        try:
+                            await self.resolve_stream(candidate, force=True, audio_max_abr=None)
+                        except Exception as exc:
+                            errors.append(str(exc))
+                            continue
+                        if candidate.stream_url:
+                            self._copy_resolved_fields(track, candidate)
+                            self._put_stream_cache(stream_cache_key, track)
+                            return track
+                except Exception as exc:
+                    errors.append(str(exc))
+
+        detail = " | ".join(e for e in errors if e)[-500:]
         raise MusicExtractionError("Não consegui obter o stream de áudio dessa música.", detail=detail)
 
     async def _try_extract_metadata(self, url: str, *, requester_id: int, requester_name: str = "") -> ExtractedBatch | None:
@@ -926,13 +1112,14 @@ class MusicExtractor:
         playlist: bool = False,
         youtube_clients: tuple[str, ...] | None = None,
         audio_max_abr: int | None = None,
+        format_override: str | None = None,
     ) -> dict[str, Any]:
         try:
             import yt_dlp  # import tardio para não pesar o boot quando música não é usada
         except Exception as exc:  # pragma: no cover
             raise MusicExtractionError("Dependência yt-dlp não está instalada no venv.") from exc
 
-        opts = self._base_opts(extract_flat=extract_flat, playlist=playlist, youtube_clients=youtube_clients, audio_max_abr=audio_max_abr)
+        opts = self._base_opts(extract_flat=extract_flat, playlist=playlist, youtube_clients=youtube_clients, audio_max_abr=audio_max_abr, format_override=format_override)
 
         def _work() -> dict[str, Any]:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -1026,25 +1213,45 @@ class MusicExtractor:
 
     async def _resolve_metadata_track(self, track: MusicTrack, *, force: bool = False, audio_max_abr: int | None = None) -> MusicTrack:
         meta = self._metadata_candidate_from_track(track)
-        candidate = await self._search_one_for_metadata(
+        candidates = await self._search_tracks_for_metadata(
             meta,
             requester_id=track.requester_id,
             requester_name=track.requester_name,
             original_url=track.original_url or meta.search_query,
         )
-        await self.resolve_stream(candidate, force=force, audio_max_abr=audio_max_abr)
-        if candidate.stream_url:
-            official_title = " - ".join(part for part in (meta.artist, meta.title) if part).strip()
-            self._copy_resolved_fields(track, candidate)
-            if official_title:
-                track.title = official_title
-            track.duration = meta.duration or track.duration
-            track.uploader = meta.artist or track.uploader
-            track.thumbnail = meta.thumbnail or track.thumbnail
-            track.original_url = track.original_url or candidate.original_url
-            track.extractor = candidate.extractor or track.extractor
-            return track
-        raise MusicExtractionError("Não consegui resolver uma fonte tocável para essa música.")
+        errors: list[str] = []
+        # Primeiro respeita a qualidade dinâmica; se todos os candidatos falharem,
+        # tenta alta qualidade sem teto para evitar pular por seletor econômico ruim.
+        caps: list[int | None] = [audio_max_abr]
+        if audio_max_abr:
+            caps.append(None)
+        for cap in caps:
+            for candidate in candidates:
+                try:
+                    await self.resolve_stream(candidate, force=force, audio_max_abr=cap)
+                except Exception as exc:
+                    errors.append(str(exc))
+                    logger.debug(
+                        "[music] candidato metadata falhou | meta=%r candidate=%r cap=%s",
+                        meta.title,
+                        candidate.title,
+                        cap,
+                        exc_info=True,
+                    )
+                    continue
+                if candidate.stream_url:
+                    official_title = " - ".join(part for part in (meta.artist, meta.title) if part).strip()
+                    self._copy_resolved_fields(track, candidate)
+                    if official_title:
+                        track.title = official_title
+                    track.duration = meta.duration or track.duration
+                    track.uploader = meta.artist or track.uploader
+                    track.thumbnail = meta.thumbnail or track.thumbnail
+                    track.original_url = track.original_url or candidate.original_url
+                    track.extractor = candidate.extractor or track.extractor
+                    return track
+        detail = " | ".join(e for e in errors if e)[-500:]
+        raise MusicExtractionError("Não consegui resolver uma fonte tocável para essa música.", detail=detail)
 
     def _track_from_api_candidate(
         self,
@@ -1132,7 +1339,7 @@ class MusicExtractor:
             else:
                 webpage_url = ""
 
-        stream_url = raw_info_url if self._is_probably_direct_stream_url(raw_info_url, info) else ""
+        stream_url, audio_abr, audio_ext, audio_codec = self._extract_stream_url_from_info(info)
         duration_raw = info.get("duration")
         try:
             duration = float(duration_raw) if duration_raw is not None else None
@@ -1143,16 +1350,6 @@ class MusicExtractor:
         extractor = str(info.get("extractor_key") or info.get("extractor") or info.get("ie_key") or "")
         source = extractor or (urlparse(webpage_url).netloc if webpage_url else "")
         is_live = bool(info.get("is_live") or info.get("live_status") == "is_live")
-        audio_abr = 0
-        for _abr_key in ("abr", "tbr"):
-            with contextlib.suppress(Exception):
-                raw_abr = info.get(_abr_key)
-                if raw_abr is not None:
-                    audio_abr = max(0, int(round(float(raw_abr))))
-                    if audio_abr:
-                        break
-        audio_ext = str(info.get("ext") or "").strip()
-        audio_codec = str(info.get("acodec") or "").strip()
         track = MusicTrack(
             title=title,
             webpage_url=webpage_url,

@@ -97,6 +97,10 @@ def _consume_expected_music_exception(done: asyncio.Future) -> None:
         if message in {"Música pulada antes de iniciar o áudio.", "Playback cancelado."}:
             return
         logger.warning("[music] task/future terminou com erro de playback: %s", exc)
+    except MusicExtractionError:
+        # Tasks de resolução também são aguardadas pelo worker; deixar o worker
+        # enviar a mensagem amigável evita traceback duplicado e ruído no log.
+        return
     except Exception as exc:
         logger.warning(
             "[music] task/future terminou com exceção inesperada",
