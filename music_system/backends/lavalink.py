@@ -888,11 +888,26 @@ class LavalinkBackend:
             or self._is_spotify_value(fallback_query)
         )
 
+        raw_values = [fallback_query, original_url, webpage_url]
         url_values = [value for value in (original_url, webpage_url, fallback_query) if self._is_url_like_value(value)]
         non_url_queries = [value for value in (fallback_query, original_url, webpage_url) if value and not self._is_url_like_value(value)]
+        explicit_prefixed = []
+        for value in raw_values:
+            prefix, body = self._split_lavalink_search_prefix(value)
+            if prefix and body:
+                explicit_prefixed.append(f"{prefix}:{body}")
         has_explicit_youtube_url = any(self._is_youtube_value(value) for value in url_values)
         sc_fallback = self._soundcloud_fallback_query(track, fallback_query=fallback_query)
         ytm_fallback = self._youtube_music_fallback_query(track, fallback_query=fallback_query)
+
+        if explicit_prefixed:
+            # Quando o comando criou uma busca explícita para o node (ex.:
+            # ytsearch:termo), respeite essa escolha antes de qualquer fallback.
+            for value in explicit_prefixed:
+                self._append_unique_candidate(candidates, value)
+            if not any(str(value).lower().startswith(("ytsearch:", "ytmsearch:")) for value in explicit_prefixed):
+                self._append_unique_candidate(candidates, ytm_fallback)
+            return candidates
 
         if has_explicit_youtube_url:
             # URL direta do YouTube é uma escolha explícita do usuário. Não troque
@@ -1029,6 +1044,16 @@ class LavalinkBackend:
     async def _search_playable_candidate(self, wavelink: Any, candidate: str) -> Any:
         prefix, body = self._split_lavalink_search_prefix(candidate)
         if prefix:
+            # Para NodeLink/Lavalink, preserve o identifier exatamente como o node
+            # aceita via REST (/loadtracks?identifier=ytsearch:termo). Usar
+            # ``source=TrackSource`` primeiro pode mudar o client/fonte escolhido e
+            # voltar a cair em erros como ANDROID_VR Missing videoDetails.
+            direct_error: Exception | None = None
+            try:
+                return await wavelink.Playable.search(f"{prefix}:{body}")
+            except Exception as exc:
+                direct_error = exc
+
             type_error: Exception | None = None
             for source in self._track_source_candidates(wavelink, prefix):
                 try:
@@ -1037,21 +1062,15 @@ class LavalinkBackend:
                     type_error = exc
                     continue
                 except Exception:
-                    # Fonte reconhecida + erro real do Lavalink: deixe o caller tentar
-                    # o próximo candidato, em vez de repetir aliases da mesma fonte.
                     raise
-            # Fallback para Wavelink antigo sem parâmetro source. Mantém o prefixo
-            # único normalizado, nunca ytmsearch:scsearch:.
-            try:
-                return await wavelink.Playable.search(f"{prefix}:{body}")
-            except Exception:
-                if type_error is not None:
-                    logger.debug(
-                        "[music/lavalink] fallback de busca prefixada também falhou após TypeError em source | query=%r",
-                        candidate,
-                        exc_info=True,
-                    )
-                raise
+            if type_error is not None:
+                logger.debug(
+                    "[music/lavalink] busca prefixada direta e fallback source falharam | query=%r",
+                    candidate,
+                    exc_info=(type(direct_error), direct_error, direct_error.__traceback__) if direct_error else None,
+                )
+            if direct_error is not None:
+                raise direct_error
         return await wavelink.Playable.search(candidate)
 
     async def find_playable(self, bot, track: Any, *, fallback_query: str = "") -> tuple[Any, dict[str, Any]]:
@@ -1104,27 +1123,60 @@ class LavalinkBackend:
             raise RuntimeError(f"Lavalink não resolveu a música: {last_error.__class__.__name__}: {last_error}") from last_error
         raise RuntimeError("Lavalink não encontrou uma faixa tocável para esta música.")
 
+    def _bot_voice_client_for_guild(self, bot: Any, guild: Any) -> Any | None:
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        for vc in list(getattr(bot, "voice_clients", []) or []):
+            with contextlib.suppress(Exception):
+                if int(getattr(getattr(vc, "guild", None), "id", 0) or 0) == guild_id:
+                    return vc
+        return getattr(guild, "voice_client", None)
+
+    async def _release_local_voice_client_for_lavalink(self, player: Any, guild: Any) -> None:
+        # TTS/local voice client não pode coexistir com Wavelink na mesma guild.
+        # Se ele estiver preso desde o boot ou durante uma tentativa anterior, pare e
+        # desconecte para o Lavalink assumir a única conexão de voz do bot.
+        if player is None:
+            return
+        with contextlib.suppress(Exception):
+            stopper = getattr(player, "stop", None)
+            if callable(stopper):
+                stopper()
+        with contextlib.suppress(Exception):
+            await guild.change_voice_state(channel=None)
+        with contextlib.suppress(Exception):
+            await player.disconnect(force=True)
+        await asyncio.sleep(0.35)
+
     async def connect_player(self, bot, guild: Any, channel: Any, *, force_reconnect: bool = False):
         wavelink, _node = await self.ensure_wavelink_pool(bot, force_reconnect=force_reconnect)
         player_cls = getattr(wavelink, "Player", None)
-        player = getattr(guild, "voice_client", None)
+        player = self._bot_voice_client_for_guild(bot, guild)
         if player_cls is None:
             raise RuntimeError("Wavelink instalado não expõe Player compatível.")
+
         if player is not None and not isinstance(player, player_cls):
-            # Em modo Lavalink real não misture dois donos de voz. Se houver áudio
-            # local/TTS ativo, falha de forma controlada; se estiver ocioso, limpa o
-            # voice client local antes do Wavelink assumir.
-            local_active = False
-            with contextlib.suppress(Exception):
-                local_active = bool(player.is_playing() or player.is_paused())
-            if local_active:
-                raise RuntimeError("Voice client local/TTS ainda está ativo; aguarde ele terminar antes de usar Lavalink real.")
-            with contextlib.suppress(Exception):
-                await player.disconnect(force=False)
-            player = None
+            await self._release_local_voice_client_for_lavalink(player, guild)
+            player = self._bot_voice_client_for_guild(bot, guild)
+            if player is not None and not isinstance(player, player_cls):
+                player = None
+
         if player is None or not bool(getattr(player, "connected", False)):
-            player = await channel.connect(cls=player_cls, self_deaf=True)
-        elif getattr(getattr(player, "channel", None), "id", None) != getattr(channel, "id", None):
+            try:
+                player = await channel.connect(cls=player_cls, self_deaf=True)
+            except Exception as exc:
+                # discord.py pode levantar "Already connected to a voice channel"
+                # mesmo quando guild.voice_client estava None, por causa de voice
+                # client local preso no cache do Client. Releia o cache e recupere.
+                if "already connected" not in str(exc).lower():
+                    raise
+                current = self._bot_voice_client_for_guild(bot, guild)
+                if current is not None and isinstance(current, player_cls):
+                    player = current
+                else:
+                    await self._release_local_voice_client_for_lavalink(current, guild)
+                    player = await channel.connect(cls=player_cls, self_deaf=True)
+
+        if getattr(getattr(player, "channel", None), "id", None) != getattr(channel, "id", None):
             await player.move_to(channel)
         with contextlib.suppress(Exception):
             await guild.change_voice_state(channel=channel, self_deaf=True)
@@ -1309,7 +1361,12 @@ class LavalinkBackend:
                     # mesmo assim ficar state.connected=false. Nesse caso o painel dizia
                     # "tocando", mas nenhum áudio saía no Discord. Aguarde a conexão REST
                     # real e reenvie channelId quando o Wavelink antigo não enviar.
-                    await self._wait_for_rest_voice_connected(player, guild, channel, timeout=12.0)
+                    await self._wait_for_rest_voice_connected(
+                        player,
+                        guild,
+                        channel,
+                        timeout=max(12.0, min(90.0, float(self.cfg.timeout_seconds or 12.0))),
+                    )
                     # Confirma também que o stream não caiu logo após abrir. Isso pega
                     # SoundCloud 404/TrackException e libera tentativa no próximo candidato.
                     await self._wait_for_playback_stable(player, guild, playable, meta, timeout=2.2)

@@ -10,6 +10,8 @@ from discord.ext import commands
 
 from music_system import AudioRouter
 from music_system.errors import MusicExtractionError
+from music_system.models import ExtractedBatch, MusicTrack
+from music_system.providers import describe_url
 from music_system.ui import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
 from music_system.musicnode_ui import MusicNodePanelView
 
@@ -60,6 +62,54 @@ class Music(commands.Cog):
             return "`⚠️` Essa fonte usa DRM. Tente outro link ou pesquise pelo nome da música."
         return f"`⚠️` {raw}"
 
+
+    def _is_lavalink_real_enabled(self, guild_id: int | None) -> bool:
+        try:
+            return bool(self.router.backends.should_use_lavalink_real(guild_id))
+        except Exception:
+            logger.debug("[music/lavalink] falha ao checar modo real", exc_info=True)
+            return False
+
+    def _lavalink_identifier_for_query(self, query: str) -> tuple[str, str, str, str]:
+        """Cria uma faixa leve para o node resolver, sem chamar yt-dlp no comando.
+
+        Em modo Lavalink/NodeLink, o node deve receber a URL/busca crua. Fazer
+        ``_play`` passar antes pelo extractor local bloqueia o event loop
+        (``voice heartbeat blocked``) e ainda pode trocar YouTube por SoundCloud.
+        """
+        raw = (query or "").strip()
+        lower = raw.lower()
+        known_prefixes = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
+        for prefix in known_prefixes:
+            if lower.startswith(prefix):
+                body = raw[len(prefix):].strip()
+                identifier = f"{prefix}{body}" if body else raw
+                source = prefix[:-1]
+                return identifier, (body or raw), source, ""
+
+        profile = describe_url(raw)
+        if profile.is_url:
+            source = profile.platform or "lavalink"
+            title = "YouTube" if profile.is_youtube else f"{source.title()} link" if source != "lavalink" else "Link"
+            return profile.canonical or raw, title, source, profile.canonical or raw
+
+        # Busca textual normal em NodeLink: usa YouTube por padrão, porque o objetivo
+        # desta migração é parar de cair em SoundCloud quando o usuário pediu YouTube.
+        return f"ytsearch:{raw}", raw, "ytsearch", ""
+
+    def _lavalink_batch_for_query(self, query: str, *, requester_id: int, requester_name: str) -> ExtractedBatch:
+        identifier, title, source, webpage_url = self._lavalink_identifier_for_query(query)
+        track = MusicTrack(
+            title=title or identifier or "Música",
+            webpage_url=webpage_url,
+            original_url=identifier,
+            requester_id=requester_id,
+            requester_name=requester_name,
+            source=source or "lavalink",
+            extractor="lavalink",
+        )
+        return ExtractedBatch(tracks=[track], query=identifier, is_playlist=False)
+
     async def _run_play(self, ctx: commands.Context, query: str) -> None:
         """Implementação compartilhada de `_play` e da alias roteada `_p <música>`."""
         query = (query or "").strip()
@@ -82,21 +132,33 @@ class Music(commands.Cog):
             reason="play_command",
         )
 
-        # Evita derrubar o comando quando o Discord aplica rate limit no endpoint de typing.
-        # A extração pode demorar, mas o indicador de "digitando..." não é essencial.
-        try:
-            batch = await self.router.extractor.extract(
+        requester_name = getattr(ctx.author, "display_name", str(ctx.author))
+
+        if self._is_lavalink_real_enabled(ctx.guild.id):
+            # NodeLink/Lavalink real deve resolver o link/busca diretamente. Isso evita
+            # yt-dlp travando o gateway e evita transformar busca/URL do YouTube em
+            # fallback de SoundCloud antes do node receber a música.
+            batch = self._lavalink_batch_for_query(
                 query,
                 requester_id=ctx.author.id,
-                requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
+                requester_name=requester_name,
             )
-        except MusicExtractionError as exc:
-            await self._reply(ctx, self._music_error_message(exc))
-            return
-        except Exception as exc:
-            logger.exception("[music] erro inesperado na extração")
-            await self._reply(ctx, self._music_error_message(exc))
-            return
+        else:
+            # Evita derrubar o comando quando o Discord aplica rate limit no endpoint de typing.
+            # A extração pode demorar, mas o indicador de "digitando..." não é essencial.
+            try:
+                batch = await self.router.extractor.extract(
+                    query,
+                    requester_id=ctx.author.id,
+                    requester_name=requester_name,
+                )
+            except MusicExtractionError as exc:
+                await self._reply(ctx, self._music_error_message(exc))
+                return
+            except Exception as exc:
+                logger.exception("[music] erro inesperado na extração")
+                await self._reply(ctx, self._music_error_message(exc))
+                return
 
         if not batch.tracks:
             await self._reply(ctx, "`📭` Não encontrei nada tocável.")
