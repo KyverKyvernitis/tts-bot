@@ -110,6 +110,35 @@ class Music(commands.Cog):
         )
         return ExtractedBatch(tracks=[track], query=identifier, is_playlist=False)
 
+    def _is_lavalink_search_request(self, query: str) -> bool:
+        raw = (query or "").strip()
+        if not raw:
+            return False
+        lower = raw.lower()
+        known_prefixes = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
+        if lower.startswith(known_prefixes):
+            return True
+        return not describe_url(raw).is_url
+
+    async def _lavalink_search_batch_for_query(
+        self,
+        ctx: commands.Context,
+        query: str,
+        *,
+        requester_id: int,
+        requester_name: str,
+    ) -> ExtractedBatch:
+        # Busca textual em NodeLink/Lavalink: consulta o node e preserva a lista
+        # de resultados para o usuário escolher. Não usa yt-dlp nem escolhe
+        # automaticamente o primeiro resultado.
+        return await self.router.backends.search_lavalink_tracks(
+            query,
+            requester_id=requester_id,
+            requester_name=requester_name,
+            guild_id=getattr(ctx.guild, "id", None),
+            limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+        )
+
     async def _run_play(self, ctx: commands.Context, query: str) -> None:
         """Implementação compartilhada de `_play` e da alias roteada `_p <música>`."""
         query = (query or "").strip()
@@ -135,14 +164,30 @@ class Music(commands.Cog):
         requester_name = getattr(ctx.author, "display_name", str(ctx.author))
 
         if self._is_lavalink_real_enabled(ctx.guild.id):
-            # NodeLink/Lavalink real deve resolver o link/busca diretamente. Isso evita
-            # yt-dlp travando o gateway e evita transformar busca/URL do YouTube em
-            # fallback de SoundCloud antes do node receber a música.
-            batch = self._lavalink_batch_for_query(
-                query,
-                requester_id=ctx.author.id,
-                requester_name=requester_name,
-            )
+            # NodeLink/Lavalink real deve resolver links diretamente. Para texto
+            # normal/ytsearch, primeiro buscamos no node e mostramos seleção; não
+            # chamamos yt-dlp e não escolhemos automaticamente o primeiro resultado.
+            try:
+                if self._is_lavalink_search_request(query):
+                    batch = await self._lavalink_search_batch_for_query(
+                        ctx,
+                        query,
+                        requester_id=ctx.author.id,
+                        requester_name=requester_name,
+                    )
+                else:
+                    batch = self._lavalink_batch_for_query(
+                        query,
+                        requester_id=ctx.author.id,
+                        requester_name=requester_name,
+                    )
+            except MusicExtractionError as exc:
+                await self._reply(ctx, self._music_error_message(exc))
+                return
+            except Exception as exc:
+                logger.exception("[music/lavalink] erro ao buscar no node")
+                await self._reply(ctx, self._music_error_message(exc))
+                return
         else:
             # Evita derrubar o comando quando o Discord aplica rate limit no endpoint de typing.
             # A extração pode demorar, mas o indicador de "digitando..." não é essencial.

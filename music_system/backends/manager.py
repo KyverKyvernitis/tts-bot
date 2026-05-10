@@ -9,6 +9,7 @@ import config
 LAVALINK_REAL_TEST_GUILD_ID = 927002914449424404
 
 from .base import BackendHealth, BackendSearchResult, LocalPlaybackBackend
+from ..models import ExtractedBatch
 from .lavalink import LavalinkBackend, LavalinkConfig
 from .lavalink_config import LavalinkConfigStore
 
@@ -237,6 +238,30 @@ class MusicBackendManager:
             return None
         finally:
             await lavalink_backend.close()
+
+    async def search_lavalink_tracks(
+        self,
+        query: str,
+        *,
+        requester_id: int = 0,
+        requester_name: str = "",
+        guild_id: int | None = None,
+        limit: int = 5,
+    ) -> ExtractedBatch:
+        if not self.should_use_lavalink_real(guild_id):
+            raise RuntimeError("Playback real via Lavalink não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
+        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=guild_id))
+        try:
+            return await lavalink_backend.extract_tracks_for_selection(
+                self.bot,
+                query,
+                requester_id=requester_id,
+                requester_name=requester_name,
+                limit=limit,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                await lavalink_backend.close()
 
     async def play_lavalink_track(self, guild, voice_channel, track, *, volume: float = 1.0):
         if not self.should_use_lavalink_real(getattr(guild, "id", None)):

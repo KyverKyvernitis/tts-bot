@@ -13,6 +13,7 @@ from urllib.parse import quote
 import config
 
 from .base import BackendHealth, BackendSearchResult
+from ..models import ExtractedBatch, MusicTrack
 
 logger = logging.getLogger(__name__)
 
@@ -412,10 +413,9 @@ class LavalinkBackend:
 
         lower_query = query.lower()
         known_prefixes = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
-        # YouTube ficou instável com cipher/login; para busca textual direta no
-        # node, SoundCloud é o primeiro alvo porque tem sido a fonte tocável mais
-        # estável. Links e prefixos explícitos continuam intactos.
-        identifier = query if "://" in query or lower_query.startswith(known_prefixes) else f"scsearch:{query}"
+        # Em modo NodeLink/Lavalink, busca textual deve consultar YouTube por
+        # padrão. Links e prefixos explícitos continuam intactos.
+        identifier = query if "://" in query or lower_query.startswith(known_prefixes) else f"ytsearch:{query}"
         start = time.perf_counter()
         try:
             version, api_major = await self._detect_api_version()
@@ -999,6 +999,150 @@ class LavalinkBackend:
         for item in iterator:
             return item
         return None
+
+    def _playables_from_search(self, search: Any, *, limit: int = 10) -> list[Any]:
+        """Extrai uma lista de Playables de resultados Wavelink/NodeLink.
+
+        Wavelink 3.x pode retornar Playable, Search, Playlist, lista/tupla ou
+        objetos iteráveis. Para seleção textual precisamos preservar vários
+        resultados em vez de escolher automaticamente o primeiro.
+        """
+        max_items = max(1, int(limit or 10))
+        items: list[Any] = []
+
+        def add(value: Any) -> None:
+            if len(items) >= max_items:
+                return
+            if self._looks_like_playable(value):
+                items.append(value)
+
+        if self._looks_like_playable(search):
+            add(search)
+            return items
+
+        tracks = getattr(search, "tracks", None)
+        if tracks:
+            with contextlib.suppress(Exception):
+                for item in list(tracks):
+                    add(item)
+                    if len(items) >= max_items:
+                        return items
+
+        data = getattr(search, "data", None)
+        if data:
+            if self._looks_like_playable(data):
+                add(data)
+            elif isinstance(data, (list, tuple)):
+                for item in data:
+                    add(item)
+                    if len(items) >= max_items:
+                        return items
+
+        if isinstance(search, (list, tuple)):
+            for item in search:
+                add(item)
+                if len(items) >= max_items:
+                    return items
+
+        if not isinstance(search, dict):
+            try:
+                iterator = iter(search)
+            except Exception:
+                iterator = None
+            if iterator is not None:
+                for item in iterator:
+                    add(item)
+                    if len(items) >= max_items:
+                        return items
+
+        return items
+
+    def _source_from_playable(self, playable: Any, *, uri: str = "", identifier: str = "") -> str:
+        raw = str(getattr(playable, "source", "") or getattr(playable, "source_name", "") or "").strip().lower()
+        raw = raw.replace("tracksource.", "").replace("source.", "")
+        joined = " ".join(part for part in (raw, uri.lower(), identifier.lower()) if part)
+        if "youtube" in joined or "youtu.be" in joined:
+            return "youtube"
+        if "soundcloud" in joined:
+            return "soundcloud"
+        if "spotify" in joined:
+            return "spotify"
+        if "deezer" in joined:
+            return "deezer"
+        if "apple" in joined:
+            return "apple"
+        return raw or "lavalink"
+
+    def _uri_from_playable(self, playable: Any, *, source: str = "", identifier: str = "") -> str:
+        for attr in ("uri", "url", "webpage_url"):
+            value = str(getattr(playable, attr, "") or "").strip()
+            if value:
+                return value
+        if source == "youtube" and identifier:
+            return f"https://www.youtube.com/watch?v={identifier}"
+        return ""
+
+    def _track_from_playable(
+        self,
+        playable: Any,
+        *,
+        requester_id: int = 0,
+        requester_name: str = "",
+    ) -> MusicTrack:
+        identifier = str(getattr(playable, "identifier", "") or "").strip()
+        provisional_uri = str(getattr(playable, "uri", "") or getattr(playable, "url", "") or "").strip()
+        source = self._source_from_playable(playable, uri=provisional_uri, identifier=identifier)
+        uri = self._uri_from_playable(playable, source=source, identifier=identifier)
+        title = str(getattr(playable, "title", "") or getattr(playable, "name", "") or "Música sem título").strip()
+        author = str(getattr(playable, "author", "") or getattr(playable, "uploader", "") or "").strip()
+        artwork = str(getattr(playable, "artwork", "") or getattr(playable, "thumbnail", "") or "").strip()
+        duration_ms = self._duration_ms_from_meta(playable, None)
+        duration = (duration_ms / 1000.0) if duration_ms > 0 else None
+        is_live = bool(getattr(playable, "is_stream", False) or getattr(playable, "isStream", False) or getattr(playable, "stream", False))
+        return MusicTrack(
+            title=title,
+            webpage_url=uri,
+            original_url=uri or identifier,
+            requester_id=int(requester_id or 0),
+            requester_name=requester_name or "",
+            duration=duration,
+            uploader=author,
+            thumbnail=artwork,
+            source=source,
+            extractor="lavalink",
+            is_live=is_live,
+        )
+
+    async def extract_tracks_for_selection(
+        self,
+        bot,
+        query: str,
+        *,
+        requester_id: int = 0,
+        requester_name: str = "",
+        limit: int = 5,
+    ) -> ExtractedBatch:
+        """Busca faixas no Lavalink/NodeLink para UI de seleção.
+
+        Diferente do fluxo de playback, esta função não chama ``yt-dlp`` nem
+        escolhe automaticamente o primeiro resultado. Ela transforma os
+        Playables retornados pelo node em ``MusicTrack`` com URL/candidato direto
+        para o usuário escolher.
+        """
+        raw = str(query or "").strip()
+        if not raw:
+            return ExtractedBatch(tracks=[], query=raw, is_playlist=False)
+        lower = raw.lower()
+        known_prefixes = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
+        identifier = raw if lower.startswith(known_prefixes) or "://" in raw else f"ytsearch:{raw}"
+        wavelink, _node = await self.ensure_wavelink_pool(bot)
+        search = await self._search_playable_candidate(wavelink, identifier)
+        playables = self._playables_from_search(search, limit=limit)
+        tracks = [
+            self._track_from_playable(item, requester_id=requester_id, requester_name=requester_name)
+            for item in playables[: max(1, int(limit or 5))]
+        ]
+        return ExtractedBatch(tracks=tracks, query=identifier, is_playlist=False)
 
     def _playable_debug_shape(self, value: Any) -> str:
         try:
