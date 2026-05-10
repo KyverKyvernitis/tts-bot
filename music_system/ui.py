@@ -362,10 +362,19 @@ class SearchSelect(discord.ui.Select):
         if voice_channel is None or text_channel is None:
             await interaction.response.send_message("Canal não encontrado.", ephemeral=True)
             return
+        state_before = self.router.get_state(self.guild_id)
+        was_session_active = bool(
+            state_before.current
+            or state_before.queue_size() > 0
+            or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
+        )
         added, dropped = await self.router.enqueue(guild, voice_channel, text_channel, [track])
         state = self.router.get_state(self.guild_id)
         position = state.queue_size() + (1 if state.current else 0)
-        msg = f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`"
+        if was_session_active or position > 1:
+            msg = f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`"
+        else:
+            msg = f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
         if dropped:
             msg += "\n`⚠️` O queue está cheio; alguns itens não entraram."
         await interaction.response.edit_message(content=msg, embed=None, view=None)
@@ -451,6 +460,12 @@ class AddSongModal(discord.ui.Modal):
             )
             return
 
+        state_before = self.router.get_state(self.guild_id)
+        was_session_active = bool(
+            state_before.current
+            or state_before.queue_size() > 0
+            or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
+        )
         added, dropped = await self.router.enqueue(guild, voice_channel, text_channel, batch.tracks)
         if batch.is_playlist:
             msg = f"`📑` **Playlist adicionada:** `{added}` música(s)"
@@ -461,7 +476,10 @@ class AddSongModal(discord.ui.Modal):
         else:
             state = self.router.get_state(self.guild_id)
             position = state.queue_size() + (1 if state.current else 0)
-            msg = f"`🎶` **Adicionada ao queue:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}` • posição `{max(1, position)}`"
+            if was_session_active or position > 1:
+                msg = f"`🎶` **Adicionada ao queue:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}` • posição `{max(1, position)}`"
+            else:
+                msg = f"`🎧` **Preparando para tocar:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}`"
         if dropped:
             msg += f"\n`⚠️` `{dropped}` item(ns) não entraram porque o queue está cheio."
         await interaction.followup.send(msg, ephemeral=True)

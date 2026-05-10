@@ -801,10 +801,46 @@ class LavalinkBackend:
 
             return wavelink, node
 
+    _LAVALINK_SEARCH_PREFIXES = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
+
+    def _strip_lavalink_search_prefixes(self, value: object) -> str:
+        text = str(value or "").strip()
+        # Evita candidatos quebrados como ytmsearch:scsearch:termo.  O Wavelink
+        # 3.x já adiciona o prefixo quando usamos o parâmetro source; por isso
+        # qualquer prefixo interno precisa virar apenas o corpo da busca.
+        while text:
+            lower = text.lower()
+            for prefix in self._LAVALINK_SEARCH_PREFIXES:
+                if lower.startswith(prefix):
+                    text = text[len(prefix) :].strip()
+                    break
+            else:
+                return text
+        return text
+
+    def _split_lavalink_search_prefix(self, value: object) -> tuple[str | None, str]:
+        text = str(value or "").strip()
+        lower = text.lower()
+        for prefix in self._LAVALINK_SEARCH_PREFIXES:
+            if lower.startswith(prefix):
+                return prefix[:-1], self._strip_lavalink_search_prefixes(text)
+        return None, text
+
     def _append_unique_candidate(self, candidates: list[str], value: object) -> None:
         text = str(value or "").strip()
-        if text and text not in candidates:
+        if not text:
+            return
+        prefix, body = self._split_lavalink_search_prefix(text)
+        if prefix:
+            if not body:
+                return
+            text = f"{prefix}:{body}"
+        if text not in candidates:
             candidates.append(text)
+
+    def _is_url_like_value(self, value: object) -> bool:
+        text = str(value or "").strip().lower()
+        return "://" in text or text.startswith(("spotify:", "applemusic:", "deezer:"))
 
     def _is_youtube_value(self, value: object) -> bool:
         text = str(value or "").strip().lower()
@@ -814,22 +850,31 @@ class LavalinkBackend:
         text = str(value or "").strip().lower()
         return "open.spotify.com" in text or text.startswith(("spotify:", "spsearch:"))
 
+    def _search_candidate(self, prefix: str, value: object) -> str:
+        body = self._strip_lavalink_search_prefixes(value)
+        return f"{prefix}:{body}" if body else ""
+
     def _soundcloud_fallback_query(self, track: Any, *, fallback_query: str = "") -> str:
-        title = str(getattr(track, "title", "") or "").strip()
-        author = str(getattr(track, "uploader", "") or getattr(track, "author", "") or "").strip()
+        title = self._strip_lavalink_search_prefixes(getattr(track, "title", "") or "")
+        author = self._strip_lavalink_search_prefixes(getattr(track, "uploader", "") or getattr(track, "author", "") or "")
         query = " ".join(part for part in (author, title) if part).strip()
         if not query:
-            query = str(fallback_query or "").strip()
+            query = self._strip_lavalink_search_prefixes(fallback_query)
         if not query:
             return ""
-        return query if query.lower().startswith("scsearch:") else f"scsearch:{query}"
+        return self._search_candidate("scsearch", query)
+
+    def _youtube_music_fallback_query(self, track: Any, *, fallback_query: str = "") -> str:
+        title = self._strip_lavalink_search_prefixes(getattr(track, "title", "") or "")
+        author = self._strip_lavalink_search_prefixes(getattr(track, "uploader", "") or getattr(track, "author", "") or "")
+        query = " ".join(part for part in (author, title) if part).strip() or self._strip_lavalink_search_prefixes(fallback_query)
+        return self._search_candidate("ytmsearch", query) if query else ""
 
     def _playable_candidates(self, track: Any, *, fallback_query: str = "") -> list[str]:
         candidates: list[str] = []
         original_url = str(getattr(track, "original_url", "") or "").strip()
         webpage_url = str(getattr(track, "webpage_url", "") or "").strip()
         source = str(getattr(track, "source", "") or getattr(track, "extractor", "") or "").strip().lower()
-        title = str(getattr(track, "title", "") or "").strip()
         is_youtube_track = (
             source in {"youtube", "yt", "ytsearch", "ytmsearch"}
             or self._is_youtube_value(original_url)
@@ -842,23 +887,47 @@ class LavalinkBackend:
             or self._is_spotify_value(webpage_url)
             or self._is_spotify_value(fallback_query)
         )
+
+        url_values = [value for value in (original_url, webpage_url, fallback_query) if self._is_url_like_value(value)]
+        non_url_queries = [value for value in (fallback_query, original_url, webpage_url) if value and not self._is_url_like_value(value)]
+        has_explicit_youtube_url = any(self._is_youtube_value(value) for value in url_values)
         sc_fallback = self._soundcloud_fallback_query(track, fallback_query=fallback_query)
+        ytm_fallback = self._youtube_music_fallback_query(track, fallback_query=fallback_query)
 
-        if is_youtube_track and sc_fallback:
-            # O youtube-source pode retornar TrackException/cipher/login mesmo com
-            # OAuth. Em modo Lavalink-only, tente SoundCloud antes de aceitar o
-            # YouTube como playable para não quebrar painel/player.
+        if has_explicit_youtube_url:
+            # Se o usuário mandou URL direta do YouTube, respeite a URL primeiro.
+            # Só depois tente SoundCloud/YouTube Music como alternativas.
+            for value in url_values:
+                self._append_unique_candidate(candidates, value)
             self._append_unique_candidate(candidates, sc_fallback)
+            self._append_unique_candidate(candidates, ytm_fallback)
+            return candidates
 
-        # Links Spotify diretos devem passar primeiro pelo LavaSrc para usar
-        # metadata/ISRC corretos. Para resultados vindos de busca YouTube, o
-        # SoundCloud já foi inserido antes.
-        for value in (original_url, webpage_url, fallback_query):
+        if is_spotify_track:
+            # Links Spotify devem passar pelo LavaSrc antes; se ele não conseguir
+            # espelhar, SoundCloud vira a primeira alternativa tocável.
+            for value in url_values:
+                self._append_unique_candidate(candidates, value)
+            self._append_unique_candidate(candidates, sc_fallback)
+            return candidates
+
+        if is_youtube_track:
+            # Resultado vindo de busca/metadata do YouTube: SoundCloud primeiro
+            # porque YouTube está instável; o link/ytmsearch ficam como fallback final.
+            self._append_unique_candidate(candidates, sc_fallback)
+            for value in url_values:
+                self._append_unique_candidate(candidates, value)
+            self._append_unique_candidate(candidates, ytm_fallback)
+            return candidates
+
+        for value in url_values:
             self._append_unique_candidate(candidates, value)
-
-        if (not is_youtube_track or is_spotify_track) and sc_fallback:
-            self._append_unique_candidate(candidates, sc_fallback)
-        self._append_unique_candidate(candidates, title)
+        self._append_unique_candidate(candidates, sc_fallback)
+        # Só usa texto cru se não há nenhuma URL/fonte melhor. Texto cru no Wavelink
+        # vira YouTube Music por padrão, então não deve passar antes de scsearch.
+        if not candidates:
+            for value in non_url_queries:
+                self._append_unique_candidate(candidates, self._search_candidate("scsearch", value))
         return candidates
 
     def _looks_like_playable(self, value: Any) -> bool:
@@ -923,6 +992,61 @@ class LavalinkBackend:
                 continue
         return f"{cls} attrs={','.join(attrs) or '-'}"
 
+    def _track_source_candidates(self, wavelink: Any, prefix: str | None) -> list[Any]:
+        if not prefix:
+            return []
+        names_by_prefix = {
+            "scsearch": ("SoundCloud", "SOUNDCLOUD", "soundcloud"),
+            "ytsearch": ("YouTube", "YOUTUBE", "youtube"),
+            "ytmsearch": ("YouTubeMusic", "YOUTUBE_MUSIC", "youtube_music"),
+            "spsearch": ("Spotify", "SPOTIFY", "spotify"),
+            "amsearch": ("AppleMusic", "APPLE_MUSIC", "apple_music"),
+            "dzsearch": ("Deezer", "DEEZER", "deezer"),
+        }
+        sources: list[Any] = []
+        track_source = getattr(wavelink, "TrackSource", None)
+        if track_source is not None:
+            for name in names_by_prefix.get(prefix, ()):  # Wavelink versions differ in enum casing.
+                with contextlib.suppress(Exception):
+                    value = getattr(track_source, name)
+                    if value not in sources:
+                        sources.append(value)
+        # Algumas builds aceitam string no parâmetro source. Fica como fallback
+        # sem quebrar as builds que aceitam apenas enum.
+        for value in names_by_prefix.get(prefix, ())[::-1]:
+            lowered = value.lower()
+            if lowered not in sources:
+                sources.append(lowered)
+        return sources
+
+    async def _search_playable_candidate(self, wavelink: Any, candidate: str) -> Any:
+        prefix, body = self._split_lavalink_search_prefix(candidate)
+        if prefix:
+            type_error: Exception | None = None
+            for source in self._track_source_candidates(wavelink, prefix):
+                try:
+                    return await wavelink.Playable.search(body, source=source)
+                except TypeError as exc:
+                    type_error = exc
+                    continue
+                except Exception:
+                    # Fonte reconhecida + erro real do Lavalink: deixe o caller tentar
+                    # o próximo candidato, em vez de repetir aliases da mesma fonte.
+                    raise
+            # Fallback para Wavelink antigo sem parâmetro source. Mantém o prefixo
+            # único normalizado, nunca ytmsearch:scsearch:.
+            try:
+                return await wavelink.Playable.search(f"{prefix}:{body}")
+            except Exception:
+                if type_error is not None:
+                    logger.debug(
+                        "[music/lavalink] fallback de busca prefixada também falhou após TypeError em source | query=%r",
+                        candidate,
+                        exc_info=True,
+                    )
+                raise
+        return await wavelink.Playable.search(candidate)
+
     async def find_playable(self, bot, track: Any, *, fallback_query: str = "") -> tuple[Any, dict[str, Any]]:
         """Resolve um MusicTrack atual para um Playable do Wavelink.
 
@@ -936,7 +1060,7 @@ class LavalinkBackend:
         for candidate in self._playable_candidates(track, fallback_query=fallback_query):
             try:
                 try:
-                    search = await wavelink.Playable.search(candidate)
+                    search = await self._search_playable_candidate(wavelink, candidate)
                 except Exception as pool_exc:
                     message = str(pool_exc).lower()
                     if (not reconnected_after_pool_error) and ("no nodes" in message or "connected state" in message or "pool" in message):
@@ -946,7 +1070,7 @@ class LavalinkBackend:
                             candidate,
                         )
                         wavelink, _node = await self.ensure_wavelink_pool(bot, force_reconnect=True)
-                        search = await wavelink.Playable.search(candidate)
+                        search = await self._search_playable_candidate(wavelink, candidate)
                     else:
                         raise
                 playable = self._first_playable_from_search(search)
@@ -1176,7 +1300,7 @@ class LavalinkBackend:
                 continue
             try:
                 try:
-                    search = await wavelink.Playable.search(candidate)
+                    search = await self._search_playable_candidate(wavelink, candidate)
                 except Exception as pool_exc:
                     message = str(pool_exc).lower()
                     if (not reconnected_after_pool_error) and ("no nodes" in message or "connected state" in message or "pool" in message):
@@ -1186,7 +1310,7 @@ class LavalinkBackend:
                             candidate,
                         )
                         wavelink, _node = await self.ensure_wavelink_pool(bot, force_reconnect=True)
-                        search = await wavelink.Playable.search(candidate)
+                        search = await self._search_playable_candidate(wavelink, candidate)
                     else:
                         raise
                 playable = self._first_playable_from_search(search)

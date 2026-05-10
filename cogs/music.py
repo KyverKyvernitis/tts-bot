@@ -121,6 +121,12 @@ class Music(commands.Cog):
             )
             return
 
+        state_before = self.router.get_state(ctx.guild.id)
+        was_session_active = bool(
+            state_before.current
+            or state_before.queue_size() > 0
+            or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
+        )
         added, dropped = await self.router.enqueue(ctx.guild, voice_channel, ctx.channel, batch.tracks)
         if added <= 0:
             await self._reply(ctx, "`⚠️` Não adicionei nada: o queue está cheio ou essa música já está no queue/tocando.")
@@ -139,7 +145,10 @@ class Music(commands.Cog):
             track = batch.tracks[0]
             state = self.router.get_state(ctx.guild.id)
             position = state.queue_size() + (1 if state.current else 0)
-            await self._reply(ctx, f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`")
+            if was_session_active or position > 1:
+                await self._reply(ctx, f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`")
+            else:
+                await self._reply(ctx, f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`")
 
     @commands.command(name="play", aliases=["tocar", "music", "musica"])
     @commands.guild_only()
