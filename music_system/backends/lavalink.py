@@ -895,12 +895,13 @@ class LavalinkBackend:
         ytm_fallback = self._youtube_music_fallback_query(track, fallback_query=fallback_query)
 
         if has_explicit_youtube_url:
-            # Se o usuário mandou URL direta do YouTube, respeite a URL primeiro.
-            # Só depois tente SoundCloud/YouTube Music como alternativas.
+            # URL direta do YouTube é uma escolha explícita do usuário. Não troque
+            # automaticamente por SoundCloud/YouTube Music, porque isso faz um link
+            # do YouTube aparecer/tocar como outra fonte. Se o youtube-source falhar,
+            # o erro deve ficar visível para o usuário em vez de mascarar a fonte.
             for value in url_values:
-                self._append_unique_candidate(candidates, value)
-            self._append_unique_candidate(candidates, sc_fallback)
-            self._append_unique_candidate(candidates, ytm_fallback)
+                if self._is_youtube_value(value):
+                    self._append_unique_candidate(candidates, value)
             return candidates
 
         if is_spotify_track:
