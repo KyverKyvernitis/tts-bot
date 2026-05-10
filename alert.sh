@@ -15,6 +15,8 @@ fi
 TYPE="${1:-info}"
 TITLE="${2:-Sem título}"
 BODY="${3:-}"
+ATTACH_FILE="${4:-}"
+ATTACH_NAME="${5:-}"
 
 if [ -z "${ALERT_WEBHOOK_URL:-}" ]; then
   exit 1
@@ -113,6 +115,14 @@ LABEL_MAP = {
     "ultimas linhas": "Últimas linhas",
     "últimas linhas do erro": "Últimas linhas",
     "ultimas linhas do erro": "Últimas linhas",
+    "ação sugerida": "Ação sugerida",
+    "acao sugerida": "Ação sugerida",
+    "arquivos locais": "Arquivos locais",
+    "status git": "Status git",
+    "diagnóstico": "Diagnóstico",
+    "diagnostico": "Diagnóstico",
+    "log": "Log",
+    "log completo": "Log completo",
 }
 
 HEADER_FIELDS = {
@@ -136,9 +146,9 @@ HEADER_FIELDS = {
     "Subestado",
 }
 STATUS_FIELDS = {"Bot health", "Frontend", "Backend", "Activity"}
-DETAIL_FIELDS = {"Etapa", "Motivo", "URL"}
+DETAIL_FIELDS = {"Etapa", "Motivo", "URL", "Diagnóstico"}
 BULLET_FIELDS = {"Arquivos"}
-CODE_FIELDS = {"Últimas linhas", "Comando", "Stderr"}
+CODE_FIELDS = {"Últimas linhas", "Comando", "Stderr", "Status git", "Arquivos locais", "Log", "Log completo"}
 MAX_TEXT = 1800
 MAX_TOTAL_TEXT = 3800
 MAX_CODE = 1200
@@ -357,8 +367,13 @@ def build_containers(title: str, summary: str, fields, footer: str, color: int):
     status_pairs = [(name, field_map.pop(name)) for name in list(field_map) if name in STATUS_FIELDS]
     detail_pairs = [(name, field_map.pop(name)) for name in list(field_map) if name in DETAIL_FIELDS]
     file_value = field_map.pop("Arquivos", "")
+    action_value = field_map.pop("Ação sugerida", "")
     command_value = field_map.pop("Comando", "")
     logs_value = field_map.pop("Últimas linhas", "")
+    stderr_value = field_map.pop("Stderr", "")
+    local_files_value = field_map.pop("Arquivos locais", "")
+    git_status_value = field_map.pop("Status git", "")
+    log_value = field_map.pop("Log", "") or field_map.pop("Log completo", "")
     other_pairs = list(field_map.items())
 
     header_meta = []
@@ -397,15 +412,20 @@ def build_containers(title: str, summary: str, fields, footer: str, color: int):
         if secondary_children:
             secondary_children.append(make_separator())
         secondary_children.extend(make_text(chunk) for chunk in split_text(f"## Arquivos alterados\n{file_value}"))
+    if action_value and action_value != "—":
+        if secondary_children:
+            secondary_children.append(make_separator())
+        secondary_children.extend(make_text(chunk) for chunk in split_text(f"## Ação sugerida\n{action_value}"))
     append_container(components, color, secondary_children)
 
     log_children = []
     if command_value and command_value != "—":
         log_children.extend(render_code_block("Comando", command_value))
-    if logs_value and logs_value != "—":
-        if log_children:
-            log_children.append(make_separator())
-        log_children.extend(render_code_block("Últimas linhas", logs_value))
+    for name, value in (("Status git", git_status_value), ("Arquivos locais", local_files_value), ("Stderr", stderr_value), ("Últimas linhas", logs_value), ("Log completo", log_value)):
+        if value and value != "—":
+            if log_children:
+                log_children.append(make_separator())
+            log_children.extend(render_code_block(name, value))
     append_container(components, color, log_children)
 
     total_chars = 0
@@ -443,17 +463,35 @@ case "$WEBHOOK_URL" in
 esac
 
 TMP_RESP="$(mktemp)"
-HTTP_CODE="$({
-  curl -sS \
-    -o "$TMP_RESP" \
-    -w '%{http_code}' \
+
+SEND_ARGS=(
+  -sS
+  -o "$TMP_RESP"
+  -w '%{http_code}'
+)
+
+if [ -n "$ATTACH_FILE" ] && [ -f "$ATTACH_FILE" ] && [ -s "$ATTACH_FILE" ]; then
+  if [ -z "$ATTACH_NAME" ]; then
+    ATTACH_NAME="$(basename "$ATTACH_FILE")"
+  fi
+  # Envio multipart permite anexar o log completo sem estourar o limite visual
+  # dos Components V2. O payload continua indo como JSON seguro.
+  HTTP_CODE="$(curl "${SEND_ARGS[@]}" \
+    --form-string "payload_json=$PAYLOAD_JSON" \
+    -F "files[0]=@$ATTACH_FILE;filename=$ATTACH_NAME;type=text/plain" \
+    "$WEBHOOK_URL")" || {
+    rm -f "$TMP_RESP"
+    exit 1
+  }
+else
+  HTTP_CODE="$(curl "${SEND_ARGS[@]}" \
     -H "Content-Type: application/json" \
     -d "$PAYLOAD_JSON" \
-    "$WEBHOOK_URL"
-})" || {
-  rm -f "$TMP_RESP"
-  exit 1
-}
+    "$WEBHOOK_URL")" || {
+    rm -f "$TMP_RESP"
+    exit 1
+  }
+fi
 
 if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "204" ]; then
   cat "$TMP_RESP" >&2

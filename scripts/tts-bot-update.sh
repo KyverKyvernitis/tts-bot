@@ -23,6 +23,7 @@ PREVIOUS_COMMIT=""
 COMMIT_SUBJECT=""
 UPDATE_APPLIED=0
 ROLLBACK_DONE=0
+MANUAL_FAILURE_ALERT_SENT=0
 
 FRONT_CHANGED=0
 BACK_CHANGED=0
@@ -39,6 +40,7 @@ CHANGED_FILES_RAW=""
 UPDATER_UNIT="tts-bot-updater.service"
 RUN_LOG_FILE="${TMPDIR:-/tmp}/tts-bot-updater.$$.log"
 : > "$RUN_LOG_FILE"
+chmod 0644 "$RUN_LOG_FILE" 2>/dev/null || true
 
 # DevAI integration: log persistente que a DevAI lê via DEVAI_LOG_PATHS.
 # Sem isso a DevAI nunca vê falhas do updater systemd (que loga só pra
@@ -134,7 +136,13 @@ send_warn() {
 }
 
 send_error() {
-  sudo -u ubuntu /home/ubuntu/bot/alert.sh error "$1" "$2" || true
+  local title="${1:-Falha no auto update}"
+  local body="${2:-}"
+  local attach=""
+  if [[ -f "$RUN_LOG_FILE" && -s "$RUN_LOG_FILE" ]]; then
+    attach="$RUN_LOG_FILE"
+  fi
+  sudo -u ubuntu /home/ubuntu/bot/alert.sh error "$title" "$body" "$attach" "tts-bot-updater.log" || true
 }
 
 human_duration() {
@@ -212,6 +220,57 @@ format_changed_files() {
     printf '• nenhum arquivo listado'
   fi
 }
+
+collect_local_tracked_changes() {
+  # Untracked locais como data/, cookies e healthcheck não bloqueiam o merge.
+  # O que bloqueia o git pull são mudanças em arquivos rastreados.
+  sudo -u ubuntu -H git status --short --untracked-files=no 2>/dev/null | trim_alert_text 1800
+}
+
+collect_local_tracked_files() {
+  {
+    sudo -u ubuntu -H git diff --name-only 2>/dev/null || true
+    sudo -u ubuntu -H git diff --name-only --cached 2>/dev/null || true
+  } | awk 'NF && !seen[$0]++' | head -n 40 | sed 's/^/• /' | trim_alert_text 1500
+}
+
+fail_local_changes_before_pull() {
+  local status_text files_text duration body
+  status_text="$(collect_local_tracked_changes)"
+  if [[ -z "${status_text//[[:space:]]/}" ]]; then
+    return 0
+  fi
+
+  MANUAL_FAILURE_ALERT_SENT=1
+  files_text="$(collect_local_tracked_files)"
+  duration="$(human_duration "$SECONDS")"
+
+  body="Resumo: O updater parou antes do git pull porque existem alterações locais em arquivos rastreados. O Git bloqueou o merge para não sobrescrever seus testes na VPS.
+Host: $HOSTNAME
+Branch: $BRANCH
+Serviço: tts-bot-updater
+Serviço afetado: $UPDATER_UNIT
+Commit anterior: $(short_commit "$CURRENT_COMMIT")
+Commit alvo: $(short_commit "$REMOTE_COMMIT")
+Commit: $(short_commit "$CURRENT_COMMIT") → $(short_commit "$REMOTE_COMMIT")
+Update: ${COMMIT_SUBJECT:-sem mensagem}
+Etapa: verificação de alterações locais
+Código: 1
+Rollback: não foi necessário
+Commit sujo: não
+Diagnóstico: existem mudanças locais que seriam sobrescritas pelo merge.
+Arquivos locais:
+${files_text:-nenhum arquivo listado}
+Status git:
+$status_text
+Ação sugerida: Rode git stash push -u -m \"backup-local-before-auto-update-$(date +%F-%H%M%S)\" antes de liberar o updater, ou commit/reverta manualmente as alterações locais.
+Duração: $duration
+Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+
+  send_error "Falha no auto update: alterações locais" "$body"
+  exit 1
+}
+
 
 deploy_bot() {
   STAGE="dependências do bot"
@@ -293,6 +352,12 @@ deploy_frontend() {
 }
 
 deploy_backend() {
+  if (( BACK_CHANGED == 0 && FRONT_CHANGED == 0 )); then
+    BACK_STATUS="não alterado"
+    ACTIVITY_HEALTHCHECK_STATUS="não alterada"
+    return 0
+  fi
+
   if (( BACK_CHANGED == 0 )); then
     BACK_STATUS="não alterado"
   else
@@ -424,6 +489,9 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
 on_error() {
   local exit_code="$?"
+  if (( MANUAL_FAILURE_ALERT_SENT == 1 )); then
+    exit "$exit_code"
+  fi
   local failed_command="${BASH_COMMAND:-desconhecido}"
   FAILED_STAGE="$STAGE"
   register_error_context "$exit_code" "$failed_command"
@@ -503,6 +571,9 @@ if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callk
   CALLKEEPER_CHANGED=1
 fi
 
+STAGE="verificação de alterações locais"
+fail_local_changes_before_pull
+
 logger -t "$LOG_TAG" "Atualizando de $CURRENT_COMMIT para $REMOTE_COMMIT"
 
 STAGE="git pull"
@@ -525,7 +596,9 @@ OVERALL_OK=1
 if (( CALLKEEPER_CHANGED == 1 )) && [[ "$CALLKEEPER_STATUS" != "OK" ]]; then
   OVERALL_OK=0
 fi
-[[ "$ACTIVITY_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_OK=0
+if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
+  [[ "$ACTIVITY_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_OK=0
+fi
 
 if (( OVERALL_OK == 1 )); then
   ALERT_TYPE="success"
