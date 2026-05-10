@@ -145,9 +145,12 @@ class Music(commands.Cog):
             track = batch.tracks[0]
             state = self.router.get_state(ctx.guild.id)
             position = state.queue_size() + (1 if state.current else 0)
-            if was_session_active or position > 1:
+            if was_session_active:
                 await self._reply(ctx, f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`")
             else:
+                # O worker pode pegar a primeira música imediatamente após enqueue,
+                # fazendo ``state.current`` existir antes da resposta do comando. Isso
+                # não significa posição 2; ainda é a faixa que está iniciando agora.
                 await self._reply(ctx, f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`")
 
     @commands.command(name="play", aliases=["tocar", "music", "musica"])

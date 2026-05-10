@@ -905,10 +905,12 @@ class LavalinkBackend:
 
         if is_spotify_track:
             # Links Spotify devem passar pelo LavaSrc antes; se ele não conseguir
-            # espelhar, SoundCloud vira a primeira alternativa tocável.
+            # espelhar, SoundCloud vira a primeira alternativa tocável e YouTube
+            # Music fica apenas como fallback final.
             for value in url_values:
                 self._append_unique_candidate(candidates, value)
             self._append_unique_candidate(candidates, sc_fallback)
+            self._append_unique_candidate(candidates, ytm_fallback)
             return candidates
 
         if is_youtube_track:
@@ -923,6 +925,10 @@ class LavalinkBackend:
         for value in url_values:
             self._append_unique_candidate(candidates, value)
         self._append_unique_candidate(candidates, sc_fallback)
+        # Busca textual normal: SoundCloud é a rota principal, mas YouTube Music
+        # fica como fallback final quando o resultado do SoundCloud carrega metadata
+        # e depois quebra no stream real (404/TrackException).
+        self._append_unique_candidate(candidates, ytm_fallback)
         # Só usa texto cru se não há nenhuma URL/fonte melhor. Texto cru no Wavelink
         # vira YouTube Music por padrão, então não deve passar antes de scsearch.
         if not candidates:
@@ -1123,41 +1129,212 @@ class LavalinkBackend:
             await guild.change_voice_state(channel=channel, self_deaf=True)
         return player
 
-    async def play_track(self, bot, guild: Any, channel: Any, track: Any, *, volume: float = 1.0) -> tuple[Any, Any, dict[str, Any]]:
-        # Primeiro resolve a faixa. Isso força/valida o Pool antes de abrir a
-        # conexão de voz, evitando cair para voice local quando o Pool ainda não
-        # terminou de conectar.
-        playable, meta = await self.find_playable(bot, track)
-        try:
-            player = await self.connect_player(bot, guild, channel)
-        except Exception as exc:
-            message = str(exc).lower()
-            if "no nodes" in message or "connected state" in message or "pool" in message:
-                logger.info("[music/lavalink] Pool sem node no connect_player; reconectando uma vez | guild=%s", getattr(guild, "id", None))
-                await self.ensure_wavelink_pool(bot, force_reconnect=True)
-                player = await self.connect_player(bot, guild, channel, force_reconnect=False)
-            else:
-                raise
-        target_volume = max(0, min(150, int(round(float(volume or 1.0) * 100))))
-        with contextlib.suppress(Exception):
-            await player.set_volume(target_volume)
-        try:
-            await self._play_with_compat(player, playable, volume=target_volume, add_history=False)
-            # Não aceite falso positivo: Lavalink pode receber track/voice e
-            # mesmo assim ficar state.connected=false. Nesse caso o painel dizia
-            # "tocando", mas nenhum áudio saía no Discord. Aguarde a conexão REST
-            # real e reenvie channelId quando o Wavelink antigo não enviar.
-            await self._wait_for_rest_voice_connected(player, guild, channel, timeout=12.0)
-        except Exception:
-            with contextlib.suppress(Exception):
-                stop = getattr(player, "stop", None)
-                if callable(stop):
-                    result = stop()
-                    if asyncio.iscoroutine(result):
-                        await result
-            raise
-        return player, playable, meta
+    async def _resolve_playable_candidate(
+        self,
+        bot,
+        wavelink: Any,
+        track: Any,
+        candidate: str,
+    ) -> tuple[Any | None, dict[str, Any] | None, Any]:
+        search = await self._search_playable_candidate(wavelink, candidate)
+        playable = self._first_playable_from_search(search)
+        if playable is None:
+            logger.debug(
+                "[music/lavalink] busca sem playable extraível | query=%r shape=%s",
+                candidate,
+                self._playable_debug_shape(search),
+            )
+            return None, None, search
+        meta = {
+            "query": candidate,
+            "title": str(getattr(playable, "title", "") or getattr(track, "title", "") or ""),
+            "author": str(getattr(playable, "author", "") or getattr(track, "uploader", "") or ""),
+            "source": str(getattr(playable, "source", "") or getattr(track, "source", "") or ""),
+            "duration": getattr(playable, "length", None) or getattr(playable, "duration", None) or getattr(track, "duration", None),
+            "artwork": str(getattr(playable, "artwork", "") or getattr(track, "thumbnail", "") or ""),
+        }
+        return playable, meta, search
 
+    def _duration_ms_from_meta(self, playable: Any, meta: dict[str, Any] | None = None) -> int:
+        for value in (
+            (meta or {}).get("duration") if isinstance(meta, dict) else None,
+            getattr(playable, "length", None),
+            getattr(playable, "duration", None),
+        ):
+            try:
+                if value is None:
+                    continue
+                numeric = float(value)
+                if numeric <= 0:
+                    continue
+                # yt-dlp/MusicTrack usa segundos; Wavelink geralmente usa ms.
+                if numeric < 10000:
+                    numeric *= 1000.0
+                return max(0, int(numeric))
+            except Exception:
+                continue
+        return 0
+
+    def _rest_payload_has_track(self, payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        track = payload.get("track")
+        if track is None:
+            return False
+        if isinstance(track, dict):
+            if track.get("encoded") or track.get("info") or track.get("pluginInfo"):
+                return True
+            return bool(track)
+        return True
+
+    async def _wait_for_playback_stable(
+        self,
+        player: Any,
+        guild: Any,
+        playable: Any,
+        meta: dict[str, Any] | None,
+        *,
+        timeout: float = 2.2,
+    ) -> None:
+        """Garante que o track não caiu imediatamente após o start.
+
+        O Lavalink pode carregar metadata e disparar o play, mas algumas fontes
+        quebram somente quando o stream real é aberto (ex.: SoundCloud 404). Sem
+        essa confirmação, o painel vira "tocando" e o worker trata a faixa como
+        concluída naturalmente em menos de 1 segundo.
+        """
+        duration_ms = self._duration_ms_from_meta(playable, meta)
+        deadline = asyncio.get_running_loop().time() + max(0.8, float(timeout or 2.2))
+        started_at = asyncio.get_running_loop().time()
+        saw_track = False
+        last_payload: dict[str, Any] | None = None
+        last_error: Exception | None = None
+
+        while True:
+            payload: dict[str, Any] | None = None
+            with contextlib.suppress(Exception):
+                payload = await self._get_rest_player(player, guild)
+            if payload is not None:
+                last_payload = payload
+
+            player_current = self._player_current_track(player)
+            rest_has_track = self._rest_payload_has_track(payload)
+            playing_or_paused = self._player_bool(player, "playing", "is_playing", "paused", "is_paused")
+            has_track_now = bool(player_current is not None or rest_has_track or playing_or_paused)
+            if has_track_now:
+                saw_track = True
+            else:
+                elapsed = asyncio.get_running_loop().time() - started_at
+                # Para faixas de música normais, sumir nos primeiros segundos é
+                # quase sempre TrackException/stream quebrado, não fim natural.
+                if saw_track or duration_ms >= 8000 or elapsed >= 0.8:
+                    state = (last_payload or {}).get("state") if isinstance(last_payload, dict) else None
+                    last_error = RuntimeError(
+                        "Lavalink iniciou a faixa, mas o player perdeu o track logo em seguida "
+                        f"(duration_ms={duration_ms}, state={state!r})."
+                    )
+                    break
+
+            if asyncio.get_running_loop().time() >= deadline:
+                return
+            await asyncio.sleep(0.25)
+
+        raise last_error or RuntimeError("Lavalink perdeu o track logo após iniciar o playback.")
+
+    async def _stop_player_quietly(self, player: Any | None) -> None:
+        if player is None:
+            return
+        with contextlib.suppress(Exception):
+            stop = getattr(player, "stop", None)
+            if callable(stop):
+                result = stop()
+                if asyncio.iscoroutine(result):
+                    await result
+
+    async def play_track(self, bot, guild: Any, channel: Any, track: Any, *, volume: float = 1.0) -> tuple[Any, Any, dict[str, Any]]:
+        # Resolve e toca cada candidato separadamente. Isso permite fallback real
+        # quando uma fonte carrega metadata, mas quebra só no stream/playback.
+        candidates = self._playable_candidates(track)
+        if not candidates:
+            raise RuntimeError("Lavalink não encontrou uma fonte candidata para esta música.")
+
+        wavelink, _node = await self.ensure_wavelink_pool(bot)
+        reconnected_after_pool_error = False
+        last_error: Exception | None = None
+        player: Any | None = None
+        target_volume = max(0, min(150, int(round(float(volume or 1.0) * 100))))
+
+        for candidate in candidates:
+            candidate = str(candidate or "").strip()
+            if not candidate:
+                continue
+            playable = None
+            meta: dict[str, Any] | None = None
+            try:
+                try:
+                    playable, meta, _search = await self._resolve_playable_candidate(bot, wavelink, track, candidate)
+                except Exception as pool_exc:
+                    message = str(pool_exc).lower()
+                    if (not reconnected_after_pool_error) and ("no nodes" in message or "connected state" in message or "pool" in message):
+                        reconnected_after_pool_error = True
+                        logger.info(
+                            "[music/lavalink] Pool Wavelink sem node conectado durante busca; reconectando uma vez | query=%r",
+                            candidate,
+                        )
+                        wavelink, _node = await self.ensure_wavelink_pool(bot, force_reconnect=True)
+                        playable, meta, _search = await self._resolve_playable_candidate(bot, wavelink, track, candidate)
+                    else:
+                        raise
+
+                if playable is None or meta is None:
+                    continue
+
+                try:
+                    player = await self.connect_player(bot, guild, channel)
+                except Exception as exc:
+                    message = str(exc).lower()
+                    if "no nodes" in message or "connected state" in message or "pool" in message:
+                        logger.info("[music/lavalink] Pool sem node no connect_player; reconectando uma vez | guild=%s", getattr(guild, "id", None))
+                        await self.ensure_wavelink_pool(bot, force_reconnect=True)
+                        player = await self.connect_player(bot, guild, channel, force_reconnect=False)
+                    else:
+                        raise
+
+                with contextlib.suppress(Exception):
+                    await player.set_volume(target_volume)
+                try:
+                    await self._play_with_compat(player, playable, volume=target_volume, add_history=False)
+                    # Não aceite falso positivo: Lavalink pode receber track/voice e
+                    # mesmo assim ficar state.connected=false. Nesse caso o painel dizia
+                    # "tocando", mas nenhum áudio saía no Discord. Aguarde a conexão REST
+                    # real e reenvie channelId quando o Wavelink antigo não enviar.
+                    await self._wait_for_rest_voice_connected(player, guild, channel, timeout=12.0)
+                    # Confirma também que o stream não caiu logo após abrir. Isso pega
+                    # SoundCloud 404/TrackException e libera tentativa no próximo candidato.
+                    await self._wait_for_playback_stable(player, guild, playable, meta, timeout=2.2)
+                except Exception:
+                    await self._stop_player_quietly(player)
+                    raise
+
+                if str(meta.get("query") or "") != candidate:
+                    meta["query"] = candidate
+                return player, playable, meta
+
+            except Exception as exc:
+                last_error = exc
+                await self._stop_player_quietly(player)
+                logger.warning(
+                    "[music/lavalink] candidato falhou; tentando próximo fallback | guild=%s query=%r track=%r erro=%s",
+                    getattr(guild, "id", None),
+                    candidate,
+                    getattr(track, "title", ""),
+                    exc,
+                )
+                continue
+
+        if last_error is not None:
+            raise RuntimeError(f"Lavalink não conseguiu tocar nenhuma fonte candidata: {last_error.__class__.__name__}: {last_error}") from last_error
+        raise RuntimeError("Lavalink não encontrou uma faixa tocável para esta música.")
 
     def _is_wavelink_player(self, player: Any) -> bool:
         if player is None:
