@@ -6,11 +6,84 @@ from typing import Optional
 
 import discord
 
+import config
+
 from .errors import MusicExtractionError
-from .models import MusicTrack
+from .models import ExtractedBatch, MusicTrack
+from .providers import describe_url
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
 QUEUE_PAGE_SIZE = 8
+
+
+_LAVALINK_SEARCH_PREFIXES = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
+
+
+def _is_lavalink_search_request(query: str) -> bool:
+    raw = (query or "").strip()
+    if not raw:
+        return False
+    lower = raw.lower()
+    if lower.startswith(_LAVALINK_SEARCH_PREFIXES):
+        return True
+    return not describe_url(raw).is_url
+
+
+def _lavalink_batch_for_direct_query(query: str, *, requester_id: int, requester_name: str) -> ExtractedBatch:
+    raw = (query or "").strip()
+    profile = describe_url(raw)
+    if profile.is_url:
+        source = profile.platform or "lavalink"
+        title = "YouTube" if profile.is_youtube else (f"{source.title()} link" if source != "lavalink" else "Link")
+        identifier = profile.canonical or raw
+        webpage_url = profile.canonical or raw
+    else:
+        # Só é usado para fallback defensivo. Texto normal deve passar por busca
+        # com seleção, não por autoplay do primeiro resultado.
+        identifier = f"ytsearch:{raw}"
+        title = raw or identifier
+        source = "ytsearch"
+        webpage_url = ""
+    track = MusicTrack(
+        title=title or identifier or "Música",
+        webpage_url=webpage_url,
+        original_url=identifier,
+        requester_id=int(requester_id or 0),
+        requester_name=requester_name or "",
+        source=source or "lavalink",
+        extractor="lavalink",
+    )
+    return ExtractedBatch(tracks=[track], query=identifier, is_playlist=False)
+
+
+async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, requester_id: int, requester_name: str) -> tuple[ExtractedBatch, bool]:
+    """Resolve o input do modal respeitando o backend ativo.
+
+    Em modo NodeLink/Lavalink, links diretos viram faixa leve para o node
+    resolver no playback. Texto normal/ytsearch consulta o node e retorna
+    múltiplos resultados para seleção, sem acionar yt-dlp local.
+    """
+    backends = getattr(router, "backends", None)
+    should_use_lavalink = getattr(backends, "should_use_lavalink_real", None)
+    if callable(should_use_lavalink) and should_use_lavalink(guild_id):
+        is_search = _is_lavalink_search_request(query)
+        if is_search:
+            batch = await backends.search_lavalink_tracks(
+                query,
+                requester_id=requester_id,
+                requester_name=requester_name,
+                guild_id=guild_id,
+                limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+            )
+            return batch, True
+        return _lavalink_batch_for_direct_query(query, requester_id=requester_id, requester_name=requester_name), False
+
+    batch = await router.extractor.extract(
+        query,
+        requester_id=requester_id,
+        requester_name=requester_name,
+    )
+    return batch, False
 
 
 def _bar(percent: float, *, size: int = 12) -> str:
@@ -428,11 +501,14 @@ class AddSongModal(discord.ui.Modal):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         query = str(self.query.value).strip()
+        requester_name = getattr(interaction.user, "display_name", str(interaction.user))
         try:
-            batch = await self.router.extractor.extract(
+            batch, force_selection = await _extract_batch_for_add_modal(
+                self.router,
+                guild.id,
                 query,
                 requester_id=interaction.user.id,
-                requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
+                requester_name=requester_name,
             )
         except MusicExtractionError as exc:
             await interaction.followup.send(f"`⚠️` {exc}", ephemeral=True)
@@ -445,17 +521,21 @@ class AddSongModal(discord.ui.Modal):
             await interaction.followup.send("`📭` Não encontrei nada tocável.", ephemeral=True)
             return
 
-        if not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1:
+        should_open_selection = bool(
+            force_selection
+            or (not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1)
+        )
+        if should_open_selection:
             embed = discord.Embed(
                 title="🔎 Escolha a música",
-                description="Selecione um dos resultados abaixo para adicionar ao queue.",
+                description="Selecione um dos resultados abaixo. Nada será adicionado ao queue até você escolher.",
                 color=discord.Color.blurple(),
             )
-            for idx, track in enumerate(batch.tracks[:5], start=1):
+            for idx, track in enumerate(batch.tracks[:10], start=1):
                 embed.add_field(name=f"{idx}. {track.short_title}", value=f"{track.uploader or track.source or 'resultado'} • `{track.duration_label}`", inline=False)
             await interaction.followup.send(
                 embed=embed,
-                view=SearchResultView(self.router, guild.id, getattr(voice_channel, "id", 0), getattr(text_channel, "id", 0), batch.tracks[:5], interaction.user.id),
+                view=SearchResultView(self.router, guild.id, getattr(voice_channel, "id", 0), getattr(text_channel, "id", 0), batch.tracks[:10], interaction.user.id),
                 ephemeral=True,
             )
             return

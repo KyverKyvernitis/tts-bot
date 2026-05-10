@@ -1982,6 +1982,12 @@ class AudioRouter:
         return max(delay, remaining - MUSIC_PREFETCH_BEFORE_END_SECONDS)
 
     def _start_prefetch_next(self, guild_id: int, state: MusicGuildState) -> None:
+        with contextlib.suppress(Exception):
+            if self.backends.should_use_lavalink_real(guild_id):
+                # Em modo NodeLink/Lavalink real, a próxima faixa deve ser resolvida
+                # pelo node no momento do playback. Prefetch local chamaria yt-dlp e
+                # poderia bloquear o event loop/voice heartbeat.
+                return
         if not MUSIC_PREFETCH_NEXT or not self._has_pending_track(state):
             return
         if MUSIC_MAX_GLOBAL_PREFETCH <= 0:
@@ -2223,6 +2229,14 @@ class AudioRouter:
             track.title = str(meta.get("title") or track.title or "Música sem título")
             track.uploader = str(meta.get("author") or track.uploader or "")
             track.source = str(meta.get("source") or track.source or "lavalink")
+            raw_duration = meta.get("duration")
+            with contextlib.suppress(Exception):
+                numeric_duration = float(raw_duration)
+                if numeric_duration > 0:
+                    # Wavelink/NodeLink geralmente informa duração em ms; MusicTrack
+                    # usa segundos. Atualizar isso impede painel final com
+                    # "desconhecida" depois que o node já resolveu a faixa.
+                    track.duration = numeric_duration / 1000.0 if numeric_duration >= 10000 else numeric_duration
             artwork = str(meta.get("artwork") or "")
             if artwork:
                 track.thumbnail = artwork

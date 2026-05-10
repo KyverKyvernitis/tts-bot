@@ -1357,6 +1357,23 @@ class TTSAudioMixin:
             state.last_channel_id = int(lavalink_channel_id or item.channel_id)
             logger.debug("[tts_voice] TTS encaminhado para reprodução via Lavalink | guild=%s channel=%s", guild.id, state.last_channel_id)
             return vc
+
+        lavalink_voice_guard = getattr(self, "_lavalink_music_should_own_voice", None)
+        if callable(lavalink_voice_guard):
+            try:
+                if lavalink_voice_guard(guild):
+                    now = time.monotonic()
+                    if now >= float(getattr(state, "lavalink_ignore_logged_until", 0.0) or 0.0):
+                        logger.info(
+                            "[tts_voice] TTS local ignorado porque NodeLink/Lavalink está assumindo a voz | guild=%s tts_channel=%s",
+                            guild.id,
+                            item.channel_id,
+                        )
+                        state.lavalink_ignore_logged_until = now + 20.0
+                    return None
+            except Exception:
+                logger.debug("[tts_voice] falha ao consultar guarda Lavalink antes do TTS local", exc_info=True)
+
         is_receive_client = bool(vc is not None and hasattr(vc, "listen") and hasattr(vc, "is_listening"))
         if vc is not None and self._voice_client_is_connected(vc):
             if is_receive_client:

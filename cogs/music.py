@@ -209,13 +209,17 @@ class Music(commands.Cog):
             await self._reply(ctx, "`📭` Não encontrei nada tocável.")
             return
 
-        if not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1:
+        should_open_selection = bool(
+            (self._is_lavalink_real_enabled(ctx.guild.id) and self._is_lavalink_search_request(query))
+            or (not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1)
+        )
+        if should_open_selection:
             embed = discord.Embed(
                 title="🔎 Escolha a música",
-                description="Selecione um dos resultados abaixo para adicionar ao queue.",
+                description="Selecione um dos resultados abaixo. Nada será adicionado ao queue até você escolher.",
                 color=discord.Color.blurple(),
             )
-            for idx, track in enumerate(batch.tracks[:5], start=1):
+            for idx, track in enumerate(batch.tracks[:10], start=1):
                 embed.add_field(
                     name=f"{idx}. {track.short_title}",
                     value=f"{track.uploader or track.source or 'resultado'} • `{track.duration_label}`",
@@ -224,7 +228,7 @@ class Music(commands.Cog):
             await self._reply(
                 ctx,
                 embed=embed,
-                view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:5], ctx.author.id),
+                view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id),
             )
             return
 
