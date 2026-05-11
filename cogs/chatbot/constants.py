@@ -67,7 +67,11 @@ MAX_TEMPERATURE = 1.5
 # Modelos preferidos por provider. Primeiro da lista é o default.
 # Llama 3.3 70B é o mais capaz no Groq free; llama 3.1 8B é fallback rápido.
 GROQ_MODELS = ("llama-3.3-70b-versatile", "llama-3.1-8b-instant")
-GEMINI_MODELS = ("gemini-2.0-flash", "gemini-2.0-flash-lite")
+
+# Fallback Gemini para quando Groq rate-limitar.
+# Evita os IDs antigos 2.0 que estavam retornando HTTP 404 na API atual.
+# Mantenha modelos estáveis em produção; previews ficam fora da cadeia padrão.
+GEMINI_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
 
 # Modelo de visão (aceita imagens via image_url ou base64). Usado só quando
 # a mensagem tem imagem — pra texto puro, os modelos acima são mais capazes
