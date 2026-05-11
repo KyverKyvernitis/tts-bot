@@ -264,18 +264,26 @@ def _lavalink_tests(cfg: dict[str, Any]) -> str:
     info = _http_json(f"{base_url}/v4/info", password=password, timeout=18.0)
     lines.append("/v4/info:")
     lines.append(json.dumps(_safe_report_obj(info), ensure_ascii=False, indent=2))
+    mirror_raw = os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "scsearch") or "scsearch"
+    mirror_prefix = re.split(r"[,;\s]+", mirror_raw.strip())[0].strip().removesuffix(":") or "scsearch"
     tests = [
         ("MP3 HTTP direto", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"),
         ("SoundCloud busca", "scsearch:megalovania"),
         ("SoundCloud link", "https://soundcloud.com/tobyfox-music/megalovania"),
-        ("Spotify busca/LavaSrc", "spsearch:505 arctic monkeys"),
-        ("YouTube direto no Lavalink (deveria ficar fora)", "https://www.youtube.com/watch?v=qU9mHegkTc4"),
+        (f"Mirror LavaSrc configurado ({mirror_prefix})", f"{mirror_prefix}:505 arctic monkeys"),
     ]
     for label, identifier in tests:
         enc = urllib.parse.quote(identifier, safe="")
         result = _http_json(f"{base_url}/v4/loadtracks?identifier={enc}", password=password, timeout=30.0)
         lines.append(f"\n{label} -> {identifier}:")
         lines.append(json.dumps(_safe_report_obj(_summarize_loadtracks(result)), ensure_ascii=False, indent=2))
+    lines.append(
+        "\nSpotify direto via spsearch: omitido. No fluxo atual, Spotify é resolvido pela API do bot "
+        "e depois espelhado pelo mirror configurado; se o application.yml estiver com spotify:false, spsearch vazio é esperado."
+    )
+    lines.append(
+        "\nYouTube direto no Lavalink: omitido. No fluxo atual, YouTube fica fora do Lavalink e é validado no teste yt-dlp local com cookies."
+    )
     return "\n".join(lines)
 
 
@@ -341,9 +349,9 @@ def _local_log_tail() -> str:
 
 def _journalctl_tail() -> str:
     commands = [
-        ["journalctl", "-u", "tts-bot.service", "--since", "20 minutes ago", "--no-pager", "-o", "cat"],
-        ["journalctl", "-u", "lavalink.service", "--since", "20 minutes ago", "--no-pager", "-o", "cat"],
-        ["journalctl", "-u", "nodelink.service", "--since", "20 minutes ago", "--no-pager", "-o", "cat"],
+        ["journalctl", "-u", "tts-bot.service", "--since", "20 minutes ago", "-n", "450", "--no-pager", "-o", "cat"],
+        ["journalctl", "-u", "lavalink.service", "--since", "20 minutes ago", "-n", "450", "--no-pager", "-o", "cat"],
+        ["journalctl", "-u", "nodelink.service", "--since", "20 minutes ago", "-n", "220", "--no-pager", "-o", "cat"],
     ]
     parts = []
     for cmd in commands:

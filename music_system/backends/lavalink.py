@@ -1368,10 +1368,42 @@ class LavalinkBackend:
     async def _search_playable_candidate(self, wavelink: Any, candidate: str) -> Any:
         prefix, body = self._split_lavalink_search_prefix(candidate)
         if prefix:
-            # Para NodeLink/Lavalink, preserve o identifier exatamente como o node
-            # aceita via REST (/loadtracks?identifier=ytsearch:termo). Usar
-            # ``source=TrackSource`` primeiro pode mudar o client/fonte escolhido e
-            # voltar a cair em erros como ANDROID_VR Missing videoDetails.
+            # Wavelink 3.5 aplica um default search próprio quando recebe uma
+            # string prefixada em Playable.search(). Em alguns nodes isso vira
+            # identificadores quebrados como ``ytmsearch:scsearch:...``. Para
+            # mirrors LavaSrc não-YouTube, use o TrackSource primeiro; só use a
+            # forma direta para buscas YouTube explícitas/legadas.
+            source_first_prefixes = {"scsearch", "spsearch", "amsearch", "dzsearch"}
+            if prefix in source_first_prefixes:
+                errors: list[Exception] = []
+                for source in self._track_source_candidates(wavelink, prefix):
+                    try:
+                        return await wavelink.Playable.search(body, source=source)
+                    except TypeError as exc:
+                        errors.append(exc)
+                        continue
+                    except Exception as exc:
+                        errors.append(exc)
+                        # Se o source existe mas a fonte falhou, esse é o erro
+                        # verdadeiro do node. Não tente direct string, pois isso
+                        # reintroduz ytmsearch:scsearch.
+                        raise
+
+                pool = getattr(wavelink, "Pool", None)
+                fetch_tracks = getattr(pool, "fetch_tracks", None) if pool is not None else None
+                if callable(fetch_tracks):
+                    try:
+                        return await fetch_tracks(f"{prefix}:{body}")
+                    except Exception as exc:
+                        errors.append(exc)
+                        raise
+
+                if errors:
+                    raise errors[-1]
+                raise RuntimeError(f"Wavelink não expôs TrackSource compatível para {prefix}.")
+
+            # Prefixos YouTube/YouTube Music ficam como compatibilidade legada.
+            # O fluxo normal do bot não deve usar YouTube pelo Lavalink.
             direct_error: Exception | None = None
             try:
                 return await wavelink.Playable.search(f"{prefix}:{body}")
