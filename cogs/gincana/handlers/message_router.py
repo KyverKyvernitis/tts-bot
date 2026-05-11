@@ -174,7 +174,11 @@ class GincanaMessageRouterMixin:
 
             if trigger_voice_channel is not None:
                 try:
-                    await self._play_pinto_sfx(message.guild, trigger_voice_channel)
+                    await self._play_disconnect_trigger_sfx(
+                        message.guild,
+                        trigger_voice_channel,
+                        target_count=len(targets),
+                    )
                 except Exception:
                     pass
                 try:

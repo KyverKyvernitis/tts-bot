@@ -31,6 +31,11 @@ class GincanaAudioMixin:
             return self._sfx_path("buckshot.mp3")
         def _pinto_sfx_path(self) -> Path:
             return self._sfx_path("pinto.mp3")
+        def _mass_disconnect_sfx_path(self) -> Path:
+            preferred = self._sfx_path("metralhadora.mp3")
+            if preferred.exists():
+                return preferred
+            return self._sfx_path("machine_gun.mp3")
         def _roleta_sfx_path(self) -> Path:
             return self._sfx_path("roleta777.mp3")
         async def _play_sfx_file(self, guild: discord.Guild, voice_channel: discord.VoiceChannel, sfx_path: Path) -> bool:
@@ -76,6 +81,11 @@ class GincanaAudioMixin:
             return await self._play_sfx_file(guild, voice_channel, self._buckshot_sfx_path())
         async def _play_pinto_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
             return await self._play_sfx_file(guild, voice_channel, self._pinto_sfx_path())
+        async def _play_disconnect_trigger_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel, *, target_count: int = 1) -> bool:
+            sfx_path = self._mass_disconnect_sfx_path() if int(target_count or 0) >= 3 else self._pinto_sfx_path()
+            if int(target_count or 0) >= 3 and not sfx_path.exists():
+                sfx_path = self._pinto_sfx_path()
+            return await self._play_sfx_file(guild, voice_channel, sfx_path)
         async def _play_roleta_sfx(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
             return await self._play_sfx_file(guild, voice_channel, self._roleta_sfx_path())
         async def _react_with_emoji(self, message: discord.Message, emoji: str, *, keep: bool, delay: float = 3.0):
