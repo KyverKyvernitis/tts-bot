@@ -686,6 +686,66 @@ class MusicExtractor:
             ) from last_error
         raise MusicExtractionError("Não encontrei resultados tocáveis. Tente pesquisar com nome e artista.")
 
+
+    async def search_youtube(self, query: str, *, requester_id: int, requester_name: str = "") -> ExtractedBatch:
+        """Busca leve no YouTube para UI/seleção, sem resolver stream.
+
+        O YouTube não deve ser tocado pelo Lavalink. Esta busca usa yt-dlp
+        apenas para listar resultados; quando o usuário escolher, o player
+        tenta espelhar no LavaSrc/SoundCloud/Spotify e cai para yt-dlp local
+        se não houver candidato confiável.
+        """
+        query = re.sub(r"\s+", " ", (query or "").strip())
+        if not query:
+            raise MusicExtractionError("Pesquisa vazia.")
+        lower = query.lower()
+        for prefix in ("ytsearch:", "ytmsearch:"):
+            if lower.startswith(prefix):
+                query = query[len(prefix):].strip()
+                break
+        query = re.sub(r"^(?:ytsearch|ytmsearch)\d*:\s*", "", query, flags=re.IGNORECASE).strip()
+        if not query:
+            raise MusicExtractionError("Pesquisa vazia.")
+
+        cache_key = "ytsearch:" + compact_key(query)
+        cached = self._cache_get_tracks(self._search_cache, cache_key, requester_id=requester_id, requester_name=requester_name, original_url=query)
+        if cached:
+            return ExtractedBatch(tracks=cached[: self.search_results], query=query, is_playlist=False)
+
+        last_error: Exception | None = None
+        for extractor_query, flat in (
+            (f"ytsearch{self.search_results}:{query}", True),
+            (f"ytsearch{self.search_results}:{query}", False),
+        ):
+            try:
+                info = await self._run_extract(extractor_query, extract_flat=flat, playlist=True)
+                entries = [entry for entry in (info.get("entries") or []) if entry]
+                tracks = [
+                    self._track_from_info(entry, requester_id=requester_id, requester_name=requester_name, original_url=query)
+                    for entry in entries
+                ]
+                tracks = self._dedupe_tracks([track for track in tracks if track.webpage_url or track.stream_url])
+                if tracks:
+                    for track in tracks:
+                        if not track.source:
+                            track.source = "youtube"
+                        # Marca claramente que veio de pesquisa. Isso permite
+                        # mirror LavaSrc antes do fallback local, diferente de
+                        # link direto do YouTube, que vai direto para yt-dlp.
+                        if not track.original_url:
+                            track.original_url = query
+                    tracks = tracks[: self.search_results]
+                    self._cache_put_tracks(self._search_cache, cache_key, tracks)
+                    return ExtractedBatch(tracks=tracks, query=query, is_playlist=False)
+            except Exception as exc:
+                last_error = exc
+                logger.debug("[music] busca YouTube falhou | query=%r flat=%s", query, flat, exc_info=True)
+
+        raise MusicExtractionError(
+            "Não encontrei resultados no YouTube. Tente pesquisar com nome e artista.",
+            detail=str(last_error or ""),
+        )
+
     async def search_one(self, query: str, *, requester_id: int, requester_name: str = "", original_url: str = "") -> MusicTrack:
         """Busca uma única faixa. Usado por links de track Spotify/Deezer/Apple.
 

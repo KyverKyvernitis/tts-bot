@@ -56,16 +56,42 @@ def _lavalink_batch_for_direct_query(query: str, *, requester_id: int, requester
     return ExtractedBatch(tracks=[track], query=identifier, is_playlist=False)
 
 
+def _is_youtube_link(query: str) -> bool:
+    return bool(describe_url((query or "").strip()).is_youtube)
+
+
+def _is_youtube_text_search(query: str) -> bool:
+    raw = (query or "").strip()
+    if not raw:
+        return False
+    lower = raw.lower()
+    if lower.startswith(("ytsearch:", "ytmsearch:")):
+        return True
+    if lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:")):
+        return False
+    return not describe_url(raw).is_url
+
+
 async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, requester_id: int, requester_name: str) -> tuple[ExtractedBatch, bool]:
     """Resolve o input do modal respeitando o backend ativo.
 
-    Em modo NodeLink/Lavalink, links diretos viram faixa leve para o node
-    resolver no playback. Texto normal/ytsearch consulta o node e retorna
-    múltiplos resultados para seleção, sem acionar yt-dlp local.
+    SoundCloud/Spotify ficam no Lavalink/LavaSrc. YouTube direto vai para
+    yt-dlp local. Texto normal/ytsearch usa yt-dlp só para listar resultados;
+    ao tocar, o router tenta mirror LavaSrc e cai para local se não bater.
     """
     backends = getattr(router, "backends", None)
     should_use_lavalink = getattr(backends, "should_use_lavalink_real", None)
-    if callable(should_use_lavalink) and should_use_lavalink(guild_id):
+    lavalink_active = bool(callable(should_use_lavalink) and should_use_lavalink(guild_id))
+
+    if lavalink_active and _is_youtube_text_search(query):
+        batch = await router.extractor.search_youtube(
+            query,
+            requester_id=requester_id,
+            requester_name=requester_name,
+        )
+        return batch, True
+
+    if lavalink_active and not _is_youtube_link(query):
         is_search = _is_lavalink_search_request(query)
         if is_search:
             batch = await backends.search_lavalink_tracks(
@@ -449,6 +475,13 @@ class SearchSelect(discord.ui.Select):
             or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
         )
         added, dropped = await self.router.enqueue(guild, voice_channel, text_channel, [track])
+        if added <= 0:
+            await interaction.response.edit_message(
+                content="`⚠️` Não adicionei nada: essa música já está no queue/tocando ou o queue está cheio.",
+                embed=None,
+                view=None,
+            )
+            return
         state = self.router.get_state(self.guild_id)
         position = state.queue_size() + (1 if state.current else 0)
         if was_session_active or position > 1:
@@ -456,7 +489,7 @@ class SearchSelect(discord.ui.Select):
         else:
             msg = f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
         if dropped:
-            msg += "\n`⚠️` O queue está cheio; alguns itens não entraram."
+            msg += "\n`⚠️` Alguns itens extras não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
         await interaction.response.edit_message(content=msg, embed=None, view=None)
 
 
@@ -535,7 +568,10 @@ class AddSongModal(discord.ui.Modal):
         if should_open_selection:
             embed = discord.Embed(
                 title="🔎 Escolha a música",
-                description="Selecione um dos resultados abaixo. Nada será adicionado ao queue até você escolher.",
+                description=(
+                    "Selecione um dos resultados abaixo. Nada será adicionado ao queue até você escolher. "
+                    "Resultados do YouTube tentam um espelho no LavaSrc e caem para o player local se necessário."
+                ),
                 color=discord.Color.blurple(),
             )
             for idx, track in enumerate(batch.tracks[:10], start=1):
@@ -554,6 +590,9 @@ class AddSongModal(discord.ui.Modal):
             or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
         )
         added, dropped = await self.router.enqueue(guild, voice_channel, text_channel, batch.tracks)
+        if added <= 0:
+            await interaction.followup.send("`⚠️` Não adicionei nada: tudo já estava no queue/tocando ou o queue está cheio.", ephemeral=True)
+            return
         if batch.is_playlist:
             msg = f"`📑` **Playlist adicionada:** `{added}` música(s)"
             if batch.playlist_title:
@@ -567,8 +606,8 @@ class AddSongModal(discord.ui.Modal):
                 msg = f"`🎶` **Adicionada ao queue:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}` • posição `{max(1, position)}`"
             else:
                 msg = f"`🎧` **Preparando para tocar:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}`"
-        if dropped:
-            msg += f"\n`⚠️` `{dropped}` item(ns) não entraram porque o queue está cheio."
+        if dropped and len(batch.tracks) > added:
+            msg += f"\n`⚠️` `{dropped}` item(ns) não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
         await interaction.followup.send(msg, ephemeral=True)
 
 

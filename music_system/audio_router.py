@@ -21,6 +21,7 @@ from .api_providers import compact_key
 from .extractor import MusicExtractor
 from .errors import MusicExtractionError, MusicPlaybackError
 from .models import LoopMode, MusicTrack
+from .providers import describe_url
 from .backends import MusicBackendManager
 
 logger = logging.getLogger(__name__)
@@ -2128,7 +2129,7 @@ class AudioRouter:
                 except Exception as exc:
                     if not state.skip_requested and not state.stop_requested:
                         logger.warning("[music] Falha ao tocar | guild=%s track=%r erro=%s", guild_id, track.title, exc)
-                        await self._send_text(guild, state, f"⚠️ Não consegui tocar **{track.short_title}**. Pulando para a próxima.")
+                        await self._send_text(guild, state, f"⚠️ Não consegui iniciar **{track.short_title}**. Se houver outra música no queue, vou tentar a próxima.")
                 finally:
                     state.current_source = None
                     state.current_resolve_task = None
@@ -2189,6 +2190,41 @@ class AudioRouter:
                 await self._restore_auto_bitrate_for_state(guild, state, reason=restore_reason)
                 await self._restore_voice_status_for_state(guild, state, reason=restore_reason)
                 self._schedule_panel_update(guild_id, create=False)
+
+    def _track_is_direct_youtube_request(self, track: MusicTrack) -> bool:
+        """Link direto do YouTube sempre toca pelo yt-dlp local.
+
+        Resultados de pesquisa do YouTube têm webpage_url do YouTube, mas o
+        original_url costuma ser o texto pesquisado; esses ainda podem tentar
+        mirror LavaSrc antes do fallback local.
+        """
+        try:
+            original = describe_url(str(getattr(track, "original_url", "") or ""))
+            if original.is_youtube:
+                return True
+        except Exception:
+            return False
+        return False
+
+    async def _disconnect_lavalink_before_local_fallback(self, guild: discord.Guild, state: MusicGuildState, *, reason: str = "fallback") -> None:
+        current_vc = guild.voice_client
+        if not self._is_lavalink_voice_client(current_vc):
+            return
+        self._mark_lavalink_transition(state, seconds=10.0)
+        self._mark_internal_voice_disconnect(guild.id, seconds=10.0)
+        with contextlib.suppress(Exception):
+            await self._vc_stop_audio(current_vc)
+        with contextlib.suppress(Exception):
+            stopper = getattr(current_vc, "stop", None)
+            if callable(stopper):
+                result = stopper()
+                if asyncio.iscoroutine(result):
+                    await result
+        with contextlib.suppress(Exception):
+            await current_vc.disconnect(force=True)
+        # Dá um pequeno tempo para o gateway liberar a sessão de voz antes do
+        # VoiceClient local tentar entrar, evitando Already connected/timeout.
+        await asyncio.sleep(0.8)
 
     async def _play_track_lavalink(
         self,
@@ -2295,7 +2331,16 @@ class AudioRouter:
         # mesma música continuam editando esse painel.
         await self.update_panel(guild.id, create=True, repost=True)
 
-        if self.backends.should_use_lavalink_real(guild.id):
+        use_lavalink_real = bool(self.backends.should_use_lavalink_real(guild.id))
+        if use_lavalink_real and self._track_is_direct_youtube_request(track):
+            logger.info(
+                "[music] YouTube direto usando player local yt-dlp | guild=%s track=%r",
+                guild.id,
+                getattr(track, "title", ""),
+            )
+            use_lavalink_real = False
+
+        if use_lavalink_real:
             try:
                 return await self._play_track_lavalink(guild, state, track, channel)
             except Exception as exc:
@@ -2337,11 +2382,7 @@ class AudioRouter:
                 state.current_lavalink_player = None
                 state.current_lavalink_playable = None
                 state.current_status = "resolving"
-                current_vc = guild.voice_client
-                if self._is_lavalink_voice_client(current_vc) and not self._vc_is_playing_or_paused(current_vc):
-                    with contextlib.suppress(Exception):
-                        self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
-                        await current_vc.disconnect(force=False)
+                await self._disconnect_lavalink_before_local_fallback(guild, state, reason="lavalink_failed")
 
         vc = await self._ensure_voice(guild, channel, state=state)
         if vc is None:

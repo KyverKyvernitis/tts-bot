@@ -5,7 +5,9 @@ import contextlib
 import importlib.util
 import json
 import logging
+import re
 import time
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -876,6 +878,73 @@ class LavalinkBackend:
         }
         return text in generic or text.endswith(" link")
 
+    def _plain_match_text(self, value: object) -> str:
+        text = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())
+        return " ".join(text.split())
+
+    def _spotify_fallback_query(self, track: Any, *, fallback_query: str = "") -> str:
+        query = self._metadata_search_query(track, fallback_query=fallback_query)
+        return self._search_candidate("spsearch", query) if query else ""
+
+    def _is_direct_youtube_track(self, track: Any, *, fallback_query: str = "") -> bool:
+        original_url = str(getattr(track, "original_url", "") or "").strip()
+        fallback_query = str(fallback_query or "").strip()
+        return bool(self._is_youtube_value(original_url) or self._is_youtube_value(fallback_query))
+
+    def _requires_strict_mirror_match(self, track: Any, *, candidate: str = "") -> bool:
+        source = str(getattr(track, "source", "") or getattr(track, "extractor", "") or "").strip().lower()
+        return bool(
+            source in {"youtube", "yt", "ytsearch", "ytmsearch"}
+            or self._is_youtube_value(str(getattr(track, "webpage_url", "") or ""))
+            or str(candidate or "").lower().startswith(("spsearch:", "scsearch:"))
+        )
+
+    def _duration_seconds_from_meta(self, value: Any) -> float:
+        try:
+            numeric = float(value or 0)
+        except Exception:
+            return 0.0
+        if numeric >= 10000:
+            numeric /= 1000.0
+        return max(0.0, numeric)
+
+    def _mirror_meta_matches_track(self, track: Any, meta: dict[str, Any], *, candidate: str = "") -> bool:
+        """Evita tocar música aleatória quando um resultado do YouTube é espelhado.
+
+        Para pesquisa do YouTube, o resultado selecionado serve como metadata. O
+        LavaSrc/SoundCloud/Spotify só é aceito se título/artista e duração forem
+        compatíveis. Se não bater, o router cai para o yt-dlp local.
+        """
+        if not self._requires_strict_mirror_match(track, candidate=candidate):
+            return True
+
+        wanted_title = self._plain_match_text(getattr(track, "title", ""))
+        wanted_author = self._plain_match_text(getattr(track, "uploader", ""))
+        got_title = self._plain_match_text(meta.get("title", ""))
+        got_author = self._plain_match_text(meta.get("author", ""))
+        combined_wanted = " ".join(part for part in (wanted_author, wanted_title) if part).strip()
+        combined_got = " ".join(part for part in (got_author, got_title) if part).strip()
+        if not wanted_title or not got_title:
+            return False
+
+        title_ratio = SequenceMatcher(None, wanted_title, got_title).ratio()
+        combined_ratio = SequenceMatcher(None, combined_wanted or wanted_title, combined_got or got_title).ratio()
+        word_score = 0.0
+        wanted_words = {w for w in wanted_title.split() if len(w) >= 3}
+        got_words = set(got_title.split())
+        if wanted_words:
+            word_score = len(wanted_words & got_words) / max(1, len(wanted_words))
+
+        expected_duration = self._duration_seconds_from_meta(getattr(track, "duration", None))
+        got_duration = self._duration_seconds_from_meta(meta.get("duration"))
+        duration_ok = True
+        if expected_duration and got_duration:
+            tolerance = max(15.0, expected_duration * 0.12)
+            duration_ok = abs(expected_duration - got_duration) <= tolerance
+
+        text_ok = title_ratio >= 0.52 or combined_ratio >= 0.48 or word_score >= 0.55
+        return bool(text_ok and duration_ok)
+
     def _metadata_search_query(self, track: Any, *, fallback_query: str = "") -> str:
         title = self._strip_lavalink_search_prefixes(getattr(track, "title", "") or "")
         author = self._strip_lavalink_search_prefixes(getattr(track, "uploader", "") or getattr(track, "author", "") or "")
@@ -925,9 +994,18 @@ class LavalinkBackend:
                 explicit_prefixed.append(f"{prefix}:{body}")
         has_explicit_youtube_url = any(self._is_youtube_value(value) for value in url_values)
         sc_fallback = self._soundcloud_fallback_query(track, fallback_query=fallback_query)
-        ytm_fallback = self._youtube_music_fallback_query(track, fallback_query=fallback_query)
+        sp_fallback = self._spotify_fallback_query(track, fallback_query=fallback_query)
         lavalink_playable = getattr(track, "lavalink_playable", None)
         lavalink_resolved = bool(getattr(track, "lavalink_resolved", False) or lavalink_playable is not None)
+
+        if is_youtube_track:
+            # YouTube nunca deve ser candidato direto do Lavalink. Resultado de
+            # pesquisa do YouTube tenta primeiro mirror no LavaSrc/Spotify e depois
+            # SoundCloud. Link direto do YouTube é pulado no AudioRouter e vai
+            # direto para yt-dlp local.
+            self._append_unique_candidate(candidates, sp_fallback)
+            self._append_unique_candidate(candidates, sc_fallback)
+            return candidates
 
         if lavalink_resolved or url_values:
             # Link direto e resultado escolhido do node são escolhas explícitas.
@@ -941,52 +1019,23 @@ class LavalinkBackend:
             return candidates
 
         if explicit_prefixed:
-            # Quando o comando criou uma busca explícita para o node (ex.:
-            # ytsearch:termo), respeite essa escolha antes de qualquer fallback.
+            # Prefixos explícitos do LavaSrc/SoundCloud/Spotify são respeitados.
+            # Prefixos YouTube não entram aqui porque YouTube é sempre local.
             for value in explicit_prefixed:
-                self._append_unique_candidate(candidates, value)
-            if not any(str(value).lower().startswith(("ytsearch:", "ytmsearch:")) for value in explicit_prefixed):
-                self._append_unique_candidate(candidates, ytm_fallback)
-            return candidates
-
-        if has_explicit_youtube_url:
-            # URL direta do YouTube é uma escolha explícita do usuário. Não troque
-            # automaticamente por SoundCloud/YouTube Music, porque isso faz um link
-            # do YouTube aparecer/tocar como outra fonte. Se o youtube-source falhar,
-            # o erro deve ficar visível para o usuário em vez de mascarar a fonte.
-            for value in url_values:
-                if self._is_youtube_value(value):
+                if not str(value).lower().startswith(("ytsearch:", "ytmsearch:")):
                     self._append_unique_candidate(candidates, value)
             return candidates
 
         if is_spotify_track:
-            # Links Spotify devem passar pelo LavaSrc antes; se ele não conseguir
-            # espelhar, SoundCloud vira a primeira alternativa tocável e YouTube
-            # Music fica apenas como fallback final.
             for value in url_values:
                 self._append_unique_candidate(candidates, value)
             self._append_unique_candidate(candidates, sc_fallback)
-            self._append_unique_candidate(candidates, ytm_fallback)
-            return candidates
-
-        if is_youtube_track:
-            # Resultado vindo de busca/metadata do YouTube: SoundCloud primeiro
-            # porque YouTube está instável; o link/ytmsearch ficam como fallback final.
-            self._append_unique_candidate(candidates, sc_fallback)
-            for value in url_values:
-                self._append_unique_candidate(candidates, value)
-            self._append_unique_candidate(candidates, ytm_fallback)
             return candidates
 
         for value in url_values:
             self._append_unique_candidate(candidates, value)
+        self._append_unique_candidate(candidates, sp_fallback)
         self._append_unique_candidate(candidates, sc_fallback)
-        # Busca textual normal: SoundCloud é a rota principal, mas YouTube Music
-        # fica como fallback final quando o resultado do SoundCloud carrega metadata
-        # e depois quebra no stream real (404/TrackException).
-        self._append_unique_candidate(candidates, ytm_fallback)
-        # Só usa texto cru se não há nenhuma URL/fonte melhor. Texto cru no Wavelink
-        # vira YouTube Music por padrão, então não deve passar antes de scsearch.
         if not candidates:
             for value in non_url_queries:
                 self._append_unique_candidate(candidates, self._search_candidate("scsearch", value))
@@ -1629,6 +1678,17 @@ class LavalinkBackend:
                         raise
 
                 if playable is None or meta is None:
+                    continue
+
+                if not self._mirror_meta_matches_track(track, meta, candidate=candidate):
+                    logger.info(
+                        "[music/lavalink] mirror rejeitado por baixa compatibilidade | guild=%s query=%r wanted=%r got=%r",
+                        getattr(guild, "id", None),
+                        candidate,
+                        getattr(track, "title", ""),
+                        meta.get("title"),
+                    )
+                    last_error = RuntimeError("Espelho LavaSrc não bateu bem com a música escolhida.")
                     continue
 
                 try:

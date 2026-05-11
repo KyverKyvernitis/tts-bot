@@ -70,6 +70,37 @@ class Music(commands.Cog):
             logger.debug("[music/lavalink] falha ao checar modo real", exc_info=True)
             return False
 
+    def _query_profile(self, query: str):
+        return describe_url((query or "").strip())
+
+    def _is_youtube_link(self, query: str) -> bool:
+        return bool(self._query_profile(query).is_youtube)
+
+    def _is_youtube_text_search(self, query: str) -> bool:
+        raw = (query or "").strip()
+        if not raw:
+            return False
+        lower = raw.lower()
+        if lower.startswith(("ytsearch:", "ytmsearch:")):
+            return True
+        if lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:")):
+            return False
+        profile = describe_url(raw)
+        return not profile.is_url
+
+    def _should_use_lavalink_for_input(self, query: str, guild_id: int | None) -> bool:
+        if not self._is_lavalink_real_enabled(guild_id):
+            return False
+        # YouTube direto nunca deve ir para Lavalink. O node fica reservado
+        # para LavaSrc/SoundCloud/Spotify; YouTube direto é player local yt-dlp.
+        if self._is_youtube_link(query):
+            return False
+        # Texto normal/ytsearch usa yt-dlp apenas como busca de metadados para
+        # seleção. A reprodução depois tenta mirror LavaSrc e cai para local.
+        if self._is_youtube_text_search(query):
+            return False
+        return True
+
     def _lavalink_identifier_for_query(self, query: str) -> tuple[str, str, str, str]:
         """Cria uma faixa leve para o node resolver, sem chamar yt-dlp no comando.
 
@@ -163,10 +194,9 @@ class Music(commands.Cog):
 
         requester_name = getattr(ctx.author, "display_name", str(ctx.author))
 
-        if self._is_lavalink_real_enabled(ctx.guild.id):
-            # NodeLink/Lavalink real deve resolver links diretamente. Para texto
-            # normal/ytsearch, primeiro buscamos no node e mostramos seleção; não
-            # chamamos yt-dlp e não escolhemos automaticamente o primeiro resultado.
+        if self._should_use_lavalink_for_input(query, ctx.guild.id):
+            # LavaSrc/Lavalink fica responsável por SoundCloud, Spotify, scsearch
+            # e spsearch. YouTube fica fora do Lavalink.
             try:
                 if self._is_lavalink_search_request(query):
                     batch = await self._lavalink_search_batch_for_query(
@@ -176,9 +206,6 @@ class Music(commands.Cog):
                         requester_name=requester_name,
                     )
                 else:
-                    # Link direto: o próprio node resolve agora e preservamos o
-                    # Playable retornado para tocar exatamente esse item. Não usa
-                    # yt-dlp e não cria faixa genérica tipo "Soundcloud link".
                     batch = await self.router.backends.resolve_lavalink_direct_tracks(
                         query,
                         requester_id=ctx.author.id,
@@ -194,14 +221,22 @@ class Music(commands.Cog):
                 await self._reply(ctx, self._music_error_message(exc))
                 return
         else:
-            # Evita derrubar o comando quando o Discord aplica rate limit no endpoint de typing.
-            # A extração pode demorar, mas o indicador de "digitando..." não é essencial.
+            # YouTube direto e pesquisa textual usam yt-dlp/local para metadata.
+            # Links do YouTube tocam direto pelo local; pesquisas abrem seleção
+            # e, na reprodução, tentam mirror LavaSrc antes do fallback local.
             try:
-                batch = await self.router.extractor.extract(
-                    query,
-                    requester_id=ctx.author.id,
-                    requester_name=requester_name,
-                )
+                if self._is_youtube_text_search(query) and self._is_lavalink_real_enabled(ctx.guild.id):
+                    batch = await self.router.extractor.search_youtube(
+                        query,
+                        requester_id=ctx.author.id,
+                        requester_name=requester_name,
+                    )
+                else:
+                    batch = await self.router.extractor.extract(
+                        query,
+                        requester_id=ctx.author.id,
+                        requester_name=requester_name,
+                    )
             except MusicExtractionError as exc:
                 await self._reply(ctx, self._music_error_message(exc))
                 return
@@ -215,13 +250,17 @@ class Music(commands.Cog):
             return
 
         should_open_selection = bool(
-            (self._is_lavalink_real_enabled(ctx.guild.id) and self._is_lavalink_search_request(query))
+            (self._should_use_lavalink_for_input(query, ctx.guild.id) and self._is_lavalink_search_request(query))
+            or (self._is_youtube_text_search(query) and len(batch.tracks) > 1)
             or (not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1)
         )
         if should_open_selection:
             embed = discord.Embed(
                 title="🔎 Escolha a música",
-                description="Selecione um dos resultados abaixo. Nada será adicionado ao queue até você escolher.",
+                description=(
+                    "Selecione um dos resultados abaixo. Nada será adicionado ao queue até você escolher. "
+                    "Resultados do YouTube serão espelhados pelo LavaSrc quando possível e, se não baterem bem, tocam pelo player local."
+                ),
                 color=discord.Color.blurple(),
             )
             for idx, track in enumerate(batch.tracks[:10], start=1):
@@ -254,8 +293,8 @@ class Music(commands.Cog):
                 desc += f" de **{batch.playlist_title}**"
             if batch.truncated:
                 desc += f"\n`⚠️` Playlist limitada aos primeiros `{getattr(config, 'MUSIC_MAX_PLAYLIST_ITEMS', 100)}` itens para não pesar o bot."
-            if dropped:
-                desc += f"\n`⚠️` `{dropped}` item(ns) não entraram por duplicata ou queue cheio."
+            if dropped and len(batch.tracks) > added:
+                desc += f"\n`⚠️` `{dropped}` item(ns) não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
             await self._reply(ctx, desc)
         else:
             track = batch.tracks[0]
