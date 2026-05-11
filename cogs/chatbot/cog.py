@@ -33,7 +33,7 @@ from .commands import ChatbotCommandsMixin
 from .lru_cache import LRUCacheTTL
 from .master import MasterPrompt, MasterPromptStore
 from .media import extract_attachments, is_voice_message, download_attachment_bytes
-from .audio import transcribe_audio, synthesize_speech, user_asked_for_tts
+from .audio import DEFAULT_TTS_VOICE, transcribe_audio, synthesize_speech, user_asked_for_tts
 from .imagegen import (
     parse_image_intent,
     generate_image,
@@ -799,14 +799,17 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             if not text_for_call:
                 return
 
+            # O anexo de áudio do chatbot é sempre gerado com edge-tts.
+            # Ao espelhar essa mesma fala na call, força a mesma engine em vez
+            # de herdar o engine pessoal do TTS da call, que pode estar em gTTS.
             from cogs.tts.audio import QueueItem
             queue_item = QueueItem(
                 guild_id=guild.id,
                 channel_id=member_channel.id,
                 author_id=message.author.id,
                 text=text_for_call,
-                engine=str(resolved.get("engine") or "edge"),
-                voice=str(resolved.get("edge_voice", resolved.get("voice", "pt-BR-FranciscaNeural")) or "pt-BR-FranciscaNeural"),
+                engine="edge",
+                voice=str(resolved.get("edge_voice") or DEFAULT_TTS_VOICE),
                 language=str(resolved.get("gtts_language", resolved.get("language", "pt-br")) or "pt-br"),
                 rate=str(resolved.get("edge_rate", resolved.get("rate", "+0%")) or "+0%"),
                 pitch=str(resolved.get("edge_pitch", resolved.get("pitch", "+0Hz")) or "+0Hz"),
