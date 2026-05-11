@@ -153,24 +153,52 @@ async def synthesize_speech(
 
 # Palavras-chave que indicam pedido EXPLÍCITO de resposta em áudio.
 # Usadas só pra "user pediu" — a outra via (frequência do profile) é random.
+# Mantemos frases exatas + regex abaixo porque users costumam responder só
+# "em áudio" depois de uma resposta em texto, ou pedir "gera um áudio".
 _TTS_REQUEST_PATTERNS = (
     # pedidos diretos
     "responde por audio", "responde por áudio",
     "responde em audio", "responde em áudio",
     "manda audio", "manda áudio",
     "manda em audio", "manda em áudio",
+    "manda um audio", "manda um áudio",
+    "me manda audio", "me manda áudio",
+    "me manda um audio", "me manda um áudio",
+    "envia audio", "envia áudio",
+    "envia um audio", "envia um áudio",
+    "gera audio", "gera áudio",
+    "gera um audio", "gera um áudio",
+    "gerar audio", "gerar áudio",
+    "cria audio", "cria áudio",
+    "cria um audio", "cria um áudio",
+    "fazer audio", "fazer áudio",
+    "faz um audio", "faz um áudio",
+    "grava audio", "grava áudio",
+    "grava um audio", "grava um áudio",
     "fala por audio", "fala por áudio",
     "fala isso", "fala por voz",
-    "me manda audio", "me manda áudio",
-    "voz", "áudio",  # genérico — pode ter falsos positivos, mas ok no contexto
+    "em audio", "em áudio",
+    "por audio", "por áudio",
+)
+
+_TTS_NEGATIVE_PATTERNS = (
+    "não manda audio", "não manda áudio",
+    "nao manda audio", "nao manda áudio",
+    "não envia audio", "não envia áudio",
+    "nao envia audio", "nao envia áudio",
+    "sem audio", "sem áudio",
+    "não precisa de audio", "não precisa de áudio",
+    "nao precisa de audio", "nao precisa de áudio",
+    "não gera audio", "não gera áudio",
+    "nao gera audio", "nao gera áudio",
 )
 
 
 def user_asked_for_tts(text: str) -> bool:
     """True se a mensagem sugere que user quer resposta em áudio.
 
-    Usa regex com variações comuns do português informal pra cobrir
-    "manda um áudio", "me manda áudio", "responde em voz" etc.
+    Usa frases + regex com variações comuns do português informal para cobrir
+    "manda um áudio", "em áudio", "gera um áudio", "fala por voz" etc.
     """
     if not text:
         return False
@@ -178,9 +206,24 @@ def user_asked_for_tts(text: str) -> bool:
     import re
 
     normalized = " ".join(text.lower().split())
+    if not normalized:
+        return False
+
+    if any(marker in normalized for marker in _TTS_NEGATIVE_PATTERNS):
+        return False
+
+    # Mensagens curtíssimas em reply, tipo "em áudio" ou "por voz".
+    if normalized in {"audio", "áudio", "voz", "em audio", "em áudio", "por audio", "por áudio", "por voz"}:
+        return True
+
+    if any(marker in normalized for marker in _TTS_REQUEST_PATTERNS):
+        return True
+
     patterns = (
-        r"\b(responde|manda|fala)\s+(isso\s+)?(por|em)?\s*(um|uma)?\s*(audio|áudio|voz)\b",
-        r"\bme\s+manda\s+(um|uma)?\s*(audio|áudio|voz)\b",
-        r"\bresponde\s+(com|em)?\s*(um|uma)?\s*(audio|áudio|voz)\b",
+        r"\b(responde|manda|envia|fala|diz|solta)\s+(isso\s+)?(com|por|em)?\s*(um|uma)?\s*(audio|áudio|voz)\b",
+        r"\bme\s+(manda|envia|faz|gera|cria|grava)\s+(um|uma)?\s*(audio|áudio|voz)\b",
+        r"\b(gera|gerar|cria|criar|faz|fazer|grava|gravar)\s+(um|uma)?\s*(audio|áudio|voz)\b",
+        r"\b(quero|queria|pode|consegue)\s+[^.!?\n]{0,80}\b(audio|áudio|voz)\b",
+        r"\b(audio|áudio|voz)\s+(disso|dessa|deste|dessa resposta|da resposta)\b",
     )
     return any(re.search(pat, normalized, flags=re.IGNORECASE) for pat in patterns)

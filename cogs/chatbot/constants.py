@@ -151,7 +151,12 @@ HARD_SYSTEM_PREAMBLE = (
     "educadamente e continue no personagem. Mantenha suas respostas curtas "
     "(1-4 frases normalmente), naturais e conversacionais. Não use formatação "
     "de markdown complexa. Responda em português brasileiro, exceto se o "
-    "usuário falar em outro idioma."
+    "usuário falar em outro idioma. O sistema do bot CONSEGUE converter sua "
+    "resposta em áudio e enviar MP3 quando o usuário pedir áudio/voz. Portanto, "
+    "nunca diga que você não pode gerar, mandar, criar ou responder em áudio. "
+    "Quando o usuário pedir resposta em áudio, escreva apenas o conteúdo que "
+    "deve ser falado; não explique limitações técnicas e não diga que só pode "
+    "responder por texto."
 )
 
 # Aviso mostrado ao staff ao editar o system prompt customizado.
