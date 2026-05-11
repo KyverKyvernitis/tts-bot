@@ -2399,11 +2399,10 @@ class AudioRouter:
         use_lavalink_real = bool(self.backends.should_use_lavalink_real(guild.id))
         if use_lavalink_real and self._track_is_direct_youtube_request(track):
             logger.info(
-                "[music] YouTube direto usando player local yt-dlp | guild=%s track=%r",
+                "[music] YouTube direto tentando mirror LavaSrc antes do yt-dlp local | guild=%s track=%r",
                 guild.id,
                 getattr(track, "title", ""),
             )
-            use_lavalink_real = False
 
         if use_lavalink_real:
             try:
@@ -3054,11 +3053,16 @@ class AudioRouter:
         def _after(error: Exception | None) -> None:
             with contextlib.suppress(Exception):
                 source.cleanup()
-            if not finished.done():
+
+            def _finish_once() -> None:
+                if finished.done():
+                    return
                 if error is None:
-                    loop.call_soon_threadsafe(finished.set_result, None)
+                    finished.set_result(None)
                 else:
-                    loop.call_soon_threadsafe(finished.set_exception, error)
+                    finished.set_exception(error)
+
+            loop.call_soon_threadsafe(_finish_once)
 
         play_call_started_at = time.monotonic()
         vc.play(source, after=_after)

@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import json
 import logging
+import os
 import re
 import time
 from difflib import SequenceMatcher
@@ -18,6 +19,28 @@ from .base import BackendHealth, BackendSearchResult
 from ..models import ExtractedBatch, MusicTrack
 
 logger = logging.getLogger(__name__)
+
+
+def _mirror_prefixes_from_config() -> tuple[str, ...]:
+    """Fontes LavaSrc usadas para espelhar YouTube/Spotify antes do fallback local.
+
+    O padrão evita YouTube no Lavalink e também evita depender de ``spsearch``
+    quando o LavaSrc/Spotify está instável. Quem quiser testar Spotify/Deezer no
+    node pode definir MUSIC_LAVASRC_MIRROR_PREFIXES="scsearch,spsearch" no .env.
+    """
+    raw = str(getattr(config, "MUSIC_LAVASRC_MIRROR_PREFIXES", "") or os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "") or "").strip()
+    if not raw:
+        raw = "scsearch"
+    allowed = {"scsearch", "spsearch", "dzsearch", "amsearch"}
+    out: list[str] = []
+    for item in re.split(r"[,;\s]+", raw):
+        prefix = item.strip().lower().removesuffix(":")
+        if prefix in allowed and prefix not in out:
+            out.append(prefix)
+    return tuple(out or ["scsearch"])
+
+
+MUSIC_LAVASRC_MIRROR_PREFIXES = _mirror_prefixes_from_config()
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -856,6 +879,21 @@ class LavalinkBackend:
         body = self._strip_lavalink_search_prefixes(value)
         return f"{prefix}:{body}" if body else ""
 
+    def _mirror_search_candidates(self, track: Any, *, fallback_query: str = "") -> list[str]:
+        """Candidatos LavaSrc seguros para espelhar metadata sem usar YouTube.
+
+        Não envia URL crua de Spotify/YouTube para o Lavalink. Em vez disso usa
+        título/artista/duração já conhecidos e prefixos configuráveis, por padrão
+        ``scsearch``. Se nada bater, o AudioRouter cai para o player local.
+        """
+        query = self._metadata_search_query(track, fallback_query=fallback_query)
+        if not query:
+            return []
+        out: list[str] = []
+        for prefix in MUSIC_LAVASRC_MIRROR_PREFIXES:
+            self._append_unique_candidate(out, self._search_candidate(prefix, query))
+        return out
+
     def _is_generic_link_title(self, value: object) -> bool:
         text = self._strip_lavalink_search_prefixes(value).strip().lower()
         if not text:
@@ -883,6 +921,9 @@ class LavalinkBackend:
         return " ".join(text.split())
 
     def _spotify_fallback_query(self, track: Any, *, fallback_query: str = "") -> str:
+        # Mantido por compatibilidade interna, mas não é mais usado como primeira
+        # escolha: Spotify no LavaSrc é Mirror e pode falhar/403. O fluxo novo usa
+        # _mirror_search_candidates(), que por padrão evita spsearch.
         query = self._metadata_search_query(track, fallback_query=fallback_query)
         return self._search_candidate("spsearch", query) if query else ""
 
@@ -994,27 +1035,27 @@ class LavalinkBackend:
                 explicit_prefixed.append(f"{prefix}:{body}")
         has_explicit_youtube_url = any(self._is_youtube_value(value) for value in url_values)
         sc_fallback = self._soundcloud_fallback_query(track, fallback_query=fallback_query)
-        sp_fallback = self._spotify_fallback_query(track, fallback_query=fallback_query)
+        mirror_fallbacks = self._mirror_search_candidates(track, fallback_query=fallback_query)
         lavalink_playable = getattr(track, "lavalink_playable", None)
         lavalink_resolved = bool(getattr(track, "lavalink_resolved", False) or lavalink_playable is not None)
 
         if is_youtube_track:
-            # YouTube nunca deve ser candidato direto do Lavalink. Resultado de
-            # pesquisa do YouTube tenta primeiro mirror no LavaSrc/SoundCloud;
-            # se não bater ou quebrar, o AudioRouter cai para yt-dlp local.
-            self._append_unique_candidate(candidates, sc_fallback)
-            self._append_unique_candidate(candidates, sp_fallback)
+            # YouTube nunca entra cru no Lavalink. Link direto e resultado de
+            # pesquisa tentam primeiro um mirror LavaSrc sem YouTube; se não bater
+            # ou o node perder o stream, o AudioRouter cai para yt-dlp local.
+            for value in mirror_fallbacks:
+                self._append_unique_candidate(candidates, value)
             return candidates
 
         if is_spotify_track:
-            # Link do Spotify não deve ser enviado cru para o node. O bot já leu
-            # a metadata pela Spotify API; aqui o LavaSrc deve receber uma busca
-            # SoundCloud equivalente. Isso evita erro 403/SpotifySourceManager no
-            # chat e permite fallback local se o mirror falhar.
-            self._append_unique_candidate(candidates, sc_fallback)
+            # Spotify também não entra cru no node. A metadata vem da Spotify API
+            # no bot; o LavaSrc recebe apenas busca por título/artista em fonte
+            # direta configurada (por padrão scsearch). Se falhar, fallback local.
+            for value in mirror_fallbacks:
+                self._append_unique_candidate(candidates, value)
             if not candidates:
                 for value in explicit_prefixed:
-                    if not str(value).lower().startswith("spsearch:"):
+                    if not str(value).lower().startswith(("spsearch:", "ytsearch:", "ytmsearch:")):
                         self._append_unique_candidate(candidates, value)
             return candidates
 
@@ -1039,11 +1080,11 @@ class LavalinkBackend:
 
         for value in url_values:
             self._append_unique_candidate(candidates, value)
-        self._append_unique_candidate(candidates, sp_fallback)
-        self._append_unique_candidate(candidates, sc_fallback)
+        for value in mirror_fallbacks:
+            self._append_unique_candidate(candidates, value)
         if not candidates:
             for value in non_url_queries:
-                self._append_unique_candidate(candidates, self._search_candidate("scsearch", value))
+                self._append_unique_candidate(candidates, self._search_candidate(MUSIC_LAVASRC_MIRROR_PREFIXES[0], value))
         return candidates
 
     def _looks_like_playable(self, value: Any) -> bool:
