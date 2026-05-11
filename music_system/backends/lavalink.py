@@ -1000,11 +1000,22 @@ class LavalinkBackend:
 
         if is_youtube_track:
             # YouTube nunca deve ser candidato direto do Lavalink. Resultado de
-            # pesquisa do YouTube tenta primeiro mirror no LavaSrc/Spotify e depois
-            # SoundCloud. Link direto do YouTube é pulado no AudioRouter e vai
-            # direto para yt-dlp local.
-            self._append_unique_candidate(candidates, sp_fallback)
+            # pesquisa do YouTube tenta primeiro mirror no LavaSrc/SoundCloud;
+            # se não bater ou quebrar, o AudioRouter cai para yt-dlp local.
             self._append_unique_candidate(candidates, sc_fallback)
+            self._append_unique_candidate(candidates, sp_fallback)
+            return candidates
+
+        if is_spotify_track:
+            # Link do Spotify não deve ser enviado cru para o node. O bot já leu
+            # a metadata pela Spotify API; aqui o LavaSrc deve receber uma busca
+            # SoundCloud equivalente. Isso evita erro 403/SpotifySourceManager no
+            # chat e permite fallback local se o mirror falhar.
+            self._append_unique_candidate(candidates, sc_fallback)
+            if not candidates:
+                for value in explicit_prefixed:
+                    if not str(value).lower().startswith("spsearch:"):
+                        self._append_unique_candidate(candidates, value)
             return candidates
 
         if lavalink_resolved or url_values:
@@ -1024,12 +1035,6 @@ class LavalinkBackend:
             for value in explicit_prefixed:
                 if not str(value).lower().startswith(("ytsearch:", "ytmsearch:")):
                     self._append_unique_candidate(candidates, value)
-            return candidates
-
-        if is_spotify_track:
-            for value in url_values:
-                self._append_unique_candidate(candidates, value)
-            self._append_unique_candidate(candidates, sc_fallback)
             return candidates
 
         for value in url_values:

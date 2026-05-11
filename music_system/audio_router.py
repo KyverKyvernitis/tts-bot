@@ -165,17 +165,38 @@ class MixedAudioSource(discord.AudioSource):
         with self._overlay_lock:
             return bool(self._overlays)
 
+    def _future_set_result_threadsafe(self, future: asyncio.Future, result: object = None) -> None:
+        def _set_once() -> None:
+            if not future.done():
+                future.set_result(result)
+
+        self.loop.call_soon_threadsafe(_set_once)
+
+    def _future_set_exception_threadsafe(self, future: asyncio.Future, error: Exception) -> None:
+        def _set_once() -> None:
+            if not future.done():
+                future.set_exception(error)
+
+        self.loop.call_soon_threadsafe(_set_once)
+
+    def _future_cancel_threadsafe(self, future: asyncio.Future) -> None:
+        def _cancel_once() -> None:
+            if not future.done():
+                future.cancel()
+
+        self.loop.call_soon_threadsafe(_cancel_once)
+
     def _mark_music_started(self) -> None:
         if self._music_started:
             return
         self._music_started = True
         if not self.music_started_future.done():
-            self.loop.call_soon_threadsafe(self.music_started_future.set_result, None)
+            self._future_set_result_threadsafe(self.music_started_future, None)
 
     def _mark_music_failed_before_start(self, message: str) -> None:
         if self._music_started or self.music_started_future.done():
             return
-        self.loop.call_soon_threadsafe(self.music_started_future.set_exception, MusicPlaybackError(message))
+        self._future_set_exception_threadsafe(self.music_started_future, MusicPlaybackError(message))
 
     def set_music_volume(self, volume: float) -> None:
         self.normal_music_volume = max(0.0, min(2.0, float(volume)))
@@ -222,7 +243,7 @@ class MixedAudioSource(discord.AudioSource):
             with contextlib.suppress(Exception):
                 target.source.cleanup()
         if not future.done():
-            self.loop.call_soon_threadsafe(future.cancel)
+            self._future_cancel_threadsafe(future)
 
     def _finish_overlay(self, overlay: TTSOverlay, error: Exception | None = None) -> None:
         if overlay.ended:
@@ -232,9 +253,9 @@ class MixedAudioSource(discord.AudioSource):
             overlay.source.cleanup()
         if not overlay.future.done():
             if error is None:
-                self.loop.call_soon_threadsafe(overlay.future.set_result, None)
+                self._future_set_result_threadsafe(overlay.future, None)
             else:
-                self.loop.call_soon_threadsafe(overlay.future.set_exception, error)
+                self._future_set_exception_threadsafe(overlay.future, error)
 
     def _effective_music_scale(self, target_volume: float) -> float:
         # music_source pode já vir com volume base aplicado pelo FFmpeg.
@@ -2206,6 +2227,50 @@ class AudioRouter:
             return False
         return False
 
+    def _prepare_track_for_local_after_lavalink_failure(self, track: MusicTrack, exc: Exception | None = None) -> bool:
+        """Converte mirrors quebrados do LavaSrc em metadata para fallback local.
+
+        SoundCloud/Spotify podem resolver metadata no Lavalink e quebrar só na hora
+        do stream real. Nesses casos não adianta entregar a mesma URL ao yt-dlp: ele
+        costuma repetir 404 ou erro de extractor. O fallback local deve usar título,
+        artista e duração para buscar uma fonte equivalente pelo player local.
+        """
+        values = " ".join(
+            str(value or "").lower()
+            for value in (
+                getattr(track, "source", ""),
+                getattr(track, "extractor", ""),
+                getattr(track, "webpage_url", ""),
+                getattr(track, "original_url", ""),
+            )
+        )
+        # A mensagem de erro do LavaSrc pode citar SoundCloud mesmo quando o track
+        # original era um resultado do YouTube. Só converte para metadata se a
+        # própria faixa veio de SoundCloud/Spotify; caso contrário, o fallback
+        # local deve tocar a URL original do YouTube selecionada pelo usuário.
+        if not any(token in values for token in ("soundcloud", "spotify", "spsearch", "scsearch", "lavasrc")):
+            return False
+        title = str(getattr(track, "title", "") or "").strip()
+        generic_titles = {"", "link", "soundcloud link", "spotify link", "música sem título", "musica sem titulo", "unknown title"}
+        if title.lower() in generic_titles:
+            return False
+        track.stream_url = ""
+        track.webpage_url = ""
+        track.extractor = "metadata"
+        track.lavalink_playable = None
+        track.lavalink_encoded = ""
+        track.lavalink_resolved = False
+        track.resolved_at_monotonic = 0.0
+        track.resolved_audio_max_abr = 0
+        track.resolved_audio_abr = 0
+        track.resolved_audio_ext = ""
+        track.resolved_audio_codec = ""
+        if "spotify" in values and "spotify" not in str(track.source or "").lower():
+            track.source = "Spotify → fallback local"
+        elif "soundcloud" in values and "soundcloud" not in str(track.source or "").lower():
+            track.source = "SoundCloud → fallback local"
+        return True
+
     async def _disconnect_lavalink_before_local_fallback(self, guild: discord.Guild, state: MusicGuildState, *, reason: str = "fallback") -> None:
         current_vc = guild.voice_client
         if not self._is_lavalink_voice_client(current_vc):
@@ -2382,6 +2447,14 @@ class AudioRouter:
                 state.current_lavalink_player = None
                 state.current_lavalink_playable = None
                 state.current_status = "resolving"
+                converted = self._prepare_track_for_local_after_lavalink_failure(track, exc)
+                if converted:
+                    logger.info(
+                        "[music/lavalink] fallback local por metadata | guild=%s track=%r source=%r",
+                        guild.id,
+                        getattr(track, "title", ""),
+                        getattr(track, "source", ""),
+                    )
                 await self._disconnect_lavalink_before_local_fallback(guild, state, reason="lavalink_failed")
 
         vc = await self._ensure_voice(guild, channel, state=state)
@@ -2453,8 +2526,12 @@ class AudioRouter:
             def _after(error: Exception | None, finished_ref: asyncio.Future = finished) -> None:
                 if error:
                     logger.warning("[music] after playback error | guild=%s erro=%s", guild.id, error)
-                if not finished_ref.done():
-                    loop.call_soon_threadsafe(finished_ref.set_result, None)
+
+                def _finish_once() -> None:
+                    if not finished_ref.done():
+                        finished_ref.set_result(None)
+
+                loop.call_soon_threadsafe(_finish_once)
 
             async with state.voice_lock:
                 if self._vc_is_playing_or_paused(vc):

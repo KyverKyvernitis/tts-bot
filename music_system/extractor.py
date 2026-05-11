@@ -147,6 +147,10 @@ class MusicExtractor:
         clone.resolved_audio_abr = int(getattr(track, "resolved_audio_abr", 0) or 0)
         clone.resolved_audio_ext = str(getattr(track, "resolved_audio_ext", "") or "")
         clone.resolved_audio_codec = str(getattr(track, "resolved_audio_codec", "") or "")
+        clone.lavalink_playable = getattr(track, "lavalink_playable", None)
+        clone.lavalink_encoded = str(getattr(track, "lavalink_encoded", "") or "")
+        clone.lavalink_query = str(getattr(track, "lavalink_query", "") or "")
+        clone.lavalink_resolved = bool(getattr(track, "lavalink_resolved", False))
         return clone
 
     def _cache_get_tracks(self, cache: dict[str, tuple[float, list[MusicTrack]]], key: str, *, requester_id: int, requester_name: str, original_url: str = "") -> list[MusicTrack] | None:
@@ -301,14 +305,16 @@ class MusicExtractor:
 
     async def _ytdlp_candidates_for_metadata(self, query: str, *, limit: int, requester_id: int, requester_name: str, original_url: str) -> list[ApiTrackCandidate]:
         candidates: list[ApiTrackCandidate] = []
-        # Prioriza SoundCloud como fonte realmente tocável na VPS atual. YouTube
-        # fica como fallback final por causa dos erros recentes de cipher/login.
+        # Quando o Lavalink/LavaSrc já falhou, o fallback local deve evitar
+        # repetir o mesmo stream do SoundCloud que acabou de dar 404. Por isso,
+        # metadata oficial (Spotify/SoundCloud/etc.) procura YouTube local primeiro
+        # e só depois tenta SoundCloud via yt-dlp como último recurso.
         search_size = max(1, min(8, int(limit)))
         for extractor_prefix, flat in (
-            (f"scsearch{search_size}:", True),
-            (f"scsearch{search_size}:", False),
             (f"ytsearch{search_size}:", True),
             (f"ytsearch{search_size}:", False),
+            (f"scsearch{search_size}:", True),
+            (f"scsearch{search_size}:", False),
         ):
             try:
                 info = await self._run_extract(f"{extractor_prefix}{query}", extract_flat=flat, playlist=True)

@@ -52,7 +52,7 @@ class Music(commands.Cog):
             return await ctx.send(content, **kwargs)
 
     def _music_error_message(self, exc: Exception) -> str:
-        raw = str(exc)
+        raw = str(exc or "")
         lower = raw.lower()
         if "sign in to confirm" in lower or "not a bot" in lower:
             return "`⚠️` O YouTube bloqueou a extração pedindo login/cookies. Confira `cookies.txt`, Deno e `yt-dlp[default]`."
@@ -60,7 +60,17 @@ class Music(commands.Cog):
             return "`⚠️` O YouTube recusou o stream de áudio. Atualize `yt-dlp[default]` e confirme se o Deno está instalado."
         if "drm" in lower:
             return "`⚠️` Essa fonte usa DRM. Tente outro link ou pesquise pelo nome da música."
-        return f"`⚠️` {raw}"
+        if "failed to load tracks" in lower or "lavalinkloadexception" in lower or "something went wrong while looking up" in lower:
+            if "spotify" in lower or "spsearch" in lower or "response code from channel info is 403" in lower:
+                return "`⚠️` Não consegui resolver esse link do Spotify no node. Vou evitar erro cru: confira a API do Spotify no `.env` e use modo `auto` para cair no player local quando o LavaSrc falhar."
+            if "soundcloud" in lower or "scsearch" in lower or "invalid status code" in lower or "404" in lower:
+                return "`⚠️` O SoundCloud respondeu metadados, mas recusou o stream no node. Tente novamente; em modo `auto`, o bot tenta uma fonte local equivalente."
+            return "`⚠️` O Lavalink não encontrou uma faixa tocável para essa busca. Tente pesquisar com nome e artista."
+        if "timed out" in lower or "timeout" in lower:
+            return "`⚠️` A fonte demorou demais para responder. Tente novamente em alguns segundos."
+        if not raw:
+            return "`⚠️` Não consegui iniciar essa música."
+        return f"`⚠️` {raw[:220]}"
 
 
     def _is_lavalink_real_enabled(self, guild_id: int | None) -> bool:
@@ -91,9 +101,16 @@ class Music(commands.Cog):
     def _should_use_lavalink_for_input(self, query: str, guild_id: int | None) -> bool:
         if not self._is_lavalink_real_enabled(guild_id):
             return False
+        profile = self._query_profile(query)
         # YouTube direto nunca deve ir para Lavalink. O node fica reservado
-        # para LavaSrc/SoundCloud/Spotify; YouTube direto é player local yt-dlp.
-        if self._is_youtube_link(query):
+        # para LavaSrc/SoundCloud; YouTube direto é player local yt-dlp.
+        if profile.is_youtube:
+            return False
+        # Spotify/Deezer/Apple são links de metadata: primeiro o bot lê título,
+        # artista e duração pela API. Só na hora do playback ele tenta espelhar
+        # no LavaSrc/SoundCloud; assim não joga URL do Spotify crua no node nem
+        # mostra erro inglês de `spsearch`/SpotifySourceManager no chat.
+        if profile.is_metadata_only:
             return False
         # Texto normal/ytsearch usa yt-dlp apenas como busca de metadados para
         # seleção. A reprodução depois tenta mirror LavaSrc e cai para local.
@@ -195,8 +212,9 @@ class Music(commands.Cog):
         requester_name = getattr(ctx.author, "display_name", str(ctx.author))
 
         if self._should_use_lavalink_for_input(query, ctx.guild.id):
-            # LavaSrc/Lavalink fica responsável por SoundCloud, Spotify, scsearch
-            # e spsearch. YouTube fica fora do Lavalink.
+            # LavaSrc/Lavalink fica responsável por SoundCloud/scsearch e por
+            # links que o node resolve com segurança. Spotify cru passa antes
+            # pela API do bot para não cair em erro bruto do SpotifySourceManager.
             try:
                 if self._is_lavalink_search_request(query):
                     batch = await self._lavalink_search_batch_for_query(
@@ -288,12 +306,15 @@ class Music(commands.Cog):
             return
 
         if batch.is_playlist:
-            desc = f"`📑` **Playlist adicionada:** `{added}` música(s)"
-            if batch.playlist_title:
-                desc += f" de **{batch.playlist_title}**"
+            count_label = "música" if added == 1 else "músicas"
+            playlist_title = (batch.playlist_title or "").strip()
+            if playlist_title:
+                desc = f"`📑` **Playlist adicionada:** `{added}` {count_label} de **{playlist_title}**"
+            else:
+                desc = f"`📑` **Adicionadas ao queue:** `{added}` {count_label}"
             if batch.truncated:
                 desc += f"\n`⚠️` Playlist limitada aos primeiros `{getattr(config, 'MUSIC_MAX_PLAYLIST_ITEMS', 100)}` itens para não pesar o bot."
-            if dropped and len(batch.tracks) > added:
+            if dropped:
                 desc += f"\n`⚠️` `{dropped}` item(ns) não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
             await self._reply(ctx, desc)
         else:
