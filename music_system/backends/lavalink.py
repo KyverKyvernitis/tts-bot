@@ -854,20 +854,47 @@ class LavalinkBackend:
         body = self._strip_lavalink_search_prefixes(value)
         return f"{prefix}:{body}" if body else ""
 
-    def _soundcloud_fallback_query(self, track: Any, *, fallback_query: str = "") -> str:
+    def _is_generic_link_title(self, value: object) -> bool:
+        text = self._strip_lavalink_search_prefixes(value).strip().lower()
+        if not text:
+            return True
+        generic = {
+            "link",
+            "youtube",
+            "youtube link",
+            "soundcloud",
+            "soundcloud link",
+            "spotify",
+            "spotify link",
+            "deezer",
+            "deezer link",
+            "applemusic",
+            "apple music",
+            "applemusic link",
+            "apple music link",
+            "lavalink",
+        }
+        return text in generic or text.endswith(" link")
+
+    def _metadata_search_query(self, track: Any, *, fallback_query: str = "") -> str:
         title = self._strip_lavalink_search_prefixes(getattr(track, "title", "") or "")
         author = self._strip_lavalink_search_prefixes(getattr(track, "uploader", "") or getattr(track, "author", "") or "")
+        if self._is_generic_link_title(title):
+            title = ""
         query = " ".join(part for part in (author, title) if part).strip()
-        if not query:
-            query = self._strip_lavalink_search_prefixes(fallback_query)
-        if not query:
-            return ""
-        return self._search_candidate("scsearch", query)
+        if query:
+            return query
+        fallback = self._strip_lavalink_search_prefixes(fallback_query)
+        if fallback and not self._is_url_like_value(fallback) and not self._is_generic_link_title(fallback):
+            return fallback
+        return ""
+
+    def _soundcloud_fallback_query(self, track: Any, *, fallback_query: str = "") -> str:
+        query = self._metadata_search_query(track, fallback_query=fallback_query)
+        return self._search_candidate("scsearch", query) if query else ""
 
     def _youtube_music_fallback_query(self, track: Any, *, fallback_query: str = "") -> str:
-        title = self._strip_lavalink_search_prefixes(getattr(track, "title", "") or "")
-        author = self._strip_lavalink_search_prefixes(getattr(track, "uploader", "") or getattr(track, "author", "") or "")
-        query = " ".join(part for part in (author, title) if part).strip() or self._strip_lavalink_search_prefixes(fallback_query)
+        query = self._metadata_search_query(track, fallback_query=fallback_query)
         return self._search_candidate("ytmsearch", query) if query else ""
 
     def _playable_candidates(self, track: Any, *, fallback_query: str = "") -> list[str]:
@@ -899,6 +926,19 @@ class LavalinkBackend:
         has_explicit_youtube_url = any(self._is_youtube_value(value) for value in url_values)
         sc_fallback = self._soundcloud_fallback_query(track, fallback_query=fallback_query)
         ytm_fallback = self._youtube_music_fallback_query(track, fallback_query=fallback_query)
+        lavalink_playable = getattr(track, "lavalink_playable", None)
+        lavalink_resolved = bool(getattr(track, "lavalink_resolved", False) or lavalink_playable is not None)
+
+        if lavalink_resolved or url_values:
+            # Link direto e resultado escolhido do node são escolhas explícitas.
+            # Não faça fallback por título genérico ("Soundcloud link", "YouTube")
+            # porque isso pode tocar uma música completamente diferente minutos depois.
+            for value in url_values:
+                self._append_unique_candidate(candidates, value)
+            if not candidates:
+                for value in explicit_prefixed:
+                    self._append_unique_candidate(candidates, value)
+            return candidates
 
         if explicit_prefixed:
             # Quando o comando criou uma busca explícita para o node (ex.:
@@ -1082,12 +1122,23 @@ class LavalinkBackend:
             return f"https://www.youtube.com/watch?v={identifier}"
         return ""
 
+    def _encoded_from_playable(self, playable: Any) -> str:
+        for attr in ("encoded", "track", "_encoded"):
+            with contextlib.suppress(Exception):
+                value = getattr(playable, attr, None)
+                if callable(value):
+                    value = value()
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
     def _track_from_playable(
         self,
         playable: Any,
         *,
         requester_id: int = 0,
         requester_name: str = "",
+        query: str = "",
     ) -> MusicTrack:
         identifier = str(getattr(playable, "identifier", "") or "").strip()
         provisional_uri = str(getattr(playable, "uri", "") or getattr(playable, "url", "") or "").strip()
@@ -1099,10 +1150,12 @@ class LavalinkBackend:
         duration_ms = self._duration_ms_from_meta(playable, None)
         duration = (duration_ms / 1000.0) if duration_ms > 0 else None
         is_live = bool(getattr(playable, "is_stream", False) or getattr(playable, "isStream", False) or getattr(playable, "stream", False))
+        original = str(query or "").strip() or uri or identifier
+        encoded = self._encoded_from_playable(playable)
         return MusicTrack(
             title=title,
             webpage_url=uri,
-            original_url=uri or identifier,
+            original_url=original,
             requester_id=int(requester_id or 0),
             requester_name=requester_name or "",
             duration=duration,
@@ -1111,6 +1164,10 @@ class LavalinkBackend:
             source=source,
             extractor="lavalink",
             is_live=is_live,
+            lavalink_playable=playable,
+            lavalink_encoded=encoded,
+            lavalink_query=original,
+            lavalink_resolved=True,
         )
 
     async def extract_tracks_for_selection(
@@ -1139,10 +1196,38 @@ class LavalinkBackend:
         search = await self._search_playable_candidate(wavelink, identifier)
         playables = self._playables_from_search(search, limit=limit)
         tracks = [
-            self._track_from_playable(item, requester_id=requester_id, requester_name=requester_name)
+            self._track_from_playable(item, requester_id=requester_id, requester_name=requester_name, query=identifier)
             for item in playables[: max(1, int(limit or 5))]
         ]
         return ExtractedBatch(tracks=tracks, query=identifier, is_playlist=False)
+
+    async def extract_direct_tracks(
+        self,
+        bot,
+        query: str,
+        *,
+        requester_id: int = 0,
+        requester_name: str = "",
+        limit: int = 25,
+    ) -> ExtractedBatch:
+        """Resolve link direto no próprio node, sem yt-dlp e sem busca por título.
+
+        Links diretos devem tocar exatamente o item retornado pelo Lavalink/NodeLink.
+        Se o node não conseguir resolver/tocar aquele link, o erro precisa aparecer;
+        não é seguro trocar automaticamente para busca textual por nomes genéricos
+        como "Soundcloud link" ou "YouTube".
+        """
+        raw = str(query or "").strip()
+        if not raw:
+            return ExtractedBatch(tracks=[], query=raw, is_playlist=False)
+        wavelink, _node = await self.ensure_wavelink_pool(bot)
+        search = await self._search_playable_candidate(wavelink, raw)
+        playables = self._playables_from_search(search, limit=max(1, int(limit or 25)))
+        tracks = [
+            self._track_from_playable(item, requester_id=requester_id, requester_name=requester_name, query=raw)
+            for item in playables[: max(1, int(limit or 25))]
+        ]
+        return ExtractedBatch(tracks=tracks, query=raw, is_playlist=len(tracks) > 1)
 
     def _playable_debug_shape(self, value: Any) -> str:
         try:
@@ -1448,6 +1533,44 @@ class LavalinkBackend:
                 if asyncio.iscoroutine(result):
                     await result
 
+    def _meta_from_playable(self, playable: Any, track: Any, *, query: str = "") -> dict[str, Any]:
+        return {
+            "query": str(query or getattr(track, "lavalink_query", "") or getattr(track, "original_url", "") or getattr(track, "webpage_url", "") or ""),
+            "title": str(getattr(playable, "title", "") or getattr(track, "title", "") or ""),
+            "author": str(getattr(playable, "author", "") or getattr(track, "uploader", "") or ""),
+            "source": str(getattr(playable, "source", "") or getattr(track, "source", "") or ""),
+            "duration": getattr(playable, "length", None) or getattr(playable, "duration", None) or getattr(track, "duration", None),
+            "artwork": str(getattr(playable, "artwork", "") or getattr(track, "thumbnail", "") or ""),
+        }
+
+    async def _play_pre_resolved_playable(
+        self,
+        bot,
+        guild: Any,
+        channel: Any,
+        track: Any,
+        playable: Any,
+        *,
+        target_volume: int,
+    ) -> tuple[Any, Any, dict[str, Any]]:
+        meta = self._meta_from_playable(playable, track)
+        player = await self.connect_player(bot, guild, channel)
+        with contextlib.suppress(Exception):
+            await player.set_volume(target_volume)
+        try:
+            await self._play_with_compat(player, playable, volume=target_volume, add_history=False)
+            await self._wait_for_rest_voice_connected(
+                player,
+                guild,
+                channel,
+                timeout=max(12.0, min(90.0, float(self.cfg.timeout_seconds or 12.0))),
+            )
+            await self._wait_for_playback_stable(player, guild, playable, meta, timeout=2.2)
+        except Exception:
+            await self._stop_player_quietly(player)
+            raise
+        return player, playable, meta
+
     async def play_track(self, bot, guild: Any, channel: Any, track: Any, *, volume: float = 1.0) -> tuple[Any, Any, dict[str, Any]]:
         # Resolve e toca cada candidato separadamente. Isso permite fallback real
         # quando uma fonte carrega metadata, mas quebra só no stream/playback.
@@ -1460,6 +1583,28 @@ class LavalinkBackend:
         last_error: Exception | None = None
         player: Any | None = None
         target_volume = max(0, min(150, int(round(float(volume or 1.0) * 100))))
+
+        pre_resolved = getattr(track, "lavalink_playable", None)
+        if self._looks_like_playable(pre_resolved):
+            try:
+                return await self._play_pre_resolved_playable(
+                    bot,
+                    guild,
+                    channel,
+                    track,
+                    pre_resolved,
+                    target_volume=target_volume,
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "[music/lavalink] playable já resolvido pelo node falhou | guild=%s track=%r erro=%s",
+                    getattr(guild, "id", None),
+                    getattr(track, "title", ""),
+                    exc,
+                )
+                # Continua apenas para o mesmo link/URI direto. _playable_candidates
+                # não adiciona fallbacks por título quando a faixa veio resolvida.
 
         for candidate in candidates:
             candidate = str(candidate or "").strip()

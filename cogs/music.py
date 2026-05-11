@@ -176,10 +176,15 @@ class Music(commands.Cog):
                         requester_name=requester_name,
                     )
                 else:
-                    batch = self._lavalink_batch_for_query(
+                    # Link direto: o próprio node resolve agora e preservamos o
+                    # Playable retornado para tocar exatamente esse item. Não usa
+                    # yt-dlp e não cria faixa genérica tipo "Soundcloud link".
+                    batch = await self.router.backends.resolve_lavalink_direct_tracks(
                         query,
                         requester_id=ctx.author.id,
                         requester_name=requester_name,
+                        guild_id=getattr(ctx.guild, "id", None),
+                        limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
                     )
             except MusicExtractionError as exc:
                 await self._reply(ctx, self._music_error_message(exc))

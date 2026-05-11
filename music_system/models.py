@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import time
-from typing import Optional
+from typing import Any, Optional
 
 
 class LoopMode(str, Enum):
@@ -40,6 +40,13 @@ class MusicTrack:
     resolved_audio_abr: int = 0
     resolved_audio_ext: str = ""
     resolved_audio_codec: str = ""
+    # Dados de runtime do Lavalink/Wavelink. Usado apenas em memória para que
+    # resultados já resolvidos pelo node (seleção/texto ou link direto) sejam
+    # tocados exatamente como retornaram, sem refazer busca por título genérico.
+    lavalink_playable: Any = None
+    lavalink_encoded: str = ""
+    lavalink_query: str = ""
+    lavalink_resolved: bool = False
 
     @property
     def display_url(self) -> str:

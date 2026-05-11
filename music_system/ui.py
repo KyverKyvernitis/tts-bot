@@ -76,7 +76,14 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
                 limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
             )
             return batch, True
-        return _lavalink_batch_for_direct_query(query, requester_id=requester_id, requester_name=requester_name), False
+        batch = await backends.resolve_lavalink_direct_tracks(
+            query,
+            requester_id=requester_id,
+            requester_name=requester_name,
+            guild_id=guild_id,
+            limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
+        )
+        return batch, False
 
     batch = await router.extractor.extract(
         query,
