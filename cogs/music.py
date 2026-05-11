@@ -83,19 +83,17 @@ class Music(commands.Cog):
         if interaction.guild is None or int(getattr(interaction.guild, "id", 0) or 0) != MUSIC_DIAGNOSTICS_GUILD_ID:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
-                    "Esse diagnóstico só funciona na guilda de teste configurada.",
-                    ephemeral=True,
+                    "Esse diagnóstico só funciona na guilda de teste configurada."
                 )
             return
 
         if not await self._can_use_music_diagnostics(interaction):
             await interaction.response.send_message(
-                "Esse diagnóstico técnico de música é exclusivo do dono do bot.",
-                ephemeral=True,
+                "Esse diagnóstico técnico de música é exclusivo do dono do bot."
             )
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
 
         try:
             report = await build_music_diagnostics_report(
@@ -126,7 +124,6 @@ class Music(commands.Cog):
         await interaction.followup.send(
             "`🧪` Diagnóstico de música concluído. O relatório foi anexado em `.txt` com segredos mascarados.",
             file=file,
-            ephemeral=True,
         )
 
     def _music_error_message(self, exc: Exception) -> str:
