@@ -117,6 +117,26 @@ class Music(commands.Cog):
                 f"Erro: {str(exc)[:500]}\n"
             )
 
+        base_summary = ""
+        base_payload: bytes | None = None
+        base_filename = ""
+        base_manifest = ""
+        if anexar_base:
+            try:
+                base_payload, base_filename, base_summary, base_manifest = await build_git_tracked_base_archive()
+            except Exception as exc:
+                logger.exception("[music/diagnostics] falha ao gerar base git-tracked")
+                base_summary = f"Base git-tracked não foi anexada: {type(exc).__name__}: {str(exc)[:300]}"
+
+        if base_manifest:
+            report += (
+                "\n\n"
+                "============================================================\n"
+                "BASE GIT-TRACKED ANEXADA\n"
+                "============================================================\n"
+                f"{base_manifest}"
+            )
+
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         payload = report.encode("utf-8", "replace")
         files: list[discord.File] = [
@@ -126,15 +146,8 @@ class Music(commands.Cog):
             )
         ]
 
-        base_summary = ""
-        if anexar_base:
-            try:
-                base_payload, base_filename, base_summary = await build_git_tracked_base_archive()
-                if base_payload:
-                    files.append(discord.File(io.BytesIO(base_payload), filename=base_filename))
-            except Exception as exc:
-                logger.exception("[music/diagnostics] falha ao gerar base git-tracked")
-                base_summary = f"Base git-tracked não foi anexada: {type(exc).__name__}: {str(exc)[:300]}"
+        if base_payload and base_filename:
+            files.append(discord.File(io.BytesIO(base_payload), filename=base_filename))
 
         message = "`🧪` Diagnóstico de música concluído. O relatório foi anexado em `.txt` com segredos mascarados."
         if anexar_base:

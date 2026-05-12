@@ -628,8 +628,14 @@ def _is_sensitive_tracked_file(rel: str) -> bool:
     lowered = normalized.lower()
     if name in BASE_ARCHIVE_SENSITIVE_NAMES:
         return True
-    if name.startswith(".env"):
+
+    # .env real e variantes locais são sensíveis.
+    # .env.example/.env.sample/.env.template são exemplos rastreados e devem ir no zip,
+    # para a base anexada ficar equivalente à base baixada do GitHub.
+    allowed_env_examples = {".env.example", ".env.sample", ".env.template"}
+    if name.startswith(".env") and name not in allowed_env_examples:
         return True
+
     if lowered.endswith(BASE_ARCHIVE_SENSITIVE_SUFFIXES):
         return True
     # Banco/log/cookies não deveriam estar rastreados, mas se estiverem, não anexa no Discord.
@@ -640,12 +646,14 @@ def _is_sensitive_tracked_file(rel: str) -> bool:
     return False
 
 
-def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str]:
+def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
     """Cria um zip com os arquivos rastreados pelo git no estado atual do disco.
 
     Usa `git ls-files`, então pega apenas arquivos rastreados pelo repositório,
     mas com o conteúdo atual da VPS, inclusive mudanças ainda não commitadas.
-    Arquivos sensíveis rastreados por engano são pulados e listados no manifesto.
+    Arquivos sensíveis rastreados por engano são pulados e listados no manifesto
+    retornado para o relatório de diagnóstico. O manifesto não entra no zip,
+    para a base ficar igual ao zip baixado do GitHub.
     """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"tts-bot-base-git-tracked-{stamp}.zip"
@@ -653,18 +661,18 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str]:
     try:
         root_check = _git_cmd(["rev-parse", "--show-toplevel"], timeout=8.0)
     except Exception as exc:
-        return None, filename, f"Não consegui executar git: {type(exc).__name__}: {exc}"
+        return None, filename, f"Não consegui executar git: {type(exc).__name__}: {exc}", ""
 
     if root_check.returncode != 0:
-        return None, filename, "Repo não parece ter .git acessível; não foi possível gerar a base rastreada pelo Git."
+        return None, filename, "Repo não parece ter .git acessível; não foi possível gerar a base rastreada pelo Git.", ""
 
     ls = _git_cmd(["ls-files", "-z"], timeout=20.0)
     if ls.returncode != 0:
-        return None, filename, f"git ls-files falhou: {redact(ls.stderr or ls.stdout)}"
+        return None, filename, f"git ls-files falhou: {redact(ls.stderr or ls.stdout)}", ""
 
     rels = [item for item in ls.stdout.split("\0") if item]
     if not rels:
-        return None, filename, "git ls-files não retornou arquivos rastreados."
+        return None, filename, "git ls-files não retornou arquivos rastreados.", ""
 
     status = _git_cmd(["status", "--short"], timeout=12.0)
     commit = _git_cmd(["rev-parse", "HEAD"], timeout=8.0)
@@ -707,20 +715,20 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str]:
 
             manifest_lines.extend(skipped or ["nenhum"])
             manifest_lines.extend(["", f"# total de arquivos anexados: {added}"])
-            zf.writestr(f"{BASE_ARCHIVE_ROOT_NAME}/BASE_SNAPSHOT_MANIFEST.txt", redact("\n".join(manifest_lines)) + "\n")
+            manifest_text = redact("\n".join(manifest_lines)) + "\n"
     except Exception as exc:
-        return None, filename, f"Falha ao montar zip da base: {type(exc).__name__}: {exc}"
+        return None, filename, f"Falha ao montar zip da base: {type(exc).__name__}: {exc}", ""
 
     payload = bio.getvalue()
     if len(payload) > BASE_ARCHIVE_MAX_BYTES:
         size_mb = len(payload) / (1024 * 1024)
-        return None, filename, f"Base zip ficou grande demais para anexar com segurança no Discord: {size_mb:.1f} MB."
+        return None, filename, f"Base zip ficou grande demais para anexar com segurança no Discord: {size_mb:.1f} MB.", manifest_text
 
     summary = f"Base git-tracked anexada: {added} arquivos; {len(skipped)} pulado(s); tamanho {len(payload) / (1024 * 1024):.2f} MB."
-    return payload, filename, summary
+    return payload, filename, summary, manifest_text
 
 
-async def build_git_tracked_base_archive() -> tuple[bytes | None, str, str]:
+async def build_git_tracked_base_archive() -> tuple[bytes | None, str, str, str]:
     return await asyncio.to_thread(build_git_tracked_base_archive_sync)
 
 
