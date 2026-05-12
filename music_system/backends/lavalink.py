@@ -1077,12 +1077,51 @@ class LavalinkBackend:
         text_ok = title_ratio >= 0.52 or combined_ratio >= 0.48 or word_score >= 0.55
         return bool(text_ok and duration_ok)
 
+    def _strip_duplicate_author_from_title(self, title: object, author: object) -> str:
+        """Remove artista repetido no começo do título antes do mirror LavaSrc.
+
+        A Spotify API às vezes entrega título já formatado como
+        ``Artista - Música`` enquanto ``uploader/author`` também é ``Artista``.
+        Sem essa normalização o mirror vira algo como
+        ``scsearch:Artista Artista - Música``, piorando a chance do SoundCloud
+        retornar outra faixa.
+        """
+        raw_title = str(title or "").strip()
+        raw_author = str(author or "").strip()
+        if not raw_title or not raw_author:
+            return raw_title
+
+        plain_title = self._plain_match_text(raw_title)
+        plain_author = self._plain_match_text(raw_author)
+        if not plain_title or not plain_author or not plain_title.startswith(plain_author + " "):
+            return raw_title
+
+        # Caminho principal: preserva o texto original do nome da música depois
+        # de separadores comuns usados por Spotify/YouTube/SoundCloud.
+        pattern = re.compile(r"^" + re.escape(raw_author) + r"\s*(?:[-–—:|•]+\s*)+", re.IGNORECASE)
+        cleaned = pattern.sub("", raw_title, count=1).strip()
+        if cleaned and self._plain_match_text(cleaned) != plain_author:
+            return cleaned
+
+        # Fallback por palavras quando há só espaço entre artista e título.
+        author_words = plain_author.split()
+        title_words = raw_title.split()
+        if len(title_words) > len(author_words):
+            candidate = " ".join(title_words[len(author_words):]).strip(" -–—:|•\t")
+            if candidate and self._plain_match_text(candidate) != plain_author:
+                return candidate
+        return raw_title
+
     def _metadata_search_query(self, track: Any, *, fallback_query: str = "") -> str:
         title = self._strip_lavalink_search_prefixes(getattr(track, "title", "") or "")
         author = self._strip_lavalink_search_prefixes(getattr(track, "uploader", "") or getattr(track, "author", "") or "")
         if self._is_generic_link_title(title):
             title = ""
-        query = " ".join(part for part in (author, title) if part).strip()
+        title = self._strip_duplicate_author_from_title(title, author)
+        if author and title:
+            query = f"{author} - {title}"
+        else:
+            query = " ".join(part for part in (author, title) if part).strip()
         if query:
             return query
         fallback = self._strip_lavalink_search_prefixes(fallback_query)

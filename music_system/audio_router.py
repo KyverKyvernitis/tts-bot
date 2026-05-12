@@ -2265,10 +2265,16 @@ class AudioRouter:
         track.resolved_audio_abr = 0
         track.resolved_audio_ext = ""
         track.resolved_audio_codec = ""
-        if "spotify" in values and "spotify" not in str(track.source or "").lower():
-            track.source = "Spotify → fallback local"
-        elif "soundcloud" in values and "soundcloud" not in str(track.source or "").lower():
-            track.source = "SoundCloud → fallback local"
+        if "spotify" in values:
+            track.fallback_reason = "Spotify"
+            if "fallback local" not in str(track.source or "").lower():
+                track.source = "Spotify → fallback local"
+        elif "soundcloud" in values or "scsearch" in values:
+            track.fallback_reason = "SoundCloud"
+            if "fallback local" not in str(track.source or "").lower():
+                track.source = "SoundCloud → fallback local"
+        else:
+            track.fallback_reason = "Lavalink"
         return True
 
     async def _disconnect_lavalink_before_local_fallback(self, guild: discord.Guild, state: MusicGuildState, *, reason: str = "fallback") -> None:

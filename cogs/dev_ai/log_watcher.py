@@ -43,12 +43,29 @@ class LogWatcher:
 
     def _existing_paths(self) -> list[Path]:
         result: list[Path] = []
+        seen: set[str] = set()
         for raw in self.log_paths:
-            if "*" in raw.as_posix():
-                result.extend(sorted(raw.parent.glob(raw.name)))
-            elif raw.exists():
-                result.append(raw)
-        return [p for p in result if p.is_file()]
+            try:
+                if "*" in raw.as_posix():
+                    expanded = sorted(raw.parent.glob(raw.name), key=lambda p: p.as_posix())
+                elif raw.exists():
+                    expanded = [raw]
+                else:
+                    expanded = []
+            except OSError:
+                continue
+            for path in expanded[:64]:
+                try:
+                    if not path.is_file():
+                        continue
+                    key = path.resolve().as_posix()
+                except OSError:
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(path)
+        return result
 
     def initialize(self) -> None:
         for path in self._existing_paths():

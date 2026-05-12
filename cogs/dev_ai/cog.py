@@ -188,7 +188,11 @@ class DevAI(commands.Cog):
         while not self.bot.is_closed():
             try:
                 if self.watcher is not None:
-                    for event in self.watcher.poll():
+                    # A varredura de arquivos pode bater em glob/stat/read de logs
+                    # grandes. Rode fora do event loop para não bloquear heartbeat
+                    # de voz/gateway do Discord.
+                    events = await asyncio.to_thread(self.watcher.poll)
+                    for event in events:
                         try:
                             self.queue.put_nowait(event)
                         except asyncio.QueueFull:

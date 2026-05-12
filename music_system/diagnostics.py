@@ -601,6 +601,48 @@ def _systemd_units_for_diagnostics(*, include_nodelink: bool | None = None) -> l
     return units
 
 
+def _node_process_inventory() -> str:
+    """Mostra processos Node.js sem confundir Sinuca Activity com NodeLink."""
+    ss_output = _run_cmd(["ss", "-ltnp"], timeout=8.0)
+    lines: list[str] = []
+    proc_root = Path("/proc")
+    for item in sorted(proc_root.iterdir(), key=lambda p: int(p.name) if p.name.isdigit() else -1):
+        if not item.name.isdigit():
+            continue
+        pid = item.name
+        try:
+            cmdline = (item / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
+            if not cmdline:
+                continue
+            exe = os.readlink(item / "exe")
+        except Exception:
+            continue
+        combined = f"{exe} {cmdline}".lower()
+        if "node" not in combined and "npm" not in combined:
+            continue
+        try:
+            cwd = os.readlink(item / "cwd")
+        except Exception:
+            cwd = "?"
+        combined_with_cwd = f"{combined} {cwd.lower()}"
+        if "nodelink" in combined_with_cwd or "/opt/nodelink" in combined_with_cwd:
+            label = "NodeLink"
+        elif "sinuca" in combined_with_cwd or "activity/sinuca-server" in combined_with_cwd:
+            label = "Sinuca Activity"
+        else:
+            label = "Node.js (outro)"
+        listen = ""
+        for ss_line in ss_output.splitlines():
+            if f"pid={pid}," in ss_line or f"pid={pid})" in ss_line:
+                listen = ss_line.strip()
+                break
+        suffix = f" | listen={listen}" if listen else ""
+        lines.append(f"pid={pid} | tipo={label} | cwd={cwd} | cmd={cmdline}{suffix}")
+    if not lines:
+        return "Nenhum processo Node.js encontrado."
+    return "Processos Node.js detectados:\n" + "\n".join(lines)
+
+
 def _journalctl_commands(*, full: bool = False) -> list[list[str]]:
     if full:
         spec = [("tts-bot.service", "2 hours ago", "1200"), ("lavalink.service", "2 hours ago", "900"), ("callkeeper.service", "2 hours ago", "500")]
@@ -873,11 +915,12 @@ def _system_status_report() -> str:
         _run_cmd(["df", "-h", "/", "/opt", "/home"], timeout=8.0),
         _run_cmd(["free", "-h"], timeout=8.0),
         _run_cmd(["ss", "-ltnp"], timeout=10.0),
+        _node_process_inventory(),
         _run_cmd(["systemctl", "--no-pager", "--full", "status", *units], timeout=18.0),
         _run_cmd(["systemctl", "cat", *units], timeout=18.0),
     ]
     if not _nodelink_enabled_for_diagnostics():
-        parts.append("NodeLink: não incluído nos services porque NODELINK_ENABLED=false/MUSIC_NODE_PROVIDER não seleciona NodeLink.")
+        parts.append("NodeLink: não incluído nos services porque NODELINK_ENABLED=false/MUSIC_NODE_PROVIDER não seleciona NodeLink. Processos Node.js em outras portas podem ser Sinuca Activity ou outra feature; veja o inventário acima.")
     return "\n\n".join(parts)
 
 

@@ -47,6 +47,9 @@ class MusicTrack:
     lavalink_encoded: str = ""
     lavalink_query: str = ""
     lavalink_resolved: bool = False
+    # Motivo curto exibido no painel quando o Lavalink cai para o player local.
+    # Ex.: "Spotify", "SoundCloud", "YouTube". Vazio = playback local normal.
+    fallback_reason: str = ""
 
     @property
     def display_url(self) -> str:
