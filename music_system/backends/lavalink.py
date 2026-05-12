@@ -1427,7 +1427,7 @@ class LavalinkBackend:
             return ExtractedBatch(tracks=[], query=raw, is_playlist=False)
         lower = raw.lower()
         known_prefixes = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
-        identifier = raw if lower.startswith(known_prefixes) or "://" in raw else f"ytsearch:{raw}"
+        identifier = raw if lower.startswith(known_prefixes) or "://" in raw else f"scsearch:{raw}"
         wavelink, _node = await self.ensure_wavelink_pool(bot)
         search = await self._search_playable_candidate(wavelink, identifier)
         playables = self._playables_from_search(search, limit=limit)

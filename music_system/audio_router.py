@@ -2227,6 +2227,26 @@ class AudioRouter:
             return False
         return False
 
+    def _track_should_preserve_official_display(self, track: MusicTrack, meta: dict | None = None) -> bool:
+        values = " ".join(
+            str(value or "").lower()
+            for value in (
+                getattr(track, "display_source", ""),
+                getattr(track, "source", ""),
+                getattr(track, "extractor", ""),
+                getattr(track, "original_url", ""),
+                getattr(track, "webpage_url", ""),
+                (meta or {}).get("query", "") if isinstance(meta, dict) else "",
+            )
+        )
+        return bool(
+            getattr(track, "display_title", "")
+            or "spotify" in values
+            or "deezer" in values
+            or "apple" in values
+            or "metadata" in values
+        )
+
     def _prepare_track_for_local_after_lavalink_failure(self, track: MusicTrack, exc: Exception | None = None) -> bool:
         """Converte mirrors quebrados do LavaSrc em metadata para fallback local.
 
@@ -2331,11 +2351,11 @@ class AudioRouter:
         state.current_lavalink_playable = playable
         self._mark_lavalink_transition(state, seconds=8.0)
         self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
-        # Usa metadados reais do node para painel/status quando disponíveis.
+        # Usa metadados reais do node quando eles representam a fonte escolhida.
+        # Para Spotify/Deezer/Apple resolvidos por mirror LavaSrc/SoundCloud,
+        # preserve a metadata oficial no painel e use o mirror só como áudio.
         if meta:
-            track.title = str(meta.get("title") or track.title or "Música sem título")
-            track.uploader = str(meta.get("author") or track.uploader or "")
-            track.source = str(meta.get("source") or track.source or "lavalink")
+            preserve_display = self._track_should_preserve_official_display(track, meta)
             raw_duration = meta.get("duration")
             with contextlib.suppress(Exception):
                 numeric_duration = float(raw_duration)
@@ -2344,9 +2364,22 @@ class AudioRouter:
                     # usa segundos. Atualizar isso impede painel final com
                     # "desconhecida" depois que o node já resolveu a faixa.
                     track.duration = numeric_duration / 1000.0 if numeric_duration >= 10000 else numeric_duration
-            artwork = str(meta.get("artwork") or "")
-            if artwork:
-                track.thumbnail = artwork
+            if preserve_display:
+                track.title = str(getattr(track, "display_title", "") or track.title or meta.get("title") or "Música sem título")
+                track.uploader = str(getattr(track, "display_uploader", "") or track.uploader or "")
+                official_thumb = str(getattr(track, "display_thumbnail", "") or "")
+                if official_thumb:
+                    track.thumbnail = official_thumb
+                # Mantém rastreável que o áudio é via Lavalink sem trocar artista/título.
+                if not str(track.source or "").strip():
+                    track.source = str(getattr(track, "display_source", "") or "metadata")
+            else:
+                track.title = str(meta.get("title") or track.title or "Música sem título")
+                track.uploader = str(meta.get("author") or track.uploader or "")
+                track.source = str(meta.get("source") or track.source or "lavalink")
+                artwork = str(meta.get("artwork") or "")
+                if artwork:
+                    track.thumbnail = artwork
         state.current_status = "playing"
         state.current_started_at_monotonic = time.monotonic()
         state.current_quality_label = "Alta"

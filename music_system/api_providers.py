@@ -19,6 +19,8 @@ import config
 
 logger = logging.getLogger(__name__)
 
+_SPOTIFY_TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
+
 
 def _env(name: str, default: str = "") -> str:
     return str(getattr(config, name, "") or os.getenv(name, default) or "").strip()
@@ -323,6 +325,34 @@ class MusicApiProviders:
 
     async def _to_thread_json(self, url: str, *, method: str = "GET", data: bytes | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
         return await asyncio.to_thread(self._request_json, url, method=method, data=data, headers=headers)
+
+    async def _spotify_to_thread_json(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        attempts: int = 3,
+    ) -> dict[str, Any]:
+        attempts = max(1, int(attempts or 1))
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return await self._to_thread_json(url, method=method, data=data, headers=headers)
+            except HTTPError as exc:
+                last_error = exc
+                if exc.code not in _SPOTIFY_TRANSIENT_HTTP_CODES or attempt >= attempts - 1:
+                    raise
+                await asyncio.sleep(min(1.5, 0.35 * (attempt + 1)))
+            except Exception as exc:
+                last_error = exc
+                if attempt >= attempts - 1:
+                    raise
+                await asyncio.sleep(min(1.5, 0.35 * (attempt + 1)))
+        if last_error:
+            raise last_error
+        return {}
 
     async def youtube_search(self, query: str, *, limit: int = 5) -> list[ApiTrackCandidate]:
         if not self.youtube_api_key:
@@ -684,7 +714,7 @@ class MusicApiProviders:
             return candidate
         try:
             params = urlencode({"q": candidate.title, "type": "track", "limit": 5, "market": self.spotify_market})
-            data = await self._to_thread_json(f"https://api.spotify.com/v1/search?{params}", headers=self._spotify_headers(token))
+            data = await self._spotify_to_thread_json(f"https://api.spotify.com/v1/search?{params}", headers=self._spotify_headers(token))
             items = (((data.get("tracks") or {}).get("items")) or [])
             best: ApiTrackCandidate | None = None
             best_score = -999.0
@@ -1050,11 +1080,13 @@ class MusicApiProviders:
         last_error: Exception | None = None
         for url in urls:
             try:
-                return await self._to_thread_json(url, headers=headers)
+                return await self._spotify_to_thread_json(url, headers=headers)
             except HTTPError as exc:
                 last_error = exc
                 # Tenta variantes sem market/additional_types antes de desistir.
-                if exc.code in {400, 403, 404}:
+                # 502/503/504/429 podem oscilar; _spotify_to_thread_json já fez
+                # retry curto, então continua para a próxima variante/token.
+                if exc.code in {400, 403, 404} or exc.code in _SPOTIFY_TRANSIENT_HTTP_CODES:
                     continue
                 raise
             except Exception as exc:
@@ -1103,7 +1135,7 @@ class MusicApiProviders:
                 try:
                     token = await self.spotify_token()
                     if token:
-                        data = await self._to_thread_json(
+                        data = await self._spotify_to_thread_json(
                             f"https://api.spotify.com/v1/tracks/{quote(item_id)}?market={quote(self.spotify_market)}",
                             headers=self._spotify_headers(token),
                         )
@@ -1125,7 +1157,7 @@ class MusicApiProviders:
                 try:
                     token = await self.spotify_token()
                     if token:
-                        data = await self._to_thread_json(
+                        data = await self._spotify_to_thread_json(
                             f"https://api.spotify.com/v1/albums/{quote(item_id)}?market={quote(self.spotify_market)}",
                             headers=self._spotify_headers(token),
                         )
@@ -1175,8 +1207,9 @@ class MusicApiProviders:
                 except HTTPError as exc:
                     last_error = exc
                     # Algumas contas/apps conseguem ler /tracks mesmo quando o endpoint
-                    # de metadata recusa fields/market. Segue tentando os itens.
-                    if exc.code not in {400, 403, 404}:
+                    # de metadata recusa fields/market. Em erro transitório, tente
+                    # os itens/próximo token/fallback público antes de desistir.
+                    if exc.code not in {400, 403, 404} and exc.code not in _SPOTIFY_TRANSIENT_HTTP_CODES:
                         raise
                 except Exception as exc:
                     last_error = exc
@@ -1217,7 +1250,7 @@ class MusicApiProviders:
                         )
                 except HTTPError as exc:
                     last_error = exc
-                    if exc.code not in {400, 403, 404}:
+                    if exc.code not in {400, 403, 404} and exc.code not in _SPOTIFY_TRANSIENT_HTTP_CODES:
                         raise
                     # Tenta próximo token e depois fallback público.
                     continue
@@ -1242,7 +1275,7 @@ class MusicApiProviders:
         token = await self.spotify_token()
         if not token:
             return None
-        data = await self._to_thread_json(f"https://api.spotify.com/v1/tracks/{quote(track_id)}?market={quote(self.spotify_market)}", headers=self._spotify_headers(token))
+        data = await self._spotify_to_thread_json(f"https://api.spotify.com/v1/tracks/{quote(track_id)}?market={quote(self.spotify_market)}", headers=self._spotify_headers(token))
         return self._spotify_candidate(data, url=url)
 
     async def spotify_search(self, query: str, *, limit: int = 5) -> list[ApiTrackCandidate]:
@@ -1250,7 +1283,7 @@ class MusicApiProviders:
         if not token:
             return []
         params = urlencode({"q": query, "type": "track", "limit": max(1, min(10, int(limit))), "market": self.spotify_market})
-        data = await self._to_thread_json(f"https://api.spotify.com/v1/search?{params}", headers=self._spotify_headers(token))
+        data = await self._spotify_to_thread_json(f"https://api.spotify.com/v1/search?{params}", headers=self._spotify_headers(token))
         items = (((data.get("tracks") or {}).get("items")) or [])
         return [cand for cand in (self._spotify_candidate(item) for item in items) if cand]
 

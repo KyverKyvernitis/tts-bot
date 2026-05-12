@@ -50,6 +50,13 @@ class MusicTrack:
     # Motivo curto exibido no painel quando o Lavalink cai para o player local.
     # Ex.: "Spotify", "SoundCloud", "YouTube". Vazio = playback local normal.
     fallback_reason: str = ""
+    # Metadados oficiais preservados para exibição quando o áudio vem de um
+    # mirror LavaSrc/SoundCloud. Ex.: Spotify track tocando via Lavalink deve
+    # mostrar "Heaven Pierce Her - Castle Vein", não o título poluído do mirror.
+    display_title: str = ""
+    display_uploader: str = ""
+    display_thumbnail: str = ""
+    display_source: str = ""
 
     @property
     def display_url(self) -> str:

@@ -40,9 +40,9 @@ def _lavalink_batch_for_direct_query(query: str, *, requester_id: int, requester
     else:
         # Só é usado para fallback defensivo. Texto normal deve passar por busca
         # com seleção, não por autoplay do primeiro resultado.
-        identifier = f"ytsearch:{raw}"
+        identifier = f"scsearch:{raw}"
         title = raw or identifier
-        source = "ytsearch"
+        source = "scsearch"
         webpage_url = ""
     track = MusicTrack(
         title=title or identifier or "Música",
@@ -84,12 +84,25 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
     lavalink_active = bool(callable(should_use_lavalink) and should_use_lavalink(guild_id))
 
     if lavalink_active and _is_youtube_text_search(query):
-        batch = await router.extractor.search_youtube(
-            query,
-            requester_id=requester_id,
-            requester_name=requester_name,
-        )
-        return batch, True
+        try:
+            batch = await backends.search_lavalink_tracks(
+                query,
+                requester_id=requester_id,
+                requester_name=requester_name,
+                guild_id=guild_id,
+                limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+            )
+            if batch.tracks:
+                return batch, True
+            raise MusicExtractionError("Node não retornou resultados para a busca textual.")
+        except Exception:
+            # Fallback local apenas se o node não conseguir buscar texto.
+            batch = await router.extractor.search_youtube(
+                query,
+                requester_id=requester_id,
+                requester_name=requester_name,
+            )
+            return batch, True
 
     profile = describe_url(query)
 

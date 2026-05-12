@@ -112,10 +112,12 @@ class Music(commands.Cog):
         # mostra erro inglês de `spsearch`/SpotifySourceManager no chat.
         if profile.is_metadata_only:
             return False
-        # Texto normal/ytsearch usa yt-dlp apenas como busca de metadados para
-        # seleção. A reprodução depois tenta mirror LavaSrc e cai para local.
+        # Texto normal agora consulta o node primeiro via scsearch/LavaSrc.
+        # Se o node não trouxer resultado, o comando cai para a busca local do
+        # yt-dlp como fallback, evitando a mensagem "não encontrei no YouTube"
+        # quando SoundCloud/Lavalink tem resultado bom.
         if self._is_youtube_text_search(query):
-            return False
+            return True
         return True
 
     def _lavalink_identifier_for_query(self, query: str) -> tuple[str, str, str, str]:
@@ -141,9 +143,9 @@ class Music(commands.Cog):
             title = "YouTube" if profile.is_youtube else f"{source.title()} link" if source != "lavalink" else "Link"
             return profile.canonical or raw, title, source, profile.canonical or raw
 
-        # Busca textual normal em node de áudio: usa YouTube por padrão, porque o objetivo
-        # desta migração é parar de cair em SoundCloud quando o usuário pediu YouTube.
-        return f"ytsearch:{raw}", raw, "ytsearch", ""
+        # Busca textual normal em node de áudio: usa SoundCloud/LavaSrc primeiro.
+        # YouTube direto continua local; texto sem prefixo ganha seleção via Lavalink.
+        return f"scsearch:{raw}", raw, "scsearch", ""
 
     def _lavalink_batch_for_query(self, query: str, *, requester_id: int, requester_name: str) -> ExtractedBatch:
         identifier, title, source, webpage_url = self._lavalink_identifier_for_query(query)
@@ -217,12 +219,43 @@ class Music(commands.Cog):
             # pela API do bot para não cair em erro bruto do SpotifySourceManager.
             try:
                 if self._is_lavalink_search_request(query):
-                    batch = await self._lavalink_search_batch_for_query(
-                        ctx,
-                        query,
-                        requester_id=ctx.author.id,
-                        requester_name=requester_name,
-                    )
+                    try:
+                        batch = await self._lavalink_search_batch_for_query(
+                            ctx,
+                            query,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                        )
+                    except Exception as lavalink_exc:
+                        raw_lower = query.lower().strip()
+                        explicit_lavalink = raw_lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:"))
+                        if not self._is_youtube_text_search(query) or explicit_lavalink:
+                            raise
+                        logger.warning(
+                            "[music/lavalink] busca textual no node falhou; fallback local yt-dlp | guild=%s query=%r erro=%s",
+                            ctx.guild.id,
+                            query,
+                            lavalink_exc,
+                        )
+                        batch = await self.router.extractor.search_youtube(
+                            query,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                        )
+                    if not batch.tracks and self._is_youtube_text_search(query):
+                        raw_lower = query.lower().strip()
+                        explicit_lavalink = raw_lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:"))
+                        if not explicit_lavalink:
+                            logger.info(
+                                "[music/lavalink] busca textual no node vazia; fallback local yt-dlp | guild=%s query=%r",
+                                ctx.guild.id,
+                                query,
+                            )
+                            batch = await self.router.extractor.search_youtube(
+                                query,
+                                requester_id=ctx.author.id,
+                                requester_name=requester_name,
+                            )
                 else:
                     batch = await self.router.backends.resolve_lavalink_direct_tracks(
                         query,

@@ -151,6 +151,11 @@ class MusicExtractor:
         clone.lavalink_encoded = str(getattr(track, "lavalink_encoded", "") or "")
         clone.lavalink_query = str(getattr(track, "lavalink_query", "") or "")
         clone.lavalink_resolved = bool(getattr(track, "lavalink_resolved", False))
+        clone.fallback_reason = str(getattr(track, "fallback_reason", "") or "")
+        clone.display_title = str(getattr(track, "display_title", "") or "")
+        clone.display_uploader = str(getattr(track, "display_uploader", "") or "")
+        clone.display_thumbnail = str(getattr(track, "display_thumbnail", "") or "")
+        clone.display_source = str(getattr(track, "display_source", "") or "")
         return clone
 
     def _cache_get_tracks(self, cache: dict[str, tuple[float, list[MusicTrack]]], key: str, *, requester_id: int, requester_name: str, original_url: str = "") -> list[MusicTrack] | None:
@@ -419,21 +424,64 @@ class MusicExtractor:
         tracks = await self._search_tracks_for_metadata(meta, requester_id=requester_id, requester_name=requester_name, original_url=original_url)
         return tracks[0]
 
+    def _cookies_file_is_valid(self, value: object) -> bool:
+        """Valida cookies.txt antes de passar para o yt-dlp.
+
+        Arquivo vazio ou fora do formato Netscape faz o yt-dlp abortar a busca
+        inteira com ``does not look like a Netscape format cookies file``. Para
+        o bot, é melhor ignorar cookies inválidos e continuar a busca sem eles.
+        """
+        try:
+            path = Path(str(value or "")).expanduser()
+            if not path.is_file() or path.stat().st_size <= 0:
+                return False
+            with path.open("r", encoding="utf-8", errors="ignore") as fp:
+                head = "".join(fp.readline() for _ in range(8))
+            if "# Netscape HTTP Cookie File" in head:
+                return True
+            # Algumas exportações não incluem cabeçalho, mas ainda seguem o
+            # formato tabulado do Netscape. Aceita pelo menos uma linha com domínio.
+            for line in head.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if "	" in stripped and len(stripped.split("	")) >= 7:
+                    return True
+            return False
+        except Exception:
+            return False
+
     def _resolve_cookies_file(self) -> str:
         value = str(
             getattr(config, "MUSIC_YTDLP_COOKIES_FILE", "")
             or getattr(config, "YTDLP_COOKIES_FILE", "")
+            or getattr(config, "YT_DLP_COOKIES_FILE", "")
             or os.getenv("MUSIC_YTDLP_COOKIES_FILE", "")
             or os.getenv("YTDLP_COOKIES_FILE", "")
+            or os.getenv("YT_DLP_COOKIES_FILE", "")
             or ""
         ).strip()
         if not value:
             return ""
         try:
             path = Path(value).expanduser()
-            return str(path) if path.is_file() else ""
+            if self._cookies_file_is_valid(path):
+                return str(path)
+            logger.warning("[music] cookies.txt ignorado: arquivo vazio/inválido ou fora do formato Netscape | path=%s", path)
+            return ""
         except Exception:
             return ""
+
+    def _current_cookies_file(self) -> str:
+        # Revalida em runtime: o arquivo pode ter sido recriado/esvaziado sem
+        # reiniciar o bot. Se ficar inválido, ignora até o próximo reload.
+        path = str(getattr(self, "cookies_file", "") or "").strip()
+        if path and self._cookies_file_is_valid(path):
+            return path
+        if path:
+            logger.warning("[music] cookies.txt deixou de ser válido; yt-dlp seguirá sem cookies | path=%s", path)
+            self.cookies_file = ""
+        return ""
 
     def _format_for_quality(self, audio_max_abr: int | None = None) -> str:
         """Formato yt-dlp adaptado à carga atual do player.
@@ -605,8 +653,9 @@ class MusicExtractor:
             # porque costuma ser leve para stream. Alta qualidade não define sort
             # customizado para deixar o yt-dlp escolher o melhor áudio-only real.
             opts["format_sort"] = ["acodec:opus", "asr:48000", "ext:webm:m4a", "abr", "proto"]
-        if self.cookies_file:
-            opts["cookiefile"] = self.cookies_file
+        cookies_file = self._current_cookies_file()
+        if cookies_file:
+            opts["cookiefile"] = cookies_file
         if youtube_clients:
             opts["extractor_args"] = {"youtube": {"player_client": list(youtube_clients)}}
         return opts
@@ -841,6 +890,11 @@ class MusicExtractor:
                 raise MusicExtractionError(
                     "A Spotify API recusou essa playlist. Gere novamente o SPOTIFY_REFRESH_TOKEN com a conta que tem acesso à playlist "
                     "e com os escopos playlist-read-private, playlist-read-collaborative e user-read-private.",
+                    detail=api_error,
+                )
+            if any(token in api_error for token in ("HTTP Error 429", "HTTP Error 500", "HTTP Error 502", "HTTP Error 503", "HTTP Error 504", "temporarily_unavailable")):
+                raise MusicExtractionError(
+                    "A Spotify API ficou temporariamente indisponível ao ler essa playlist. Tente novamente em alguns segundos.",
                     detail=api_error,
                 )
             raise MusicExtractionError(
@@ -1280,6 +1334,10 @@ class MusicExtractor:
             original_url=candidate.webpage_url or original_url or candidate.search_query,
             extractor="metadata",
         )
+        track.display_title = display_title
+        track.display_uploader = artist
+        track.display_thumbnail = candidate.thumbnail or ""
+        track.display_source = candidate.source or candidate.provider or "metadata"
         return track
 
     def _metadata_candidate_from_track(self, track: MusicTrack) -> ApiTrackCandidate:
@@ -1338,9 +1396,13 @@ class MusicExtractor:
                     self._copy_resolved_fields(track, candidate)
                     if official_title:
                         track.title = official_title
+                        track.display_title = official_title
                     track.duration = meta.duration or track.duration
                     track.uploader = meta.artist or track.uploader
                     track.thumbnail = meta.thumbnail or track.thumbnail
+                    track.display_uploader = meta.artist or track.display_uploader
+                    track.display_thumbnail = meta.thumbnail or track.display_thumbnail
+                    track.display_source = meta.source or track.display_source
                     track.original_url = track.original_url or candidate.original_url
                     track.extractor = candidate.extractor or track.extractor
                     return track
@@ -1367,6 +1429,12 @@ class MusicExtractor:
             original_url=original_url or candidate.webpage_url,
             extractor=candidate.provider or "api",
         )
+        if candidate.provider in {"spotify", "deezer", "apple", "metadata"} or "spotify" in (candidate.source or "").lower():
+            official = " - ".join(part for part in (candidate.artist, candidate.title) if part).strip()
+            track.display_title = official or track.title
+            track.display_uploader = candidate.artist or ""
+            track.display_thumbnail = candidate.thumbnail or ""
+            track.display_source = candidate.source or candidate.provider or "API"
         return track
 
     def _prefer_clean_title(self, current_title: str, api_meta: ApiTrackCandidate) -> str:
