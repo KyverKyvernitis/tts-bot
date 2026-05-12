@@ -429,3 +429,13 @@ DEVAI_PATCH_REVIEW_TIMEOUT_SECONDS = _parse_int(os.getenv("DEVAI_PATCH_REVIEW_TI
 # tentativas que falharam ou propor solução já aplicada.
 DEVAI_HISTORY_ITEMS = _parse_int(os.getenv("DEVAI_HISTORY_ITEMS", "5"), 5)
 DEVAI_HISTORY_MAX_AGE_SECONDS = _parse_int(os.getenv("DEVAI_HISTORY_MAX_AGE_SECONDS", str(7 * 24 * 3600)), 7 * 24 * 3600)
+# --- Music/TTS recovery defaults ---
+MUSIC_LAVALINK_PREMATURE_END_MIN_SECONDS = float(os.getenv("MUSIC_LAVALINK_PREMATURE_END_MIN_SECONDS", "45"))
+MUSIC_LAVALINK_PREMATURE_END_REMAINING_SECONDS = float(os.getenv("MUSIC_LAVALINK_PREMATURE_END_REMAINING_SECONDS", "35"))
+MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES = int(os.getenv("MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES", "1"))
+MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS = float(os.getenv("MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS", "18"))
+MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS = float(os.getenv("MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS", "1.5"))
+# Evita segunda rodada automática quando o primeiro patch da IA já veio com
+# sintaxe Python inválida (casos como `def def`). O erro ainda é reportado,
+# mas não gasta mais CPU/API tentando reparar lixo óbvio.
+DEVAI_REPAIR_SYNTAX_FAILURES = _parse_bool(os.getenv("DEVAI_REPAIR_SYNTAX_FAILURES", "false"), False)

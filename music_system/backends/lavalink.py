@@ -2282,7 +2282,11 @@ class LavalinkBackend:
                     break
                 await asyncio.sleep(0.10)
             else:
-                raise RuntimeError(f"Playback TTS via Lavalink excedeu {float(timeout or 120.0):.1f}s")
+                logger.warning(
+                    "[music/lavalink] tts_session_timeout | guild=%s timeout=%.1fs; restaurando música anterior",
+                    getattr(guild, "id", None),
+                    float(timeout or 120.0),
+                )
             playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
             return {
                 "source_setup_ms": resolved_ms,
@@ -2291,6 +2295,7 @@ class LavalinkBackend:
                 "playback_started_at": playback_started_at,
                 "tts_lavalink": True,
                 "tts_lavalink_query": meta.get("query", ""),
+                "tts_lavalink_timeout_recovered": playback_ms >= (max(1.0, float(timeout or 120.0)) * 1000.0),
             }
         finally:
             allowed = True

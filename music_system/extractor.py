@@ -156,6 +156,9 @@ class MusicExtractor:
         clone.display_uploader = str(getattr(track, "display_uploader", "") or "")
         clone.display_thumbnail = str(getattr(track, "display_thumbnail", "") or "")
         clone.display_source = str(getattr(track, "display_source", "") or "")
+        clone.lavalink_recoveries = int(getattr(track, "lavalink_recoveries", 0) or 0)
+        clone.lavalink_last_position_ms = int(getattr(track, "lavalink_last_position_ms", 0) or 0)
+        clone.lavalink_last_played_seconds = float(getattr(track, "lavalink_last_played_seconds", 0.0) or 0.0)
         return clone
 
     def _cache_get_tracks(self, cache: dict[str, tuple[float, list[MusicTrack]]], key: str, *, requester_id: int, requester_name: str, original_url: str = "") -> list[MusicTrack] | None:
@@ -888,24 +891,23 @@ class MusicExtractor:
             )
 
         if profile.platform == "spotify" and profile.resource_type == "playlist":
-            if not getattr(self.api, "spotify_has_user_auth", False):
+            if any(token in api_error for token in ("HTTP Error 429", "HTTP Error 500", "HTTP Error 502", "HTTP Error 503", "HTTP Error 504", "temporarily_unavailable")):
                 raise MusicExtractionError(
-                    "Não consegui abrir essa playlist do Spotify. A API do app está configurada, mas playlists exigem autorização de usuário. "
-                    "Gere e configure SPOTIFY_REFRESH_TOKEN ou envie uma música única.",
+                    "A Spotify API ficou temporariamente indisponível ao ler essa playlist pública. Tente novamente em alguns segundos; se repetir, envie uma playlist menor ou uma música única.",
+                    detail=api_error,
+                )
+            if "404" in api_error or "Not Found" in api_error or "Resource not found" in api_error:
+                raise MusicExtractionError(
+                    "A Spotify API não expôs essa playlist para o token atual. Ela pode parecer pública no app/site, mas a Web API retornou 404 para esse link.",
+                    detail=api_error,
                 )
             if "403" in api_error or "Forbidden" in api_error:
                 raise MusicExtractionError(
-                    "A Spotify API recusou essa playlist. Gere novamente o SPOTIFY_REFRESH_TOKEN com a conta que tem acesso à playlist "
-                    "e com os escopos playlist-read-private, playlist-read-collaborative e user-read-private.",
-                    detail=api_error,
-                )
-            if any(token in api_error for token in ("HTTP Error 429", "HTTP Error 500", "HTTP Error 502", "HTTP Error 503", "HTTP Error 504", "temporarily_unavailable")):
-                raise MusicExtractionError(
-                    "A Spotify API ficou temporariamente indisponível ao ler essa playlist. Tente novamente em alguns segundos.",
+                    "A Spotify API recusou essa playlist. Se ela for privada/colaborativa, gere um SPOTIFY_REFRESH_TOKEN com acesso; se for pública, é restrição temporária ou do app Spotify.",
                     detail=api_error,
                 )
             raise MusicExtractionError(
-                "Não consegui ler essa playlist do Spotify mesmo com autorização. Verifique se o link é válido e se a conta autorizada tem acesso.",
+                "Não consegui ler essa playlist do Spotify. Para playlists públicas o bot tenta client credentials primeiro; se uma playlist pequena funciona, este link específico pode estar restrito, paginado com erro ou temporariamente indisponível.",
                 detail=api_error,
             )
 

@@ -848,22 +848,48 @@ def _node_process_inventory() -> str:
     return "Processos Node.js detectados:\n" + "\n".join(lines)
 
 
+
+def _tts_runtime_snapshot(router: Any, guild_id: int) -> str:
+    try:
+        state = router.get_state(int(guild_id)) if router is not None and hasattr(router, "get_state") else None
+    except Exception as exc:
+        return f"Não consegui ler estado TTS/música: {type(exc).__name__}: {exc}"
+    if state is None:
+        return "Sem estado de música/TTS para esta guild."
+    now = time.monotonic()
+    data = {
+        "current_backend": getattr(state, "current_backend", ""),
+        "current_status": getattr(state, "current_status", ""),
+        "current_track": getattr(getattr(state, "current", None), "title", ""),
+        "tts_voice_touched": bool(getattr(state, "tts_voice_touched", False)),
+        "last_tts_activity_age_s": round(max(0.0, now - float(getattr(state, "last_tts_activity_at", 0.0) or 0.0)), 2) if getattr(state, "last_tts_activity_at", 0.0) else None,
+        "lavalink_tts_active_for_s": round(max(0.0, float(getattr(state, "lavalink_tts_until", 0.0) or 0.0) - now), 2),
+        "lavalink_resume_grace_for_s": round(max(0.0, float(getattr(state, "lavalink_resume_grace_until", 0.0) or 0.0) - now), 2),
+        "tts_session_active_for_s": round(max(0.0, float(getattr(state, "tts_session_active_until", 0.0) or 0.0) - now), 2),
+        "tts_lavalink_failures": int(getattr(state, "tts_lavalink_failures", 0) or 0),
+        "tts_session_last_error": str(getattr(state, "tts_session_last_error", "") or ""),
+        "current_lavalink_player_present": getattr(state, "current_lavalink_player", None) is not None,
+        "current_lavalink_playable_present": getattr(state, "current_lavalink_playable", None) is not None,
+        "current_source_present": getattr(state, "current_source", None) is not None,
+    }
+    return json.dumps(_safe_report_obj(data), ensure_ascii=False, indent=2)
+
 def _journalctl_commands(*, full: bool = False) -> list[list[str]]:
     if full:
         spec = [("tts-bot.service", "2 hours ago", "1200"), ("lavalink.service", "2 hours ago", "900"), ("callkeeper.service", "2 hours ago", "500")]
         if _nodelink_enabled_for_diagnostics():
             spec.insert(2, ("nodelink.service", "2 hours ago", "500"))
     else:
-        spec = [("tts-bot.service", "20 minutes ago", "450"), ("lavalink.service", "20 minutes ago", "450")]
+        spec = [("tts-bot.service", "12 minutes ago", "240"), ("lavalink.service", "12 minutes ago", "240")]
         if _nodelink_enabled_for_diagnostics():
-            spec.append(("nodelink.service", "20 minutes ago", "220"))
+            spec.append(("nodelink.service", "12 minutes ago", "160"))
     return [["journalctl", "-u", unit, "--since", since, "-n", limit, "--no-pager", "-o", "cat"] for unit, since, limit in spec]
 
 
 def _journalctl_tail() -> str:
     parts = []
     for cmd in _journalctl_commands(full=False):
-        out = _run_cmd(cmd, timeout=10.0, cwd=REPO_ROOT)
+        out = _run_cmd(cmd, timeout=6.0, cwd=REPO_ROOT)
         lines = out.splitlines()
         if len(lines) > 260:
             lines = lines[:3] + ["... (cortado) ..."] + lines[-250:]
@@ -1050,6 +1076,7 @@ def build_music_diagnostics_report_sync(router: Any, options: DiagnosticsOptions
     sections.append(("DB musicnode", db_text))
     cfg = _lavalink_cfg_from_router(router, options.guild_id)
     sections.append(("Config Lavalink efetiva no bot", json.dumps(_safe_report_obj(cfg), ensure_ascii=False, indent=2)))
+    sections.append(("Estado TTS/música em memória", _tts_runtime_snapshot(router, options.guild_id)))
     sections.append(("Teste Spotify API do bot", _spotify_api_test()))
     sections.append(("Dry-run Spotify mirror/fallback (sem tocar áudio)", _spotify_dry_run_mirror_test(cfg)))
     sections.append(("Testes Lavalink REST", _lavalink_tests(cfg)))
@@ -1161,6 +1188,7 @@ def build_full_vps_diagnostics_report_sync(router: Any, options: DiagnosticsOpti
     sections.append(("DB musicnode", db_text))
     cfg = _lavalink_cfg_from_router(router, options.guild_id)
     sections.append(("Config Lavalink efetiva no bot", json.dumps(_safe_report_obj(cfg), ensure_ascii=False, indent=2)))
+    sections.append(("Estado TTS/música em memória", _tts_runtime_snapshot(router, options.guild_id)))
     sections.append(("Teste Spotify API do bot", _spotify_api_test()))
     sections.append(("Dry-run Spotify mirror/fallback (sem tocar áudio)", _spotify_dry_run_mirror_test(cfg)))
     sections.append(("Testes Lavalink REST", _lavalink_tests(cfg)))

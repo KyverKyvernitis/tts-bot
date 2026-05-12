@@ -1109,7 +1109,7 @@ class MusicApiProviders:
         quoted_id = quote(playlist_id)
         fields = "items(track(name,artists(name),album(name,images),duration_ms,external_ids,external_urls,is_local,type)),next,total"
         base = {
-            "limit": max(1, min(50, int(limit))),
+            "limit": max(1, min(100, int(limit))),
             "offset": max(0, int(offset)),
             "fields": fields,
         }
@@ -1219,7 +1219,7 @@ class MusicApiProviders:
                 offset = 0
                 try:
                     while len(tracks) < limit:
-                        page_limit = min(50, limit - len(tracks))
+                        page_limit = min(100, limit - len(tracks))
                         data = await self._spotify_json_first_ok(
                             self._spotify_playlist_tracks_urls(item_id, limit=page_limit, offset=offset),
                             headers=headers,

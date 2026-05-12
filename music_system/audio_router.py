@@ -59,6 +59,11 @@ MUSIC_AUTO_BITRATE_ENABLED = bool(getattr(config, "MUSIC_AUTO_BITRATE_ENABLED", 
 MUSIC_AUTO_BITRATE_MAX = max(8000, int(getattr(config, "MUSIC_AUTO_BITRATE_MAX", 384000)))
 MUSIC_AUTO_BITRATE_MIN_GAIN = max(0, int(getattr(config, "MUSIC_AUTO_BITRATE_MIN_GAIN", 16000)))
 MUSIC_STREAM_START_RETRIES = max(0, int(getattr(config, "MUSIC_STREAM_START_RETRIES", 1)))
+MUSIC_LAVALINK_PREMATURE_END_MIN_SECONDS = max(5.0, float(getattr(config, "MUSIC_LAVALINK_PREMATURE_END_MIN_SECONDS", 45.0)))
+MUSIC_LAVALINK_PREMATURE_END_REMAINING_SECONDS = max(5.0, float(getattr(config, "MUSIC_LAVALINK_PREMATURE_END_REMAINING_SECONDS", 35.0)))
+MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES = max(0, int(getattr(config, "MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES", 1)))
+MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS = max(0.0, float(getattr(config, "MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS", 18.0)))
+MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS = max(0.2, float(getattr(config, "MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS", 1.5)))
 MUSIC_VOICE_STATUS_ENABLED = bool(getattr(config, "MUSIC_VOICE_STATUS_ENABLED", True))
 MUSIC_VOICE_STATUS_TEMPLATE = str(getattr(config, "MUSIC_VOICE_STATUS_TEMPLATE", "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})") or "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})").strip()
 MUSIC_VOICE_STATUS_IDLE = str(getattr(config, "MUSIC_VOICE_STATUS_IDLE", "") or "").strip()
@@ -397,6 +402,11 @@ class MusicGuildState:
     last_tts_activity_at: float = 0.0
     lavalink_tts_until: float = 0.0
     lavalink_resume_grace_until: float = 0.0
+    tts_session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    tts_session_active_until: float = 0.0
+    tts_session_last_error: str = ""
+    tts_session_last_cleanup_at: float = 0.0
+    tts_lavalink_failures: int = 0
     music_session_active: bool = False
     music_idle_disconnect_task: Optional[asyncio.Task] = None
     control_votes: dict[str, ControlVote] = field(default_factory=dict)
@@ -2258,6 +2268,36 @@ class AudioRouter:
             or "metadata" in values
         )
 
+    def _lavalink_position_ms(self, player: Any) -> int:
+        for attr in ("position", "last_position"):
+            value = getattr(player, attr, None)
+            try:
+                if callable(value):
+                    value = value()
+                if value is not None:
+                    return max(0, int(float(value)))
+            except Exception:
+                continue
+        return 0
+
+    def _lavalink_premature_end_reason(self, track: MusicTrack, *, played_seconds: float, position_ms: int) -> str:
+        if getattr(track, "is_live", False):
+            return ""
+        duration = getattr(track, "duration", None)
+        try:
+            duration_seconds = float(duration or 0.0)
+        except Exception:
+            duration_seconds = 0.0
+        observed = max(float(played_seconds or 0.0), float(position_ms or 0) / 1000.0)
+        if duration_seconds <= 0.0:
+            return ""
+        remaining = max(0.0, duration_seconds - observed)
+        if observed < MUSIC_LAVALINK_PREMATURE_END_MIN_SECONDS and remaining > MUSIC_LAVALINK_PREMATURE_END_REMAINING_SECONDS:
+            return f"tocou só {observed:.1f}s de {duration_seconds:.1f}s"
+        if duration_seconds >= 90.0 and observed / max(duration_seconds, 1.0) < 0.70 and remaining > MUSIC_LAVALINK_PREMATURE_END_REMAINING_SECONDS:
+            return f"tocou {observed / max(duration_seconds, 1.0):.0%} da faixa ({observed:.1f}s/{duration_seconds:.1f}s)"
+        return ""
+
     def _prepare_track_for_local_after_lavalink_failure(self, track: MusicTrack, exc: Exception | None = None) -> bool:
         """Converte mirrors quebrados do LavaSrc em metadata para fallback local.
 
@@ -2352,79 +2392,106 @@ class AudioRouter:
         await self._boost_auto_bitrate_for_music(guild, channel, state)
         await self.update_panel(guild.id, create=True)
 
-        player, playable, meta = await self.backends.play_lavalink_track(
-            guild,
-            channel,
-            track,
-            volume=state.volume,
-        )
-        state.current_lavalink_player = player
-        state.current_lavalink_playable = playable
-        self._mark_lavalink_transition(state, seconds=8.0)
-        self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
-        # Usa metadados reais do node quando eles representam a fonte escolhida.
-        # Para Spotify/Deezer/Apple resolvidos por mirror LavaSrc/SoundCloud,
-        # preserve a metadata oficial no painel e use o mirror só como áudio.
-        if meta:
-            preserve_display = self._track_should_preserve_official_display(track, meta)
-            raw_duration = meta.get("duration")
-            with contextlib.suppress(Exception):
-                numeric_duration = float(raw_duration)
-                if numeric_duration > 0:
-                    # Wavelink geralmente informa duração em ms; MusicTrack
-                    # usa segundos. Atualizar isso impede painel final com
-                    # "desconhecida" depois que o node já resolveu a faixa.
-                    track.duration = numeric_duration / 1000.0 if numeric_duration >= 10000 else numeric_duration
-            if preserve_display:
-                track.title = str(getattr(track, "display_title", "") or track.title or meta.get("title") or "Música sem título")
-                track.uploader = str(getattr(track, "display_uploader", "") or track.uploader or "")
-                official_thumb = str(getattr(track, "display_thumbnail", "") or "")
-                if official_thumb:
-                    track.thumbnail = official_thumb
-                # Mantém rastreável que o áudio é via Lavalink sem trocar artista/título.
-                if not str(track.source or "").strip():
-                    track.source = str(getattr(track, "display_source", "") or "metadata")
-            else:
-                track.title = str(meta.get("title") or track.title or "Música sem título")
-                track.uploader = str(meta.get("author") or track.uploader or "")
-                track.source = str(meta.get("source") or track.source or "lavalink")
-                artwork = str(meta.get("artwork") or "")
-                if artwork:
-                    track.thumbnail = artwork
-        state.current_status = "playing"
-        state.current_started_at_monotonic = time.monotonic()
-        state.current_quality_label = "Alta"
-        state.current_quality_kbps = MUSIC_HIGH_QUALITY_MAX_ABR
-        self._schedule_voice_status_track_sync(guild.id, repeat_after=1.0, reason="lavalink_track_started")
-        self._schedule_panel_update(guild.id, create=True)
+        recoveries = max(0, int(getattr(track, "lavalink_recoveries", 0) or 0))
+        while True:
+            player, playable, meta = await self.backends.play_lavalink_track(
+                guild,
+                channel,
+                track,
+                volume=state.volume,
+            )
+            state.current_lavalink_player = player
+            state.current_lavalink_playable = playable
+            self._mark_lavalink_transition(state, seconds=8.0)
+            self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
+            # Usa metadados reais do node quando eles representam a fonte escolhida.
+            # Para Spotify/Deezer/Apple resolvidos por mirror LavaSrc/SoundCloud,
+            # preserve a metadata oficial no painel e use o mirror só como áudio.
+            if meta:
+                preserve_display = self._track_should_preserve_official_display(track, meta)
+                raw_duration = meta.get("duration")
+                with contextlib.suppress(Exception):
+                    numeric_duration = float(raw_duration)
+                    if numeric_duration > 0:
+                        track.duration = numeric_duration / 1000.0 if numeric_duration >= 10000 else numeric_duration
+                if preserve_display:
+                    track.title = str(getattr(track, "display_title", "") or track.title or meta.get("title") or "Música sem título")
+                    track.uploader = str(getattr(track, "display_uploader", "") or track.uploader or "")
+                    official_thumb = str(getattr(track, "display_thumbnail", "") or "")
+                    if official_thumb:
+                        track.thumbnail = official_thumb
+                    if not str(track.source or "").strip():
+                        track.source = str(getattr(track, "display_source", "") or "metadata")
+                else:
+                    track.title = str(meta.get("title") or track.title or "Música sem título")
+                    track.uploader = str(meta.get("author") or track.uploader or "")
+                    track.source = str(meta.get("source") or track.source or "lavalink")
+                    artwork = str(meta.get("artwork") or "")
+                    if artwork:
+                        track.thumbnail = artwork
+            state.current_status = "playing"
+            state.current_started_at_monotonic = time.monotonic()
+            state.current_quality_label = "Alta"
+            state.current_quality_kbps = MUSIC_HIGH_QUALITY_MAX_ABR
+            self._schedule_voice_status_track_sync(guild.id, repeat_after=1.0, reason="lavalink_track_started")
+            self._schedule_panel_update(guild.id, create=True)
 
-        # Polling simples e seguro enquanto o backend real ainda não usa eventos
-        # Wavelink dedicados no Cog. Em Wavelink 3, ``playing`` pode oscilar logo
-        # após play/skip, então usamos ``current`` + uma pequena janela de graça
-        # para não concluir a faixa cedo e avançar várias músicas/status em loop.
-        started_at = time.monotonic()
-        last_explicit_active_at = started_at
-        while not state.stop_requested and not state.skip_requested:
-            if not self._vc_is_connected(player):
-                raise MusicPlaybackError("Player Lavalink desconectou durante a música.")
-            now = time.monotonic()
-            explicit_active = self._vc_lavalink_explicit_playing_or_paused(player)
-            has_current = getattr(player, "current", None) is not None
-            if explicit_active:
-                last_explicit_active_at = now
-                await asyncio.sleep(0.35)
-                continue
-            if self._lavalink_tts_active(state) or self._lavalink_resume_grace_active(state):
-                # Durante TTS via Lavalink, o player troca temporariamente a faixa
-                # e ``playing`` pode cair falso na janela de restauração. Não trate
-                # isso como fim natural da música.
-                await asyncio.sleep(0.20)
-                continue
-            if has_current and (now - started_at < 4.0 or now - last_explicit_active_at < 3.0):
-                await asyncio.sleep(0.20)
-                continue
-            break
-        return not state.stop_requested and not state.skip_requested
+            started_at = time.monotonic()
+            last_explicit_active_at = started_at
+            last_position_ms = 0
+            while not state.stop_requested and not state.skip_requested:
+                if not self._vc_is_connected(player):
+                    raise MusicPlaybackError("Player Lavalink desconectou durante a música.")
+                now = time.monotonic()
+                explicit_active = self._vc_lavalink_explicit_playing_or_paused(player)
+                has_current = getattr(player, "current", None) is not None
+                with contextlib.suppress(Exception):
+                    last_position_ms = max(last_position_ms, self._lavalink_position_ms(player))
+                if explicit_active:
+                    last_explicit_active_at = now
+                    await asyncio.sleep(0.35)
+                    continue
+                if self._lavalink_tts_active(state) or self._lavalink_resume_grace_active(state):
+                    await asyncio.sleep(0.20)
+                    continue
+                if has_current and (now - started_at < 4.0 or now - last_explicit_active_at < 3.0):
+                    await asyncio.sleep(0.20)
+                    continue
+                break
+
+            if state.stop_requested or state.skip_requested:
+                return False
+
+            played_seconds = max(0.0, time.monotonic() - started_at)
+            with contextlib.suppress(Exception):
+                last_position_ms = max(last_position_ms, self._lavalink_position_ms(player))
+            track.lavalink_last_position_ms = int(last_position_ms)
+            track.lavalink_last_played_seconds = float(played_seconds)
+            premature_reason = self._lavalink_premature_end_reason(track, played_seconds=played_seconds, position_ms=last_position_ms)
+            if premature_reason:
+                if recoveries < MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES:
+                    recoveries += 1
+                    track.lavalink_recoveries = recoveries
+                    logger.warning(
+                        "[music/lavalink] lavalink_premature_end | guild=%s track=%r reason=%s retry=%s/%s",
+                        guild.id,
+                        getattr(track, "title", ""),
+                        premature_reason,
+                        recoveries,
+                        MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES,
+                    )
+                    self._mark_lavalink_transition(state, seconds=6.0)
+                    self._mark_internal_voice_disconnect(guild.id, seconds=6.0)
+                    await asyncio.sleep(0.35)
+                    continue
+                logger.warning(
+                    "[music/lavalink] lavalink_fallback_local_same_track | guild=%s track=%r reason=%s",
+                    guild.id,
+                    getattr(track, "title", ""),
+                    premature_reason,
+                )
+                raise MusicPlaybackError(f"Lavalink terminou/falhou cedo demais: {premature_reason}")
+            return True
 
     async def _play_track(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> bool:
         if not state.last_voice_channel_id:
@@ -3024,9 +3091,11 @@ class AudioRouter:
                     "tts_lavalink_failed": True,
                     "tts_lavalink_missing_source": True,
                 }
-            tts_window = max(8.0, float(timeout or 120.0) + 6.0)
+            tts_window = max(12.0, float(timeout or 120.0) + MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS)
             try:
                 async with state.voice_lock:
+                    state.tts_session_active_until = time.monotonic() + tts_window
+                    state.tts_session_last_error = ""
                     state.lavalink_tts_until = max(float(getattr(state, "lavalink_tts_until", 0.0) or 0.0), time.monotonic() + tts_window)
                     self._mark_lavalink_transition(state, seconds=tts_window)
                     self._mark_internal_voice_disconnect(int(guild_id), seconds=tts_window)
@@ -3049,17 +3118,26 @@ class AudioRouter:
                 result.setdefault("playback_started_at", playback_started_at)
                 result.setdefault("playback_ms", max(0.0, (time.monotonic() - playback_started_at) * 1000.0))
                 state.last_tts_activity_at = time.monotonic()
-                state.lavalink_resume_grace_until = time.monotonic() + 4.0
+                cleanup_grace = MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS
+                state.tts_session_active_until = time.monotonic() + cleanup_grace
+                state.tts_session_last_cleanup_at = time.monotonic()
+                state.lavalink_resume_grace_until = time.monotonic() + max(1.0, cleanup_grace)
                 state.lavalink_tts_until = min(float(getattr(state, "lavalink_tts_until", 0.0) or 0.0), state.lavalink_resume_grace_until)
-                self._mark_lavalink_transition(state, seconds=4.0)
-                self._mark_internal_voice_disconnect(int(guild_id), seconds=4.0)
+                self._mark_lavalink_transition(state, seconds=max(1.0, cleanup_grace))
+                self._mark_internal_voice_disconnect(int(guild_id), seconds=max(1.0, cleanup_grace))
                 return result
             except Exception as exc:
+                state.tts_lavalink_failures = int(getattr(state, "tts_lavalink_failures", 0) or 0) + 1
+                state.tts_session_last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning("[music/lavalink] TTS via Lavalink falhou; música deve continuar/resumir | guild=%s erro=%s", guild_id, exc)
-                state.lavalink_resume_grace_until = time.monotonic() + 6.0
+                cleanup_grace = MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS
+                state.tts_session_active_until = time.monotonic() + cleanup_grace
+                state.tts_session_last_cleanup_at = time.monotonic()
+                state.lavalink_resume_grace_until = time.monotonic() + max(1.0, cleanup_grace)
                 state.lavalink_tts_until = min(float(getattr(state, "lavalink_tts_until", 0.0) or 0.0), state.lavalink_resume_grace_until)
-                self._mark_lavalink_transition(state, seconds=6.0)
-                self._mark_internal_voice_disconnect(int(guild_id), seconds=6.0)
+                self._mark_lavalink_transition(state, seconds=max(1.0, cleanup_grace))
+                self._mark_internal_voice_disconnect(int(guild_id), seconds=max(1.0, cleanup_grace))
+                logger.info("[music/lavalink] tts_session_cleanup | guild=%s failures=%s", guild_id, state.tts_lavalink_failures)
                 return {
                     "source_setup_ms": source_setup_ms,
                     "play_call_ms": 0.0,

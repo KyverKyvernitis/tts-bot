@@ -364,6 +364,12 @@ SCHEMA EXATO DO JSON:
                         self.patch_builder.build_from_ai_response, result.text, label=event.signature
                     )
                 except Exception as build_exc:
+                    build_error_text = str(build_exc)
+                    syntax_like_failure = any(token in build_error_text for token in ("SyntaxError", "invalid syntax", "def def"))
+                    if syntax_like_failure and not bool(getattr(config, "DEVAI_REPAIR_SYNTAX_FAILURES", False)):
+                        log.warning("DevAI: patch rejeitado por sintaxe inválida; repair automático suprimido: %s", build_exc)
+                        await self._report_build_failure(event, result, build_exc, comment=comment)
+                        return
                     if not bool(getattr(config, "DEVAI_REPAIR_ENABLED", True)):
                         await self._report_build_failure(event, result, build_exc, comment=comment)
                         return

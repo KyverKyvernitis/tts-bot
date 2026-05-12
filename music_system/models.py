@@ -57,6 +57,11 @@ class MusicTrack:
     display_uploader: str = ""
     display_thumbnail: str = ""
     display_source: str = ""
+    # Controle de recuperação quando o stream do Lavalink/SoundCloud termina
+    # cedo demais. Mantido por faixa para evitar retry infinito em playlists.
+    lavalink_recoveries: int = 0
+    lavalink_last_position_ms: int = 0
+    lavalink_last_played_seconds: float = 0.0
 
     @property
     def display_url(self) -> str:
