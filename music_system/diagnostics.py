@@ -379,6 +379,210 @@ def _mirror_prefixes_for_diagnostics() -> tuple[list[str], list[str]]:
     return prefixes, notes
 
 
+
+def _spotify_api_fetch_test_track() -> tuple[dict[str, Any] | None, list[str]]:
+    """Busca a metadata do track Spotify de teste.
+
+    Retorna também linhas de diagnóstico para que o dry-run consiga explicar
+    quando caiu para metadata estática. O dry-run não toca áudio nem entra em call.
+    """
+    client_id = os.getenv("SPOTIFY_CLIENT_ID", "") or os.getenv("SPOTIFY_ID", "")
+    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "") or os.getenv("SPOTIFY_SECRET", "")
+    lines: list[str] = []
+    if not client_id or not client_secret:
+        lines.append("Spotify API não consultada no dry-run: credenciais ausentes.")
+        return None, lines
+    import base64
+    try:
+        basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        body = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode()
+        req = urllib.request.Request(
+            "https://accounts.spotify.com/api/token",
+            data=body,
+            headers={"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=18) as resp:
+            token_payload = json.loads(resp.read().decode("utf-8", "replace"))
+        token = token_payload.get("access_token") or ""
+        if not token:
+            lines.append("Spotify API retornou token vazio no dry-run.")
+            return None, lines
+        req = urllib.request.Request(
+            f"https://api.spotify.com/v1/tracks/{VALID_SPOTIFY_TEST_ID}?market=BR",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=18) as resp:
+            track = json.loads(resp.read().decode("utf-8", "replace"))
+        artists = [a.get("name", "") for a in track.get("artists", []) if isinstance(a, dict) and a.get("name")]
+        data = {
+            "ok": True,
+            "metadata_source": "Spotify API",
+            "id": track.get("id") or VALID_SPOTIFY_TEST_ID,
+            "title": track.get("name") or "Castle Vein",
+            "artists": ", ".join(artists) or "Heaven Pierce Her",
+            "primary_artist": artists[0] if artists else "Heaven Pierce Her",
+            "duration_ms": track.get("duration_ms") or 340480,
+            "url": VALID_SPOTIFY_TEST_URL,
+        }
+        return data, lines
+    except urllib.error.HTTPError as exc:
+        body = exc.read(2000).decode("utf-8", "replace")
+        lines.append(f"Spotify API indisponível no dry-run: HTTP {exc.code} {redact(body[:600])}")
+    except Exception as exc:
+        lines.append(f"Spotify API indisponível no dry-run: {type(exc).__name__}: {exc}")
+    return None, lines
+
+
+def _spotify_static_test_track_metadata() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "metadata_source": "fallback estático do diagnóstico",
+        "id": VALID_SPOTIFY_TEST_ID,
+        "title": "Castle Vein",
+        "artists": "Heaven Pierce Her",
+        "primary_artist": "Heaven Pierce Her",
+        "duration_ms": 340480,
+        "url": VALID_SPOTIFY_TEST_URL,
+    }
+
+
+def _spotify_dry_run_mirror_test(cfg: dict[str, Any]) -> str:
+    """Simula Spotify -> mirror LavaSrc -> decisão de fallback sem tocar áudio.
+
+    Esse teste existe para validar a query gerada pelo bot e a decisão que seria
+    tomada pelo fluxo real, mas sem entrar em call, mexer em fila ou trocar música.
+    """
+    base_url = str(cfg.get("base_url") or "").rstrip("/")
+    password = str(cfg.get("raw_password") or "")
+    provider_label = str(cfg.get("provider_label") or "Lavalink")
+    lines: list[str] = [
+        "Este teste NÃO entra em call e NÃO toca áudio; ele só simula a resolução Spotify -> mirror/fallback.",
+        f"Link Spotify de teste: {VALID_SPOTIFY_TEST_URL}",
+    ]
+    if not base_url or not password:
+        lines.append(f"{provider_label} não configurado ou senha ausente; dry-run encerrado.")
+        return "\n".join(lines)
+
+    track_meta, api_notes = _spotify_api_fetch_test_track()
+    if api_notes:
+        lines.append("Notas Spotify API:")
+        lines.extend(f"- {note}" for note in api_notes)
+    if track_meta is None:
+        track_meta = _spotify_static_test_track_metadata()
+        lines.append("Usando metadata estática conhecida para ainda validar normalização de query e mirror.")
+
+    title = str(track_meta.get("title") or "Castle Vein").strip()
+    primary_artist = str(track_meta.get("primary_artist") or "Heaven Pierce Her").strip()
+    duration_ms = int(track_meta.get("duration_ms") or 0)
+    spotify_url = str(track_meta.get("url") or VALID_SPOTIFY_TEST_URL).strip()
+
+    try:
+        from .backends.lavalink import LavalinkBackend, LavalinkConfig
+        from .models import MusicTrack
+
+        backend = LavalinkBackend(LavalinkConfig(
+            enabled=True,
+            mode=str(cfg.get("mode") or "auto"),
+            host=str(cfg.get("host") or "127.0.0.1"),
+            port=int(cfg.get("port") or 2333),
+            password=password,
+            secure=bool(cfg.get("secure") or False),
+            node_name=str(cfg.get("node_name") or "lavalink"),
+            timeout_seconds=float(cfg.get("timeout_seconds") or 45.0),
+            provider=str(cfg.get("provider") or "lavalink"),
+        ))
+        # Simula o formato que o fluxo local do Spotify costuma entregar:
+        # título já pode vir como "Artista - Música" e uploader também como artista.
+        # A correção esperada é não gerar "Artista Artista - Música".
+        simulated_track = MusicTrack(
+            title=f"{primary_artist} - {title}",
+            webpage_url=spotify_url,
+            requester_id=0,
+            requester_name="diagnóstico",
+            duration=duration_ms / 1000 if duration_ms else None,
+            uploader=primary_artist,
+            source="spotify",
+            original_url=spotify_url,
+            extractor="spotify",
+        )
+        metadata_query = backend._metadata_search_query(simulated_track, fallback_query=spotify_url)
+        candidates = backend._mirror_search_candidates(simulated_track, fallback_query=spotify_url)
+    except Exception as exc:
+        lines.append(f"ERRO ao gerar query pelo backend: {type(exc).__name__}: {exc}")
+        return "\n".join(lines)
+
+    prefixes, prefix_notes = _mirror_prefixes_for_diagnostics()
+    lines.append("Metadata usada:")
+    lines.append(json.dumps(_safe_report_obj({
+        "source": track_meta.get("metadata_source"),
+        "title": title,
+        "artist": primary_artist,
+        "duration_ms": duration_ms,
+    }), ensure_ascii=False, indent=2))
+    lines.append(f"Mirror prefixes efetivos: {', '.join(prefixes)}")
+    if prefix_notes:
+        lines.append("Notas de prefixo:")
+        lines.extend(f"- {note}" for note in prefix_notes)
+    lines.append(f"Query metadata normalizada: {metadata_query!r}")
+    lines.append("Candidatos gerados:")
+    lines.append(json.dumps(candidates[:6], ensure_ascii=False, indent=2))
+
+    decision = "fallback local · Spotify"
+    tested: list[dict[str, Any]] = []
+    for candidate in candidates[:4]:
+        enc = urllib.parse.quote(candidate, safe="")
+        result = _http_json(f"{base_url}/v4/loadtracks?identifier={enc}", password=password, timeout=25.0)
+        summary = _summarize_loadtracks(result)
+        first = (summary.get("tracks") or [None])[0] if isinstance(summary, dict) else None
+        item: dict[str, Any] = {
+            "candidate": candidate,
+            "ok": bool(result.get("ok")),
+            "status": result.get("status"),
+            "latency_ms": result.get("latency_ms"),
+            "loadType": summary.get("loadType") if isinstance(summary, dict) else None,
+            "tracks_found": summary.get("tracks_found") if isinstance(summary, dict) else None,
+            "first_track": first,
+            "strict_match": False,
+        }
+        if isinstance(first, dict):
+            compare_meta = {
+                "title": first.get("title") or "",
+                "uploader": first.get("author") or "",
+                "duration": (float(first.get("length") or 0) / 1000) if first.get("length") else None,
+            }
+            try:
+                item["strict_match"] = bool(backend._mirror_meta_matches_track(simulated_track, compare_meta, candidate=candidate))
+            except Exception as exc:
+                item["match_error"] = f"{type(exc).__name__}: {exc}"
+        tested.append(item)
+        if item.get("strict_match"):
+            decision = f"{provider_label} · mirror Spotify aprovado"
+            break
+
+    lines.append("Resultados dos mirrors testados:")
+    lines.append(json.dumps(_safe_report_obj(tested), ensure_ascii=False, indent=2))
+    lines.append(f"Decisão simulada: {decision}")
+    if any("  " in str(c) for c in candidates):
+        lines.append("AVISO: há espaços duplicados nos candidatos gerados.")
+    duplicated_pattern = f"{primary_artist} {primary_artist}".lower()
+    if duplicated_pattern in "\n".join(str(c).lower() for c in candidates):
+        lines.append("AVISO: artista ainda apareceu duplicado na query gerada.")
+    return "\n".join(lines)
+
+
+def _service_restart_markers() -> str:
+    cmds = [
+        ["systemctl", "show", "tts-bot.service", "-p", "ActiveEnterTimestamp", "-p", "ExecMainStartTimestamp", "-p", "MainPID", "--no-pager"],
+        ["systemctl", "show", "lavalink.service", "-p", "ActiveEnterTimestamp", "-p", "ExecMainStartTimestamp", "-p", "MainPID", "--no-pager"],
+    ]
+    lines = [
+        "Use estes horários para diferenciar logs antigas de logs pós-restart.",
+        "Logs locais podem conter histórico antigo; journalctl por unidade é mais confiável para eventos recentes.",
+    ]
+    for cmd in cmds:
+        lines.append(_run_cmd(cmd, timeout=8.0, cwd=REPO_ROOT))
+    return "\n\n".join(lines)
+
 def _spotify_api_test() -> str:
     client_id = os.getenv("SPOTIFY_CLIENT_ID", "") or os.getenv("SPOTIFY_ID", "")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "") or os.getenv("SPOTIFY_SECRET", "")
@@ -573,9 +777,10 @@ def _yt_dlp_test() -> str:
     return "\n".join(lines)
 
 def _local_log_tail() -> str:
+    note = "Observação: logs locais podem conter eventos pré-restart; confira a seção Marcos de restart/runtime para contextualizar horários.\n\n"
     log_dir = REPO_ROOT / "logs"
     if not log_dir.exists():
-        return "Pasta logs/ não existe."
+        return note + "Pasta logs/ não existe."
     parts: list[str] = []
     for path in sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)[:4]:
         try:
@@ -584,7 +789,7 @@ def _local_log_tail() -> str:
             parts.append(f"===== {path.relative_to(REPO_ROOT)} =====\n{tail}")
         except Exception as exc:
             parts.append(f"===== {path} =====\nERRO: {type(exc).__name__}: {exc}")
-    return "\n\n".join(parts) if parts else "Nenhum .log em logs/."
+    return note + ("\n\n".join(parts) if parts else "Nenhum .log em logs/.")
 
 
 def _nodelink_enabled_for_diagnostics() -> bool:
@@ -846,7 +1051,9 @@ def build_music_diagnostics_report_sync(router: Any, options: DiagnosticsOptions
     cfg = _lavalink_cfg_from_router(router, options.guild_id)
     sections.append(("Config Lavalink efetiva no bot", json.dumps(_safe_report_obj(cfg), ensure_ascii=False, indent=2)))
     sections.append(("Teste Spotify API do bot", _spotify_api_test()))
+    sections.append(("Dry-run Spotify mirror/fallback (sem tocar áudio)", _spotify_dry_run_mirror_test(cfg)))
     sections.append(("Testes Lavalink REST", _lavalink_tests(cfg)))
+    sections.append(("Marcos de restart/runtime", _service_restart_markers()))
     sections.append(("Teste yt-dlp local com cookies", _yt_dlp_test()))
     sections.append(("application.yml do Lavalink (sanitizado)", _application_yml_head()))
     if options.include_local_logs:
@@ -870,6 +1077,7 @@ async def build_music_diagnostics_report(router: Any, options: DiagnosticsOption
 
 
 def _local_log_tail_full() -> str:
+    note = "Observação: logs locais podem conter eventos pré-restart; confira a seção Marcos de restart/runtime para contextualizar horários.\n\n"
     log_dir = REPO_ROOT / "logs"
     parts: list[str] = []
 
@@ -882,7 +1090,7 @@ def _local_log_tail_full() -> str:
             candidates.append(extra)
 
     if not candidates:
-        return "Nenhum arquivo de log local encontrado."
+        return note + "Nenhum arquivo de log local encontrado."
 
     for path in candidates[:12]:
         try:
@@ -892,7 +1100,7 @@ def _local_log_tail_full() -> str:
             parts.append(f"===== {rel} =====\n{tail}")
         except Exception as exc:
             parts.append(f"===== {path} =====\nERRO: {type(exc).__name__}: {exc}")
-    return "\n\n".join(parts)
+    return note + "\n\n".join(parts)
 
 
 def _journalctl_full_tail() -> str:
@@ -954,7 +1162,9 @@ def build_full_vps_diagnostics_report_sync(router: Any, options: DiagnosticsOpti
     cfg = _lavalink_cfg_from_router(router, options.guild_id)
     sections.append(("Config Lavalink efetiva no bot", json.dumps(_safe_report_obj(cfg), ensure_ascii=False, indent=2)))
     sections.append(("Teste Spotify API do bot", _spotify_api_test()))
+    sections.append(("Dry-run Spotify mirror/fallback (sem tocar áudio)", _spotify_dry_run_mirror_test(cfg)))
     sections.append(("Testes Lavalink REST", _lavalink_tests(cfg)))
+    sections.append(("Marcos de restart/runtime", _service_restart_markers()))
     sections.append(("Teste yt-dlp local com cookies", _yt_dlp_test()))
     sections.append(("application.yml do Lavalink (sanitizado)", _application_yml_head()))
     sections.append(("Status do sistema e services", _system_status_report()))
