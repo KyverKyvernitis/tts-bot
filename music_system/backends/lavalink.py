@@ -26,11 +26,11 @@ def _mirror_prefixes_from_config() -> tuple[str, ...]:
 
     O padrão evita YouTube no Lavalink e também evita depender de ``spsearch``
     quando o LavaSrc/Spotify está instável. Quem quiser testar Spotify/Deezer no
-    node pode definir MUSIC_LAVASRC_MIRROR_PREFIXES="scsearch,spsearch" no .env.
+    node pode definir MUSIC_LAVASRC_MIRROR_PREFIXES="dzsearch,scsearch" no .env.
     """
     raw = str(getattr(config, "MUSIC_LAVASRC_MIRROR_PREFIXES", "") or os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "") or "").strip()
     if not raw:
-        raw = "scsearch"
+        raw = "dzsearch,scsearch"
     allowed = {"scsearch", "spsearch", "dzsearch", "amsearch"}
     out: list[str] = []
     for item in re.split(r"[,;\s]+", raw):
@@ -934,10 +934,17 @@ class LavalinkBackend:
 
     def _requires_strict_mirror_match(self, track: Any, *, candidate: str = "") -> bool:
         source = str(getattr(track, "source", "") or getattr(track, "extractor", "") or "").strip().lower()
+        original_url = str(getattr(track, "original_url", "") or "")
+        webpage_url = str(getattr(track, "webpage_url", "") or "")
+        prefix, _body = self._split_lavalink_search_prefix(candidate)
+        mirror_prefixes = {"scsearch", "spsearch", "dzsearch", "amsearch"}
         return bool(
-            source in {"youtube", "yt", "ytsearch", "ytmsearch"}
-            or self._is_youtube_value(str(getattr(track, "webpage_url", "") or ""))
-            or str(candidate or "").lower().startswith(("spsearch:", "scsearch:"))
+            source in {"youtube", "yt", "ytsearch", "ytmsearch", "spotify", "deezer", "apple", "metadata"}
+            or self._is_youtube_value(webpage_url)
+            or self._is_youtube_value(original_url)
+            or self._is_spotify_value(webpage_url)
+            or self._is_spotify_value(original_url)
+            or prefix in mirror_prefixes
         )
 
     def _duration_seconds_from_meta(self, value: Any) -> float:
@@ -1024,6 +1031,12 @@ class LavalinkBackend:
             or self._is_spotify_value(webpage_url)
             or self._is_spotify_value(fallback_query)
         )
+        is_soundcloud_track = (
+            source in {"soundcloud", "scsearch"}
+            or "soundcloud.com" in original_url.lower()
+            or "soundcloud.com" in webpage_url.lower()
+            or "soundcloud.com" in str(fallback_query or "").lower()
+        )
 
         raw_values = [fallback_query, original_url, webpage_url]
         url_values = [value for value in (original_url, webpage_url, fallback_query) if self._is_url_like_value(value)]
@@ -1061,12 +1074,17 @@ class LavalinkBackend:
 
         if lavalink_resolved or url_values:
             # Link direto e resultado escolhido do node são escolhas explícitas.
-            # Não faça fallback por título genérico ("Soundcloud link", "YouTube")
-            # porque isso pode tocar uma música completamente diferente minutos depois.
+            # Primeiro tenta exatamente o link/playable retornado. Para SoundCloud,
+            # alguns itens resolvem metadata mas quebram no stream real com 404;
+            # nesses casos é seguro tentar mirrors por título/artista depois do link
+            # direto, desde que _mirror_meta_matches_track aprove o candidato.
             for value in url_values:
                 self._append_unique_candidate(candidates, value)
             if not candidates:
                 for value in explicit_prefixed:
+                    self._append_unique_candidate(candidates, value)
+            if is_soundcloud_track:
+                for value in mirror_fallbacks:
                     self._append_unique_candidate(candidates, value)
             return candidates
 
@@ -1730,8 +1748,8 @@ class LavalinkBackend:
                     getattr(track, "title", ""),
                     exc,
                 )
-                # Continua apenas para o mesmo link/URI direto. _playable_candidates
-                # não adiciona fallbacks por título quando a faixa veio resolvida.
+                # Continua para os candidatos calculados. Para SoundCloud, isso pode
+                # incluir mirrors por título/artista quando o stream direto cair com 404.
 
         for candidate in candidates:
             candidate = str(candidate or "").strip()

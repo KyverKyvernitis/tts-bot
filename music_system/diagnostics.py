@@ -264,7 +264,7 @@ def _lavalink_tests(cfg: dict[str, Any]) -> str:
     info = _http_json(f"{base_url}/v4/info", password=password, timeout=18.0)
     lines.append("/v4/info:")
     lines.append(json.dumps(_safe_report_obj(info), ensure_ascii=False, indent=2))
-    mirror_raw = os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "scsearch") or "scsearch"
+    mirror_raw = os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "dzsearch,scsearch") or "dzsearch,scsearch"
     mirror_prefix = re.split(r"[,;\s]+", mirror_raw.strip())[0].strip().removesuffix(":") or "scsearch"
     tests = [
         ("MP3 HTTP direto", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"),

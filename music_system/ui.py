@@ -75,9 +75,9 @@ def _is_youtube_text_search(query: str) -> bool:
 async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, requester_id: int, requester_name: str) -> tuple[ExtractedBatch, bool]:
     """Resolve o input do modal respeitando o backend ativo.
 
-    SoundCloud/Spotify ficam no Lavalink/LavaSrc. YouTube direto vai para
-    yt-dlp local. Texto normal/ytsearch usa yt-dlp só para listar resultados;
-    ao tocar, o router tenta mirror LavaSrc e cai para local se não bater.
+    SoundCloud direto fica no Lavalink/LavaSrc. Spotify/Deezer/Apple são
+    metadata-only: o bot lê título/artista pela API e só depois tenta mirror
+    Deezer/SoundCloud no playback. YouTube direto vai para yt-dlp local.
     """
     backends = getattr(router, "backends", None)
     should_use_lavalink = getattr(backends, "should_use_lavalink_real", None)
@@ -91,7 +91,17 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
         )
         return batch, True
 
-    if lavalink_active and not _is_youtube_link(query):
+    profile = describe_url(query)
+
+    if lavalink_active and profile.is_metadata_only:
+        batch = await router.extractor.extract(
+            query,
+            requester_id=requester_id,
+            requester_name=requester_name,
+        )
+        return batch, False
+
+    if lavalink_active and not profile.is_youtube:
         is_search = _is_lavalink_search_request(query)
         if is_search:
             batch = await backends.search_lavalink_tracks(

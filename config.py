@@ -256,6 +256,9 @@ MUSIC_MIN_LINK_METADATA_CONFIDENCE = (os.getenv("MUSIC_MIN_LINK_METADATA_CONFIDE
 MUSIC_MAX_DURATION_MISMATCH_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_MAX_DURATION_MISMATCH_SECONDS", "45"), 45.0))
 MUSIC_MAX_DURATION_MISMATCH_RATIO = max(0.0, _parse_float(os.getenv("MUSIC_MAX_DURATION_MISMATCH_RATIO", "0.25"), 0.25))
 MUSIC_REJECT_WEAK_LINK_MATCHES = _parse_bool(os.getenv("MUSIC_REJECT_WEAK_LINK_MATCHES", "true"), True)
+# Mirrors do LavaSrc usados para transformar metadata de Spotify/YouTube em áudio tocável.
+# Spotify direto/spsearch fica fora do padrão porque o LavaSrc 4.8.x pode falhar com 403.
+MUSIC_LAVASRC_MIRROR_PREFIXES = (os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "dzsearch,scsearch") or "dzsearch,scsearch").strip()
 
 # Lavalink — suporte invisível/diagnóstico para migração futura do player.
 # Patch atual NÃO troca o player real: MUSIC_BACKEND permanece local por padrão.
