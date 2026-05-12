@@ -9,7 +9,7 @@ import os
 import re
 import time
 from difflib import SequenceMatcher
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import quote
 
@@ -210,6 +210,7 @@ class LavalinkBackend:
     _shared_pool_locks: dict[int, asyncio.Lock] = {}
     _node_failure_until: dict[str, float] = {}
     _node_failure_reason: dict[str, str] = {}
+    _search_cache: dict[str, tuple[float, list[MusicTrack]]] = {}
 
     def __init__(self, cfg: LavalinkConfig) -> None:
         self.cfg = cfg
@@ -1406,6 +1407,61 @@ class LavalinkBackend:
             lavalink_resolved=True,
         )
 
+    def _clone_cached_track(self, track: MusicTrack, *, requester_id: int = 0, requester_name: str = "") -> MusicTrack:
+        try:
+            return replace(
+                track,
+                requester_id=int(requester_id or 0),
+                requester_name=requester_name or "",
+            )
+        except Exception:
+            clone = MusicTrack(
+                title=track.title,
+                webpage_url=track.webpage_url,
+                requester_id=int(requester_id or 0),
+                requester_name=requester_name or "",
+                stream_url=track.stream_url,
+                duration=track.duration,
+                uploader=track.uploader,
+                thumbnail=track.thumbnail,
+                source=track.source,
+                original_url=track.original_url,
+                extractor=track.extractor,
+                is_live=track.is_live,
+            )
+            clone.lavalink_playable = getattr(track, "lavalink_playable", None)
+            clone.lavalink_encoded = str(getattr(track, "lavalink_encoded", "") or "")
+            clone.lavalink_query = str(getattr(track, "lavalink_query", "") or "")
+            clone.lavalink_resolved = bool(getattr(track, "lavalink_resolved", False))
+            return clone
+
+    def _search_cache_key(self, query: str, *, limit: int) -> str:
+        return "|".join([self.cfg.base_url, self.cfg.node_name, str(max(1, int(limit or 5))), re.sub(r"\s+", " ", str(query or "").strip().lower())])
+
+    def _get_cached_selection_tracks(self, key: str, *, requester_id: int = 0, requester_name: str = "") -> list[MusicTrack] | None:
+        ttl = max(0, int(getattr(config, "MUSIC_LAVALINK_SEARCH_CACHE_TTL_SECONDS", 90) or 0))
+        if ttl <= 0 or not key:
+            return None
+        item = self.__class__._search_cache.get(key)
+        if not item:
+            return None
+        created, tracks = item
+        if time.monotonic() - created > ttl:
+            self.__class__._search_cache.pop(key, None)
+            return None
+        return [self._clone_cached_track(track, requester_id=requester_id, requester_name=requester_name) for track in tracks]
+
+    def _put_cached_selection_tracks(self, key: str, tracks: list[MusicTrack]) -> None:
+        ttl = max(0, int(getattr(config, "MUSIC_LAVALINK_SEARCH_CACHE_TTL_SECONDS", 90) or 0))
+        if ttl <= 0 or not key or not tracks:
+            return
+        cache = self.__class__._search_cache
+        if len(cache) >= 128:
+            oldest = sorted(cache.items(), key=lambda item: item[1][0])[:16]
+            for old_key, _ in oldest:
+                cache.pop(old_key, None)
+        cache[key] = (time.monotonic(), [self._clone_cached_track(track, requester_id=track.requester_id, requester_name=track.requester_name) for track in tracks])
+
     async def extract_tracks_for_selection(
         self,
         bot,
@@ -1428,6 +1484,10 @@ class LavalinkBackend:
         lower = raw.lower()
         known_prefixes = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
         identifier = raw if lower.startswith(known_prefixes) or "://" in raw else f"scsearch:{raw}"
+        cache_key = self._search_cache_key(identifier, limit=max(1, int(limit or 5)))
+        cached = self._get_cached_selection_tracks(cache_key, requester_id=requester_id, requester_name=requester_name)
+        if cached is not None:
+            return ExtractedBatch(tracks=cached[: max(1, int(limit or 5))], query=identifier, is_playlist=False)
         wavelink, _node = await self.ensure_wavelink_pool(bot)
         search = await self._search_playable_candidate(wavelink, identifier)
         playables = self._playables_from_search(search, limit=limit)
@@ -1435,6 +1495,7 @@ class LavalinkBackend:
             self._track_from_playable(item, requester_id=requester_id, requester_name=requester_name, query=identifier)
             for item in playables[: max(1, int(limit or 5))]
         ]
+        self._put_cached_selection_tracks(cache_key, tracks)
         return ExtractedBatch(tracks=tracks, query=identifier, is_playlist=False)
 
     async def extract_direct_tracks(
@@ -2177,6 +2238,23 @@ class LavalinkBackend:
         was_paused = self._player_bool(player, "paused", "is_paused")
         music_volume = self._player_volume_percent(player, resume_volume)
         tts_volume = max(0, min(150, int(round(float(volume or 1.0) * 100))))
+        pause_before_tts = bool(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_ENABLED", True)) and previous_playable is not None and not was_paused
+        pause_grace = max(0.2, float(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS", 0.35) or 0.35))
+        if pause_before_tts:
+            try:
+                await self._pause_player(player, True)
+                # Releia a posição logo depois do pause para restaurar mais perto
+                # do ponto real onde o TTS interrompeu a música.
+                previous_position = max(previous_position, self._player_position_ms(player))
+                logger.info(
+                    "[music/lavalink] tts_pause_lavalink_start | guild=%s position_ms=%s volume=%s",
+                    getattr(guild, "id", None),
+                    previous_position,
+                    music_volume,
+                )
+                await asyncio.sleep(pause_grace)
+            except Exception:
+                logger.debug("[music/lavalink] falha ao pausar música antes do TTS; seguindo com interrupt", exc_info=True)
         play_call_started_at = time.monotonic()
         restored = False
         restore_error: Exception | None = None
@@ -2236,6 +2314,12 @@ class LavalinkBackend:
                     )
                     if was_paused:
                         await self._pause_player(player, True)
+                    logger.info(
+                        "[music/lavalink] tts_pause_lavalink_resume | guild=%s restored=%s position_ms=%s",
+                        getattr(guild, "id", None),
+                        True,
+                        max(0, int(previous_position)),
+                    )
                     restored = True
                 except Exception as exc:
                     restore_error = exc

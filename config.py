@@ -160,6 +160,13 @@ TTS_FFMPEG_OPTIONS = (os.getenv("TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or 
 # -----------------------------------------------------------------------------
 MUSIC_DEFAULT_VOLUME = _parse_float(os.getenv("MUSIC_DEFAULT_VOLUME", "0.55"), 0.55)
 MUSIC_TTS_VOLUME = _parse_float(os.getenv("MUSIC_TTS_VOLUME", "1.0"), 1.0)
+# Quando TTS toca junto com música local/yt-dlp, reduza a música para 5%
+# do volume normal e restaure automaticamente ao fim do TTS.
+MUSIC_TTS_LOCAL_DUCK_PERCENT = max(0.0, min(100.0, _parse_float(os.getenv("MUSIC_TTS_LOCAL_DUCK_PERCENT", "5"), 5.0)))
+# Para música via Lavalink, o TTS usa o próprio node: pausa a faixa atual, toca
+# o áudio curto e restaura a música na posição anterior.
+MUSIC_LAVALINK_TTS_PAUSE_ENABLED = _parse_bool(os.getenv("MUSIC_LAVALINK_TTS_PAUSE_ENABLED", "true"), True)
+MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS = max(0.2, _parse_float(os.getenv("MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS", "0.35"), 0.35))
 MUSIC_TTS_PUBLIC_BASE_URL = (
     os.getenv("MUSIC_TTS_PUBLIC_BASE_URL", os.getenv("PUBLIC_BASE_URL", os.getenv("WEB_PUBLIC_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", ""))))
     or ""
@@ -183,6 +190,7 @@ MUSIC_YTDLP_COOKIES_FILE = (os.getenv("MUSIC_YTDLP_COOKIES_FILE", os.getenv("YTD
 MUSIC_API_SEARCH_ENABLED = _parse_bool(os.getenv("MUSIC_API_SEARCH_ENABLED", "true"), True)
 MUSIC_API_TIMEOUT_SECONDS = _parse_float(os.getenv("MUSIC_API_TIMEOUT_SECONDS", "5.0"), 5.0)
 MUSIC_METADATA_CACHE_TTL_SECONDS = _parse_int(os.getenv("MUSIC_METADATA_CACHE_TTL_SECONDS", "300"), 300)
+MUSIC_LAVALINK_SEARCH_CACHE_TTL_SECONDS = max(0, _parse_int(os.getenv("MUSIC_LAVALINK_SEARCH_CACHE_TTL_SECONDS", "90"), 90))
 MUSIC_STREAM_CACHE_TTL_SECONDS = _parse_int(os.getenv("MUSIC_STREAM_CACHE_TTL_SECONDS", "480"), 480)
 MUSIC_CACHE_MAX_ITEMS = _parse_int(os.getenv("MUSIC_CACHE_MAX_ITEMS", "160"), 160)
 MUSIC_PREFETCH_NEXT = _parse_bool(os.getenv("MUSIC_PREFETCH_NEXT", "true"), True)
@@ -195,9 +203,10 @@ MUSIC_LIMITER_ENABLED = _parse_bool(os.getenv("MUSIC_LIMITER_ENABLED", "true"), 
 MUSIC_YTDLP_FORMAT = (
     os.getenv(
         "MUSIC_YTDLP_FORMAT",
-        # Alta qualidade real: melhor áudio-only disponível, sem teto de abr.
-        # O modo econômico ainda aplica teto dinamicamente no extractor.
-        "bestaudio/best",
+        # Alta qualidade real: prioriza Opus áudio-only, depois M4A, e só
+        # então fallbacks amplos. Opus reduz reencode/latência no Discord;
+        # M4A costuma ser a alternativa estável quando Opus não existe.
+        "bestaudio[acodec=opus][vcodec=none]/bestaudio[ext=webm][vcodec=none]/bestaudio[ext=m4a][vcodec=none]/bestaudio[vcodec=none]/bestaudio/best",
     )
     or "bestaudio/best"
 ).strip()

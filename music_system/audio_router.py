@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 MUSIC_DEFAULT_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_DEFAULT_VOLUME", 0.55))))
 TTS_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_TTS_VOLUME", 1.0))))
+MUSIC_TTS_LOCAL_DUCK_FACTOR = max(0.0, min(1.0, float(getattr(config, "MUSIC_TTS_LOCAL_DUCK_PERCENT", 5.0)) / 100.0))
+MUSIC_LAVALINK_TTS_PAUSE_ENABLED = bool(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_ENABLED", True))
+MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS = max(0.2, float(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS", 0.35)))
 MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL = bool(getattr(config, "MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL", True))
 MUSIC_IDLE_DISCONNECT_SECONDS = max(15.0, float(getattr(config, "MUSIC_IDLE_DISCONNECT_SECONDS", 120)))
 MUSIC_QUEUE_MAXSIZE = min(100, max(1, int(getattr(config, "MUSIC_QUEUE_MAXSIZE", 100))))
@@ -143,11 +146,12 @@ class MixedAudioSource(discord.AudioSource):
     resolvida com call_soon_threadsafe no loop principal.
     """
 
-    def __init__(self, *, loop: asyncio.AbstractEventLoop, music_source: discord.AudioSource, music_volume: float, source_base_volume: float = 1.0) -> None:
+    def __init__(self, *, loop: asyncio.AbstractEventLoop, music_source: discord.AudioSource, music_volume: float, source_base_volume: float = 1.0, duck_factor: float = MUSIC_TTS_LOCAL_DUCK_FACTOR) -> None:
         self.loop = loop
         self.music_source = music_source
         self.music_volume = float(music_volume)
         self.normal_music_volume = float(music_volume)
+        self.duck_factor = max(0.0, min(1.0, float(duck_factor)))
         self.source_base_volume = max(0.001, min(2.0, float(source_base_volume or 1.0)))
         self._current_music_volume = float(music_volume)
         self._overlays: list[TTSOverlay] = []
@@ -200,6 +204,9 @@ class MixedAudioSource(discord.AudioSource):
 
     def set_music_volume(self, volume: float) -> None:
         self.normal_music_volume = max(0.0, min(2.0, float(volume)))
+
+    def set_duck_factor(self, factor: float) -> None:
+        self.duck_factor = max(0.0, min(1.0, float(factor)))
 
     def _step_music_volume(self, target: float) -> float:
         target = max(0.0, min(2.0, float(target)))
@@ -303,7 +310,11 @@ class MixedAudioSource(discord.AudioSource):
             return b""
 
         if music_frame:
-            target_music_volume = self.normal_music_volume
+            # Ducking local/yt-dlp: quando há TTS sobreposto, reduza a música
+            # para uma fração pequena do volume normal, mas sem alterar o volume
+            # persistido do servidor. Quando o último TTS termina, o read() volta
+            # automaticamente ao volume normal.
+            target_music_volume = self.normal_music_volume * (self.duck_factor if active_overlays else 1.0)
             stepped_volume = self._step_music_volume(target_music_volume)
             scale = self._effective_music_scale(stepped_volume)
             if not active_overlays and abs(scale - 1.0) <= 0.001:
@@ -2557,6 +2568,7 @@ class AudioRouter:
                 music_source=ffmpeg_source,
                 music_volume=state.volume,
                 source_base_volume=source_base_volume,
+                duck_factor=MUSIC_TTS_LOCAL_DUCK_FACTOR,
             )
             state.current_source = mixed_source
             mixed_source.music_started_future.add_done_callback(_consume_expected_music_exception)
@@ -3060,6 +3072,14 @@ class AudioRouter:
         source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
 
         if active_source is not None and not getattr(active_source, "_closed", True) and (self._vc_is_playing_or_paused(vc)):
+            with contextlib.suppress(Exception):
+                active_source.set_duck_factor(MUSIC_TTS_LOCAL_DUCK_FACTOR)
+            logger.info(
+                "[music] tts_duck_local_start | guild=%s duck_percent=%.1f base_volume=%.3f",
+                guild_id,
+                MUSIC_TTS_LOCAL_DUCK_FACTOR * 100.0,
+                getattr(active_source, "normal_music_volume", state.volume if state is not None else 0.0),
+            )
             future = active_source.add_tts(source, volume=TTS_VOLUME)
             try:
                 await asyncio.wait_for(future, timeout=max(1.0, float(timeout)))
@@ -3071,20 +3091,26 @@ class AudioRouter:
                         "[music] TTS overlay excedeu %.1fs; cancelando apenas este TTS e mantendo a música/call",
                         float(timeout),
                     )
+                    logger.info("[music] tts_duck_local_restore | guild=%s cancelled=True", guild_id)
                     return {
                         "source_setup_ms": source_setup_ms,
                         "play_call_ms": play_call_ms,
                         "playback_ms": playback_ms,
                         "playback_started_at": playback_started_at,
                         "tts_overlay_cancelled": True,
+                        "tts_local_ducked": True,
+                        "tts_local_duck_percent": MUSIC_TTS_LOCAL_DUCK_FACTOR * 100.0,
                     }
                 raise RuntimeError(f"Playback TTS em overlay excedeu {float(timeout):.1f}s")
             playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
+            logger.info("[music] tts_duck_local_restore | guild=%s cancelled=False", guild_id)
             return {
                 "source_setup_ms": source_setup_ms,
                 "play_call_ms": play_call_ms,
                 "playback_ms": playback_ms,
                 "playback_started_at": playback_started_at,
+                "tts_local_ducked": True,
+                "tts_local_duck_percent": MUSIC_TTS_LOCAL_DUCK_FACTOR * 100.0,
             }
 
         finished = loop.create_future()

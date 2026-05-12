@@ -497,11 +497,14 @@ class MusicExtractor:
         except Exception:
             max_abr = 0
         if max_abr <= 0:
-            return MUSIC_YTDLP_FORMAT or "bestaudio/best"
+            return MUSIC_YTDLP_FORMAT or "bestaudio[acodec=opus][vcodec=none]/bestaudio[ext=webm][vcodec=none]/bestaudio[ext=m4a][vcodec=none]/bestaudio[vcodec=none]/bestaudio/best"
         return (
-            f"bestaudio[abr<={max_abr}]/"
+            f"bestaudio[acodec=opus][vcodec=none][abr<={max_abr}]/"
+            f"bestaudio[ext=webm][vcodec=none][abr<={max_abr}]/"
+            f"bestaudio[ext=m4a][vcodec=none][abr<={max_abr}]/"
+            f"bestaudio[vcodec=none][abr<={max_abr}]/"
             f"ba[abr<={max_abr}]/"
-            "bestaudio/best"
+            "bestaudio[acodec=opus][vcodec=none]/bestaudio[ext=m4a][vcodec=none]/bestaudio/best"
         )
 
     def _safe_format_fallbacks(self, audio_max_abr: int | None = None) -> list[tuple[str, int | None]]:
@@ -521,6 +524,7 @@ class MusicExtractor:
         # Fallbacks largos: primeiro mantém áudio preferencial, depois abre mão de
         # qualquer filtro. Isso corrige vídeos em que o YouTube/yt-dlp recusa o
         # seletor anterior com "Requested format is not available".
+        candidates.append(("bestaudio[acodec=opus][vcodec=none]/bestaudio[ext=m4a][vcodec=none]/bestaudio[vcodec=none]/bestaudio/best", None))
         candidates.append(("bestaudio/best", None))
         candidates.append(("ba/b", None))
         if max_abr > 0:
@@ -650,9 +654,12 @@ class MusicExtractor:
             capped_abr = 0
         if capped_abr > 0:
             # Modo econômico/estável: prefere Opus/WebM quando estiver dentro do teto,
-            # porque costuma ser leve para stream. Alta qualidade não define sort
-            # customizado para deixar o yt-dlp escolher o melhor áudio-only real.
-            opts["format_sort"] = ["acodec:opus", "asr:48000", "ext:webm:m4a", "abr", "proto"]
+            # porque costuma ser leve para stream.
+            opts["format_sort"] = ["acodec:opus", "asr:48000", "vcodec:none", "ext:webm:m4a", "abr", "proto"]
+        else:
+            # Alta qualidade: ainda prioriza áudio-only Opus/M4A e 48 kHz quando
+            # disponível, mas sem limitar abr.
+            opts["format_sort"] = ["acodec:opus", "asr:48000", "vcodec:none", "ext:webm:m4a", "abr", "proto"]
         cookies_file = self._current_cookies_file()
         if cookies_file:
             opts["cookiefile"] = cookies_file
