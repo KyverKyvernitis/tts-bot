@@ -684,7 +684,7 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
     try:
         with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             manifest_lines = [
-                "Base gerada pelo /diagnostico_musica",
+                "Base gerada pelo /vps",
                 f"Gerado em: {_now_stamp()}",
                 f"Repo root: {REPO_ROOT}",
                 f"Branch: {(branch.stdout or '').strip() if branch.returncode == 0 else 'desconhecida'}",
@@ -782,3 +782,194 @@ def build_music_diagnostics_report_sync(router: Any, options: DiagnosticsOptions
 
 async def build_music_diagnostics_report(router: Any, options: DiagnosticsOptions) -> str:
     return await asyncio.to_thread(build_music_diagnostics_report_sync, router, options)
+
+
+def _local_log_tail_full() -> str:
+    log_dir = REPO_ROOT / "logs"
+    parts: list[str] = []
+
+    candidates: list[Path] = []
+    if log_dir.exists():
+        with contextlib.suppress(Exception):
+            candidates.extend(sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True))
+    for extra in [REPO_ROOT / "bot.log", REPO_ROOT / "logs" / "bot.log", REPO_ROOT / "logs" / "updater.log"]:
+        if extra.exists() and extra not in candidates:
+            candidates.append(extra)
+
+    if not candidates:
+        return "Nenhum arquivo de log local encontrado."
+
+    for path in candidates[:12]:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            tail = "\n".join(text.splitlines()[-1200:])
+            rel = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path
+            parts.append(f"===== {rel} =====\n{tail}")
+        except Exception as exc:
+            parts.append(f"===== {path} =====\nERRO: {type(exc).__name__}: {exc}")
+    return "\n\n".join(parts)
+
+
+def _journalctl_full_tail() -> str:
+    commands = [
+        ["journalctl", "-u", "tts-bot.service", "--since", "2 hours ago", "-n", "1200", "--no-pager", "-o", "cat"],
+        ["journalctl", "-u", "lavalink.service", "--since", "2 hours ago", "-n", "900", "--no-pager", "-o", "cat"],
+        ["journalctl", "-u", "nodelink.service", "--since", "2 hours ago", "-n", "500", "--no-pager", "-o", "cat"],
+        ["journalctl", "-u", "callkeeper.service", "--since", "2 hours ago", "-n", "500", "--no-pager", "-o", "cat"],
+    ]
+    parts: list[str] = []
+    for cmd in commands:
+        out = _run_cmd(cmd, timeout=18.0, cwd=REPO_ROOT)
+        lines = out.splitlines()
+        if len(lines) > 900:
+            lines = lines[:4] + ["... (cortado) ..."] + lines[-880:]
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
+def _system_status_report() -> str:
+    parts = [
+        _run_cmd(["date", "-Is"], timeout=5.0),
+        _run_cmd(["hostname"], timeout=5.0),
+        _run_cmd(["uname", "-a"], timeout=5.0),
+        _run_cmd(["df", "-h", "/", "/opt", "/home"], timeout=8.0),
+        _run_cmd(["free", "-h"], timeout=8.0),
+        _run_cmd(["ss", "-ltnp"], timeout=10.0),
+        _run_cmd(["systemctl", "--no-pager", "--full", "status", "tts-bot.service", "lavalink.service", "nodelink.service", "callkeeper.service"], timeout=18.0),
+        _run_cmd(["systemctl", "cat", "tts-bot.service", "lavalink.service", "nodelink.service", "callkeeper.service"], timeout=18.0),
+    ]
+    return "\n\n".join(parts)
+
+
+def build_full_vps_diagnostics_report_sync(router: Any, options: DiagnosticsOptions) -> str:
+    sections: list[tuple[str, str]] = []
+    sections.append((
+        "Resumo",
+        "\n".join([
+            f"Gerado em: {_now_stamp()}",
+            f"Guild: {options.guild_name} ({options.guild_id})",
+            f"Solicitado por: {options.requester_name} ({options.requester_id})",
+            f"Python: {sys.version.split()[0]} ({sys.executable})",
+            f"Sistema: {platform.platform()}",
+            f"Repo root: {REPO_ROOT}",
+            "Tipo: diagnóstico completo da VPS/bot",
+        ]),
+    ))
+    sections.append((
+        "Pacotes",
+        "\n".join([
+            f"discord.py: {_package_version('discord.py')}",
+            f"wavelink: {_package_version('wavelink')}",
+            f"yt-dlp: {_package_version('yt-dlp')}",
+            f"PyNaCl: {_package_version('PyNaCl')}",
+            f"aiohttp: {_package_version('aiohttp')}",
+        ]),
+    ))
+    sections.append(("Variáveis relevantes (.env carregado pelo processo)", json.dumps(_safe_report_obj(_read_env_flags()), ensure_ascii=False, indent=2)))
+    db_text, _ = _db_snapshot()
+    sections.append(("DB musicnode", db_text))
+    cfg = _lavalink_cfg_from_router(router, options.guild_id)
+    sections.append(("Config Lavalink efetiva no bot", json.dumps(_safe_report_obj(cfg), ensure_ascii=False, indent=2)))
+    sections.append(("Teste Spotify API do bot", _spotify_api_test()))
+    sections.append(("Testes Lavalink REST", _lavalink_tests(cfg)))
+    sections.append(("Teste yt-dlp local com cookies", _yt_dlp_test()))
+    sections.append(("application.yml do Lavalink (sanitizado)", _application_yml_head()))
+    sections.append(("Status do sistema e services", _system_status_report()))
+    sections.append(("Logs locais completas/cortadas", _local_log_tail_full()))
+    sections.append(("journalctl completo/cortado", _journalctl_full_tail()))
+
+    body_parts = [f"\n\n# {title}\n{redact(body)}" for title, body in sections]
+    report = "".join(body_parts).strip() + "\n"
+    max_chars = 1_900_000
+    if len(report) > max_chars:
+        report = report[:max_chars] + "\n\n[relatório completo cortado por tamanho]\n"
+    return redact(report)
+
+
+async def build_full_vps_diagnostics_report(router: Any, options: DiagnosticsOptions) -> str:
+    return await asyncio.to_thread(build_full_vps_diagnostics_report_sync, router, options)
+
+
+VPS_SNAPSHOT_MAX_BYTES = 24 * 1024 * 1024
+
+
+def _write_zip_text(zf: zipfile.ZipFile, arcname: str, text: str) -> None:
+    zf.writestr(arcname, redact(text if text is not None else ""))
+
+
+def _sanitized_env_text() -> str:
+    path = REPO_ROOT / ".env"
+    if not path.exists():
+        return ".env não encontrado\n"
+    lines: list[str] = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#") or "=" not in raw:
+            lines.append(raw)
+            continue
+        key, value = raw.split("=", 1)
+        lines.append(f"{key}=***REDACTED***" if _mask_value(key, value) == "***REDACTED***" else raw)
+    return "\n".join(lines) + "\n"
+
+
+def _safe_read_file(path: Path, *, max_chars: int = 500_000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n[arquivo cortado por tamanho]\n"
+        return text
+    except Exception as exc:
+        return f"ERRO ao ler {path}: {type(exc).__name__}: {exc}\n"
+
+
+def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"vps-snapshot-{stamp}.zip"
+    bio = io.BytesIO()
+    added = 0
+
+    try:
+        with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            _write_zip_text(zf, "meta/summary.txt", "\n".join([
+                f"Gerado em: {_now_stamp()}",
+                f"Repo root: {REPO_ROOT}",
+                f"Sistema: {platform.platform()}",
+                "Snapshot sanitizado da VPS para diagnóstico.",
+            ]) + "\n")
+            added += 1
+
+            _write_zip_text(zf, "bot/env.sanitized.txt", _sanitized_env_text()); added += 1
+            for rel in ["config.py", "requirements.txt", "cogs/music.py", "cogs/utility.py"]:
+                path = REPO_ROOT / rel
+                if path.exists():
+                    _write_zip_text(zf, f"bot/{rel}", _safe_read_file(path)); added += 1
+            for folder in ["music_system", "utility"]:
+                root = REPO_ROOT / folder
+                if root.exists():
+                    for path in sorted(root.rglob("*.py")):
+                        try:
+                            arc = f"bot/{path.relative_to(REPO_ROOT)}"
+                        except Exception:
+                            arc = f"bot/{path.name}"
+                        _write_zip_text(zf, arc, _safe_read_file(path, max_chars=250_000)); added += 1
+
+            app_path = Path("/opt/lavalink/application.yml")
+            _write_zip_text(zf, "lavalink/application.sanitized.yml", _safe_read_file(app_path, max_chars=500_000)); added += 1
+            _write_zip_text(zf, "lavalink/listing.txt", _run_cmd(["bash", "-lc", "ls -lah /opt/lavalink; echo; ls -lah /opt/lavalink/plugins"], timeout=12.0)); added += 1
+
+            _write_zip_text(zf, "db/musicnode.snapshot.txt", _db_snapshot()[0]); added += 1
+            _write_zip_text(zf, "systemd/services.txt", _run_cmd(["systemctl", "cat", "tts-bot.service", "lavalink.service", "nodelink.service", "callkeeper.service"], timeout=18.0)); added += 1
+            _write_zip_text(zf, "meta/system.txt", _system_status_report()); added += 1
+            _write_zip_text(zf, "logs/tts-bot.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u tts-bot.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|deezer|fallback|TrackException|LoadException|ChannelTimeout|erro|falhou|exception|traceback' || true"], timeout=18.0)); added += 1
+            _write_zip_text(zf, "logs/lavalink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u lavalink.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|master|403|404|error|exception|failed|TrackException' || true"], timeout=18.0)); added += 1
+            _write_zip_text(zf, "logs/local-bot-logs.txt", _local_log_tail()); added += 1
+    except Exception as exc:
+        return None, filename, f"Falha ao montar snapshot da VPS: {type(exc).__name__}: {exc}"
+
+    payload = bio.getvalue()
+    if len(payload) > VPS_SNAPSHOT_MAX_BYTES:
+        return None, filename, f"Snapshot ficou grande demais para anexar com segurança: {len(payload) / (1024 * 1024):.1f} MB."
+    return payload, filename, f"Snapshot da VPS anexado: {added} item(ns); tamanho {len(payload) / (1024 * 1024):.2f} MB."
+
+
+async def build_vps_snapshot_archive() -> tuple[bytes | None, str, str]:
+    return await asyncio.to_thread(build_vps_snapshot_archive_sync)

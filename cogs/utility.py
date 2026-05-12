@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import os
 import time
 from typing import Any
 
@@ -11,8 +12,10 @@ import config
 from .tts.aliases import format_prefixed_aliases, matches_prefixed_command
 from .tts.utils.app_commands import fetch_root_command_ids_cached, slash_mention
 
-from utility.commands.diagnostico_musica import MusicDiagnosticsCommandMixin
+from utility.commands.help import HelpCommandMixin
+from utility.commands.health import HealthCommandMixin
 from utility.commands.ping import PingCommandMixin
+from utility.commands.vps import VpsCommandMixin
 
 
 HELP_EXPIRE_AFTER_SECONDS = 600.0
@@ -677,7 +680,7 @@ class HealthDashboardView(discord.ui.LayoutView):
             pass
 
 
-class Utility(MusicDiagnosticsCommandMixin, PingCommandMixin, commands.Cog):
+class Utility(HelpCommandMixin, HealthCommandMixin, PingCommandMixin, VpsCommandMixin, commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._app_command_id_cache: dict[object, tuple[float, dict[str, int]]] = {}
@@ -861,6 +864,7 @@ class Utility(MusicDiagnosticsCommandMixin, PingCommandMixin, commands.Cog):
         # por exemplo), o helper retorna texto literal `/path`.
         help_slash = slash_mention(root_ids, root="help", path="help")
         ping_slash = slash_mention(root_ids, root="ping", path="ping")
+        vps_slash = slash_mention(root_ids, root="vps", path="vps")
         tts_menu_slash = slash_mention(root_ids, root="tts", path="tts menu")
         tts_status_slash = slash_mention(root_ids, root="tts", path="tts status")
         tts_user_slash = slash_mention(root_ids, root="tts", path="tts usuario")
@@ -1067,6 +1071,10 @@ class Utility(MusicDiagnosticsCommandMixin, PingCommandMixin, commands.Cog):
                 f"### Ping\n"
                 f"{ping_slash}\n"
                 "Latência, uptime, uso de recursos e status geral do bot.\n\n"
+                f"### VPS\n"
+                f"{vps_slash}\n"
+                "Abre o painel técnico da VPS na guilda de teste: base Git, diagnóstico musical, "
+                "diagnóstico completo e snapshot sanitizado.\n\n"
                 f"### Help\n"
                 f"{help_slash} ou {prefix_help}\n"
                 "Abre esta central de ajuda. O número no centro do paginator "
@@ -1321,36 +1329,7 @@ class Utility(MusicDiagnosticsCommandMixin, PingCommandMixin, commands.Cog):
         return snapshot
 
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.content:
-            return
-
-        prefixes = await self._get_prefix_data(message.guild)
-        bot_prefix = prefixes["bot_prefix"]
-        if not matches_prefixed_command(message.content, bot_prefix, kind="help"):
-            return
-
-        await self._send_help_response(
-            guild=message.guild,
-            owner=message.author,
-            responder=message.channel,
-            prefix_command_message=message,
-        )
-
-    @app_commands.command(name="help", description="Mostra a central de ajuda com todos os comandos principais do bot")
-    async def help_command(self, interaction: discord.Interaction):
-        await self._send_help_response(
-            guild=interaction.guild,
-            owner=interaction.user,
-            responder=interaction.channel,
-            interaction=interaction,
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="health", description="Mostra a saúde geral do bot, fila, cache, engines e guilds")
-    @app_commands.guilds(HEALTH_COMMAND_GUILD)
-    async def health(self, interaction: discord.Interaction):
+    async def _send_health_response(self, interaction: discord.Interaction):
         # Responde imediatamente ao Discord para evitar "O aplicativo não
         # respondeu" caso a leitura de métricas/cache demore alguns segundos.
         await interaction.response.defer(ephemeral=False, thinking=True)
