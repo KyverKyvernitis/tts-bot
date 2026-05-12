@@ -871,6 +871,9 @@ def _tts_runtime_snapshot(router: Any, guild_id: int) -> str:
         "current_lavalink_player_present": getattr(state, "current_lavalink_player", None) is not None,
         "current_lavalink_playable_present": getattr(state, "current_lavalink_playable", None) is not None,
         "current_source_present": getattr(state, "current_source", None) is not None,
+        "tts_public_base_url_configured": bool(str(getattr(config, "MUSIC_TTS_PUBLIC_BASE_URL", "") or "").strip()),
+        "tts_public_base_url": redact(str(getattr(config, "MUSIC_TTS_PUBLIC_BASE_URL", "") or "").strip()),
+        "lavalink_tts_file_fallback": bool(getattr(config, "MUSIC_LAVALINK_TTS_FILE_FALLBACK", False)),
     }
     return json.dumps(_safe_report_obj(data), ensure_ascii=False, indent=2)
 

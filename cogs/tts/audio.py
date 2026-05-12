@@ -1341,22 +1341,30 @@ class TTSAudioMixin:
 
         vc = self._get_voice_client_for_guild(guild)
         if getattr(self, "_is_lavalink_voice_client", lambda _vc: False)(vc):
-            lavalink_channel = self._voice_client_channel(vc) or getattr(getattr(guild, "me", None), "voice", None) and getattr(getattr(guild, "me", None).voice, "channel", None)
-            lavalink_channel_id = getattr(lavalink_channel, "id", None)
-            if lavalink_channel_id is not None and lavalink_channel_id != item.channel_id:
-                now = time.monotonic()
-                if now >= float(getattr(state, "lavalink_ignore_logged_until", 0.0) or 0.0):
-                    logger.info(
-                        "[tts_voice] TTS ignorado porque o Lavalink está em outro canal | guild=%s lavalink_channel=%s tts_channel=%s",
-                        guild.id,
-                        lavalink_channel_id,
-                        item.channel_id,
-                    )
-                    state.lavalink_ignore_logged_until = now + 20.0
-                return None
-            state.last_channel_id = int(lavalink_channel_id or item.channel_id)
-            logger.debug("[tts_voice] TTS encaminhado para reprodução via Lavalink | guild=%s channel=%s", guild.id, state.last_channel_id)
-            return vc
+            if not getattr(self, "_lavalink_music_should_own_voice", lambda _guild: False)(guild):
+                # Wavelink ficou como voice_client fantasma depois de stop/falha,
+                # mas o roteador não está usando Lavalink agora. Limpe para o TTS
+                # local conseguir conectar/tocar normalmente.
+                with contextlib.suppress(Exception):
+                    await vc.disconnect(force=True)
+                vc = None
+            else:
+                lavalink_channel = self._voice_client_channel(vc) or getattr(getattr(guild, "me", None), "voice", None) and getattr(getattr(guild, "me", None).voice, "channel", None)
+                lavalink_channel_id = getattr(lavalink_channel, "id", None)
+                if lavalink_channel_id is not None and lavalink_channel_id != item.channel_id:
+                    now = time.monotonic()
+                    if now >= float(getattr(state, "lavalink_ignore_logged_until", 0.0) or 0.0):
+                        logger.info(
+                            "[tts_voice] TTS ignorado porque o Lavalink está em outro canal | guild=%s lavalink_channel=%s tts_channel=%s",
+                            guild.id,
+                            lavalink_channel_id,
+                            item.channel_id,
+                        )
+                        state.lavalink_ignore_logged_until = now + 20.0
+                    return None
+                state.last_channel_id = int(lavalink_channel_id or item.channel_id)
+                logger.debug("[tts_voice] TTS encaminhado para reprodução via Lavalink | guild=%s channel=%s", guild.id, state.last_channel_id)
+                return vc
 
         lavalink_voice_guard = getattr(self, "_lavalink_music_should_own_voice", None)
         if callable(lavalink_voice_guard):

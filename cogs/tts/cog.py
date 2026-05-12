@@ -1668,21 +1668,18 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         router = getattr(getattr(self, "bot", None), "audio_router", None)
         if router is None:
             return False
+        should_block_local = getattr(router, "should_block_tts_local_voice", None)
+        if callable(should_block_local):
+            try:
+                return bool(should_block_local(guild.id))
+            except Exception:
+                pass
         lavalink_active = getattr(router, "is_lavalink_active_for_guild", None)
         if callable(lavalink_active):
             try:
-                if lavalink_active(guild.id):
-                    return True
+                return bool(lavalink_active(guild.id))
             except Exception:
                 pass
-        backends = getattr(router, "backends", None)
-        should_use_lavalink = getattr(backends, "should_use_lavalink_real", None)
-        is_music_active = getattr(router, "is_music_active", None)
-        if callable(should_use_lavalink) and callable(is_music_active):
-            try:
-                return bool(should_use_lavalink(guild.id) and is_music_active(guild.id))
-            except Exception:
-                return False
         return False
 
     async def _disconnect_and_clear(self, guild: discord.Guild):
@@ -1842,8 +1839,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 await self._recover_stale_voice_client(guild, reason="ensure_connected")
                 vc = self._get_voice_client_for_guild(guild)
             if self._is_lavalink_voice_client(vc):
-                print(f"[tts_voice] conexão TTS ignorada | player Lavalink ativo | guild={guild.id}")
-                return None
+                if self._lavalink_music_should_own_voice(guild):
+                    print(f"[tts_voice] conexão TTS ignorada | player Lavalink ativo | guild={guild.id}")
+                    return None
+                # Wavelink parado/órfão: force a limpeza para o TTS local não ficar
+                # bloqueado depois de uma falha de música/TTS.
+                with contextlib.suppress(Exception):
+                    await vc.disconnect(force=True)
+                vc = None
             if self._lavalink_music_should_own_voice(guild):
                 print(f"[tts_voice] conexão local do TTS ignorada | música Lavalink aguardando conexão | guild={guild.id}")
                 return None

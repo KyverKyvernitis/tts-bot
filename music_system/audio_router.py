@@ -1592,6 +1592,32 @@ class AudioRouter:
             or self._is_lavalink_transition_recent(state)
         )
 
+    def should_block_tts_local_voice(self, guild_id: int | None) -> bool:
+        """Retorna se o TTS deve evitar conectar via VoiceClient local.
+
+        O bloqueio existe apenas quando uma sessão Lavalink real está ativa ou em
+        transição. Se a música atual é local/yt-dlp, o TTS deve entrar pelo
+        overlay/ducking local; bloquear aqui faz o TTS simplesmente sumir.
+        """
+        try:
+            state = self.get_state(int(guild_id or 0))
+        except Exception:
+            return False
+        if state.current_backend == "local":
+            # Música local ativa: o roteador consegue aplicar ducking no
+            # MixedAudioSource. Não deixe o guarda de Lavalink impedir o TTS.
+            if state.current_source is not None or state.current is not None:
+                return False
+            if not self._is_lavalink_transition_recent(state):
+                return False
+        if self._lavalink_tts_active(state) or self._lavalink_resume_grace_active(state):
+            return True
+        return bool(
+            state.current_backend == "lavalink"
+            or state.current_lavalink_player is not None
+            or self._is_lavalink_transition_recent(state)
+        )
+
     def is_music_staff(self, member) -> bool:
         if member is None or getattr(member, "bot", False):
             return False
@@ -3028,22 +3054,29 @@ class AudioRouter:
     def _lavalink_tts_candidates_for_path(self, path: str, *, timeout: float = 120.0) -> list[str]:
         candidates: list[str] = []
         public_base = str(getattr(config, "MUSIC_TTS_PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
-        if public_base:
+        abs_path = os.path.abspath(str(path or ""))
+        file_ok = bool(abs_path and os.path.isfile(abs_path) and os.path.getsize(abs_path) > 0)
+        if public_base and file_ok:
             try:
                 from webserver import register_tts_audio_file
 
                 token = register_tts_audio_file(
-                    path,
+                    abs_path,
                     ttl_seconds=max(float(timeout or 120.0) + 90.0, float(getattr(config, "MUSIC_LAVALINK_TTS_URL_TTL_SECONDS", 240))),
                 )
                 if token:
-                    candidates.append(f"{public_base}/tts-audio/{token}.mp3")
+                    url = f"{public_base}/tts-audio/{token}.mp3"
+                    candidates.append(url)
+                    logger.info("[music/lavalink] tts_public_url_registered | url=%s size=%s", url, os.path.getsize(abs_path))
             except Exception:
                 logger.debug("[music/lavalink] falha ao registrar URL temporária do TTS", exc_info=True)
+        elif public_base and not file_ok:
+            logger.warning("[music/lavalink] TTS via Lavalink sem arquivo válido para publicar | path=%s exists=%s", abs_path, os.path.exists(abs_path))
+        else:
+            logger.warning("[music/lavalink] TTS via Lavalink sem MUSIC_TTS_PUBLIC_BASE_URL configurado")
 
-        if bool(getattr(config, "MUSIC_LAVALINK_TTS_FILE_FALLBACK", False)):
+        if bool(getattr(config, "MUSIC_LAVALINK_TTS_FILE_FALLBACK", False)) and file_ok:
             with contextlib.suppress(Exception):
-                abs_path = os.path.abspath(str(path or ""))
                 candidates.append("file://" + quote(abs_path))
                 candidates.append(abs_path)
         return [candidate for candidate in candidates if str(candidate or "").strip()]
@@ -3319,15 +3352,16 @@ class AudioRouter:
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
         if vc:
-            should_stop_audio = state.current is not None or state.current_source is not None or state.current_lavalink_player is not None or not state.tts_voice_touched
-            if should_stop_audio:
-                with contextlib.suppress(Exception):
-                    if self._vc_is_playing_or_paused(vc):
-                        await self._vc_stop_audio(vc)
-            if disconnect and not state.tts_voice_touched:
+            # Stop manual precisa limpar também estados presos de TTS/Lavalink. Antes,
+            # se o TTS já tinha tocado/encostado na voz, o botão não desconectava e
+            # deixava o bot preso na call.
+            with contextlib.suppress(Exception):
+                if self._vc_is_playing_or_paused(vc):
+                    await self._vc_stop_audio(vc)
+            if disconnect:
                 with contextlib.suppress(Exception):
                     self._mark_internal_voice_disconnect(guild_id, seconds=8.0)
-                    await vc.disconnect(force=False)
+                    await vc.disconnect(force=True)
                 state.music_owns_voice = False
         state.current = None
         state.current_started_at_monotonic = 0.0
@@ -3336,6 +3370,10 @@ class AudioRouter:
         state.current_backend = "local"
         state.current_lavalink_player = None
         state.current_lavalink_playable = None
+        state.lavalink_tts_until = 0.0
+        state.lavalink_resume_grace_until = 0.0
+        state.tts_session_active_until = 0.0
+        state.tts_session_last_error = ""
         state.skip_transition_active = False
         state.skip_history_suppressed_once = False
         state.current_status = "idle"

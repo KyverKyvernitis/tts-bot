@@ -2260,22 +2260,41 @@ class LavalinkBackend:
         restore_error: Exception | None = None
         try:
             await self._play_with_compat(player, tts_playable, start=0, volume=tts_volume, add_history=False)
+            # O player pode permanecer pausado porque pausamos a música anterior
+            # antes de substituir a faixa. Sem este resume explícito, o payload REST
+            # fica com ``paused: true`` e o TTS HTTP carrega, mas nunca toca.
+            with contextlib.suppress(Exception):
+                await self._pause_player(player, False)
             play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
             playback_started_at = time.monotonic()
             deadline = playback_started_at + max(1.0, float(timeout or 120.0))
             last_active = playback_started_at
+            resume_attempted_at = 0.0
             while time.monotonic() < deadline:
                 current = self._player_current_track(player)
                 if current is not None and not self._same_playable(current, tts_playable):
                     break
                 active = self._player_bool(player, "playing", "is_playing")
+                paused = self._player_bool(player, "paused", "is_paused")
                 rest_active = False
+                rest_paused = False
                 with contextlib.suppress(Exception):
                     rest_payload = await self._get_rest_player(player, guild)
                     rest_state = (rest_payload or {}).get("state") or {}
                     rest_position = int(float(rest_state.get("position") or 0)) if isinstance(rest_state, dict) else 0
                     rest_connected = bool(rest_state.get("connected")) if isinstance(rest_state, dict) else False
+                    rest_paused = bool(rest_state.get("paused")) if isinstance(rest_state, dict) else False
                     rest_active = bool(rest_connected and (rest_position > 0 or time.monotonic() - playback_started_at < 1.0))
+                if paused or rest_paused:
+                    now = time.monotonic()
+                    if now - resume_attempted_at > 0.75:
+                        resume_attempted_at = now
+                        with contextlib.suppress(Exception):
+                            await self._pause_player(player, False)
+                        logger.info(
+                            "[music/lavalink] tts_lavalink_forced_resume | guild=%s",
+                            getattr(guild, "id", None),
+                        )
                 if active or rest_active:
                     last_active = time.monotonic()
                 elif time.monotonic() - last_active > 0.85:
