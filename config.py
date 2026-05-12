@@ -213,7 +213,7 @@ SPOTIFY_MARKET = (os.getenv("SPOTIFY_MARKET", "BR") or "BR").strip().upper()
 # quando a Web API oficial retornar 403 para playlists públicas em apps novos.
 SPOTIFY_PUBLIC_FALLBACK_ENABLED = _parse_bool(os.getenv("SPOTIFY_PUBLIC_FALLBACK_ENABLED", "true"), True)
 SPOTIFY_PUBLIC_FALLBACK_MAX_TRACKS = max(1, _parse_int(os.getenv("SPOTIFY_PUBLIC_FALLBACK_MAX_TRACKS", "100"), 100))
-DEEZER_API_ENABLED = _parse_bool(os.getenv("DEEZER_API_ENABLED", "true"), True)
+DEEZER_API_ENABLED = _parse_bool(os.getenv("DEEZER_API_ENABLED", "false"), False)
 SOUNDCLOUD_API_ENABLED = _parse_bool(os.getenv("SOUNDCLOUD_API_ENABLED", "false"), False)
 SOUNDCLOUD_API_TOKEN = (os.getenv("SOUNDCLOUD_API_TOKEN", "") or "").strip()
 SOUNDCLOUD_CLIENT_ID = (os.getenv("SOUNDCLOUD_CLIENT_ID", "") or "").strip()
@@ -258,7 +258,7 @@ MUSIC_MAX_DURATION_MISMATCH_RATIO = max(0.0, _parse_float(os.getenv("MUSIC_MAX_D
 MUSIC_REJECT_WEAK_LINK_MATCHES = _parse_bool(os.getenv("MUSIC_REJECT_WEAK_LINK_MATCHES", "true"), True)
 # Mirrors do LavaSrc usados para transformar metadata de Spotify/YouTube em áudio tocável.
 # Spotify direto/spsearch fica fora do padrão porque o LavaSrc 4.8.x pode falhar com 403.
-MUSIC_LAVASRC_MIRROR_PREFIXES = (os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "dzsearch,scsearch") or "dzsearch,scsearch").strip()
+MUSIC_LAVASRC_MIRROR_PREFIXES = (os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "scsearch") or "scsearch").strip()
 
 # Lavalink — suporte invisível/diagnóstico para migração futura do player.
 # Patch atual NÃO troca o player real: MUSIC_BACKEND permanece local por padrão.

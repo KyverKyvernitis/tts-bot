@@ -43,6 +43,16 @@ SENSITIVE_PATTERNS = (
 REPO_ROOT = Path(getattr(config, "BASE_DIR", Path(__file__).resolve().parents[1])).resolve()
 DEFAULT_MUSICNODE_DB = REPO_ROOT / "data" / "musicnode" / "musicnode.db"
 
+VALID_SPOTIFY_TEST_URL = "https://open.spotify.com/track/3BxXcWY0ZYkNBhiOvy6vWr?si=I69KMQsjTB2g4La8tLAOCw"
+VALID_SPOTIFY_TEST_ID = "3BxXcWY0ZYkNBhiOvy6vWr"
+VALID_SOUNDCLOUD_TEST_URL = (
+    "https://soundcloud.com/yosoyharmless/untitled-1"
+    "?si=f0620a0357c74d5badaa77670b9094a5"
+    "&utm_source=clipboard&utm_medium=text&utm_campaign=social_sharing"
+)
+VALID_YOUTUBE_TEST_URL = "https://www.youtube.com/watch?v=qU9mHegkTc4"
+
+
 
 @dataclass(slots=True)
 class DiagnosticsOptions:
@@ -123,6 +133,9 @@ def _read_env_flags() -> dict[str, Any]:
         "SPOTIFY_CLIENT_SECRET",
         "SPOTIFY_SECRET",
         "LAVASRC_SPOTIFY_CLIENT_SECRET",
+        "DEEZER_API_ENABLED",
+        "LAVASRC_DEEZER_ARL",
+        "LAVASRC_DEEZER_MASTER_DECRYPTION_KEY",
         "TTS_VOICE_AUTO_RESTORE_ENABLED",
     ]
     result: dict[str, Any] = {}
@@ -255,21 +268,170 @@ def _summarize_loadtracks(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _application_yml_text() -> str:
+    path = Path("/opt/lavalink/application.yml")
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _application_lavasrc_analysis() -> dict[str, Any]:
+    text = _application_yml_text()
+    data: dict[str, Any] = {
+        "path": "/opt/lavalink/application.yml",
+        "exists": bool(text),
+        "providers": [],
+        "sources": {},
+        "warnings": [],
+    }
+    if not text:
+        data["warnings"].append("application.yml não encontrado ou inacessível.")
+        return data
+
+    lines = text.splitlines()
+    in_providers = False
+    in_sources = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "providers:":
+            in_providers = True
+            in_sources = False
+            continue
+        if stripped == "sources:":
+            in_sources = True
+            in_providers = False
+            continue
+        if in_providers:
+            if re.match(r"^\s+-\s+", line):
+                data["providers"].append(stripped.lstrip("- ").strip().strip('"'))
+                continue
+            if stripped and not line.startswith("      "):
+                in_providers = False
+        if in_sources:
+            m = re.match(r"^\s+([A-Za-z0-9_-]+):\s*(true|false)\s*$", line)
+            if m:
+                data["sources"][m.group(1)] = m.group(2).lower() == "true"
+                continue
+            if stripped and not line.startswith("      "):
+                in_sources = False
+
+    deezer_enabled = bool(data["sources"].get("deezer"))
+    has_deezer_master = bool(re.search(r"(?m)^\s*masterDecryptionKey:\s*\S+", text))
+    has_deezer_arl = bool(re.search(r"(?m)^\s*arl:\s*\S+", text))
+    has_dz_provider = any(str(item).startswith(("dzsearch:", "dzisrc:")) for item in data["providers"])
+    data["deezer_master_key_defined"] = has_deezer_master
+    data["deezer_arl_defined"] = has_deezer_arl
+    if deezer_enabled and not has_deezer_master:
+        data["warnings"].append("Deezer está ligado no LavaSrc, mas masterDecryptionKey não foi configurada. Isso derruba o Lavalink com 'Deezer master key must be set'.")
+    if has_dz_provider and not deezer_enabled:
+        data["warnings"].append("Provider dzsearch/dzisrc está configurado, mas sources.deezer está false; dzsearch tende a falhar/ficar inútil.")
+    if has_dz_provider and deezer_enabled and not has_deezer_master:
+        data["warnings"].append("Remova dzsearch ou configure Deezer corretamente antes de usar esse provider.")
+    return data
+
+
+def _mirror_prefixes_for_diagnostics() -> tuple[list[str], list[str]]:
+    raw = os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "scsearch") or "scsearch"
+    prefixes: list[str] = []
+    notes: list[str] = []
+    analysis = _application_lavasrc_analysis()
+    deezer_ok = bool(analysis.get("sources", {}).get("deezer")) and bool(analysis.get("deezer_master_key_defined"))
+    for item in re.split(r"[,;\s]+", raw.strip()):
+        prefix = item.strip().lower().removesuffix(":")
+        if not prefix:
+            continue
+        if prefix.startswith("dz") and not deezer_ok:
+            notes.append(f"{prefix} ignorado no diagnóstico porque Deezer não está totalmente configurado no LavaSrc.")
+            continue
+        if prefix not in {"scsearch", "spsearch", "dzsearch", "amsearch"}:
+            notes.append(f"{prefix} ignorado: prefixo desconhecido para mirror LavaSrc.")
+            continue
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+    if not prefixes:
+        prefixes = ["scsearch"]
+        notes.append("Mirror efetivo do diagnóstico caiu para scsearch.")
+    return prefixes, notes
+
+
+def _spotify_api_test() -> str:
+    client_id = os.getenv("SPOTIFY_CLIENT_ID", "") or os.getenv("SPOTIFY_ID", "")
+    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "") or os.getenv("SPOTIFY_SECRET", "")
+    lines = [f"Link Spotify válido usado no diagnóstico: {VALID_SPOTIFY_TEST_URL}"]
+    lines.append(f"client_id: {'definido (' + str(len(client_id)) + ' chars)' if client_id else 'não definido'}")
+    lines.append(f"client_secret: {'definido (' + str(len(client_secret)) + ' chars)' if client_secret else 'não definido'}")
+    if not client_id or not client_secret:
+        lines.append("Spotify API não testada: SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET ausentes.")
+        return "\n".join(lines)
+    import base64
+    try:
+        basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        body = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode()
+        req = urllib.request.Request(
+            "https://accounts.spotify.com/api/token",
+            data=body,
+            headers={"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=18) as resp:
+            token_payload = json.loads(resp.read().decode("utf-8", "replace"))
+        token = token_payload.get("access_token") or ""
+        lines.append(f"token_ok: {bool(token)}")
+        if not token:
+            return "\n".join(lines)
+        req = urllib.request.Request(
+            f"https://api.spotify.com/v1/tracks/{VALID_SPOTIFY_TEST_ID}?market=BR",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=18) as resp:
+            track = json.loads(resp.read().decode("utf-8", "replace"))
+        artists = ", ".join(a.get("name", "") for a in track.get("artists", []) if isinstance(a, dict))
+        summary = {
+            "ok": True,
+            "id": track.get("id"),
+            "title": track.get("name"),
+            "artists": artists,
+            "duration_ms": track.get("duration_ms"),
+            "preview_url_defined": bool(track.get("preview_url")),
+        }
+        lines.append(json.dumps(summary, ensure_ascii=False, indent=2))
+    except urllib.error.HTTPError as exc:
+        body = exc.read(2000).decode("utf-8", "replace")
+        lines.append(f"HTTP_ERROR: {exc.code}")
+        lines.append(redact(body[:1200]))
+    except Exception as exc:
+        lines.append(f"ERRO: {type(exc).__name__}: {exc}")
+    return "\n".join(lines)
+
+
 def _lavalink_tests(cfg: dict[str, Any]) -> str:
     base_url = str(cfg.get("base_url") or "").rstrip("/")
     password = str(cfg.get("raw_password") or "")
     if not base_url or not password:
         return "Lavalink não configurado ou senha ausente."
     lines: list[str] = []
+    analysis = _application_lavasrc_analysis()
+    lines.append("Análise rápida do application.yml/LavaSrc:")
+    lines.append(json.dumps(_safe_report_obj(analysis), ensure_ascii=False, indent=2))
+    if analysis.get("warnings"):
+        lines.append("\nAVISO: há alerta de configuração acima. Se o Lavalink estiver em Connection refused, corrija isso primeiro.")
+
     info = _http_json(f"{base_url}/v4/info", password=password, timeout=18.0)
-    lines.append("/v4/info:")
+    lines.append("\n/v4/info:")
     lines.append(json.dumps(_safe_report_obj(info), ensure_ascii=False, indent=2))
-    mirror_raw = os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "dzsearch,scsearch") or "dzsearch,scsearch"
-    mirror_prefix = re.split(r"[,;\s]+", mirror_raw.strip())[0].strip().removesuffix(":") or "scsearch"
+
+    prefixes, notes = _mirror_prefixes_for_diagnostics()
+    if notes:
+        lines.append("\nNotas sobre mirrors configurados:")
+        lines.extend(f"- {note}" for note in notes)
+    mirror_prefix = prefixes[0]
+
     tests = [
         ("MP3 HTTP direto", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"),
         ("SoundCloud busca", "scsearch:megalovania"),
-        ("SoundCloud link", "https://soundcloud.com/tobyfox-music/megalovania"),
+        ("SoundCloud link válido", VALID_SOUNDCLOUD_TEST_URL),
         (f"Mirror LavaSrc configurado ({mirror_prefix})", f"{mirror_prefix}:505 arctic monkeys"),
     ]
     for label, identifier in tests:
@@ -286,7 +448,6 @@ def _lavalink_tests(cfg: dict[str, Any]) -> str:
     )
     return "\n".join(lines)
 
-
 def _safe_report_obj(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _safe_report_obj(_mask_value(k, v)) for k, v in obj.items() if k != "raw_password"}
@@ -295,6 +456,62 @@ def _safe_report_obj(obj: Any) -> Any:
     if isinstance(obj, str):
         return redact(obj)
     return obj
+
+
+def _run_yt_dlp_quick(args: list[str], *, timeout: float = 35.0) -> str:
+    """Executa yt-dlp e encerra assim que título+duração aparecerem.
+
+    Alguns builds continuam fazendo trabalho de rede mesmo depois de imprimir as
+    duas linhas úteis; para diagnóstico, duas linhas já bastam.
+    """
+    started = time.monotonic()
+    lines: list[str] = [f"$ {' '.join(args)}"]
+    proc: subprocess.Popen[str] | None = None
+    try:
+        proc = subprocess.Popen(
+            args,
+            cwd=str(REPO_ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+        captured: list[str] = []
+        assert proc.stdout is not None
+        while True:
+            if time.monotonic() - started > timeout:
+                break
+            line = proc.stdout.readline()
+            if line:
+                captured.append(line.rstrip("\n"))
+                useful = [x for x in captured if x.strip() and not x.startswith("[")]
+                if len(useful) >= 2:
+                    proc.terminate()
+                    with contextlib.suppress(Exception):
+                        proc.wait(timeout=3)
+                    lines.append("exit=0 (saída útil coletada; processo encerrado pelo diagnóstico)")
+                    lines.extend(captured)
+                    return "\n".join(lines)
+                continue
+            rc = proc.poll()
+            if rc is not None:
+                lines.append(f"exit={rc}")
+                lines.extend(captured)
+                return "\n".join(lines)
+            time.sleep(0.05)
+        if proc and proc.poll() is None:
+            proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=3)
+        lines.append(f"TIMEOUT após {timeout}s")
+        if 'captured' in locals():
+            lines.extend(captured)
+        return "\n".join(lines)
+    except Exception as exc:
+        if proc and proc.poll() is None:
+            with contextlib.suppress(Exception):
+                proc.kill()
+        return f"$ {' '.join(args)}\nERRO: {type(exc).__name__}: {exc}"
 
 
 def _yt_dlp_test() -> str:
@@ -327,10 +544,9 @@ def _yt_dlp_test() -> str:
     ]
     if cookie_path:
         args.extend(["--cookies", cookie_path])
-    args.append("https://www.youtube.com/watch?v=qU9mHegkTc4")
-    lines.append(_run_cmd(args, timeout=35.0, cwd=REPO_ROOT))
+    args.append(VALID_YOUTUBE_TEST_URL)
+    lines.append(_run_yt_dlp_quick(args, timeout=35.0))
     return "\n".join(lines)
-
 
 def _local_log_tail() -> str:
     log_dir = REPO_ROOT / "logs"
@@ -403,6 +619,7 @@ def build_music_diagnostics_report_sync(router: Any, options: DiagnosticsOptions
     sections.append(("DB musicnode", db_text))
     cfg = _lavalink_cfg_from_router(router, options.guild_id)
     sections.append(("Config Lavalink efetiva no bot", json.dumps(_safe_report_obj(cfg), ensure_ascii=False, indent=2)))
+    sections.append(("Teste Spotify API do bot", _spotify_api_test()))
     sections.append(("Testes Lavalink REST", _lavalink_tests(cfg)))
     sections.append(("Teste yt-dlp local com cookies", _yt_dlp_test()))
     sections.append(("application.yml do Lavalink (sanitizado)", _application_yml_head()))

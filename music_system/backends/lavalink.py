@@ -26,11 +26,11 @@ def _mirror_prefixes_from_config() -> tuple[str, ...]:
 
     O padrão evita YouTube no Lavalink e também evita depender de ``spsearch``
     quando o LavaSrc/Spotify está instável. Quem quiser testar Spotify/Deezer no
-    node pode definir MUSIC_LAVASRC_MIRROR_PREFIXES="dzsearch,scsearch" no .env.
+    node pode definir MUSIC_LAVASRC_MIRROR_PREFIXES="dzsearch,scsearch" no .env, mas Deezer só deve ser ligado quando a master key/ARL existirem.
     """
     raw = str(getattr(config, "MUSIC_LAVASRC_MIRROR_PREFIXES", "") or os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "") or "").strip()
     if not raw:
-        raw = "dzsearch,scsearch"
+        raw = "scsearch"
     allowed = {"scsearch", "spsearch", "dzsearch", "amsearch"}
     out: list[str] = []
     for item in re.split(r"[,;\s]+", raw):
