@@ -16,6 +16,7 @@ from music_system.diagnostics import (
     build_full_vps_diagnostics_report,
     build_git_tracked_base_archive,
     build_music_diagnostics_report,
+    build_music_diagnostics_archive,
     build_vps_snapshot_archive,
 )
 
@@ -207,12 +208,23 @@ class VpsCommandMixin:
         elif action == "music_diag":
             router = _get_audio_router(self.bot)
             try:
-                report = await build_music_diagnostics_report(router, await self._vps_context_options(interaction))
+                payload, filename, summary, fallback_report = await build_music_diagnostics_archive(router, await self._vps_context_options(interaction))
+                if payload and filename:
+                    files.append(discord.File(io.BytesIO(payload), filename=filename))
+                    lines.append("`🎵` Diagnóstico musical modular anexado em .zip.")
+                    if summary:
+                        lines.append(f"`ℹ️` {summary}")
+                    if fallback_report:
+                        files.append(discord.File(io.BytesIO(fallback_report.encode("utf-8", "replace")), filename=f"vps-music-diagnostics-summary-{stamp}.txt"))
+                else:
+                    lines.append(f"`⚠️` Diagnóstico modular não foi anexado: {summary or 'falha sem detalhes'}")
+                    report = fallback_report or await build_music_diagnostics_report(router, await self._vps_context_options(interaction))
+                    files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"vps-music-diagnostics-{stamp}.txt"))
             except Exception as exc:
                 logger.exception("[utility/vps] falha ao gerar diagnóstico musical")
                 report = f"# Diagnóstico musical falhou\nTipo: {type(exc).__name__}\nErro: {str(exc)[:500]}\n"
-            files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"vps-music-diagnostics-{stamp}.txt"))
-            lines.append("`🎵` Diagnóstico musical anexado.")
+                files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"vps-music-diagnostics-{stamp}.txt"))
+                lines.append("`⚠️` Diagnóstico musical falhou; anexei relatório mínimo.")
 
         else:
             router = _get_audio_router(self.bot)

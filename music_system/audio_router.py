@@ -7,6 +7,7 @@ import os
 import random
 import time
 import threading
+import shutil
 from datetime import datetime, timezone
 from array import array
 from collections import deque
@@ -68,6 +69,12 @@ MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS = max(0.2, float(getattr(config, "MUSIC_
 MUSIC_TTS_INTERNAL_BASE_URL = str(getattr(config, "MUSIC_TTS_INTERNAL_BASE_URL", "") or "").strip().rstrip("/")
 MUSIC_LAVALINK_TTS_INTERNAL_FIRST = bool(getattr(config, "MUSIC_LAVALINK_TTS_INTERNAL_FIRST", True))
 MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS = max(0.25, float(getattr(config, "MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS", 1.75)))
+MUSIC_TTS_AUDIO_FORMAT = str(getattr(config, "MUSIC_TTS_AUDIO_FORMAT", "opus") or "opus").strip().lower()
+MUSIC_TTS_AUDIO_FALLBACK_FORMAT = str(getattr(config, "MUSIC_TTS_AUDIO_FALLBACK_FORMAT", "mp3") or "mp3").strip().lower()
+MUSIC_TTS_OPUS_BITRATE = str(getattr(config, "MUSIC_TTS_OPUS_BITRATE", "48k") or "48k").strip()
+MUSIC_TTS_OPUS_SAMPLE_RATE = max(8000, int(getattr(config, "MUSIC_TTS_OPUS_SAMPLE_RATE", 48000) or 48000))
+MUSIC_TTS_OPUS_CHANNELS = min(2, max(1, int(getattr(config, "MUSIC_TTS_OPUS_CHANNELS", 1) or 1)))
+MUSIC_TTS_CONVERT_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "MUSIC_TTS_CONVERT_TIMEOUT_SECONDS", 8.0) or 8.0))
 MUSIC_RESOLVING_STALE_SECONDS = max(5.0, float(getattr(config, "MUSIC_RESOLVING_STALE_SECONDS", 45.0)))
 MUSIC_VOICE_STATUS_ENABLED = bool(getattr(config, "MUSIC_VOICE_STATUS_ENABLED", True))
 MUSIC_VOICE_STATUS_TEMPLATE = str(getattr(config, "MUSIC_VOICE_STATUS_TEMPLATE", "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})") or "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})").strip()
@@ -3118,6 +3125,131 @@ class AudioRouter:
         except Exception:
             return ""
 
+    def _tts_format_suffix(self, fmt: str) -> str:
+        fmt = str(fmt or "").strip().lower()
+        if fmt in {"ogg", "opus", "ogg_opus", "ogg/opus"}:
+            return ".ogg"
+        if fmt in {"m4a", "aac"}:
+            return ".m4a"
+        if fmt in {"wav", "wave"}:
+            return ".wav"
+        return ".mp3"
+
+    async def _convert_tts_audio_for_lavalink(self, source_path: str, fmt: str) -> str | None:
+        """Converte o TTS já gerado para um formato mais leve para o Lavalink.
+
+        O TTS original continua disponível como fallback. A conversão acontece antes
+        de pausar a música, então uma falha aqui não deve travar o player.
+        """
+        fmt = str(fmt or "").strip().lower()
+        if fmt in {"", "mp3", "mpeg"}:
+            return source_path if str(source_path).lower().endswith(".mp3") else None
+        if fmt not in {"opus", "ogg", "ogg_opus", "ogg/opus"}:
+            return None
+        try:
+            source_path = os.path.abspath(str(source_path or ""))
+            if not os.path.isfile(source_path) or os.path.getsize(source_path) <= 0:
+                return None
+            if source_path.lower().endswith((".ogg", ".opus")):
+                return source_path
+            ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+            base, _ext = os.path.splitext(source_path)
+            target = f"{base}.opus.ogg"
+            if (
+                os.path.isfile(target)
+                and os.path.getsize(target) > 0
+                and os.path.getmtime(target) >= os.path.getmtime(source_path)
+            ):
+                return target
+            cmd = [
+                ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                source_path,
+                "-vn",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                MUSIC_TTS_OPUS_BITRATE,
+                "-ar",
+                str(MUSIC_TTS_OPUS_SAMPLE_RATE),
+                "-ac",
+                str(MUSIC_TTS_OPUS_CHANNELS),
+                target,
+            ]
+            started = time.monotonic()
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=MUSIC_TTS_CONVERT_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.communicate()
+                with contextlib.suppress(Exception):
+                    os.remove(target)
+                logger.warning(
+                    "[music/lavalink] tts_opus_convert_timeout | source=%s timeout=%.1fs",
+                    source_path,
+                    MUSIC_TTS_CONVERT_TIMEOUT_SECONDS,
+                )
+                return None
+            if proc.returncode != 0 or not os.path.isfile(target) or os.path.getsize(target) <= 0:
+                with contextlib.suppress(Exception):
+                    os.remove(target)
+                logger.warning(
+                    "[music/lavalink] tts_opus_convert_failed | source=%s rc=%s stderr=%s",
+                    source_path,
+                    proc.returncode,
+                    (stderr or stdout or b"").decode("utf-8", "replace")[:400],
+                )
+                return None
+            logger.info(
+                "[music/lavalink] tts_opus_convert_ok | source=%s target=%s size=%s elapsed_ms=%.1f",
+                source_path,
+                target,
+                os.path.getsize(target),
+                (time.monotonic() - started) * 1000.0,
+            )
+            return target
+        except Exception:
+            logger.debug("[music/lavalink] falha ao converter TTS para OGG/Opus", exc_info=True)
+            return None
+
+    async def _lavalink_tts_source_paths_for_playback(self, path: str) -> list[str]:
+        """Retorna caminhos em ordem: formato preferido leve, depois fallback."""
+        paths: list[str] = []
+        original = os.path.abspath(str(path or ""))
+        if not os.path.isfile(original) or os.path.getsize(original) <= 0:
+            return paths
+        preferred = MUSIC_TTS_AUDIO_FORMAT
+        fallback = MUSIC_TTS_AUDIO_FALLBACK_FORMAT
+        if preferred in {"opus", "ogg", "ogg_opus", "ogg/opus"}:
+            converted = await self._convert_tts_audio_for_lavalink(original, preferred)
+            if converted:
+                paths.append(converted)
+        elif preferred in {"mp3", "mpeg"}:
+            paths.append(original)
+        # MP3 fallback preserva compatibilidade e evita travar quando o Lavalink não
+        # aceitar o container/codec preferido.
+        if fallback in {"mp3", "mpeg", ""} and original not in paths:
+            paths.append(original)
+        elif fallback in {"opus", "ogg", "ogg_opus", "ogg/opus"}:
+            converted = await self._convert_tts_audio_for_lavalink(original, fallback)
+            if converted and converted not in paths:
+                paths.append(converted)
+        if original not in paths:
+            paths.append(original)
+        return paths
+
     async def _probe_tts_url(self, url: str, *, timeout: float | None = None) -> bool:
         url = str(url or "").strip()
         if not url:
@@ -3145,11 +3277,13 @@ class AudioRouter:
     async def _filter_lavalink_tts_candidates(self, candidates: list[str]) -> list[str]:
         """Valida URLs HTTP antes de pausar/substituir a música no Lavalink.
 
-        Retorna a primeira URL HTTP que respondeu OK. Assim a URL pública externa
-        só é testada se a interna 127.0.0.1 falhar, reduzindo travadas antes do TTS.
+        Mantém todos os candidatos HTTP que responderam OK, em ordem. Isso permite
+        tentar OGG/Opus primeiro e MP3 depois, sem pausar a música antes de saber
+        que pelo menos uma URL está acessível.
         """
         if not candidates:
             return []
+        ready: list[str] = []
         unprobed: list[str] = []
         for candidate in candidates:
             candidate = str(candidate or "").strip()
@@ -3158,11 +3292,12 @@ class AudioRouter:
             if candidate.startswith("http://") or candidate.startswith("https://"):
                 if await self._probe_tts_url(candidate):
                     logger.info("[music/lavalink] tts_url_probe_ok | url=%s", candidate)
-                    return [candidate] + unprobed
+                    ready.append(candidate)
+                    continue
                 logger.warning("[music/lavalink] tts_url_probe_failed | url=%s", candidate)
             else:
                 unprobed.append(candidate)
-        return unprobed
+        return ready + unprobed
 
     def _lavalink_tts_candidates_for_path(self, path: str, *, timeout: float = 120.0) -> list[str]:
         candidates: list[str] = []
@@ -3181,11 +3316,14 @@ class AudioRouter:
                     ttl_seconds=max(float(timeout or 120.0) + 90.0, float(getattr(config, "MUSIC_LAVALINK_TTS_URL_TTL_SECONDS", 240))),
                 )
                 if token:
-                    public_url = f"{public_base}/tts-audio/{token}.mp3" if public_base else ""
+                    suffix = os.path.splitext(abs_path)[1].lower() or ".mp3"
+                    if suffix not in {".ogg", ".opus", ".m4a", ".aac", ".wav", ".mp3"}:
+                        suffix = ".mp3"
+                    public_url = f"{public_base}/tts-audio/{token}{suffix}" if public_base else ""
                     if public_url:
                         internal_url = self._swap_url_base_preserving_path(public_url, internal_base)
                     elif internal_base:
-                        internal_url = f"{internal_base}/tts-audio/{token}.mp3"
+                        internal_url = f"{internal_base}/tts-audio/{token}{suffix}"
                     if MUSIC_LAVALINK_TTS_INTERNAL_FIRST and internal_url:
                         candidates.append(internal_url)
                     if public_url:
@@ -3241,16 +3379,20 @@ class AudioRouter:
         active_source = state.current_source if state is not None else None
 
         if state is not None and guild is not None and (state.current_backend == "lavalink" or self._is_lavalink_voice_client(vc)):
-            # O arquivo já foi gerado pelo TTS antes de chegar aqui. Só agora o
-            # Lavalink resolve uma fonte tocável e substitui temporariamente a
-            # música; se qualquer etapa falhar, a faixa atual continua/resume.
-            raw_candidates = self._lavalink_tts_candidates_for_path(path, timeout=timeout)
+            # O arquivo já foi gerado pelo TTS antes de chegar aqui. Antes de
+            # pausar/substituir a música, tenta preparar uma versão OGG/Opus
+            # menor para Lavalink e mantém MP3 como fallback.
+            source_paths = await self._lavalink_tts_source_paths_for_playback(path)
+            raw_candidates: list[str] = []
+            for source_path in source_paths:
+                raw_candidates.extend(self._lavalink_tts_candidates_for_path(source_path, timeout=timeout))
             candidates = await self._filter_lavalink_tts_candidates(raw_candidates)
             source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
             if not candidates:
                 logger.warning(
-                    "[music/lavalink] TTS via Lavalink sem URL acessível/configurada | guild=%s raw_candidates=%s",
+                    "[music/lavalink] TTS via Lavalink sem URL acessível/configurada | guild=%s source_paths=%s raw_candidates=%s",
                     guild_id,
+                    source_paths,
                     raw_candidates,
                 )
                 return {

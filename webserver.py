@@ -26,10 +26,11 @@ def _purge_expired_tts_audio(now: float | None = None) -> None:
 
 
 def register_tts_audio_file(path: str, *, ttl_seconds: float = 240.0) -> str | None:
-    """Registra um MP3 temporário para o Lavalink buscar via HTTP.
+    """Registra um áudio temporário para o Lavalink buscar via HTTP.
 
     O token é aleatório e expira rápido. O arquivo não é copiado para evitar RAM/IO
-    extra; o endpoint apenas faz streaming do caminho já gerado pelo TTS.
+    extra; o endpoint apenas faz streaming do caminho já gerado pelo TTS. A URL
+    pode usar a extensão real do arquivo (.ogg/.opus/.m4a/.mp3) ou apenas o token.
     """
     try:
         abs_path = os.path.abspath(str(path or ""))
@@ -65,9 +66,14 @@ def health():
 
 
 @app.get("/tts-audio/<token>")
-@app.get("/tts-audio/<token>.mp3")
-def tts_audio(token: str):
-    token = str(token or "").strip().removesuffix(".mp3")
+@app.get("/tts-audio/<token>.<ext>")
+def tts_audio(token: str, ext: str | None = None):
+    token = str(token or "").strip()
+    # Compatibilidade com rotas antigas onde o sufixo vinha incorporado no token.
+    for suffix in (".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav"):
+        if token.lower().endswith(suffix):
+            token = token[: -len(suffix)]
+            break
     if not token:
         abort(404)
     now = time.time()
@@ -83,7 +89,16 @@ def tts_audio(token: str):
         with _tts_audio_lock:
             _tts_audio_files.pop(token, None)
         abort(404)
-    return send_file(path, mimetype="audio/mpeg", conditional=True, max_age=0)
+    lowered = path.lower()
+    if lowered.endswith((".ogg", ".opus")):
+        mimetype = "audio/ogg"
+    elif lowered.endswith((".m4a", ".aac")):
+        mimetype = "audio/mp4"
+    elif lowered.endswith(".wav"):
+        mimetype = "audio/wav"
+    else:
+        mimetype = "audio/mpeg"
+    return send_file(path, mimetype=mimetype, conditional=True, max_age=0)
 
 
 def run_webserver():

@@ -182,6 +182,15 @@ MUSIC_LAVALINK_TTS_INTERNAL_FIRST = _parse_bool(os.getenv("MUSIC_LAVALINK_TTS_IN
 MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS = max(0.25, _parse_float(os.getenv("MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS", "1.75"), 1.75))
 MUSIC_LAVALINK_TTS_FILE_FALLBACK = _parse_bool(os.getenv("MUSIC_LAVALINK_TTS_FILE_FALLBACK", "false"), False)
 MUSIC_LAVALINK_TTS_URL_TTL_SECONDS = max(30, _parse_int(os.getenv("MUSIC_LAVALINK_TTS_URL_TTL_SECONDS", "240"), 240))
+# Formato preferido para o áudio temporário de TTS usado pelo Lavalink.
+# OGG/Opus é menor e costuma carregar mais rápido que MP3; MP3 fica como fallback
+# por compatibilidade quando a conversão ou o loadtracks do Lavalink falhar.
+MUSIC_TTS_AUDIO_FORMAT = (os.getenv("MUSIC_TTS_AUDIO_FORMAT", "opus") or "opus").strip().lower()
+MUSIC_TTS_AUDIO_FALLBACK_FORMAT = (os.getenv("MUSIC_TTS_AUDIO_FALLBACK_FORMAT", "mp3") or "mp3").strip().lower()
+MUSIC_TTS_OPUS_BITRATE = (os.getenv("MUSIC_TTS_OPUS_BITRATE", "48k") or "48k").strip()
+MUSIC_TTS_OPUS_SAMPLE_RATE = max(8000, _parse_int(os.getenv("MUSIC_TTS_OPUS_SAMPLE_RATE", "48000"), 48000))
+MUSIC_TTS_OPUS_CHANNELS = min(2, max(1, _parse_int(os.getenv("MUSIC_TTS_OPUS_CHANNELS", "1"), 1)))
+MUSIC_TTS_CONVERT_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_TTS_CONVERT_TIMEOUT_SECONDS", "8.0"), 8.0))
 MUSIC_IDLE_DISCONNECT_SECONDS = _parse_int(os.getenv("MUSIC_IDLE_DISCONNECT_SECONDS", "120"), 120)
 MUSIC_QUEUE_MAXSIZE = min(100, max(1, _parse_int(os.getenv("MUSIC_QUEUE_MAXSIZE", "100"), 100)))
 MUSIC_MAX_PLAYLIST_ITEMS = min(100, max(1, _parse_int(os.getenv("MUSIC_MAX_PLAYLIST_ITEMS", "100"), 100)))

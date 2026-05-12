@@ -152,6 +152,12 @@ def _read_env_flags() -> dict[str, Any]:
         "MUSIC_TTS_INTERNAL_BASE_URL",
         "MUSIC_LAVALINK_TTS_INTERNAL_FIRST",
         "MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS",
+        "MUSIC_TTS_AUDIO_FORMAT",
+        "MUSIC_TTS_AUDIO_FALLBACK_FORMAT",
+        "MUSIC_TTS_OPUS_BITRATE",
+        "MUSIC_TTS_OPUS_SAMPLE_RATE",
+        "MUSIC_TTS_OPUS_CHANNELS",
+        "MUSIC_TTS_CONVERT_TIMEOUT_SECONDS",
     ]
     result: dict[str, Any] = {}
     for name in names:
@@ -883,6 +889,9 @@ def _tts_runtime_snapshot(router: Any, guild_id: int) -> str:
         "tts_internal_base_url": redact(str(getattr(config, "MUSIC_TTS_INTERNAL_BASE_URL", "") or "").strip()),
         "lavalink_tts_internal_first": bool(getattr(config, "MUSIC_LAVALINK_TTS_INTERNAL_FIRST", True)),
         "lavalink_tts_file_fallback": bool(getattr(config, "MUSIC_LAVALINK_TTS_FILE_FALLBACK", False)),
+        "tts_audio_format": str(getattr(config, "MUSIC_TTS_AUDIO_FORMAT", "opus") or "opus"),
+        "tts_audio_fallback_format": str(getattr(config, "MUSIC_TTS_AUDIO_FALLBACK_FORMAT", "mp3") or "mp3"),
+        "tts_opus_bitrate": str(getattr(config, "MUSIC_TTS_OPUS_BITRATE", "48k") or "48k"),
     }
     return json.dumps(_safe_report_obj(data), ensure_ascii=False, indent=2)
 
@@ -1113,6 +1122,153 @@ def build_music_diagnostics_report_sync(router: Any, options: DiagnosticsOptions
 
 async def build_music_diagnostics_report(router: Any, options: DiagnosticsOptions) -> str:
     return await asyncio.to_thread(build_music_diagnostics_report_sync, router, options)
+
+
+def _music_diagnostics_sections(router: Any, options: DiagnosticsOptions) -> tuple[list[tuple[str, str, str]], dict[str, Any]]:
+    """Monta seções reutilizáveis para relatório texto e pacote modular."""
+    cfg = _lavalink_cfg_from_router(router, options.guild_id)
+    db_text, db_data = _db_snapshot()
+    summary = "\n".join([
+        f"Gerado em: {_now_stamp()}",
+        f"Guild: {options.guild_name} ({options.guild_id})",
+        f"Solicitado por: {options.requester_name} ({options.requester_id})",
+        f"Python: {sys.version.split()[0]} ({sys.executable})",
+        f"Sistema: {platform.platform()}",
+        f"Repo root: {REPO_ROOT}",
+    ])
+    package_versions = "\n".join([
+        f"discord.py: {_package_version('discord.py')}",
+        f"wavelink: {_package_version('wavelink')}",
+        f"yt-dlp: {_package_version('yt-dlp')}",
+        f"PyNaCl: {_package_version('PyNaCl')}",
+        f"aiohttp: {_package_version('aiohttp')}",
+    ])
+    sections: list[tuple[str, str, str]] = [
+        ("00-resumo.txt", "Resumo", summary),
+        ("01-pacotes.txt", "Pacotes", package_versions),
+        ("02-env-relevante.json", "Variáveis relevantes (.env carregado pelo processo)", json.dumps(_safe_report_obj(_read_env_flags()), ensure_ascii=False, indent=2)),
+        ("03-db-musicnode.json", "DB musicnode", db_text),
+        ("04-lavalink-config-efetiva.json", "Config Lavalink efetiva no bot", json.dumps(_safe_report_obj(cfg), ensure_ascii=False, indent=2)),
+        ("05-runtime-tts-musica.json", "Estado TTS/música em memória", _tts_runtime_snapshot(router, options.guild_id)),
+        ("tests/spotify-api.txt", "Teste Spotify API do bot", _spotify_api_test()),
+        ("tests/spotify-mirror-dry-run.txt", "Dry-run Spotify mirror/fallback (sem tocar áudio)", _spotify_dry_run_mirror_test(cfg)),
+        ("tests/lavalink-rest.txt", "Testes Lavalink REST", _lavalink_tests(cfg)),
+        ("tests/ytdlp-local.txt", "Teste yt-dlp local com cookies", _yt_dlp_test()),
+        ("system/restart-markers.txt", "Marcos de restart/runtime", _service_restart_markers()),
+        ("lavalink/application-sanitized.yml", "application.yml do Lavalink (sanitizado)", _application_yml_head()),
+    ]
+    return sections, {"cfg": cfg, "db": db_data}
+
+
+def _music_diagnostics_summary_text(sections: list[tuple[str, str, str]]) -> str:
+    """Resumo textual que continua útil mesmo quando o zip é o anexo principal."""
+    wanted = {
+        "Resumo",
+        "Pacotes",
+        "Estado TTS/música em memória",
+        "Teste Spotify API do bot",
+        "Dry-run Spotify mirror/fallback (sem tocar áudio)",
+        "Testes Lavalink REST",
+        "Teste yt-dlp local com cookies",
+    }
+    body_parts: list[str] = []
+    for _arc, title, body in sections:
+        if title in wanted:
+            body_parts.append(f"\n\n# {title}\n{redact(body)}")
+    return ("".join(body_parts).strip() + "\n") if body_parts else "Diagnóstico musical gerado em pacote modular.\n"
+
+
+def _diagnostic_log_commands() -> dict[str, list[str]]:
+    return {
+        "logs/relevant/music-events.txt": [
+            "bash", "-lc",
+            "journalctl -u tts-bot.service --since '4 hours ago' -n 2500 --no-pager -o cat "
+            "| grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|fallback|premature|TrackException|LoadException|tts_|tts |duck|resolve|resolving|FFmpeg|erro|falhou|timeout|exception|traceback' || true",
+        ],
+        "logs/relevant/tts-events.txt": [
+            "bash", "-lc",
+            "journalctl -u tts-bot.service --since '4 hours ago' -n 2200 --no-pager -o cat "
+            "| grep -Ei 'tts|tts_voice|tts-audio|duck|lavalink_tts|public_url|internal_url|voice.*assumindo|timeout|falhou|erro' || true",
+        ],
+        "logs/relevant/errors-warnings.txt": [
+            "bash", "-lc",
+            "journalctl -u tts-bot.service -u lavalink.service --since '4 hours ago' -n 2500 --no-pager -o cat "
+            "| grep -Ei 'warning|error|exception|traceback|falhou|erro|timeout|TrackException|LoadException|stuck|premature|invalid status|404|403|429|5[0-9][0-9]' || true",
+        ],
+        "logs/relevant/lavalink-events.txt": [
+            "bash", "-lc",
+            "journalctl -u lavalink.service --since '4 hours ago' -n 1800 --no-pager -o cat "
+            "| grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|track|exception|failed|error|404|403|429|5[0-9][0-9]' || true",
+        ],
+        "logs/raw/tts-bot-journal-tail.txt": [
+            "bash", "-lc",
+            "journalctl -u tts-bot.service --since '4 hours ago' -n 3500 --no-pager -o short-iso",
+        ],
+        "logs/raw/lavalink-journal-tail.txt": [
+            "bash", "-lc",
+            "journalctl -u lavalink.service --since '4 hours ago' -n 2500 --no-pager -o short-iso",
+        ],
+    }
+
+
+def _local_logs_archive_text() -> dict[str, str]:
+    result: dict[str, str] = {}
+    log_dir = REPO_ROOT / "logs"
+    candidates: list[Path] = []
+    if log_dir.exists():
+        with contextlib.suppress(Exception):
+            candidates.extend(sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True))
+    for extra in [REPO_ROOT / "bot.log", REPO_ROOT / "logs" / "bot.log", REPO_ROOT / "logs" / "updater.log"]:
+        if extra.exists() and extra not in candidates:
+            candidates.append(extra)
+    for path in candidates[:12]:
+        try:
+            rel = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else Path(path.name)
+        except Exception:
+            rel = Path(path.name)
+        arc = "logs/local/" + str(rel).replace(os.sep, "_")
+        result[arc] = _safe_read_file(path, max_chars=900_000)
+    if not result:
+        result["logs/local/sem-logs.txt"] = "Nenhum arquivo de log local encontrado.\n"
+    return result
+
+
+MUSIC_DIAGNOSTICS_ARCHIVE_MAX_BYTES = 24 * 1024 * 1024
+
+
+def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOptions) -> tuple[bytes | None, str, str, str]:
+    """Gera diagnóstico musical em zip modular, sem perder testes/logs importantes."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"vps-music-diagnostics-{stamp}.zip"
+    bio = io.BytesIO()
+    added = 0
+    try:
+        sections, _meta = _music_diagnostics_sections(router, options)
+        summary_text = _music_diagnostics_summary_text(sections)
+        with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            _write_zip_text(zf, "README.txt", "Diagnóstico musical modular. O resumo fica em 00-resumo-curto.txt; logs brutas ficam em logs/raw/.\n"); added += 1
+            _write_zip_text(zf, "00-resumo-curto.txt", summary_text); added += 1
+            for arc, _title, body in sections:
+                _write_zip_text(zf, arc, body); added += 1
+            _write_zip_text(zf, "bot/env.sanitized.txt", _sanitized_env_text()); added += 1
+            for arc, cmd in _diagnostic_log_commands().items():
+                timeout = 26.0 if "/raw/" in arc else 18.0
+                _write_zip_text(zf, arc, _run_cmd(cmd, timeout=timeout)); added += 1
+            for arc, text in _local_logs_archive_text().items():
+                _write_zip_text(zf, arc, text); added += 1
+            # Informações úteis para diagnosticar peso/IO sem tornar o relatório síncrono demais.
+            _write_zip_text(zf, "system/disk-and-process.txt", _run_cmd(["bash", "-lc", "df -h; echo; free -m; echo; ps -eo pid,ppid,%cpu,%mem,etime,cmd --sort=-%cpu | head -40"], timeout=12.0)); added += 1
+    except Exception as exc:
+        return None, filename, f"Falha ao montar diagnóstico musical modular: {type(exc).__name__}: {exc}", ""
+    payload = bio.getvalue()
+    summary = f"Diagnóstico musical modular anexado: {added} item(ns); tamanho {len(payload) / (1024 * 1024):.2f} MB."
+    if len(payload) > MUSIC_DIAGNOSTICS_ARCHIVE_MAX_BYTES:
+        return None, filename, f"Diagnóstico musical modular ficou grande demais para anexar: {len(payload) / (1024 * 1024):.1f} MB.", summary_text
+    return payload, filename, summary, summary_text
+
+
+async def build_music_diagnostics_archive(router: Any, options: DiagnosticsOptions) -> tuple[bytes | None, str, str, str]:
+    return await asyncio.to_thread(build_music_diagnostics_archive_sync, router, options)
 
 
 def _local_log_tail_full() -> str:
