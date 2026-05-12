@@ -121,7 +121,7 @@ class Music(commands.Cog):
     def _lavalink_identifier_for_query(self, query: str) -> tuple[str, str, str, str]:
         """Cria uma faixa leve para o node resolver, sem chamar yt-dlp no comando.
 
-        Em modo Lavalink/NodeLink, o node deve receber a URL/busca crua. Fazer
+        Em modo node de áudio, o node deve receber a URL/busca crua. Fazer
         ``_play`` passar antes pelo extractor local bloqueia o event loop
         (``voice heartbeat blocked``) e ainda pode trocar YouTube por SoundCloud.
         """
@@ -141,7 +141,7 @@ class Music(commands.Cog):
             title = "YouTube" if profile.is_youtube else f"{source.title()} link" if source != "lavalink" else "Link"
             return profile.canonical or raw, title, source, profile.canonical or raw
 
-        # Busca textual normal em NodeLink: usa YouTube por padrão, porque o objetivo
+        # Busca textual normal em node de áudio: usa YouTube por padrão, porque o objetivo
         # desta migração é parar de cair em SoundCloud quando o usuário pediu YouTube.
         return f"ytsearch:{raw}", raw, "ytsearch", ""
 
@@ -176,7 +176,7 @@ class Music(commands.Cog):
         requester_id: int,
         requester_name: str,
     ) -> ExtractedBatch:
-        # Busca textual em NodeLink/Lavalink: consulta o node e preserva a lista
+        # Busca textual em node de áudio: consulta o node e preserva a lista
         # de resultados para o usuário escolher. Não usa yt-dlp nem escolhe
         # automaticamente o primeiro resultado.
         return await self.router.backends.search_lavalink_tracks(
@@ -492,6 +492,8 @@ class Music(commands.Cog):
         if players is not None:
             lines.append(f"• players: `{players}` • tocando: `{playing if playing is not None else '?'}`")
         extra = getattr(health, "extra", {}) or {}
+        if extra.get("provider"):
+            lines.append(f"• node: `{discord.utils.escape_markdown(str(extra.get('provider'))[:30])}`")
         if extra.get("host"):
             lines.append(f"• host: `{discord.utils.escape_markdown(str(extra.get('host'))[:80])}`")
         if "wavelink_installed" in extra:
@@ -504,7 +506,7 @@ class Music(commands.Cog):
     def _format_lavalink_test(self, result) -> str:
         icon = "🟢" if getattr(result, "ok", False) else "🔴"
         lines = [
-            f"{icon} **Teste Lavalink**",
+            f"{icon} **Teste do node de áudio**",
             f"• query: `{discord.utils.escape_markdown(str(getattr(result, 'query', '') or '')[:160])}`",
             f"• resultado: `{'OK' if getattr(result, 'ok', False) else 'falhou'}`",
         ]

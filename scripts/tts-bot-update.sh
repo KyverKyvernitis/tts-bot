@@ -5,6 +5,8 @@ REPO_DIR="/home/ubuntu/bot"
 BRANCH="main"
 SERVICE="tts-bot"
 CALLKEEPER_SERVICE="callkeeper"
+LAVALINK_SERVICE="lavalink"
+NODELINK_SERVICE="nodelink"
 LOG_TAG="tts-bot-updater"
 DIRTY_MARKER_FILE="$REPO_DIR/.fatal-update-dirty"
 
@@ -32,6 +34,8 @@ CALLKEEPER_CHANGED=0
 
 BOT_HEALTHCHECK_STATUS="não verificado"
 CALLKEEPER_STATUS="não alterado"
+AUDIO_SERVICES_STATUS="não alterado"
+NODELINK_STATUS="não alterado"
 FRONT_STATUS="não alterado"
 BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
@@ -176,6 +180,24 @@ wait_for_health() {
   return 1
 }
 
+env_truthy() {
+  local key="${1:?}"
+  local value=""
+  if [[ -f "$REPO_DIR/.env" ]]; then
+    value="$(grep -E "^${key}=" "$REPO_DIR/.env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d ' "' || true)"
+  fi
+  value="${value,,}"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "y" || "$value" == "on" || "$value" == "sim" ]]
+}
+
+wait_for_lavalink_ready() {
+  if [[ -x "$REPO_DIR/scripts/wait-audio-node-ready.py" ]]; then
+    sudo -u ubuntu -H "$REPO_DIR/scripts/wait-audio-node-ready.py" --timeout "${AUDIO_NODE_STARTUP_WAIT_SECONDS:-90}"
+    return $?
+  fi
+  return 0
+}
+
 short_commit() {
   local value="${1:-}"
   if [[ -z "$value" ]]; then
@@ -272,7 +294,49 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 }
 
 
+deploy_audio_services() {
+  STAGE="configuração dos serviços de áudio"
+  local installed=0
+
+  if [[ -f "$REPO_DIR/deploy/systemd/lavalink.service" ]]; then
+    cp "$REPO_DIR/deploy/systemd/lavalink.service" /etc/systemd/system/lavalink.service
+    installed=1
+  fi
+  if [[ -f "$REPO_DIR/deploy/systemd/tts-bot.service" ]]; then
+    cp "$REPO_DIR/deploy/systemd/tts-bot.service" /etc/systemd/system/tts-bot.service
+    installed=1
+  fi
+  if (( installed == 1 )); then
+    systemctl daemon-reload
+  fi
+
+  if env_truthy LAVALINK_ENABLED; then
+    systemctl enable "$LAVALINK_SERVICE" >/dev/null 2>&1 || true
+    systemctl restart "$LAVALINK_SERVICE" || true
+    if systemctl is-active --quiet "$LAVALINK_SERVICE"; then
+      AUDIO_SERVICES_STATUS="Lavalink ativo"
+    else
+      AUDIO_SERVICES_STATUS="Lavalink configurado, mas não ficou ativo"
+    fi
+  else
+    AUDIO_SERVICES_STATUS="Lavalink não iniciado porque LAVALINK_ENABLED=false"
+  fi
+
+  if env_truthy NODELINK_ENABLED; then
+    NODELINK_STATUS="mantido porque NODELINK_ENABLED=true"
+  else
+    if systemctl list-unit-files "$NODELINK_SERVICE.service" >/dev/null 2>&1; then
+      systemctl disable --now "$NODELINK_SERVICE" >/dev/null 2>&1 || true
+      NODELINK_STATUS="desativado/removido do boot"
+    else
+      NODELINK_STATUS="não instalado"
+    fi
+  fi
+}
+
 deploy_bot() {
+  deploy_audio_services
+
   STAGE="dependências do bot"
   if [[ -x "$REPO_DIR/.venv/bin/pip" && -f "$REPO_DIR/requirements.txt" ]]; then
     sudo -u ubuntu -H "$REPO_DIR/.venv/bin/pip" install -r "$REPO_DIR/requirements.txt"
@@ -282,6 +346,10 @@ deploy_bot() {
     STAGE="reinício do bot"
     systemctl restart "$SERVICE"
     sleep 3
+    if env_truthy LAVALINK_ENABLED; then
+      STAGE="espera do Lavalink"
+      wait_for_lavalink_ready || true
+    fi
     STAGE="healthcheck do bot"
     if systemctl is-active --quiet "$SERVICE" && wait_for_health "$BOT_HEALTH_URL" 12 5; then
       BOT_HEALTHCHECK_STATUS="OK"
@@ -618,6 +686,8 @@ Mudança: $COMMIT_SUBJECT
 Arquivos:
 $CHANGED_FILES
 Bot: $BOT_HEALTHCHECK_STATUS
+Serviços de áudio: $AUDIO_SERVICES_STATUS
+NodeLink: $NODELINK_STATUS
 CallKeeper: $CALLKEEPER_STATUS
 Frontend: $FRONT_STATUS
 Backend: $BACK_STATUS

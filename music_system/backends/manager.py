@@ -10,7 +10,7 @@ LAVALINK_REAL_TEST_GUILD_ID = 927002914449424404
 
 from .base import BackendHealth, BackendSearchResult, LocalPlaybackBackend
 from ..models import ExtractedBatch
-from .lavalink import LavalinkBackend, LavalinkConfig
+from .lavalink import LavalinkBackend, LavalinkConfig, _as_bool, _normalize_provider, _safe_int
 from .lavalink_config import LavalinkConfigStore
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class MusicBackendManager:
         self.extractor = extractor
         self.local = LocalPlaybackBackend(extractor)
         self.lavalink_store = LavalinkConfigStore()
-        self.lavalink = LavalinkBackend.from_config(self.lavalink_store.load())
+        self.lavalink = LavalinkBackend.from_config(self._node_config_for_guild(None))
         self.mode = str(getattr(config, "MUSIC_BACKEND", "local") or "local").strip().lower()
         self._last_lavalink_shadow: dict[int, BackendSearchResult] = {}
 
@@ -42,6 +42,50 @@ class MusicBackendManager:
             return int(guild_id or 0)
         except Exception:
             return 0
+
+    def _configured_node_provider(self) -> str:
+        raw = getattr(config, "MUSIC_NODE_PROVIDER", "lavalink")
+        provider = _normalize_provider(raw)
+        if provider == "auto":
+            if _as_bool(getattr(config, "NODELINK_ENABLED", False), False):
+                return "nodelink"
+            return "lavalink"
+        return provider
+
+    def _node_config_for_guild(self, guild_id: int | None = None) -> LavalinkConfig:
+        """Retorna o node compatível com Wavelink que deve ser usado agora.
+
+        O storage/painel histórico continua sendo Lavalink. NodeLink é
+        experimental e vem apenas por .env para não misturar as credenciais no DB
+        antigo nem quebrar o painel `_musicnode`.
+        """
+        cfg = self.lavalink_store.load(guild_id=guild_id)
+        provider = self._configured_node_provider()
+        if provider != "nodelink":
+            cfg.provider = "lavalink"
+            return cfg
+
+        node_cfg = LavalinkConfig(
+            enabled=_as_bool(getattr(config, "NODELINK_ENABLED", False), False),
+            mode=cfg.mode,
+            host=str(getattr(config, "NODELINK_HOST", "127.0.0.1") or "127.0.0.1").strip(),
+            port=max(1, _safe_int(getattr(config, "NODELINK_PORT", 8787), 8787)),
+            password=str(getattr(config, "NODELINK_PASSWORD", "") or getattr(config, "LAVALINK_PASSWORD", "") or "").strip(),
+            secure=_as_bool(getattr(config, "NODELINK_SECURE", False), False),
+            node_name=str(getattr(config, "NODELINK_NODE_NAME", "nodelink") or "nodelink").strip() or "nodelink",
+            timeout_seconds=max(2.0, float(getattr(config, "NODELINK_TIMEOUT_SECONDS", getattr(config, "LAVALINK_TIMEOUT_SECONDS", 8.0)) or 8.0)),
+            provider="nodelink",
+        )
+        # Se o dono marcou NodeLink sem senha própria, herde a senha do Lavalink.
+        if not node_cfg.password and cfg.password:
+            node_cfg.password = cfg.password
+        return node_cfg
+
+    def node_provider_for_guild(self, guild_id: int | None = None) -> str:
+        try:
+            return self._node_config_for_guild(guild_id).provider
+        except Exception:
+            return "lavalink"
 
     def _real_lavalink_guild_ids(self) -> set[int]:
         """Lista opcional de restrição herdada dos testes antigos.
@@ -77,7 +121,7 @@ class MusicBackendManager:
         MUSIC_LAVALINK_REAL_GUILD_IDS estiver definido.
         """
         try:
-            cfg = self.lavalink_store.load(guild_id=guild_id)
+            cfg = self._node_config_for_guild(guild_id)
         except Exception:
             logger.debug("[music/lavalink] falha ao ler config real", exc_info=True)
             return False
@@ -85,6 +129,10 @@ class MusicBackendManager:
             return False
         if not self.is_lavalink_real_allowed_guild(guild_id):
             return False
+        if cfg.mode == "auto":
+            probe = LavalinkBackend.from_config(cfg)
+            if probe.failure_cooldown_remaining() > 0:
+                return False
         return bool(self.lavalink._wavelink_installed())
 
     def playback_backend_for_guild(self, guild_id: int | None = None) -> str:
@@ -153,17 +201,17 @@ class MusicBackendManager:
             secure=secure,
             guild_id=guild_id,
         )
-        await self._replace_lavalink(cfg)
+        await self._replace_lavalink(self._node_config_for_guild(guild_id))
         return cfg
 
     async def set_lavalink_mode(self, mode: str, *, guild_id: int | None = None) -> LavalinkConfig:
         cfg = self.lavalink_store.set_mode(mode, guild_id=guild_id)
-        await self._replace_lavalink(cfg)
+        await self._replace_lavalink(self._node_config_for_guild(guild_id))
         return cfg
 
     async def clear_lavalink_config(self, *, guild_id: int | None = None) -> LavalinkConfig:
         cfg = self.lavalink_store.clear(guild_id=guild_id)
-        await self._replace_lavalink(cfg)
+        await self._replace_lavalink(self._node_config_for_guild(guild_id))
         return cfg
 
     async def update_lavalink_panel_options(self, **options: Any) -> dict[str, bool]:
@@ -174,7 +222,7 @@ class MusicBackendManager:
 
     async def status(self, guild_id: int | None = None) -> dict[str, BackendHealth]:
         local = await self.local.health()
-        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=guild_id))
+        lavalink_backend = LavalinkBackend.from_config(self._node_config_for_guild(guild_id))
         try:
             lavalink = await lavalink_backend.health()
         finally:
@@ -189,7 +237,7 @@ class MusicBackendManager:
         requester_name: str = "",
         guild_id: int | None = None,
     ) -> BackendSearchResult:
-        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=guild_id))
+        lavalink_backend = LavalinkBackend.from_config(self._node_config_for_guild(guild_id))
         try:
             result = await lavalink_backend.search(query, requester_id=requester_id, requester_name=requester_name)
             result.extra.setdefault("origin", "manual")
@@ -208,7 +256,7 @@ class MusicBackendManager:
     ) -> BackendSearchResult | None:
         if not self.should_shadow_lavalink(guild_id):
             return None
-        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=guild_id))
+        lavalink_backend = LavalinkBackend.from_config(self._node_config_for_guild(guild_id))
         try:
             result = await lavalink_backend.search(query, requester_id=requester_id, requester_name=requester_name)
             result.extra.setdefault("origin", "shadow")
@@ -249,8 +297,8 @@ class MusicBackendManager:
         limit: int = 5,
     ) -> ExtractedBatch:
         if not self.should_use_lavalink_real(guild_id):
-            raise RuntimeError("Playback real via Lavalink não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
-        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=guild_id))
+            raise RuntimeError("Playback real via node de áudio não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
+        lavalink_backend = LavalinkBackend.from_config(self._node_config_for_guild(guild_id))
         try:
             return await lavalink_backend.extract_tracks_for_selection(
                 self.bot,
@@ -273,8 +321,8 @@ class MusicBackendManager:
         limit: int = 25,
     ) -> ExtractedBatch:
         if not self.should_use_lavalink_real(guild_id):
-            raise RuntimeError("Playback real via Lavalink não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
-        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=guild_id))
+            raise RuntimeError("Playback real via node de áudio não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
+        lavalink_backend = LavalinkBackend.from_config(self._node_config_for_guild(guild_id))
         try:
             return await lavalink_backend.extract_direct_tracks(
                 self.bot,
@@ -289,8 +337,8 @@ class MusicBackendManager:
 
     async def play_lavalink_track(self, guild, voice_channel, track, *, volume: float = 1.0):
         if not self.should_use_lavalink_real(getattr(guild, "id", None)):
-            raise RuntimeError("Playback real via Lavalink não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
-        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=getattr(guild, "id", None)))
+            raise RuntimeError("Playback real via node de áudio não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
+        lavalink_backend = LavalinkBackend.from_config(self._node_config_for_guild(getattr(guild, "id", None)))
         try:
             return await lavalink_backend.play_track(self.bot, guild, voice_channel, track, volume=volume)
         finally:
@@ -310,8 +358,8 @@ class MusicBackendManager:
         should_resume=None,
     ) -> dict[str, Any]:
         if not self.should_use_lavalink_real(getattr(guild, "id", None)):
-            raise RuntimeError("Playback real via Lavalink não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
-        lavalink_backend = LavalinkBackend.from_config(self.lavalink_store.load(guild_id=getattr(guild, "id", None)))
+            raise RuntimeError("Playback real via node de áudio não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
+        lavalink_backend = LavalinkBackend.from_config(self._node_config_for_guild(getattr(guild, "id", None)))
         try:
             return await lavalink_backend.play_tts_interrupt(
                 self.bot,
@@ -344,7 +392,8 @@ class MusicBackendManager:
 
     def compact_runtime_summary(self, guild_id: int | None = None) -> dict[str, Any]:
         cfg_summary = self.lavalink_config_summary(guild_id=guild_id)
-        cfg = self.lavalink_store.load(guild_id=guild_id)
+        cfg = self._node_config_for_guild(guild_id)
+        node_probe = LavalinkBackend.from_config(cfg)
         return {
             "configured_backend": self.mode,
             "active_backend": self.playback_backend_for_guild(guild_id),
@@ -357,4 +406,9 @@ class MusicBackendManager:
             "lavalink_real_allowed_guild": self.is_lavalink_real_allowed_guild(guild_id),
             "lavalink_real_active": self.should_use_lavalink_real(guild_id),
             "lavalink_real_scope": "allowlist" if self._real_lavalink_guild_ids() else "todos",
+            "audio_node_provider": cfg.provider,
+            "audio_node_name": cfg.node_name,
+            "audio_node_host": cfg.safe_host_label,
+            "audio_node_cooldown_seconds": round(node_probe.failure_cooldown_remaining(), 1),
+            "music_node_provider_env": str(getattr(config, "MUSIC_NODE_PROVIDER", "lavalink") or "lavalink"),
         }

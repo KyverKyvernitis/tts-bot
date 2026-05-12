@@ -43,6 +43,24 @@ def _mirror_prefixes_from_config() -> tuple[str, ...]:
 MUSIC_LAVASRC_MIRROR_PREFIXES = _mirror_prefixes_from_config()
 
 
+def _normalize_provider(value: object) -> str:
+    raw = str(value or "lavalink").strip().lower()
+    if raw in {"node", "nodelink", "node-link"}:
+        return "nodelink"
+    if raw in {"auto", "prefer_nodelink", "prefer-nodelink"}:
+        return "auto"
+    return "lavalink"
+
+
+def _provider_label(value: object) -> str:
+    provider = _normalize_provider(value)
+    if provider == "nodelink":
+        return "NodeLink"
+    if provider == "auto":
+        return "Auto"
+    return "Lavalink"
+
+
 def _as_bool(value: object, default: bool = False) -> bool:
     if value is None:
         return default
@@ -149,6 +167,7 @@ class LavalinkConfig:
     secure: bool
     node_name: str
     timeout_seconds: float
+    provider: str = "lavalink"
 
     @property
     def configured(self) -> bool:
@@ -175,6 +194,10 @@ class LavalinkConfig:
         raw_host = raw_host.replace("https://", "").replace("http://", "")
         return raw_host.split("/")[0]
 
+    @property
+    def provider_label(self) -> str:
+        return _provider_label(self.provider)
+
 
 class LavalinkBackend:
     """Backend Lavalink real usado pelo player de música.
@@ -185,9 +208,12 @@ class LavalinkBackend:
 
     name = "lavalink"
     _shared_pool_locks: dict[int, asyncio.Lock] = {}
+    _node_failure_until: dict[str, float] = {}
+    _node_failure_reason: dict[str, str] = {}
 
     def __init__(self, cfg: LavalinkConfig) -> None:
         self.cfg = cfg
+        self.provider = _normalize_provider(getattr(cfg, "provider", "lavalink"))
         self._session = None
         self._session_lock = asyncio.Lock()
         self._pool_lock = asyncio.Lock()
@@ -217,13 +243,14 @@ class LavalinkBackend:
                 secure=_as_bool(getattr(config, "LAVALINK_SECURE", False), False),
                 node_name=str(getattr(config, "LAVALINK_NODE_NAME", "main") or "main").strip() or "main",
                 timeout_seconds=max(2.0, float(getattr(config, "LAVALINK_TIMEOUT_SECONDS", 8.0) or 8.0)),
+                provider="lavalink",
             )
         return cls(cfg)
 
     def _headers(self) -> dict[str, str]:
         headers = {
             "Accept": "application/json",
-            "Client-Name": "tts-bot-lavalink-diagnostics/1.0",
+            "Client-Name": f"tts-bot-{self.provider}-diagnostics/1.0",
         }
         if self.cfg.password:
             headers["Authorization"] = self.cfg.password
@@ -250,7 +277,7 @@ class LavalinkBackend:
         fallback_only_on_not_found: bool = True,
     ) -> tuple[Any, int, str]:
         if not self.cfg.configured:
-            raise RuntimeError("Lavalink não configurado: defina host, porta e senha no painel `_musicnode`.")
+            raise RuntimeError(f"{self.cfg.provider_label} não configurado: defina host, porta e senha no painel `_musicnode`/env.")
         session = await self._get_session()
         attempts: list[str] = []
         for index, item in enumerate(paths):
@@ -295,8 +322,8 @@ class LavalinkBackend:
                 configured=self.cfg.configured,
                 available=False,
                 mode=self.cfg.mode,
-                message="Lavalink desativado. Player local continua como backend real.",
-                extra={"node": self.cfg.node_name, "host": self.cfg.safe_host_label, "wavelink_installed": self._wavelink_installed()},
+                message=f"{self.cfg.provider_label} desativado. Player local continua como backend real.",
+                extra={"node": self.cfg.node_name, "host": self.cfg.safe_host_label, "provider": self.provider, "wavelink_installed": self._wavelink_installed()},
             )
         if not self.cfg.configured:
             return BackendHealth(
@@ -305,8 +332,8 @@ class LavalinkBackend:
                 configured=False,
                 available=False,
                 mode=self.cfg.mode,
-                message="Lavalink ativado, mas faltam host, porta ou senha no painel `_musicnode`.",
-                extra={"node": self.cfg.node_name, "host": self.cfg.safe_host_label, "wavelink_installed": self._wavelink_installed()},
+                message=f"{self.cfg.provider_label} ativado, mas faltam host, porta ou senha no painel `_musicnode`/env.",
+                extra={"node": self.cfg.node_name, "host": self.cfg.safe_host_label, "provider": self.provider, "wavelink_installed": self._wavelink_installed()},
             )
 
         start = time.perf_counter()
@@ -329,7 +356,7 @@ class LavalinkBackend:
                 configured=True,
                 available=True,
                 mode=self.cfg.mode,
-                message="Node Lavalink respondeu. Playback real disponível para servidores em modo Lavalink/Auto.",
+                message=f"Node {self.cfg.provider_label} respondeu. Playback real disponível para servidores em modo Lavalink/Auto.",
                 latency_ms=latency_ms,
                 version=version,
                 players=players,
@@ -337,6 +364,7 @@ class LavalinkBackend:
                 extra={
                     "node": self.cfg.node_name,
                     "host": self.cfg.safe_host_label,
+                    "provider": self.provider,
                     "wavelink_installed": self._wavelink_installed(),
                     "api_major": api_major,
                     "stats_endpoint": stats_endpoint,
@@ -353,7 +381,7 @@ class LavalinkBackend:
                 mode=self.cfg.mode,
                 message=str(exc) or exc.__class__.__name__,
                 latency_ms=latency_ms,
-                extra={"node": self.cfg.node_name, "host": self.cfg.safe_host_label, "wavelink_installed": self._wavelink_installed()},
+                extra={"node": self.cfg.node_name, "host": self.cfg.safe_host_label, "provider": self.provider, "wavelink_installed": self._wavelink_installed()},
             )
 
     def _track_info(self, raw: Any) -> dict[str, Any]:
@@ -432,9 +460,9 @@ class LavalinkBackend:
         if not query:
             return BackendSearchResult(backend=self.name, ok=False, query=query, message="Busca vazia.")
         if not self.cfg.enabled or self.cfg.mode == "off":
-            return BackendSearchResult(backend=self.name, ok=False, query=query, message="Lavalink está desativado.")
+            return BackendSearchResult(backend=self.name, ok=False, query=query, message=f"{self.cfg.provider_label} está desativado.")
         if not self.cfg.configured:
-            return BackendSearchResult(backend=self.name, ok=False, query=query, message="Lavalink não configurado.")
+            return BackendSearchResult(backend=self.name, ok=False, query=query, message=f"{self.cfg.provider_label} não configurado.")
 
         lower_query = query.lower()
         known_prefixes = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
@@ -649,7 +677,7 @@ class LavalinkBackend:
         ok_statuses: set[int] | None = None,
     ) -> tuple[Any, int]:
         if not self.cfg.configured:
-            raise RuntimeError("Lavalink não configurado: defina host, porta e senha no painel `_musicnode`.")
+            raise RuntimeError(f"{self.cfg.provider_label} não configurado: defina host, porta e senha no painel `_musicnode`/env.")
         ok_statuses = ok_statuses or {200}
         session = await self._get_session()
         url = f"{self.cfg.base_url}{path}"
@@ -758,6 +786,44 @@ class LavalinkBackend:
             f"(state={state!r}, voice_keys={voice_keys})."
         )
 
+    def _node_failure_key(self) -> str:
+        return "|".join([self.provider, self.cfg.node_name, self.cfg.base_url, str(bool(self.cfg.secure))])
+
+    def failure_cooldown_remaining(self) -> float:
+        until = float(self.__class__._node_failure_until.get(self._node_failure_key(), 0.0) or 0.0)
+        return max(0.0, until - time.monotonic())
+
+    def failure_cooldown_reason(self) -> str:
+        return self.__class__._node_failure_reason.get(self._node_failure_key(), "")
+
+    def _mark_node_failure(self, reason: object, *, seconds: float | None = None) -> None:
+        cooldown = seconds
+        if cooldown is None:
+            cooldown = float(getattr(config, "AUDIO_NODE_FAILURE_COOLDOWN_SECONDS", 45.0) or 45.0)
+        cooldown = max(5.0, float(cooldown or 45.0))
+        key = self._node_failure_key()
+        self.__class__._node_failure_until[key] = time.monotonic() + cooldown
+        self.__class__._node_failure_reason[key] = _normalize_response_text(reason, limit=180)
+
+    def _clear_node_failure(self) -> None:
+        key = self._node_failure_key()
+        self.__class__._node_failure_until.pop(key, None)
+        self.__class__._node_failure_reason.pop(key, None)
+
+    async def probe_ready(self) -> dict[str, Any]:
+        """Healthcheck REST leve antes de entregar o Pool para Wavelink.
+
+        Evita martelar websocket quando Java/NodeLink ainda está subindo.
+        /v4/info é preferido porque confirma API v4; /version fica como fallback
+        para nodes compatíveis que não expõem info completo.
+        """
+        if not self.cfg.configured:
+            raise RuntimeError(f"{self.cfg.provider_label} não configurado: host/porta/senha ausentes.")
+        start = time.perf_counter()
+        payload, _status, endpoint = await self._request_json_any(["/v4/info", "/version"], fallback_only_on_not_found=True)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        return {"endpoint": endpoint, "latency_ms": latency_ms, "payload": payload}
+
     async def ensure_wavelink_pool(self, bot, *, force_reconnect: bool = False):
         """Garante que o Pool do Wavelink está conectado ao node configurado.
 
@@ -767,9 +833,20 @@ class LavalinkBackend:
         não remove o identificador em algumas versões 3.x.
         """
         if not self.cfg.enabled or self.cfg.mode == "off":
-            raise RuntimeError("Lavalink está desativado para este servidor.")
+            raise RuntimeError(f"{self.cfg.provider_label} está desativado para este servidor.")
         if not self.cfg.configured:
-            raise RuntimeError("Lavalink não configurado: defina host, porta e senha no painel `_musicnode`.")
+            raise RuntimeError(f"{self.cfg.provider_label} não configurado: defina host, porta e senha no painel `_musicnode`/env.")
+
+        remaining = self.failure_cooldown_remaining()
+        if remaining > 0 and not force_reconnect:
+            reason = self.failure_cooldown_reason() or "falha recente de conexão"
+            raise RuntimeError(f"{self.cfg.provider_label} em cooldown por {remaining:.0f}s após {reason}. Usando fallback local quando permitido.")
+
+        try:
+            await self.probe_ready()
+        except Exception as exc:
+            self._mark_node_failure(exc)
+            raise RuntimeError(f"{self.cfg.provider_label} ainda não está pronto no REST: {exc}") from exc
 
         async with self._shared_pool_lock():
             wavelink = self._import_wavelink()
@@ -805,9 +882,13 @@ class LavalinkBackend:
 
             kwargs = {"nodes": [node], "client": bot}
             try:
-                await pool.connect(**kwargs, cache_capacity=100)
-            except TypeError:
-                await pool.connect(**kwargs)
+                try:
+                    await pool.connect(**kwargs, cache_capacity=100)
+                except TypeError:
+                    await pool.connect(**kwargs)
+            except Exception as exc:
+                self._mark_node_failure(exc)
+                raise
 
             node = await self._wait_for_connected_node(pool, node)
             if not self._node_is_connected(node):
@@ -819,11 +900,14 @@ class LavalinkBackend:
                     self.cfg.base_url,
                 )
                 await self._close_wavelink_node(node, pool=pool, eject=True)
-                raise RuntimeError(
-                    "Lavalink ainda não está pronto/conectado. "
+                error = RuntimeError(
+                    f"{self.cfg.provider_label} ainda não está pronto/conectado. "
                     f"Node `{self.cfg.node_name}` ficou em `{status}`; tente novamente em alguns segundos."
                 )
+                self._mark_node_failure(error)
+                raise error
 
+            self._clear_node_failure()
             return wavelink, node
 
     _LAVALINK_SEARCH_PREFIXES = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")

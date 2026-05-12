@@ -1,0 +1,23 @@
+[Unit]
+Description=Lavalink Audio Node
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/lavalink
+EnvironmentFile=-/etc/lavalink/lavasrc.env
+EnvironmentFile=-/home/ubuntu/bot/.env
+ExecStart=/usr/bin/java -Xms128m -Xmx384m -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -jar /opt/lavalink/Lavalink.jar
+Restart=always
+RestartSec=8
+SuccessExitStatus=143
+TimeoutStartSec=120
+TimeoutStopSec=25
+
+[Install]
+WantedBy=multi-user.target

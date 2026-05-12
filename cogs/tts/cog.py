@@ -1655,7 +1655,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return False
 
     def _lavalink_music_should_own_voice(self, guild: discord.Guild | None) -> bool:
-        """Evita que o TTS local roube a conexão enquanto NodeLink/Lavalink está ativo.
+        """Evita que o TTS local roube a conexão enquanto o player de música via Wavelink está ativo.
 
         Quando uma música está resolvendo/iniciando pelo Wavelink, ainda pode não
         existir ``guild.voice_client``. Se o TTS conectar localmente nessa janela,
@@ -1796,7 +1796,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return None
 
         if self._lavalink_music_should_own_voice(guild):
-            print(f"[tts_voice] conexão local do TTS ignorada | NodeLink/Lavalink controlando voz | guild={guild.id}")
+            print(f"[tts_voice] conexão local do TTS ignorada | player de música via Wavelink controlando voz | guild={guild.id}")
             return None
 
         async def _desired_self_deaf() -> bool:

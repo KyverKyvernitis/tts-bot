@@ -120,6 +120,15 @@ def _read_env_flags() -> dict[str, Any]:
     names = [
         "LAVALINK_ENABLED",
         "LAVALINK_MODE",
+        "MUSIC_NODE_PROVIDER",
+        "AUDIO_NODE_FAILURE_COOLDOWN_SECONDS",
+        "AUDIO_NODE_STARTUP_WAIT_SECONDS",
+        "NODELINK_ENABLED",
+        "NODELINK_HOST",
+        "NODELINK_PORT",
+        "NODELINK_PASSWORD",
+        "NODELINK_SECURE",
+        "NODELINK_NODE_NAME",
         "LAVALINK_HOST",
         "LAVALINK_PORT",
         "WAVELINK_HOST",
@@ -186,10 +195,18 @@ def _db_snapshot(db_path: Path = DEFAULT_MUSICNODE_DB) -> tuple[str, dict[str, A
 def _lavalink_cfg_from_router(router: Any, guild_id: int) -> dict[str, Any]:
     cfg_data: dict[str, Any] = {}
     try:
-        store = getattr(getattr(router, "backends", None), "lavalink_store", None)
-        if store is not None:
+        backends = getattr(router, "backends", None)
+        store = getattr(backends, "lavalink_store", None)
+        if backends is not None and hasattr(backends, "_node_config_for_guild"):
+            cfg = backends._node_config_for_guild(guild_id)  # diagnóstico interno: mostra o node efetivo.
+        elif store is not None:
             cfg = store.load(guild_id=guild_id)
+        else:
+            cfg = None
+        if cfg is not None:
             cfg_data = {
+                "provider": str(getattr(cfg, "provider", "lavalink") or "lavalink"),
+                "provider_label": str(getattr(cfg, "provider_label", "Lavalink") or "Lavalink"),
                 "enabled": bool(getattr(cfg, "enabled", False)),
                 "configured": bool(getattr(cfg, "configured", False)),
                 "mode": str(getattr(cfg, "mode", "") or ""),
@@ -204,7 +221,10 @@ def _lavalink_cfg_from_router(router: Any, guild_id: int) -> dict[str, Any]:
                 "raw_password": str(getattr(cfg, "password", "") or ""),
             }
             with contextlib.suppress(Exception):
-                cfg_data["summary"] = store.summary(guild_id=guild_id)
+                cfg_data["summary"] = store.summary(guild_id=guild_id) if store is not None else {}
+            with contextlib.suppress(Exception):
+                runtime = backends.compact_runtime_summary(guild_id=guild_id) if backends is not None else {}
+                cfg_data["runtime"] = runtime
     except Exception as exc:
         cfg_data = {"error": f"{type(exc).__name__}: {exc}"}
     return cfg_data
@@ -411,9 +431,11 @@ def _spotify_api_test() -> str:
 def _lavalink_tests(cfg: dict[str, Any]) -> str:
     base_url = str(cfg.get("base_url") or "").rstrip("/")
     password = str(cfg.get("raw_password") or "")
+    provider_label = str(cfg.get("provider_label") or "Lavalink")
     if not base_url or not password:
-        return "Lavalink não configurado ou senha ausente."
+        return f"{provider_label} não configurado ou senha ausente."
     lines: list[str] = []
+    lines.append(f"Node efetivo testado: {provider_label} ({base_url})")
     analysis = _application_lavasrc_analysis()
     lines.append("Análise rápida do application.yml/LavaSrc:")
     lines.append(json.dumps(_safe_report_obj(analysis), ensure_ascii=False, indent=2))
@@ -565,14 +587,35 @@ def _local_log_tail() -> str:
     return "\n\n".join(parts) if parts else "Nenhum .log em logs/."
 
 
+def _nodelink_enabled_for_diagnostics() -> bool:
+    provider = str(os.getenv("MUSIC_NODE_PROVIDER", "lavalink") or "lavalink").strip().lower()
+    return provider in {"nodelink", "node", "auto"} and str(os.getenv("NODELINK_ENABLED", "false") or "false").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
+
+
+def _systemd_units_for_diagnostics(*, include_nodelink: bool | None = None) -> list[str]:
+    units = ["tts-bot.service", "lavalink.service", "callkeeper.service"]
+    if include_nodelink is None:
+        include_nodelink = _nodelink_enabled_for_diagnostics()
+    if include_nodelink:
+        units.insert(2, "nodelink.service")
+    return units
+
+
+def _journalctl_commands(*, full: bool = False) -> list[list[str]]:
+    if full:
+        spec = [("tts-bot.service", "2 hours ago", "1200"), ("lavalink.service", "2 hours ago", "900"), ("callkeeper.service", "2 hours ago", "500")]
+        if _nodelink_enabled_for_diagnostics():
+            spec.insert(2, ("nodelink.service", "2 hours ago", "500"))
+    else:
+        spec = [("tts-bot.service", "20 minutes ago", "450"), ("lavalink.service", "20 minutes ago", "450")]
+        if _nodelink_enabled_for_diagnostics():
+            spec.append(("nodelink.service", "20 minutes ago", "220"))
+    return [["journalctl", "-u", unit, "--since", since, "-n", limit, "--no-pager", "-o", "cat"] for unit, since, limit in spec]
+
+
 def _journalctl_tail() -> str:
-    commands = [
-        ["journalctl", "-u", "tts-bot.service", "--since", "20 minutes ago", "-n", "450", "--no-pager", "-o", "cat"],
-        ["journalctl", "-u", "lavalink.service", "--since", "20 minutes ago", "-n", "450", "--no-pager", "-o", "cat"],
-        ["journalctl", "-u", "nodelink.service", "--since", "20 minutes ago", "-n", "220", "--no-pager", "-o", "cat"],
-    ]
     parts = []
-    for cmd in commands:
+    for cmd in _journalctl_commands(full=False):
         out = _run_cmd(cmd, timeout=10.0, cwd=REPO_ROOT)
         lines = out.splitlines()
         if len(lines) > 260:
@@ -811,14 +854,8 @@ def _local_log_tail_full() -> str:
 
 
 def _journalctl_full_tail() -> str:
-    commands = [
-        ["journalctl", "-u", "tts-bot.service", "--since", "2 hours ago", "-n", "1200", "--no-pager", "-o", "cat"],
-        ["journalctl", "-u", "lavalink.service", "--since", "2 hours ago", "-n", "900", "--no-pager", "-o", "cat"],
-        ["journalctl", "-u", "nodelink.service", "--since", "2 hours ago", "-n", "500", "--no-pager", "-o", "cat"],
-        ["journalctl", "-u", "callkeeper.service", "--since", "2 hours ago", "-n", "500", "--no-pager", "-o", "cat"],
-    ]
     parts: list[str] = []
-    for cmd in commands:
+    for cmd in _journalctl_commands(full=True):
         out = _run_cmd(cmd, timeout=18.0, cwd=REPO_ROOT)
         lines = out.splitlines()
         if len(lines) > 900:
@@ -828,6 +865,7 @@ def _journalctl_full_tail() -> str:
 
 
 def _system_status_report() -> str:
+    units = _systemd_units_for_diagnostics()
     parts = [
         _run_cmd(["date", "-Is"], timeout=5.0),
         _run_cmd(["hostname"], timeout=5.0),
@@ -835,9 +873,11 @@ def _system_status_report() -> str:
         _run_cmd(["df", "-h", "/", "/opt", "/home"], timeout=8.0),
         _run_cmd(["free", "-h"], timeout=8.0),
         _run_cmd(["ss", "-ltnp"], timeout=10.0),
-        _run_cmd(["systemctl", "--no-pager", "--full", "status", "tts-bot.service", "lavalink.service", "nodelink.service", "callkeeper.service"], timeout=18.0),
-        _run_cmd(["systemctl", "cat", "tts-bot.service", "lavalink.service", "nodelink.service", "callkeeper.service"], timeout=18.0),
+        _run_cmd(["systemctl", "--no-pager", "--full", "status", *units], timeout=18.0),
+        _run_cmd(["systemctl", "cat", *units], timeout=18.0),
     ]
+    if not _nodelink_enabled_for_diagnostics():
+        parts.append("NodeLink: não incluído nos services porque NODELINK_ENABLED=false/MUSIC_NODE_PROVIDER não seleciona NodeLink.")
     return "\n\n".join(parts)
 
 
@@ -957,10 +997,12 @@ def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
             _write_zip_text(zf, "lavalink/listing.txt", _run_cmd(["bash", "-lc", "ls -lah /opt/lavalink; echo; ls -lah /opt/lavalink/plugins"], timeout=12.0)); added += 1
 
             _write_zip_text(zf, "db/musicnode.snapshot.txt", _db_snapshot()[0]); added += 1
-            _write_zip_text(zf, "systemd/services.txt", _run_cmd(["systemctl", "cat", "tts-bot.service", "lavalink.service", "nodelink.service", "callkeeper.service"], timeout=18.0)); added += 1
+            _write_zip_text(zf, "systemd/services.txt", _run_cmd(["systemctl", "cat", *_systemd_units_for_diagnostics()], timeout=18.0)); added += 1
             _write_zip_text(zf, "meta/system.txt", _system_status_report()); added += 1
             _write_zip_text(zf, "logs/tts-bot.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u tts-bot.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|deezer|fallback|TrackException|LoadException|ChannelTimeout|erro|falhou|exception|traceback' || true"], timeout=18.0)); added += 1
             _write_zip_text(zf, "logs/lavalink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u lavalink.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|master|403|404|error|exception|failed|TrackException' || true"], timeout=18.0)); added += 1
+            if _nodelink_enabled_for_diagnostics():
+                _write_zip_text(zf, "logs/nodelink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u nodelink.service --since '2 hours ago' -n 700 --no-pager -o cat | grep -Ei 'ready|lavalink|spotify|soundcloud|youtube|deezer|loadtracks|error|exception|failed|TrackException' || true"], timeout=18.0)); added += 1
             _write_zip_text(zf, "logs/local-bot-logs.txt", _local_log_tail()); added += 1
     except Exception as exc:
         return None, filename, f"Falha ao montar snapshot da VPS: {type(exc).__name__}: {exc}"

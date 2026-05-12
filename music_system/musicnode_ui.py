@@ -551,11 +551,17 @@ class MusicNodePanelView(discord.ui.LayoutView):
         backend_real = str(runtime.get("active_backend", "local") or "local")
         accent = _accent_for(lavalink, summary)
 
+        provider = str(runtime.get("audio_node_provider") or "lavalink").lower()
+        provider_label = "NodeLink" if provider == "nodelink" else "Lavalink"
+        node_host = str(runtime.get("audio_node_host") or summary.get("host_label") or "-")
+        cooldown = float(runtime.get("audio_node_cooldown_seconds") or 0.0)
+        cooldown_label = f" • cooldown: `{cooldown:.0f}s`" if cooldown > 0 else ""
         header = [
-            "# 🔌 Lavalink Node Manager",
+            f"# 🔌 {provider_label} Node Manager",
             f"**Modo:** {mode_text} — {_mode_hint(mode)}",
             f"**Backend real:** `{backend_real}` • **Node configurado:** `{'sim' if configured else 'não'}`",
-            "-# Em modo Lavalink/Auto, o player real usa Lavalink em qualquer servidor configurado.",
+            f"**Node efetivo:** `{provider_label}` em `{_escape(node_host, limit=70)}`{cooldown_label}",
+            "-# Em modo Lavalink/Auto, o player real usa o node de áudio compatível com Lavalink API; NodeLink é experimental por env.",
         ]
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(header)),
@@ -573,9 +579,9 @@ class MusicNodePanelView(discord.ui.LayoutView):
             f"**Local:** {_escape(local_msg, limit=160)}",
             "**Fallback:** FFmpeg/yt-dlp continua intacto para o modo Auto.",
             f"**Shadow real:** `{'ativo' if runtime.get('lavalink_shadow_active') else 'inativo'}`",
-            f"**Lavalink real:** `{'ativo neste servidor' if runtime.get('lavalink_real_active') else 'inativo neste servidor'}`",
+            f"**Node real:** `{'ativo neste servidor' if runtime.get('lavalink_real_active') else 'inativo neste servidor'}`",
             f"**Escopo real:** `{'allowlist' if runtime.get('lavalink_real_scope') == 'allowlist' else 'todos os servidores configurados'}`",
-            "**Senha:** nunca aparece no painel; fica salva só no DB separado `data/musicnode/musicnode.db`.",
+            "**Senha:** nunca aparece no painel; Lavalink fica no DB separado e NodeLink usa somente `.env`.",
         ]
         options = summary.get("options", {}) or {}
         if bool(options.get("test_after_save")):

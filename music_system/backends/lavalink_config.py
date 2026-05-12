@@ -46,6 +46,7 @@ def _env_config() -> LavalinkConfig:
         secure=_as_bool(getattr(config, "LAVALINK_SECURE", False), False),
         node_name=str(getattr(config, "LAVALINK_NODE_NAME", "main") or "main").strip() or "main",
         timeout_seconds=max(2.0, _safe_float(getattr(config, "LAVALINK_TIMEOUT_SECONDS", 8.0), 8.0)),
+        provider="lavalink",
     )
 
 
@@ -80,6 +81,7 @@ def _legacy_config_from_mapping(raw: dict[str, Any], *, fallback: LavalinkConfig
         secure=_as_bool(node.get("secure"), fallback.secure),
         node_name=str(node.get("name", fallback.node_name) or "main").strip() or "main",
         timeout_seconds=max(2.0, _safe_float(raw.get("timeout_seconds", fallback.timeout_seconds), fallback.timeout_seconds or 8.0)),
+        provider="lavalink",
     )
 
 
@@ -362,6 +364,7 @@ class LavalinkConfigStore:
             secure=_as_bool(row["secure"], False),
             node_name=str(row["name"] or "main").strip() or "main",
             timeout_seconds=max(2.0, _safe_float(row["timeout_seconds"], 8.0)),
+            provider="lavalink",
         )
 
     def load(self, guild_id: int | None = None) -> LavalinkConfig:

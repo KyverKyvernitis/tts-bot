@@ -1365,7 +1365,7 @@ class TTSAudioMixin:
                     now = time.monotonic()
                     if now >= float(getattr(state, "lavalink_ignore_logged_until", 0.0) or 0.0):
                         logger.info(
-                            "[tts_voice] TTS local ignorado porque NodeLink/Lavalink está assumindo a voz | guild=%s tts_channel=%s",
+                            "[tts_voice] TTS local ignorado porque o player de música via Wavelink está assumindo a voz | guild=%s tts_channel=%s",
                             guild.id,
                             item.channel_id,
                         )
