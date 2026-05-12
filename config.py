@@ -171,6 +171,15 @@ MUSIC_TTS_PUBLIC_BASE_URL = (
     os.getenv("MUSIC_TTS_PUBLIC_BASE_URL", os.getenv("PUBLIC_BASE_URL", os.getenv("WEB_PUBLIC_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", ""))))
     or ""
 ).strip().rstrip("/")
+# URL local que o Lavalink usa para buscar TTS gerado pelo próprio bot.
+# O padrão usa a porta do webserver/waitress no mesmo host, evitando DNS, HTTPS e
+# proxy externo. A URL pública continua como fallback.
+MUSIC_TTS_INTERNAL_BASE_URL = (
+    os.getenv("MUSIC_TTS_INTERNAL_BASE_URL", f"http://127.0.0.1:{os.getenv('PORT', '10000')}")
+    or ""
+).strip().rstrip("/")
+MUSIC_LAVALINK_TTS_INTERNAL_FIRST = _parse_bool(os.getenv("MUSIC_LAVALINK_TTS_INTERNAL_FIRST", "true"), True)
+MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS = max(0.25, _parse_float(os.getenv("MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS", "1.75"), 1.75))
 MUSIC_LAVALINK_TTS_FILE_FALLBACK = _parse_bool(os.getenv("MUSIC_LAVALINK_TTS_FILE_FALLBACK", "false"), False)
 MUSIC_LAVALINK_TTS_URL_TTL_SECONDS = max(30, _parse_int(os.getenv("MUSIC_LAVALINK_TTS_URL_TTL_SECONDS", "240"), 240))
 MUSIC_IDLE_DISCONNECT_SECONDS = _parse_int(os.getenv("MUSIC_IDLE_DISCONNECT_SECONDS", "120"), 120)
@@ -435,6 +444,7 @@ MUSIC_LAVALINK_PREMATURE_END_REMAINING_SECONDS = float(os.getenv("MUSIC_LAVALINK
 MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES = int(os.getenv("MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES", "1"))
 MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS = float(os.getenv("MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS", "18"))
 MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS = float(os.getenv("MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS", "1.5"))
+MUSIC_RESOLVING_STALE_SECONDS = float(os.getenv("MUSIC_RESOLVING_STALE_SECONDS", "45"))
 # Evita segunda rodada automática quando o primeiro patch da IA já veio com
 # sintaxe Python inválida (casos como `def def`). O erro ainda é reportado,
 # mas não gasta mais CPU/API tentando reparar lixo óbvio.

@@ -64,9 +64,10 @@ def health():
     return jsonify({"ok": True}), 200
 
 
+@app.get("/tts-audio/<token>")
 @app.get("/tts-audio/<token>.mp3")
 def tts_audio(token: str):
-    token = str(token or "").strip()
+    token = str(token or "").strip().removesuffix(".mp3")
     if not token:
         abort(404)
     now = time.time()

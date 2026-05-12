@@ -12,9 +12,10 @@ from array import array
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import discord
+import aiohttp
 
 import config
 from .api_providers import compact_key
@@ -64,6 +65,10 @@ MUSIC_LAVALINK_PREMATURE_END_REMAINING_SECONDS = max(5.0, float(getattr(config, 
 MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES = max(0, int(getattr(config, "MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES", 1)))
 MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS = max(0.0, float(getattr(config, "MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS", 18.0)))
 MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS = max(0.2, float(getattr(config, "MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS", 1.5)))
+MUSIC_TTS_INTERNAL_BASE_URL = str(getattr(config, "MUSIC_TTS_INTERNAL_BASE_URL", "") or "").strip().rstrip("/")
+MUSIC_LAVALINK_TTS_INTERNAL_FIRST = bool(getattr(config, "MUSIC_LAVALINK_TTS_INTERNAL_FIRST", True))
+MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS = max(0.25, float(getattr(config, "MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS", 1.75)))
+MUSIC_RESOLVING_STALE_SECONDS = max(5.0, float(getattr(config, "MUSIC_RESOLVING_STALE_SECONDS", 45.0)))
 MUSIC_VOICE_STATUS_ENABLED = bool(getattr(config, "MUSIC_VOICE_STATUS_ENABLED", True))
 MUSIC_VOICE_STATUS_TEMPLATE = str(getattr(config, "MUSIC_VOICE_STATUS_TEMPLATE", "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})") or "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})").strip()
 MUSIC_VOICE_STATUS_IDLE = str(getattr(config, "MUSIC_VOICE_STATUS_IDLE", "") or "").strip()
@@ -388,6 +393,7 @@ class MusicGuildState:
     next_resolve_key: str = ""
     next_resolve_active_key: str = ""
     current_status: str = "idle"
+    current_status_changed_at: float = field(default_factory=time.monotonic)
     skip_requested: bool = False
     skip_transition_active: bool = False
     skip_history_suppressed_once: bool = False
@@ -486,6 +492,49 @@ class AudioRouter:
                 state.volume = max(0.0, min(1.5, float(raw_volume)))
         except Exception:
             logger.debug("[music] falha ao carregar volume persistido", exc_info=True)
+
+    def _set_current_status(self, state: MusicGuildState, status: str) -> None:
+        status = str(status or "idle").strip().lower() or "idle"
+        if getattr(state, "current_status", "") != status:
+            state.current_status = status
+            state.current_status_changed_at = time.monotonic()
+        else:
+            state.current_status = status
+
+    def _reset_stale_resolving_state(self, guild_id: int, state: MusicGuildState, *, reason: str = "stale") -> bool:
+        """Limpa estado local preso em resolving sem task/source ativa.
+
+        Esse estado impede ducking/TTS local e faz o painel/stop acharem que há
+        playback pendente quando FFmpeg ou fallback local já falhou antes de iniciar.
+        """
+        if str(getattr(state, "current_status", "") or "").lower() != "resolving":
+            return False
+        task = getattr(state, "current_resolve_task", None)
+        task_active = bool(task is not None and not task.done())
+        if task_active or state.current_source is not None:
+            return False
+        age = time.monotonic() - float(getattr(state, "current_status_changed_at", 0.0) or 0.0)
+        if age < MUSIC_RESOLVING_STALE_SECONDS:
+            return False
+        logger.warning(
+            "[music] resolving preso limpo | guild=%s track=%r age=%.1fs reason=%s",
+            guild_id,
+            getattr(getattr(state, "current", None), "title", ""),
+            age,
+            reason,
+        )
+        state.current = None
+        state.current_source = None
+        state.current_resolve_task = None
+        state.current_lavalink_player = None
+        state.current_lavalink_playable = None
+        state.current_backend = "local"
+        state.music_session_active = False
+        state.paused = False
+        state.skip_transition_active = False
+        state.skip_history_suppressed_once = False
+        self._set_current_status(state, "idle" if not self._has_pending_track(state) else "queued")
+        return True
 
     def _is_lavalink_voice_client(self, vc: Any) -> bool:
         if vc is None:
@@ -1603,20 +1652,17 @@ class AudioRouter:
             state = self.get_state(int(guild_id or 0))
         except Exception:
             return False
+        self._reset_stale_resolving_state(int(guild_id or 0), state, reason="tts_guard")
         if state.current_backend == "local":
-            # Música local ativa: o roteador consegue aplicar ducking no
-            # MixedAudioSource. Não deixe o guarda de Lavalink impedir o TTS.
-            if state.current_source is not None or state.current is not None:
-                return False
-            if not self._is_lavalink_transition_recent(state):
-                return False
+            # Música/fallback local precisa permitir o TTS local para o ducking de 5%.
+            # Wavelink antigo em guild.voice_client sem player ativo é tratado como
+            # fantasma pelo cog de TTS e pode ser desconectado.
+            if self._lavalink_tts_active(state) or self._lavalink_resume_grace_active(state):
+                return True
+            return False
         if self._lavalink_tts_active(state) or self._lavalink_resume_grace_active(state):
             return True
-        return bool(
-            state.current_backend == "lavalink"
-            or state.current_lavalink_player is not None
-            or self._is_lavalink_transition_recent(state)
-        )
+        return bool(state.current_backend == "lavalink" and (state.current_lavalink_player is not None or state.current is not None))
 
     def is_music_staff(self, member) -> bool:
         if member is None or getattr(member, "bot", False):
@@ -1703,6 +1749,8 @@ class AudioRouter:
 
     def is_music_active(self, guild_id: int) -> bool:
         state = self._states.get(int(guild_id))
+        if state is not None:
+            self._reset_stale_resolving_state(int(guild_id), state, reason="is_music_active")
         return bool(
             state
             and (
@@ -1718,6 +1766,7 @@ class AudioRouter:
         state = self._states.get(int(guild_id))
         if state is None:
             return False
+        self._reset_stale_resolving_state(int(guild_id), state, reason="tts_auto_leave")
         return bool(
             state.music_session_active
             or state.current
@@ -2181,7 +2230,7 @@ class AudioRouter:
                 # onde o painel via queue vazio + current vazio e mostrava
                 # "Nada tocando agora" antes da próxima faixa começar.
                 state.current = track
-                state.current_status = "resolving"
+                self._set_current_status(state, "resolving")
                 state.current_backend = "local"
                 state.skip_transition_active = False
 
@@ -2227,7 +2276,7 @@ class AudioRouter:
                     state.paused = False
                     state.skip_history_suppressed_once = False
                     state.skip_transition_active = skip_to_next
-                    state.current_status = "skipping" if skip_to_next else ("idle" if not self._has_pending_track(state) else "queued")
+                    self._set_current_status(state, "skipping" if skip_to_next else ("idle" if not self._has_pending_track(state) else "queued"))
                     if track_from_queue:
                         with contextlib.suppress(Exception):
                             state.queue.task_done()
@@ -2248,7 +2297,7 @@ class AudioRouter:
                 state.current_lavalink_playable = None
                 state.skip_transition_active = False
                 state.skip_history_suppressed_once = False
-                state.current_status = "idle"
+                self._set_current_status(state, "idle")
                 guild = self.bot.get_guild(int(guild_id))
                 restore_reason = "queue_finished" if not self._has_pending_track(state) else "stop_requested"
                 if state.stop_requested and str(getattr(state, "idle_reason", "") or "") == "manual_stop":
@@ -2412,7 +2461,7 @@ class AudioRouter:
         state.current_lavalink_player = None
         state.current_lavalink_playable = None
         state.last_lavalink_error = ""
-        state.current_status = "starting"
+        self._set_current_status(state, "starting")
         self._mark_lavalink_transition(state, seconds=18.0)
         self._mark_internal_voice_disconnect(guild.id, seconds=18.0)
         await self._boost_auto_bitrate_for_music(guild, channel, state)
@@ -2455,7 +2504,7 @@ class AudioRouter:
                     artwork = str(meta.get("artwork") or "")
                     if artwork:
                         track.thumbnail = artwork
-            state.current_status = "playing"
+            self._set_current_status(state, "playing")
             state.current_started_at_monotonic = time.monotonic()
             state.current_quality_label = "Alta"
             state.current_quality_kbps = MUSIC_HIGH_QUALITY_MAX_ABR
@@ -2530,7 +2579,7 @@ class AudioRouter:
         state.music_session_active = True
         self._clear_idle_reason(state)
         self._cancel_music_idle_disconnect(state)
-        state.current_status = "resolving"
+        self._set_current_status(state, "resolving")
         state.paused = False
         state.current_backend = "local"
         state.current_lavalink_player = None
@@ -2569,7 +2618,7 @@ class AudioRouter:
                     )
                     self._mark_lavalink_transition(state, seconds=10.0)
                     self._mark_internal_voice_disconnect(guild.id, seconds=10.0)
-                    state.current_status = "queued" if self._has_pending_track(state) else "idle"
+                    self._set_current_status(state, "queued" if self._has_pending_track(state) else "idle")
                     await self._send_text(
                         guild,
                         state,
@@ -2588,7 +2637,7 @@ class AudioRouter:
                 state.current_backend = "local"
                 state.current_lavalink_player = None
                 state.current_lavalink_playable = None
-                state.current_status = "resolving"
+                self._set_current_status(state, "resolving")
                 converted = self._prepare_track_for_local_after_lavalink_failure(track, exc)
                 if converted:
                     logger.info(
@@ -2614,7 +2663,7 @@ class AudioRouter:
         if not track.stream_url:
             raise MusicExtractionError("A música não retornou URL de stream.")
 
-        state.current_status = "starting"
+        self._set_current_status(state, "starting")
         await self.update_panel(guild.id, create=True)
 
         # Se um TTS direto ainda estiver tocando, espera acabar antes da música entrar.
@@ -2710,7 +2759,7 @@ class AudioRouter:
         if mixed_source is None or finished is None:
             raise last_start_error or MusicPlaybackError("Não consegui iniciar o áudio.")
 
-        state.current_status = "playing"
+        self._set_current_status(state, "playing")
         state.current_started_at_monotonic = time.monotonic()
         self._refresh_quality_state(state, track)
         self._schedule_voice_status_track_sync(guild.id, repeat_after=1.0, reason="playback_started")
@@ -2758,7 +2807,7 @@ class AudioRouter:
         # Sem modo 24/7 para música: quando a música/fila acabam e o bot fica
         # sozinho ou só com bots, ele sai depois do timeout de música. Se ainda
         # há humanos, a conexão pode continuar para o TTS usar.
-        state.current_status = "idle"
+        self._set_current_status(state, "idle")
         if not state.current and not self._has_pending_track(state) and state.idle_reason == "idle":
             self._set_idle_reason(state, "queue_finished")
         vc = guild.voice_client
@@ -2881,6 +2930,9 @@ class AudioRouter:
                 state.current_source.cleanup()
         if state.current_resolve_task is not None and not state.current_resolve_task.done():
             state.current_resolve_task.cancel()
+        if state.current_source is not None:
+            with contextlib.suppress(Exception):
+                state.current_source.cleanup()
         while not state.queue.empty():
             with contextlib.suppress(Exception):
                 state.queue.get_nowait()
@@ -2896,7 +2948,7 @@ class AudioRouter:
         state.paused = False
         state.stop_requested = True
         state.skip_requested = True
-        state.current_status = "idle"
+        self._set_current_status(state, "idle")
         state.music_session_active = False
         state.music_owns_voice = False
         await self._restore_auto_bitrate_for_state(guild, state, reason="external_disconnect", channel_hint=before_channel)
@@ -3051,12 +3103,76 @@ class AudioRouter:
         await self.update_panel(guild.id, create=True)
 
 
+    def _swap_url_base_preserving_path(self, url: str, new_base: str) -> str:
+        """Troca apenas scheme/host/porta, mantendo path/query exatamente."""
+        raw_url = str(url or "").strip()
+        raw_base = str(new_base or "").strip().rstrip("/")
+        if not raw_url or not raw_base:
+            return ""
+        try:
+            source = urlsplit(raw_url)
+            base = urlsplit(raw_base)
+            if not source.scheme or not source.netloc or not base.scheme or not base.netloc:
+                return ""
+            return urlunsplit((base.scheme, base.netloc, source.path, source.query, ""))
+        except Exception:
+            return ""
+
+    async def _probe_tts_url(self, url: str, *, timeout: float | None = None) -> bool:
+        url = str(url or "").strip()
+        if not url:
+            return False
+        probe_timeout = max(0.25, float(timeout or MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS))
+        try:
+            client_timeout = aiohttp.ClientTimeout(total=probe_timeout)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                for method in ("HEAD", "GET"):
+                    try:
+                        async with session.request(method, url) as response:
+                            if 200 <= int(response.status) < 300:
+                                return True
+                            if method == "HEAD" and int(response.status) in {405, 403}:
+                                continue
+                            return False
+                    except Exception:
+                        if method == "HEAD":
+                            continue
+                        raise
+        except Exception:
+            logger.debug("[music/lavalink] probe da URL TTS falhou | url=%s", url, exc_info=True)
+        return False
+
+    async def _filter_lavalink_tts_candidates(self, candidates: list[str]) -> list[str]:
+        """Valida URLs HTTP antes de pausar/substituir a música no Lavalink.
+
+        Retorna a primeira URL HTTP que respondeu OK. Assim a URL pública externa
+        só é testada se a interna 127.0.0.1 falhar, reduzindo travadas antes do TTS.
+        """
+        if not candidates:
+            return []
+        unprobed: list[str] = []
+        for candidate in candidates:
+            candidate = str(candidate or "").strip()
+            if not candidate:
+                continue
+            if candidate.startswith("http://") or candidate.startswith("https://"):
+                if await self._probe_tts_url(candidate):
+                    logger.info("[music/lavalink] tts_url_probe_ok | url=%s", candidate)
+                    return [candidate] + unprobed
+                logger.warning("[music/lavalink] tts_url_probe_failed | url=%s", candidate)
+            else:
+                unprobed.append(candidate)
+        return unprobed
+
     def _lavalink_tts_candidates_for_path(self, path: str, *, timeout: float = 120.0) -> list[str]:
         candidates: list[str] = []
         public_base = str(getattr(config, "MUSIC_TTS_PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+        internal_base = MUSIC_TTS_INTERNAL_BASE_URL
         abs_path = os.path.abspath(str(path or ""))
         file_ok = bool(abs_path and os.path.isfile(abs_path) and os.path.getsize(abs_path) > 0)
-        if public_base and file_ok:
+        public_url = ""
+        internal_url = ""
+        if (public_base or internal_base) and file_ok:
             try:
                 from webserver import register_tts_audio_file
 
@@ -3065,21 +3181,40 @@ class AudioRouter:
                     ttl_seconds=max(float(timeout or 120.0) + 90.0, float(getattr(config, "MUSIC_LAVALINK_TTS_URL_TTL_SECONDS", 240))),
                 )
                 if token:
-                    url = f"{public_base}/tts-audio/{token}.mp3"
-                    candidates.append(url)
-                    logger.info("[music/lavalink] tts_public_url_registered | url=%s size=%s", url, os.path.getsize(abs_path))
+                    public_url = f"{public_base}/tts-audio/{token}.mp3" if public_base else ""
+                    if public_url:
+                        internal_url = self._swap_url_base_preserving_path(public_url, internal_base)
+                    elif internal_base:
+                        internal_url = f"{internal_base}/tts-audio/{token}.mp3"
+                    if MUSIC_LAVALINK_TTS_INTERNAL_FIRST and internal_url:
+                        candidates.append(internal_url)
+                    if public_url:
+                        candidates.append(public_url)
+                    if (not MUSIC_LAVALINK_TTS_INTERNAL_FIRST) and internal_url:
+                        candidates.append(internal_url)
+                    logger.info(
+                        "[music/lavalink] tts_public_url_registered | url=%s internal_url=%s size=%s",
+                        public_url or "não configurada",
+                        internal_url or "não configurada",
+                        os.path.getsize(abs_path),
+                    )
             except Exception:
                 logger.debug("[music/lavalink] falha ao registrar URL temporária do TTS", exc_info=True)
-        elif public_base and not file_ok:
+        elif (public_base or internal_base) and not file_ok:
             logger.warning("[music/lavalink] TTS via Lavalink sem arquivo válido para publicar | path=%s exists=%s", abs_path, os.path.exists(abs_path))
         else:
-            logger.warning("[music/lavalink] TTS via Lavalink sem MUSIC_TTS_PUBLIC_BASE_URL configurado")
+            logger.warning("[music/lavalink] TTS via Lavalink sem MUSIC_TTS_PUBLIC_BASE_URL/MUSIC_TTS_INTERNAL_BASE_URL configurado")
 
         if bool(getattr(config, "MUSIC_LAVALINK_TTS_FILE_FALLBACK", False)) and file_ok:
             with contextlib.suppress(Exception):
                 candidates.append("file://" + quote(abs_path))
                 candidates.append(abs_path)
-        return [candidate for candidate in candidates if str(candidate or "").strip()]
+        deduped: list[str] = []
+        for candidate in candidates:
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in deduped:
+                deduped.append(candidate)
+        return deduped
 
     async def play_tts(
         self,
@@ -3109,12 +3244,14 @@ class AudioRouter:
             # O arquivo já foi gerado pelo TTS antes de chegar aqui. Só agora o
             # Lavalink resolve uma fonte tocável e substitui temporariamente a
             # música; se qualquer etapa falhar, a faixa atual continua/resume.
-            candidates = self._lavalink_tts_candidates_for_path(path, timeout=timeout)
+            raw_candidates = self._lavalink_tts_candidates_for_path(path, timeout=timeout)
+            candidates = await self._filter_lavalink_tts_candidates(raw_candidates)
             source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
             if not candidates:
                 logger.warning(
-                    "[music/lavalink] TTS via Lavalink sem URL pública configurada | guild=%s",
+                    "[music/lavalink] TTS via Lavalink sem URL acessível/configurada | guild=%s raw_candidates=%s",
                     guild_id,
+                    raw_candidates,
                 )
                 return {
                     "source_setup_ms": source_setup_ms,
@@ -3264,7 +3401,7 @@ class AudioRouter:
         else:
             vc.pause()
         state.paused = True
-        state.current_status = "paused"
+        self._set_current_status(state, "paused")
         await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 
@@ -3279,7 +3416,7 @@ class AudioRouter:
         else:
             vc.resume()
         state.paused = False
-        state.current_status = "playing"
+        self._set_current_status(state, "playing")
         await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 
@@ -3314,10 +3451,10 @@ class AudioRouter:
             state.current_source = None
             state.current_lavalink_playable = None
             state.paused = False
-            state.current_status = "skipping"
+            self._set_current_status(state, "skipping")
             did_anything = True
         else:
-            state.current_status = "queued" if self._has_pending_track(state) else "idle"
+            self._set_current_status(state, "queued" if self._has_pending_track(state) else "idle")
             if self._has_pending_track(state):
                 # Pode acontecer durante uma transição rápida de anterior/avançar:
                 # não há faixa ativa no instante do clique, mas ainda existe uma
@@ -3344,6 +3481,9 @@ class AudioRouter:
                 _vote_task.cancel()
         if state.current_resolve_task is not None and not state.current_resolve_task.done():
             state.current_resolve_task.cancel()
+        if state.current_source is not None:
+            with contextlib.suppress(Exception):
+                state.current_source.cleanup()
         while not state.queue.empty():
             with contextlib.suppress(Exception):
                 state.queue.get_nowait()
@@ -3376,7 +3516,7 @@ class AudioRouter:
         state.tts_session_last_error = ""
         state.skip_transition_active = False
         state.skip_history_suppressed_once = False
-        state.current_status = "idle"
+        self._set_current_status(state, "idle")
         state.paused = False
         state.music_session_active = False
         self._cancel_music_idle_disconnect(state)
@@ -3520,7 +3660,7 @@ class AudioRouter:
             state.skip_requested = False
             state.skip_transition_active = True
             state.skip_history_suppressed_once = False
-            state.current_status = "skipping"
+            self._set_current_status(state, "skipping")
             self._clear_idle_reason(state)
             self._cancel_music_idle_disconnect(state)
             state.music_session_active = True

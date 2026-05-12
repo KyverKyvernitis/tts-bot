@@ -148,6 +148,10 @@ def _read_env_flags() -> dict[str, Any]:
         "LAVASRC_DEEZER_ARL",
         "LAVASRC_DEEZER_MASTER_DECRYPTION_KEY",
         "TTS_VOICE_AUTO_RESTORE_ENABLED",
+        "MUSIC_TTS_PUBLIC_BASE_URL",
+        "MUSIC_TTS_INTERNAL_BASE_URL",
+        "MUSIC_LAVALINK_TTS_INTERNAL_FIRST",
+        "MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS",
     ]
     result: dict[str, Any] = {}
     for name in names:
@@ -871,8 +875,13 @@ def _tts_runtime_snapshot(router: Any, guild_id: int) -> str:
         "current_lavalink_player_present": getattr(state, "current_lavalink_player", None) is not None,
         "current_lavalink_playable_present": getattr(state, "current_lavalink_playable", None) is not None,
         "current_source_present": getattr(state, "current_source", None) is not None,
+        "current_status_age_s": round(max(0.0, now - float(getattr(state, "current_status_changed_at", 0.0) or 0.0)), 2),
+        "current_resolve_task_active": bool(getattr(state, "current_resolve_task", None) is not None and not getattr(state, "current_resolve_task", None).done()),
         "tts_public_base_url_configured": bool(str(getattr(config, "MUSIC_TTS_PUBLIC_BASE_URL", "") or "").strip()),
         "tts_public_base_url": redact(str(getattr(config, "MUSIC_TTS_PUBLIC_BASE_URL", "") or "").strip()),
+        "tts_internal_base_url_configured": bool(str(getattr(config, "MUSIC_TTS_INTERNAL_BASE_URL", "") or "").strip()),
+        "tts_internal_base_url": redact(str(getattr(config, "MUSIC_TTS_INTERNAL_BASE_URL", "") or "").strip()),
+        "lavalink_tts_internal_first": bool(getattr(config, "MUSIC_LAVALINK_TTS_INTERNAL_FIRST", True)),
         "lavalink_tts_file_fallback": bool(getattr(config, "MUSIC_LAVALINK_TTS_FILE_FALLBACK", False)),
     }
     return json.dumps(_safe_report_obj(data), ensure_ascii=False, indent=2)
@@ -883,9 +892,9 @@ def _journalctl_commands(*, full: bool = False) -> list[list[str]]:
         if _nodelink_enabled_for_diagnostics():
             spec.insert(2, ("nodelink.service", "2 hours ago", "500"))
     else:
-        spec = [("tts-bot.service", "12 minutes ago", "240"), ("lavalink.service", "12 minutes ago", "240")]
+        spec = [("tts-bot.service", "8 minutes ago", "160"), ("lavalink.service", "8 minutes ago", "160")]
         if _nodelink_enabled_for_diagnostics():
-            spec.append(("nodelink.service", "12 minutes ago", "160"))
+            spec.append(("nodelink.service", "8 minutes ago", "100"))
     return [["journalctl", "-u", unit, "--since", since, "-n", limit, "--no-pager", "-o", "cat"] for unit, since, limit in spec]
 
 
