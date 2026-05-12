@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import traceback
+import zipfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -589,6 +590,137 @@ def _application_yml_head() -> str:
         return "\n".join(f"{idx + 1}: {line}" for idx, line in enumerate(lines))
     except Exception as exc:
         return f"ERRO ao ler application.yml: {type(exc).__name__}: {exc}"
+
+
+
+BASE_ARCHIVE_ROOT_NAME = "tts-bot-main"
+BASE_ARCHIVE_MAX_BYTES = 23 * 1024 * 1024
+BASE_ARCHIVE_SENSITIVE_NAMES = {
+    ".env",
+    "cookies.txt",
+    "cookie.txt",
+    "youtube-cookies.txt",
+}
+BASE_ARCHIVE_SENSITIVE_SUFFIXES = (
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+)
+
+
+def _git_cmd(args: list[str], *, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(REPO_ROOT),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _is_sensitive_tracked_file(rel: str) -> bool:
+    normalized = rel.replace("\\", "/").lstrip("/")
+    name = Path(normalized).name.lower()
+    lowered = normalized.lower()
+    if name in BASE_ARCHIVE_SENSITIVE_NAMES:
+        return True
+    if name.startswith(".env"):
+        return True
+    if lowered.endswith(BASE_ARCHIVE_SENSITIVE_SUFFIXES):
+        return True
+    # Banco/log/cookies não deveriam estar rastreados, mas se estiverem, não anexa no Discord.
+    if lowered.endswith((".sqlite", ".sqlite3", ".db", ".log")):
+        return True
+    if "cookies" in lowered and lowered.endswith(".txt"):
+        return True
+    return False
+
+
+def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str]:
+    """Cria um zip com os arquivos rastreados pelo git no estado atual do disco.
+
+    Usa `git ls-files`, então pega apenas arquivos rastreados pelo repositório,
+    mas com o conteúdo atual da VPS, inclusive mudanças ainda não commitadas.
+    Arquivos sensíveis rastreados por engano são pulados e listados no manifesto.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"tts-bot-base-git-tracked-{stamp}.zip"
+
+    try:
+        root_check = _git_cmd(["rev-parse", "--show-toplevel"], timeout=8.0)
+    except Exception as exc:
+        return None, filename, f"Não consegui executar git: {type(exc).__name__}: {exc}"
+
+    if root_check.returncode != 0:
+        return None, filename, "Repo não parece ter .git acessível; não foi possível gerar a base rastreada pelo Git."
+
+    ls = _git_cmd(["ls-files", "-z"], timeout=20.0)
+    if ls.returncode != 0:
+        return None, filename, f"git ls-files falhou: {redact(ls.stderr or ls.stdout)}"
+
+    rels = [item for item in ls.stdout.split("\0") if item]
+    if not rels:
+        return None, filename, "git ls-files não retornou arquivos rastreados."
+
+    status = _git_cmd(["status", "--short"], timeout=12.0)
+    commit = _git_cmd(["rev-parse", "HEAD"], timeout=8.0)
+    branch = _git_cmd(["rev-parse", "--abbrev-ref", "HEAD"], timeout=8.0)
+
+    skipped: list[str] = []
+    added = 0
+    bio = io.BytesIO()
+    try:
+        with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            manifest_lines = [
+                "Base gerada pelo /diagnostico_musica",
+                f"Gerado em: {_now_stamp()}",
+                f"Repo root: {REPO_ROOT}",
+                f"Branch: {(branch.stdout or '').strip() if branch.returncode == 0 else 'desconhecida'}",
+                f"Commit HEAD: {(commit.stdout or '').strip() if commit.returncode == 0 else 'desconhecido'}",
+                "Conteúdo: arquivos retornados por `git ls-files`, usando o conteúdo atual do disco.",
+                "Arquivos sensíveis rastreados por engano são pulados.",
+                "",
+                "# git status --short",
+                (status.stdout or "limpo").rstrip() if status.returncode == 0 else redact(status.stderr or status.stdout),
+                "",
+                "# arquivos pulados",
+            ]
+
+            for rel in rels:
+                safe_rel = rel.replace("\\", "/").lstrip("/")
+                if not safe_rel or safe_rel.startswith("../") or "/../" in safe_rel:
+                    skipped.append(rel)
+                    continue
+                if _is_sensitive_tracked_file(safe_rel):
+                    skipped.append(safe_rel)
+                    continue
+                src = REPO_ROOT / safe_rel
+                if not src.is_file():
+                    skipped.append(f"{safe_rel} (não é arquivo regular)")
+                    continue
+                zf.write(src, f"{BASE_ARCHIVE_ROOT_NAME}/{safe_rel}")
+                added += 1
+
+            manifest_lines.extend(skipped or ["nenhum"])
+            manifest_lines.extend(["", f"# total de arquivos anexados: {added}"])
+            zf.writestr(f"{BASE_ARCHIVE_ROOT_NAME}/BASE_SNAPSHOT_MANIFEST.txt", redact("\n".join(manifest_lines)) + "\n")
+    except Exception as exc:
+        return None, filename, f"Falha ao montar zip da base: {type(exc).__name__}: {exc}"
+
+    payload = bio.getvalue()
+    if len(payload) > BASE_ARCHIVE_MAX_BYTES:
+        size_mb = len(payload) / (1024 * 1024)
+        return None, filename, f"Base zip ficou grande demais para anexar com segurança no Discord: {size_mb:.1f} MB."
+
+    summary = f"Base git-tracked anexada: {added} arquivos; {len(skipped)} pulado(s); tamanho {len(payload) / (1024 * 1024):.2f} MB."
+    return payload, filename, summary
+
+
+async def build_git_tracked_base_archive() -> tuple[bytes | None, str, str]:
+    return await asyncio.to_thread(build_git_tracked_base_archive_sync)
 
 
 def build_music_diagnostics_report_sync(router: Any, options: DiagnosticsOptions) -> str:

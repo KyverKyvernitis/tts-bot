@@ -17,7 +17,7 @@ from music_system.models import ExtractedBatch, MusicTrack
 from music_system.providers import describe_url
 from music_system.ui import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
 from music_system.musicnode_ui import MusicNodePanelView
-from music_system.diagnostics import DiagnosticsOptions, build_music_diagnostics_report
+from music_system.diagnostics import DiagnosticsOptions, build_git_tracked_base_archive, build_music_diagnostics_report
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +73,14 @@ class Music(commands.Cog):
     @app_commands.describe(
         incluir_journalctl="Inclui logs recentes dos serviços tts-bot/lavalink/nodelink quando o usuário do bot puder ler",
         incluir_logs_locais="Inclui o final dos arquivos em logs/*.log do projeto",
+        anexar_base="Anexa também um .zip com os arquivos atuais rastreados pelo Git",
     )
     async def diagnostico_musica(
         self,
         interaction: discord.Interaction,
         incluir_journalctl: bool = True,
         incluir_logs_locais: bool = True,
+        anexar_base: bool = True,
     ):
         if interaction.guild is None or int(getattr(interaction.guild, "id", 0) or 0) != MUSIC_DIAGNOSTICS_GUILD_ID:
             if not interaction.response.is_done():
@@ -117,13 +119,32 @@ class Music(commands.Cog):
 
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         payload = report.encode("utf-8", "replace")
-        file = discord.File(
-            io.BytesIO(payload),
-            filename=f"music-diagnostics-{stamp}.txt",
-        )
+        files: list[discord.File] = [
+            discord.File(
+                io.BytesIO(payload),
+                filename=f"music-diagnostics-{stamp}.txt",
+            )
+        ]
+
+        base_summary = ""
+        if anexar_base:
+            try:
+                base_payload, base_filename, base_summary = await build_git_tracked_base_archive()
+                if base_payload:
+                    files.append(discord.File(io.BytesIO(base_payload), filename=base_filename))
+            except Exception as exc:
+                logger.exception("[music/diagnostics] falha ao gerar base git-tracked")
+                base_summary = f"Base git-tracked não foi anexada: {type(exc).__name__}: {str(exc)[:300]}"
+
+        message = "`🧪` Diagnóstico de música concluído. O relatório foi anexado em `.txt` com segredos mascarados."
+        if anexar_base:
+            message += "\n`📦` Também anexei a base atual rastreada pelo Git em `.zip`." if len(files) > 1 else f"\n`⚠️` {base_summary or 'Não consegui anexar a base git-tracked.'}"
+        if base_summary and len(files) > 1:
+            message += f"\n`ℹ️` {base_summary}"
+
         await interaction.followup.send(
-            "`🧪` Diagnóstico de música concluído. O relatório foi anexado em `.txt` com segredos mascarados.",
-            file=file,
+            message,
+            files=files,
         )
 
     def _music_error_message(self, exc: Exception) -> str:
