@@ -191,6 +191,18 @@ MUSIC_TTS_OPUS_BITRATE = (os.getenv("MUSIC_TTS_OPUS_BITRATE", "48k") or "48k").s
 MUSIC_TTS_OPUS_SAMPLE_RATE = max(8000, _parse_int(os.getenv("MUSIC_TTS_OPUS_SAMPLE_RATE", "48000"), 48000))
 MUSIC_TTS_OPUS_CHANNELS = min(2, max(1, _parse_int(os.getenv("MUSIC_TTS_OPUS_CHANNELS", "1"), 1)))
 MUSIC_TTS_CONVERT_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_TTS_CONVERT_TIMEOUT_SECONDS", "8.0"), 8.0))
+# Suavização das transições do TTS tocado pelo Lavalink.
+# O áudio curto recebe silêncio/fade antes de ser publicado, e a música faz uma
+# rampa breve de volume antes/depois da interrupção para evitar clicks/flicker.
+MUSIC_TTS_PREROLL_SILENCE_MS = max(0, _parse_int(os.getenv("MUSIC_TTS_PREROLL_SILENCE_MS", "140"), 140))
+MUSIC_TTS_POSTROLL_SILENCE_MS = max(0, _parse_int(os.getenv("MUSIC_TTS_POSTROLL_SILENCE_MS", "180"), 180))
+MUSIC_TTS_FADE_IN_MS = max(0, _parse_int(os.getenv("MUSIC_TTS_FADE_IN_MS", "45"), 45))
+MUSIC_TTS_FADE_OUT_MS = max(0, _parse_int(os.getenv("MUSIC_TTS_FADE_OUT_MS", "70"), 70))
+MUSIC_TTS_MP3_BITRATE = (os.getenv("MUSIC_TTS_MP3_BITRATE", "96k") or "96k").strip()
+MUSIC_TTS_RESUME_SEEK_AHEAD_MS = max(0, _parse_int(os.getenv("MUSIC_TTS_RESUME_SEEK_AHEAD_MS", "120"), 120))
+MUSIC_TTS_LAVALINK_VOLUME_RAMP_ENABLED = _parse_bool(os.getenv("MUSIC_TTS_LAVALINK_VOLUME_RAMP_ENABLED", "true"), True)
+MUSIC_TTS_LAVALINK_VOLUME_RAMP_MS = max(0, _parse_int(os.getenv("MUSIC_TTS_LAVALINK_VOLUME_RAMP_MS", "180"), 180))
+MUSIC_TTS_LAVALINK_RAMP_FLOOR_PERCENT = max(0, min(100, _parse_int(os.getenv("MUSIC_TTS_LAVALINK_RAMP_FLOOR_PERCENT", "5"), 5)))
 MUSIC_IDLE_DISCONNECT_SECONDS = _parse_int(os.getenv("MUSIC_IDLE_DISCONNECT_SECONDS", "120"), 120)
 MUSIC_QUEUE_MAXSIZE = min(100, max(1, _parse_int(os.getenv("MUSIC_QUEUE_MAXSIZE", "100"), 100)))
 MUSIC_MAX_PLAYLIST_ITEMS = min(100, max(1, _parse_int(os.getenv("MUSIC_MAX_PLAYLIST_ITEMS", "100"), 100)))

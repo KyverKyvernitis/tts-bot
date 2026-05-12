@@ -158,6 +158,14 @@ def _read_env_flags() -> dict[str, Any]:
         "MUSIC_TTS_OPUS_SAMPLE_RATE",
         "MUSIC_TTS_OPUS_CHANNELS",
         "MUSIC_TTS_CONVERT_TIMEOUT_SECONDS",
+        "MUSIC_TTS_PREROLL_SILENCE_MS",
+        "MUSIC_TTS_POSTROLL_SILENCE_MS",
+        "MUSIC_TTS_FADE_IN_MS",
+        "MUSIC_TTS_FADE_OUT_MS",
+        "MUSIC_TTS_RESUME_SEEK_AHEAD_MS",
+        "MUSIC_TTS_LAVALINK_VOLUME_RAMP_ENABLED",
+        "MUSIC_TTS_LAVALINK_VOLUME_RAMP_MS",
+        "MUSIC_TTS_LAVALINK_RAMP_FLOOR_PERCENT",
     ]
     result: dict[str, Any] = {}
     for name in names:
@@ -892,6 +900,14 @@ def _tts_runtime_snapshot(router: Any, guild_id: int) -> str:
         "tts_audio_format": str(getattr(config, "MUSIC_TTS_AUDIO_FORMAT", "opus") or "opus"),
         "tts_audio_fallback_format": str(getattr(config, "MUSIC_TTS_AUDIO_FALLBACK_FORMAT", "mp3") or "mp3"),
         "tts_opus_bitrate": str(getattr(config, "MUSIC_TTS_OPUS_BITRATE", "48k") or "48k"),
+        "tts_preroll_silence_ms": int(getattr(config, "MUSIC_TTS_PREROLL_SILENCE_MS", 140) or 0),
+        "tts_postroll_silence_ms": int(getattr(config, "MUSIC_TTS_POSTROLL_SILENCE_MS", 180) or 0),
+        "tts_fade_in_ms": int(getattr(config, "MUSIC_TTS_FADE_IN_MS", 45) or 0),
+        "tts_fade_out_ms": int(getattr(config, "MUSIC_TTS_FADE_OUT_MS", 70) or 0),
+        "tts_resume_seek_ahead_ms": int(getattr(config, "MUSIC_TTS_RESUME_SEEK_AHEAD_MS", 120) or 0),
+        "tts_lavalink_volume_ramp_enabled": bool(getattr(config, "MUSIC_TTS_LAVALINK_VOLUME_RAMP_ENABLED", True)),
+        "tts_lavalink_volume_ramp_ms": int(getattr(config, "MUSIC_TTS_LAVALINK_VOLUME_RAMP_MS", 180) or 0),
+        "tts_lavalink_ramp_floor_percent": int(getattr(config, "MUSIC_TTS_LAVALINK_RAMP_FLOOR_PERCENT", 5) or 0),
     }
     return json.dumps(_safe_report_obj(data), ensure_ascii=False, indent=2)
 

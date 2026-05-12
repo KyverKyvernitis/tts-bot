@@ -2121,6 +2121,34 @@ class LavalinkBackend:
             if asyncio.iscoroutine(result):
                 await result
 
+    async def _set_player_volume(self, player: Any, volume: int) -> None:
+        setter = getattr(player, "set_volume", None)
+        if not callable(setter):
+            return
+        result = setter(max(0, min(150, int(volume))))
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def _ramp_player_volume(self, player: Any, start: int, end: int, duration_ms: int) -> None:
+        """Rampa curta de volume para evitar click/flicker em troca de stream."""
+        if not bool(getattr(config, "MUSIC_TTS_LAVALINK_VOLUME_RAMP_ENABLED", True)):
+            await self._set_player_volume(player, end)
+            return
+        duration_ms = max(0, int(duration_ms or 0))
+        start = max(0, min(150, int(start)))
+        end = max(0, min(150, int(end)))
+        if duration_ms <= 0 or start == end:
+            await self._set_player_volume(player, end)
+            return
+        steps = max(2, min(8, int(duration_ms / 35) or 2))
+        delay = max(0.0, duration_ms / 1000.0 / steps)
+        for idx in range(1, steps + 1):
+            value = round(start + ((end - start) * idx / steps))
+            with contextlib.suppress(Exception):
+                await self._set_player_volume(player, int(value))
+            if idx < steps and delay > 0:
+                await asyncio.sleep(delay)
+
     async def _play_with_compat(
         self,
         player: Any,
@@ -2239,18 +2267,25 @@ class LavalinkBackend:
         music_volume = self._player_volume_percent(player, resume_volume)
         tts_volume = max(0, min(150, int(round(float(volume or 1.0) * 100))))
         pause_before_tts = bool(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_ENABLED", True)) and previous_playable is not None and not was_paused
-        pause_grace = max(0.2, float(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS", 0.35) or 0.35))
+        pause_grace = max(0.05, float(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS", 0.35) or 0.35))
+        ramp_ms = max(0, int(getattr(config, "MUSIC_TTS_LAVALINK_VOLUME_RAMP_MS", 180) or 0))
+        ramp_floor = max(0, min(100, int(getattr(config, "MUSIC_TTS_LAVALINK_RAMP_FLOOR_PERCENT", 5) or 0)))
+        ramp_floor_volume = max(0, min(music_volume, int(round(music_volume * (ramp_floor / 100.0)))))
         if pause_before_tts:
             try:
+                if bool(getattr(config, "MUSIC_TTS_LAVALINK_VOLUME_RAMP_ENABLED", True)) and music_volume > ramp_floor_volume and ramp_ms > 0:
+                    await self._ramp_player_volume(player, music_volume, ramp_floor_volume, ramp_ms)
                 await self._pause_player(player, True)
                 # Releia a posição logo depois do pause para restaurar mais perto
                 # do ponto real onde o TTS interrompeu a música.
                 previous_position = max(previous_position, self._player_position_ms(player))
                 logger.info(
-                    "[music/lavalink] tts_pause_lavalink_start | guild=%s position_ms=%s volume=%s",
+                    "[music/lavalink] tts_pause_lavalink_start | guild=%s position_ms=%s volume=%s ramp_floor=%s ramp_ms=%s",
                     getattr(guild, "id", None),
                     previous_position,
                     music_volume,
+                    ramp_floor_volume,
+                    ramp_ms,
                 )
                 await asyncio.sleep(pause_grace)
             except Exception:
@@ -2314,6 +2349,8 @@ class LavalinkBackend:
                 "playback_started_at": playback_started_at,
                 "tts_lavalink": True,
                 "tts_lavalink_query": meta.get("query", ""),
+                "tts_lavalink_source": meta.get("source", ""),
+                "tts_lavalink_uri": meta.get("uri", ""),
                 "tts_lavalink_timeout_recovered": playback_ms >= (max(1.0, float(timeout or 120.0)) * 1000.0),
             }
         finally:
@@ -2323,11 +2360,18 @@ class LavalinkBackend:
                     allowed = bool(should_resume())
             if previous_playable is not None and allowed:
                 try:
+                    seek_ahead_ms = max(0, int(getattr(config, "MUSIC_TTS_RESUME_SEEK_AHEAD_MS", 120) or 0))
+                    resume_position = max(0, int(previous_position) + seek_ahead_ms)
+                    ramp_ms = max(0, int(getattr(config, "MUSIC_TTS_LAVALINK_VOLUME_RAMP_MS", 180) or 0))
+                    ramp_floor = max(0, min(100, int(getattr(config, "MUSIC_TTS_LAVALINK_RAMP_FLOOR_PERCENT", 5) or 0)))
+                    start_volume = music_volume
+                    if bool(getattr(config, "MUSIC_TTS_LAVALINK_VOLUME_RAMP_ENABLED", True)) and not was_paused and ramp_ms > 0:
+                        start_volume = max(0, min(music_volume, int(round(music_volume * (ramp_floor / 100.0)))))
                     await self._play_with_compat(
                         player,
                         previous_playable,
-                        start=max(0, int(previous_position)),
-                        volume=music_volume,
+                        start=resume_position,
+                        volume=start_volume,
                         add_history=False,
                     )
                     await self._wait_for_rest_voice_connected(
@@ -2338,11 +2382,17 @@ class LavalinkBackend:
                     )
                     if was_paused:
                         await self._pause_player(player, True)
+                    elif start_volume != music_volume:
+                        await self._ramp_player_volume(player, start_volume, music_volume, ramp_ms)
                     logger.info(
-                        "[music/lavalink] tts_pause_lavalink_resume | guild=%s restored=%s position_ms=%s",
+                        "[music/lavalink] tts_pause_lavalink_resume | guild=%s restored=%s position_ms=%s seek_ahead_ms=%s volume_start=%s volume_final=%s ramp_ms=%s",
                         getattr(guild, "id", None),
                         True,
-                        max(0, int(previous_position)),
+                        resume_position,
+                        seek_ahead_ms,
+                        start_volume,
+                        music_volume,
+                        ramp_ms,
                     )
                     restored = True
                 except Exception as exc:
