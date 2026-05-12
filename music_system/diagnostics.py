@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.metadata
+import io
 import json
 import os
 import platform
