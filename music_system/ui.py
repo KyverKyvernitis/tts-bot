@@ -287,11 +287,10 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     if backend == "lavalink":
         backend_label = "Reprodução via Lavalink"
     else:
-        fallback_reason = str(getattr(track, "fallback_reason", "") or "").strip()
-        source_lower = str(getattr(track, "source", "") or "").lower()
-        if not fallback_reason and "fallback local" in source_lower:
-            fallback_reason = str(getattr(track, "source", "") or "").split("→", 1)[0].strip() or "Lavalink"
-        backend_label = f"Reprodução local · fallback {fallback_reason}" if fallback_reason else "Reprodução local"
+        # Fallback é detalhe de diagnóstico. No painel público, mostrar
+        # "fallback LavaSrc" dá a impressão de fonte errada/invertida quando a
+        # música já caiu corretamente para o player local.
+        backend_label = "Reprodução local"
     lines.append(f"> -# 🎧 **⠂** `{backend_label}`")
 
     loop_mode = getattr(state, "loop_mode", None)

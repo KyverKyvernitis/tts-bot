@@ -834,6 +834,7 @@ class MusicExtractor:
 
         if MUSIC_YOUTUBE_SEARCH_API_FIRST:
             try:
+                api_started = time.monotonic()
                 api_candidates = await asyncio.wait_for(
                     self.api.youtube_search(query, limit=self.search_results),
                     timeout=min(MUSIC_YOUTUBE_SEARCH_TIMEOUT_SECONDS, max(2.0, self.timeout_seconds)),
@@ -850,6 +851,12 @@ class MusicExtractor:
                         track.extractor = track.extractor or "youtube"
                     api_tracks = api_tracks[: self.search_results]
                     self._cache_put_tracks(self._search_cache, cache_key, api_tracks)
+                    logger.info(
+                        "[music.perf] youtube_api_search query=%r results=%s elapsed=%.2fs",
+                        query,
+                        len(api_tracks),
+                        time.monotonic() - api_started,
+                    )
                     return ExtractedBatch(tracks=api_tracks, query=query, is_playlist=False)
             except Exception:
                 logger.debug("[music] busca YouTube API falhou/expirou | query=%r", query, exc_info=True)
@@ -866,6 +873,7 @@ class MusicExtractor:
 
         for extractor_query, flat, use_cookies in searches:
             try:
+                ytdlp_started = time.monotonic()
                 info = await self._run_extract(
                     extractor_query,
                     extract_flat=flat,
@@ -890,6 +898,13 @@ class MusicExtractor:
                             track.original_url = query
                     tracks = tracks[: self.search_results]
                     self._cache_put_tracks(self._search_cache, cache_key, tracks)
+                    logger.info(
+                        "[music.perf] ytdlp_youtube_search query=%r results=%s cookies=%s elapsed=%.2fs",
+                        query,
+                        len(tracks),
+                        bool(use_cookies),
+                        time.monotonic() - ytdlp_started,
+                    )
                     return ExtractedBatch(tracks=tracks, query=query, is_playlist=False)
             except Exception as exc:
                 last_error = exc
@@ -1285,20 +1300,26 @@ class MusicExtractor:
 
         errors: list[str] = []
         if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
-            runs: list[tuple[bool | str, bool, tuple[str, ...] | None]] = [
-                (False, False, MUSIC_LOCAL_YOUTUBE_CLIENTS),
-                (False, False, ("web",)),
+            runs: list[tuple[bool | str, bool, tuple[str, ...] | None, bool]] = [
+                # Resultado público vindo da YouTube API quase sempre resolve sem
+                # cookies. Tentar sem cookies primeiro costuma ser mais rápido;
+                # cookies ficam como fallback para vídeos restritos.
+                (False, False, MUSIC_LOCAL_YOUTUBE_CLIENTS, False),
+                (False, False, ("web",), False),
+                (False, False, MUSIC_LOCAL_YOUTUBE_CLIENTS, True),
             ]
             format_fallbacks = self._fast_youtube_format_fallbacks(audio_max_abr)
         else:
-            runs = [(False, False, None)]
+            runs = [(False, False, None, True)]
             if profile.is_youtube:
-                runs.extend((False, False, clients) for clients in _YOUTUBE_CLIENT_SETS)
+                runs.extend((False, False, clients, True) for clients in _YOUTUBE_CLIENT_SETS)
             format_fallbacks = self._safe_format_fallbacks(audio_max_abr)
 
+        resolve_started = time.monotonic()
         for format_selector, format_cap in format_fallbacks:
-            for flat, playlist, clients in runs:
+            for flat, playlist, clients, use_cookies in runs:
                 try:
+                    attempt_started = time.monotonic()
                     info = await self._run_extract(
                         source,
                         extract_flat=flat,
@@ -1306,6 +1327,7 @@ class MusicExtractor:
                         youtube_clients=clients,
                         audio_max_abr=format_cap,
                         format_override=format_selector,
+                        use_cookies=use_cookies,
                     )
                     if info.get("entries"):
                         first = next((entry for entry in info.get("entries") or [] if entry), None)
@@ -1321,18 +1343,37 @@ class MusicExtractor:
                         updated.resolved_audio_max_abr = int(format_cap or 0)
                         self._copy_resolved_fields(track, updated)
                         self._put_stream_cache(stream_cache_key, track)
+                        logger.info(
+                            "[music.perf] local_resolve source=%s cookies=%s clients=%s format=%s elapsed=%.2fs total=%.2fs",
+                            "youtube" if profile.is_youtube else profile.platform or "url",
+                            bool(use_cookies),
+                            ",".join(clients or ()),
+                            format_selector,
+                            time.monotonic() - attempt_started,
+                            time.monotonic() - resolve_started,
+                        )
                         return track
                     if self._apply_stream_info_to_track(updated, info, requested_abr=int(format_cap or 0)):
                         self._copy_resolved_fields(track, updated)
                         self._put_stream_cache(stream_cache_key, track)
+                        logger.info(
+                            "[music.perf] local_resolve source=%s cookies=%s clients=%s format=%s elapsed=%.2fs total=%.2fs",
+                            "youtube" if profile.is_youtube else profile.platform or "url",
+                            bool(use_cookies),
+                            ",".join(clients or ()),
+                            format_selector,
+                            time.monotonic() - attempt_started,
+                            time.monotonic() - resolve_started,
+                        )
                         return track
                     errors.append(f"sem stream direto com formato {format_selector}")
                 except Exception as exc:
                     errors.append(str(exc))
                     logger.debug(
-                        "[music] stream resolve failed | source=%s clients=%s format=%s",
+                        "[music] stream resolve failed | source=%s clients=%s cookies=%s format=%s",
                         source,
                         clients,
+                        bool(use_cookies),
                         format_selector,
                         exc_info=True,
                     )

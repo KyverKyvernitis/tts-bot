@@ -1001,6 +1001,22 @@ class LavalinkBackend:
         text = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())
         return " ".join(text.split())
 
+    def _plain_channel_match_text(self, value: object) -> str:
+        """Normaliza nomes de canal/autoria para comparação de mirror.
+
+        A YouTube API costuma retornar canais oficiais como ``Artista - Topic``.
+        O SoundCloud/LavaSrc normalmente responde apenas ``Artista``. Para a
+        regra de correspondência exata continuar segura sem rejeitar official
+        Topic, removemos apenas sufixos/prefixos genéricos de canal.
+        """
+        text = self._plain_match_text(value)
+        if not text:
+            return ""
+        text = re.sub(r"(?:^| )official(?: artist)?(?: channel)?(?:$| )", " ", text).strip()
+        text = re.sub(r"(?:^| )vevo(?:$| )", " ", text).strip()
+        text = re.sub(r"(?:^| )topic(?:$| )", " ", text).strip()
+        return " ".join(text.split())
+
     def _spotify_fallback_query(self, track: Any, *, fallback_query: str = "") -> str:
         # Mantido por compatibilidade interna, mas não é mais usado como primeira
         # escolha: Spotify no LavaSrc é Mirror e pode falhar/403. O fluxo novo usa
@@ -1048,9 +1064,9 @@ class LavalinkBackend:
             return True
 
         wanted_title = self._plain_match_text(getattr(track, "title", ""))
-        wanted_author = self._plain_match_text(getattr(track, "uploader", ""))
+        wanted_author = self._plain_channel_match_text(getattr(track, "uploader", ""))
         got_title = self._plain_match_text(meta.get("title", ""))
-        got_author = self._plain_match_text(meta.get("author", ""))
+        got_author = self._plain_channel_match_text(meta.get("author", ""))
         combined_wanted = " ".join(part for part in (wanted_author, wanted_title) if part).strip()
         combined_got = " ".join(part for part in (got_author, got_title) if part).strip()
         if not wanted_title or not got_title:
@@ -1079,8 +1095,11 @@ class LavalinkBackend:
         if is_youtube_selection:
             # Para resultado escolhido no YouTube, LavaSrc só pode assumir se
             # autor/canal e nome da música baterem exatamente após normalização
-            # simples. Qualquer diferença cai para o player local/yt-dlp.
-            return bool(wanted_title and wanted_author and got_title == wanted_title and got_author == wanted_author)
+            # segura. ``Toby Fox - Topic`` e ``Toby Fox`` são o mesmo canal
+            # oficial; cover/remix/resultado parecido continuam rejeitados.
+            exact_title = bool(wanted_title and got_title == wanted_title)
+            exact_author = bool(wanted_author and got_author and got_author == wanted_author)
+            return bool(exact_title and exact_author and duration_ok)
 
         text_ok = title_ratio >= 0.52 or combined_ratio >= 0.48 or word_score >= 0.55
         return bool(text_ok and duration_ok)

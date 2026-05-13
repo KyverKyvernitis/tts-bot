@@ -2494,6 +2494,13 @@ class AudioRouter:
                 return True
         return False
 
+    def _exc_label(self, exc: BaseException | None) -> str:
+        if exc is None:
+            return ""
+        text = str(exc or "").strip()
+        name = exc.__class__.__name__
+        return f"{name}: {text}" if text else name
+
     def _track_should_preserve_official_display(self, track: MusicTrack, meta: dict | None = None) -> bool:
         values = " ".join(
             str(value or "").lower()
@@ -2816,7 +2823,7 @@ class AudioRouter:
                     "[music/lavalink] playback real falhou antes/durante teste | guild=%s track=%r erro=%s; fallback local(auto)",
                     guild.id,
                     getattr(track, "title", ""),
-                    exc,
+                    self._exc_label(exc),
                 )
                 state.current_backend = "local"
                 state.current_lavalink_player = None
@@ -2824,13 +2831,16 @@ class AudioRouter:
                 self._set_current_status(state, "resolving")
                 converted = False if self._track_is_youtube_selection(track) else self._prepare_track_for_local_after_lavalink_failure(track, exc)
                 if self._track_is_youtube_selection(track):
-                    track.fallback_reason = "LavaSrc"
-                    if "fallback local" not in str(track.source or "").lower():
-                        track.source = "YouTube → fallback local"
+                    # Fallback do YouTube é detalhe interno: no painel público a
+                    # fonte deve continuar simples como reprodução local.
+                    track.fallback_reason = ""
+                    track.source = "YouTube"
+                    track.extractor = track.extractor or "youtube"
                     logger.info(
-                        "[music/lavalink] fallback local para resultado YouTube sem correspondência exata | guild=%s track=%r",
+                        "[music/lavalink] fallback local para resultado YouTube | guild=%s track=%r reason=%s",
                         guild.id,
                         getattr(track, "title", ""),
+                        self._exc_label(exc),
                     )
                 elif converted:
                     logger.info(
@@ -2855,7 +2865,14 @@ class AudioRouter:
         await self._boost_auto_bitrate_for_music(guild, channel, state)
 
         try:
+            local_resolve_started = time.monotonic()
             await self._resolve_current_track(state, track)
+            logger.info(
+                "[music.perf] local_track_ready guild=%s track=%r elapsed=%.2fs",
+                guild.id,
+                getattr(track, "title", ""),
+                time.monotonic() - local_resolve_started,
+            )
         except asyncio.CancelledError as exc:
             raise MusicPlaybackError("Música pulada antes de iniciar o áudio.") from exc
 
