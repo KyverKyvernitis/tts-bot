@@ -46,7 +46,7 @@ MUSIC_FRAGMENT_RETRIES = max(0, int(getattr(config, "MUSIC_FRAGMENT_RETRIES", 1)
 MUSIC_EXTRACTOR_RETRIES = max(0, int(getattr(config, "MUSIC_EXTRACTOR_RETRIES", 1)))
 MUSIC_PLAYLIST_LAZY_LOAD = bool(getattr(config, "MUSIC_PLAYLIST_LAZY_LOAD", True))
 MUSIC_CACHE_MAX_ITEMS = max(20, int(getattr(config, "MUSIC_CACHE_MAX_ITEMS", 160)))
-MUSIC_YTDLP_FORMAT = str(getattr(config, "MUSIC_YTDLP_FORMAT", "") or "bestaudio[vcodec=none]/bestaudio/best").strip()
+MUSIC_YTDLP_FORMAT = str(getattr(config, "MUSIC_YTDLP_FORMAT", "") or "bestaudio/best").strip()
 MUSIC_HIGH_QUALITY_MAX_ABR = max(96, int(getattr(config, "MUSIC_HIGH_QUALITY_MAX_ABR", 256)))
 MUSIC_MAX_AUDIO_BITRATE_STABLE = max(64, int(getattr(config, "MUSIC_MAX_AUDIO_BITRATE_STABLE", 160)))
 MUSIC_HEAVY_LOAD_MAX_ABR = max(64, int(getattr(config, "MUSIC_HEAVY_LOAD_MAX_ABR", 128)))
@@ -168,6 +168,7 @@ class MusicExtractor:
         clone.resolved_audio_abr = int(getattr(track, "resolved_audio_abr", 0) or 0)
         clone.resolved_audio_ext = str(getattr(track, "resolved_audio_ext", "") or "")
         clone.resolved_audio_codec = str(getattr(track, "resolved_audio_codec", "") or "")
+        clone.resolved_audio_format_id = str(getattr(track, "resolved_audio_format_id", "") or "")
         clone.lavalink_playable = getattr(track, "lavalink_playable", None)
         clone.lavalink_encoded = str(getattr(track, "lavalink_encoded", "") or "")
         clone.lavalink_query = str(getattr(track, "lavalink_query", "") or "")
@@ -570,23 +571,34 @@ class MusicExtractor:
         return unique
 
     def _fast_youtube_format_fallbacks(self, audio_max_abr: int | None = None) -> list[tuple[str, int | None]]:
-        """Formato local rápido para YouTube.
+        """Seletores locais para YouTube: qualidade primeiro, estabilidade depois.
 
-        Evita a matriz grande de fallbacks no caminho comum. Se o seletor
-        principal falhar, tenta um seletor amplo; sem busca por título depois.
+        O primeiro seletor tenta o melhor áudio disponível. Se o YouTube/yt-dlp
+        recusar o seletor para um client específico, os próximos fallbacks ainda
+        priorizam áudio-only estável: Opus/WebM, depois M4A/MP4A, depois qualquer
+        áudio e, por último, deixa o yt-dlp decidir sozinho.
         """
         try:
             max_abr = int(audio_max_abr or 0)
         except Exception:
             max_abr = 0
         requested_cap = max_abr if max_abr > 0 else None
-        # Caminho rápido do YouTube: usar um seletor amplo evita que o mesmo
-        # vídeo passe por vários extract_info caros antes de chegar no stream.
-        # Em links diretos, rapidez/estabilidade é mais importante que testar
-        # uma matriz grande de formatos.
-        candidates = [("bestaudio/best", None)]
         if requested_cap:
-            candidates.insert(0, (f"bestaudio[abr<={requested_cap}]/bestaudio/best", requested_cap))
+            candidates: list[tuple[str, int | None]] = [
+                (f"bestaudio[abr<={requested_cap}]/bestaudio/best", requested_cap),
+                (f"bestaudio[acodec*=opus][abr<={requested_cap}]/bestaudio[ext=webm][abr<={requested_cap}]/bestaudio[ext=m4a][abr<={requested_cap}]/ba[abr<={requested_cap}]/ba/b", requested_cap),
+                ("bestaudio/best", None),
+                ("ba/b", None),
+                (_AUTO_FORMAT_SENTINEL, None),
+            ]
+        else:
+            candidates = [
+                (MUSIC_YTDLP_FORMAT or "bestaudio/best", None),
+                ("bestaudio[acodec*=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best", None),
+                ("bestaudio/best", None),
+                ("ba/b", None),
+                (_AUTO_FORMAT_SENTINEL, None),
+            ]
         seen: set[str] = set()
         unique: list[tuple[str, int | None]] = []
         for fmt, cap in candidates:
@@ -618,20 +630,27 @@ class MusicExtractor:
                 candidates.append(item)
 
         if has_cookies and MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST:
+            # Primeiro o client padrão do yt-dlp com cookies. Foi o caminho que
+            # listou formatos reais na VPS; forçar ios/android/web antes disso
+            # pode causar "Requested format is not available" mesmo havendo áudio.
+            add(None, True)
             add(preferred, True)
-            add(("ios",), True)
-            add(("android",), True)
             add(("web",), True)
-            add(("ios",), False)
+            add(("android",), True)
+            add(("ios",), True)
+            # Sem cookies apenas como último teste curto, porque a VPS costuma
+            # receber anti-bot do YouTube sem cookies.
+            add(None, False)
         else:
-            add(("ios",), False)
+            add(None, False)
             add(preferred, False)
             if has_cookies:
+                add(None, True)
                 add(preferred, True)
                 add(("web",), True)
         return candidates
 
-    def _extract_stream_url_from_info(self, info: dict[str, Any]) -> tuple[str, int, str, str]:
+    def _extract_stream_url_from_info(self, info: dict[str, Any]) -> tuple[str, int, str, str, str]:
         """Extrai uma URL de áudio real mesmo quando o yt-dlp retorna formatos.
 
         Algumas respostas de busca/metadata não colocam o stream final em info["url"],
@@ -648,13 +667,14 @@ class MusicExtractor:
                             return parsed
             return 0
 
-        def _candidate_tuple(item: dict[str, Any]) -> tuple[str, int, str, str] | None:
+        def _candidate_tuple(item: dict[str, Any]) -> tuple[str, int, str, str, str] | None:
             url = str(item.get("url") or "").strip()
             if not url or not self._is_probably_direct_stream_url(url, item):
                 return None
             codec = str(item.get("acodec") or "").strip()
             ext = str(item.get("ext") or "").strip()
-            return url, _info_abr(item), ext, codec
+            format_id = str(item.get("format_id") or item.get("format") or "").strip()
+            return url, _info_abr(item), ext, codec, format_id
 
         for key in ("requested_downloads", "requested_formats"):
             raw = info.get(key)
@@ -670,13 +690,13 @@ class MusicExtractor:
             return direct
 
         formats = [item for item in (info.get("formats") or []) if isinstance(item, dict)]
-        best: tuple[str, int, str, str] | None = None
+        best: tuple[str, int, str, str, str] | None = None
         best_score = -1
         for item in formats:
             found = _candidate_tuple(item)
             if not found:
                 continue
-            _url, abr, ext, codec = found
+            _url, abr, ext, codec, _format_id = found
             vcodec = str(item.get("vcodec") or "").lower()
             acodec = str(item.get("acodec") or "").lower()
             score = abr
@@ -689,10 +709,10 @@ class MusicExtractor:
             if score > best_score:
                 best_score = score
                 best = found
-        return best or ("", 0, "", "")
+        return best or ("", 0, "", "", "")
 
     def _apply_stream_info_to_track(self, track: MusicTrack, info: dict[str, Any], *, requested_abr: int = 0) -> bool:
-        stream_url, audio_abr, audio_ext, audio_codec = self._extract_stream_url_from_info(info)
+        stream_url, audio_abr, audio_ext, audio_codec, audio_format_id = self._extract_stream_url_from_info(info)
         if not stream_url:
             return False
         track.stream_url = stream_url
@@ -701,6 +721,7 @@ class MusicExtractor:
         track.resolved_audio_abr = int(audio_abr or 0)
         track.resolved_audio_ext = audio_ext
         track.resolved_audio_codec = audio_codec
+        track.resolved_audio_format_id = audio_format_id
         return True
 
     def _base_opts(
@@ -1430,93 +1451,113 @@ class MusicExtractor:
 
         resolve_started = time.monotonic()
         youtube_no_cookie_blocked = False
-        for format_selector, format_cap in format_fallbacks:
+        attempt_plan: list[tuple[str, int | None, bool, bool, tuple[str, ...] | None, bool]] = []
+        if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
+            # Para YouTube local, testa todos os formatos úteis no client padrão
+            # antes de forçar clients específicos. Isso preserva melhor áudio e
+            # evita repetir o erro "Requested format is not available" em cadeia.
             for flat, playlist, clients, use_cookies in runs:
-                if profile.is_youtube and not use_cookies and youtube_no_cookie_blocked:
-                    continue
-                try:
-                    attempt_started = time.monotonic()
-                    attempt_timeout: float | None = None
-                    if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
-                        attempt_timeout = MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS
-                        if not use_cookies:
-                            attempt_timeout = min(attempt_timeout, MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS)
-                    info = await self._run_extract(
-                        source,
-                        extract_flat=flat,
-                        playlist=playlist,
-                        youtube_clients=clients,
-                        audio_max_abr=format_cap,
-                        format_override=format_selector,
-                        use_cookies=use_cookies,
-                        timeout_seconds=attempt_timeout,
-                    )
-                    if info.get("entries"):
-                        first = next((entry for entry in info.get("entries") or [] if entry), None)
-                        if first:
-                            info = first
-                    updated = self._track_from_info(
-                        info,
-                        requester_id=track.requester_id,
-                        requester_name=track.requester_name,
-                        original_url=track.original_url or source,
-                    )
-                    if updated.stream_url:
-                        updated.resolved_audio_max_abr = int(format_cap or 0)
-                        self._copy_resolved_fields(track, updated)
-                        self._put_stream_cache(stream_cache_key, track)
-                        logger.info(
-                            "[music.perf] local_resolve source=%s cookies=%s clients=%s format=%s elapsed=%.2fs total=%.2fs",
-                            "youtube" if profile.is_youtube else profile.platform or "url",
-                            bool(use_cookies),
-                            ",".join(clients or ()),
-                            format_selector,
-                            time.monotonic() - attempt_started,
-                            time.monotonic() - resolve_started,
-                        )
-                        return track
-                    if self._apply_stream_info_to_track(updated, info, requested_abr=int(format_cap or 0)):
-                        self._copy_resolved_fields(track, updated)
-                        self._put_stream_cache(stream_cache_key, track)
-                        logger.info(
-                            "[music.perf] local_resolve source=%s cookies=%s clients=%s format=%s elapsed=%.2fs total=%.2fs",
-                            "youtube" if profile.is_youtube else profile.platform or "url",
-                            bool(use_cookies),
-                            ",".join(clients or ()),
-                            format_selector,
-                            time.monotonic() - attempt_started,
-                            time.monotonic() - resolve_started,
-                        )
-                        return track
-                    errors.append(f"sem stream direto com formato {format_selector}")
-                except Exception as exc:
-                    err_text = str(exc)
-                    err_detail = str(getattr(exc, "detail", "") or "")
-                    err_label = err_text or exc.__class__.__name__
-                    errors.append(err_label)
-                    auth_block = bool(profile.is_youtube and self._is_youtube_auth_error(exc))
-                    if profile.is_youtube and not use_cookies and auth_block:
-                        youtube_no_cookie_blocked = True
-                    log_fn = logger.warning if (profile.is_youtube and auth_block) else logger.info
-                    log_fn(
-                        "[music.local] stream resolve failed | source=%s clients=%s cookies=%s format=%s timeout=%s erro=%s detail=%s",
-                        "youtube" if profile.is_youtube else source,
+                for format_selector, format_cap in format_fallbacks:
+                    attempt_plan.append((format_selector, format_cap, flat, playlist, clients, use_cookies))
+        else:
+            for format_selector, format_cap in format_fallbacks:
+                for flat, playlist, clients, use_cookies in runs:
+                    attempt_plan.append((format_selector, format_cap, flat, playlist, clients, use_cookies))
+
+        for format_selector, format_cap, flat, playlist, clients, use_cookies in attempt_plan:
+            if profile.is_youtube and not use_cookies and youtube_no_cookie_blocked:
+                continue
+            try:
+                attempt_started = time.monotonic()
+                attempt_timeout: float | None = None
+                if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
+                    attempt_timeout = MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS
+                    if not use_cookies:
+                        attempt_timeout = min(attempt_timeout, MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS)
+                info = await self._run_extract(
+                    source,
+                    extract_flat=flat,
+                    playlist=playlist,
+                    youtube_clients=clients,
+                    audio_max_abr=format_cap,
+                    format_override=format_selector,
+                    use_cookies=use_cookies,
+                    timeout_seconds=attempt_timeout,
+                )
+                if info.get("entries"):
+                    first = next((entry for entry in info.get("entries") or [] if entry), None)
+                    if first:
+                        info = first
+                updated = self._track_from_info(
+                    info,
+                    requester_id=track.requester_id,
+                    requester_name=track.requester_name,
+                    original_url=track.original_url or source,
+                )
+                if updated.stream_url:
+                    updated.resolved_audio_max_abr = int(format_cap or 0)
+                    self._copy_resolved_fields(track, updated)
+                    self._put_stream_cache(stream_cache_key, track)
+                    logger.info(
+                        "[music.perf] local_resolve source=%s cookies=%s clients=%s selector=%s selected_format=%s ext=%s codec=%s abr=%s elapsed=%.2fs total=%.2fs",
+                        "youtube" if profile.is_youtube else profile.platform or "url",
+                        bool(use_cookies),
                         ",".join(clients or ()),
-                        "on" if use_cookies else "off",
                         format_selector,
-                        attempt_timeout,
-                        err_label,
-                        err_detail[:180],
-                        exc_info=False,
+                        str(getattr(track, "resolved_audio_format_id", "") or ""),
+                        str(getattr(track, "resolved_audio_ext", "") or ""),
+                        str(getattr(track, "resolved_audio_codec", "") or ""),
+                        int(getattr(track, "resolved_audio_abr", 0) or 0),
+                        time.monotonic() - attempt_started,
+                        time.monotonic() - resolve_started,
                     )
-                    if profile.is_youtube and auth_block and use_cookies:
-                        # Se até com cookies o YouTube respondeu anti-bot, repetir
-                        # vários formatos normalmente só aumenta 20-60s de espera.
-                        # Tenta no máximo outro client; depois falha com mensagem clara.
-                        cookie_auth_errors = sum(1 for item in errors if "cookie" in item.lower() or "login" in item.lower() or "not a bot" in item.lower() or "sign in" in item.lower())
-                        if cookie_auth_errors >= 2:
-                            detail = "YouTube bloqueou a VPS mesmo usando cookies. Atualize o cookies.txt ou teste outro IP/rota. " + (err_detail or err_label)
-                            raise MusicExtractionError("YouTube bloqueou a reprodução local por anti-bot/cookies.", detail=detail) from exc
+                    return track
+                if self._apply_stream_info_to_track(updated, info, requested_abr=int(format_cap or 0)):
+                    self._copy_resolved_fields(track, updated)
+                    self._put_stream_cache(stream_cache_key, track)
+                    logger.info(
+                        "[music.perf] local_resolve source=%s cookies=%s clients=%s selector=%s selected_format=%s ext=%s codec=%s abr=%s elapsed=%.2fs total=%.2fs",
+                        "youtube" if profile.is_youtube else profile.platform or "url",
+                        bool(use_cookies),
+                        ",".join(clients or ()),
+                        format_selector,
+                        str(getattr(track, "resolved_audio_format_id", "") or ""),
+                        str(getattr(track, "resolved_audio_ext", "") or ""),
+                        str(getattr(track, "resolved_audio_codec", "") or ""),
+                        int(getattr(track, "resolved_audio_abr", 0) or 0),
+                        time.monotonic() - attempt_started,
+                        time.monotonic() - resolve_started,
+                    )
+                    return track
+                errors.append(f"sem stream direto com formato {format_selector}")
+            except Exception as exc:
+                err_text = str(exc)
+                err_detail = str(getattr(exc, "detail", "") or "")
+                err_label = err_text or exc.__class__.__name__
+                errors.append(err_label)
+                auth_block = bool(profile.is_youtube and self._is_youtube_auth_error(exc))
+                if profile.is_youtube and not use_cookies and auth_block:
+                    youtube_no_cookie_blocked = True
+                log_fn = logger.warning if (profile.is_youtube and auth_block) else logger.info
+                log_fn(
+                    "[music.local] stream resolve failed | source=%s clients=%s cookies=%s format=%s timeout=%s erro=%s detail=%s",
+                    "youtube" if profile.is_youtube else source,
+                    ",".join(clients or ()),
+                    "on" if use_cookies else "off",
+                    format_selector,
+                    attempt_timeout,
+                    err_label,
+                    err_detail[:180],
+                    exc_info=False,
+                )
+                if profile.is_youtube and auth_block and use_cookies:
+                    # Se até com cookies o YouTube respondeu anti-bot, repetir
+                    # vários formatos normalmente só aumenta 20-60s de espera.
+                    # Tenta no máximo outro client; depois falha com mensagem clara.
+                    cookie_auth_errors = sum(1 for item in errors if "cookie" in item.lower() or "login" in item.lower() or "not a bot" in item.lower() or "sign in" in item.lower())
+                    if cookie_auth_errors >= 2:
+                        detail = "YouTube bloqueou a VPS mesmo usando cookies. Atualize o cookies.txt ou teste outro IP/rota. " + (err_detail or err_label)
+                        raise MusicExtractionError("YouTube bloqueou a reprodução local por anti-bot/cookies.", detail=detail) from exc
 
         # Último fallback: busca pelo título atual e resolve candidatos alternativos.
         if track.title and not profile.is_metadata_only and not profile.is_youtube:
@@ -1848,7 +1889,7 @@ class MusicExtractor:
             else:
                 webpage_url = ""
 
-        stream_url, audio_abr, audio_ext, audio_codec = self._extract_stream_url_from_info(info)
+        stream_url, audio_abr, audio_ext, audio_codec, audio_format_id = self._extract_stream_url_from_info(info)
         duration_raw = info.get("duration")
         try:
             duration = float(duration_raw) if duration_raw is not None else None
@@ -1876,6 +1917,7 @@ class MusicExtractor:
         track.resolved_audio_abr = audio_abr
         track.resolved_audio_ext = audio_ext
         track.resolved_audio_codec = audio_codec
+        track.resolved_audio_format_id = audio_format_id
         if stream_url:
             track.resolved_at_monotonic = time.monotonic()
             track.resolved_audio_max_abr = 0
@@ -1949,3 +1991,4 @@ class MusicExtractor:
         target.resolved_audio_abr = int(getattr(source, "resolved_audio_abr", 0) or 0)
         target.resolved_audio_ext = str(getattr(source, "resolved_audio_ext", "") or "")
         target.resolved_audio_codec = str(getattr(source, "resolved_audio_codec", "") or "")
+        target.resolved_audio_format_id = str(getattr(source, "resolved_audio_format_id", "") or "")

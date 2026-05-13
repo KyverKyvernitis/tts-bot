@@ -2604,6 +2604,7 @@ class AudioRouter:
         track.resolved_audio_abr = 0
         track.resolved_audio_ext = ""
         track.resolved_audio_codec = ""
+        track.resolved_audio_format_id = ""
         if "spotify" in values:
             track.fallback_reason = "Spotify"
             if "fallback local" not in str(track.source or "").lower():
@@ -2976,6 +2977,7 @@ class AudioRouter:
                 track.resolved_audio_abr = 0
                 track.resolved_audio_ext = ""
                 track.resolved_audio_codec = ""
+                track.resolved_audio_format_id = ""
                 retry_cap = self._audio_max_abr_for_load()
                 await self.extractor.resolve_stream(track, force=True, audio_max_abr=retry_cap)
                 self._refresh_quality_state(state, track, cap=retry_cap)

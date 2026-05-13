@@ -209,6 +209,29 @@ def _track_link(track: MusicTrack, *, title_limit: int = 82) -> str:
     return f"`{title}`"
 
 
+
+
+def _local_audio_format_label(track: MusicTrack) -> str:
+    format_id = str(getattr(track, "resolved_audio_format_id", "") or "").strip()
+    ext = str(getattr(track, "resolved_audio_ext", "") or "").strip().lower()
+    codec = str(getattr(track, "resolved_audio_codec", "") or "").strip().lower()
+    abr = 0
+    with contextlib.suppress(Exception):
+        abr = int(getattr(track, "resolved_audio_abr", 0) or 0)
+    parts: list[str] = []
+    if format_id:
+        parts.append(format_id[:24])
+    if ext and codec and codec not in {"none", ext}:
+        short_codec = codec.split(".", 1)[0]
+        parts.append(f"{ext}/{short_codec}")
+    elif ext:
+        parts.append(ext)
+    elif codec and codec != "none":
+        parts.append(codec.split(".", 1)[0])
+    if abr:
+        parts.append(f"{abr}kbps")
+    return " · ".join(parts)
+
 def _queue_items(state) -> list[MusicTrack]:
     items: list[MusicTrack] = []
     with contextlib.suppress(Exception):
@@ -292,6 +315,12 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
         # música já caiu corretamente para o player local.
         backend_label = "Reprodução local"
     lines.append(f"> -# 🎧 **⠂** `{backend_label}`")
+    if backend != "lavalink":
+        format_label = _local_audio_format_label(track)
+        if format_label:
+            lines.append(f"> -# 🎚️ **⠂** `Formato: {format_label}`")
+        elif loading:
+            lines.append("> -# 🎚️ **⠂** `Formato: resolvendo`")
 
     loop_mode = getattr(state, "loop_mode", None)
     loop_label = getattr(loop_mode, "label", "desligado")
