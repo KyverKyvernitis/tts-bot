@@ -165,12 +165,6 @@ def _read_env_flags() -> dict[str, Any]:
         "MUSIC_NODE_PROVIDER",
         "AUDIO_NODE_FAILURE_COOLDOWN_SECONDS",
         "AUDIO_NODE_STARTUP_WAIT_SECONDS",
-        "NODELINK_ENABLED",
-        "NODELINK_HOST",
-        "NODELINK_PORT",
-        "NODELINK_PASSWORD",
-        "NODELINK_SECURE",
-        "NODELINK_NODE_NAME",
         "LAVALINK_HOST",
         "LAVALINK_PORT",
         "WAVELINK_HOST",
@@ -852,22 +846,12 @@ def _local_log_tail() -> str:
     return note + ("\n\n".join(parts) if parts else "Nenhum .log em logs/.")
 
 
-def _nodelink_enabled_for_diagnostics() -> bool:
-    provider = str(os.getenv("MUSIC_NODE_PROVIDER", "lavalink") or "lavalink").strip().lower()
-    return provider in {"nodelink", "node", "auto"} and str(os.getenv("NODELINK_ENABLED", "false") or "false").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
-
-
-def _systemd_units_for_diagnostics(*, include_nodelink: bool | None = None) -> list[str]:
-    units = ["tts-bot.service", "lavalink.service", "callkeeper.service"]
-    if include_nodelink is None:
-        include_nodelink = _nodelink_enabled_for_diagnostics()
-    if include_nodelink:
-        units.insert(2, "nodelink.service")
-    return units
+def _systemd_units_for_diagnostics() -> list[str]:
+    return ["tts-bot.service", "lavalink.service", "callkeeper.service"]
 
 
 def _node_process_inventory() -> str:
-    """Mostra processos Node.js sem confundir Sinuca Activity com NodeLink."""
+    """Mostra processos Node.js de features independentes, como Sinuca Activity."""
     ss_output = _run_cmd(["ss", "-ltnp"], timeout=8.0)
     lines: list[str] = []
     proc_root = Path("/proc")
@@ -890,12 +874,10 @@ def _node_process_inventory() -> str:
         except Exception:
             cwd = "?"
         combined_with_cwd = f"{combined} {cwd.lower()}"
-        if "nodelink" in combined_with_cwd or "/opt/nodelink" in combined_with_cwd:
-            label = "NodeLink"
-        elif "sinuca" in combined_with_cwd or "activity/sinuca-server" in combined_with_cwd:
+        if "sinuca" in combined_with_cwd or "activity/sinuca-server" in combined_with_cwd:
             label = "Sinuca Activity"
         else:
-            label = "Node.js (outro)"
+            label = "Node.js (outro; não é backend de música)"
         listen = ""
         for ss_line in ss_output.splitlines():
             if f"pid={pid}," in ss_line or f"pid={pid})" in ss_line:
@@ -956,12 +938,8 @@ def _tts_runtime_snapshot(router: Any, guild_id: int) -> str:
 def _journalctl_commands(*, full: bool = False) -> list[list[str]]:
     if full:
         spec = [("tts-bot.service", "2 hours ago", "1200"), ("lavalink.service", "2 hours ago", "900"), ("callkeeper.service", "2 hours ago", "500")]
-        if _nodelink_enabled_for_diagnostics():
-            spec.insert(2, ("nodelink.service", "2 hours ago", "500"))
     else:
         spec = [("tts-bot.service", "8 minutes ago", "160"), ("lavalink.service", "8 minutes ago", "160")]
-        if _nodelink_enabled_for_diagnostics():
-            spec.append(("nodelink.service", "8 minutes ago", "100"))
     return [["journalctl", "-u", unit, "--since", since, "-n", limit, "--no-pager", "-o", "cat"] for unit, since, limit in spec]
 
 
@@ -1385,8 +1363,7 @@ def _system_status_report() -> str:
         _run_cmd(["systemctl", "--no-pager", "--full", "status", *units], timeout=18.0),
         _run_cmd(["systemctl", "cat", *units], timeout=18.0),
     ]
-    if not _nodelink_enabled_for_diagnostics():
-        parts.append("NodeLink: não incluído nos services porque NODELINK_ENABLED=false/MUSIC_NODE_PROVIDER não seleciona NodeLink. Processos Node.js em outras portas podem ser Sinuca Activity ou outra feature; veja o inventário acima.")
+    parts.append("Backends de música ativos: Lavalink e fallback local/yt-dlp. Processos Node.js em outras portas são features independentes, como Sinuca Activity; veja o inventário acima.")
     return "\n\n".join(parts)
 
 
@@ -1513,8 +1490,6 @@ def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
             _write_zip_text(zf, "meta/system.txt", _system_status_report()); added += 1
             _write_zip_text(zf, "logs/tts-bot.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u tts-bot.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|deezer|fallback|TrackException|LoadException|ChannelTimeout|erro|falhou|exception|traceback' || true"], timeout=18.0)); added += 1
             _write_zip_text(zf, "logs/lavalink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u lavalink.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|master|403|404|error|exception|failed|TrackException' || true"], timeout=18.0)); added += 1
-            if _nodelink_enabled_for_diagnostics():
-                _write_zip_text(zf, "logs/nodelink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u nodelink.service --since '2 hours ago' -n 700 --no-pager -o cat | grep -Ei 'ready|lavalink|spotify|soundcloud|youtube|deezer|loadtracks|error|exception|failed|TrackException' || true"], timeout=18.0)); added += 1
             _write_zip_text(zf, "logs/local-bot-logs.txt", _local_log_tail()); added += 1
     except Exception as exc:
         return None, filename, f"Falha ao montar snapshot da VPS: {type(exc).__name__}: {exc}"

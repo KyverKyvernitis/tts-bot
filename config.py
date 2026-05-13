@@ -310,17 +310,10 @@ LAVALINK_PASSWORD = (os.getenv("LAVALINK_PASSWORD", "") or "").strip()
 LAVALINK_SECURE = _parse_bool(os.getenv("LAVALINK_SECURE", "false"), False)
 LAVALINK_NODE_NAME = (os.getenv("LAVALINK_NODE_NAME", "main") or "main").strip() or "main"
 LAVALINK_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("LAVALINK_TIMEOUT_SECONDS", "8.0"), 8.0))
-# Node de áudio compatível com Lavalink API. Lavalink continua padrão;
-# NodeLink é experimental e só entra quando MUSIC_NODE_PROVIDER=nodelink
-# ou quando MUSIC_NODE_PROVIDER=auto + NODELINK_ENABLED=true.
-MUSIC_NODE_PROVIDER = (os.getenv("MUSIC_NODE_PROVIDER", "lavalink") or "lavalink").strip().lower()
-NODELINK_ENABLED = _parse_bool(os.getenv("NODELINK_ENABLED", "false"), False)
-NODELINK_HOST = (os.getenv("NODELINK_HOST", "127.0.0.1") or "127.0.0.1").strip()
-NODELINK_PORT = _parse_int(os.getenv("NODELINK_PORT", "8787"), 8787)
-NODELINK_PASSWORD = (os.getenv("NODELINK_PASSWORD", os.getenv("LAVALINK_PASSWORD", "")) or "").strip()
-NODELINK_SECURE = _parse_bool(os.getenv("NODELINK_SECURE", "false"), False)
-NODELINK_NODE_NAME = (os.getenv("NODELINK_NODE_NAME", "nodelink") or "nodelink").strip() or "nodelink"
-NODELINK_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("NODELINK_TIMEOUT_SECONDS", os.getenv("LAVALINK_TIMEOUT_SECONDS", "8.0")), 8.0))
+# Node de áudio compatível com Lavalink API.
+# Qualquer valor legado de MUSIC_NODE_PROVIDER cai para Lavalink.
+_MUSIC_NODE_PROVIDER_RAW = (os.getenv("MUSIC_NODE_PROVIDER", "lavalink") or "lavalink").strip().lower()
+MUSIC_NODE_PROVIDER = _MUSIC_NODE_PROVIDER_RAW if _MUSIC_NODE_PROVIDER_RAW in {"lavalink", "auto"} else "lavalink"
 AUDIO_NODE_FAILURE_COOLDOWN_SECONDS = max(5.0, _parse_float(os.getenv("AUDIO_NODE_FAILURE_COOLDOWN_SECONDS", "45"), 45.0))
 AUDIO_NODE_STARTUP_WAIT_SECONDS = max(0.0, _parse_float(os.getenv("AUDIO_NODE_STARTUP_WAIT_SECONDS", "90"), 90.0))
 AUDIO_NODE_STARTUP_WAIT_REQUIRED = _parse_bool(os.getenv("AUDIO_NODE_STARTUP_WAIT_REQUIRED", "true"), True)

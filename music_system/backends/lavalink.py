@@ -45,17 +45,13 @@ MUSIC_LAVASRC_MIRROR_PREFIXES = _mirror_prefixes_from_config()
 
 def _normalize_provider(value: object) -> str:
     raw = str(value or "lavalink").strip().lower()
-    if raw in {"node", "nodelink", "node-link"}:
-        return "nodelink"
-    if raw in {"auto", "prefer_nodelink", "prefer-nodelink"}:
+    if raw == "auto":
         return "auto"
     return "lavalink"
 
 
 def _provider_label(value: object) -> str:
     provider = _normalize_provider(value)
-    if provider == "nodelink":
-        return "NodeLink"
     if provider == "auto":
         return "Auto"
     return "Lavalink"
@@ -467,7 +463,7 @@ class LavalinkBackend:
 
         lower_query = query.lower()
         known_prefixes = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
-        # Em modo NodeLink/Lavalink, busca textual deve consultar YouTube por
+        # Em modo Lavalink, busca textual deve consultar YouTube por
         # padrão. Links e prefixos explícitos continuam intactos.
         identifier = query if "://" in query or lower_query.startswith(known_prefixes) else f"ytsearch:{query}"
         start = time.perf_counter()
@@ -814,7 +810,7 @@ class LavalinkBackend:
     async def probe_ready(self) -> dict[str, Any]:
         """Healthcheck REST leve antes de entregar o Pool para Wavelink.
 
-        Evita martelar websocket quando Java/NodeLink ainda está subindo.
+        Evita martelar websocket quando o Lavalink ainda está subindo.
         /v4/info é preferido porque confirma API v4; /version fica como fallback
         para nodes compatíveis que não expõem info completo.
         """
@@ -1278,7 +1274,7 @@ class LavalinkBackend:
         return None
 
     def _playables_from_search(self, search: Any, *, limit: int = 10) -> list[Any]:
-        """Extrai uma lista de Playables de resultados Wavelink/NodeLink.
+        """Extrai uma lista de Playables de resultados Wavelink/Lavalink.
 
         Wavelink 3.x pode retornar Playable, Search, Playlist, lista/tupla ou
         objetos iteráveis. Para seleção textual precisamos preservar vários
@@ -1471,7 +1467,7 @@ class LavalinkBackend:
         requester_name: str = "",
         limit: int = 5,
     ) -> ExtractedBatch:
-        """Busca faixas no Lavalink/NodeLink para UI de seleção.
+        """Busca faixas no Lavalink para UI de seleção.
 
         Diferente do fluxo de playback, esta função não chama ``yt-dlp`` nem
         escolhe automaticamente o primeiro resultado. Ela transforma os
@@ -1509,7 +1505,7 @@ class LavalinkBackend:
     ) -> ExtractedBatch:
         """Resolve link direto no próprio node, sem yt-dlp e sem busca por título.
 
-        Links diretos devem tocar exatamente o item retornado pelo Lavalink/NodeLink.
+        Links diretos devem tocar exatamente o item retornado pelo Lavalink.
         Se o node não conseguir resolver/tocar aquele link, o erro precisa aparecer;
         não é seguro trocar automaticamente para busca textual por nomes genéricos
         como "Soundcloud link" ou "YouTube".

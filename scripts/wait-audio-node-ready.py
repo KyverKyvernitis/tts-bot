@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Espera o node de áudio compatível com Lavalink API ficar pronto.
+"""Espera o Lavalink ficar pronto antes de iniciar o bot.
 
 Usado pelo start.sh/systemd para evitar que o Wavelink tente conectar enquanto
-Java/Lavalink ou NodeLink ainda está subindo. Se o node estiver desativado, sai
-com sucesso imediatamente.
+o Lavalink ainda está subindo. Se o Lavalink estiver desativado, sai com sucesso.
 """
 from __future__ import annotations
 
@@ -67,26 +66,7 @@ def _base_url(host: str, port: int, secure: bool) -> str:
 
 
 def _selected_node() -> dict[str, object] | None:
-    provider = (os.getenv("MUSIC_NODE_PROVIDER", "lavalink") or "lavalink").strip().lower()
-    if provider in {"node", "node-link"}:
-        provider = "nodelink"
-    if provider not in {"lavalink", "nodelink", "auto"}:
-        provider = "lavalink"
-
     lavalink_enabled = _as_bool(os.getenv("LAVALINK_ENABLED"), False) and (os.getenv("LAVALINK_MODE", "off") or "off").strip().lower() != "off"
-    nodelink_enabled = _as_bool(os.getenv("NODELINK_ENABLED"), False)
-
-    if provider == "nodelink" or (provider == "auto" and nodelink_enabled):
-        if not nodelink_enabled:
-            return None
-        return {
-            "label": "NodeLink",
-            "host": os.getenv("NODELINK_HOST", "127.0.0.1"),
-            "port": _as_int(os.getenv("NODELINK_PORT"), 8787),
-            "password": os.getenv("NODELINK_PASSWORD") or os.getenv("LAVALINK_PASSWORD", ""),
-            "secure": _as_bool(os.getenv("NODELINK_SECURE"), False),
-        }
-
     if not lavalink_enabled:
         return None
     return {

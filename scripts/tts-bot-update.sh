@@ -6,7 +6,6 @@ BRANCH="main"
 SERVICE="tts-bot"
 CALLKEEPER_SERVICE="callkeeper"
 LAVALINK_SERVICE="lavalink"
-NODELINK_SERVICE="nodelink"
 LOG_TAG="tts-bot-updater"
 DIRTY_MARKER_FILE="$REPO_DIR/.fatal-update-dirty"
 
@@ -35,7 +34,6 @@ CALLKEEPER_CHANGED=0
 BOT_HEALTHCHECK_STATUS="não verificado"
 CALLKEEPER_STATUS="não alterado"
 AUDIO_SERVICES_STATUS="não alterado"
-NODELINK_STATUS="não alterado"
 FRONT_STATUS="não alterado"
 BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
@@ -322,16 +320,6 @@ deploy_audio_services() {
     AUDIO_SERVICES_STATUS="Lavalink não iniciado porque LAVALINK_ENABLED=false"
   fi
 
-  if env_truthy NODELINK_ENABLED; then
-    NODELINK_STATUS="mantido porque NODELINK_ENABLED=true"
-  else
-    if systemctl list-unit-files "$NODELINK_SERVICE.service" >/dev/null 2>&1; then
-      systemctl disable --now "$NODELINK_SERVICE" >/dev/null 2>&1 || true
-      NODELINK_STATUS="desativado/removido do boot"
-    else
-      NODELINK_STATUS="não instalado"
-    fi
-  fi
 }
 
 deploy_bot() {
@@ -687,7 +675,6 @@ Arquivos:
 $CHANGED_FILES
 Bot: $BOT_HEALTHCHECK_STATUS
 Serviços de áudio: $AUDIO_SERVICES_STATUS
-NodeLink: $NODELINK_STATUS
 CallKeeper: $CALLKEEPER_STATUS
 Frontend: $FRONT_STATUS
 Backend: $BACK_STATUS

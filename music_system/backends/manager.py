@@ -10,7 +10,7 @@ LAVALINK_REAL_TEST_GUILD_ID = 927002914449424404
 
 from .base import BackendHealth, BackendSearchResult, LocalPlaybackBackend
 from ..models import ExtractedBatch
-from .lavalink import LavalinkBackend, LavalinkConfig, _as_bool, _normalize_provider, _safe_int
+from .lavalink import LavalinkBackend, LavalinkConfig, _normalize_provider
 from .lavalink_config import LavalinkConfigStore
 
 logger = logging.getLogger(__name__)
@@ -44,42 +44,15 @@ class MusicBackendManager:
             return 0
 
     def _configured_node_provider(self) -> str:
-        raw = getattr(config, "MUSIC_NODE_PROVIDER", "lavalink")
-        provider = _normalize_provider(raw)
-        if provider == "auto":
-            if _as_bool(getattr(config, "NODELINK_ENABLED", False), False):
-                return "nodelink"
-            return "lavalink"
-        return provider
+        # Valores antigos de MUSIC_NODE_PROVIDER são aceitos apenas para
+        # compatibilidade e caem para Lavalink.
+        return "lavalink" if _normalize_provider(getattr(config, "MUSIC_NODE_PROVIDER", "lavalink")) in {"lavalink", "auto"} else "lavalink"
 
     def _node_config_for_guild(self, guild_id: int | None = None) -> LavalinkConfig:
-        """Retorna o node compatível com Wavelink que deve ser usado agora.
-
-        O storage/painel histórico continua sendo Lavalink. NodeLink é
-        experimental e vem apenas por .env para não misturar as credenciais no DB
-        antigo nem quebrar o painel `_musicnode`.
-        """
+        """Retorna o node Lavalink que deve ser usado agora."""
         cfg = self.lavalink_store.load(guild_id=guild_id)
-        provider = self._configured_node_provider()
-        if provider != "nodelink":
-            cfg.provider = "lavalink"
-            return cfg
-
-        node_cfg = LavalinkConfig(
-            enabled=_as_bool(getattr(config, "NODELINK_ENABLED", False), False),
-            mode=cfg.mode,
-            host=str(getattr(config, "NODELINK_HOST", "127.0.0.1") or "127.0.0.1").strip(),
-            port=max(1, _safe_int(getattr(config, "NODELINK_PORT", 8787), 8787)),
-            password=str(getattr(config, "NODELINK_PASSWORD", "") or getattr(config, "LAVALINK_PASSWORD", "") or "").strip(),
-            secure=_as_bool(getattr(config, "NODELINK_SECURE", False), False),
-            node_name=str(getattr(config, "NODELINK_NODE_NAME", "nodelink") or "nodelink").strip() or "nodelink",
-            timeout_seconds=max(2.0, float(getattr(config, "NODELINK_TIMEOUT_SECONDS", getattr(config, "LAVALINK_TIMEOUT_SECONDS", 8.0)) or 8.0)),
-            provider="nodelink",
-        )
-        # Se o dono marcou NodeLink sem senha própria, herde a senha do Lavalink.
-        if not node_cfg.password and cfg.password:
-            node_cfg.password = cfg.password
-        return node_cfg
+        cfg.provider = "lavalink"
+        return cfg
 
     def node_provider_for_guild(self, guild_id: int | None = None) -> str:
         try:
