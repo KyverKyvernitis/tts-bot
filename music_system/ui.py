@@ -387,6 +387,15 @@ def build_player_embeds(state) -> list[discord.Embed]:
                 "O queue terminou e não tem mais nada para tocar.\n"
                 "Use `_play <link ou pesquisa>` para adicionar outra música."
             )
+        elif reason == "track_failed":
+            embed.set_author(name="Não consegui iniciar", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
+            failed_title = _escape(actor_name or "essa música", limit=64)
+            detail = _escape(channel_name, limit=120) if channel_name else ""
+            embed.description = (
+                f"Falhei antes do áudio começar em **{failed_title}**.\n"
+                + (f"-# `{detail}`\n" if detail else "")
+                + "Use `_play <link ou pesquisa>` para tentar outra música."
+            )
         elif reason == "manual_stop":
             embed.set_author(name="Player encerrado", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
             embed.description = (

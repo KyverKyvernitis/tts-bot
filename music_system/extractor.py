@@ -75,7 +75,7 @@ def _client_tuple(value: object, default: tuple[str, ...] = ("android", "web")) 
     return clients or default
 
 
-MUSIC_LOCAL_YOUTUBE_CLIENTS = _client_tuple(getattr(config, "MUSIC_LOCAL_YOUTUBE_CLIENTS", "android,web"))
+MUSIC_LOCAL_YOUTUBE_CLIENTS = _client_tuple(getattr(config, "MUSIC_LOCAL_YOUTUBE_CLIENTS", "ios,android,web"), default=("ios", "android", "web"))
 _GLOBAL_YTDLP_SEMAPHORE: asyncio.Semaphore | None = None
 
 
@@ -596,6 +596,40 @@ class MusicExtractor:
             seen.add(fmt)
             unique.append((fmt, cap))
         return unique
+
+    def _is_youtube_auth_error(self, exc: BaseException | None) -> bool:
+        text = f"{exc or ''} {getattr(exc, 'detail', '') if exc is not None else ''}".lower()
+        return any(token in text for token in ("sign in", "not a bot", "login", "cookies"))
+
+    def _youtube_client_run_sets(self, *, has_cookies: bool) -> list[tuple[tuple[str, ...] | None, bool]]:
+        """Ordem curta de tentativas para YouTube local.
+
+        O maior gargalo da VPS era repetir várias extrações longas do mesmo vídeo
+        quando o YouTube respondia anti-bot. Mantemos poucas tentativas úteis:
+        cookies primeiro quando existem, clients móveis antes do web genérico e
+        no-cookie só como último recurso rápido.
+        """
+        preferred = MUSIC_LOCAL_YOUTUBE_CLIENTS or ("ios", "android", "web")
+        candidates: list[tuple[tuple[str, ...] | None, bool]] = []
+
+        def add(clients: tuple[str, ...] | None, cookies: bool) -> None:
+            item = (clients, bool(cookies))
+            if item not in candidates:
+                candidates.append(item)
+
+        if has_cookies and MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST:
+            add(preferred, True)
+            add(("ios",), True)
+            add(("android",), True)
+            add(("web",), True)
+            add(("ios",), False)
+        else:
+            add(("ios",), False)
+            add(preferred, False)
+            if has_cookies:
+                add(preferred, True)
+                add(("web",), True)
+        return candidates
 
     def _extract_stream_url_from_info(self, info: dict[str, Any]) -> tuple[str, int, str, str]:
         """Extrai uma URL de áudio real mesmo quando o yt-dlp retorna formatos.
@@ -1378,28 +1412,16 @@ class MusicExtractor:
 
         errors: list[str] = []
         if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
-            runs: list[tuple[bool | str, bool, tuple[str, ...] | None, bool]] = []
-
-            def _add_youtube_run(clients: tuple[str, ...] | None, use_cookies: bool) -> None:
-                item = (False, False, clients, bool(use_cookies))
-                if item not in runs:
-                    runs.append(item)
-
             has_cookies = bool(self._current_cookies_file())
-            if has_cookies and MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST:
-                # Na VPS atual, tentativas sem cookie costumam bater no anti-bot do
-                # YouTube e só atrasam. Começa pelo caminho com maior chance de tocar.
-                _add_youtube_run(("web",), True)
-                _add_youtube_run(MUSIC_LOCAL_YOUTUBE_CLIENTS, True)
-                _add_youtube_run(MUSIC_LOCAL_YOUTUBE_CLIENTS, False)
-            else:
-                _add_youtube_run(MUSIC_LOCAL_YOUTUBE_CLIENTS, False)
-                if has_cookies:
-                    _add_youtube_run(("web",), True)
-                    _add_youtube_run(MUSIC_LOCAL_YOUTUBE_CLIENTS, True)
-                else:
-                    _add_youtube_run(("web",), False)
+            runs = [(False, False, clients, use_cookies) for clients, use_cookies in self._youtube_client_run_sets(has_cookies=has_cookies)]
             format_fallbacks = self._fast_youtube_format_fallbacks(audio_max_abr)
+            logger.info(
+                "[music.local] youtube resolve start | cookies=%s clients=%s formats=%s source=%s",
+                "on" if has_cookies else "off",
+                ";".join(",".join(clients or ()) + ("+cookies" if use_cookies else "+nocookies") for _flat, _playlist, clients, use_cookies in runs),
+                ";".join(str(fmt) for fmt, _cap in format_fallbacks),
+                source,
+            )
         else:
             runs = [(False, False, None, True)]
             if profile.is_youtube:
@@ -1470,21 +1492,31 @@ class MusicExtractor:
                 except Exception as exc:
                     err_text = str(exc)
                     err_detail = str(getattr(exc, "detail", "") or "")
-                    errors.append(err_text or exc.__class__.__name__)
-                    if profile.is_youtube and not use_cookies:
-                        lower_error = f"{err_text} {err_detail}".lower()
-                        if "sign in" in lower_error or "login" in lower_error or "cookies" in lower_error or "not a bot" in lower_error:
-                            youtube_no_cookie_blocked = True
-                    logger.debug(
-                        "[music] stream resolve failed | source=%s clients=%s cookies=%s format=%s timeout=%s erro=%s",
-                        source,
-                        clients,
-                        bool(use_cookies),
+                    err_label = err_text or exc.__class__.__name__
+                    errors.append(err_label)
+                    auth_block = bool(profile.is_youtube and self._is_youtube_auth_error(exc))
+                    if profile.is_youtube and not use_cookies and auth_block:
+                        youtube_no_cookie_blocked = True
+                    log_fn = logger.warning if (profile.is_youtube and auth_block) else logger.info
+                    log_fn(
+                        "[music.local] stream resolve failed | source=%s clients=%s cookies=%s format=%s timeout=%s erro=%s detail=%s",
+                        "youtube" if profile.is_youtube else source,
+                        ",".join(clients or ()),
+                        "on" if use_cookies else "off",
                         format_selector,
                         attempt_timeout,
-                        err_text or exc.__class__.__name__,
-                        exc_info=True,
+                        err_label,
+                        err_detail[:180],
+                        exc_info=False,
                     )
+                    if profile.is_youtube and auth_block and use_cookies:
+                        # Se até com cookies o YouTube respondeu anti-bot, repetir
+                        # vários formatos normalmente só aumenta 20-60s de espera.
+                        # Tenta no máximo outro client; depois falha com mensagem clara.
+                        cookie_auth_errors = sum(1 for item in errors if "cookie" in item.lower() or "login" in item.lower() or "not a bot" in item.lower() or "sign in" in item.lower())
+                        if cookie_auth_errors >= 2:
+                            detail = "YouTube bloqueou a VPS mesmo usando cookies. Atualize o cookies.txt ou teste outro IP/rota. " + (err_detail or err_label)
+                            raise MusicExtractionError("YouTube bloqueou a reprodução local por anti-bot/cookies.", detail=detail) from exc
 
         # Último fallback: busca pelo título atual e resolve candidatos alternativos.
         if track.title and not profile.is_metadata_only and not profile.is_youtube:
@@ -1520,6 +1552,12 @@ class MusicExtractor:
                     errors.append(str(exc))
 
         detail = " | ".join(e for e in errors if e)[-500:]
+        lower_detail = detail.lower()
+        if profile.is_youtube and any(token in lower_detail for token in ("sign in", "not a bot", "login", "cookies")):
+            raise MusicExtractionError(
+                "YouTube bloqueou a reprodução local por anti-bot/cookies.",
+                detail=detail or "Atualize o cookies.txt ou teste outro IP/rota da VPS.",
+            )
         raise MusicExtractionError("Não consegui obter o stream de áudio dessa música.", detail=detail)
 
     async def _try_extract_metadata(self, url: str, *, requester_id: int, requester_name: str = "") -> ExtractedBatch | None:

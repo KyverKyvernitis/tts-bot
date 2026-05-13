@@ -2383,6 +2383,9 @@ class AudioRouter:
                 state.skip_transition_active = False
 
                 played_ok = False
+                playback_failed = False
+                playback_failed_before_start = False
+                playback_failure_label = ""
                 state.skip_requested = False
                 state.control_votes.clear()
                 for task in list(state.control_vote_cleanup_tasks.values()):
@@ -2392,8 +2395,11 @@ class AudioRouter:
                 try:
                     played_ok = await self._play_track(guild, state, track)
                 except Exception as exc:
+                    playback_failed = True
+                    playback_failed_before_start = not bool(float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0))
+                    playback_failure_label = self._exc_label(exc)
                     if not state.skip_requested and not state.stop_requested:
-                        logger.warning("[music] Falha ao tocar | guild=%s track=%r erro=%s", guild_id, track.title, exc)
+                        logger.warning("[music] Falha ao tocar | guild=%s track=%r erro=%s", guild_id, track.title, self._exc_label(exc))
                         await self._send_text(guild, state, f"⚠️ Não consegui iniciar **{track.short_title}**. Se houver outra música no queue, vou tentar a próxima.")
                 finally:
                     state.current_source = None
@@ -2434,7 +2440,15 @@ class AudioRouter:
                     # definir current e redesenhar o painel como preparando/tocando.
                     if not skip_to_next:
                         if not state.stop_requested and not self._has_pending_track(state):
-                            self._set_idle_reason(state, "queue_finished")
+                            if playback_failed and playback_failed_before_start:
+                                self._set_idle_reason(
+                                    state,
+                                    "track_failed",
+                                    actor_name=getattr(track, "short_title", None) or getattr(track, "title", "") or "essa música",
+                                )
+                                state.idle_channel_name = playback_failure_label[:160]
+                            else:
+                                self._set_idle_reason(state, "queue_finished")
                             self._set_panel_controls_invalidation(guild_id, delay=60.0)
                             await self.schedule_music_idle_disconnect(guild_id)
                         self._schedule_panel_update(guild_id, create=bool(state.now_message))
@@ -2442,7 +2456,8 @@ class AudioRouter:
             state.worker_task = None
             if state.stop_requested or not self._has_pending_track(state):
                 if not state.stop_requested and not self._has_pending_track(state):
-                    self._set_idle_reason(state, "queue_finished")
+                    if str(getattr(state, "idle_reason", "") or "") != "track_failed":
+                        self._set_idle_reason(state, "queue_finished")
                     self._set_panel_controls_invalidation(guild_id, delay=60.0)
                 state.current = None
                 state.current_started_at_monotonic = 0.0
@@ -2904,11 +2919,6 @@ class AudioRouter:
             with contextlib.suppress(Exception):
                 playback_start_offset = min(playback_start_offset, max(0.0, float(track.duration) - 0.25))
 
-        vc = await self._ensure_voice(guild, channel, state=state)
-        if vc is None:
-            raise RuntimeError("Não consegui conectar ao canal de voz.")
-        await self._boost_auto_bitrate_for_music(guild, channel, state)
-
         try:
             local_resolve_started = time.monotonic()
             await self._resolve_current_track(state, track)
@@ -2925,6 +2935,14 @@ class AudioRouter:
             raise MusicPlaybackError("Playback cancelado.")
         if not track.stream_url:
             raise MusicExtractionError("A música não retornou URL de stream.")
+
+        # Só entra/move para a call depois que existe stream válido. Antes disso
+        # ficaríamos conectando/desconectando enquanto o yt-dlp falha por anti-bot,
+        # e a UI tratava a falha como fim normal de fila.
+        vc = await self._ensure_voice(guild, channel, state=state)
+        if vc is None:
+            raise RuntimeError("Não consegui conectar ao canal de voz.")
+        await self._boost_auto_bitrate_for_music(guild, channel, state)
 
         self._set_current_status(state, "starting")
         if direct_youtube_request:
