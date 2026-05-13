@@ -327,10 +327,7 @@ class Music(commands.Cog):
         if should_open_selection:
             embed = discord.Embed(
                 title="🔎 Escolha a música",
-                description=(
-                    "Selecione um dos resultados abaixo. Nada será adicionado ao queue até você escolher. "
-                    "Resultados do YouTube tentam LavaSrc por autor e título exatos; se não bater, tocam pelo player local."
-                ),
+                description="Selecione um dos resultados abaixo.",
                 color=discord.Color.blurple(),
             )
             for idx, track in enumerate(batch.tracks[:10], start=1):

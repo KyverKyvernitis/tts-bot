@@ -1739,25 +1739,57 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         router = getattr(getattr(self, "bot", None), "audio_router", None)
-        if self._music_player_is_active(guild.id):
-            print(f"[tts_voice] auto-leave ignorado | player de música ativo | guild={guild.id}")
-            return
-
         vc = self._get_voice_client_for_guild(guild)
         if vc is None or not self._voice_client_is_connected(vc) or self._voice_client_channel(vc) is None:
             return
-        if self._voice_channel_has_only_bots_or_is_empty(self._voice_client_channel(vc)):
-            should_defer = getattr(router, "should_defer_tts_auto_leave", None)
-            if callable(should_defer):
-                try:
-                    if should_defer(guild.id):
+
+        channel = self._voice_client_channel(vc)
+        only_bots_or_empty = self._voice_channel_has_only_bots_or_is_empty(channel)
+
+        should_defer = getattr(router, "should_defer_tts_auto_leave", None)
+        if callable(should_defer):
+            try:
+                if should_defer(guild.id):
+                    occupancy_update = getattr(router, "handle_music_voice_occupancy_update", None)
+                    if callable(occupancy_update):
+                        await occupancy_update(guild.id, auto_leave_enabled=True)
+                    elif only_bots_or_empty:
                         schedule_idle = getattr(router, "schedule_music_idle_disconnect", None)
                         if callable(schedule_idle):
                             await schedule_idle(guild.id)
-                        print(f"[tts_voice] auto-leave instantâneo adiado | sessão de música aguardando timeout | guild={guild.id}")
-                        return
-                except Exception:
-                    pass
+                    if only_bots_or_empty:
+                        print(f"[tts_voice] auto-leave adiado | sessão de música em contagem AFK | guild={guild.id}")
+                    return
+            except Exception:
+                pass
+
+        if self._music_player_is_active(guild.id):
+            if only_bots_or_empty:
+                schedule_idle = getattr(router, "schedule_music_idle_disconnect", None)
+                if callable(schedule_idle):
+                    await schedule_idle(guild.id)
+                print(f"[tts_voice] auto-leave adiado | player de música ativo em contagem AFK | guild={guild.id}")
+            return
+
+        if only_bots_or_empty:
+            # TTS puro: não sai mais imediatamente. Dá 2s para estabilizar voice
+            # state/reconexões rápidas e só então confirma se ainda está sozinho.
+            await asyncio.sleep(2.0)
+            auto_leave_enabled = await self._get_guild_toggle_value(
+                guild.id,
+                public_key="auto_leave",
+                raw_key="auto_leave_enabled",
+                default=True,
+            )
+            if not auto_leave_enabled:
+                return
+            vc = self._get_voice_client_for_guild(guild)
+            if vc is None or not self._voice_client_is_connected(vc) or self._voice_client_channel(vc) is None:
+                return
+            if self._music_player_is_active(guild.id):
+                return
+            if not self._voice_channel_has_only_bots_or_is_empty(self._voice_client_channel(vc)):
+                return
             print(f"[tts_voice] saindo da call | sozinho ou só com bots | guild={guild.id} channel={getattr(self._voice_client_channel(vc), 'id', None)}")
             await self._disconnect_and_clear(guild)
 

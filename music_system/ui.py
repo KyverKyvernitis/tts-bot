@@ -696,10 +696,7 @@ class AddSongModal(discord.ui.Modal):
         if should_open_selection:
             embed = discord.Embed(
                 title="🔎 Escolha a música",
-                description=(
-                    "Selecione um dos resultados abaixo. Nada será adicionado ao queue até você escolher. "
-                    "Resultados do YouTube tentam um espelho no LavaSrc e caem para o player local se necessário."
-                ),
+                description="Selecione um dos resultados abaixo.",
                 color=discord.Color.blurple(),
             )
             for idx, track in enumerate(batch.tracks[:10], start=1):

@@ -35,6 +35,7 @@ MUSIC_LAVALINK_TTS_PAUSE_ENABLED = bool(getattr(config, "MUSIC_LAVALINK_TTS_PAUS
 MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS = max(0.2, float(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS", 0.35)))
 MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL = bool(getattr(config, "MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL", True))
 MUSIC_IDLE_DISCONNECT_SECONDS = max(15.0, float(getattr(config, "MUSIC_IDLE_DISCONNECT_SECONDS", 120)))
+MUSIC_AFK_DISCONNECT_GRACE_SECONDS = max(0.0, float(getattr(config, "MUSIC_AFK_DISCONNECT_GRACE_SECONDS", 2.0)))
 MUSIC_QUEUE_MAXSIZE = min(100, max(1, int(getattr(config, "MUSIC_QUEUE_MAXSIZE", 100))))
 MUSIC_MAX_PLAYLIST_ITEMS = min(100, max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 100))))
 MUSIC_SEARCH_RESULTS = max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5))))
@@ -427,6 +428,7 @@ class MusicGuildState:
     tts_lavalink_failures: int = 0
     music_session_active: bool = False
     music_idle_disconnect_task: Optional[asyncio.Task] = None
+    music_afk_expired: bool = False
     control_votes: dict[str, ControlVote] = field(default_factory=dict)
     control_vote_cleanup_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     volume_loaded: bool = False
@@ -546,6 +548,7 @@ class AudioRouter:
         state.current_lavalink_playable = None
         state.current_backend = "local"
         state.music_session_active = False
+        state.music_afk_expired = False
         state.paused = False
         state.skip_transition_active = False
         state.skip_history_suppressed_once = False
@@ -1847,6 +1850,7 @@ class AudioRouter:
         self._reset_stale_resolving_state(int(guild_id), state, reason="tts_auto_leave")
         return bool(
             state.music_session_active
+            or state.music_afk_expired
             or state.current
             or self._has_pending_track(state)
             or state.current_resolve_task
@@ -1855,18 +1859,79 @@ class AudioRouter:
             or self._is_lavalink_transition_recent(state)
         )
 
+    async def _music_auto_leave_enabled(self, guild_id: int) -> bool:
+        tts_cog = None
+        getter = getattr(self.bot, "get_cog", None)
+        if callable(getter):
+            with contextlib.suppress(Exception):
+                tts_cog = getter("TTSVoice")
+        toggle_getter = getattr(tts_cog, "_get_guild_toggle_value", None) if tts_cog is not None else None
+        if callable(toggle_getter):
+            try:
+                result = toggle_getter(
+                    int(guild_id),
+                    public_key="auto_leave",
+                    raw_key="auto_leave_enabled",
+                    default=True,
+                )
+                if asyncio.iscoroutine(result):
+                    result = await result
+                return bool(result)
+            except Exception:
+                return True
+        return True
+
+    def _voice_channel_has_humans(self, channel: Any) -> bool:
+        if channel is None:
+            return False
+        try:
+            return any(not getattr(member, "bot", False) for member in getattr(channel, "members", []) or [])
+        except Exception:
+            return False
+
+    async def handle_music_voice_occupancy_update(self, guild_id: int, *, auto_leave_enabled: bool = True) -> None:
+        state = self.get_state(guild_id)
+        if not auto_leave_enabled:
+            self._cancel_music_idle_disconnect(state)
+            return
+        if not self.should_defer_tts_auto_leave(guild_id):
+            return
+        guild = self.bot.get_guild(int(guild_id))
+        vc = getattr(guild, "voice_client", None) if guild is not None else None
+        channel = getattr(vc, "channel", None)
+        has_humans = self._voice_channel_has_humans(channel)
+        if has_humans:
+            # Antes dos 2 minutos, a volta de alguém cancela a contagem. Depois que
+            # o estado AFK expirou, a saída final não é cancelada por presença tardia.
+            if not state.music_afk_expired:
+                self._cancel_music_idle_disconnect(state)
+            return
+        await self.schedule_music_idle_disconnect(guild_id)
+
     async def schedule_music_idle_disconnect(self, guild_id: int, *, delay: float | None = None) -> None:
         state = self.get_state(guild_id)
         if state.music_idle_disconnect_task is not None and not state.music_idle_disconnect_task.done():
             return
         delay_seconds = MUSIC_IDLE_DISCONNECT_SECONDS if delay is None else max(0.0, float(delay))
+        state.music_afk_expired = False
 
         async def _runner() -> None:
             try:
                 await asyncio.sleep(delay_seconds)
+                st = self.get_state(guild_id)
+                if not await self._music_auto_leave_enabled(guild_id):
+                    st.music_afk_expired = False
+                    return
+                st.music_afk_expired = True
+                # Estado AFK: a sessão musical expirou. A presença de alguém depois
+                # daqui não reinicia nem cancela a saída final.
+                await asyncio.sleep(MUSIC_AFK_DISCONNECT_GRACE_SECONDS)
+                if not await self._music_auto_leave_enabled(guild_id):
+                    st.music_afk_expired = False
+                    return
                 guild = self.bot.get_guild(int(guild_id))
                 if guild is not None:
-                    await self._maybe_disconnect_idle(guild, self.get_state(guild_id))
+                    await self._disconnect_music_afk(guild, self.get_state(guild_id))
             finally:
                 st = self.get_state(guild_id)
                 if st.music_idle_disconnect_task is task:
@@ -1878,9 +1943,13 @@ class AudioRouter:
 
     def _cancel_music_idle_disconnect(self, state: MusicGuildState) -> None:
         task = state.music_idle_disconnect_task
-        if task is not None and not task.done():
+        current_task = None
+        with contextlib.suppress(RuntimeError):
+            current_task = asyncio.current_task()
+        if task is not None and not task.done() and task is not current_task:
             task.cancel()
         state.music_idle_disconnect_task = None
+        state.music_afk_expired = False
 
     async def close(self) -> None:
         for task in list(getattr(self, "_lavalink_shadow_tasks", {}).values()):
@@ -2363,6 +2432,10 @@ class AudioRouter:
                     # estado intermediário vazio/queued. A próxima iteração já vai
                     # definir current e redesenhar o painel como preparando/tocando.
                     if not skip_to_next:
+                        if not state.stop_requested and not self._has_pending_track(state):
+                            self._set_idle_reason(state, "queue_finished")
+                            self._set_panel_controls_invalidation(guild_id, delay=60.0)
+                            await self.schedule_music_idle_disconnect(guild_id)
                         self._schedule_panel_update(guild_id, create=bool(state.now_message))
         finally:
             state.worker_task = None
@@ -2925,10 +2998,76 @@ class AudioRouter:
             logger.warning("[music] falha ao conectar | guild=%s channel=%s erro=%s", guild.id, getattr(channel, "id", None), exc)
             return guild.voice_client if guild.voice_client and self._vc_is_connected(guild.voice_client) else None
 
+    async def _disconnect_music_afk(self, guild: discord.Guild, state: MusicGuildState) -> None:
+        if guild is None:
+            return
+        if not await self._music_auto_leave_enabled(guild.id):
+            state.music_afk_expired = False
+            return
+        logger.info("[music] sessão musical AFK expirada; saindo da call | guild=%s", guild.id)
+        state.stop_requested = True
+        state.skip_requested = True
+        self._cancel_next_prefetch(state)
+        self._set_idle_reason(state, "music_afk")
+        self._invalidate_panel_controls_now(guild.id)
+        for _vote_action in ("skip", "stop"):
+            state.control_votes.pop(_vote_action, None)
+            _vote_task = state.control_vote_cleanup_tasks.pop(_vote_action, None)
+            if _vote_task is not None and not _vote_task.done():
+                _vote_task.cancel()
+        if state.current_resolve_task is not None and not state.current_resolve_task.done():
+            state.current_resolve_task.cancel()
+        if state.current_source is not None:
+            with contextlib.suppress(Exception):
+                state.current_source.cleanup()
+        while not state.queue.empty():
+            with contextlib.suppress(Exception):
+                state.queue.get_nowait()
+                state.queue.task_done()
+        state.forward_queue.clear()
+
+        vc = getattr(guild, "voice_client", None)
+        if vc is not None and self._vc_is_connected(vc):
+            with contextlib.suppress(Exception):
+                if self._vc_is_playing_or_paused(vc):
+                    await self._vc_stop_audio(vc)
+            with contextlib.suppress(Exception):
+                self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
+                await vc.disconnect(force=False)
+
+        state.current = None
+        state.current_started_at_monotonic = 0.0
+        state.current_start_offset_seconds = 0.0
+        state.next_local_start_offset_seconds = 0.0
+        state.current_source = None
+        state.current_resolve_task = None
+        state.current_backend = "local"
+        state.current_lavalink_player = None
+        state.current_lavalink_playable = None
+        state.lavalink_tts_until = 0.0
+        state.lavalink_resume_grace_until = 0.0
+        state.tts_session_active_until = 0.0
+        state.tts_session_last_error = ""
+        state.skip_transition_active = False
+        state.skip_history_suppressed_once = False
+        state.paused = False
+        state.music_session_active = False
+        state.music_owns_voice = False
+        state.music_afk_expired = False
+        self._set_current_status(state, "idle")
+        state.control_votes.clear()
+        for _vote_task in list(state.control_vote_cleanup_tasks.values()):
+            if _vote_task is not None and not _vote_task.done():
+                _vote_task.cancel()
+        state.control_vote_cleanup_tasks.clear()
+        await self._restore_auto_bitrate_for_state(guild, state, reason="music_afk")
+        await self._restore_voice_status_for_state(guild, state, reason="music_afk")
+        await self.update_panel(guild.id, create=bool(state.now_message))
+
     async def _maybe_disconnect_idle(self, guild: discord.Guild, state: MusicGuildState) -> None:
-        # Sem modo 24/7 para música: quando a música/fila acabam e o bot fica
-        # sozinho ou só com bots, ele sai depois do timeout de música. Se ainda
-        # há humanos, a conexão pode continuar para o TTS usar.
+        # Sem modo 24/7 para música: quando a música/fila acabam, a sessão entra
+        # em contagem AFK de música. Depois que a contagem expira, a saída final
+        # acontece após a graça curta de TTS e não é cancelada por presença tardia.
         self._set_current_status(state, "idle")
         if not state.current and not self._has_pending_track(state) and state.idle_reason == "idle":
             self._set_idle_reason(state, "queue_finished")
@@ -2937,24 +3076,21 @@ class AudioRouter:
         if not vc or not self._vc_is_connected(vc) or getattr(vc, "channel", None) is None:
             state.music_session_active = False
             state.music_owns_voice = False
+            state.music_afk_expired = False
             await self.update_panel(guild.id, create=False)
             return
         if state.current or self._has_pending_track(state) or state.current_resolve_task or state.current_source:
+            await self.schedule_music_idle_disconnect(guild.id)
             return
-        # Se algum áudio direto do TTS ainda estiver tocando, não derruba a call.
+        # Se algum áudio direto do TTS ainda estiver tocando, tenta novamente logo.
         if self._vc_is_playing_or_paused(vc):
             await self.schedule_music_idle_disconnect(guild.id, delay=15.0)
             return
         try:
-            members = list(getattr(vc.channel, "members", []))
-            humans = [m for m in members if not getattr(m, "bot", False)]
-            if humans:
+            if self._voice_channel_has_humans(getattr(vc, "channel", None)) and not state.music_afk_expired:
                 await self.update_panel(guild.id, create=False)
                 return
-            self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
-            await vc.disconnect(force=False)
-            state.music_owns_voice = False
-            state.music_session_active = False
+            await self.schedule_music_idle_disconnect(guild.id, delay=0.0)
             await self.update_panel(guild.id, create=False)
         except Exception:
             logger.debug("[music] idle disconnect falhou", exc_info=True)
