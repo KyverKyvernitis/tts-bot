@@ -65,6 +65,7 @@ MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE = bool(getattr(config, "MUSIC_LOCAL_YOUTUBE_FAS
 MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST = bool(getattr(config, "MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST", True))
 MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS = max(3.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS", 9.0)))
 MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS", 2.5)))
+MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS = max(6.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS", 14.0)))
 
 
 def _client_tuple(value: object, default: tuple[str, ...] = ("android", "web")) -> tuple[str, ...]:
@@ -522,14 +523,11 @@ class MusicExtractor:
         except Exception:
             max_abr = 0
         if max_abr <= 0:
-            return MUSIC_YTDLP_FORMAT or "bestaudio[acodec=opus][vcodec=none]/bestaudio[ext=webm][vcodec=none]/bestaudio[ext=m4a][vcodec=none]/bestaudio[vcodec=none]/bestaudio/best"
+            return MUSIC_YTDLP_FORMAT or "bestaudio/best"
         return (
-            f"bestaudio[acodec=opus][vcodec=none][abr<={max_abr}]/"
-            f"bestaudio[ext=webm][vcodec=none][abr<={max_abr}]/"
-            f"bestaudio[ext=m4a][vcodec=none][abr<={max_abr}]/"
-            f"bestaudio[vcodec=none][abr<={max_abr}]/"
+            f"bestaudio[abr<={max_abr}]/"
             f"ba[abr<={max_abr}]/"
-            "bestaudio[acodec=opus][vcodec=none]/bestaudio[ext=m4a][vcodec=none]/bestaudio/best"
+            "bestaudio/best"
         )
 
     def _safe_format_fallbacks(self, audio_max_abr: int | None = None) -> list[tuple[str, int | None]]:
@@ -571,12 +569,12 @@ class MusicExtractor:
         return unique
 
     def _fast_youtube_format_fallbacks(self, audio_max_abr: int | None = None) -> list[tuple[str, int | None]]:
-        """Seletores locais para YouTube: qualidade primeiro, estabilidade depois.
+        """Seletores locais para YouTube: melhor áudio primeiro, fallbacks estáveis.
 
-        O primeiro seletor tenta o melhor áudio disponível. Se o YouTube/yt-dlp
-        recusar o seletor para um client específico, os próximos fallbacks ainda
-        priorizam áudio-only estável: Opus/WebM, depois M4A/MP4A, depois qualquer
-        áudio e, por último, deixa o yt-dlp decidir sozinho.
+        Não usa o MUSIC_YTDLP_FORMAT como primeira opção porque ele pode vir do
+        .env com filtros antigos/rígidos. Para YouTube local, o caminho crítico
+        deve primeiro deixar o yt-dlp escolher o melhor áudio disponível e só
+        depois tentar fallbacks previsíveis.
         """
         try:
             max_abr = int(audio_max_abr or 0)
@@ -585,17 +583,16 @@ class MusicExtractor:
         requested_cap = max_abr if max_abr > 0 else None
         if requested_cap:
             candidates: list[tuple[str, int | None]] = [
-                (f"bestaudio[abr<={requested_cap}]/bestaudio/best", requested_cap),
-                (f"bestaudio[acodec*=opus][abr<={requested_cap}]/bestaudio[ext=webm][abr<={requested_cap}]/bestaudio[ext=m4a][abr<={requested_cap}]/ba[abr<={requested_cap}]/ba/b", requested_cap),
+                (f"bestaudio[abr<={requested_cap}]/ba[abr<={requested_cap}]/bestaudio/best", requested_cap),
                 ("bestaudio/best", None),
+                ("bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best", None),
                 ("ba/b", None),
                 (_AUTO_FORMAT_SENTINEL, None),
             ]
         else:
             candidates = [
-                (MUSIC_YTDLP_FORMAT or "bestaudio/best", None),
-                ("bestaudio[acodec*=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best", None),
                 ("bestaudio/best", None),
+                ("bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best", None),
                 ("ba/b", None),
                 (_AUTO_FORMAT_SENTINEL, None),
             ]
@@ -616,12 +613,10 @@ class MusicExtractor:
     def _youtube_client_run_sets(self, *, has_cookies: bool) -> list[tuple[tuple[str, ...] | None, bool]]:
         """Ordem curta de tentativas para YouTube local.
 
-        O maior gargalo da VPS era repetir várias extrações longas do mesmo vídeo
-        quando o YouTube respondia anti-bot. Mantemos poucas tentativas úteis:
-        cookies primeiro quando existem, clients móveis antes do web genérico e
-        no-cookie só como último recurso rápido.
+        O caminho que listou formatos reais na VPS foi o client padrão do yt-dlp
+        com cookies. Clients forçados entram só como fallback curto, nunca como
+        matriz longa que prende o painel.
         """
-        preferred = MUSIC_LOCAL_YOUTUBE_CLIENTS or ("ios", "android", "web")
         candidates: list[tuple[tuple[str, ...] | None, bool]] = []
 
         def add(clients: tuple[str, ...] | None, cookies: bool) -> None:
@@ -630,23 +625,14 @@ class MusicExtractor:
                 candidates.append(item)
 
         if has_cookies and MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST:
-            # Primeiro o client padrão do yt-dlp com cookies. Foi o caminho que
-            # listou formatos reais na VPS; forçar ios/android/web antes disso
-            # pode causar "Requested format is not available" mesmo havendo áudio.
-            add(None, True)
-            add(preferred, True)
-            add(("web",), True)
-            add(("android",), True)
-            add(("ios",), True)
-            # Sem cookies apenas como último teste curto, porque a VPS costuma
-            # receber anti-bot do YouTube sem cookies.
-            add(None, False)
+            add(None, True)          # client padrão + cookies: melhor chance de formato real
+            add(("web",), True)      # fallback estável
+            add(("android",), True)  # fallback curto
+            add(None, False)         # último teste rápido; VPS costuma cair em anti-bot
         else:
             add(None, False)
-            add(preferred, False)
             if has_cookies:
                 add(None, True)
-                add(preferred, True)
                 add(("web",), True)
         return candidates
 
@@ -1450,14 +1436,17 @@ class MusicExtractor:
             format_fallbacks = self._safe_format_fallbacks(audio_max_abr)
 
         resolve_started = time.monotonic()
+        total_timeout: float | None = None
+        if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
+            total_timeout = MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS
         youtube_no_cookie_blocked = False
         attempt_plan: list[tuple[str, int | None, bool, bool, tuple[str, ...] | None, bool]] = []
         if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
-            # Para YouTube local, testa todos os formatos úteis no client padrão
-            # antes de forçar clients específicos. Isso preserva melhor áudio e
-            # evita repetir o erro "Requested format is not available" em cadeia.
-            for flat, playlist, clients, use_cookies in runs:
-                for format_selector, format_cap in format_fallbacks:
+            # Testa todos os formatos úteis só no primeiro run (client padrão).
+            # Runs forçados entram com poucas opções para não prender o painel.
+            for run_index, (flat, playlist, clients, use_cookies) in enumerate(runs):
+                run_formats = format_fallbacks if run_index == 0 else [("bestaudio/best", None), (_AUTO_FORMAT_SENTINEL, None)]
+                for format_selector, format_cap in run_formats:
                     attempt_plan.append((format_selector, format_cap, flat, playlist, clients, use_cookies))
         else:
             for format_selector, format_cap in format_fallbacks:
@@ -1467,6 +1456,16 @@ class MusicExtractor:
         for format_selector, format_cap, flat, playlist, clients, use_cookies in attempt_plan:
             if profile.is_youtube and not use_cookies and youtube_no_cookie_blocked:
                 continue
+            elapsed_total = time.monotonic() - resolve_started
+            if total_timeout is not None and elapsed_total >= total_timeout:
+                errors.append(f"timeout total de resolução local do YouTube após {total_timeout:.1f}s")
+                logger.warning(
+                    "[music.local] youtube resolve total timeout | source=youtube elapsed=%.2fs timeout=%.2fs attempts=%s",
+                    elapsed_total,
+                    total_timeout,
+                    len(errors),
+                )
+                break
             try:
                 attempt_started = time.monotonic()
                 attempt_timeout: float | None = None
@@ -1474,6 +1473,9 @@ class MusicExtractor:
                     attempt_timeout = MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS
                     if not use_cookies:
                         attempt_timeout = min(attempt_timeout, MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS)
+                    if total_timeout is not None:
+                        remaining = max(0.8, total_timeout - (time.monotonic() - resolve_started))
+                        attempt_timeout = min(attempt_timeout, remaining)
                 info = await self._run_extract(
                     source,
                     extract_flat=flat,

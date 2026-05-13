@@ -2618,18 +2618,21 @@ class AudioRouter:
         return True
 
     def _start_youtube_direct_metadata_refresh(self, guild_id: int, state: MusicGuildState, track: MusicTrack) -> None:
-        """Hidrata metadata de link direto do YouTube depois do áudio iniciar.
+        """Hidrata metadata de link direto do YouTube em background.
 
         A chamada é fire-and-forget de propósito: YouTube API, oEmbed ou qualquer
         lookup de metadata nunca pode participar do caminho crítico de playback.
+        Ela pode rodar enquanto o stream local ainda está resolvendo; assim o
+        painel não fica preso em ``YouTube <id>``/``desconhecida``.
         """
         if not self._track_is_direct_youtube_request(track):
             return
 
         async def _runner() -> None:
             try:
-                # Dá preferência total ao thread de áudio/FFmpeg e ao primeiro
-                # update de estado. Metadata é acabamento visual, não requisito.
+                # Dá preferência ao caminho de áudio, mas não espera o start do
+                # FFmpeg: metadata visual deve atualizar o painel mesmo se o
+                # stream ainda estiver em resolução ou vier a falhar.
                 await asyncio.sleep(0.05)
                 if state.current is not track or state.stop_requested:
                     return
@@ -2639,7 +2642,7 @@ class AudioRouter:
                 if state.current is not track or state.stop_requested:
                     return
                 logger.info(
-                    "[music] metadata YouTube direta aplicada após start | guild=%s track=%r",
+                    "[music] metadata YouTube direta aplicada em background | guild=%s track=%r",
                     guild_id,
                     getattr(track, "title", ""),
                 )
@@ -2649,7 +2652,7 @@ class AudioRouter:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.debug("[music] metadata YouTube direta pós-start falhou | guild=%s", guild_id, exc_info=True)
+                logger.debug("[music] metadata YouTube direta em background falhou | guild=%s", guild_id, exc_info=True)
 
         try:
             task = asyncio.create_task(_runner())
@@ -2847,6 +2850,11 @@ class AudioRouter:
                 guild.id,
                 getattr(track, "title", ""),
             )
+            # Não aguarda metadata, mas já dispara atualização visual e painel.
+            # O resolver de áudio continua em primeiro plano; a API só embeleza
+            # título/autor/duração/thumb quando responder.
+            self._start_youtube_direct_metadata_refresh(guild.id, state, track)
+            self._schedule_panel_update(guild.id, create=True)
 
         if use_lavalink_real:
             try:
