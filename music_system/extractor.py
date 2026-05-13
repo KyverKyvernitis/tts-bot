@@ -55,6 +55,24 @@ MUSIC_REJECT_WEAK_LINK_MATCHES = bool(getattr(config, "MUSIC_REJECT_WEAK_LINK_MA
 MUSIC_MAX_DURATION_MISMATCH_SECONDS = max(0.0, float(getattr(config, "MUSIC_MAX_DURATION_MISMATCH_SECONDS", 45.0)))
 MUSIC_MAX_DURATION_MISMATCH_RATIO = max(0.0, float(getattr(config, "MUSIC_MAX_DURATION_MISMATCH_RATIO", 0.25)))
 MUSIC_MAX_GLOBAL_EXTRACTORS = max(1, int(getattr(config, "MUSIC_MAX_GLOBAL_EXTRACTORS", 1)))
+MUSIC_YOUTUBE_SEARCH_API_FIRST = bool(getattr(config, "MUSIC_YOUTUBE_SEARCH_API_FIRST", True))
+MUSIC_YOUTUBE_SEARCH_FAST_ONLY = bool(getattr(config, "MUSIC_YOUTUBE_SEARCH_FAST_ONLY", True))
+MUSIC_YOUTUBE_SEARCH_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "MUSIC_YOUTUBE_SEARCH_TIMEOUT_SECONDS", 7.0)))
+MUSIC_YOUTUBE_SEARCH_USE_COOKIES = bool(getattr(config, "MUSIC_YOUTUBE_SEARCH_USE_COOKIES", False))
+MUSIC_YOUTUBE_DIRECT_FAST_ENQUEUE = bool(getattr(config, "MUSIC_YOUTUBE_DIRECT_FAST_ENQUEUE", True))
+MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS = max(0.5, float(getattr(config, "MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS", 1.4)))
+MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE = bool(getattr(config, "MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE", True))
+
+
+def _client_tuple(value: object, default: tuple[str, ...] = ("android", "web")) -> tuple[str, ...]:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    clients = tuple(part.strip() for part in raw.split(",") if part.strip())
+    return clients or default
+
+
+MUSIC_LOCAL_YOUTUBE_CLIENTS = _client_tuple(getattr(config, "MUSIC_LOCAL_YOUTUBE_CLIENTS", "android,web"))
 _GLOBAL_YTDLP_SEMAPHORE: asyncio.Semaphore | None = None
 
 
@@ -548,6 +566,31 @@ class MusicExtractor:
             unique.append((fmt, cap))
         return unique
 
+    def _fast_youtube_format_fallbacks(self, audio_max_abr: int | None = None) -> list[tuple[str, int | None]]:
+        """Formato local rápido para YouTube.
+
+        Evita a matriz grande de fallbacks no caminho comum. Se o seletor
+        principal falhar, tenta um seletor amplo; sem busca por título depois.
+        """
+        try:
+            max_abr = int(audio_max_abr or 0)
+        except Exception:
+            max_abr = 0
+        requested_cap = max_abr if max_abr > 0 else None
+        candidates = [
+            (self._format_for_quality(audio_max_abr), requested_cap),
+            ("bestaudio/best", None),
+        ]
+        seen: set[str] = set()
+        unique: list[tuple[str, int | None]] = []
+        for fmt, cap in candidates:
+            fmt = str(fmt or "").strip()
+            if not fmt or fmt in seen:
+                continue
+            seen.add(fmt)
+            unique.append((fmt, cap))
+        return unique
+
     def _extract_stream_url_from_info(self, info: dict[str, Any]) -> tuple[str, int, str, str]:
         """Extrai uma URL de áudio real mesmo quando o yt-dlp retorna formatos.
 
@@ -620,7 +663,16 @@ class MusicExtractor:
         track.resolved_audio_codec = audio_codec
         return True
 
-    def _base_opts(self, *, extract_flat: bool | str = False, playlist: bool = False, youtube_clients: tuple[str, ...] | None = None, audio_max_abr: int | None = None, format_override: str | None = None) -> dict[str, Any]:
+    def _base_opts(
+        self,
+        *,
+        extract_flat: bool | str = False,
+        playlist: bool = False,
+        youtube_clients: tuple[str, ...] | None = None,
+        audio_max_abr: int | None = None,
+        format_override: str | None = None,
+        use_cookies: bool = True,
+    ) -> dict[str, Any]:
         opts: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -646,9 +698,13 @@ class MusicExtractor:
                 "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
             },
         }
-        format_value = str(format_override or self._format_for_quality(audio_max_abr) or "").strip()
-        if format_value and format_value != _AUTO_FORMAT_SENTINEL:
-            opts["format"] = format_value
+        # Busca/metadata flat não precisa calcular formato de áudio. Evitar esse
+        # seletor na pesquisa reduz trabalho do yt-dlp e deixa o painel responder
+        # mais rápido; o stream real é resolvido apenas na hora de tocar.
+        if not extract_flat:
+            format_value = str(format_override or self._format_for_quality(audio_max_abr) or "").strip()
+            if format_value and format_value != _AUTO_FORMAT_SENTINEL:
+                opts["format"] = format_value
         if opts["playlistend"] is None:
             opts.pop("playlistend", None)
         try:
@@ -663,7 +719,7 @@ class MusicExtractor:
             # Alta qualidade: ainda prioriza áudio-only Opus/M4A e 48 kHz quando
             # disponível, mas sem limitar abr.
             opts["format_sort"] = ["acodec:opus", "asr:48000", "vcodec:none", "ext:webm:m4a", "abr", "proto"]
-        cookies_file = self._current_cookies_file()
+        cookies_file = self._current_cookies_file() if use_cookies else ""
         if cookies_file:
             opts["cookiefile"] = cookies_file
         if youtube_clients:
@@ -755,10 +811,9 @@ class MusicExtractor:
     async def search_youtube(self, query: str, *, requester_id: int, requester_name: str = "") -> ExtractedBatch:
         """Busca leve no YouTube para UI/seleção, sem resolver stream.
 
-        O YouTube não deve ser tocado pelo Lavalink. Esta busca usa yt-dlp
-        apenas para listar resultados; quando o usuário escolher, o player
-        tenta espelhar no LavaSrc/SoundCloud/Spotify e cai para yt-dlp local
-        se não houver candidato confiável.
+        Prioriza fontes rápidas: YouTube Data API quando configurada e yt-dlp
+        em modo flat sem cookies por padrão. A resolução real do áudio fica para
+        o playback, para a tela de resultados responder sem travar.
         """
         query = re.sub(r"\s+", " ", (query or "").strip())
         if not query:
@@ -777,13 +832,47 @@ class MusicExtractor:
         if cached:
             return ExtractedBatch(tracks=cached[: self.search_results], query=query, is_playlist=False)
 
-        last_error: Exception | None = None
-        for extractor_query, flat in (
-            (f"ytsearch{self.search_results}:{query}", True),
-            (f"ytsearch{self.search_results}:{query}", False),
-        ):
+        if MUSIC_YOUTUBE_SEARCH_API_FIRST:
             try:
-                info = await self._run_extract(extractor_query, extract_flat=flat, playlist=True)
+                api_candidates = await asyncio.wait_for(
+                    self.api.youtube_search(query, limit=self.search_results),
+                    timeout=min(MUSIC_YOUTUBE_SEARCH_TIMEOUT_SECONDS, max(2.0, self.timeout_seconds)),
+                )
+                api_tracks = [
+                    self._track_from_api_candidate(candidate, requester_id=requester_id, requester_name=requester_name, original_url=query)
+                    for candidate in api_candidates
+                    if candidate.webpage_url
+                ]
+                api_tracks = self._dedupe_tracks(api_tracks)
+                if api_tracks:
+                    for track in api_tracks:
+                        track.source = track.source or "YouTube"
+                        track.extractor = track.extractor or "youtube"
+                    api_tracks = api_tracks[: self.search_results]
+                    self._cache_put_tracks(self._search_cache, cache_key, api_tracks)
+                    return ExtractedBatch(tracks=api_tracks, query=query, is_playlist=False)
+            except Exception:
+                logger.debug("[music] busca YouTube API falhou/expirou | query=%r", query, exc_info=True)
+
+        last_error: Exception | None = None
+        searches: list[tuple[str, bool | str, bool]] = [
+            (f"ytsearch{self.search_results}:{query}", "in_playlist", MUSIC_YOUTUBE_SEARCH_USE_COOKIES),
+        ]
+        if not MUSIC_YOUTUBE_SEARCH_FAST_ONLY:
+            searches.extend([
+                (f"ytmsearch{self.search_results}:{query}", "in_playlist", MUSIC_YOUTUBE_SEARCH_USE_COOKIES),
+                (f"ytsearch{self.search_results}:{query}", False, True),
+            ])
+
+        for extractor_query, flat, use_cookies in searches:
+            try:
+                info = await self._run_extract(
+                    extractor_query,
+                    extract_flat=flat,
+                    playlist=True,
+                    use_cookies=use_cookies,
+                    timeout_seconds=MUSIC_YOUTUBE_SEARCH_TIMEOUT_SECONDS,
+                )
                 entries = [entry for entry in (info.get("entries") or []) if entry]
                 tracks = [
                     self._track_from_info(entry, requester_id=requester_id, requester_name=requester_name, original_url=query)
@@ -794,9 +883,9 @@ class MusicExtractor:
                     for track in tracks:
                         if not track.source:
                             track.source = "youtube"
-                        # Marca claramente que veio de pesquisa. Isso permite
-                        # mirror LavaSrc antes do fallback local, diferente de
-                        # link direto do YouTube, que vai direto para yt-dlp.
+                        if not track.extractor:
+                            track.extractor = "youtube"
+                        # Resultado de pesquisa: no playback tenta LavaSrc e cai local.
                         if not track.original_url:
                             track.original_url = query
                     tracks = tracks[: self.search_results]
@@ -804,12 +893,13 @@ class MusicExtractor:
                     return ExtractedBatch(tracks=tracks, query=query, is_playlist=False)
             except Exception as exc:
                 last_error = exc
-                logger.debug("[music] busca YouTube falhou | query=%r flat=%s", query, flat, exc_info=True)
+                logger.debug("[music] busca YouTube rápida falhou | query=%r flat=%s", query, flat, exc_info=True)
 
         raise MusicExtractionError(
             "Não encontrei resultados no YouTube. Tente pesquisar com nome e artista.",
             detail=str(last_error or ""),
         )
+
 
     async def search_one(self, query: str, *, requester_id: int, requester_name: str = "", original_url: str = "") -> MusicTrack:
         """Busca uma única faixa. Usado por links de track Spotify/Deezer/Apple.
@@ -967,9 +1057,52 @@ class MusicExtractor:
 
         raise MusicExtractionError(self._metadata_error_message(profile.platform, None))
 
+    async def _quick_youtube_direct_batch(self, profile: UrlProfile, *, requester_id: int, requester_name: str = "") -> ExtractedBatch:
+        """Cria uma faixa leve para link direto do YouTube sem bloquear no yt-dlp.
+
+        O comando responde rápido e a URL real de áudio é resolvida só quando a
+        faixa virar atual. Se metadata pública demorar, usa o id/título genérico.
+        """
+        title = ""
+        thumbnail = ""
+        try:
+            raw_meta = await asyncio.wait_for(
+                asyncio.to_thread(
+                    fetch_public_metadata,
+                    profile.canonical,
+                    timeout=min(MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS, self.timeout_seconds),
+                ),
+                timeout=MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS + 0.35,
+            )
+            title = clean_metadata_title(str(raw_meta.get("title") or ""))
+            thumbnail = str(raw_meta.get("thumbnail") or "").strip()
+        except Exception:
+            logger.debug("[music] metadata rápida do YouTube ignorada | url=%s", profile.raw, exc_info=True)
+        video_id = str(getattr(profile, "youtube_video_id", "") or "").strip()
+        if not title:
+            title = f"YouTube {video_id}" if video_id else "YouTube"
+        if not thumbnail and video_id:
+            thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+        track = MusicTrack(
+            title=title,
+            webpage_url=profile.canonical or profile.raw,
+            requester_id=int(requester_id),
+            requester_name=requester_name,
+            duration=None,
+            uploader="YouTube",
+            thumbnail=thumbnail,
+            source="YouTube",
+            original_url=profile.raw,
+            extractor="youtube",
+        )
+        return ExtractedBatch(tracks=[track], query=profile.raw, is_playlist=False)
+
     async def _extract_youtube(self, profile: UrlProfile, *, requester_id: int, requester_name: str = "") -> ExtractedBatch:
         errors: list[str] = []
         candidates = unique_queries(profile.canonical, profile.raw)
+
+        if profile.resource_type != "playlist" and MUSIC_YOUTUBE_DIRECT_FAST_ENQUEUE:
+            return await self._quick_youtube_direct_batch(profile, requester_id=requester_id, requester_name=requester_name)
 
         if profile.resource_type == "playlist":
             try:
@@ -1151,11 +1284,19 @@ class MusicExtractor:
             return track
 
         errors: list[str] = []
-        runs: list[tuple[bool | str, bool, tuple[str, ...] | None]] = [(False, False, None)]
-        if profile.is_youtube:
-            runs.extend((False, False, clients) for clients in _YOUTUBE_CLIENT_SETS)
+        if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
+            runs: list[tuple[bool | str, bool, tuple[str, ...] | None]] = [
+                (False, False, MUSIC_LOCAL_YOUTUBE_CLIENTS),
+                (False, False, ("web",)),
+            ]
+            format_fallbacks = self._fast_youtube_format_fallbacks(audio_max_abr)
+        else:
+            runs = [(False, False, None)]
+            if profile.is_youtube:
+                runs.extend((False, False, clients) for clients in _YOUTUBE_CLIENT_SETS)
+            format_fallbacks = self._safe_format_fallbacks(audio_max_abr)
 
-        for format_selector, format_cap in self._safe_format_fallbacks(audio_max_abr):
+        for format_selector, format_cap in format_fallbacks:
             for flat, playlist, clients in runs:
                 try:
                     info = await self._run_extract(
@@ -1197,7 +1338,7 @@ class MusicExtractor:
                     )
 
         # Último fallback: busca pelo título atual e resolve candidatos alternativos.
-        if track.title and not profile.is_metadata_only:
+        if track.title and not profile.is_metadata_only and not profile.is_youtube:
             fallback_queries = self._search_queries_for_metadata(
                 ApiTrackCandidate(
                     title=track.title,
@@ -1268,13 +1409,23 @@ class MusicExtractor:
         youtube_clients: tuple[str, ...] | None = None,
         audio_max_abr: int | None = None,
         format_override: str | None = None,
+        use_cookies: bool = True,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         try:
             import yt_dlp  # import tardio para não pesar o boot quando música não é usada
         except Exception as exc:  # pragma: no cover
             raise MusicExtractionError("Dependência yt-dlp não está instalada no venv.") from exc
 
-        opts = self._base_opts(extract_flat=extract_flat, playlist=playlist, youtube_clients=youtube_clients, audio_max_abr=audio_max_abr, format_override=format_override)
+        opts = self._base_opts(
+            extract_flat=extract_flat,
+            playlist=playlist,
+            youtube_clients=youtube_clients,
+            audio_max_abr=audio_max_abr,
+            format_override=format_override,
+            use_cookies=use_cookies,
+        )
+        effective_timeout = max(1.0, float(timeout_seconds if timeout_seconds is not None else self.timeout_seconds + 5.0))
 
         def _work() -> dict[str, Any]:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -1283,7 +1434,7 @@ class MusicExtractor:
 
         try:
             async with _get_global_ytdlp_semaphore():
-                return await asyncio.wait_for(asyncio.to_thread(_work), timeout=self.timeout_seconds + 5.0)
+                return await asyncio.wait_for(asyncio.to_thread(_work), timeout=effective_timeout)
         except asyncio.TimeoutError as exc:
             raise MusicExtractionError("A extração demorou demais e foi cancelada.") from exc
         except MusicExtractionError:

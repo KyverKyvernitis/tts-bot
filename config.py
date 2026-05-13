@@ -207,6 +207,21 @@ MUSIC_IDLE_DISCONNECT_SECONDS = _parse_int(os.getenv("MUSIC_IDLE_DISCONNECT_SECO
 MUSIC_QUEUE_MAXSIZE = min(100, max(1, _parse_int(os.getenv("MUSIC_QUEUE_MAXSIZE", "100"), 100)))
 MUSIC_MAX_PLAYLIST_ITEMS = min(100, max(1, _parse_int(os.getenv("MUSIC_MAX_PLAYLIST_ITEMS", "100"), 100)))
 MUSIC_SEARCH_RESULTS = _parse_int(os.getenv("MUSIC_SEARCH_RESULTS", "5"), 5)
+MUSIC_YOUTUBE_SEARCH_API_FIRST = _parse_bool(os.getenv("MUSIC_YOUTUBE_SEARCH_API_FIRST", "true"), True)
+# Pesquisa textual do YouTube deve ser rápida: por padrão só lista metadata leve
+# (API oficial se configurada, depois yt-dlp flat). Desative para permitir fallback
+# pesado de busca completa quando a busca leve não encontrar nada.
+MUSIC_YOUTUBE_SEARCH_FAST_ONLY = _parse_bool(os.getenv("MUSIC_YOUTUBE_SEARCH_FAST_ONLY", "true"), True)
+MUSIC_YOUTUBE_SEARCH_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_YOUTUBE_SEARCH_TIMEOUT_SECONDS", "7.0"), 7.0))
+MUSIC_YOUTUBE_SEARCH_USE_COOKIES = _parse_bool(os.getenv("MUSIC_YOUTUBE_SEARCH_USE_COOKIES", "false"), False)
+# Link direto do YouTube entra rápido no queue/painel e resolve o stream só na hora
+# de tocar. Isso evita o comando travar em yt-dlp antes de responder.
+MUSIC_YOUTUBE_DIRECT_FAST_ENQUEUE = _parse_bool(os.getenv("MUSIC_YOUTUBE_DIRECT_FAST_ENQUEUE", "true"), True)
+MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS", "1.4"), 1.4))
+# Resolução local rápida: reduz combinações de clients/formatos do yt-dlp.
+MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE = _parse_bool(os.getenv("MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE", "true"), True)
+MUSIC_LOCAL_YOUTUBE_CLIENTS = (os.getenv("MUSIC_LOCAL_YOUTUBE_CLIENTS", "android,web") or "android,web").strip()
+MUSIC_YOUTUBE_LAVASRC_MIRROR_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("MUSIC_YOUTUBE_LAVASRC_MIRROR_TIMEOUT_SECONDS", "4.0"), 4.0))
 MUSIC_YTDLP_TIMEOUT_SECONDS = _parse_float(os.getenv("MUSIC_YTDLP_TIMEOUT_SECONDS", "20"), 20.0)
 MUSIC_EXTRACT_SOCKET_TIMEOUT_SECONDS = max(3.0, _parse_float(os.getenv("MUSIC_EXTRACT_SOCKET_TIMEOUT_SECONDS", "8"), 8.0))
 MUSIC_YTDLP_RETRIES = max(0, _parse_int(os.getenv("MUSIC_YTDLP_RETRIES", "1"), 1))

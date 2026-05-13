@@ -65,6 +65,7 @@ MUSIC_STREAM_START_RETRIES = max(0, int(getattr(config, "MUSIC_STREAM_START_RETR
 MUSIC_LAVALINK_PREMATURE_END_MIN_SECONDS = max(5.0, float(getattr(config, "MUSIC_LAVALINK_PREMATURE_END_MIN_SECONDS", 45.0)))
 MUSIC_LAVALINK_PREMATURE_END_REMAINING_SECONDS = max(5.0, float(getattr(config, "MUSIC_LAVALINK_PREMATURE_END_REMAINING_SECONDS", 35.0)))
 MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES = max(0, int(getattr(config, "MUSIC_LAVALINK_PREMATURE_END_MAX_RECOVERIES", 1)))
+MUSIC_YOUTUBE_LAVASRC_MIRROR_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "MUSIC_YOUTUBE_LAVASRC_MIRROR_TIMEOUT_SECONDS", 4.0)))
 MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS = max(0.0, float(getattr(config, "MUSIC_LAVALINK_TTS_TIMEOUT_PADDING_SECONDS", 18.0)))
 MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS = max(0.2, float(getattr(config, "MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS", 1.5)))
 MUSIC_TTS_INTERNAL_BASE_URL = str(getattr(config, "MUSIC_TTS_INTERNAL_BASE_URL", "") or "").strip().rstrip("/")
@@ -2639,12 +2640,22 @@ class AudioRouter:
 
         recoveries = max(0, int(getattr(track, "lavalink_recoveries", 0) or 0))
         while True:
-            player, playable, meta = await self.backends.play_lavalink_track(
+            play_coro = self.backends.play_lavalink_track(
                 guild,
                 channel,
                 track,
                 volume=state.volume,
             )
+            if self._track_is_youtube_selection(track):
+                # Resultado escolhido no YouTube só tenta LavaSrc por um tempo
+                # curto. Se o espelho não bater/abrir rápido, cai para yt-dlp
+                # local em vez de deixar a reprodução parecer travada.
+                player, playable, meta = await asyncio.wait_for(
+                    play_coro,
+                    timeout=MUSIC_YOUTUBE_LAVASRC_MIRROR_TIMEOUT_SECONDS,
+                )
+            else:
+                player, playable, meta = await play_coro
             state.current_lavalink_player = player
             state.current_lavalink_playable = playable
             self._mark_lavalink_transition(state, seconds=8.0)
