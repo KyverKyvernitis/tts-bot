@@ -5,10 +5,11 @@ import contextlib
 import logging
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import config
 
@@ -635,6 +636,148 @@ class MusicExtractor:
                 add(None, True)
                 add(("web",), True)
         return candidates
+
+    def _youtube_stream_format_from_url(self, stream_url: str, *, selector: str = "") -> tuple[str, str, str, int]:
+        """Inferência leve do formato escolhido pelo yt-dlp -g.
+
+        O comando ``yt-dlp -g`` é o mesmo caminho que funcionou manualmente na
+        VPS. Ele retorna a URL final, não o JSON completo. Para ainda preencher o
+        painel, inferimos o formato a partir do itag/mime do googlevideo. Quando
+        não der para saber bitrate com segurança, deixamos abr=0 para não mostrar
+        número inventado.
+        """
+        parsed = urlparse(stream_url or "")
+        query = parse_qs(parsed.query or "")
+        itag = (query.get("itag") or [""])[0].strip()
+        mime = unquote((query.get("mime") or [""])[0]).lower()
+        ext = ""
+        codec = ""
+        if "/" in mime:
+            ext = mime.split("/", 1)[1].split(";", 1)[0].strip()
+            if ext == "mp4":
+                ext = "m4a"
+        known: dict[str, tuple[str, str]] = {
+            "251": ("webm", "opus"),
+            "250": ("webm", "opus"),
+            "249": ("webm", "opus"),
+            "140": ("m4a", "mp4a"),
+            "141": ("m4a", "mp4a"),
+            "139": ("m4a", "mp4a"),
+            "171": ("webm", "vorbis"),
+            "172": ("webm", "vorbis"),
+            "18": ("mp4", "mp4a"),
+            "22": ("mp4", "mp4a"),
+        }
+        if itag in known:
+            ext = ext or known[itag][0]
+            codec = known[itag][1]
+        if not codec:
+            if "opus" in mime:
+                codec = "opus"
+            elif "mp4a" in mime or ext == "m4a":
+                codec = "mp4a"
+            elif "vorbis" in mime:
+                codec = "vorbis"
+        if not itag:
+            # Mostra o seletor só como pista de diagnóstico, nunca como formato real.
+            itag = selector if selector in {"bestaudio/best", "251/140/ba/b", "ba/b"} else ""
+        return itag, ext, codec, 0
+
+    async def _resolve_youtube_stream_with_cli(self, source: str, track: MusicTrack, *, audio_max_abr: int | None = None) -> bool:
+        """Resolve YouTube local usando o mesmo caminho testado na VPS.
+
+        A API Python do yt-dlp estava falhando no bot apesar do terminal retornar
+        URLs válidas com ``python -m yt_dlp -g``. Para links diretos do YouTube,
+        usamos esse caminho curto, com cookies e client padrão, antes de qualquer
+        matriz de clients forçados. Isso evita o erro falso de formato ausente.
+        """
+        cookies_file = self._current_cookies_file()
+        use_cookies_values = [True] if cookies_file else [False]
+        if cookies_file:
+            # Sem cookies é só último recurso curto; na VPS costuma cair em anti-bot.
+            use_cookies_values.append(False)
+        selectors = ["bestaudio/best", "251/140/ba/b", "ba/b"]
+        timeout = max(3.0, min(MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS, MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS))
+        errors: list[str] = []
+
+        for use_cookies in use_cookies_values:
+            for selector in selectors:
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "yt_dlp",
+                    "--no-playlist",
+                    "--no-warnings",
+                    "--quiet",
+                    "--no-cache-dir",
+                    "-f",
+                    selector,
+                    "-g",
+                    source,
+                ]
+                if use_cookies and cookies_file:
+                    cmd[3:3] = ["--cookies", cookies_file]
+                attempt_started = time.monotonic()
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout if use_cookies else min(timeout, MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS))
+                except asyncio.TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    with contextlib.suppress(Exception):
+                        await proc.communicate()
+                    msg = f"cli timeout selector={selector} cookies={'on' if use_cookies else 'off'}"
+                    errors.append(msg)
+                    logger.info("[music.local] youtube_cli_resolve_failed | %s", msg)
+                    continue
+
+                stdout = stdout_b.decode("utf-8", "replace").strip()
+                stderr = stderr_b.decode("utf-8", "replace").strip()
+                urls = [line.strip() for line in stdout.splitlines() if self._is_probably_direct_stream_url(line.strip(), {})]
+                if proc.returncode == 0 and urls:
+                    stream_url = urls[0]
+                    format_id, ext, codec, abr = self._youtube_stream_format_from_url(stream_url, selector=selector)
+                    track.stream_url = stream_url
+                    track.resolved_at_monotonic = time.monotonic()
+                    track.resolved_audio_max_abr = int(audio_max_abr or 0)
+                    track.resolved_audio_format_id = format_id
+                    track.resolved_audio_ext = ext
+                    track.resolved_audio_codec = codec
+                    track.resolved_audio_abr = int(abr or 0)
+                    logger.info(
+                        "[music.perf] youtube_cli_resolve_ok | cookies=%s selector=%s selected_format=%s ext=%s codec=%s elapsed=%.2fs",
+                        "on" if use_cookies else "off",
+                        selector,
+                        format_id or "unknown",
+                        ext or "unknown",
+                        codec or "unknown",
+                        time.monotonic() - attempt_started,
+                    )
+                    return True
+
+                detail = stderr or stdout or f"returncode={proc.returncode}"
+                detail = detail.replace("\n", " ")[:260]
+                errors.append(f"selector={selector} cookies={'on' if use_cookies else 'off'} detail={detail}")
+                logger.info(
+                    "[music.local] youtube_cli_resolve_failed | cookies=%s selector=%s rc=%s detail=%s",
+                    "on" if use_cookies else "off",
+                    selector,
+                    proc.returncode,
+                    detail,
+                )
+                lower = detail.lower()
+                if not use_cookies and ("sign in" in lower or "not a bot" in lower or "login" in lower):
+                    # Não adianta testar outros seletores sem cookies quando o YouTube
+                    # já bloqueou a VPS.
+                    break
+
+        if errors:
+            track.fallback_reason = "; ".join(errors[-3:])[:500]
+        return False
 
     def _extract_stream_url_from_info(self, info: dict[str, Any]) -> tuple[str, int, str, str, str]:
         """Extrai uma URL de áudio real mesmo quando o yt-dlp retorna formatos.
@@ -1418,6 +1561,21 @@ class MusicExtractor:
             return track
 
         errors: list[str] = []
+        if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
+            try:
+                if await self._resolve_youtube_stream_with_cli(source, track, audio_max_abr=audio_max_abr):
+                    self._put_stream_cache(stream_cache_key, track)
+                    return track
+                if getattr(track, "fallback_reason", ""):
+                    errors.append(str(getattr(track, "fallback_reason", "")))
+            except Exception as exc:
+                errors.append(str(exc) or exc.__class__.__name__)
+                logger.info(
+                    "[music.local] youtube_cli_resolve_exception | source=youtube erro=%s detail=%s",
+                    str(exc) or exc.__class__.__name__,
+                    str(getattr(exc, "detail", "") or "")[:180],
+                )
+
         if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
             has_cookies = bool(self._current_cookies_file())
             runs = [(False, False, clients, use_cookies) for clients, use_cookies in self._youtube_client_run_sets(has_cookies=has_cookies)]
