@@ -214,8 +214,8 @@ class VpsCommandMixin:
                     lines.append("`🎵` Diagnóstico musical modular anexado em .zip.")
                     if summary:
                         lines.append(f"`ℹ️` {summary}")
-                    if fallback_report:
-                        files.append(discord.File(io.BytesIO(fallback_report.encode("utf-8", "replace")), filename=f"vps-music-diagnostics-summary-{stamp}.txt"))
+                    # O diagnóstico musical modular deve ser um único anexo.
+                    # O resumo completo fica dentro do zip como 00-resumo-curto.txt/summary.txt.
                 else:
                     lines.append(f"`⚠️` Diagnóstico modular não foi anexado: {summary or 'falha sem detalhes'}")
                     report = fallback_report or await build_music_diagnostics_report(router, await self._vps_context_options(interaction))

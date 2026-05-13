@@ -87,6 +87,48 @@ def _now_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+
+
+def cleanup_music_diagnostics_temp_artifacts(*, max_age_seconds: float = 12 * 3600) -> str:
+    """Remove apenas artefatos temporários de diagnóstico, nunca logs reais.
+
+    O diagnóstico musical deve continuar completo, mas não precisa manter zips/txt
+    antigos em pastas temporárias. A função é conservadora e apaga só nomes que
+    seguem o padrão do próprio diagnóstico.
+    """
+    now = time.time()
+    roots = [
+        Path("/tmp"),
+        REPO_ROOT / "data" / "diagnostics" / "tmp",
+        REPO_ROOT / "data" / "diagnostics",
+    ]
+    patterns = (
+        "vps-music-diagnostics-*.zip",
+        "vps-music-diagnostics-summary-*.txt",
+        "vps-music-diagnostics-*.txt",
+        "vps-full-diagnostics-*.txt",
+    )
+    removed = 0
+    checked = 0
+    for root in roots:
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            with contextlib.suppress(Exception):
+                for path in root.glob(pattern):
+                    checked += 1
+                    if not path.is_file():
+                        continue
+                    try:
+                        age = now - path.stat().st_mtime
+                    except Exception:
+                        continue
+                    if age >= max_age_seconds:
+                        with contextlib.suppress(Exception):
+                            path.unlink()
+                            removed += 1
+    return f"diagnostic-temp-cleanup: checked={checked} removed={removed} max_age_seconds={int(max_age_seconds)}"
+
 def _package_version(name: str) -> str:
     try:
         return importlib.metadata.version(name)
@@ -1259,11 +1301,14 @@ def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOption
     bio = io.BytesIO()
     added = 0
     try:
+        cleanup_note = cleanup_music_diagnostics_temp_artifacts()
         sections, _meta = _music_diagnostics_sections(router, options)
         summary_text = _music_diagnostics_summary_text(sections)
         with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            _write_zip_text(zf, "README.txt", "Diagnóstico musical modular. O resumo fica em 00-resumo-curto.txt; logs brutas ficam em logs/raw/.\n"); added += 1
+            _write_zip_text(zf, "README.txt", "Diagnóstico musical modular. O resumo fica em 00-resumo-curto.txt e summary.txt; logs brutas ficam em logs/raw/.\n"); added += 1
             _write_zip_text(zf, "00-resumo-curto.txt", summary_text); added += 1
+            _write_zip_text(zf, "summary.txt", summary_text); added += 1
+            _write_zip_text(zf, "system/diagnostic-temp-cleanup.txt", cleanup_note); added += 1
             for arc, _title, body in sections:
                 _write_zip_text(zf, arc, body); added += 1
             _write_zip_text(zf, "bot/env.sanitized.txt", _sanitized_env_text()); added += 1
@@ -1280,7 +1325,9 @@ def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOption
     summary = f"Diagnóstico musical modular anexado: {added} item(ns); tamanho {len(payload) / (1024 * 1024):.2f} MB."
     if len(payload) > MUSIC_DIAGNOSTICS_ARCHIVE_MAX_BYTES:
         return None, filename, f"Diagnóstico musical modular ficou grande demais para anexar: {len(payload) / (1024 * 1024):.1f} MB.", summary_text
-    return payload, filename, summary, summary_text
+    # Sucesso modular: o resumo já está dentro do zip. Não retorne fallback_report,
+    # para o comando /vps não anexar um segundo arquivo de resumo.
+    return payload, filename, summary, ""
 
 
 async def build_music_diagnostics_archive(router: Any, options: DiagnosticsOptions) -> tuple[bytes | None, str, str, str]:

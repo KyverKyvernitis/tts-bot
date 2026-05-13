@@ -201,15 +201,19 @@ class Music(commands.Cog):
             await self._reply(ctx, "Entre em um canal de voz primeiro.")
             return
 
+        input_profile = self._query_profile(query)
+
         # Shadow mode Lavalink: consulta o node em paralelo, mas mantém o áudio real
-        # no player local atual. Se o node público falhar/atrasar, o usuário não é afetado.
-        self.router.schedule_lavalink_shadow_search(
-            ctx.guild.id,
-            query,
-            requester_id=ctx.author.id,
-            requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
-            reason="play_command",
-        )
+        # no player local atual. YouTube direto fica totalmente fora do LavaSrc/node
+        # para não criar atraso nem mirror desnecessário.
+        if not input_profile.is_youtube:
+            self.router.schedule_lavalink_shadow_search(
+                ctx.guild.id,
+                query,
+                requester_id=ctx.author.id,
+                requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
+                reason="play_command",
+            )
 
         requester_name = getattr(ctx.author, "display_name", str(ctx.author))
 

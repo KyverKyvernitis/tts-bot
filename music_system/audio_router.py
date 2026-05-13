@@ -2323,16 +2323,17 @@ class AudioRouter:
     def _track_is_direct_youtube_request(self, track: MusicTrack) -> bool:
         """Link direto do YouTube sempre toca pelo yt-dlp local.
 
-        Resultados de pesquisa do YouTube têm webpage_url do YouTube, mas o
-        original_url costuma ser o texto pesquisado; esses ainda podem tentar
-        mirror LavaSrc antes do fallback local.
+        Não tenta Lavalink, não tenta scsearch/mirror e não faz fallback que
+        atrase. Pesquisa textual/seleção continua podendo usar o fluxo normal;
+        aqui só bloqueamos quando a entrada original do usuário foi um link
+        real do YouTube/YouTube Music/Shorts.
         """
         try:
-            original = describe_url(str(getattr(track, "original_url", "") or ""))
-            if original.is_youtube:
+            original_raw = str(getattr(track, "original_url", "") or "").strip()
+            if original_raw and describe_url(original_raw).is_youtube:
                 return True
         except Exception:
-            return False
+            pass
         return False
 
     def _track_should_preserve_official_display(self, track: MusicTrack, meta: dict | None = None) -> bool:
@@ -2600,10 +2601,11 @@ class AudioRouter:
         # mesma música continuam editando esse painel.
         await self.update_panel(guild.id, create=True, repost=True)
 
-        use_lavalink_real = bool(self.backends.should_use_lavalink_real(guild.id))
-        if use_lavalink_real and self._track_is_direct_youtube_request(track):
+        direct_youtube_request = self._track_is_direct_youtube_request(track)
+        use_lavalink_real = bool(self.backends.should_use_lavalink_real(guild.id)) and not direct_youtube_request
+        if direct_youtube_request:
             logger.info(
-                "[music] YouTube direto tentando mirror LavaSrc antes do yt-dlp local | guild=%s track=%r",
+                "[music] YouTube direto usando reprodução local/yt-dlp sem mirror LavaSrc | guild=%s track=%r",
                 guild.id,
                 getattr(track, "title", ""),
             )

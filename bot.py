@@ -183,6 +183,12 @@ class BotLocal(commands.Bot):
 
     async def setup_hook(self):
         print("SETUP_HOOK INICIOU")
+        try:
+            from music_system.diagnostics import cleanup_music_diagnostics_temp_artifacts
+
+            print(f"[DIAGNOSTICS] {cleanup_music_diagnostics_temp_artifacts()}")
+        except Exception as exc:
+            print(f"[DIAGNOSTICS] cleanup temporário falhou: {type(exc).__name__}: {exc}")
 
         mongo_uri = _cfg("MONGODB_URI", "MONGO_URI")
         mongo_db_name = _cfg("MONGODB_DB", "MONGO_DB_NAME", "MONGODB_DB_NAME", default="chat_revive")
