@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import time
 from typing import Optional
 
 import discord
@@ -83,26 +84,16 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
     should_use_lavalink = getattr(backends, "should_use_lavalink_real", None)
     lavalink_active = bool(callable(should_use_lavalink) and should_use_lavalink(guild_id))
 
-    if lavalink_active and _is_youtube_text_search(query):
-        try:
-            batch = await backends.search_lavalink_tracks(
-                query,
-                requester_id=requester_id,
-                requester_name=requester_name,
-                guild_id=guild_id,
-                limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
-            )
-            if batch.tracks:
-                return batch, True
-            raise MusicExtractionError("Node não retornou resultados para a busca textual.")
-        except Exception:
-            # Fallback local apenas se o node não conseguir buscar texto.
-            batch = await router.extractor.search_youtube(
-                query,
-                requester_id=requester_id,
-                requester_name=requester_name,
-            )
-            return batch, True
+    if _is_youtube_text_search(query):
+        # Pesquisa textual sempre mostra resultados reais do YouTube. Depois que o
+        # usuário escolher, o playback tenta espelhar autor+título no LavaSrc; se
+        # não houver correspondência exata, cai para o yt-dlp local.
+        batch = await router.extractor.search_youtube(
+            query,
+            requester_id=requester_id,
+            requester_name=requester_name,
+        )
+        return batch, True
 
     profile = describe_url(query)
 
@@ -141,6 +132,62 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
     )
     return batch, False
 
+
+
+
+def _panel_controls_invalid(state) -> bool:
+    try:
+        invalid_at = float(getattr(state, "panel_controls_invalid_at", 0.0) or 0.0)
+    except Exception:
+        invalid_at = 0.0
+    return bool(invalid_at > 0.0 and time.monotonic() >= invalid_at)
+
+
+def _interaction_user_voice_channel(interaction: discord.Interaction):
+    return getattr(getattr(getattr(interaction, "user", None), "voice", None), "channel", None)
+
+
+def _interaction_bot_voice_channel(interaction: discord.Interaction, state=None):
+    guild = getattr(interaction, "guild", None)
+    vc = getattr(guild, "voice_client", None) if guild is not None else None
+    channel = getattr(vc, "channel", None) if vc is not None else None
+    if channel is not None:
+        return channel
+    player = getattr(state, "current_lavalink_player", None) if state is not None else None
+    channel = getattr(player, "channel", None) if player is not None else None
+    return channel
+
+
+async def _send_interaction_notice(interaction: discord.Interaction, message: str) -> None:
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.NotFound:
+        return
+
+
+async def _require_music_voice_interaction(interaction: discord.Interaction, router, guild_id: int, *, same_as_bot: bool = True) -> bool:
+    state = router.get_state(guild_id)
+    user_channel = _interaction_user_voice_channel(interaction)
+    if user_channel is None:
+        await _send_interaction_notice(interaction, "Entre em um canal de voz primeiro.")
+        return False
+    if same_as_bot:
+        bot_channel = _interaction_bot_voice_channel(interaction, state)
+        if bot_channel is not None and getattr(bot_channel, "id", None) != getattr(user_channel, "id", None):
+            await _send_interaction_notice(interaction, "Entre no mesmo canal de voz do bot para usar isso.")
+            return False
+    return True
+
+
+def _current_track_requester_id(state) -> int:
+    current = getattr(state, "current", None)
+    try:
+        return int(getattr(current, "requester_id", 0) or 0)
+    except Exception:
+        return 0
 
 def _bar(percent: float, *, size: int = 12) -> str:
     percent = max(0.0, min(1.0, float(percent)))
@@ -443,6 +490,8 @@ class VolumeModal(discord.ui.Modal):
         self.add_item(self.value)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
+            return
         if not self.router.is_music_staff(getattr(interaction, "user", None)):
             await interaction.response.send_message("Apenas staff pode alterar volumes do player.", ephemeral=True)
             return
@@ -499,6 +548,16 @@ class SeekModal(discord.ui.Modal):
         self.add_item(self.value)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
+            return
+        state = self.router.get_state(self.guild_id)
+        requester_id = _current_track_requester_id(state)
+        if getattr(state, "current", None) is None:
+            await interaction.response.send_message("Não há música tocando agora.", ephemeral=True)
+            return
+        if int(getattr(interaction.user, "id", 0) or 0) != requester_id:
+            await interaction.response.send_message("Apenas quem adicionou a música atual pode selecionar o momento.", ephemeral=True)
+            return
         seconds = _parse_seek_seconds(str(self.value.value))
         if seconds is None:
             await interaction.response.send_message("Tempo inválido. Use algo como `129`, `45`, `1:29` ou `01:29`.", ephemeral=True)
@@ -536,9 +595,11 @@ class SearchSelect(discord.ui.Select):
         if guild is None:
             await interaction.response.send_message("Guild não encontrada.", ephemeral=True)
             return
+        if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
+            return
         idx = int(self.values[0])
         track = self.tracks[idx]
-        voice_channel = guild.get_channel(self.voice_channel_id) or interaction.client.get_channel(self.voice_channel_id)
+        voice_channel = _interaction_user_voice_channel(interaction)
         text_channel = guild.get_channel(self.text_channel_id) or interaction.channel
         if voice_channel is None or text_channel is None:
             await interaction.response.send_message("Canal não encontrado.", ephemeral=True)
@@ -597,22 +658,14 @@ class AddSongModal(discord.ui.Modal):
             return
 
         state = self.router.get_state(self.guild_id)
-        voice_channel = None
-        user_voice = getattr(getattr(interaction.user, "voice", None), "channel", None)
-        if user_voice is not None:
-            voice_channel = user_voice
-        if voice_channel is None and (self.voice_channel_id or state.last_voice_channel_id):
-            cid = self.voice_channel_id or state.last_voice_channel_id
-            voice_channel = guild.get_channel(int(cid)) or interaction.client.get_channel(int(cid))
+        if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
+            return
+        voice_channel = _interaction_user_voice_channel(interaction)
         text_channel = None
         if self.text_channel_id or state.last_text_channel_id:
             cid = self.text_channel_id or state.last_text_channel_id
             text_channel = guild.get_channel(int(cid)) or interaction.client.get_channel(int(cid))
         text_channel = text_channel or interaction.channel
-
-        if voice_channel is None:
-            await interaction.response.send_message("Entre em um canal de voz primeiro.", ephemeral=True)
-            return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         query = str(self.query.value).strip()
@@ -735,6 +788,8 @@ class MoveSelectedModal(discord.ui.Modal):
         self.add_item(self.to_pos)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
+            return
         try:
             to_pos = int(str(self.to_pos.value).strip())
         except Exception:
@@ -769,7 +824,7 @@ class QueueConfirmView(discord.ui.View):
         if self.owner_id and interaction.user and interaction.user.id != self.owner_id:
             await interaction.response.send_message(f"Apenas <@{self.owner_id}> pode confirmar essa ação.", ephemeral=True)
             return False
-        return True
+        return await _require_music_voice_interaction(interaction, self.router, self.guild_id)
 
     async def _refresh_parent(self) -> None:
         if self.message is None:
@@ -820,7 +875,7 @@ class QueueView(discord.ui.View):
         if self.owner_id and interaction.user and interaction.user.id != self.owner_id:
             await interaction.response.send_message(f"Apenas <@{self.owner_id}> pode interagir nesse painel de queue.", ephemeral=True)
             return False
-        return True
+        return await _require_music_voice_interaction(interaction, self.router, self.guild_id)
 
     def _queue_items(self) -> list[MusicTrack]:
         return self.router.snapshot_queue(self.guild_id)
@@ -1145,6 +1200,13 @@ class PlayerOptionsSelect(discord.ui.Select):
             await interaction.response.send_message(message, ephemeral=True)
             return
         if value == "seek":
+            requester_id = _current_track_requester_id(state)
+            if getattr(state, "current", None) is None:
+                await interaction.response.send_message("Não há música tocando agora.", ephemeral=True)
+                return
+            if int(getattr(interaction.user, "id", 0) or 0) != requester_id:
+                await interaction.response.send_message("Apenas quem adicionou a música atual pode selecionar o momento.", ephemeral=True)
+                return
             await interaction.response.send_modal(SeekModal(self.router, self.guild_id))
             return
         if value == "loop":
@@ -1174,9 +1236,16 @@ class MusicPlayerView(discord.ui.View):
         has_queue = bool(_queue_items(state))
         has_history = bool(list(getattr(state, "history", []) or []))
         has_session = bool(getattr(state, "music_session_active", False) or has_current or has_queue)
+        controls_invalid = _panel_controls_invalid(state)
 
         for item in self.children:
+            if isinstance(item, discord.ui.Select):
+                item.disabled = controls_invalid
+                continue
             if not isinstance(item, discord.ui.Button):
+                continue
+            if controls_invalid:
+                item.disabled = True
                 continue
             item.label = None
             emoji_name = self._emoji_name(item)
@@ -1193,6 +1262,13 @@ class MusicPlayerView(discord.ui.View):
                 item.disabled = not has_session
             elif emoji_name == "📜":
                 item.disabled = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        state = self.router.get_state(self.guild_id)
+        if _panel_controls_invalid(state):
+            await _send_interaction_notice(interaction, "`⌛` Esse painel expirou. Use `_play <link ou pesquisa>` para começar de novo.")
+            return False
+        return await _require_music_voice_interaction(interaction, self.router, self.guild_id)
 
     async def _ack(self, interaction: discord.Interaction, message: str) -> None:
         if interaction.response.is_done():

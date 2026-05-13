@@ -1071,6 +1071,17 @@ class LavalinkBackend:
             tolerance = max(15.0, expected_duration * 0.12)
             duration_ok = abs(expected_duration - got_duration) <= tolerance
 
+        is_youtube_selection = bool(
+            self._is_youtube_value(getattr(track, "webpage_url", ""))
+            or self._is_youtube_value(getattr(track, "original_url", ""))
+            or str(getattr(track, "source", "") or getattr(track, "extractor", "")).strip().lower() in {"youtube", "yt", "ytsearch", "ytmsearch"}
+        )
+        if is_youtube_selection:
+            # Para resultado escolhido no YouTube, LavaSrc só pode assumir se
+            # autor/canal e nome da música baterem exatamente após normalização
+            # simples. Qualquer diferença cai para o player local/yt-dlp.
+            return bool(wanted_title and wanted_author and got_title == wanted_title and got_author == wanted_author)
+
         text_ok = title_ratio >= 0.52 or combined_ratio >= 0.48 or word_score >= 0.55
         return bool(text_ok and duration_ok)
 

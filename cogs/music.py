@@ -43,6 +43,22 @@ class Music(commands.Cog):
             return voice
         return None
 
+    async def _ensure_music_action_voice(self, ctx: commands.Context) -> bool:
+        user_channel = await self._voice_channel_from_ctx(ctx)
+        if user_channel is None:
+            await self._reply(ctx, "Entre em um canal de voz primeiro.")
+            return False
+        state = self.router.get_state(ctx.guild.id)
+        vc = getattr(ctx.guild, "voice_client", None)
+        bot_channel = getattr(vc, "channel", None) if vc is not None else None
+        if bot_channel is None:
+            player = getattr(state, "current_lavalink_player", None)
+            bot_channel = getattr(player, "channel", None) if player is not None else None
+        if bot_channel is not None and getattr(bot_channel, "id", None) != getattr(user_channel, "id", None):
+            await self._reply(ctx, "Entre no mesmo canal de voz do bot para usar isso.")
+            return False
+        return True
+
     async def _reply(self, ctx: commands.Context, content: str | None = None, **kwargs):
         # Todas as mensagens novas da música são silenciosas por padrão para não notificar o servidor.
         kwargs.setdefault("silent", True)
@@ -112,12 +128,11 @@ class Music(commands.Cog):
         # mostra erro inglês de `spsearch`/SpotifySourceManager no chat.
         if profile.is_metadata_only:
             return False
-        # Texto normal agora consulta o node primeiro via scsearch/LavaSrc.
-        # Se o node não trouxer resultado, o comando cai para a busca local do
-        # yt-dlp como fallback, evitando a mensagem "não encontrei no YouTube"
-        # quando SoundCloud/Lavalink tem resultado bom.
+        # Pesquisa textual sempre mostra resultados do YouTube. A escolha do
+        # usuário tenta espelho LavaSrc por autor+título exatos no playback e, se
+        # não bater, cai para yt-dlp local.
         if self._is_youtube_text_search(query):
-            return True
+            return False
         return True
 
     def _lavalink_identifier_for_query(self, query: str) -> tuple[str, str, str, str]:
@@ -280,7 +295,7 @@ class Music(commands.Cog):
             # Links do YouTube tocam direto pelo local; pesquisas abrem seleção
             # e, na reprodução, tentam mirror LavaSrc antes do fallback local.
             try:
-                if self._is_youtube_text_search(query) and self._is_lavalink_real_enabled(ctx.guild.id):
+                if self._is_youtube_text_search(query):
                     batch = await self.router.extractor.search_youtube(
                         query,
                         requester_id=ctx.author.id,
@@ -314,7 +329,7 @@ class Music(commands.Cog):
                 title="🔎 Escolha a música",
                 description=(
                     "Selecione um dos resultados abaixo. Nada será adicionado ao queue até você escolher. "
-                    "Resultados do YouTube serão espelhados pelo LavaSrc quando possível e, se não baterem bem, tocam pelo player local."
+                    "Resultados do YouTube tentam LavaSrc por autor e título exatos; se não bater, tocam pelo player local."
                 ),
                 color=discord.Color.blurple(),
             )
@@ -376,6 +391,8 @@ class Music(commands.Cog):
     @commands.command(name="pause", aliases=["pausar", "pa"])
     @commands.guild_only()
     async def pause(self, ctx: commands.Context):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         ok = await self.router.pause(ctx.guild.id)
         if not ok:
             await self._reply(ctx, "Não há música tocando para pausar.")
@@ -383,6 +400,8 @@ class Music(commands.Cog):
     @commands.command(name="resume", aliases=["retomar", "continuar", "r"])
     @commands.guild_only()
     async def resume(self, ctx: commands.Context):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         ok = await self.router.resume(ctx.guild.id)
         if not ok:
             await self._reply(ctx, "Não há música pausada.")
@@ -390,30 +409,40 @@ class Music(commands.Cog):
     @commands.command(name="skip", aliases=["s", "pular"])
     @commands.guild_only()
     async def skip(self, ctx: commands.Context):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         _ok, message = await self.router.request_skip(ctx.guild.id, ctx.author)
         await self._reply(ctx, message)
 
     @commands.command(name="back", aliases=["b", "previous", "voltar", "anterior"])
     @commands.guild_only()
     async def back(self, ctx: commands.Context):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         ok = await self.router.previous(ctx.guild.id)
         await self._reply(ctx, "`⏮️` Voltando para a música anterior." if ok else "Não há música anterior no histórico.")
 
     @commands.command(name="stop", aliases=["st", "pararmusica", "musicstop"])
     @commands.guild_only()
     async def stop(self, ctx: commands.Context):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         _ok, message = await self.router.request_stop(ctx.guild.id, ctx.author, disconnect=True)
         await self._reply(ctx, message)
 
     @commands.command(name="queue", aliases=["fila", "q"])
     @commands.guild_only()
     async def queue(self, ctx: commands.Context):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         state = self.router.get_state(ctx.guild.id)
         await self._reply(ctx, embed=build_queue_embed(state, 0), view=QueueView(self.router, ctx.guild.id, 0, owner_id=ctx.author.id))
 
     @commands.command(name="np", aliases=["now", "nowplaying", "tocando"])
     @commands.guild_only()
     async def now_playing(self, ctx: commands.Context):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         state = self.router.get_state(ctx.guild.id)
         if state.current is None and state.queue.empty():
             await self._reply(ctx, "Nada tocando agora.")
@@ -424,6 +453,8 @@ class Music(commands.Cog):
     @commands.command(name="volume", aliases=["v", "vol"])
     @commands.guild_only()
     async def volume(self, ctx: commands.Context, value: Optional[int] = None):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         state = self.router.get_state(ctx.guild.id)
         if value is None:
             await self._reply(ctx, f"`🔊` Volume atual: `{int(round(state.volume * 100))}%`.")
@@ -437,18 +468,24 @@ class Music(commands.Cog):
     @commands.command(name="shuffle", aliases=["sh", "embaralhar"])
     @commands.guild_only()
     async def shuffle(self, ctx: commands.Context):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         _ok, message = await self.router.request_shuffle(ctx.guild.id, ctx.author)
         await self._reply(ctx, message)
 
     @commands.command(name="loop", aliases=["l", "repeat", "repetir"])
     @commands.guild_only()
     async def loop(self, ctx: commands.Context):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         _ok, message = await self.router.request_loop(ctx.guild.id, ctx.author)
         await self._reply(ctx, message)
 
     @commands.command(name="remove", aliases=["rm", "remover"])
     @commands.guild_only()
     async def remove(self, ctx: commands.Context, position: Optional[int] = None):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         if position is None:
             await self._reply(ctx, "Use `_remove <posição>`.")
             return
@@ -461,6 +498,8 @@ class Music(commands.Cog):
     @commands.command(name="move", aliases=["mv", "mover"])
     @commands.guild_only()
     async def move(self, ctx: commands.Context, from_pos: Optional[int] = None, to_pos: Optional[int] = None):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         if from_pos is None or to_pos is None:
             await self._reply(ctx, "Use `_move <posição atual> <nova posição>`.")
             return
@@ -470,6 +509,8 @@ class Music(commands.Cog):
     @commands.command(name="skipto", aliases=["goto", "jump", "jumpto", "tocarfila"])
     @commands.guild_only()
     async def skipto(self, ctx: commands.Context, position: Optional[int] = None):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         if position is None:
             await self._reply(ctx, "Use `_skipto <posição>`.")
             return
@@ -499,6 +540,8 @@ class Music(commands.Cog):
     @commands.command(name="clearqueue", aliases=["cq", "limparfila", "limparqueue", "clearq"])
     @commands.guild_only()
     async def clearqueue(self, ctx: commands.Context):
+        if not await self._ensure_music_action_voice(ctx):
+            return
         await self.router.replace_queue(ctx.guild.id, [])
         await self._reply(ctx, "`🧹` Queue limpo.")
 

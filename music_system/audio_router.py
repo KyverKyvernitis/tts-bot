@@ -440,6 +440,8 @@ class MusicGuildState:
     panel_update_task: Optional[asyncio.Task] = None
     panel_update_create: bool = True
     panel_update_requested_at: float = 0.0
+    panel_controls_invalid_at: float = 0.0
+    panel_controls_invalidation_task: Optional[asyncio.Task] = None
     current_started_at_monotonic: float = 0.0
     current_start_offset_seconds: float = 0.0
     next_local_start_offset_seconds: float = 0.0
@@ -1615,6 +1617,53 @@ class AudioRouter:
         state.idle_actor_id = None
         state.idle_actor_name = ""
         state.idle_channel_name = ""
+        state.panel_controls_invalid_at = 0.0
+        task = getattr(state, "panel_controls_invalidation_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        state.panel_controls_invalidation_task = None
+
+    def _set_panel_controls_invalidation(self, guild_id: int, *, delay: float = 60.0) -> None:
+        state = self.get_state(guild_id)
+        delay = max(0.0, float(delay))
+        invalid_at = time.monotonic() + delay
+        current_invalid_at = float(getattr(state, "panel_controls_invalid_at", 0.0) or 0.0)
+        if current_invalid_at > time.monotonic() and current_invalid_at <= invalid_at + 0.05:
+            return
+        state.panel_controls_invalid_at = invalid_at
+        old_task = getattr(state, "panel_controls_invalidation_task", None)
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+
+        async def _runner() -> None:
+            try:
+                await asyncio.sleep(delay)
+                st = self.get_state(guild_id)
+                if float(getattr(st, "panel_controls_invalid_at", 0.0) or 0.0) <= time.monotonic():
+                    await self.update_panel(guild_id, create=bool(st.now_message))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("[music] falha ao invalidar controles do painel", exc_info=True)
+            finally:
+                st = self.get_state(guild_id)
+                if getattr(st, "panel_controls_invalidation_task", None) is task:
+                    st.panel_controls_invalidation_task = None
+
+        try:
+            task = asyncio.create_task(_runner())
+            task.add_done_callback(_consume_expected_music_exception)
+            state.panel_controls_invalidation_task = task
+        except RuntimeError:
+            state.panel_controls_invalidation_task = None
+
+    def _invalidate_panel_controls_now(self, guild_id: int) -> None:
+        state = self.get_state(guild_id)
+        state.panel_controls_invalid_at = time.monotonic()
+        task = getattr(state, "panel_controls_invalidation_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        state.panel_controls_invalidation_task = None
 
     def _set_idle_reason(
         self,
@@ -2320,6 +2369,7 @@ class AudioRouter:
             if state.stop_requested or not self._has_pending_track(state):
                 if not state.stop_requested and not self._has_pending_track(state):
                     self._set_idle_reason(state, "queue_finished")
+                    self._set_panel_controls_invalidation(guild_id, delay=60.0)
                 state.current = None
                 state.current_started_at_monotonic = 0.0
                 state.current_start_offset_seconds = 0.0
@@ -2353,6 +2403,21 @@ class AudioRouter:
                 return True
         except Exception:
             pass
+        return False
+
+    def _track_is_youtube_selection(self, track: MusicTrack) -> bool:
+        """Resultado de pesquisa do YouTube: tenta LavaSrc, mas pode cair local."""
+        if self._track_is_direct_youtube_request(track):
+            return False
+        values = (
+            str(getattr(track, "source", "") or "").lower(),
+            str(getattr(track, "extractor", "") or "").lower(),
+        )
+        if any(value in {"youtube", "yt", "ytsearch", "ytmsearch"} for value in values):
+            return True
+        with contextlib.suppress(Exception):
+            if describe_url(str(getattr(track, "webpage_url", "") or "")).is_youtube:
+                return True
         return False
 
     def _track_should_preserve_official_display(self, track: MusicTrack, meta: dict | None = None) -> bool:
@@ -2635,11 +2700,11 @@ class AudioRouter:
             try:
                 return await self._play_track_lavalink(guild, state, track, channel)
             except Exception as exc:
-                allow_local_fallback = False
+                allow_local_fallback = bool(self._track_is_youtube_selection(track))
                 fallback_getter = getattr(self.backends, "should_lavalink_fallback_to_local", None)
                 if callable(fallback_getter):
                     with contextlib.suppress(Exception):
-                        allow_local_fallback = bool(fallback_getter(guild.id))
+                        allow_local_fallback = bool(allow_local_fallback or fallback_getter(guild.id))
                 state.last_lavalink_error = f"{exc.__class__.__name__}: {exc}"
                 if not allow_local_fallback:
                     # Modo Lavalink é lavalink-only. Não misture com voice client local
@@ -2673,8 +2738,17 @@ class AudioRouter:
                 state.current_lavalink_player = None
                 state.current_lavalink_playable = None
                 self._set_current_status(state, "resolving")
-                converted = self._prepare_track_for_local_after_lavalink_failure(track, exc)
-                if converted:
+                converted = False if self._track_is_youtube_selection(track) else self._prepare_track_for_local_after_lavalink_failure(track, exc)
+                if self._track_is_youtube_selection(track):
+                    track.fallback_reason = "LavaSrc"
+                    if "fallback local" not in str(track.source or "").lower():
+                        track.source = "YouTube → fallback local"
+                    logger.info(
+                        "[music/lavalink] fallback local para resultado YouTube sem correspondência exata | guild=%s track=%r",
+                        guild.id,
+                        getattr(track, "title", ""),
+                    )
+                elif converted:
                     logger.info(
                         "[music/lavalink] fallback local por metadata | guild=%s track=%r source=%r",
                         guild.id,
@@ -2858,6 +2932,7 @@ class AudioRouter:
         self._set_current_status(state, "idle")
         if not state.current and not self._has_pending_track(state) and state.idle_reason == "idle":
             self._set_idle_reason(state, "queue_finished")
+            self._set_panel_controls_invalidation(guild.id, delay=60.0)
         vc = guild.voice_client
         if not vc or not self._vc_is_connected(vc) or getattr(vc, "channel", None) is None:
             state.music_session_active = False
@@ -3011,6 +3086,7 @@ class AudioRouter:
             actor=actor,
             channel_name=getattr(before_channel, "name", "") or "",
         )
+        self._invalidate_panel_controls_now(guild.id)
         await self.update_panel(guild.id, create=True)
 
     async def handle_bot_voice_move(
@@ -3738,6 +3814,7 @@ class AudioRouter:
         state.skip_requested = True
         self._cancel_next_prefetch(state)
         self._set_idle_reason(state, "manual_stop")
+        self._invalidate_panel_controls_now(guild_id)
         for _vote_action in ("skip", "stop"):
             state.control_votes.pop(_vote_action, None)
             _vote_task = state.control_vote_cleanup_tasks.pop(_vote_action, None)
