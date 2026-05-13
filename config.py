@@ -227,6 +227,9 @@ MUSIC_LOCAL_YOUTUBE_CLIENTS = (os.getenv("MUSIC_LOCAL_YOUTUBE_CLIENTS", "ios,and
 MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST = _parse_bool(os.getenv("MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST", "true"), True)
 MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS", "5.0"), 5.0))
 MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS", "1.6"), 1.6))
+# Limite total do caminho local do YouTube por faixa. Sem isso, várias
+# combinações de clients/formatos podem deixar o painel preso em “resolvendo”.
+MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS = max(6.0, _parse_float(os.getenv("MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS", "14.0"), 14.0))
 # Resultado escolhido no YouTube tenta mirror LavaSrc por pouco tempo. Se o
 # espelho não bater/abrir rápido, cai para yt-dlp local sem segurar o usuário.
 MUSIC_YOUTUBE_LAVASRC_MIRROR_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("MUSIC_YOUTUBE_LAVASRC_MIRROR_TIMEOUT_SECONDS", "2.5"), 2.5))
@@ -256,10 +259,9 @@ MUSIC_LIMITER_ENABLED = _parse_bool(os.getenv("MUSIC_LIMITER_ENABLED", "true"), 
 MUSIC_YTDLP_FORMAT = (
     os.getenv(
         "MUSIC_YTDLP_FORMAT",
-        # Alta qualidade real: prioriza Opus áudio-only, depois M4A, e só
-        # então fallbacks amplos. Opus reduz reencode/latência no Discord;
-        # M4A costuma ser a alternativa estável quando Opus não existe.
-        "bestaudio[acodec=opus][vcodec=none]/bestaudio[ext=webm][vcodec=none]/bestaudio[ext=m4a][vcodec=none]/bestaudio[vcodec=none]/bestaudio/best",
+        # Alta qualidade real, mas sem filtros rígidos. O yt-dlp escolhe o
+        # melhor áudio possível; fallbacks específicos ficam no extractor.
+        "bestaudio/best",
     )
     or "bestaudio/best"
 ).strip()
