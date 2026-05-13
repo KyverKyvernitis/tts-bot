@@ -221,6 +221,12 @@ MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv(
 # Resolução local rápida: reduz combinações de clients/formatos do yt-dlp.
 MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE = _parse_bool(os.getenv("MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE", "true"), True)
 MUSIC_LOCAL_YOUTUBE_CLIENTS = (os.getenv("MUSIC_LOCAL_YOUTUBE_CLIENTS", "android,web") or "android,web").strip()
+# Na VPS, YouTube costuma bloquear extrações sem cookie com "confirm you are not a bot".
+# Para link direto/resultado do YouTube, usar cookies primeiro evita duas tentativas lentas
+# sem cookie antes de chegar no caminho que realmente funciona.
+MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST = _parse_bool(os.getenv("MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST", "true"), True)
+MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS = max(3.0, _parse_float(os.getenv("MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS", "9.0"), 9.0))
+MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS", "2.5"), 2.5))
 # Resultado escolhido no YouTube tenta mirror LavaSrc por pouco tempo. Se o
 # espelho não bater/abrir rápido, cai para yt-dlp local sem segurar o usuário.
 MUSIC_YOUTUBE_LAVASRC_MIRROR_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("MUSIC_YOUTUBE_LAVASRC_MIRROR_TIMEOUT_SECONDS", "2.5"), 2.5))

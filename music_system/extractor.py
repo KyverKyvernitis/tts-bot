@@ -62,6 +62,9 @@ MUSIC_YOUTUBE_SEARCH_USE_COOKIES = bool(getattr(config, "MUSIC_YOUTUBE_SEARCH_US
 MUSIC_YOUTUBE_DIRECT_FAST_ENQUEUE = bool(getattr(config, "MUSIC_YOUTUBE_DIRECT_FAST_ENQUEUE", True))
 MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS = max(0.5, float(getattr(config, "MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS", 1.4)))
 MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE = bool(getattr(config, "MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE", True))
+MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST = bool(getattr(config, "MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST", True))
+MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS = max(3.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS", 9.0)))
+MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS", 2.5)))
 
 
 def _client_tuple(value: object, default: tuple[str, ...] = ("android", "web")) -> tuple[str, ...]:
@@ -577,10 +580,13 @@ class MusicExtractor:
         except Exception:
             max_abr = 0
         requested_cap = max_abr if max_abr > 0 else None
-        candidates = [
-            (self._format_for_quality(audio_max_abr), requested_cap),
-            ("bestaudio/best", None),
-        ]
+        # Caminho rápido do YouTube: usar um seletor amplo evita que o mesmo
+        # vídeo passe por vários extract_info caros antes de chegar no stream.
+        # Em links diretos, rapidez/estabilidade é mais importante que testar
+        # uma matriz grande de formatos.
+        candidates = [("bestaudio/best", None)]
+        if requested_cap:
+            candidates.insert(0, (f"bestaudio[abr<={requested_cap}]/bestaudio/best", requested_cap))
         seen: set[str] = set()
         unique: list[tuple[str, int | None]] = []
         for fmt, cap in candidates:
@@ -1076,24 +1082,59 @@ class MusicExtractor:
         """Cria uma faixa leve para link direto do YouTube sem bloquear no yt-dlp.
 
         O comando responde rápido e a URL real de áudio é resolvida só quando a
-        faixa virar atual. Se metadata pública demorar, usa o id/título genérico.
+        faixa virar atual. Metadata vem primeiro da YouTube Data API, porque ela
+        já está configurada na VPS e evita placeholder ruim como "YouTube <id>".
         """
         title = ""
+        uploader = "YouTube"
         thumbnail = ""
-        try:
-            raw_meta = await asyncio.wait_for(
-                asyncio.to_thread(
-                    fetch_public_metadata,
-                    profile.canonical,
-                    timeout=min(MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS, self.timeout_seconds),
-                ),
-                timeout=MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS + 0.35,
-            )
-            title = clean_metadata_title(str(raw_meta.get("title") or ""))
-            thumbnail = str(raw_meta.get("thumbnail") or "").strip()
-        except Exception:
-            logger.debug("[music] metadata rápida do YouTube ignorada | url=%s", profile.raw, exc_info=True)
+        duration: float | None = None
         video_id = str(getattr(profile, "youtube_video_id", "") or "").strip()
+
+        if video_id:
+            try:
+                api_started = time.monotonic()
+                candidate = await asyncio.wait_for(
+                    self.api.youtube_video_metadata(video_id),
+                    timeout=max(1.0, min(3.0, MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS + 1.0)),
+                )
+                if candidate is not None:
+                    title = clean_metadata_title(candidate.title) or candidate.title
+                    uploader = candidate.artist or uploader
+                    thumbnail = candidate.thumbnail or thumbnail
+                    duration = candidate.duration
+                    logger.info(
+                        "[music.perf] youtube_direct_api_metadata video=%s ok=%s elapsed=%.2fs",
+                        video_id,
+                        bool(title),
+                        time.monotonic() - api_started,
+                    )
+            except Exception:
+                logger.debug("[music] metadata YouTube API direta falhou | url=%s", profile.raw, exc_info=True)
+
+        if not title:
+            try:
+                public_started = time.monotonic()
+                raw_meta = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        fetch_public_metadata,
+                        profile.canonical,
+                        timeout=min(MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS, self.timeout_seconds),
+                    ),
+                    timeout=MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS + 0.35,
+                )
+                title = clean_metadata_title(str(raw_meta.get("title") or ""))
+                uploader = str(raw_meta.get("artist") or uploader or "YouTube").strip() or "YouTube"
+                thumbnail = str(raw_meta.get("thumbnail") or "").strip()
+                logger.info(
+                    "[music.perf] youtube_direct_public_metadata video=%s ok=%s elapsed=%.2fs",
+                    video_id,
+                    bool(title),
+                    time.monotonic() - public_started,
+                )
+            except Exception:
+                logger.debug("[music] metadata rápida do YouTube ignorada | url=%s", profile.raw, exc_info=True)
+
         if not title:
             title = f"YouTube {video_id}" if video_id else "YouTube"
         if not thumbnail and video_id:
@@ -1103,8 +1144,8 @@ class MusicExtractor:
             webpage_url=profile.canonical or profile.raw,
             requester_id=int(requester_id),
             requester_name=requester_name,
-            duration=None,
-            uploader="YouTube",
+            duration=duration,
+            uploader=uploader,
             thumbnail=thumbnail,
             source="YouTube",
             original_url=profile.raw,
@@ -1300,14 +1341,27 @@ class MusicExtractor:
 
         errors: list[str] = []
         if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
-            runs: list[tuple[bool | str, bool, tuple[str, ...] | None, bool]] = [
-                # Resultado público vindo da YouTube API quase sempre resolve sem
-                # cookies. Tentar sem cookies primeiro costuma ser mais rápido;
-                # cookies ficam como fallback para vídeos restritos.
-                (False, False, MUSIC_LOCAL_YOUTUBE_CLIENTS, False),
-                (False, False, ("web",), False),
-                (False, False, MUSIC_LOCAL_YOUTUBE_CLIENTS, True),
-            ]
+            runs: list[tuple[bool | str, bool, tuple[str, ...] | None, bool]] = []
+
+            def _add_youtube_run(clients: tuple[str, ...] | None, use_cookies: bool) -> None:
+                item = (False, False, clients, bool(use_cookies))
+                if item not in runs:
+                    runs.append(item)
+
+            has_cookies = bool(self._current_cookies_file())
+            if has_cookies and MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST:
+                # Na VPS atual, tentativas sem cookie costumam bater no anti-bot do
+                # YouTube e só atrasam. Começa pelo caminho com maior chance de tocar.
+                _add_youtube_run(("web",), True)
+                _add_youtube_run(MUSIC_LOCAL_YOUTUBE_CLIENTS, True)
+                _add_youtube_run(MUSIC_LOCAL_YOUTUBE_CLIENTS, False)
+            else:
+                _add_youtube_run(MUSIC_LOCAL_YOUTUBE_CLIENTS, False)
+                if has_cookies:
+                    _add_youtube_run(("web",), True)
+                    _add_youtube_run(MUSIC_LOCAL_YOUTUBE_CLIENTS, True)
+                else:
+                    _add_youtube_run(("web",), False)
             format_fallbacks = self._fast_youtube_format_fallbacks(audio_max_abr)
         else:
             runs = [(False, False, None, True)]
@@ -1316,10 +1370,18 @@ class MusicExtractor:
             format_fallbacks = self._safe_format_fallbacks(audio_max_abr)
 
         resolve_started = time.monotonic()
+        youtube_no_cookie_blocked = False
         for format_selector, format_cap in format_fallbacks:
             for flat, playlist, clients, use_cookies in runs:
+                if profile.is_youtube and not use_cookies and youtube_no_cookie_blocked:
+                    continue
                 try:
                     attempt_started = time.monotonic()
+                    attempt_timeout: float | None = None
+                    if profile.is_youtube and MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE:
+                        attempt_timeout = MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS
+                        if not use_cookies:
+                            attempt_timeout = min(attempt_timeout, MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS)
                     info = await self._run_extract(
                         source,
                         extract_flat=flat,
@@ -1328,6 +1390,7 @@ class MusicExtractor:
                         audio_max_abr=format_cap,
                         format_override=format_selector,
                         use_cookies=use_cookies,
+                        timeout_seconds=attempt_timeout,
                     )
                     if info.get("entries"):
                         first = next((entry for entry in info.get("entries") or [] if entry), None)
@@ -1368,13 +1431,21 @@ class MusicExtractor:
                         return track
                     errors.append(f"sem stream direto com formato {format_selector}")
                 except Exception as exc:
-                    errors.append(str(exc))
+                    err_text = str(exc)
+                    err_detail = str(getattr(exc, "detail", "") or "")
+                    errors.append(err_text or exc.__class__.__name__)
+                    if profile.is_youtube and not use_cookies:
+                        lower_error = f"{err_text} {err_detail}".lower()
+                        if "sign in" in lower_error or "login" in lower_error or "cookies" in lower_error or "not a bot" in lower_error:
+                            youtube_no_cookie_blocked = True
                     logger.debug(
-                        "[music] stream resolve failed | source=%s clients=%s cookies=%s format=%s",
+                        "[music] stream resolve failed | source=%s clients=%s cookies=%s format=%s timeout=%s erro=%s",
                         source,
                         clients,
                         bool(use_cookies),
                         format_selector,
+                        attempt_timeout,
+                        err_text or exc.__class__.__name__,
                         exc_info=True,
                     )
 

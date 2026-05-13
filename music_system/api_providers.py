@@ -354,6 +354,54 @@ class MusicApiProviders:
             raise last_error
         return {}
 
+
+    def _youtube_video_id_from_url(self, url: str) -> str:
+        parsed = urlparse(url or "")
+        host = (parsed.netloc or "").lower()
+        if "youtu.be" in host:
+            return (parsed.path or "").strip("/").split("/", 1)[0]
+        if "youtube" in host:
+            if parsed.path.startswith("/watch"):
+                return str((parse_qs(parsed.query).get("v") or [""])[0]).strip()
+            for prefix in ("/shorts/", "/embed/", "/live/"):
+                if parsed.path.startswith(prefix):
+                    return parsed.path[len(prefix):].strip("/").split("/", 1)[0]
+        return ""
+
+    async def youtube_video_metadata(self, video_id_or_url: str) -> ApiTrackCandidate | None:
+        if not self.youtube_api_key:
+            return None
+        video_id = self._youtube_video_id_from_url(video_id_or_url) or str(video_id_or_url or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,}", video_id):
+            return None
+        params = urlencode({
+            "part": "snippet,contentDetails,status",
+            "id": video_id,
+            "key": self.youtube_api_key,
+        })
+        data = await self._to_thread_json(f"https://www.googleapis.com/youtube/v3/videos?{params}")
+        first = next((item for item in (data.get("items") or []) if item), None)
+        if not first:
+            return None
+        snippet = first.get("snippet") or {}
+        thumbnails = snippet.get("thumbnails") or {}
+        thumb = ((thumbnails.get("maxres") or thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default") or {}).get("url") or "")
+        candidate = ApiTrackCandidate(
+            title=html.unescape(str(snippet.get("title") or "").strip()),
+            artist=html.unescape(str(snippet.get("channelTitle") or "").strip()),
+            thumbnail=thumb,
+            webpage_url=f"https://www.youtube.com/watch?v={video_id}",
+            source="YouTube API",
+            provider="youtube",
+            query=video_id,
+            score=45,
+        )
+        candidate.duration = parse_iso8601_duration(str((first.get("contentDetails") or {}).get("duration") or ""))
+        status = first.get("status") or {}
+        if str(status.get("embeddable", "true")).lower() == "false":
+            candidate.score -= 10
+        return candidate
+
     async def youtube_search(self, query: str, *, limit: int = 5) -> list[ApiTrackCandidate]:
         if not self.youtube_api_key:
             return []
