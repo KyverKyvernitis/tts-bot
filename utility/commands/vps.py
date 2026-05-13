@@ -63,15 +63,15 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
     quebrar o comando.
     """
 
-    def __init__(self, cog: "VpsCommandMixin"):
+    def __init__(self, cog: "VpsCommandMixin", *, force_text_fallback: bool = False):
         super().__init__(timeout=180)
         self.cog = cog
         self._ui_mode = "fallback_text"
 
-        radio_cls = getattr(discord.ui, "RadioGroup", None)
-        checkbox_cls = getattr(discord.ui, "Checkbox", None)
-        label_cls = getattr(discord.ui, "Label", None)
-        radio_opt_cls = getattr(discord, "RadioGroupOption", None)
+        radio_cls = None if force_text_fallback else getattr(discord.ui, "RadioGroup", None)
+        checkbox_cls = None if force_text_fallback else getattr(discord.ui, "Checkbox", None)
+        label_cls = None if force_text_fallback else getattr(discord.ui, "Label", None)
+        radio_opt_cls = None if force_text_fallback else getattr(discord, "RadioGroupOption", None)
 
         if radio_cls is not None and checkbox_cls is not None and label_cls is not None:
             try:
@@ -313,13 +313,40 @@ class VpsCommandMixin:
             with contextlib.suppress(Exception):
                 await interaction.followup.send(fallback[:1900])
 
+    async def _send_vps_modal(self, interaction: discord.Interaction) -> None:
+        """Abre o modal do /vps sem defer prévio.
+
+        Discord não permite ``send_modal`` depois de ``defer``. Além disso, em
+        alguns runtimes/mobile os componentes novos de Modal (RadioGroup/Checkbox
+        dentro de Label) podem falhar antes de abrir. Nesse caso, o comando cai
+        imediatamente para um modal clássico de TextInput em vez de deixar
+        “O aplicativo não respondeu”.
+        """
+        try:
+            await interaction.response.send_modal(VpsModal(self))
+            return
+        except Exception:
+            logger.exception("[utility/vps] falha ao abrir modal avançado; tentando fallback TextInput")
+
+        if interaction.response.is_done():
+            return
+        try:
+            await interaction.response.send_modal(VpsModal(self, force_text_fallback=True))
+        except Exception:
+            logger.exception("[utility/vps] fallback TextInput também falhou")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "`⚠️` Não consegui abrir o painel da VPS. Tente novamente em alguns segundos.",
+                    ephemeral=True,
+                )
+
     @app_commands.command(name="vps", description="Abre o painel de diagnóstico/anexos da VPS")
     @app_commands.guilds(VPS_COMMAND_GUILD)
     async def vps(self, interaction: discord.Interaction):
         if interaction.guild is None or int(getattr(interaction.guild, "id", 0) or 0) != VPS_COMMAND_GUILD_ID:
-            await interaction.response.send_message("Esse painel só funciona na guilda de teste configurada.")
+            await interaction.response.send_message("Esse painel só funciona na guilda de teste configurada.", ephemeral=True)
             return
-        if not await self._can_use_vps(interaction):
-            await interaction.response.send_message("Esse painel técnico da VPS é exclusivo do dono do bot.")
-            return
-        await interaction.response.send_modal(VpsModal(self))
+        # Não faça await pesado antes de send_modal: se o owner check/rede travar,
+        # o Discord mostra “O aplicativo não respondeu” e o modal nem abre.
+        # A validação de dono continua no submit, logo após o defer correto.
+        await self._send_vps_modal(interaction)
