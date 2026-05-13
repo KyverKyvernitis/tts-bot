@@ -455,7 +455,7 @@ def _spotify_api_fetch_test_track() -> tuple[dict[str, Any] | None, list[str]]:
             data=body,
             headers={"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"},
         )
-        with urllib.request.urlopen(req, timeout=18) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             token_payload = json.loads(resp.read().decode("utf-8", "replace"))
         token = token_payload.get("access_token") or ""
         if not token:
@@ -465,7 +465,7 @@ def _spotify_api_fetch_test_track() -> tuple[dict[str, Any] | None, list[str]]:
             f"https://api.spotify.com/v1/tracks/{VALID_SPOTIFY_TEST_ID}?market=BR",
             headers={"Authorization": f"Bearer {token}"},
         )
-        with urllib.request.urlopen(req, timeout=18) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             track = json.loads(resp.read().decode("utf-8", "replace"))
         artists = [a.get("name", "") for a in track.get("artists", []) if isinstance(a, dict) and a.get("name")]
         data = {
@@ -585,7 +585,7 @@ def _spotify_dry_run_mirror_test(cfg: dict[str, Any]) -> str:
     tested: list[dict[str, Any]] = []
     for candidate in candidates[:4]:
         enc = urllib.parse.quote(candidate, safe="")
-        result = _http_json(f"{base_url}/v4/loadtracks?identifier={enc}", password=password, timeout=25.0)
+        result = _http_json(f"{base_url}/v4/loadtracks?identifier={enc}", password=password, timeout=10.0)
         summary = _summarize_loadtracks(result)
         first = (summary.get("tracks") or [None])[0] if isinstance(summary, dict) else None
         item: dict[str, Any] = {
@@ -655,7 +655,7 @@ def _spotify_api_test() -> str:
             data=body,
             headers={"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"},
         )
-        with urllib.request.urlopen(req, timeout=18) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             token_payload = json.loads(resp.read().decode("utf-8", "replace"))
         token = token_payload.get("access_token") or ""
         lines.append(f"token_ok: {bool(token)}")
@@ -665,7 +665,7 @@ def _spotify_api_test() -> str:
             f"https://api.spotify.com/v1/tracks/{VALID_SPOTIFY_TEST_ID}?market=BR",
             headers={"Authorization": f"Bearer {token}"},
         )
-        with urllib.request.urlopen(req, timeout=18) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             track = json.loads(resp.read().decode("utf-8", "replace"))
         artists = ", ".join(a.get("name", "") for a in track.get("artists", []) if isinstance(a, dict))
         summary = {
@@ -700,7 +700,7 @@ def _lavalink_tests(cfg: dict[str, Any]) -> str:
     if analysis.get("warnings"):
         lines.append("\nAVISO: há alerta de configuração acima. Se o Lavalink estiver em Connection refused, corrija isso primeiro.")
 
-    info = _http_json(f"{base_url}/v4/info", password=password, timeout=18.0)
+    info = _http_json(f"{base_url}/v4/info", password=password, timeout=8.0)
     lines.append("\n/v4/info:")
     lines.append(json.dumps(_safe_report_obj(info), ensure_ascii=False, indent=2))
 
@@ -718,7 +718,7 @@ def _lavalink_tests(cfg: dict[str, Any]) -> str:
     ]
     for label, identifier in tests:
         enc = urllib.parse.quote(identifier, safe="")
-        result = _http_json(f"{base_url}/v4/loadtracks?identifier={enc}", password=password, timeout=30.0)
+        result = _http_json(f"{base_url}/v4/loadtracks?identifier={enc}", password=password, timeout=12.0)
         lines.append(f"\n{label} -> {identifier}:")
         lines.append(json.dumps(_safe_report_obj(_summarize_loadtracks(result)), ensure_ascii=False, indent=2))
     lines.append(
@@ -827,7 +827,7 @@ def _yt_dlp_test() -> str:
     if cookie_path:
         args.extend(["--cookies", cookie_path])
     args.append(VALID_YOUTUBE_TEST_URL)
-    lines.append(_run_yt_dlp_quick(args, timeout=35.0))
+    lines.append(_run_yt_dlp_quick(args, timeout=14.0))
     return "\n".join(lines)
 
 def _local_log_tail() -> str:
@@ -1218,31 +1218,31 @@ def _diagnostic_log_commands() -> dict[str, list[str]]:
     return {
         "logs/relevant/music-events.txt": [
             "bash", "-lc",
-            "journalctl -u tts-bot.service --since '4 hours ago' -n 2500 --no-pager -o cat "
+            "journalctl -u tts-bot.service --since '90 minutes ago' -n 1200 --no-pager -o cat "
             "| grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|fallback|premature|TrackException|LoadException|tts_|tts |duck|resolve|resolving|FFmpeg|erro|falhou|timeout|exception|traceback' || true",
         ],
         "logs/relevant/tts-events.txt": [
             "bash", "-lc",
-            "journalctl -u tts-bot.service --since '4 hours ago' -n 2200 --no-pager -o cat "
+            "journalctl -u tts-bot.service --since '90 minutes ago' -n 1000 --no-pager -o cat "
             "| grep -Ei 'tts|tts_voice|tts-audio|duck|lavalink_tts|public_url|internal_url|voice.*assumindo|timeout|falhou|erro' || true",
         ],
         "logs/relevant/errors-warnings.txt": [
             "bash", "-lc",
-            "journalctl -u tts-bot.service -u lavalink.service --since '4 hours ago' -n 2500 --no-pager -o cat "
+            "journalctl -u tts-bot.service -u lavalink.service --since '90 minutes ago' -n 1200 --no-pager -o cat "
             "| grep -Ei 'warning|error|exception|traceback|falhou|erro|timeout|TrackException|LoadException|stuck|premature|invalid status|404|403|429|5[0-9][0-9]' || true",
         ],
         "logs/relevant/lavalink-events.txt": [
             "bash", "-lc",
-            "journalctl -u lavalink.service --since '4 hours ago' -n 1800 --no-pager -o cat "
+            "journalctl -u lavalink.service --since '90 minutes ago' -n 900 --no-pager -o cat "
             "| grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|track|exception|failed|error|404|403|429|5[0-9][0-9]' || true",
         ],
         "logs/raw/tts-bot-journal-tail.txt": [
             "bash", "-lc",
-            "journalctl -u tts-bot.service --since '4 hours ago' -n 3500 --no-pager -o short-iso",
+            "journalctl -u tts-bot.service --since '90 minutes ago' -n 1600 --no-pager -o short-iso",
         ],
         "logs/raw/lavalink-journal-tail.txt": [
             "bash", "-lc",
-            "journalctl -u lavalink.service --since '4 hours ago' -n 2500 --no-pager -o short-iso",
+            "journalctl -u lavalink.service --since '90 minutes ago' -n 1200 --no-pager -o short-iso",
         ],
     }
 
@@ -1272,6 +1272,52 @@ def _local_logs_archive_text() -> dict[str, str]:
 MUSIC_DIAGNOSTICS_ARCHIVE_MAX_BYTES = 24 * 1024 * 1024
 
 
+def build_music_diagnostics_emergency_report_sync(router: Any, options: DiagnosticsOptions, *, reason: str = "") -> str:
+    """Relatório mínimo para quando o diagnóstico modular estourar timeout/falhar.
+
+    A ideia é nunca deixar o /vps preso em "pensando". Este relatório evita
+    testes REST longos e coleta só o essencial para debug imediato.
+    """
+    sections: list[tuple[str, str]] = []
+    sections.append((
+        "Resumo emergencial",
+        "\n".join([
+            f"Gerado em: {_now_stamp()}",
+            f"Guild: {options.guild_name} ({options.guild_id})",
+            f"Solicitado por: {options.requester_name} ({options.requester_id})",
+            f"Repo root: {REPO_ROOT}",
+            f"Motivo do fallback: {reason or 'diagnóstico principal indisponível'}",
+        ]),
+    ))
+    sections.append(("Variáveis relevantes (.env carregado pelo processo)", json.dumps(_safe_report_obj(_read_env_flags()), ensure_ascii=False, indent=2)))
+    with contextlib.suppress(Exception):
+        sections.append(("Estado TTS/música em memória", _tts_runtime_snapshot(router, options.guild_id)))
+    sections.append(("Marcos de restart/runtime", _service_restart_markers()))
+    sections.append((
+        "journalctl musical recente",
+        _run_cmd([
+            "bash", "-lc",
+            "journalctl -u tts-bot.service --since '45 minutes ago' -n 900 --no-pager -o cat "
+            "| grep -Ei 'music|youtube|yt-dlp|lavalink|spotify|soundcloud|fallback|stream|format|cookie|anti-bot|Sign in|ffmpeg|voice|erro|falhou|exception|traceback|heartbeat|vps|diagn' || true",
+        ], timeout=8.0, cwd=REPO_ROOT),
+    ))
+    sections.append((
+        "journalctl lavalink recente",
+        _run_cmd([
+            "bash", "-lc",
+            "journalctl -u lavalink.service --since '45 minutes ago' -n 700 --no-pager -o cat "
+            "| grep -Ei 'ready|lavasrc|spotify|soundcloud|youtube|loadtracks|track|exception|failed|error|404|403|429|5[0-9][0-9]' || true",
+        ], timeout=8.0, cwd=REPO_ROOT),
+    ))
+    sections.append(("Processos e recursos", _run_cmd(["bash", "-lc", "date -Is; echo; free -m; echo; ps -eo pid,ppid,%cpu,%mem,etime,cmd --sort=-%cpu | head -35"], timeout=6.0, cwd=REPO_ROOT)))
+    body = "".join(f"\n\n# {title}\n{redact(text)}" for title, text in sections).strip() + "\n"
+    return redact(body)
+
+
+async def build_music_diagnostics_emergency_report(router: Any, options: DiagnosticsOptions, *, reason: str = "") -> str:
+    return await asyncio.to_thread(build_music_diagnostics_emergency_report_sync, router, options, reason=reason)
+
+
 def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOptions) -> tuple[bytes | None, str, str, str]:
     """Gera diagnóstico musical em zip modular, sem perder testes/logs importantes."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -1291,12 +1337,12 @@ def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOption
                 _write_zip_text(zf, arc, body); added += 1
             _write_zip_text(zf, "bot/env.sanitized.txt", _sanitized_env_text()); added += 1
             for arc, cmd in _diagnostic_log_commands().items():
-                timeout = 26.0 if "/raw/" in arc else 18.0
+                timeout = 10.0 if "/raw/" in arc else 8.0
                 _write_zip_text(zf, arc, _run_cmd(cmd, timeout=timeout)); added += 1
             for arc, text in _local_logs_archive_text().items():
                 _write_zip_text(zf, arc, text); added += 1
             # Informações úteis para diagnosticar peso/IO sem tornar o relatório síncrono demais.
-            _write_zip_text(zf, "system/disk-and-process.txt", _run_cmd(["bash", "-lc", "df -h; echo; free -m; echo; ps -eo pid,ppid,%cpu,%mem,etime,cmd --sort=-%cpu | head -40"], timeout=12.0)); added += 1
+            _write_zip_text(zf, "system/disk-and-process.txt", _run_cmd(["bash", "-lc", "df -h; echo; free -m; echo; ps -eo pid,ppid,%cpu,%mem,etime,cmd --sort=-%cpu | head -40"], timeout=8.0)); added += 1
     except Exception as exc:
         return None, filename, f"Falha ao montar diagnóstico musical modular: {type(exc).__name__}: {exc}", ""
     payload = bio.getvalue()
@@ -1360,8 +1406,8 @@ def _system_status_report() -> str:
         _run_cmd(["free", "-h"], timeout=8.0),
         _run_cmd(["ss", "-ltnp"], timeout=10.0),
         _node_process_inventory(),
-        _run_cmd(["systemctl", "--no-pager", "--full", "status", *units], timeout=18.0),
-        _run_cmd(["systemctl", "cat", *units], timeout=18.0),
+        _run_cmd(["systemctl", "--no-pager", "--full", "status", *units], timeout=8.0),
+        _run_cmd(["systemctl", "cat", *units], timeout=8.0),
     ]
     parts.append("Backends de música ativos: Lavalink e fallback local/yt-dlp. Processos Node.js em outras portas são features independentes, como Sinuca Activity; veja o inventário acima.")
     return "\n\n".join(parts)
@@ -1483,13 +1529,13 @@ def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
 
             app_path = Path("/opt/lavalink/application.yml")
             _write_zip_text(zf, "lavalink/application.sanitized.yml", _safe_read_file(app_path, max_chars=500_000)); added += 1
-            _write_zip_text(zf, "lavalink/listing.txt", _run_cmd(["bash", "-lc", "ls -lah /opt/lavalink; echo; ls -lah /opt/lavalink/plugins"], timeout=12.0)); added += 1
+            _write_zip_text(zf, "lavalink/listing.txt", _run_cmd(["bash", "-lc", "ls -lah /opt/lavalink; echo; ls -lah /opt/lavalink/plugins"], timeout=8.0)); added += 1
 
             _write_zip_text(zf, "db/musicnode.snapshot.txt", _db_snapshot()[0]); added += 1
-            _write_zip_text(zf, "systemd/services.txt", _run_cmd(["systemctl", "cat", *_systemd_units_for_diagnostics()], timeout=18.0)); added += 1
+            _write_zip_text(zf, "systemd/services.txt", _run_cmd(["systemctl", "cat", *_systemd_units_for_diagnostics()], timeout=8.0)); added += 1
             _write_zip_text(zf, "meta/system.txt", _system_status_report()); added += 1
-            _write_zip_text(zf, "logs/tts-bot.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u tts-bot.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|deezer|fallback|TrackException|LoadException|ChannelTimeout|erro|falhou|exception|traceback' || true"], timeout=18.0)); added += 1
-            _write_zip_text(zf, "logs/lavalink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u lavalink.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|master|403|404|error|exception|failed|TrackException' || true"], timeout=18.0)); added += 1
+            _write_zip_text(zf, "logs/tts-bot.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u tts-bot.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|deezer|fallback|TrackException|LoadException|ChannelTimeout|erro|falhou|exception|traceback' || true"], timeout=8.0)); added += 1
+            _write_zip_text(zf, "logs/lavalink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u lavalink.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|master|403|404|error|exception|failed|TrackException' || true"], timeout=8.0)); added += 1
             _write_zip_text(zf, "logs/local-bot-logs.txt", _local_log_tail()); added += 1
     except Exception as exc:
         return None, filename, f"Falha ao montar snapshot da VPS: {type(exc).__name__}: {exc}"

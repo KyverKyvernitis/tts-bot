@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import logging
@@ -17,6 +18,7 @@ from music_system.diagnostics import (
     build_git_tracked_base_archive,
     build_music_diagnostics_report,
     build_music_diagnostics_archive,
+    build_music_diagnostics_emergency_report,
     build_vps_snapshot_archive,
 )
 
@@ -26,6 +28,11 @@ VPS_COMMAND_GUILD_ID = 927002914449424404
 VPS_COMMAND_GUILD = discord.Object(id=VPS_COMMAND_GUILD_ID)
 
 VpsAction = Literal["base_git", "music_diag", "full_diag"]
+
+VPS_BASE_TIMEOUT_SECONDS = 70.0
+VPS_MUSIC_DIAG_TIMEOUT_SECONDS = 115.0
+VPS_FULL_DIAG_TIMEOUT_SECONDS = 150.0
+VPS_SNAPSHOT_TIMEOUT_SECONDS = 75.0
 
 
 def _get_audio_router(bot: commands.Bot) -> AudioRouter:
@@ -146,11 +153,21 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
         return raw in {"s", "sim", "y", "yes", "1", "true", "on"}
 
     async def on_submit(self, interaction: discord.Interaction):
-        await self.cog._run_vps_action(
-            interaction,
-            action=self._selected_action(),
-            include_snapshot=self._include_snapshot(),
-        )
+        try:
+            await self.cog._run_vps_action(
+                interaction,
+                action=self._selected_action(),
+                include_snapshot=self._include_snapshot(),
+            )
+        except Exception as exc:
+            logger.exception("[utility/vps] erro fatal no submit do modal")
+            message = f"`⚠️` O painel da VPS falhou antes de concluir: {type(exc).__name__}: {str(exc)[:300]}"
+            with contextlib.suppress(Exception):
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(message)
+                    return
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(message)
 
 
 class VpsCommandMixin:
@@ -173,16 +190,37 @@ class VpsCommandMixin:
             include_local_logs=True,
         )
 
+    async def _defer_vps_interaction(self, interaction: discord.Interaction) -> bool:
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(thinking=True, ephemeral=False)
+            return True
+        except discord.InteractionResponded:
+            return True
+        except Exception:
+            logger.exception("[utility/vps] não consegui deferir interação /vps")
+            return False
+
+    async def _with_vps_timeout(self, label: str, coro, *, timeout: float):
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            logger.warning("[utility/vps] %s excedeu timeout de %.1fs", label, timeout)
+            raise TimeoutError(f"{label} excedeu {timeout:.0f}s") from exc
+
     async def _run_vps_action(self, interaction: discord.Interaction, *, action: VpsAction, include_snapshot: bool) -> None:
         if interaction.guild is None or int(getattr(interaction.guild, "id", 0) or 0) != VPS_COMMAND_GUILD_ID:
             await interaction.response.send_message("Esse painel só funciona na guilda de teste configurada.")
             return
 
-        if not await self._can_use_vps(interaction):
-            await interaction.response.send_message("Esse painel técnico da VPS é exclusivo do dono do bot.")
+        # Modal submit precisa ser reconhecido em até poucos segundos.
+        # Fazemos o defer antes de qualquer coleta, consulta de owner ou I/O pesado.
+        if not await self._defer_vps_interaction(interaction):
             return
 
-        await interaction.response.defer(thinking=True, ephemeral=False)
+        if not await self._can_use_vps(interaction):
+            await interaction.followup.send("Esse painel técnico da VPS é exclusivo do dono do bot.")
+            return
 
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         files: list[discord.File] = []
@@ -190,7 +228,7 @@ class VpsCommandMixin:
 
         if action == "base_git":
             try:
-                payload, filename, summary, manifest = await build_git_tracked_base_archive()
+                payload, filename, summary, manifest = await self._with_vps_timeout("base Git", build_git_tracked_base_archive(), timeout=VPS_BASE_TIMEOUT_SECONDS)
                 if payload and filename:
                     files.append(discord.File(io.BytesIO(payload), filename=filename))
                     lines.append("`📦` Base Git rastreada anexada.")
@@ -208,7 +246,7 @@ class VpsCommandMixin:
         elif action == "music_diag":
             router = _get_audio_router(self.bot)
             try:
-                payload, filename, summary, fallback_report = await build_music_diagnostics_archive(router, await self._vps_context_options(interaction))
+                payload, filename, summary, fallback_report = await self._with_vps_timeout("diagnóstico musical", build_music_diagnostics_archive(router, await self._vps_context_options(interaction)), timeout=VPS_MUSIC_DIAG_TIMEOUT_SECONDS)
                 if payload and filename:
                     files.append(discord.File(io.BytesIO(payload), filename=filename))
                     lines.append("`🎵` Diagnóstico musical modular anexado em .zip.")
@@ -218,18 +256,32 @@ class VpsCommandMixin:
                     # O resumo completo fica dentro do zip como 00-resumo-curto.txt/summary.txt.
                 else:
                     lines.append(f"`⚠️` Diagnóstico modular não foi anexado: {summary or 'falha sem detalhes'}")
-                    report = fallback_report or await build_music_diagnostics_report(router, await self._vps_context_options(interaction))
+                    report = fallback_report or await self._with_vps_timeout("diagnóstico musical texto", build_music_diagnostics_report(router, await self._vps_context_options(interaction)), timeout=VPS_MUSIC_DIAG_TIMEOUT_SECONDS)
                     files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"vps-music-diagnostics-{stamp}.txt"))
             except Exception as exc:
                 logger.exception("[utility/vps] falha ao gerar diagnóstico musical")
-                report = f"# Diagnóstico musical falhou\nTipo: {type(exc).__name__}\nErro: {str(exc)[:500]}\n"
-                files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"vps-music-diagnostics-{stamp}.txt"))
-                lines.append("`⚠️` Diagnóstico musical falhou; anexei relatório mínimo.")
+                try:
+                    report = await self._with_vps_timeout(
+                        "diagnóstico musical emergencial",
+                        build_music_diagnostics_emergency_report(router, await self._vps_context_options(interaction), reason=f"{type(exc).__name__}: {str(exc)[:500]}"),
+                        timeout=18.0,
+                    )
+                except Exception as emergency_exc:
+                    report = (
+                        "# Diagnóstico musical falhou\n"
+                        f"Tipo: {type(exc).__name__}\n"
+                        f"Erro: {str(exc)[:500]}\n\n"
+                        "# Diagnóstico emergencial também falhou\n"
+                        f"Tipo: {type(emergency_exc).__name__}\n"
+                        f"Erro: {str(emergency_exc)[:500]}\n"
+                    )
+                files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"vps-music-diagnostics-emergency-{stamp}.txt"))
+                lines.append("`⚠️` Diagnóstico musical principal falhou ou passou do tempo; anexei relatório emergencial.")
 
         else:
             router = _get_audio_router(self.bot)
             try:
-                report = await build_full_vps_diagnostics_report(router, await self._vps_context_options(interaction))
+                report = await self._with_vps_timeout("diagnóstico completo", build_full_vps_diagnostics_report(router, await self._vps_context_options(interaction)), timeout=VPS_FULL_DIAG_TIMEOUT_SECONDS)
             except Exception as exc:
                 logger.exception("[utility/vps] falha ao gerar diagnóstico completo")
                 report = f"# Diagnóstico completo falhou\nTipo: {type(exc).__name__}\nErro: {str(exc)[:500]}\n"
@@ -238,7 +290,7 @@ class VpsCommandMixin:
 
         if include_snapshot:
             try:
-                payload, filename, summary = await build_vps_snapshot_archive()
+                payload, filename, summary = await self._with_vps_timeout("snapshot da VPS", build_vps_snapshot_archive(), timeout=VPS_SNAPSHOT_TIMEOUT_SECONDS)
                 if payload and filename:
                     files.append(discord.File(io.BytesIO(payload), filename=filename))
                     lines.append("`🧰` Snapshot sanitizado da VPS anexado.")
@@ -253,7 +305,13 @@ class VpsCommandMixin:
         if not files:
             lines.append("`⚠️` Nenhum arquivo foi gerado.")
 
-        await interaction.followup.send("\n".join(lines), files=files[:10])
+        try:
+            await interaction.followup.send("\n".join(lines), files=files[:10])
+        except Exception as exc:
+            logger.exception("[utility/vps] falha ao enviar resposta final")
+            fallback = "\n".join(lines + [f"`⚠️` Falhei ao anexar/enviar arquivos: {type(exc).__name__}: {str(exc)[:300]}"])
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(fallback[:1900])
 
     @app_commands.command(name="vps", description="Abre o painel de diagnóstico/anexos da VPS")
     @app_commands.guilds(VPS_COMMAND_GUILD)
