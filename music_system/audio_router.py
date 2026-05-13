@@ -2601,6 +2601,46 @@ class AudioRouter:
             track.fallback_reason = "Lavalink"
         return True
 
+    def _start_youtube_direct_metadata_refresh(self, guild_id: int, state: MusicGuildState, track: MusicTrack) -> None:
+        """Hidrata metadata de link direto do YouTube depois do áudio iniciar.
+
+        A chamada é fire-and-forget de propósito: YouTube API, oEmbed ou qualquer
+        lookup de metadata nunca pode participar do caminho crítico de playback.
+        """
+        if not self._track_is_direct_youtube_request(track):
+            return
+
+        async def _runner() -> None:
+            try:
+                # Dá preferência total ao thread de áudio/FFmpeg e ao primeiro
+                # update de estado. Metadata é acabamento visual, não requisito.
+                await asyncio.sleep(0.05)
+                if state.current is not track or state.stop_requested:
+                    return
+                changed = await self.extractor.hydrate_youtube_direct_metadata(track)
+                if not changed:
+                    return
+                if state.current is not track or state.stop_requested:
+                    return
+                logger.info(
+                    "[music] metadata YouTube direta aplicada após start | guild=%s track=%r",
+                    guild_id,
+                    getattr(track, "title", ""),
+                )
+                self._mark_voice_status_track_change(state)
+                self._schedule_voice_status_track_sync(guild_id, repeat_after=0.5, reason="youtube_direct_metadata")
+                await self.update_panel(guild_id, create=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("[music] metadata YouTube direta pós-start falhou | guild=%s", guild_id, exc_info=True)
+
+        try:
+            task = asyncio.create_task(_runner())
+            task.add_done_callback(_consume_expected_music_exception)
+        except RuntimeError:
+            return
+
     async def _disconnect_lavalink_before_local_fallback(self, guild: discord.Guild, state: MusicGuildState, *, reason: str = "fallback") -> None:
         current_vc = guild.voice_client
         if not self._is_lavalink_voice_client(current_vc):
@@ -2774,11 +2814,16 @@ class AudioRouter:
         state.current_backend = "local"
         state.current_lavalink_player = None
         state.current_lavalink_playable = None
-        # Cada música nova ganha um painel novo no fim do chat. Alterações da
-        # mesma música continuam editando esse painel.
-        await self.update_panel(guild.id, create=True, repost=True)
 
         direct_youtube_request = self._track_is_direct_youtube_request(track)
+        # Link direto do YouTube prioriza áudio. Não bloqueie a resolução do
+        # stream local aguardando painel/metadata bonitos; o painel é criado
+        # depois, quando o stream já estiver pronto/iniciando.
+        if not direct_youtube_request:
+            # Cada música nova ganha um painel novo no fim do chat. Alterações da
+            # mesma música continuam editando esse painel.
+            await self.update_panel(guild.id, create=True, repost=True)
+
         use_lavalink_real = bool(self.backends.should_use_lavalink_real(guild.id)) and not direct_youtube_request
         if direct_youtube_request:
             logger.info(
@@ -2882,7 +2927,10 @@ class AudioRouter:
             raise MusicExtractionError("A música não retornou URL de stream.")
 
         self._set_current_status(state, "starting")
-        await self.update_panel(guild.id, create=True)
+        if direct_youtube_request:
+            self._schedule_panel_update(guild.id, create=True)
+        else:
+            await self.update_panel(guild.id, create=True)
 
         # Se um TTS direto ainda estiver tocando, espera acabar antes da música entrar.
         for _ in range(60):
@@ -2987,6 +3035,7 @@ class AudioRouter:
         self._mark_voice_status_track_change(state)
         self._schedule_voice_status_track_sync(guild.id, repeat_after=1.0, reason="playback_started")
         self._schedule_panel_update(guild.id, create=True)
+        self._start_youtube_direct_metadata_refresh(guild.id, state, track)
         self._start_prefetch_next(guild.id, state)
         await finished
         return not state.skip_requested and not state.stop_requested

@@ -1079,40 +1079,85 @@ class MusicExtractor:
         raise MusicExtractionError(self._metadata_error_message(profile.platform, None))
 
     async def _quick_youtube_direct_batch(self, profile: UrlProfile, *, requester_id: int, requester_name: str = "") -> ExtractedBatch:
-        """Cria uma faixa leve para link direto do YouTube sem bloquear no yt-dlp.
+        """Cria uma faixa mínima para link direto do YouTube sem bloquear no yt-dlp.
 
-        O comando responde rápido e a URL real de áudio é resolvida só quando a
-        faixa virar atual. Metadata vem primeiro da YouTube Data API, porque ela
-        já está configurada na VPS e evita placeholder ruim como "YouTube <id>".
+        Regra de prioridade: áudio primeiro. A metadata bonita da YouTube API
+        (título/canal/duração/thumb) é hidratada depois que a música já começou
+        a tocar, pelo AudioRouter. Isso impede que API, quota, timeout ou
+        metadata pública atrasem ou quebrem a reprodução local por link direto.
         """
-        title = ""
-        uploader = "YouTube"
-        thumbnail = ""
-        duration: float | None = None
         video_id = str(getattr(profile, "youtube_video_id", "") or "").strip()
+        thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else ""
+        track = MusicTrack(
+            title=f"YouTube {video_id}" if video_id else "YouTube",
+            webpage_url=profile.canonical or profile.raw,
+            requester_id=int(requester_id),
+            requester_name=requester_name,
+            duration=None,
+            uploader="YouTube",
+            thumbnail=thumbnail,
+            source="YouTube",
+            original_url=profile.raw,
+            extractor="youtube",
+        )
+        logger.info(
+            "[music.perf] youtube_direct_fast_enqueue video=%s metadata=deferred",
+            video_id or "unknown",
+        )
+        return ExtractedBatch(tracks=[track], query=profile.raw, is_playlist=False)
 
-        if video_id:
-            try:
-                api_started = time.monotonic()
-                candidate = await asyncio.wait_for(
-                    self.api.youtube_video_metadata(video_id),
-                    timeout=max(1.0, min(3.0, MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS + 1.0)),
-                )
-                if candidate is not None:
-                    title = clean_metadata_title(candidate.title) or candidate.title
-                    uploader = candidate.artist or uploader
-                    thumbnail = candidate.thumbnail or thumbnail
-                    duration = candidate.duration
-                    logger.info(
-                        "[music.perf] youtube_direct_api_metadata video=%s ok=%s elapsed=%.2fs",
-                        video_id,
-                        bool(title),
-                        time.monotonic() - api_started,
-                    )
-            except Exception:
-                logger.debug("[music] metadata YouTube API direta falhou | url=%s", profile.raw, exc_info=True)
+    async def hydrate_youtube_direct_metadata(self, track: MusicTrack) -> bool:
+        """Atualiza metadata de link direto do YouTube sem participar do start do áudio.
 
-        if not title:
+        Retorna True quando algum campo visível mudou. Essa função deve ser
+        chamada em background depois que o playback local já iniciou.
+        """
+        source = str(getattr(track, "original_url", "") or getattr(track, "webpage_url", "") or "").strip()
+        if not source:
+            return False
+        profile = describe_url(source)
+        if not profile.is_youtube or profile.resource_type == "playlist":
+            return False
+        video_id = str(getattr(profile, "youtube_video_id", "") or "").strip()
+        if not video_id:
+            return False
+
+        before = (
+            str(track.title or ""),
+            str(track.uploader or ""),
+            str(track.thumbnail or ""),
+            float(track.duration or 0.0),
+        )
+
+        candidate: ApiTrackCandidate | None = None
+        try:
+            api_started = time.monotonic()
+            candidate = await asyncio.wait_for(
+                self.api.youtube_video_metadata(video_id),
+                timeout=max(0.6, min(3.0, MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS + 1.0)),
+            )
+            logger.info(
+                "[music.perf] youtube_direct_api_metadata_deferred video=%s ok=%s elapsed=%.2fs",
+                video_id,
+                bool(candidate and candidate.title),
+                time.monotonic() - api_started,
+            )
+        except Exception as exc:
+            logger.debug(
+                "[music] metadata YouTube API direta adiada falhou | video=%s erro=%s",
+                video_id,
+                exc.__class__.__name__,
+                exc_info=True,
+            )
+
+        if candidate is not None and (candidate.title or "").strip():
+            track.title = clean_metadata_title(candidate.title) or candidate.title
+            track.uploader = (candidate.artist or track.uploader or "YouTube").strip() or "YouTube"
+            track.thumbnail = candidate.thumbnail or track.thumbnail
+            if candidate.duration is not None and float(candidate.duration or 0) > 0:
+                track.duration = float(candidate.duration)
+            track.webpage_url = candidate.webpage_url or track.webpage_url
+        else:
             try:
                 public_started = time.monotonic()
                 raw_meta = await asyncio.wait_for(
@@ -1124,34 +1169,26 @@ class MusicExtractor:
                     timeout=MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS + 0.35,
                 )
                 title = clean_metadata_title(str(raw_meta.get("title") or ""))
-                uploader = str(raw_meta.get("artist") or uploader or "YouTube").strip() or "YouTube"
-                thumbnail = str(raw_meta.get("thumbnail") or "").strip()
+                if title:
+                    track.title = title
+                    track.uploader = str(raw_meta.get("artist") or track.uploader or "YouTube").strip() or "YouTube"
+                    track.thumbnail = str(raw_meta.get("thumbnail") or track.thumbnail or "").strip()
                 logger.info(
-                    "[music.perf] youtube_direct_public_metadata video=%s ok=%s elapsed=%.2fs",
+                    "[music.perf] youtube_direct_public_metadata_deferred video=%s ok=%s elapsed=%.2fs",
                     video_id,
                     bool(title),
                     time.monotonic() - public_started,
                 )
             except Exception:
-                logger.debug("[music] metadata rápida do YouTube ignorada | url=%s", profile.raw, exc_info=True)
+                logger.debug("[music] metadata pública direta adiada ignorada | url=%s", profile.raw, exc_info=True)
 
-        if not title:
-            title = f"YouTube {video_id}" if video_id else "YouTube"
-        if not thumbnail and video_id:
-            thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-        track = MusicTrack(
-            title=title,
-            webpage_url=profile.canonical or profile.raw,
-            requester_id=int(requester_id),
-            requester_name=requester_name,
-            duration=duration,
-            uploader=uploader,
-            thumbnail=thumbnail,
-            source="YouTube",
-            original_url=profile.raw,
-            extractor="youtube",
+        after = (
+            str(track.title or ""),
+            str(track.uploader or ""),
+            str(track.thumbnail or ""),
+            float(track.duration or 0.0),
         )
-        return ExtractedBatch(tracks=[track], query=profile.raw, is_playlist=False)
+        return after != before
 
     async def _extract_youtube(self, profile: UrlProfile, *, requester_id: int, requester_name: str = "") -> ExtractedBatch:
         errors: list[str] = []
