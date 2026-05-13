@@ -441,6 +441,8 @@ class MusicGuildState:
     panel_update_create: bool = True
     panel_update_requested_at: float = 0.0
     current_started_at_monotonic: float = 0.0
+    current_start_offset_seconds: float = 0.0
+    next_local_start_offset_seconds: float = 0.0
     auto_bitrate_channel_id: Optional[int] = None
     auto_bitrate_original: Optional[int] = None
     auto_bitrate_boosted: Optional[int] = None
@@ -1140,7 +1142,8 @@ class AudioRouter:
         remaining = duration
         if track is not None and not getattr(track, "is_live", False):
             started = float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0)
-            elapsed_seconds = max(0, int(time.monotonic() - started)) if started else 0
+            offset = max(0.0, float(getattr(state, "current_start_offset_seconds", 0.0) or 0.0))
+            elapsed_seconds = max(0, int(offset + (time.monotonic() - started))) if started else int(offset)
             elapsed = self._format_seconds(elapsed_seconds)
             if getattr(track, "duration", None) is not None:
                 remaining = self._format_seconds(max(0, int(float(track.duration) - elapsed_seconds)))
@@ -1313,7 +1316,8 @@ class AudioRouter:
         # Dedup barato antes de chamar REST: se o status renderizado já é o
         # último aplicado para essa faixa/canal, não faça nova chamada nem log.
         if (
-            int(getattr(state, "voice_status_channel_id", 0) or 0) == channel_id
+            not force
+            and int(getattr(state, "voice_status_channel_id", 0) or 0) == channel_id
             and str(getattr(state, "voice_status_last_track_key", "") or "") == track_key
             and str(getattr(state, "voice_status_last_bot", "") or "") == desired
         ):
@@ -1365,9 +1369,9 @@ class AudioRouter:
                 state.voice_status_last_bot = ""
                 state.voice_status_last_track_key = ""
 
-            if desired == state.voice_status_last_bot and track_key == state.voice_status_last_track_key:
+            if not force and desired == state.voice_status_last_bot and track_key == state.voice_status_last_track_key:
                 return
-            if desired_key == str(getattr(state, "voice_status_last_applied_key", "") or ""):
+            if not force and desired_key == str(getattr(state, "voice_status_last_applied_key", "") or ""):
                 return
             if force and not self._voice_status_track_is_current(state, track, track_key):
                 return
@@ -1415,7 +1419,7 @@ class AudioRouter:
         # o usuário alterna rápido A → B → A. O cooldown antigo podia bloquear
         # a segunda atualização legítima e deixar o status preso na música
         # anterior até o refresh tardio.
-        high_priority_reason = reason in {"playback_started", "lavalink_track_started", "skip", "previous"}
+        high_priority_reason = reason in {"playback_started", "lavalink_track_started", "skip", "previous", "seek"}
         if (
             not high_priority_reason
             and sync_key
@@ -1505,6 +1509,19 @@ class AudioRouter:
             force_task.cancel()
         if force_task is not current_task:
             state.voice_status_force_task = None
+
+    def _mark_voice_status_track_change(self, state: MusicGuildState) -> None:
+        """Libera dedupe antes de uma troca real de faixa/posição.
+
+        Mantém ``voice_status_last_bot`` para ainda reconhecer o status anterior
+        como status do próprio bot, mas força o próximo PUT. Isso evita que
+        skip rápido, A → B → A, seek ou faixas repetidas fiquem presas no
+        status visual antigo por causa da chave deduplicada.
+        """
+        state.voice_status_last_track_key = ""
+        state.voice_status_last_applied_key = ""
+        state.voice_status_last_sync_request_key = ""
+        state.voice_status_last_sync_request_at = 0.0
 
     async def _restore_voice_status_for_state(
         self,
@@ -2282,6 +2299,7 @@ class AudioRouter:
                     skip_to_next = bool(state.skip_requested and not state.stop_requested and self._has_pending_track(state))
                     state.current = None
                     state.current_started_at_monotonic = 0.0
+                    state.current_start_offset_seconds = 0.0
                     state.current_backend = "local"
                     state.current_lavalink_player = None
                     state.current_lavalink_playable = None
@@ -2296,7 +2314,7 @@ class AudioRouter:
                     # estado intermediário vazio/queued. A próxima iteração já vai
                     # definir current e redesenhar o painel como preparando/tocando.
                     if not skip_to_next:
-                        await self.update_panel(guild_id, create=bool(state.now_message))
+                        self._schedule_panel_update(guild_id, create=bool(state.now_message))
         finally:
             state.worker_task = None
             if state.stop_requested or not self._has_pending_track(state):
@@ -2304,6 +2322,7 @@ class AudioRouter:
                     self._set_idle_reason(state, "queue_finished")
                 state.current = None
                 state.current_started_at_monotonic = 0.0
+                state.current_start_offset_seconds = 0.0
                 state.current_backend = "local"
                 state.current_lavalink_player = None
                 state.current_lavalink_playable = None
@@ -2521,6 +2540,8 @@ class AudioRouter:
             state.current_started_at_monotonic = time.monotonic()
             state.current_quality_label = "Alta"
             state.current_quality_kbps = MUSIC_HIGH_QUALITY_MAX_ABR
+            state.current_start_offset_seconds = 0.0
+            self._mark_voice_status_track_change(state)
             self._schedule_voice_status_track_sync(guild.id, repeat_after=1.0, reason="lavalink_track_started")
             self._schedule_panel_update(guild.id, create=True)
 
@@ -2662,6 +2683,14 @@ class AudioRouter:
                     )
                 await self._disconnect_lavalink_before_local_fallback(guild, state, reason="lavalink_failed")
 
+        playback_start_offset = 0.0
+        with contextlib.suppress(Exception):
+            playback_start_offset = max(0.0, float(getattr(state, "next_local_start_offset_seconds", 0.0) or 0.0))
+        state.next_local_start_offset_seconds = 0.0
+        if getattr(track, "duration", None) is not None and playback_start_offset > 0:
+            with contextlib.suppress(Exception):
+                playback_start_offset = min(playback_start_offset, max(0.0, float(track.duration) - 0.25))
+
         vc = await self._ensure_voice(guild, channel, state=state)
         if vc is None:
             raise RuntimeError("Não consegui conectar ao canal de voz.")
@@ -2714,9 +2743,12 @@ class AudioRouter:
 
             finished = loop.create_future()
             ffmpeg_options, source_base_volume = _ffmpeg_options_with_base_volume(MUSIC_FFMPEG_OPTIONS, state.volume)
+            ffmpeg_before_options = MUSIC_RECONNECT_BEFORE_OPTIONS
+            if playback_start_offset > 0:
+                ffmpeg_before_options = f"{ffmpeg_before_options} -ss {playback_start_offset:.3f}".strip()
             ffmpeg_source = discord.FFmpegPCMAudio(
                 track.stream_url,
-                before_options=MUSIC_RECONNECT_BEFORE_OPTIONS,
+                before_options=ffmpeg_before_options,
                 options=ffmpeg_options,
             )
             mixed_source = MixedAudioSource(
@@ -2775,7 +2807,9 @@ class AudioRouter:
 
         self._set_current_status(state, "playing")
         state.current_started_at_monotonic = time.monotonic()
+        state.current_start_offset_seconds = playback_start_offset
         self._refresh_quality_state(state, track)
+        self._mark_voice_status_track_change(state)
         self._schedule_voice_status_track_sync(guild.id, repeat_after=1.0, reason="playback_started")
         self._schedule_panel_update(guild.id, create=True)
         self._start_prefetch_next(guild.id, state)
@@ -2954,6 +2988,8 @@ class AudioRouter:
         state.forward_queue.clear()
         state.current = None
         state.current_started_at_monotonic = 0.0
+        state.current_start_offset_seconds = 0.0
+        state.next_local_start_offset_seconds = 0.0
         state.current_source = None
         state.current_resolve_task = None
         state.current_backend = "local"
@@ -3757,6 +3793,116 @@ class AudioRouter:
         await self._restore_voice_status_for_state(guild, state, reason="manual_stop")
         await self.update_panel(guild_id, create=bool(state.now_message))
         return True
+
+    async def _seek_lavalink_current(self, guild_id: int, state: MusicGuildState, position_seconds: float) -> bool:
+        player = state.current_lavalink_player
+        if player is None:
+            guild = self.bot.get_guild(int(guild_id))
+            player = getattr(guild, "voice_client", None) if guild is not None else None
+        if player is None or not self._is_lavalink_voice_client(player):
+            return False
+        position_ms = max(0, int(float(position_seconds) * 1000))
+        seeker = getattr(player, "seek", None)
+        if callable(seeker):
+            try:
+                result = seeker(position_ms)
+            except TypeError:
+                try:
+                    result = seeker(position=position_ms)
+                except TypeError:
+                    result = seeker(milliseconds=position_ms)
+            if asyncio.iscoroutine(result):
+                await result
+            return True
+
+        # Fallback defensivo para versões sem método ``seek`` exposto: reenvia a
+        # faixa atual para o node começando no ponto escolhido.
+        playable = state.current_lavalink_playable or getattr(player, "current", None)
+        if playable is None:
+            return False
+        kwargs = {"replace": True, "start": position_ms}
+        with contextlib.suppress(Exception):
+            kwargs["volume"] = max(0, min(150, int(round(float(state.volume or 1.0) * 100))))
+        try:
+            result = player.play(playable, **kwargs)
+        except TypeError:
+            kwargs.pop("volume", None)
+            try:
+                result = player.play(playable, **kwargs)
+            except TypeError:
+                result = player.play(playable)
+        if asyncio.iscoroutine(result):
+            await result
+        return True
+
+    async def seek_to(self, guild_id: int, position_seconds: int | float) -> tuple[bool, str]:
+        state = self.get_state(guild_id)
+        track = state.current
+        if track is None:
+            return False, "Não há música tocando agora."
+        if getattr(track, "is_live", False) or getattr(track, "duration", None) is None:
+            return False, "Essa música parece ser live/stream ou não tem duração fixa, então não dá para selecionar momento."
+        try:
+            target = max(0.0, float(position_seconds))
+            duration = float(track.duration)
+        except Exception:
+            return False, "Tempo inválido. Use algo como `129`, `45` ou `1:29`."
+        if duration <= 0:
+            return False, "Essa música não tem duração fixa, então não dá para selecionar momento."
+        if target > duration:
+            return False, f"Esse momento passa da duração da música (`{self._format_seconds(duration)}`)."
+
+        guild = self.bot.get_guild(int(guild_id))
+        if guild is None:
+            return False, "Servidor não encontrado."
+
+        target_label = self._format_seconds(target)
+        backend = str(getattr(state, "current_backend", "local") or "local").lower()
+        if backend == "lavalink" or state.current_lavalink_player is not None:
+            try:
+                ok = await self._seek_lavalink_current(guild_id, state, target)
+            except Exception as exc:
+                logger.warning("[music/lavalink] falha ao selecionar momento | guild=%s target=%.2fs erro=%s", guild_id, target, exc)
+                ok = False
+            if not ok:
+                return False, "O backend Lavalink atual não aceitou seek nessa música."
+            state.current_started_at_monotonic = time.monotonic()
+            state.current_start_offset_seconds = target
+            state.paused = False
+            self._mark_voice_status_track_change(state)
+            self._schedule_voice_status_track_sync(guild_id, repeat_after=0.75, reason="seek")
+            self._schedule_panel_update(guild_id, create=bool(state.now_message))
+            return True, f"`💠` Pulando para `{target_label}`."
+
+        vc = getattr(guild, "voice_client", None)
+        if vc is None or not self._vc_is_connected(vc) or (state.current_source is None and not self._vc_is_playing_or_paused(vc)):
+            return False, "Não há música local tocando agora."
+
+        # Player local/yt-dlp: FFmpeg não seeka uma source já aberta. Para mudar
+        # de ponto sem avançar a fila, recolocamos a faixa atual na frente e
+        # paramos a source atual com o histórico suprimido nessa transição.
+        state.next_local_start_offset_seconds = target
+        pending_same_track = False
+        with contextlib.suppress(Exception):
+            pending_same_track = bool(state.skip_requested and state.forward_queue and state.forward_queue[0] is track)
+        if not pending_same_track:
+            state.forward_queue.appendleft(track)
+        state.skip_requested = True
+        state.stop_requested = False
+        state.skip_history_suppressed_once = True
+        state.skip_transition_active = True
+        state.music_session_active = True
+        state.paused = False
+        self._set_current_status(state, "skipping")
+        self._cancel_music_idle_disconnect(state)
+        with contextlib.suppress(Exception):
+            if state.current_source is not None:
+                state.current_source.cleanup()
+        with contextlib.suppress(Exception):
+            await self._vc_stop_audio(vc)
+        self.ensure_music_worker(guild_id)
+        self._schedule_panel_update(guild_id, create=bool(state.now_message))
+        return True, f"`💠` Pulando para `{target_label}`."
 
     async def set_volume(self, guild_id: int, volume_percent: int) -> float:
         state = self.get_state(guild_id)

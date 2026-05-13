@@ -259,9 +259,6 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     if queue:
         lines.append(f"> -# 🎶 **⠂** `{len(queue)} música{'s' if len(queue) != 1 else ''} no queue`")
 
-    history_count = len(list(getattr(state, "history", []) or []))
-    if history_count:
-        lines.append(f"> -# ↩️ **⠂** `{history_count} música{'s' if history_count != 1 else ''} no histórico`")
 
     for label, count, needed in list(getattr(state, "panel_vote_summary", []) or []):
         lines.append(f"> -# 🗳️ **⠂** `{label}: {count}/{needed}`")
@@ -417,9 +414,6 @@ def build_queue_embed(state, page: int = 0, *, selected_position: int | None = N
 
         lines.append("")
         lines.append(f"-# ⏳ Duração aproximada do queue: `{_queue_duration_label(items)}`")
-        history_count = len(list(getattr(state, "history", []) or []))
-        if history_count:
-            lines.append(f"-# ↩️ Histórico: `{history_count}` música{'s' if history_count != 1 else ''}")
 
     embed.description = "\n".join(lines)
     if selected_position and 1 <= selected_position <= len(items):
@@ -461,6 +455,57 @@ class VolumeModal(discord.ui.Modal):
         value = max(0, min(150, value))
         await self.router.set_volume(self.guild_id, value)
         await interaction.response.send_message(f"🔊 Volume da música: `{value}%`.", ephemeral=True)
+
+
+def _parse_seek_seconds(raw: str) -> int | None:
+    value = str(raw or "").strip().replace(" ", "")
+    if not value:
+        return None
+    if ":" in value:
+        parts = value.split(":")
+        if len(parts) not in {2, 3} or any(part == "" or not part.isdigit() for part in parts):
+            return None
+        numbers = [int(part) for part in parts]
+        if numbers[-1] >= 60 or (len(numbers) == 3 and numbers[-2] >= 60):
+            return None
+        if len(numbers) == 2:
+            minutes, seconds = numbers
+            return minutes * 60 + seconds
+        hours, minutes, seconds = numbers
+        return hours * 3600 + minutes * 60 + seconds
+    if not value.isdigit():
+        return None
+    if len(value) <= 2:
+        return int(value)
+    minutes = int(value[:-2] or "0")
+    seconds = int(value[-2:])
+    if seconds >= 60:
+        return None
+    return minutes * 60 + seconds
+
+
+class SeekModal(discord.ui.Modal):
+    def __init__(self, router, guild_id: int) -> None:
+        super().__init__(title="Selecionar momento")
+        self.router = router
+        self.guild_id = int(guild_id)
+        self.value = discord.ui.TextInput(
+            label="Tempo da música",
+            placeholder="Exemplos: 129, 45, 1:29 ou 01:29",
+            min_length=1,
+            max_length=12,
+            required=True,
+        )
+        self.add_item(self.value)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        seconds = _parse_seek_seconds(str(self.value.value))
+        if seconds is None:
+            await interaction.response.send_message("Tempo inválido. Use algo como `129`, `45`, `1:29` ou `01:29`.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        ok, message = await self.router.seek_to(self.guild_id, seconds)
+        await interaction.followup.send(message, ephemeral=True)
 
 
 class SearchSelect(discord.ui.Select):
@@ -1068,7 +1113,7 @@ class PlayerOptionsSelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="Adicionar música", emoji="🎶", value="add_song", description="Adicionar uma música ou playlist no queue."),
             discord.SelectOption(label=f"Volume: {volume_percent}%", emoji="🔊", value="volume", description="Ajustar volume da música."),
-            discord.SelectOption(label="Adicionar histórico", emoji="↩️", value="readd", description="Readicionar músicas tocadas de volta no queue."),
+            discord.SelectOption(label="Selecionar momento", emoji="💠", value="seek", description="Ir para um tempo específico da música."),
             discord.SelectOption(label="Repetição", emoji="🔁", value="loop", description="Alternar repetição da música/queue."),
             discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Misturar o queue."),
         ]
@@ -1099,12 +1144,8 @@ class PlayerOptionsSelect(discord.ui.Select):
             _ok, message = await self.router.request_shuffle(self.guild_id, interaction.user)
             await interaction.response.send_message(message, ephemeral=True)
             return
-        if value == "readd":
-            added = await self.router.readd_history(self.guild_id)
-            await interaction.response.send_message(
-                f"`🎶` Readicionei `{added}` música(s) do histórico." if added else "O histórico está vazio.",
-                ephemeral=True,
-            )
+        if value == "seek":
+            await interaction.response.send_modal(SeekModal(self.router, self.guild_id))
             return
         if value == "loop":
             _ok, message = await self.router.request_loop(self.guild_id, interaction.user)
