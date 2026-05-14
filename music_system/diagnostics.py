@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 from typing import Any
 
@@ -83,8 +84,32 @@ def _mask_value(key: str, value: Any) -> Any:
     return value
 
 
+def _diagnostics_timezone():
+    """Fuso usado em nomes de anexos e timestamps do /vps.
+
+    A VPS costuma estar em UTC, mas o comando é usado pelo dono do bot no Brasil.
+    BOT_TIMEZONE permite trocar sem patch; o fallback é America/Sao_Paulo.
+    """
+    tz_name = (
+        os.getenv("BOT_TIMEZONE")
+        or os.getenv("VPS_TIMEZONE")
+        or os.getenv("TZ")
+        or "America/Sao_Paulo"
+    )
+    try:
+        return ZoneInfo(str(tz_name).strip() or "America/Sao_Paulo")
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.utc
+
+
+def diagnostics_file_stamp() -> str:
+    return datetime.now(_diagnostics_timezone()).strftime("%Y%m%d-%H%M%S")
+
+
 def _now_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now = datetime.now(_diagnostics_timezone())
+    suffix = now.tzname() or str(now.utcoffset() or "")
+    return now.strftime(f"%Y-%m-%d %H:%M:%S {suffix}")
 
 
 
@@ -1099,7 +1124,7 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
     A base do /vps deve ser leve e voltada para análise de código; por isso
     nenhum manifesto separado é retornado/anexado junto da base.
     """
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stamp = diagnostics_file_stamp()
     filename = f"repo-{stamp}.zip"
 
     try:
@@ -1394,7 +1419,7 @@ async def build_music_diagnostics_emergency_report(router: Any, options: Diagnos
 
 def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOptions) -> tuple[bytes | None, str, str, str]:
     """Gera diagnóstico musical em zip modular, sem perder testes/logs importantes."""
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stamp = diagnostics_file_stamp()
     filename = f"music-diag-{stamp}.zip"
     bio = io.BytesIO()
     added = 0
@@ -1514,26 +1539,165 @@ def _system_status_report() -> str:
     return "\n\n".join(parts)
 
 
-def build_quick_vps_status_report_sync() -> str:
-    """Resumo curto do estado da VPS para o /vps sem gerar zip pesado."""
-    services = " ".join(_systemd_units_for_diagnostics())
-    sections: list[tuple[str, str]] = [
-        ("gerado", _now_stamp()),
-        ("uptime", _run_cmd_body(["uptime", "-p"], timeout=5.0, max_chars=200)),
-        ("ram", _run_cmd_body(["bash", "-lc", "free -h | awk 'NR==1 || NR==2'"], timeout=5.0, max_chars=240)),
-        ("disco", _run_cmd_body(["bash", "-lc", "df -h / /home /home/ubuntu/bot 2>/dev/null | awk 'NR==1 || !seen[$6]++'"], timeout=6.0, max_chars=360)),
-        ("pastas", _run_cmd_body(["bash", "-lc", "for p in . 'activity ' assets data logs tmp_audio .venv; do [ -e \"$p\" ] && du -sh \"$p\"; done"], timeout=8.0, max_chars=420)),
-        ("serviços", _run_cmd_body(["bash", "-lc", f"for u in {services}; do printf '%-24s ' \"$u\"; systemctl is-active \"$u\" 2>/dev/null || true; done"], timeout=8.0, max_chars=420)),
-        ("git", _run_cmd_body(["bash", "-lc", "printf 'branch: '; git rev-parse --abbrev-ref HEAD 2>/dev/null; printf 'head: '; git log -1 --pretty='%h %s' 2>/dev/null; printf 'status:\n'; git status --short 2>/dev/null | head -20"], timeout=8.0, max_chars=520)),
-        ("erros recentes", _run_cmd_body(["bash", "-lc", "journalctl -u tts-bot.service --since '30 minutes ago' -n 80 --no-pager -o cat 2>/dev/null | grep -Ei 'critical|error|exception|traceback|falhou|erro|timeout' | tail -10 || true"], timeout=8.0, max_chars=520)),
+def _first_nonempty_line(text: str) -> str:
+    for line in str(text or "").splitlines():
+        clean = line.strip()
+        if clean:
+            return clean
+    return ""
+
+
+def _compact_uptime(raw: str) -> str:
+    text = _first_nonempty_line(raw).removeprefix("up ").strip()
+    if not text:
+        return "indisponível"
+    replacements = [
+        (" days", "d"), (" day", "d"),
+        (" hours", "h"), (" hour", "h"),
+        (" minutes", "min"), (" minute", "min"),
+        (" seconds", "s"), (" second", "s"),
+        (",", ""),
     ]
+    for old, new in replacements:
+        text = text.replace(old, new)
+    return text.strip() or "indisponível"
+
+
+def _pretty_space_size(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "?"
+    raw = raw.replace("Gi", " GB").replace("Mi", " MB").replace("Ki", " KB")
+    raw = re.sub(r"(?<=\d)([KMGTP])$", r" \1B", raw)
+    raw = re.sub(r"(?<=\d)([KMGTP])(?=\s|$)", r" \1B", raw)
+    return raw.replace("  ", " ")
+
+
+def _quick_memory_line() -> str:
+    raw = _run_cmd_body(["bash", "-lc", "free -m | awk '/^Mem:/ {print $3, $2}'"], timeout=5.0, max_chars=80)
+    parts = _first_nonempty_line(raw).split()
+    if len(parts) >= 2 and all(part.isdigit() for part in parts[:2]):
+        return f"{int(parts[0])} MB / {int(parts[1])} MB"
+    return "indisponível"
+
+
+def _quick_disk_line() -> str:
+    raw = _run_cmd_body(["bash", "-lc", "df -h / | awk 'NR==2 {print $3, $2, $5}'"], timeout=5.0, max_chars=120)
+    parts = _first_nonempty_line(raw).split()
+    if len(parts) >= 3:
+        used, total, pct = parts[:3]
+        return f"{_pretty_space_size(used)} / {_pretty_space_size(total)} — {pct} usado"
+    return "indisponível"
+
+
+def _quick_folder_lines() -> list[str]:
+    labels = {
+        ".": "Bot",
+        "activity ": "Activity",
+        "assets": "Assets",
+        "data": "Data",
+        "logs": "Logs",
+        "tmp_audio": "Temp áudio",
+        ".venv": "Venv",
+    }
+    cmd = "for p in . 'activity ' assets data logs tmp_audio .venv; do [ -e \"$p\" ] && du -sh \"$p\"; done"
+    raw = _run_cmd_body(["bash", "-lc", cmd], timeout=8.0, max_chars=700)
+    result: list[str] = []
+    for line in raw.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        size, path = parts[0], parts[1]
+        label = labels.get(path.strip(), path.strip())
+        if label in {"Assets", "Data"}:
+            # Mantém o status rápido enxuto; estes diretórios raramente são os vilões.
+            continue
+        result.append(f"{label}: {_pretty_space_size(size)}")
+    return result or ["sem dados"]
+
+
+def _quick_service_lines() -> list[str]:
+    labels = {
+        "tts-bot.service": "Bot",
+        "lavalink.service": "Lavalink",
+        "callkeeper.service": "CallKeeper",
+    }
+    names = {
+        "active": "ativo",
+        "inactive": "parado",
+        "failed": "falhou",
+        "activating": "iniciando",
+        "deactivating": "parando",
+        "unknown": "desconhecido",
+    }
     lines: list[str] = []
-    for title, body in sections:
-        clean = (body or "").strip() or "sem dados"
-        lines.append(f"[{title}]\n{clean}")
-    report = "\n\n".join(lines).strip() + "\n"
-    if len(report) > 2200:
-        report = report[:2200] + "\n[cortado por tamanho]\n"
+    for unit in _systemd_units_for_diagnostics():
+        raw = _run_cmd_body(["systemctl", "is-active", unit], timeout=4.0, max_chars=80)
+        state = _first_nonempty_line(raw).lower() or "unknown"
+        lines.append(f"{labels.get(unit, unit)}: {names.get(state, state)}")
+    return lines
+
+
+def _quick_git_lines() -> list[str]:
+    branch = _first_nonempty_line(_run_cmd_body(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=5.0, max_chars=120)) or "desconhecida"
+    commit = _first_nonempty_line(_run_cmd_body(["git", "log", "-1", "--pretty=%h %s"], timeout=5.0, max_chars=220)) or "desconhecido"
+    raw_count = _first_nonempty_line(_run_cmd_body(["bash", "-lc", "git status --short 2>/dev/null | wc -l"], timeout=6.0, max_chars=80))
+    try:
+        count = max(0, int(raw_count))
+    except Exception:
+        count = 0
+    suffix = "arquivo" if count == 1 else "arquivos"
+    return [f"Branch: {branch}", f"Último commit: {commit}", f"Alterações locais: {count} {suffix}"]
+
+
+def _quick_recent_errors_lines() -> list[str]:
+    cmd = (
+        "journalctl -u tts-bot.service --since '30 minutes ago' -n 120 --no-pager -o cat 2>/dev/null "
+        "| grep -Ei 'critical|error|exception|traceback|falhou|erro|timeout' "
+        "| tail -3 || true"
+    )
+    raw = _run_cmd_body(["bash", "-lc", cmd], timeout=10.0, max_chars=600)
+    clean = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not clean:
+        return ["Nenhum erro recente encontrado."]
+    if len(clean) == 1 and clean[0].lower().startswith("timeout"):
+        return [clean[0]]
+    return [line[:180] for line in clean[-3:]]
+
+
+def build_quick_vps_status_report_sync() -> str:
+    """Resumo curto, legível e pronto para Components V2."""
+    services = _quick_service_lines()
+    uptime = _compact_uptime(_run_cmd_body(["uptime", "-p"], timeout=5.0, max_chars=200))
+    ram = _quick_memory_line()
+    disk = _quick_disk_line()
+    folders = _quick_folder_lines()
+    git_lines = _quick_git_lines()
+    errors = _quick_recent_errors_lines()
+
+    sections = [
+        "## ⚡ Status rápido",
+        "",
+        "### 🟢 Serviços",
+        *services,
+        "",
+        "### 💾 VPS",
+        f"RAM: {ram}",
+        f"Disco: {disk}",
+        f"Uptime: {uptime}",
+        "",
+        "### 📁 Pastas",
+        *folders,
+        "",
+        "### 🌿 Git",
+        *git_lines,
+        "",
+        "### ⚠️ Erros recentes",
+        *errors,
+    ]
+    report = "\n".join(sections).strip() + "\n"
+    if len(report) > 2800:
+        report = report[:2800] + "\n[cortado por tamanho]\n"
     return redact(report)
 
 
@@ -1625,7 +1789,7 @@ def _safe_read_file(path: Path, *, max_chars: int = 500_000) -> str:
 
 
 def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stamp = diagnostics_file_stamp()
     filename = f"vps-snapshot-{stamp}.zip"
     bio = io.BytesIO()
     added = 0
