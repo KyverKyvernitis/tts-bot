@@ -103,6 +103,13 @@ def cleanup_music_diagnostics_temp_artifacts(*, max_age_seconds: float = 12 * 36
         REPO_ROOT / "data" / "diagnostics",
     ]
     patterns = (
+        "music-diag-*.zip",
+        "music-diag-*.txt",
+        "music-diag-emergency-*.txt",
+        "full-diag-*.txt",
+        "status-*.txt",
+        "vps-resumo-*.txt",
+        # nomes antigos, para limpar sobras de versões anteriores
         "vps-music-diagnostics-*.zip",
         "vps-music-diagnostics-summary-*.txt",
         "vps-music-diagnostics-*.txt",
@@ -1093,7 +1100,7 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
     nenhum manifesto separado é retornado/anexado junto da base.
     """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    filename = f"tts-bot-base-git-tracked-{stamp}.zip"
+    filename = f"repo-{stamp}.zip"
 
     try:
         root_check = _git_cmd(["rev-parse", "--show-toplevel"], timeout=8.0)
@@ -1164,10 +1171,7 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
         size_mb = len(payload) / (1024 * 1024)
         return None, filename, f"Base zip ficou grande demais para anexar com segurança no Discord: {size_mb:.1f} MB.", ""
 
-    summary = (
-        f"Base git-tracked leve anexada: {added} arquivos; {len(skipped)} pulado(s); "
-        f"sem assets/manifestos; tamanho {len(payload) / (1024 * 1024):.2f} MB."
-    )
+    summary = f"Repositório anexado ({len(payload)} bytes)."
     return payload, filename, summary, ""
 
 
@@ -1391,7 +1395,7 @@ async def build_music_diagnostics_emergency_report(router: Any, options: Diagnos
 def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOptions) -> tuple[bytes | None, str, str, str]:
     """Gera diagnóstico musical em zip modular, sem perder testes/logs importantes."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    filename = f"vps-music-diagnostics-{stamp}.zip"
+    filename = f"music-diag-{stamp}.zip"
     bio = io.BytesIO()
     added = 0
     try:
@@ -1416,7 +1420,7 @@ def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOption
     except Exception as exc:
         return None, filename, f"Falha ao montar diagnóstico musical modular: {type(exc).__name__}: {exc}", ""
     payload = bio.getvalue()
-    summary = f"Diagnóstico musical modular anexado: {added} item(ns); tamanho {len(payload) / (1024 * 1024):.2f} MB."
+    summary = f"Diagnóstico musical anexado ({len(payload)} bytes)."
     if len(payload) > MUSIC_DIAGNOSTICS_ARCHIVE_MAX_BYTES:
         return None, filename, f"Diagnóstico musical modular ficou grande demais para anexar: {len(payload) / (1024 * 1024):.1f} MB.", summary_text
     # Sucesso modular: o resumo já está dentro do zip. Não retorne fallback_report,
@@ -1667,7 +1671,7 @@ def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
     payload = bio.getvalue()
     if len(payload) > VPS_SNAPSHOT_MAX_BYTES:
         return None, filename, f"Snapshot ficou grande demais para anexar com segurança: {len(payload) / (1024 * 1024):.1f} MB."
-    return payload, filename, f"Snapshot da VPS anexado: {added} item(ns); tamanho {len(payload) / (1024 * 1024):.2f} MB."
+    return payload, filename, f"Snapshot da VPS anexado ({len(payload)} bytes)."
 
 
 async def build_vps_snapshot_archive() -> tuple[bytes | None, str, str]:

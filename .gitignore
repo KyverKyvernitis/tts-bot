@@ -95,6 +95,14 @@ tmp_audio/
 
 
 # Diagnósticos gerados localmente pelo comando de suporte/VPS
+repo-*.zip
+music-diag-*.zip
+music-diag-*.txt
+music-diag-emergency-*.txt
+full-diag-*.txt
+status-*.txt
+vps-resumo-*.txt
+vps-snapshot-*.zip
 vps-full-diagnostics-*.txt
 vps-music-diagnostics-*.txt
 vps-files-diagnostics-*.txt

@@ -58,6 +58,18 @@ def _safe_get_value(item: Any, *, default: Any = None) -> Any:
     return default
 
 
+def _format_attachment_size(size_bytes: int | None) -> str:
+    try:
+        size = max(0, int(size_bytes or 0))
+    except Exception:
+        size = 0
+    if size < 1_000:
+        return f"{size} B"
+    if size < 1_000_000:
+        return f"{round(size / 1_000)} kB"
+    return f"{size / 1_000_000:.2f} MB"
+
+
 class VpsModal(discord.ui.Modal, title="Painel da VPS"):
     """Modal simples do /vps.
 
@@ -259,8 +271,8 @@ class VpsCommandMixin:
                     report = await self._with_vps_timeout("status rápido", build_quick_vps_status_report(), timeout=VPS_QUICK_STATUS_TIMEOUT_SECONDS)
                     report = (report or "Status rápido vazio.").strip()
                     if len(report) > 1350:
-                        files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"vps-quick-status-{stamp}.txt"))
-                        lines.append("`⚡` Status rápido anexado em .txt.")
+                        files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"status-{stamp}.txt"))
+                        lines.append("`⚡` Status rápido anexado.")
                     else:
                         lines.append("`⚡` Status rápido:")
                         lines.append(f"```txt\n{report}\n```")
@@ -275,9 +287,7 @@ class VpsCommandMixin:
                     payload, filename, summary, _manifest = await self._with_vps_timeout("base Git", build_git_tracked_base_archive(), timeout=VPS_BASE_TIMEOUT_SECONDS)
                     if payload and filename:
                         files.append(discord.File(io.BytesIO(payload), filename=filename))
-                        lines.append("`📦` Base Git leve anexada.")
-                        if summary:
-                            lines.append(f"`ℹ️` {summary}")
+                        lines.append(f"`📦` Repositório anexado ({_format_attachment_size(len(payload))}).")
                         generated_any = True
                     else:
                         lines.append(f"`⚠️` {summary or 'Não consegui gerar a base Git.'}")
@@ -292,16 +302,16 @@ class VpsCommandMixin:
                     payload, filename, summary, fallback_report = await self._with_vps_timeout("diagnóstico musical", build_music_diagnostics_archive(router, await self._vps_context_options(interaction)), timeout=VPS_MUSIC_DIAG_TIMEOUT_SECONDS)
                     if payload and filename:
                         files.append(discord.File(io.BytesIO(payload), filename=filename))
-                        lines.append("`🎵` Diagnóstico musical modular anexado em .zip.")
-                        if summary:
-                            lines.append(f"`ℹ️` {summary}")
+                        lines.append(f"`🎵` Diagnóstico musical anexado ({_format_attachment_size(len(payload))}).")
                         generated_any = True
                         # O diagnóstico musical modular deve ser um único anexo.
                         # O resumo completo fica dentro do zip como 00-resumo-curto.txt/summary.txt.
                     else:
                         lines.append(f"`⚠️` Diagnóstico modular não foi anexado: {summary or 'falha sem detalhes'}")
                         report = fallback_report or await self._with_vps_timeout("diagnóstico musical texto", build_music_diagnostics_report(router, await self._vps_context_options(interaction)), timeout=VPS_MUSIC_DIAG_TIMEOUT_SECONDS)
-                        files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"vps-music-diagnostics-{stamp}.txt"))
+                        report_bytes = report.encode("utf-8", "replace")
+                        files.append(discord.File(io.BytesIO(report_bytes), filename=f"music-diag-{stamp}.txt"))
+                        lines.append(f"`🎵` Diagnóstico musical anexado ({_format_attachment_size(len(report_bytes))}).")
                         generated_any = True
                 except Exception as exc:
                     logger.exception("[utility/vps] falha ao gerar diagnóstico musical")
@@ -320,8 +330,9 @@ class VpsCommandMixin:
                             f"Tipo: {type(emergency_exc).__name__}\n"
                             f"Erro: {str(emergency_exc)[:500]}\n"
                         )
-                    files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"vps-music-diagnostics-emergency-{stamp}.txt"))
-                    lines.append("`⚠️` Diagnóstico musical principal falhou ou passou do tempo; anexei relatório emergencial.")
+                    report_bytes = report.encode("utf-8", "replace")
+                    files.append(discord.File(io.BytesIO(report_bytes), filename=f"music-diag-emergency-{stamp}.txt"))
+                    lines.append(f"`⚠️` Diagnóstico musical emergencial anexado ({_format_attachment_size(len(report_bytes))}).")
                     generated_any = True
                 continue
 
@@ -332,8 +343,9 @@ class VpsCommandMixin:
                 except Exception as exc:
                     logger.exception("[utility/vps] falha ao gerar diagnóstico completo")
                     report = f"# Diagnóstico completo falhou\nTipo: {type(exc).__name__}\nErro: {str(exc)[:500]}\n"
-                files.append(discord.File(io.BytesIO(report.encode("utf-8", "replace")), filename=f"vps-full-diagnostics-{stamp}.txt"))
-                lines.append("`🧾` Diagnóstico completo anexado.")
+                report_bytes = report.encode("utf-8", "replace")
+                files.append(discord.File(io.BytesIO(report_bytes), filename=f"full-diag-{stamp}.txt"))
+                lines.append(f"`🧾` Diagnóstico completo anexado ({_format_attachment_size(len(report_bytes))}).")
                 generated_any = True
                 continue
 
@@ -342,9 +354,7 @@ class VpsCommandMixin:
                     payload, filename, summary = await self._with_vps_timeout("snapshot da VPS", build_vps_snapshot_archive(), timeout=VPS_SNAPSHOT_TIMEOUT_SECONDS)
                     if payload and filename:
                         files.append(discord.File(io.BytesIO(payload), filename=filename))
-                        lines.append("`🧰` Snapshot sanitizado da VPS anexado.")
-                        if summary:
-                            lines.append(f"`ℹ️` {summary}")
+                        lines.append(f"`🧰` Snapshot da VPS anexado ({_format_attachment_size(len(payload))}).")
                         generated_any = True
                     else:
                         lines.append(f"`⚠️` Snapshot da VPS não foi anexado: {summary or 'falha sem detalhes'}")
@@ -360,7 +370,7 @@ class VpsCommandMixin:
             content = "\n".join(lines)
             if len(content) > 1900:
                 overflow = content
-                files.append(discord.File(io.BytesIO(overflow.encode("utf-8", "replace")), filename=f"vps-response-summary-{stamp}.txt"))
+                files.append(discord.File(io.BytesIO(overflow.encode("utf-8", "replace")), filename=f"vps-resumo-{stamp}.txt"))
                 content = "`🖥️` Painel da VPS concluído.\n`ℹ️` O resumo ficou grande e foi anexado em .txt."
             await interaction.followup.send(content, files=files[:10])
         except Exception as exc:
