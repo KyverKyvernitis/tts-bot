@@ -1594,27 +1594,30 @@ def _quick_folder_lines() -> list[str]:
     labels = {
         ".": "Bot",
         "activity ": "Activity",
-        "assets": "Assets",
-        "data": "Data",
         "logs": "Logs",
         "tmp_audio": "Temp áudio",
-        ".venv": "Venv",
+        ".venv": ".venv",
     }
-    cmd = "for p in . 'activity ' assets data logs tmp_audio .venv; do [ -e \"$p\" ] && du -sh \"$p\"; done"
-    raw = _run_cmd_body(["bash", "-lc", cmd], timeout=8.0, max_chars=700)
-    result: list[str] = []
+    cmd = "for p in . 'activity ' logs tmp_audio .venv; do [ -e \"$p\" ] && du -sh \"$p\"; done"
+    raw = _run_cmd_body(["bash", "-lc", cmd], timeout=8.0, max_chars=500)
+    values: dict[str, str] = {}
     for line in raw.splitlines():
         parts = line.split(None, 1)
         if len(parts) != 2:
             continue
-        size, path = parts[0], parts[1]
-        label = labels.get(path.strip(), path.strip())
-        if label in {"Assets", "Data"}:
-            # Mantém o status rápido enxuto; estes diretórios raramente são os vilões.
-            continue
-        result.append(f"{label}: {_pretty_space_size(size)}")
-    return result or ["sem dados"]
+        size, path = parts[0], parts[1].strip()
+        label = labels.get(path)
+        if label:
+            values[label] = _pretty_space_size(size)
 
+    primary = [f"{label}: {values[label]}" for label in ("Bot", "Activity", ".venv") if label in values]
+    secondary = [f"{label}: {values[label]}" for label in ("Logs", "Temp áudio") if label in values]
+    result: list[str] = []
+    if primary:
+        result.append(" · ".join(primary))
+    if secondary:
+        result.append(" · ".join(secondary))
+    return result or ["sem dados"]
 
 def _quick_service_lines() -> list[str]:
     labels = {
@@ -1630,40 +1633,44 @@ def _quick_service_lines() -> list[str]:
         "deactivating": "parando",
         "unknown": "desconhecido",
     }
-    lines: list[str] = []
+    states: list[tuple[str, str]] = []
     for unit in _systemd_units_for_diagnostics():
         raw = _run_cmd_body(["systemctl", "is-active", unit], timeout=4.0, max_chars=80)
         state = _first_nonempty_line(raw).lower() or "unknown"
-        lines.append(f"{labels.get(unit, unit)}: {names.get(state, state)}")
-    return lines
+        states.append((labels.get(unit, unit), names.get(state, state)))
 
+    if states and all(state == "ativo" for _, state in states):
+        names_only = [name for name, _ in states]
+        if len(names_only) >= 3:
+            return [", ".join(names_only[:-1]) + f" e {names_only[-1]} ativos."]
+        return [" e ".join(names_only) + " ativos."]
+    return [" · ".join(f"{name}: {state}" for name, state in states)] or ["sem dados"]
 
 def _quick_git_lines() -> list[str]:
     branch = _first_nonempty_line(_run_cmd_body(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=5.0, max_chars=120)) or "desconhecida"
     commit = _first_nonempty_line(_run_cmd_body(["git", "log", "-1", "--pretty=%h %s"], timeout=5.0, max_chars=220)) or "desconhecido"
+    if len(commit) > 72:
+        commit = commit[:69].rstrip() + "..."
     raw_count = _first_nonempty_line(_run_cmd_body(["bash", "-lc", "git status --short 2>/dev/null | wc -l"], timeout=6.0, max_chars=80))
     try:
         count = max(0, int(raw_count))
     except Exception:
         count = 0
-    suffix = "arquivo" if count == 1 else "arquivos"
-    return [f"Branch: {branch}", f"Último commit: {commit}", f"Alterações locais: {count} {suffix}"]
-
+    return [f"{branch} · {commit}", f"Alterações locais: {count}"]
 
 def _quick_recent_errors_lines() -> list[str]:
     cmd = (
         "journalctl -u tts-bot.service --since '30 minutes ago' -n 120 --no-pager -o cat 2>/dev/null "
         "| grep -Ei 'critical|error|exception|traceback|falhou|erro|timeout' "
-        "| tail -3 || true"
+        "| tail -2 || true"
     )
-    raw = _run_cmd_body(["bash", "-lc", cmd], timeout=10.0, max_chars=600)
+    raw = _run_cmd_body(["bash", "-lc", cmd], timeout=10.0, max_chars=450)
     clean = [line.strip() for line in raw.splitlines() if line.strip()]
     if not clean:
         return ["Nenhum erro recente encontrado."]
-    if len(clean) == 1 and clean[0].lower().startswith("timeout"):
-        return [clean[0]]
-    return [line[:180] for line in clean[-3:]]
-
+    if len(clean) == 1:
+        return [clean[0][:180]]
+    return [line[:160] for line in clean[-2:]]
 
 def build_quick_vps_status_report_sync() -> str:
     """Resumo curto, legível e pronto para Components V2."""

@@ -207,13 +207,8 @@ class VpsResultView(discord.ui.LayoutView):
     def __init__(self, *, status_report: str | None, attachment_lines: list[str], error_lines: list[str]):
         super().__init__(timeout=None)
 
-        header_children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("# 🖥️ Painel da VPS concluído"),
-        ]
-        if not status_report and not attachment_lines and not error_lines:
-            header_children.append(discord.ui.TextDisplay("⚠️ Nenhum arquivo ou status foi gerado."))
-        self.add_item(discord.ui.Container(*header_children, accent_color=discord.Color.blurple()))
-
+        # Não usa card de título separado: ele ocupava espaço no mobile e não
+        # trazia informação útil. O primeiro card já identifica a resposta.
         if status_report:
             self.add_item(
                 discord.ui.Container(
@@ -234,6 +229,14 @@ class VpsResultView(discord.ui.LayoutView):
             self.add_item(
                 discord.ui.Container(
                     discord.ui.TextDisplay("## ⚠️ Avisos\n" + "\n".join(error_lines)),
+                    accent_color=discord.Color.orange(),
+                )
+            )
+
+        if not status_report and not attachment_lines and not error_lines:
+            self.add_item(
+                discord.ui.Container(
+                    discord.ui.TextDisplay("⚠️ Nenhum arquivo ou status foi gerado."),
                     accent_color=discord.Color.orange(),
                 )
             )
@@ -408,23 +411,34 @@ class VpsCommandMixin:
 
         try:
             view = VpsResultView(status_report=status_report, attachment_lines=attachment_lines, error_lines=error_lines)
-            await interaction.followup.send(view=view, files=files[:10])
+            # Components V2 e anexos no mesmo followup podem não renderizar os
+            # arquivos em alguns runtimes/clientes. Envia o painel bonito em uma
+            # mensagem e os arquivos em outra para garantir que os anexos apareçam.
+            await interaction.followup.send(view=view)
+            if files:
+                try:
+                    await interaction.followup.send(files=files[:10])
+                except Exception as file_exc:
+                    logger.exception("[utility/vps] falha ao enviar anexos do painel da VPS")
+                    await interaction.followup.send(
+                        f"`⚠️` O painel foi gerado, mas os anexos falharam: {type(file_exc).__name__}: {str(file_exc)[:300]}"
+                    )
         except Exception as exc:
             logger.exception("[utility/vps] falha ao enviar resposta final em Components V2; usando fallback texto")
-            fallback_lines = ["`🖥️` Painel da VPS concluído."]
+            fallback_lines: list[str] = []
             if status_report:
-                fallback_lines.extend(["`⚡` Status rápido:", status_report.strip()])
+                fallback_lines.append(status_report.strip())
             fallback_lines.extend(attachment_lines)
             if error_lines:
                 fallback_lines.append("`⚠️` Avisos:")
                 fallback_lines.extend(error_lines)
             fallback_lines.append(f"`⚠️` Falhei ao enviar Components V2: {type(exc).__name__}: {str(exc)[:300]}")
-            fallback = "\n".join(fallback_lines)
+            fallback = "\n".join(line for line in fallback_lines if line).strip()
             if len(fallback) > 1900:
                 files.append(discord.File(io.BytesIO(fallback.encode("utf-8", "replace")), filename=f"vps-resumo-{stamp}.txt"))
-                fallback = "`🖥️` Painel da VPS concluído.\n`ℹ️` O resumo ficou grande e foi anexado em .txt."
+                fallback = "`ℹ️` O resumo ficou grande e foi anexado em .txt."
             with contextlib.suppress(Exception):
-                await interaction.followup.send(fallback[:1900], files=files[:10])
+                await interaction.followup.send(fallback[:1900] or "`⚠️` Nenhum resultado gerado.", files=files[:10])
 
     async def _send_vps_modal(self, interaction: discord.Interaction) -> None:
         """Abre o modal do /vps sem defer prévio.
