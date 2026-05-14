@@ -1,31 +1,97 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AUDIO_TMP_DIR="/home/ubuntu/bot/tmp_audio"
-LOG_FILE="/home/ubuntu/bot/cleanup-audio-temp.log"
-MAX_BYTES=$((500 * 1024 * 1024))
+BOT_DIR="${BOT_DIR:-/home/ubuntu/bot}"
+AUDIO_TMP_DIR="${AUDIO_TMP_DIR:-$BOT_DIR/tmp_audio}"
+CACHE_DIR="${CACHE_DIR:-$AUDIO_TMP_DIR/cache}"
+LOG_FILE="${LOG_FILE:-$BOT_DIR/cleanup-audio-temp.log}"
 
-mkdir -p "$AUDIO_TMP_DIR"
-chmod 700 "$AUDIO_TMP_DIR"
+# Limites conservadores para VPS pequena: evita tmp_audio crescer sem apagar
+# arquivos recém-criados que ainda podem estar tocando.
+RUNTIME_MAX_AGE_MINUTES="${RUNTIME_MAX_AGE_MINUTES:-360}"      # 6h
+CACHE_MAX_AGE_MINUTES="${CACHE_MAX_AGE_MINUTES:-10080}"        # 7 dias
+MAX_BYTES="${MAX_BYTES:-134217728}"                            # 128 MiB total
+CACHE_MAX_BYTES="${CACHE_MAX_BYTES:-100663296}"                # 96 MiB cache
+LOG_MAX_BYTES="${LOG_MAX_BYTES:-262144}"                       # 256 KiB
 
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+mkdir -p "$AUDIO_TMP_DIR" "$CACHE_DIR"
+chmod 700 "$AUDIO_TMP_DIR" "$CACHE_DIR" 2>/dev/null || true
+
+rotate_log() {
+  if [[ -f "$LOG_FILE" ]]; then
+    local size
+    size=$(stat -c '%s' "$LOG_FILE" 2>/dev/null || echo 0)
+    if [[ "$size" -gt "$LOG_MAX_BYTES" ]]; then
+      mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
+    fi
+  fi
 }
 
-current_size=$(du -sb "$AUDIO_TMP_DIR" 2>/dev/null | awk '{print $1}')
-current_size=${current_size:-0}
+log() {
+  rotate_log
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE" 2>/dev/null || true
+}
 
-if [ "$current_size" -gt "$MAX_BYTES" ]; then
-  log "tmp_audio acima do limite: ${current_size} bytes"
+dir_size() {
+  du -sb "$1" 2>/dev/null | awk '{print $1}' || echo 0
+}
 
-  while [ "$current_size" -gt "$MAX_BYTES" ]; do
-    oldest_file=$(find "$AUDIO_TMP_DIR" -type f | xargs -r ls -1tr 2>/dev/null | head -n 1)
-    [ -z "$oldest_file" ] && break
+delete_old_files() {
+  local dir="$1"
+  local max_age="$2"
+  local label="$3"
+  [[ -d "$dir" ]] || return 0
 
-    rm -f "$oldest_file"
-    current_size=$(du -sb "$AUDIO_TMP_DIR" 2>/dev/null | awk '{print $1}')
+  local deleted
+  deleted=$(find "$dir" -type f -mmin +"$max_age" -print -delete 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "${deleted:-0}" -gt 0 ]]; then
+    log "${label}: ${deleted} arquivo(s) antigo(s) removido(s)"
+  fi
+}
+
+trim_dir_to_limit() {
+  local dir="$1"
+  local limit="$2"
+  local label="$3"
+  [[ -d "$dir" ]] || return 0
+
+  local current_size
+  current_size=$(dir_size "$dir")
+  current_size=${current_size:-0}
+
+  if [[ "$current_size" -le "$limit" ]]; then
+    return 0
+  fi
+
+  log "${label}: acima do limite (${current_size} bytes > ${limit} bytes)"
+
+  while [[ "$current_size" -gt "$limit" ]]; do
+    local oldest_file
+    oldest_file=$(find "$dir" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -n 1 | cut -d' ' -f2-)
+    [[ -n "$oldest_file" ]] || break
+    rm -f "$oldest_file" 2>/dev/null || break
+    current_size=$(dir_size "$dir")
     current_size=${current_size:-0}
   done
 
-  log "tmp_audio reduzido para ${current_size} bytes"
+  log "${label}: reduzido para ${current_size} bytes"
+}
+
+# Arquivos soltos de runtime: podem ser removidos mais cedo.
+if [[ -d "$AUDIO_TMP_DIR" ]]; then
+  find "$AUDIO_TMP_DIR" -mindepth 1 -type f ! -path "$CACHE_DIR/*" -mmin +"$RUNTIME_MAX_AGE_MINUTES" -print -delete 2>/dev/null | {
+    count=$(wc -l | tr -d ' ')
+    if [[ "${count:-0}" -gt 0 ]]; then
+      log "runtime: ${count} arquivo(s) antigo(s) removido(s)"
+    fi
+  }
 fi
+
+# Cache pode ficar mais tempo, mas não pode crescer sem limite.
+delete_old_files "$CACHE_DIR" "$CACHE_MAX_AGE_MINUTES" "cache"
+trim_dir_to_limit "$CACHE_DIR" "$CACHE_MAX_BYTES" "cache"
+trim_dir_to_limit "$AUDIO_TMP_DIR" "$MAX_BYTES" "tmp_audio"
+
+find "$AUDIO_TMP_DIR" -type d -empty -delete 2>/dev/null || true
+mkdir -p "$AUDIO_TMP_DIR" "$CACHE_DIR"
+chmod 700 "$AUDIO_TMP_DIR" "$CACHE_DIR" 2>/dev/null || true

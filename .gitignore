@@ -93,6 +93,12 @@ tmp_audio/
 *.swo
 *~
 
+
+# Diagnósticos gerados localmente pelo comando de suporte/VPS
+vps-full-diagnostics-*.txt
+vps-music-diagnostics-*.txt
+vps-files-diagnostics-*.txt
+
 # Arquivos de estado locais
 .healthcheck_last_alert
 .update_last_failed_remote_hash

@@ -34,6 +34,7 @@ CALLKEEPER_CHANGED=0
 BOT_HEALTHCHECK_STATUS="não verificado"
 CALLKEEPER_STATUS="não alterado"
 AUDIO_SERVICES_STATUS="não alterado"
+CLEANUP_STATUS="não alterada"
 FRONT_STATUS="não alterado"
 BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
@@ -322,8 +323,39 @@ deploy_audio_services() {
 
 }
 
+deploy_cleanup_timer() {
+  STAGE="configuração da limpeza de temporários"
+  local installed=0
+
+  if [[ -f "$REPO_DIR/deploy/systemd/cleanup-audio-temp.service" ]]; then
+    cp "$REPO_DIR/deploy/systemd/cleanup-audio-temp.service" /etc/systemd/system/cleanup-audio-temp.service
+    installed=1
+  fi
+  if [[ -f "$REPO_DIR/deploy/systemd/cleanup-audio-temp.timer" ]]; then
+    cp "$REPO_DIR/deploy/systemd/cleanup-audio-temp.timer" /etc/systemd/system/cleanup-audio-temp.timer
+    installed=1
+  fi
+
+  if (( installed == 0 )); then
+    CLEANUP_STATUS="units de limpeza não encontrados"
+    return 0
+  fi
+
+  systemctl daemon-reload
+  systemctl enable --now cleanup-audio-temp.timer >/dev/null 2>&1 || true
+  systemctl start cleanup-audio-temp.service >/dev/null 2>&1 || true
+
+  if systemctl is-active --quiet cleanup-audio-temp.timer; then
+    CLEANUP_STATUS="timer ativo"
+  else
+    CLEANUP_STATUS="timer instalado, mas não ativo"
+  fi
+}
+
+
 deploy_bot() {
   deploy_audio_services
+  deploy_cleanup_timer
 
   STAGE="dependências do bot"
   if [[ -x "$REPO_DIR/.venv/bin/pip" && -f "$REPO_DIR/requirements.txt" ]]; then
@@ -395,15 +427,21 @@ deploy_frontend() {
     return 1
   fi
 
+  STAGE="dependências do frontend"
+  run_as_ubuntu "cd \"$FRONT_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
+
   STAGE="build do frontend"
-  run_as_ubuntu "cd \"$FRONT_DIR\" && [ -d node_modules ] || npm install"
   run_as_ubuntu "cd \"$FRONT_DIR\" && npm run build"
 
   STAGE="publicação do frontend"
   mkdir -p "$FRONT_PUBLISH_DIR"
   rm -rf "${FRONT_PUBLISH_DIR:?}/"*
   cp -r "$FRONT_DIR/dist/." "$FRONT_PUBLISH_DIR/"
-  FRONT_STATUS="frontend publicado em $FRONT_PUBLISH_DIR"
+
+  STAGE="limpeza do frontend"
+  run_as_ubuntu "cd \"$FRONT_DIR\" && rm -rf node_modules && npm cache clean --force >/dev/null 2>&1 || true"
+
+  FRONT_STATUS="frontend publicado em $FRONT_PUBLISH_DIR; node_modules removido após build"
   return 0
 }
 
@@ -422,9 +460,14 @@ deploy_backend() {
       return 1
     fi
 
+    STAGE="dependências do backend"
+    run_as_ubuntu "cd \"$BACK_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
+
     STAGE="build do backend"
-    run_as_ubuntu "cd \"$BACK_DIR\" && [ -d node_modules ] || npm install"
     run_as_ubuntu "cd \"$BACK_DIR\" && npm run build"
+
+    STAGE="limpeza do backend"
+    run_as_ubuntu "cd \"$BACK_DIR\" && npm prune --omit=dev && npm cache clean --force >/dev/null 2>&1 || true"
 
     STAGE="reinício do backend"
     fuser -k "${BACK_PORT}/tcp" >/dev/null 2>&1 || true
@@ -675,6 +718,7 @@ Arquivos:
 $CHANGED_FILES
 Bot: $BOT_HEALTHCHECK_STATUS
 Serviços de áudio: $AUDIO_SERVICES_STATUS
+Limpeza de áudio: $CLEANUP_STATUS
 CallKeeper: $CALLKEEPER_STATUS
 Frontend: $FRONT_STATUS
 Backend: $BACK_STATUS

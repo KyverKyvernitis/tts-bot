@@ -12,9 +12,9 @@ import {
 } from "./sdk/discord";
 import type { ActivityBootstrap, ActivityUser, AimPointerMode, BalanceDebugSnapshot, BalanceSnapshot, GameBallSnapshot, GameSnapshot, RoomPlayer, RoomSnapshot, SessionContextPayload } from "./types/activity";
 import StatusCard from "./ui/StatusCard";
-import lobbyBackground from "./assets/lobby-bg.png";
-import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.wav";
-import lobbyBgmAsset from "./assets/lobby-bgm-cat-cafe.mp3";
+import lobbyBackground from "./assets/lobby-bg.webp";
+import clickTone from "./assets/mixkit-cool-interface-click-tone-2568_iusvjsoq.ogg";
+import lobbyBgmAsset from "./assets/lobby-bgm-cat-cafe.ogg";
 import GameScreen from "./screens/GameScreen";
 import {
   completeGameBootstrapSession,

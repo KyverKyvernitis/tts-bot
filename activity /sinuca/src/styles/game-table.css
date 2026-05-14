@@ -1058,7 +1058,7 @@
   background:
     radial-gradient(circle at center, rgba(6, 12, 22, 0.10), rgba(6, 12, 22, 0.42) 52%, rgba(6, 12, 22, 0.68) 100%),
     linear-gradient(180deg, rgba(6, 12, 22, 0.14), rgba(6, 12, 22, 0.38)),
-    url("/images/ui/popup_bg.png") center/cover no-repeat;
+    url("/images/ui/popup_bg.webp") center/cover no-repeat;
   opacity: 0.96;
   pointer-events: none;
 }

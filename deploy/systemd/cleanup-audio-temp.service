@@ -1,0 +1,10 @@
+[Unit]
+Description=Clean temporary TTS/audio files
+After=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/bot
+ExecStart=/home/ubuntu/bot/cleanup-audio-temp.sh

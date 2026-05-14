@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from "react";
 import type { AimPointerMode, AimStateSnapshot, BallGroup, GameBallSnapshot, GameShotFrame, GameShotFrameBall, GameSnapshot, RoomPlayer, RoomSnapshot } from "../types/activity";
 import { drawAimLine, drawCue, drawGhostBall, drawRemoteAimOverlay, type AimPreview } from "./gameStageAimRender";
-import tableAsset from "../assets/game/pool-table-public.png";
+import tableAsset from "../assets/game/pool-table-public.webp";
 import cueAsset from "../assets/game/pool-cue-public.png";
 import type { ShotPipelineDebugEvent } from "../screens/GameScreen";
 
@@ -10,12 +10,12 @@ import type { ShotPipelineDebugEvent } from "../screens/GameScreen";
 // 3D gradients, numbers, stripes, specular highlights than the old PNG sprites.
 
 // ─── Audio template paths ──────────────────────────────────────────────────
-const POWER_RELEASE_SOFT_TEMPLATE_PATH = "/audio/game/templates/power_release_soft_template.wav";
-const POWER_RELEASE_HARD_TEMPLATE_PATH = "/audio/game/templates/power_release_hard_template.wav";
-const POCKET_ENTER_TEMPLATE_PATH = "/audio/game/templates/pocket_enter_template.wav";
-const CUE_SCRATCH_TEMPLATE_PATH = "/audio/game/templates/cue_scratch_template.wav";
-const BALL_HIT_TEMPLATE_PATH = "/audio/game/templates/ball_hit_template.wav";
-const TURN_START_TEMPLATE_PATH = "/audio/game/templates/turn_start_template.wav";
+const POWER_RELEASE_SOFT_TEMPLATE_PATH = "/audio/game/templates/power_release_soft_template.ogg";
+const POWER_RELEASE_HARD_TEMPLATE_PATH = "/audio/game/templates/power_release_hard_template.ogg";
+const POCKET_ENTER_TEMPLATE_PATH = "/audio/game/templates/pocket_enter_template.ogg";
+const CUE_SCRATCH_TEMPLATE_PATH = "/audio/game/templates/cue_scratch_template.ogg";
+const BALL_HIT_TEMPLATE_PATH = "/audio/game/templates/ball_hit_template.ogg";
+const TURN_START_TEMPLATE_PATH = "/audio/game/templates/turn_start_template.ogg";
 
 // ─── Web Audio API sound engine ────────────────────────────────────────────
 const SFX = (() => {
