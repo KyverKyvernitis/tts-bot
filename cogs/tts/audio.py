@@ -1123,7 +1123,7 @@ class TTSAudioMixin:
             router = getattr(getattr(self, "bot", None), "audio_router", None)
             play_tts = getattr(router, "play_tts", None)
             if callable(play_tts) and guild is not None:
-                return await play_tts(
+                router_result = await play_tts(
                     guild=guild,
                     vc=vc,
                     path=path,
@@ -1132,6 +1132,24 @@ class TTSAudioMixin:
                     timeout=self._estimate_playback_timeout(item),
                     item=item,
                 )
+                if not (isinstance(router_result, dict) and router_result.get("tts_lavalink_failed")):
+                    return router_result
+
+                fallback = getattr(router, "prepare_tts_local_fallback_after_lavalink_failure", None)
+                if callable(fallback):
+                    reason = str(router_result.get("tts_lavalink_error") or router_result.get("error") or "tts_lavalink_failed")
+                    fallback_vc = await fallback(guild, vc, reason=reason)
+                    if fallback_vc is not None and not getattr(router, "_is_lavalink_voice_client", lambda _vc: False)(fallback_vc):
+                        vc = fallback_vc
+                        logger.warning(
+                            "[tts_voice] TTS via Lavalink falhou; usando playback local direto | guild=%s reason=%s",
+                            getattr(guild, "id", None),
+                            reason,
+                        )
+                    else:
+                        return router_result
+                else:
+                    return router_result
 
             source_setup_started_at = time.monotonic()
             source = discord.FFmpegPCMAudio(

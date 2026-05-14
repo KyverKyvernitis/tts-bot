@@ -73,6 +73,8 @@ MUSIC_TTS_SESSION_CLEANUP_GRACE_SECONDS = max(0.2, float(getattr(config, "MUSIC_
 MUSIC_TTS_INTERNAL_BASE_URL = str(getattr(config, "MUSIC_TTS_INTERNAL_BASE_URL", "") or "").strip().rstrip("/")
 MUSIC_LAVALINK_TTS_INTERNAL_FIRST = bool(getattr(config, "MUSIC_LAVALINK_TTS_INTERNAL_FIRST", True))
 MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS = max(0.25, float(getattr(config, "MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS", 1.75)))
+MUSIC_TTS_LAVALINK_FAILURE_LOCAL_FALLBACK = bool(getattr(config, "MUSIC_TTS_LAVALINK_FAILURE_LOCAL_FALLBACK", True))
+MUSIC_TTS_LAVALINK_LOCAL_FALLBACK_COOLDOWN_SECONDS = max(5.0, float(getattr(config, "MUSIC_TTS_LAVALINK_LOCAL_FALLBACK_COOLDOWN_SECONDS", 45.0) or 45.0))
 MUSIC_TTS_AUDIO_FORMAT = str(getattr(config, "MUSIC_TTS_AUDIO_FORMAT", "opus") or "opus").strip().lower()
 MUSIC_TTS_AUDIO_FALLBACK_FORMAT = str(getattr(config, "MUSIC_TTS_AUDIO_FALLBACK_FORMAT", "mp3") or "mp3").strip().lower()
 MUSIC_TTS_OPUS_BITRATE = str(getattr(config, "MUSIC_TTS_OPUS_BITRATE", "48k") or "48k").strip()
@@ -440,6 +442,7 @@ class MusicGuildState:
     tts_session_last_error: str = ""
     tts_session_last_cleanup_at: float = 0.0
     tts_lavalink_failures: int = 0
+    tts_lavalink_local_fallback_until: float = 0.0
     music_session_active: bool = False
     music_idle_disconnect_task: Optional[asyncio.Task] = None
     music_afk_expired: bool = False
@@ -1750,6 +1753,11 @@ class AudioRouter:
         except Exception:
             return False
         self._reset_stale_resolving_state(int(guild_id or 0), state, reason="tts_guard")
+        if time.monotonic() < float(getattr(state, "tts_lavalink_local_fallback_until", 0.0) or 0.0):
+            # Depois de falha real de voice state no Lavalink, permita que o cog
+            # de TTS assuma um VoiceClient local por um curto período. Sem isso,
+            # o próximo TTS fica bloqueado pelo Wavelink fantasma e some.
+            return False
         if state.current_backend == "local":
             # Música/fallback local precisa permitir o TTS local para o ducking de 5%.
             # Wavelink antigo em guild.voice_client sem player ativo é tratado como
@@ -3946,6 +3954,76 @@ class AudioRouter:
                 deduped.append(candidate)
         return deduped
 
+
+    async def prepare_tts_local_fallback_after_lavalink_failure(
+        self,
+        guild: discord.Guild | None,
+        vc: Any | None,
+        *,
+        reason: str = "",
+    ) -> discord.VoiceClient | None:
+        """Prepara um VoiceClient local quando o TTS via Lavalink perdeu voz.
+
+        O Lavalink pode receber o arquivo e mesmo assim ficar sem payload de voz
+        válido (state=None/voice_keys=[]). Nesse caso, insistir no node só silencia
+        o TTS. Este fallback derruba apenas o Player Wavelink preso, libera o
+        guarda de TTS local por alguns segundos e conecta o VoiceClient normal.
+        A música via Lavalink pode ser restaurada depois pelo fluxo normal/fallback
+        do player, mas o TTS curto não fica perdido.
+        """
+        if not MUSIC_TTS_LAVALINK_FAILURE_LOCAL_FALLBACK:
+            return None
+        if guild is None:
+            return None
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        state = self.get_state(guild_id)
+        channel = getattr(vc, "channel", None)
+        if channel is None and getattr(state, "last_voice_channel_id", None):
+            with contextlib.suppress(Exception):
+                channel = guild.get_channel(int(state.last_voice_channel_id)) or self.bot.get_channel(int(state.last_voice_channel_id))
+        if channel is None:
+            with contextlib.suppress(Exception):
+                channel = getattr(getattr(guild, "me", None), "voice", None).channel
+        if channel is None:
+            logger.warning(
+                "[music/lavalink] fallback local de TTS cancelado: canal de voz desconhecido | guild=%s reason=%s",
+                guild_id,
+                reason,
+            )
+            return None
+
+        logger.warning(
+            "[music/lavalink] usando fallback local para TTS após falha de voz Lavalink | guild=%s channel=%s reason=%s",
+            guild_id,
+            getattr(channel, "id", None),
+            reason,
+        )
+        # Libera as travas que fariam o cog de TTS ignorar a conexão local.
+        state.lavalink_tts_until = 0.0
+        state.lavalink_resume_grace_until = 0.0
+        state.tts_session_active_until = 0.0
+        state.tts_lavalink_local_fallback_until = time.monotonic() + MUSIC_TTS_LAVALINK_LOCAL_FALLBACK_COOLDOWN_SECONDS
+        self._mark_lavalink_transition(state, seconds=2.0)
+        self._mark_internal_voice_disconnect(guild_id, seconds=2.0)
+
+        current_vc = getattr(guild, "voice_client", None)
+        if self._is_lavalink_voice_client(current_vc):
+            with contextlib.suppress(Exception):
+                await self._vc_stop_audio(current_vc)
+            with contextlib.suppress(Exception):
+                await current_vc.disconnect(force=True)
+            await asyncio.sleep(0.8)
+
+        local_vc = await self._ensure_voice(guild, channel, state=state)
+        if local_vc is None or self._is_lavalink_voice_client(local_vc):
+            logger.warning(
+                "[music/lavalink] fallback local de TTS não obteve VoiceClient local | guild=%s vc=%s",
+                guild_id,
+                type(local_vc).__name__ if local_vc is not None else "None",
+            )
+            return None
+        return local_vc
+
     async def play_tts(
         self,
         *,
@@ -4053,6 +4131,8 @@ class AudioRouter:
                     "playback_ms": max(0.0, (time.monotonic() - playback_started_at) * 1000.0),
                     "playback_started_at": playback_started_at,
                     "tts_lavalink_failed": True,
+                    "tts_lavalink_error": str(exc),
+                    "tts_lavalink_local_fallback_available": MUSIC_TTS_LAVALINK_FAILURE_LOCAL_FALLBACK,
                 }
 
         source = discord.FFmpegPCMAudio(path, before_options=before_options, options=options)

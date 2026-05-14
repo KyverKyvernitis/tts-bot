@@ -181,6 +181,10 @@ MUSIC_TTS_INTERNAL_BASE_URL = (
 MUSIC_LAVALINK_TTS_INTERNAL_FIRST = _parse_bool(os.getenv("MUSIC_LAVALINK_TTS_INTERNAL_FIRST", "true"), True)
 MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS = max(0.25, _parse_float(os.getenv("MUSIC_LAVALINK_TTS_URL_PROBE_TIMEOUT_SECONDS", "1.75"), 1.75))
 MUSIC_LAVALINK_TTS_FILE_FALLBACK = _parse_bool(os.getenv("MUSIC_LAVALINK_TTS_FILE_FALLBACK", "false"), False)
+# Se o Lavalink recebe o TTS/arquivo mas perde o voice state (state=None/voice_keys=[]),
+# o bot pode cair para o TTS local direto em vez de silenciar a mensagem.
+MUSIC_TTS_LAVALINK_FAILURE_LOCAL_FALLBACK = _parse_bool(os.getenv("MUSIC_TTS_LAVALINK_FAILURE_LOCAL_FALLBACK", "true"), True)
+MUSIC_TTS_LAVALINK_LOCAL_FALLBACK_COOLDOWN_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_TTS_LAVALINK_LOCAL_FALLBACK_COOLDOWN_SECONDS", "45"), 45.0))
 MUSIC_LAVALINK_TTS_URL_TTL_SECONDS = max(30, _parse_int(os.getenv("MUSIC_LAVALINK_TTS_URL_TTL_SECONDS", "240"), 240))
 # Formato preferido para o áudio temporário de TTS usado pelo Lavalink.
 # OGG/Opus é menor e costuma carregar mais rápido que MP3; MP3 fica como fallback
