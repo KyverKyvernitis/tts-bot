@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import base64
+import json
 import logging
 import os
 import random
@@ -77,6 +79,9 @@ MUSIC_TTS_OPUS_BITRATE = str(getattr(config, "MUSIC_TTS_OPUS_BITRATE", "48k") or
 MUSIC_TTS_OPUS_SAMPLE_RATE = max(8000, int(getattr(config, "MUSIC_TTS_OPUS_SAMPLE_RATE", 48000) or 48000))
 MUSIC_TTS_OPUS_CHANNELS = min(2, max(1, int(getattr(config, "MUSIC_TTS_OPUS_CHANNELS", 1) or 1)))
 MUSIC_TTS_CONVERT_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "MUSIC_TTS_CONVERT_TIMEOUT_SECONDS", 8.0) or 8.0))
+MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED = bool(getattr(config, "MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED", True))
+MUSIC_TTS_PHONE_WORKER_CONVERT_TIMEOUT_SECONDS = max(0.8, float(getattr(config, "MUSIC_TTS_PHONE_WORKER_CONVERT_TIMEOUT_SECONDS", 3.5) or 3.5))
+MUSIC_TTS_PHONE_WORKER_CONVERT_MAX_MB = max(1, int(getattr(config, "MUSIC_TTS_PHONE_WORKER_CONVERT_MAX_MB", 8) or 8))
 MUSIC_TTS_PREROLL_SILENCE_MS = max(0, int(getattr(config, "MUSIC_TTS_PREROLL_SILENCE_MS", 140) or 0))
 MUSIC_TTS_POSTROLL_SILENCE_MS = max(0, int(getattr(config, "MUSIC_TTS_POSTROLL_SILENCE_MS", 180) or 0))
 MUSIC_TTS_FADE_IN_MS = max(0, int(getattr(config, "MUSIC_TTS_FADE_IN_MS", 45) or 0))
@@ -94,6 +99,12 @@ MUSIC_SOURCE_EMOJIS = {
     "soundcloud": "<:SoundCloud:1502491211485675631>",
 }
 MUSIC_SOURCE_EMOJI_FALLBACK = "🎵"
+
+PHONE_WORKER_ENABLED = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
+PHONE_WORKER_HOST = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
+PHONE_WORKER_PORT = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
+PHONE_WORKER_SCHEME = str(getattr(config, "PHONE_WORKER_SCHEME", "http") or "http").strip() or "http"
+PHONE_WORKER_TOKEN = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
 PCM_FRAME_MS = 20.0
@@ -490,6 +501,8 @@ class AudioRouter:
         self._global_prefetch_active = 0
         self.backends = MusicBackendManager(bot, self.extractor)
         self._lavalink_shadow_tasks: dict[int, asyncio.Task] = {}
+        self._phone_worker_tts_convert_disabled_until: float = 0.0
+        self._phone_worker_tts_convert_last_log_at: float = 0.0
 
     def get_state(self, guild_id: int) -> MusicGuildState:
         state = self._states.get(int(guild_id))
@@ -3549,6 +3562,117 @@ class AudioRouter:
             filters.append(f"apad=pad_dur={post_s:.3f}")
         return ",".join(filters)
 
+    def _phone_worker_base_url(self) -> str:
+        if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
+            return ""
+        scheme = PHONE_WORKER_SCHEME if PHONE_WORKER_SCHEME in {"http", "https"} else "http"
+        return f"{scheme}://{PHONE_WORKER_HOST}:{PHONE_WORKER_PORT}"
+
+    def _phone_worker_available_for_tts_convert(self) -> bool:
+        if not MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED:
+            return False
+        if time.monotonic() < float(getattr(self, "_phone_worker_tts_convert_disabled_until", 0.0) or 0.0):
+            return False
+        return bool(self._phone_worker_base_url())
+
+    def _mark_phone_worker_tts_convert_failure(self, exc: Exception | str, *, cooldown: float = 45.0) -> None:
+        self._phone_worker_tts_convert_disabled_until = time.monotonic() + max(5.0, float(cooldown))
+        now = time.monotonic()
+        if now - float(getattr(self, "_phone_worker_tts_convert_last_log_at", 0.0) or 0.0) >= 60.0:
+            self._phone_worker_tts_convert_last_log_at = now
+            logger.warning("[music/phone-worker] TTS convert indisponível; fallback local por %.0fs | erro=%s", max(5.0, float(cooldown)), exc)
+        else:
+            logger.debug("[music/phone-worker] TTS convert falhou; fallback local", exc_info=isinstance(exc, Exception))
+
+    async def _phone_worker_convert_tts_audio(
+        self,
+        source_path: str,
+        target_path: str,
+        *,
+        input_ext: str,
+        output_ext: str,
+        ffmpeg_args: list[str],
+    ) -> bool:
+        """Tenta converter/normalizar TTS no celular via phone-worker.
+
+        É opcional e pré-playback: se falhar, a VPS faz a conversão local normal.
+        """
+        if not self._phone_worker_available_for_tts_convert():
+            return False
+        try:
+            source_path = os.path.abspath(str(source_path or ""))
+            target_path = os.path.abspath(str(target_path or ""))
+            if not os.path.isfile(source_path) or os.path.getsize(source_path) <= 0:
+                return False
+            max_input_bytes = MUSIC_TTS_PHONE_WORKER_CONVERT_MAX_MB * 1024 * 1024
+            source_size = os.path.getsize(source_path)
+            if source_size > max_input_bytes:
+                logger.debug(
+                    "[music/phone-worker] TTS convert ignorado: arquivo grande demais | size=%s max=%s",
+                    source_size,
+                    max_input_bytes,
+                )
+                return False
+
+            def _read_file(path: str) -> bytes:
+                with open(path, "rb") as handle:
+                    return handle.read()
+
+            raw = await asyncio.to_thread(_read_file, source_path)
+            payload = {
+                "task": "ffmpeg_convert",
+                "data_b64": base64.b64encode(raw).decode("ascii"),
+                "input_ext": str(input_ext or "mp3").strip(". /\\") or "mp3",
+                "output_ext": str(output_ext or "ogg").strip(". /\\") or "ogg",
+                "ffmpeg_args": [str(part) for part in ffmpeg_args],
+                "timeout_seconds": max(3, int(MUSIC_TTS_CONVERT_TIMEOUT_SECONDS + 1)),
+            }
+            started = time.monotonic()
+            base = self._phone_worker_base_url()
+            timeout = aiohttp.ClientTimeout(total=MUSIC_TTS_PHONE_WORKER_CONVERT_TIMEOUT_SECONDS)
+            headers = {
+                "Authorization": f"Bearer {PHONE_WORKER_TOKEN}",
+                "Content-Type": "application/json",
+            }
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(f"{base}/task", headers=headers, json=payload) as response:
+                    text = await response.text()
+                    if response.status < 200 or response.status >= 300:
+                        raise RuntimeError(f"HTTP {response.status}: {text[:240]}")
+                    data = json.loads(text or "{}")
+            out_b64 = str(data.get("data_b64") or "")
+            if not out_b64:
+                raise RuntimeError("phone-worker não retornou data_b64")
+            out = base64.b64decode(out_b64.encode("ascii"), validate=True)
+            if not out:
+                raise RuntimeError("phone-worker retornou áudio vazio")
+
+            def _write_file(path: str, content: bytes) -> None:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                tmp = f"{path}.phone-worker.tmp"
+                with open(tmp, "wb") as handle:
+                    handle.write(content)
+                os.replace(tmp, path)
+
+            await asyncio.to_thread(_write_file, target_path, out)
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            logger.info(
+                "[music/phone-worker] tts_convert_ok | source=%s target=%s format=%s input=%s output=%s elapsed_ms=%.1f",
+                source_path,
+                target_path,
+                output_ext,
+                source_size,
+                len(out),
+                elapsed_ms,
+            )
+            return True
+        except asyncio.TimeoutError as exc:
+            self._mark_phone_worker_tts_convert_failure(f"timeout após {MUSIC_TTS_PHONE_WORKER_CONVERT_TIMEOUT_SECONDS:.1f}s", cooldown=30.0)
+            return False
+        except Exception as exc:
+            self._mark_phone_worker_tts_convert_failure(exc, cooldown=45.0)
+            return False
+
     async def _convert_tts_audio_for_lavalink(self, source_path: str, fmt: str) -> str | None:
         """Prepara o TTS para o Lavalink em formato leve e com transição suave.
 
@@ -3605,11 +3729,22 @@ class AudioRouter:
             ):
                 return target
 
-            cmd = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", source_path, "-vn"]
+            worker_args = ["-vn"]
             if transition_filter:
-                cmd.extend(["-af", transition_filter])
-            cmd.extend(codec_args)
-            cmd.append(target)
+                worker_args.extend(["-af", transition_filter])
+            worker_args.extend(codec_args)
+            output_ext = "ogg" if fmt in {"opus", "ogg", "ogg_opus", "ogg/opus"} else "mp3"
+            input_ext = os.path.splitext(source_path)[1].strip(".").lower() or "mp3"
+            if await self._phone_worker_convert_tts_audio(
+                source_path,
+                target,
+                input_ext=input_ext,
+                output_ext=output_ext,
+                ffmpeg_args=worker_args,
+            ):
+                return target
+
+            cmd = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", source_path, *worker_args, target]
 
             started = time.monotonic()
             proc = await asyncio.create_subprocess_exec(

@@ -349,6 +349,20 @@ AUX_LAVALINK_NODE_NAME = (os.getenv("AUX_LAVALINK_NODE_NAME", "phone") or "phone
 AUX_LAVALINK_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("AUX_LAVALINK_TIMEOUT_SECONDS", "3.0"), 3.0))
 AUX_LAVALINK_COOLDOWN_SECONDS = max(10.0, _parse_float(os.getenv("AUX_LAVALINK_COOLDOWN_SECONDS", "300"), 300.0))
 
+# Phone-worker auxiliar — celular via Tailscale. Nunca é obrigatório: qualquer
+# falha cai para processamento local na VPS.
+PHONE_WORKER_ENABLED = _parse_bool(os.getenv("PHONE_WORKER_ENABLED", "false"), False)
+PHONE_WORKER_HOST = (os.getenv("PHONE_WORKER_HOST", "") or "").strip()
+PHONE_WORKER_PORT = _parse_int(os.getenv("PHONE_WORKER_PORT", "8766"), 8766)
+PHONE_WORKER_SCHEME = (os.getenv("PHONE_WORKER_SCHEME", "http") or "http").strip().lower() or "http"
+PHONE_WORKER_TOKEN = (os.getenv("PHONE_WORKER_TOKEN", "") or "").strip()
+
+# Uso do phone-worker fora do /vps: preparação de áudio TTS para Lavalink.
+# A VPS sempre mantém fallback local.
+MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED = _parse_bool(os.getenv("MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED", "true"), True)
+MUSIC_TTS_PHONE_WORKER_CONVERT_TIMEOUT_SECONDS = max(0.8, _parse_float(os.getenv("MUSIC_TTS_PHONE_WORKER_CONVERT_TIMEOUT_SECONDS", "3.5"), 3.5))
+MUSIC_TTS_PHONE_WORKER_CONVERT_MAX_MB = max(1, _parse_int(os.getenv("MUSIC_TTS_PHONE_WORKER_CONVERT_MAX_MB", "8"), 8))
+
 # Node de áudio compatível com Lavalink API.
 # Qualquer valor legado de MUSIC_NODE_PROVIDER cai para Lavalink.
 _MUSIC_NODE_PROVIDER_RAW = (os.getenv("MUSIC_NODE_PROVIDER", "lavalink") or "lavalink").strip().lower()

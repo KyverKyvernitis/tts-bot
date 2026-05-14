@@ -72,3 +72,15 @@ PHONE_WORKER_LOG_SUMMARY_MAX_INPUT_MB=8
 PHONE_WORKER_LOG_SUMMARY_MAX_RECENT=12
 PHONE_WORKER_LOG_SUMMARY_MAX_TOP=12
 ```
+## Uso fora do `/vps`
+
+Além dos diagnósticos, a VPS pode usar o phone-worker para preparar áudio curto de TTS antes do Lavalink tocar. Isso é opcional e tem fallback local automático.
+
+```env
+MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED=true
+MUSIC_TTS_PHONE_WORKER_CONVERT_TIMEOUT_SECONDS=3.5
+MUSIC_TTS_PHONE_WORKER_CONVERT_MAX_MB=8
+```
+
+Se o celular estiver offline, lento ou falhar no `ffmpeg`, a VPS converte localmente e o TTS continua funcionando.
+
