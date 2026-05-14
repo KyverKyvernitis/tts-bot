@@ -30,6 +30,9 @@ FRONT_CHANGED=0
 BACK_CHANGED=0
 BOT_CHANGED=0
 CALLKEEPER_CHANGED=0
+REQUIREMENTS_CHANGED=0
+AUDIO_SYSTEMD_CHANGED=0
+CLEANUP_CHANGED=0
 
 BOT_HEALTHCHECK_STATUS="não verificado"
 CALLKEEPER_STATUS="não alterado"
@@ -179,6 +182,119 @@ wait_for_health() {
   return 1
 }
 
+
+service_restart_count() {
+  local unit="${1:?}"
+  local value
+  value="$(systemctl show "$unit" -p NRestarts --value 2>/dev/null || echo 0)"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+  else
+    printf '0'
+  fi
+}
+
+journal_since_epoch() {
+  local unit="${1:?}"
+  local since_epoch="${2:?}"
+  journalctl -u "$unit" --since "@${since_epoch}" --no-pager 2>/dev/null || true
+}
+
+fatal_boot_log_patterns() {
+  cat <<'EOF'
+SyntaxError|IndentationError|TabError|ImportError|ModuleNotFoundError|No module named|cannot import name|ExtensionFailed|ExtensionNotFound|Failed to load extension|discord\.ext\.commands\.errors\.ExtensionFailed|discord\.ext\.commands\.errors\.ExtensionNotFound|RuntimeError:.*(boot|startup|setup|load|cog)|AttributeError:.*(setup|load_extension|cog)|Start request repeated too quickly|Failed with result|Main process exited.*status=1
+EOF
+}
+
+has_fatal_boot_logs() {
+  local unit="${1:?}"
+  local since_epoch="${2:?}"
+  local logs patterns
+  logs="$(journal_since_epoch "$unit" "$since_epoch")"
+  [[ -n "${logs//[[:space:]]/}" ]] || return 1
+  patterns="$(fatal_boot_log_patterns)"
+  printf '%s\n' "$logs" | grep -Eiq "$patterns"
+}
+
+run_preflight_checks() {
+  local py="$REPO_DIR/.venv/bin/python"
+  local file checked_py=0 checked_sh=0
+  [[ -x "$py" ]] || py="$(command -v python3 || true)"
+
+  if [[ -n "$py" ]]; then
+    STAGE="preflight Python"
+    while IFS= read -r file; do
+      [[ -n "$file" ]] || continue
+      [[ -f "$REPO_DIR/$file" ]] || continue
+      checked_py=1
+      sudo -u ubuntu -H "$py" -m py_compile "$REPO_DIR/$file"
+    done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity ' || true)
+  fi
+
+  STAGE="preflight Bash"
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    [[ -f "$REPO_DIR/$file" ]] || continue
+    checked_sh=1
+    bash -n "$REPO_DIR/$file"
+  done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.sh$' || true)
+
+  if (( checked_py == 1 || checked_sh == 1 )); then
+    logger -t "$LOG_TAG" "Preflight OK: Python=$checked_py Bash=$checked_sh"
+  else
+    logger -t "$LOG_TAG" "Preflight sem arquivos Python/Bash alterados"
+  fi
+}
+
+verify_bot_after_restart() {
+  local restart_epoch="${1:?}"
+  local restarts_before="${2:-0}"
+  local checkpoints=(8 20 35)
+  local waited=0 checkpoint sleep_for restarts_after health_ok=0
+
+  for checkpoint in "${checkpoints[@]}"; do
+    sleep_for=$((checkpoint - waited))
+    if (( sleep_for > 0 )); then
+      sleep "$sleep_for"
+      waited="$checkpoint"
+    fi
+
+    if systemctl is-failed --quiet "$SERVICE"; then
+      BOT_HEALTHCHECK_STATUS="falhou: serviço em failed"
+      return 1
+    fi
+
+    if ! systemctl is-active --quiet "$SERVICE"; then
+      BOT_HEALTHCHECK_STATUS="falhou: serviço não ficou active"
+      return 1
+    fi
+
+    restarts_after="$(service_restart_count "$SERVICE")"
+    if [[ "$restarts_after" =~ ^[0-9]+$ && "$restarts_before" =~ ^[0-9]+$ ]]; then
+      if (( restarts_after > restarts_before + 1 )); then
+        BOT_HEALTHCHECK_STATUS="falhou: restart loop detectado (${restarts_before}→${restarts_after})"
+        return 1
+      fi
+    fi
+
+    if has_fatal_boot_logs "$SERVICE" "$restart_epoch"; then
+      BOT_HEALTHCHECK_STATUS="falhou: erro fatal de boot nas logs"
+      return 1
+    fi
+
+    if curl -fsS --max-time 3 "$BOT_HEALTH_URL" >/dev/null 2>&1; then
+      health_ok=1
+    fi
+  done
+
+  if (( health_ok == 1 )); then
+    BOT_HEALTHCHECK_STATUS="OK"
+  else
+    BOT_HEALTHCHECK_STATUS="ativo; health HTTP sem resposta"
+  fi
+  return 0
+}
+
 env_truthy() {
   local key="${1:?}"
   local value=""
@@ -191,7 +307,7 @@ env_truthy() {
 
 wait_for_lavalink_ready() {
   if [[ -x "$REPO_DIR/scripts/wait-audio-node-ready.py" ]]; then
-    sudo -u ubuntu -H "$REPO_DIR/scripts/wait-audio-node-ready.py" --timeout "${AUDIO_NODE_STARTUP_WAIT_SECONDS:-90}"
+    sudo -u ubuntu -H "$REPO_DIR/scripts/wait-audio-node-ready.py" --timeout "${AUDIO_NODE_STARTUP_WAIT_SECONDS:-20}"
     return $?
   fi
   return 0
@@ -294,36 +410,57 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
 
 deploy_audio_services() {
-  STAGE="configuração dos serviços de áudio"
-  local installed=0
+  if (( AUDIO_SYSTEMD_CHANGED == 0 )); then
+    AUDIO_SERVICES_STATUS="não alterado"
+    return 0
+  fi
 
-  if [[ -f "$REPO_DIR/deploy/systemd/lavalink.service" ]]; then
-    cp "$REPO_DIR/deploy/systemd/lavalink.service" /etc/systemd/system/lavalink.service
-    installed=1
+  STAGE="configuração dos serviços de áudio"
+  local installed=0 lavalink_unit_changed=0
+
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^deploy/systemd/lavalink\.service$'; then
+    lavalink_unit_changed=1
+    if [[ -f "$REPO_DIR/deploy/systemd/lavalink.service" ]]; then
+      cp "$REPO_DIR/deploy/systemd/lavalink.service" /etc/systemd/system/lavalink.service
+      installed=1
+    fi
   fi
-  if [[ -f "$REPO_DIR/deploy/systemd/tts-bot.service" ]]; then
-    cp "$REPO_DIR/deploy/systemd/tts-bot.service" /etc/systemd/system/tts-bot.service
-    installed=1
+
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^deploy/systemd/tts-bot\.service$'; then
+    if [[ -f "$REPO_DIR/deploy/systemd/tts-bot.service" ]]; then
+      cp "$REPO_DIR/deploy/systemd/tts-bot.service" /etc/systemd/system/tts-bot.service
+      installed=1
+    fi
   fi
+
   if (( installed == 1 )); then
     systemctl daemon-reload
   fi
 
-  if env_truthy LAVALINK_ENABLED; then
-    systemctl enable "$LAVALINK_SERVICE" >/dev/null 2>&1 || true
-    systemctl restart "$LAVALINK_SERVICE" || true
-    if systemctl is-active --quiet "$LAVALINK_SERVICE"; then
-      AUDIO_SERVICES_STATUS="Lavalink ativo"
+  if (( lavalink_unit_changed == 1 )); then
+    if env_truthy LAVALINK_ENABLED; then
+      systemctl enable "$LAVALINK_SERVICE" >/dev/null 2>&1 || true
+      systemctl restart "$LAVALINK_SERVICE" || true
+      if systemctl is-active --quiet "$LAVALINK_SERVICE"; then
+        AUDIO_SERVICES_STATUS="Lavalink ativo"
+      else
+        AUDIO_SERVICES_STATUS="Lavalink configurado, mas não ficou ativo"
+      fi
     else
-      AUDIO_SERVICES_STATUS="Lavalink configurado, mas não ficou ativo"
+      AUDIO_SERVICES_STATUS="Lavalink não iniciado porque LAVALINK_ENABLED=false"
     fi
   else
-    AUDIO_SERVICES_STATUS="Lavalink não iniciado porque LAVALINK_ENABLED=false"
+    AUDIO_SERVICES_STATUS="units atualizadas; Lavalink não alterado"
   fi
-
 }
 
+
 deploy_cleanup_timer() {
+  if (( CLEANUP_CHANGED == 0 )); then
+    CLEANUP_STATUS="não alterada"
+    return 0
+  fi
+
   STAGE="configuração da limpeza de temporários"
   local installed=0
 
@@ -357,37 +494,40 @@ deploy_bot() {
   deploy_audio_services
   deploy_cleanup_timer
 
-  STAGE="dependências do bot"
-  if [[ -x "$REPO_DIR/.venv/bin/pip" && -f "$REPO_DIR/requirements.txt" ]]; then
-    sudo -u ubuntu -H "$REPO_DIR/.venv/bin/pip" install -r "$REPO_DIR/requirements.txt"
+  if (( REQUIREMENTS_CHANGED == 1 )); then
+    STAGE="dependências do bot"
+    if [[ -x "$REPO_DIR/.venv/bin/pip" && -f "$REPO_DIR/requirements.txt" ]]; then
+      sudo -u ubuntu -H "$REPO_DIR/.venv/bin/pip" install -r "$REPO_DIR/requirements.txt"
+    fi
   fi
 
   if (( BOT_CHANGED == 1 )); then
+    local restart_epoch restarts_before
+    restarts_before="$(service_restart_count "$SERVICE")"
+
     STAGE="reinício do bot"
+    restart_epoch="$(date +%s)"
     systemctl restart "$SERVICE"
-    sleep 3
+
     if env_truthy LAVALINK_ENABLED; then
-      STAGE="espera do Lavalink"
+      STAGE="espera curta do Lavalink"
       wait_for_lavalink_ready || true
     fi
-    STAGE="healthcheck do bot"
-    if systemctl is-active --quiet "$SERVICE" && wait_for_health "$BOT_HEALTH_URL" 12 5; then
-      BOT_HEALTHCHECK_STATUS="OK"
-      return 0
-    fi
-    BOT_HEALTHCHECK_STATUS="falhou"
-    return 1
+
+    STAGE="validação fatal do bot"
+    verify_bot_after_restart "$restart_epoch" "$restarts_before"
+    return $?
   fi
 
   STAGE="healthcheck do bot"
   if wait_for_health "$BOT_HEALTH_URL" 2 2; then
     BOT_HEALTHCHECK_STATUS="OK"
-    return 0
+  else
+    BOT_HEALTHCHECK_STATUS="não alterado; health HTTP sem resposta"
   fi
-
-  BOT_HEALTHCHECK_STATUS="falhou"
-  return 1
+  return 0
 }
+
 
 deploy_callkeeper() {
   if (( CALLKEEPER_CHANGED == 0 )); then
@@ -454,45 +594,47 @@ deploy_backend() {
 
   if (( BACK_CHANGED == 0 )); then
     BACK_STATUS="não alterado"
-  else
-    if [[ ! -d "$BACK_DIR" ]]; then
-      BACK_STATUS="backend não encontrado em $BACK_DIR"
-      return 1
-    fi
-
-    STAGE="dependências do backend"
-    run_as_ubuntu "cd \"$BACK_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
-
-    STAGE="build do backend"
-    run_as_ubuntu "cd \"$BACK_DIR\" && npm run build"
-
-    STAGE="limpeza do backend"
-    run_as_ubuntu "cd \"$BACK_DIR\" && npm prune --omit=dev && npm cache clean --force >/dev/null 2>&1 || true"
-
-    STAGE="reinício do backend"
-    fuser -k "${BACK_PORT}/tcp" >/dev/null 2>&1 || true
-    run_as_ubuntu "cd \"$BACK_DIR\"; set -a; [ -f \"$REPO_DIR/.env\" ] && . \"$REPO_DIR/.env\" || true; [ -f .env ] && . ./.env || true; set +a; nohup node dist/index.js >> sinuca-server.log 2>&1 &"
-    sleep 3
-    BACK_STATUS="backend reiniciado na porta $BACK_PORT"
-  fi
-
-  STAGE="healthcheck da activity"
-  if wait_for_health "$BACK_HEALTH_URL" 18 5; then
-    ACTIVITY_HEALTHCHECK_STATUS="OK"
-    if (( BACK_CHANGED == 1 )); then
-      BACK_STATUS="backend publicado e validado em $BACK_HEALTH_URL"
+    STAGE="healthcheck informativo da activity"
+    if wait_for_health "$BACK_HEALTH_URL" 3 2; then
+      ACTIVITY_HEALTHCHECK_STATUS="OK"
+    else
+      ACTIVITY_HEALTHCHECK_STATUS="indisponível; backend não foi alterado"
     fi
     return 0
   fi
 
-  ACTIVITY_HEALTHCHECK_STATUS="falhou"
-  if (( BACK_CHANGED == 1 )); then
-    BACK_STATUS="backend reiniciado, mas healthcheck falhou em $BACK_HEALTH_URL"
-  elif (( FRONT_CHANGED == 0 )); then
-    BACK_STATUS="backend sem mudanças, mas healthcheck falhou em $BACK_HEALTH_URL"
+  if [[ ! -d "$BACK_DIR" ]]; then
+    BACK_STATUS="backend não encontrado em $BACK_DIR"
+    return 1
   fi
+
+  STAGE="dependências do backend"
+  run_as_ubuntu "cd \"$BACK_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
+
+  STAGE="build do backend"
+  run_as_ubuntu "cd \"$BACK_DIR\" && npm run build"
+
+  STAGE="limpeza do backend"
+  run_as_ubuntu "cd \"$BACK_DIR\" && npm prune --omit=dev && npm cache clean --force >/dev/null 2>&1 || true"
+
+  STAGE="reinício do backend"
+  fuser -k "${BACK_PORT}/tcp" >/dev/null 2>&1 || true
+  run_as_ubuntu "cd \"$BACK_DIR\"; set -a; [ -f \"$REPO_DIR/.env\" ] && . \"$REPO_DIR/.env\" || true; [ -f .env ] && . ./.env || true; set +a; nohup node dist/index.js >> sinuca-server.log 2>&1 &"
+  sleep 3
+  BACK_STATUS="backend reiniciado na porta $BACK_PORT"
+
+  STAGE="healthcheck da activity"
+  if wait_for_health "$BACK_HEALTH_URL" 8 3; then
+    ACTIVITY_HEALTHCHECK_STATUS="OK"
+    BACK_STATUS="backend publicado e validado em $BACK_HEALTH_URL"
+    return 0
+  fi
+
+  ACTIVITY_HEALTHCHECK_STATUS="falhou"
+  BACK_STATUS="backend reiniciado, mas healthcheck falhou em $BACK_HEALTH_URL"
   return 1
 }
+
 
 rollback_after_failure() {
   local exit_code="${1:-1}"
@@ -666,6 +808,15 @@ fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -vq '^activity /sinuca'; then
   BOT_CHANGED=1
 fi
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^requirements\.txt$'; then
+  REQUIREMENTS_CHANGED=1
+fi
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd/(lavalink|tts-bot)\.service$'; then
+  AUDIO_SYSTEMD_CHANGED=1
+fi
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(cleanup-audio-temp\.sh|deploy/systemd/cleanup-audio-temp\.(service|timer))$'; then
+  CLEANUP_CHANGED=1
+fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callkeeper_runtime/|deploy/systemd/callkeeper\.service|config\.py|db\.py|requirements\.txt)$'; then
   CALLKEEPER_CHANGED=1
 fi
@@ -680,6 +831,8 @@ sudo -u ubuntu -H git pull --ff-only origin "$BRANCH"
 UPDATE_APPLIED=1
 
 FAILED_STAGE=""
+
+run_preflight_checks
 
 deploy_bot
 deploy_callkeeper
