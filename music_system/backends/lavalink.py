@@ -2260,6 +2260,7 @@ class LavalinkBackend:
         bot,
         guild: Any,
         *,
+        channel: Any | None = None,
         candidates: list[str],
         volume: float = 1.0,
         resume_volume: float = 1.0,
@@ -2277,16 +2278,38 @@ class LavalinkBackend:
         tts_playable, meta = await self.find_first_playable_from_candidates(bot, candidates)
         resolved_ms = max(0.0, (time.monotonic() - started_at) * 1000.0)
 
+        # O TTS pode chegar em uma janela em que o Wavelink ainda existe no
+        # cache, mas o payload REST do Lavalink já perdeu state/voice. Antes
+        # de tocar, garanta um Player válido e reconecte uma vez ao canal de
+        # voz conhecido; depois de dar play, a confirmação REST é feita de
+        # novo, como no fluxo normal de música.
         player = getattr(guild, "voice_client", None)
-        if player is None or not self._is_wavelink_player(player):
-            raise RuntimeError("Player Lavalink não está conectado para tocar TTS.")
+        channel = channel or getattr(player, "channel", None)
+        if channel is None:
+            raise RuntimeError("Canal de voz não encontrado para tocar TTS via Lavalink.")
 
-        await self._wait_for_rest_voice_connected(
-            player,
-            guild,
-            getattr(player, "channel", None) or getattr(guild, "voice_client", None),
-            timeout=6.0,
-        )
+        needs_connect = bool(player is None or not self._is_wavelink_player(player) or not bool(getattr(player, "connected", False)))
+        if needs_connect:
+            player = await self.connect_player(bot, guild, channel, force_reconnect=True)
+        else:
+            current_channel_id = getattr(getattr(player, "channel", None), "id", None)
+            target_channel_id = getattr(channel, "id", None)
+            if target_channel_id and current_channel_id != target_channel_id:
+                with contextlib.suppress(Exception):
+                    await player.move_to(channel)
+
+        # Pré-checagem leve: se já existe payload REST e ele está sem conexão,
+        # tente curar com channelId. Se o payload ainda não existe (404/None),
+        # não falhe aqui; o /play logo abaixo cria o player no Lavalink.
+        with contextlib.suppress(Exception):
+            payload = await self._get_rest_player(player, guild)
+            if payload is not None and not self._lavalink_state_connected(payload):
+                await self._wait_for_rest_voice_connected(
+                    player,
+                    guild,
+                    channel,
+                    timeout=3.0,
+                )
         previous_playable = self._player_current_track(player) or resume_playable
         previous_position = self._player_position_ms(player)
         was_paused = self._player_bool(player, "paused", "is_paused")
@@ -2321,6 +2344,12 @@ class LavalinkBackend:
         restore_error: Exception | None = None
         try:
             await self._play_with_compat(player, tts_playable, start=0, volume=tts_volume, add_history=False)
+            await self._wait_for_rest_voice_connected(
+                player,
+                guild,
+                channel,
+                timeout=max(6.0, min(12.0, float(timeout or 120.0))),
+            )
             # O player pode permanecer pausado porque pausamos a música anterior
             # antes de substituir a faixa. Sem este resume explícito, o payload REST
             # fica com ``paused: true`` e o TTS HTTP carrega, mas nunca toca.

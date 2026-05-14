@@ -520,10 +520,31 @@ class MusicBackendManager:
         raise RuntimeError("Lavalink não conseguiu iniciar o playback.")
 
 
+
+    def mark_aux_lavalink_failure(self, guild_id: int | None, reason: BaseException | str) -> None:
+        """Coloca o node auxiliar em cooldown sem afetar o node principal.
+
+        Usado quando o playback já começou no celular, mas caiu cedo demais
+        durante a faixa. Assim a próxima tentativa cai direto para a VPS em vez
+        de insistir em um celular/rede instável.
+        """
+        try:
+            aux = self._aux_node_config_for_guild(guild_id)
+            backend = LavalinkBackend.from_config(aux)
+            self._mark_aux_failure(backend, reason if isinstance(reason, BaseException) else RuntimeError(str(reason)))
+            logger.warning(
+                "[music/lavalink-aux] node auxiliar marcado em cooldown | guild=%s reason=%s",
+                guild_id,
+                reason,
+            )
+        except Exception:
+            logger.debug("[music/lavalink-aux] falha ao marcar cooldown manual do auxiliar", exc_info=True)
+
     async def play_lavalink_tts(
         self,
         guild,
         *,
+        voice_channel=None,
         candidates: list[str],
         volume: float = 1.0,
         resume_volume: float = 1.0,
@@ -538,6 +559,7 @@ class MusicBackendManager:
             return await lavalink_backend.play_tts_interrupt(
                 self.bot,
                 guild,
+                channel=voice_channel,
                 candidates=candidates,
                 volume=volume,
                 resume_volume=resume_volume,

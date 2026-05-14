@@ -413,6 +413,8 @@ class MusicGuildState:
     current_backend: str = "local"
     current_lavalink_player: Any = None
     current_lavalink_playable: Any = None
+    current_lavalink_node_label: str = ""
+    current_lavalink_node_name: str = ""
     current_resolve_task: Optional[asyncio.Task] = None
     next_resolve_task: Optional[asyncio.Task] = None
     next_resolve_key: str = ""
@@ -2741,6 +2743,12 @@ class AudioRouter:
                 player, playable, meta = await play_coro
             state.current_lavalink_player = player
             state.current_lavalink_playable = playable
+            if isinstance(meta, dict):
+                state.current_lavalink_node_label = str(meta.get("node_label") or "")
+                state.current_lavalink_node_name = str(meta.get("node_name") or "")
+            else:
+                state.current_lavalink_node_label = ""
+                state.current_lavalink_node_name = ""
             self._mark_lavalink_transition(state, seconds=8.0)
             self._mark_internal_voice_disconnect(guild.id, seconds=8.0)
             # Usa metadados reais do node quando eles representam a fonte escolhida.
@@ -2831,6 +2839,12 @@ class AudioRouter:
                     getattr(track, "title", ""),
                     premature_reason,
                 )
+                if str(getattr(state, "current_lavalink_node_label", "") or "").lower() == "auxiliar":
+                    with contextlib.suppress(Exception):
+                        self.backends.mark_aux_lavalink_failure(
+                            guild.id,
+                            RuntimeError(f"node auxiliar terminou/falhou cedo demais: {premature_reason}"),
+                        )
                 raise MusicPlaybackError(f"Lavalink terminou/falhou cedo demais: {premature_reason}")
             return True
 
@@ -3989,8 +4003,13 @@ class AudioRouter:
                     state.lavalink_tts_until = max(float(getattr(state, "lavalink_tts_until", 0.0) or 0.0), time.monotonic() + tts_window)
                     self._mark_lavalink_transition(state, seconds=tts_window)
                     self._mark_internal_voice_disconnect(int(guild_id), seconds=tts_window)
+                    tts_channel = getattr(vc, "channel", None) or getattr(getattr(state, "current_lavalink_player", None), "channel", None)
+                    if tts_channel is None and getattr(state, "last_voice_channel_id", None):
+                        with contextlib.suppress(Exception):
+                            tts_channel = guild.get_channel(int(state.last_voice_channel_id)) or self.bot.get_channel(int(state.last_voice_channel_id))
                     result = await self.backends.play_lavalink_tts(
                         guild,
+                        voice_channel=tts_channel,
                         candidates=candidates,
                         volume=TTS_VOLUME,
                         resume_volume=state.volume,
