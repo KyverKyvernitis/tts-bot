@@ -227,8 +227,15 @@ class BotLocal(commands.Bot):
 
             if os.path.isdir(full_path):
                 init_py = os.path.join(full_path, "__init__.py")
-                if entry != "tts" and os.path.isfile(init_py):
-                    extensions.append(f"cogs.{entry}")
+                if entry == "tts" or not os.path.isfile(init_py):
+                    continue
+                try:
+                    init_source = Path(init_py).read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    init_source = ""
+                if "def setup" not in init_source:
+                    continue
+                extensions.append(f"cogs.{entry}")
 
         # TTS foi reorganizado para um pacote próprio em cogs/tts.
         extensions.extend([
@@ -645,18 +652,6 @@ class BotLocal(commands.Bot):
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
-    async def _schedule_devai_patch_review(
-        self,
-        *,
-        zip_path: Path,
-        changed_files: list[str],
-        commit_hash: object,
-        branch: object,
-        triggered_update: bool,
-    ) -> None:
-        # Economia de CPU/API: patch aplicado com sucesso não dispara DevAI.
-        # Falhas continuam sendo enviadas pelo fluxo de exceção do auto-update.
-        return
 
     async def _handle_zip_update_message(self, message: discord.Message):
         zip_attachment = None
@@ -730,8 +725,6 @@ class BotLocal(commands.Bot):
                     discord.Color.red(),
                 )
             except Exception as e:
-                # IMPORTANTE: usa logger.exception (vai pro bot.log) em vez de print —
-                # caso contrário o LogWatcher da DevAI nunca veria essa falha.
                 logging.getLogger("zip_update").exception(
                     "Falha no auto-update via ZIP do Discord"
                 )
@@ -741,30 +734,6 @@ class BotLocal(commands.Bot):
                     f"Nada foi aplicado. Motivo: **{e}**",
                     discord.Color.red(),
                 )
-                # Notifica a DevAI explicitamente — não esperar o LogWatcher
-                # bater o log; queremos análise imediata em falha de update.
-                try:
-                    devai = self.get_cog("DevAI")
-                    notify = getattr(devai, "notify_external_event", None)
-                    if callable(notify):
-                        zip_name = zip_attachment.filename if zip_attachment else "?"
-                        synthetic_text = (
-                            f"AUTO-UPDATE FALHOU\n"
-                            f"Stage: _handle_zip_update_message\n"
-                            f"ZIP: {zip_name}\n"
-                            f"Erro: {type(e).__name__}: {e}\n\n"
-                            f"Traceback (most recent call last):\n"
-                            f"{traceback.format_exc()}"
-                        )
-                        await notify(
-                            source="auto_update",
-                            text=synthetic_text,
-                            signature_hint=f"auto_update_fail:{type(e).__name__}",
-                        )
-                except Exception:
-                    logging.getLogger("zip_update").debug(
-                        "DevAI notify_external_event falhou (não-crítico)", exc_info=True
-                    )
             finally:
                 shutil.rmtree(work_dir, ignore_errors=True)
 

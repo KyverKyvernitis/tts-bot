@@ -8,9 +8,14 @@ from typing import Iterable
 import discord
 
 import config
-from cogs.dev_ai.remote_cmd.executor import run_shell
-from cogs.dev_ai.remote_cmd.formatting import build_result_attachment, chunk_text, format_result
-from cogs.dev_ai.remote_cmd.redactor import redact_bytes, redact_text
+from .rescue_shell import (
+    build_result_attachment,
+    chunk_text,
+    format_result,
+    redact_bytes,
+    redact_text,
+    run_shell,
+)
 
 from .settings import CALLKEEPER_OWNER_USER_ID
 
@@ -28,13 +33,6 @@ def _safe_int(value: object) -> int:
 
 
 def _iter_config_owner_ids() -> Iterable[int]:
-    raw = getattr(config, "DEVAI_OWNER_IDS", []) or []
-    if isinstance(raw, str):
-        raw = [item.strip() for item in raw.split(",") if item.strip()]
-    for item in raw:
-        uid = _safe_int(item)
-        if uid:
-            yield uid
     for attr in ("BOT_OWNER_ID", "OWNER_ID", "TTS_VOICE_FAILURE_DM_USER_ID"):
         uid = _safe_int(getattr(config, attr, 0))
         if uid:

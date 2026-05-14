@@ -45,9 +45,9 @@ RUN_LOG_FILE="${TMPDIR:-/tmp}/tts-bot-updater.$$.log"
 : > "$RUN_LOG_FILE"
 chmod 0644 "$RUN_LOG_FILE" 2>/dev/null || true
 
-# DevAI integration: log persistente que a DevAI lê via DEVAI_LOG_PATHS.
-# Sem isso a DevAI nunca vê falhas do updater systemd (que loga só pra
-# journalctl + tmpfile com PID no nome).
+# Log persistente do updater para diagnóstico pelo /vps.
+# O systemd guarda a saída no journalctl, mas este arquivo facilita anexar
+# falhas recentes sem depender só do journal.
 PERSISTENT_LOG_DIR="$REPO_DIR/logs"
 PERSISTENT_LOG_FILE="$PERSISTENT_LOG_DIR/updater.log"
 mkdir -p "$PERSISTENT_LOG_DIR" 2>/dev/null || true
