@@ -45,7 +45,7 @@ def request_json(url: str, token: str, *, payload: dict | None = None, timeout: 
 def main() -> int:
     env = read_env(Path(os.getenv("ENV_FILE", "/home/ubuntu/bot/.env")))
     parser = argparse.ArgumentParser(description="Cliente simples do phone-worker.")
-    parser.add_argument("command", choices=["health", "status", "sha256", "zip", "log-extract", "text-stats", "ffmpeg-convert"])
+    parser.add_argument("command", choices=["health", "status", "sha256", "zip", "log-extract", "log-summary", "text-stats", "ffprobe", "ffmpeg-convert"])
     parser.add_argument("paths", nargs="*")
     parser.add_argument("--host", default=env.get("PHONE_WORKER_HOST") or env.get("AUX_LAVALINK_HOST") or "")
     parser.add_argument("--port", default=env.get("PHONE_WORKER_PORT", "8766"))
@@ -56,6 +56,8 @@ def main() -> int:
     parser.add_argument("--input-ext", default="")
     parser.add_argument("--ffmpeg-arg", action="append", default=[])
     parser.add_argument("--max-lines", type=int, default=120)
+    parser.add_argument("--max-recent", type=int, default=12)
+    parser.add_argument("--max-top", type=int, default=12)
     args = parser.parse_args()
 
     if not args.host:
@@ -93,6 +95,23 @@ def main() -> int:
     if args.command == "log-extract":
         text = "\n".join(Path(p).read_text(encoding="utf-8", errors="ignore") for p in args.paths) if args.paths else sys.stdin.read()
         payload = {"task": "log_extract", "text": text, "max_lines": args.max_lines}
+        print(json.dumps(request_json(f"{base}/task", args.token, payload=payload, timeout=args.timeout), indent=2, ensure_ascii=False))
+        return 0
+
+
+    if args.command == "log-summary":
+        text = "\n".join(Path(p).read_text(encoding="utf-8", errors="ignore") for p in args.paths) if args.paths else sys.stdin.read()
+        payload = {"task": "log_summary", "text": text, "max_recent": args.max_recent, "max_top": args.max_top}
+        print(json.dumps(request_json(f"{base}/task", args.token, payload=payload, timeout=args.timeout), indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "ffprobe":
+        if not args.paths:
+            raise SystemExit("informe o arquivo de entrada")
+        src = Path(args.paths[0])
+        data = src.read_bytes()
+        input_ext = (args.input_ext or src.suffix.lstrip(".") or "bin").strip(".")
+        payload = {"task": "ffprobe_media", "data_b64": base64.b64encode(data).decode("ascii"), "input_ext": input_ext}
         print(json.dumps(request_json(f"{base}/task", args.token, payload=payload, timeout=args.timeout), indent=2, ensure_ascii=False))
         return 0
 

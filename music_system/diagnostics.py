@@ -188,7 +188,8 @@ def _phone_worker_health_summary(*, timeout: float = 3.0) -> str:
         jobs = data.get("jobs_started")
         failed = data.get("jobs_failed")
         ffmpeg = "sim" if data.get("ffmpeg") else "não"
-        return f"phone-worker online · uptime={uptime}s · jobs={jobs} · falhas={failed} · ffmpeg={ffmpeg}"
+        ffprobe = "sim" if data.get("ffprobe") else "não"
+        return f"phone-worker online · uptime={uptime}s · jobs={jobs} · falhas={failed} · ffmpeg={ffmpeg} · ffprobe={ffprobe}"
     except Exception as exc:
         return f"phone-worker indisponível: {type(exc).__name__}: {str(exc)[:220]}"
 
@@ -367,6 +368,140 @@ def _phone_worker_text_stats_summary(text: str, *, source: str, timeout: float |
         out.append(f"entrada local foi cortada para os últimos {max_input_mb} MB")
     return "\n".join(out) + "\n"
 
+
+
+def _local_log_summary_obj(text: str, *, max_recent: int = 12, max_top: int = 12) -> dict[str, Any]:
+    raw = str(text or "")
+    patterns = {
+        "critical": r"\bcritical\b|\bcritico\b|\bcrítico\b|\bfatal\b",
+        "error": r"\berror\b|\berro\b",
+        "warning": r"\bwarning\b|\bwarn\b|\baviso\b",
+        "timeout": r"timeout|timed out|tempo esgotado",
+        "traceback": r"traceback",
+        "exception": r"exception|exce[cç][aã]o",
+        "failed": r"failed|falhou|failure|falha",
+        "restart": r"restart|restarting|started|stopped|iniciando|parando",
+        "syntax": r"syntaxerror|indentationerror|taberror",
+        "import": r"importerror|modulenotfounderror|extensionfailed|extensionnotfound",
+        "lavalink": r"lavalink|lavasrc|trackexception|loadexception",
+        "yt_dlp": r"yt[-_ ]?dlp|youtube|googlevideo",
+        "rate_limit": r"rate.?limit|too many requests|429",
+        "phone_worker": r"phone-worker|phone_lavalink|phone-lavalink",
+    }
+    compiled = {key: re.compile(pattern, re.IGNORECASE) for key, pattern in patterns.items()}
+    counts = {key: 0 for key in compiled}
+    recent: list[str] = []
+    grouped: dict[str, int] = {}
+    for line in raw.splitlines():
+        hit = False
+        for key, regex in compiled.items():
+            if regex.search(line or ""):
+                counts[key] += 1
+                hit = True
+        if hit:
+            stripped = line.strip()
+            recent.append(stripped)
+            normalized = re.sub(r"^\d{4}-\d{2}-\d{2}[T\s][^\s]+\s+", "", stripped)
+            normalized = re.sub(r"^[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+", "", normalized)
+            normalized = re.sub(r"^[\w@./+\-]+(?:\[\d+\])?:\s*", "", normalized)
+            normalized = re.sub(r"\b(guild|channel|user)=\d+\b", r"\1=<id>", normalized)
+            normalized = re.sub(r"\b\d{15,22}\b", "<snowflake>", normalized)
+            normalized = re.sub(r"\s+", " ", normalized).strip()[:220] or "linha vazia"
+            grouped[normalized] = grouped.get(normalized, 0) + 1
+    top_messages = [
+        {"message": msg, "count": count}
+        for msg, count in sorted(grouped.items(), key=lambda item: item[1], reverse=True)[:max(1, max_top)]
+    ]
+    return {
+        "ok": True,
+        "bytes": len(raw.encode("utf-8", "replace")),
+        "lines": len(raw.splitlines()),
+        "important_count": len(recent),
+        "counts": counts,
+        "recent": recent[-max(1, max_recent):],
+        "top_messages": top_messages,
+    }
+
+
+def _format_log_summary(data: dict[str, Any], *, source: str, processing: str, truncated: bool = False) -> str:
+    counts = data.get("counts") if isinstance(data.get("counts"), dict) else {}
+    recent = [str(item) for item in (data.get("recent") or [])]
+    top_messages = data.get("top_messages") if isinstance(data.get("top_messages"), list) else []
+    count_order = [
+        ("critical", "críticos"),
+        ("error", "erros"),
+        ("warning", "avisos"),
+        ("timeout", "timeouts"),
+        ("failed", "falhas"),
+        ("exception", "exceptions"),
+        ("traceback", "tracebacks"),
+        ("syntax", "syntax/import"),
+        ("lavalink", "lavalink"),
+        ("yt_dlp", "yt/ytdlp"),
+        ("rate_limit", "rate limit"),
+        ("phone_worker", "phone worker"),
+    ]
+    lines = [
+        f"fonte: {source}",
+        f"processamento: {processing}",
+        f"linhas analisadas: {data.get('lines')}",
+        f"linhas importantes: {data.get('important_count')}",
+        "",
+        "contagens:",
+    ]
+    lines.extend(f"- {label}: {counts.get(key, 0)}" for key, label in count_order)
+    if truncated:
+        lines.append("entrada enviada ao worker foi cortada por limite de tamanho")
+    lines.append("")
+    lines.append("top mensagens agrupadas:")
+    if top_messages:
+        for item in top_messages[:12]:
+            if isinstance(item, dict):
+                lines.append(f"- {item.get('count', 0)}x · {str(item.get('message') or '')[:240]}")
+    else:
+        lines.append("- nenhuma mensagem relevante agrupada")
+    lines.append("")
+    lines.append("recentes:")
+    lines.extend(f"- {line[:260]}" for line in (recent or ["nenhuma linha relevante encontrada"]))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _phone_worker_log_summary_text(
+    text: str,
+    *,
+    source: str,
+    max_recent: int | None = None,
+    max_top: int | None = None,
+    timeout: float | None = None,
+) -> str:
+    raw = redact(text or "")
+    if not raw.strip():
+        return f"fonte: {source}\nsem logs para resumir\n"
+    max_recent = max_recent if max_recent is not None else _env_int("PHONE_WORKER_LOG_SUMMARY_MAX_RECENT", 12)
+    max_top = max_top if max_top is not None else _env_int("PHONE_WORKER_LOG_SUMMARY_MAX_TOP", 12)
+    max_input_mb = max(1, _env_int("PHONE_WORKER_LOG_SUMMARY_MAX_INPUT_MB", 8))
+    raw_bytes = raw.encode("utf-8", "replace")
+    truncated = False
+    if len(raw_bytes) > max_input_mb * 1024 * 1024:
+        raw_bytes = raw_bytes[-max_input_mb * 1024 * 1024:]
+        raw = raw_bytes.decode("utf-8", "replace")
+        truncated = True
+    timeout = timeout if timeout is not None else max(2.0, _env_float("PHONE_WORKER_LOG_SUMMARY_TIMEOUT_SECONDS", 7.0))
+    if _env_bool("PHONE_WORKER_ENABLED", False) and _phone_worker_base_url():
+        try:
+            result = _phone_worker_request_json(
+                "/task",
+                payload={"task": "log_summary", "text": raw, "max_recent": max_recent, "max_top": max_top},
+                timeout=timeout,
+            )
+            if result.get("ok"):
+                logger.info("[phone-worker] resumo inteligente de logs calculado no celular | fonte=%s importantes=%s", source, result.get("important_count"))
+                return _format_log_summary(result, source=source, processing="phone-worker", truncated=truncated)
+            logger.info("[phone-worker] log_summary respondeu falha; fallback local | fonte=%s resposta=%s", source, redact(result))
+        except Exception as exc:
+            logger.info("[phone-worker] log_summary indisponível; fallback local | fonte=%s motivo=%s: %s", source, type(exc).__name__, str(exc)[:180])
+    local = _local_log_summary_obj(raw, max_recent=max_recent, max_top=max_top)
+    return _format_log_summary(local, source=source, processing="local na VPS", truncated=truncated)
 
 def _zip_texts_local(files: list[tuple[str, str]], *, compresslevel: int = 6) -> bytes:
     bio = io.BytesIO()
@@ -1732,6 +1867,7 @@ def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOption
             combined_logs = "\n\n".join(collected_log_texts)
             files.append(("logs/phone-worker/error-highlights.txt", _phone_worker_log_extract_text(combined_logs, source="diagnóstico musical")))
             files.append(("logs/phone-worker/text-stats.txt", _phone_worker_text_stats_summary(combined_logs, source="diagnóstico musical")))
+            files.append(("logs/phone-worker/log-summary.txt", _phone_worker_log_summary_text(combined_logs, source="diagnóstico musical")))
         # Informações úteis para diagnosticar peso/IO sem tornar o relatório síncrono demais.
         files.append(("system/disk-and-process.txt", _run_cmd(["bash", "-lc", "df -h; echo; free -m; echo; ps -eo pid,ppid,%cpu,%mem,etime,cmd --sort=-%cpu | head -40"], timeout=8.0)))
 
@@ -1993,6 +2129,36 @@ def _quick_recent_errors_lines() -> list[str]:
         timeout=10.0,
         max_chars=8000,
     )
+
+    # O phone-worker ajuda aqui só como acelerador/analisador curto. Se ele
+    # estiver offline, o fallback local abaixo continua instantâneo e seguro.
+    if (
+        raw.strip()
+        and _env_bool("PHONE_WORKER_ENABLED", False)
+        and _env_bool("PHONE_WORKER_QUICK_STATUS_ENABLED", True)
+        and _phone_worker_base_url()
+    ):
+        try:
+            worker_timeout = max(0.8, _env_float("PHONE_WORKER_QUICK_STATUS_TIMEOUT_SECONDS", 1.2))
+            summary = _phone_worker_request_json(
+                "/task",
+                payload={"task": "log_summary", "text": raw, "max_recent": 3, "max_top": 3},
+                timeout=worker_timeout,
+            )
+            if summary.get("ok"):
+                recent = [str(line) for line in (summary.get("recent") or []) if str(line).strip()]
+                if recent:
+                    out: list[str] = []
+                    for line in recent[-3:]:
+                        raw_time, message = _clean_journal_error_message(line)
+                        when = _format_journal_time(raw_time)
+                        out.append(f"{when} · {message[:135].rstrip()}")
+                    if out:
+                        logger.info("[phone-worker] status rápido analisou erros recentes no celular")
+                        return out
+        except Exception as exc:
+            logger.info("[phone-worker] status rápido usou fallback local para erros recentes | motivo=%s: %s", type(exc).__name__, str(exc)[:120])
+
     matches: list[str] = []
     for line in raw.splitlines():
         if pattern.search(line or ""):
@@ -2090,6 +2256,7 @@ def build_full_vps_diagnostics_report_sync(router: Any, options: DiagnosticsOpti
     combined_full_logs = "\n\n# Logs locais completas/cortadas\n" + local_logs_full + "\n\n# journalctl completo/cortado\n" + journal_full
     sections.append(("Phone-worker: destaques de erros nas logs completas", _phone_worker_log_extract_text(combined_full_logs, source="diagnóstico completo")))
     sections.append(("Phone-worker: estatísticas das logs completas", _phone_worker_text_stats_summary(combined_full_logs, source="diagnóstico completo")))
+    sections.append(("Phone-worker: resumo inteligente das logs completas", _phone_worker_log_summary_text(combined_full_logs, source="diagnóstico completo")))
     sections.append(("Logs locais completas/cortadas", local_logs_full))
     sections.append(("journalctl completo/cortado", journal_full))
 
@@ -2187,6 +2354,7 @@ def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
             combined_snapshot_logs = "\n\n".join(snapshot_log_blocks)
             files.append(("logs/phone-worker/error-highlights.txt", _phone_worker_log_extract_text(combined_snapshot_logs, source="snapshot da VPS")))
             files.append(("logs/phone-worker/text-stats.txt", _phone_worker_text_stats_summary(combined_snapshot_logs, source="snapshot da VPS")))
+            files.append(("logs/phone-worker/log-summary.txt", _phone_worker_log_summary_text(combined_snapshot_logs, source="snapshot da VPS")))
 
         payload, worker_status = _phone_worker_zip_texts(files, filename=filename, compresslevel=6)
         if payload is None:

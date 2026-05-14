@@ -13,6 +13,8 @@ Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e us
   - `zip`
   - `text_stats`
   - `log_extract`
+  - `log_summary` para resumir logs, contar erros e agrupar mensagens repetidas
+  - `ffprobe_media` quando `ffprobe` estiver disponível junto do ffmpeg
   - `ffmpeg_convert` quando `ffmpeg` estiver instalado no Termux.
 
 Todas as rotas usam token via:
@@ -59,3 +61,14 @@ PHONE_WORKER_START_COMMAND=/data/data/com.termux/files/home/start-phone-worker.s
 ```
 
 O timer da VPS chama `scripts/phone-worker-watch.sh` para manter o worker acordado quando possível.
+
+Variáveis opcionais usadas pelos diagnósticos do bot:
+
+```env
+PHONE_WORKER_QUICK_STATUS_ENABLED=true
+PHONE_WORKER_QUICK_STATUS_TIMEOUT_SECONDS=1.2
+PHONE_WORKER_LOG_SUMMARY_TIMEOUT_SECONDS=7
+PHONE_WORKER_LOG_SUMMARY_MAX_INPUT_MB=8
+PHONE_WORKER_LOG_SUMMARY_MAX_RECENT=12
+PHONE_WORKER_LOG_SUMMARY_MAX_TOP=12
+```

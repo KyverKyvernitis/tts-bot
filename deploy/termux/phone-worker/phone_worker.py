@@ -8,7 +8,9 @@ import io
 import json
 import os
 import platform
+import re
 import shutil
+from collections import Counter
 import subprocess
 import tempfile
 import time
@@ -110,11 +112,12 @@ def _system_status() -> dict[str, Any]:
             "free": disk.free,
         },
         "ffmpeg": bool(shutil.which("ffmpeg")),
+        "ffprobe": bool(shutil.which("ffprobe")),
     }
 
 
 class WorkerHandler(BaseHTTPRequestHandler):
-    server_version = "PhoneWorker/1.0"
+    server_version = "PhoneWorker/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quiet default HTTP noise
         if _env_bool("PHONE_WORKER_HTTP_LOGS", False):
@@ -204,6 +207,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_text_stats(body)
             elif task == "log_extract":
                 payload = self._task_log_extract(body)
+            elif task == "log_summary":
+                payload = self._task_log_summary(body)
+            elif task == "ffprobe_media":
+                payload = self._task_ffprobe_media(body)
             elif task == "ffmpeg_convert":
                 payload = self._task_ffmpeg_convert(body)
             else:
@@ -272,6 +279,118 @@ class WorkerHandler(BaseHTTPRequestHandler):
         matches = [line for line in text.splitlines() if regex.search(line)]
         trimmed = matches[-max_lines:]
         return {"ok": True, "matches": trimmed, "count": len(matches), "returned": len(trimmed)}
+
+
+    @staticmethod
+    def _normalize_log_message(line: str) -> str:
+        text = str(line or "")
+        # Remove prefixos comuns de journal/systemd e dados muito voláteis para agrupar melhor.
+        text = re.sub(r"^\d{4}-\d{2}-\d{2}[T\s][^\s]+\s+", "", text)
+        text = re.sub(r"^[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+", "", text)
+        text = re.sub(r"^[\w.\-]+\s+", "", text, count=1)
+        text = re.sub(r"^[\w@./+\-]+(?:\[\d+\])?:\s*", "", text)
+        text = re.sub(r"\bguild=\d+\b", "guild=<id>", text)
+        text = re.sub(r"\bchannel=\d+\b", "channel=<id>", text)
+        text = re.sub(r"\buser=\d+\b", "user=<id>", text)
+        text = re.sub(r"\b\d{15,22}\b", "<snowflake>", text)
+        text = re.sub(r"\bpid=\d+\b|\[\d+\]", "[pid]", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:220] or "linha vazia"
+
+    def _task_log_summary(self, body: dict[str, Any]) -> dict[str, Any]:
+        text = str(body.get("text") or "")
+        if len(text.encode("utf-8")) > self.max_body_bytes:
+            raise ValueError("texto grande demais")
+        max_recent = max(1, min(80, int(body.get("max_recent") or 12)))
+        max_top = max(1, min(40, int(body.get("max_top") or 12)))
+        lines = text.splitlines()
+        patterns = {
+            "critical": r"\bcritical\b|\bcritico\b|\bcrítico\b|\bfatal\b",
+            "error": r"\berror\b|\berro\b",
+            "warning": r"\bwarning\b|\bwarn\b|\baviso\b",
+            "timeout": r"timeout|timed out|tempo esgotado",
+            "traceback": r"traceback",
+            "exception": r"exception|exce[cç][aã]o",
+            "failed": r"failed|falhou|failure|falha",
+            "restart": r"restart|restarting|started|stopped|iniciando|parando",
+            "syntax": r"syntaxerror|indentationerror|taberror",
+            "import": r"importerror|modulenotfounderror|extensionfailed|extensionnotfound",
+            "lavalink": r"lavalink|lavasrc|trackexception|loadexception",
+            "yt_dlp": r"yt[-_ ]?dlp|youtube|googlevideo",
+            "rate_limit": r"rate.?limit|too many requests|429",
+            "phone_worker": r"phone-worker|phone_lavalink|phone-lavalink",
+        }
+        compiled = {key: re.compile(pattern, re.IGNORECASE) for key, pattern in patterns.items()}
+        counts = {key: 0 for key in compiled}
+        important: list[str] = []
+        grouped: Counter[str] = Counter()
+        for line in lines:
+            hit = False
+            for key, regex in compiled.items():
+                if regex.search(line or ""):
+                    counts[key] += 1
+                    hit = True
+            if hit:
+                important.append(line.strip())
+                grouped[self._normalize_log_message(line)] += 1
+        top_messages = [
+            {"message": message, "count": count}
+            for message, count in grouped.most_common(max_top)
+        ]
+        return {
+            "ok": True,
+            "bytes": len(text.encode("utf-8")),
+            "lines": len(lines),
+            "important_count": len(important),
+            "counts": counts,
+            "recent": important[-max_recent:],
+            "top_messages": top_messages,
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        }
+
+    def _task_ffprobe_media(self, body: dict[str, Any]) -> dict[str, Any]:
+        ffprobe = shutil.which("ffprobe")
+        if not ffprobe:
+            raise RuntimeError("ffprobe não instalado no celular")
+        input_ext = str(body.get("input_ext") or "bin").strip(". /\\")[:12] or "bin"
+        data = _b64decode(str(body.get("data_b64") or ""), max_bytes=self.max_body_bytes)
+        timeout = max(3, min(self.job_timeout, int(body.get("timeout_seconds") or min(self.job_timeout, 20))))
+        with tempfile.TemporaryDirectory(prefix="phone-worker-ffprobe-") as tmp:
+            src = Path(tmp) / f"input.{input_ext}"
+            src.write_bytes(data)
+            cmd = [ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(src)]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            if proc.returncode != 0:
+                err = proc.stderr.decode("utf-8", errors="ignore")[-800:]
+                raise RuntimeError(f"ffprobe falhou: {err}")
+            parsed = json.loads(proc.stdout.decode("utf-8", errors="replace") or "{}")
+        streams = []
+        for stream in parsed.get("streams") or []:
+            if not isinstance(stream, dict):
+                continue
+            streams.append({
+                "index": stream.get("index"),
+                "type": stream.get("codec_type"),
+                "codec": stream.get("codec_name"),
+                "duration": stream.get("duration"),
+                "channels": stream.get("channels"),
+                "sample_rate": stream.get("sample_rate"),
+                "width": stream.get("width"),
+                "height": stream.get("height"),
+                "bit_rate": stream.get("bit_rate"),
+            })
+        fmt = parsed.get("format") if isinstance(parsed.get("format"), dict) else {}
+        return {
+            "ok": True,
+            "input_size": len(data),
+            "format": {
+                "name": fmt.get("format_name"),
+                "duration": fmt.get("duration"),
+                "size": fmt.get("size"),
+                "bit_rate": fmt.get("bit_rate"),
+            },
+            "streams": streams,
+        }
 
     def _task_ffmpeg_convert(self, body: dict[str, Any]) -> dict[str, Any]:
         if not shutil.which("ffmpeg"):
