@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import importlib.metadata
 import io
@@ -113,6 +114,144 @@ def _now_stamp() -> str:
 
 
 
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "y", "on", "sim"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off", "nao", "não"}:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name, default)).strip())
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(str(os.getenv(name, default)).strip().replace(",", "."))
+    except Exception:
+        return default
+
+
+def _phone_worker_base_url() -> str:
+    host = (os.getenv("PHONE_WORKER_HOST") or "").strip()
+    if not host:
+        return ""
+    port = (os.getenv("PHONE_WORKER_PORT") or "8766").strip() or "8766"
+    scheme = (os.getenv("PHONE_WORKER_SCHEME") or "http").strip() or "http"
+    return f"{scheme}://{host}:{port}"
+
+
+def _phone_worker_request_json(path: str, *, payload: dict[str, Any] | None = None, timeout: float = 10.0) -> dict[str, Any]:
+    base = _phone_worker_base_url()
+    if not base:
+        raise RuntimeError("PHONE_WORKER_HOST não configurado")
+    token = (os.getenv("PHONE_WORKER_TOKEN") or "").strip()
+    data = None
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        headers["Content-Type"] = "application/json; charset=utf-8"
+    req = urllib.request.Request(
+        f"{base}{path}",
+        data=data,
+        headers=headers,
+        method="POST" if payload is not None else "GET",
+    )
+    with urllib.request.urlopen(req, timeout=max(0.5, timeout)) as resp:
+        raw = resp.read()
+    parsed = json.loads(raw.decode("utf-8", errors="replace"))
+    if not isinstance(parsed, dict):
+        raise RuntimeError("resposta do phone-worker não é objeto JSON")
+    return parsed
+
+
+def _phone_worker_health_summary(*, timeout: float = 3.0) -> str:
+    if not _env_bool("PHONE_WORKER_ENABLED", False):
+        return "phone-worker desativado."
+    try:
+        data = _phone_worker_request_json("/health", timeout=timeout)
+        if not data.get("ok"):
+            return f"phone-worker respondeu erro: {redact(data)}"
+        uptime = data.get("uptime_seconds")
+        jobs = data.get("jobs_started")
+        failed = data.get("jobs_failed")
+        ffmpeg = "sim" if data.get("ffmpeg") else "não"
+        return f"phone-worker online · uptime={uptime}s · jobs={jobs} · falhas={failed} · ffmpeg={ffmpeg}"
+    except Exception as exc:
+        return f"phone-worker indisponível: {type(exc).__name__}: {str(exc)[:220]}"
+
+
+def _phone_worker_zip_texts(
+    files: list[tuple[str, str]],
+    *,
+    filename: str,
+    compresslevel: int = 6,
+    timeout: float | None = None,
+) -> tuple[bytes | None, str]:
+    """Tenta compactar textos no phone-worker; retorna (payload, status).
+
+    É uma aceleração opcional: falha/offline nunca quebra o diagnóstico, porque o
+    chamador deve cair para ZIP local na VPS.
+    """
+    if not _env_bool("PHONE_WORKER_ENABLED", False):
+        return None, "phone-worker desativado."
+    if not _phone_worker_base_url():
+        return None, "PHONE_WORKER_HOST não configurado."
+    max_input_mb = max(1, _env_int("PHONE_WORKER_ZIP_MAX_INPUT_MB", 24))
+    max_files = max(1, _env_int("PHONE_WORKER_ZIP_MAX_FILES", 80))
+    if len(files) > max_files:
+        return None, f"arquivos demais para o phone-worker: {len(files)} > {max_files}."
+
+    encoded_files: list[dict[str, str]] = []
+    total_in = 0
+    for arcname, text in files:
+        data = redact(text if text is not None else "").encode("utf-8", "replace")
+        total_in += len(data)
+        if total_in > max_input_mb * 1024 * 1024:
+            return None, f"entrada grande demais para o phone-worker: {total_in} bytes."
+        encoded_files.append({
+            "name": str(arcname).replace("\\", "/").lstrip("/") or "file.txt",
+            "data_b64": base64.b64encode(data).decode("ascii"),
+        })
+
+    payload = {
+        "task": "zip",
+        "filename": filename,
+        "compresslevel": max(1, min(9, int(compresslevel or 6))),
+        "files": encoded_files,
+    }
+    timeout = timeout if timeout is not None else max(3.0, _env_float("PHONE_WORKER_ZIP_TIMEOUT_SECONDS", 18.0))
+    try:
+        result = _phone_worker_request_json("/task", payload=payload, timeout=timeout)
+        if not result.get("ok"):
+            return None, f"phone-worker respondeu falha: {redact(result)}"
+        raw_b64 = str(result.get("data_b64") or "")
+        if not raw_b64:
+            return None, "phone-worker não retornou data_b64."
+        data = base64.b64decode(raw_b64.encode("ascii"), validate=True)
+        return data, (
+            "phone-worker usado para compactação "
+            f"(entrada={result.get('input_size', total_in)} bytes; saída={len(data)} bytes)."
+        )
+    except Exception as exc:
+        return None, f"phone-worker falhou: {type(exc).__name__}: {str(exc)[:260]}"
+
+
+def _zip_texts_local(files: list[tuple[str, str]], *, compresslevel: int = 6) -> bytes:
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=max(1, min(9, int(compresslevel or 6)))) as zf:
+        for arcname, text in files:
+            _write_zip_text(zf, arcname, text)
+    return bio.getvalue()
 
 def cleanup_music_diagnostics_temp_artifacts(*, max_age_seconds: float = 12 * 3600) -> str:
     """Remove apenas artefatos temporários de diagnóstico, nunca logs reais.
@@ -234,6 +373,20 @@ def _read_env_flags() -> dict[str, Any]:
         "MUSIC_TTS_LAVALINK_VOLUME_RAMP_ENABLED",
         "MUSIC_TTS_LAVALINK_VOLUME_RAMP_MS",
         "MUSIC_TTS_LAVALINK_RAMP_FLOOR_PERCENT",
+        "PHONE_WORKER_ENABLED",
+        "PHONE_WORKER_HOST",
+        "PHONE_WORKER_PORT",
+        "PHONE_WORKER_TOKEN",
+        "PHONE_WORKER_SSH_USER",
+        "PHONE_WORKER_SSH_PORT",
+        "PHONE_WORKER_START_COMMAND",
+        "PHONE_WORKER_ZIP_TIMEOUT_SECONDS",
+        "PHONE_WORKER_ZIP_MAX_INPUT_MB",
+        "PHONE_WORKER_ZIP_MAX_FILES",
+        "PHONE_LAVALINK_WATCH_ENABLED",
+        "PHONE_LAVALINK_HOST",
+        "PHONE_LAVALINK_PORT",
+        "PHONE_LAVALINK_PASSWORD",
     ]
     result: dict[str, Any] = {}
     for name in names:
@@ -1418,33 +1571,46 @@ async def build_music_diagnostics_emergency_report(router: Any, options: Diagnos
 
 
 def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOptions) -> tuple[bytes | None, str, str, str]:
-    """Gera diagnóstico musical em zip modular, sem perder testes/logs importantes."""
+    """Gera diagnóstico musical em zip modular, usando phone-worker quando disponível."""
     stamp = diagnostics_file_stamp()
     filename = f"music-diag-{stamp}.zip"
-    bio = io.BytesIO()
-    added = 0
+    summary_text = "Diagnóstico musical gerado em pacote modular.\n"
+    files: list[tuple[str, str]] = []
     try:
         cleanup_note = cleanup_music_diagnostics_temp_artifacts()
         sections, _meta = _music_diagnostics_sections(router, options)
         summary_text = _music_diagnostics_summary_text(sections)
-        with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            _write_zip_text(zf, "README.txt", "Diagnóstico musical modular. O resumo fica em 00-resumo-curto.txt e summary.txt; logs brutas ficam em logs/raw/.\n"); added += 1
-            _write_zip_text(zf, "00-resumo-curto.txt", summary_text); added += 1
-            _write_zip_text(zf, "summary.txt", summary_text); added += 1
-            _write_zip_text(zf, "system/diagnostic-temp-cleanup.txt", cleanup_note); added += 1
-            for arc, _title, body in sections:
-                _write_zip_text(zf, arc, body); added += 1
-            _write_zip_text(zf, "bot/env.sanitized.txt", _sanitized_env_text()); added += 1
-            for arc, cmd in _diagnostic_log_commands().items():
-                timeout = 10.0 if "/raw/" in arc else 8.0
-                _write_zip_text(zf, arc, _run_cmd(cmd, timeout=timeout)); added += 1
-            for arc, text in _local_logs_archive_text().items():
-                _write_zip_text(zf, arc, text); added += 1
-            # Informações úteis para diagnosticar peso/IO sem tornar o relatório síncrono demais.
-            _write_zip_text(zf, "system/disk-and-process.txt", _run_cmd(["bash", "-lc", "df -h; echo; free -m; echo; ps -eo pid,ppid,%cpu,%mem,etime,cmd --sort=-%cpu | head -40"], timeout=8.0)); added += 1
+        worker_note = _phone_worker_health_summary(timeout=2.5)
+
+        files.extend([
+            ("README.txt", "Diagnóstico musical modular. O resumo fica em 00-resumo-curto.txt e summary.txt; logs brutas ficam em logs/raw/.\n"),
+            ("00-resumo-curto.txt", summary_text),
+            ("summary.txt", summary_text),
+            ("system/diagnostic-temp-cleanup.txt", cleanup_note),
+            ("system/phone-worker.txt", worker_note + "\n"),
+        ])
+        for arc, _title, body in sections:
+            files.append((arc, body))
+        files.append(("bot/env.sanitized.txt", _sanitized_env_text()))
+        for arc, cmd in _diagnostic_log_commands().items():
+            timeout = 10.0 if "/raw/" in arc else 8.0
+            files.append((arc, _run_cmd(cmd, timeout=timeout)))
+        for arc, text in _local_logs_archive_text().items():
+            files.append((arc, text))
+        # Informações úteis para diagnosticar peso/IO sem tornar o relatório síncrono demais.
+        files.append(("system/disk-and-process.txt", _run_cmd(["bash", "-lc", "df -h; echo; free -m; echo; ps -eo pid,ppid,%cpu,%mem,etime,cmd --sort=-%cpu | head -40"], timeout=8.0)))
+
+        payload, worker_status = _phone_worker_zip_texts(files, filename=filename, compresslevel=6)
+        if payload is None:
+            files.append(("system/phone-worker-fallback.txt", worker_status + "\nCompactação feita localmente na VPS.\n"))
+            payload = _zip_texts_local(files, compresslevel=6)
+        else:
+            # O status detalhado já foi registrado em system/phone-worker.txt; manter
+            # o nome/tamanho do anexo igual para não poluir o /vps.
+            pass
     except Exception as exc:
-        return None, filename, f"Falha ao montar diagnóstico musical modular: {type(exc).__name__}: {exc}", ""
-    payload = bio.getvalue()
+        return None, filename, f"Falha ao montar diagnóstico musical modular: {type(exc).__name__}: {exc}", summary_text
+
     summary = f"Diagnóstico musical anexado ({len(payload)} bytes)."
     if len(payload) > MUSIC_DIAGNOSTICS_ARCHIVE_MAX_BYTES:
         return None, filename, f"Diagnóstico musical modular ficou grande demais para anexar: {len(payload) / (1024 * 1024):.1f} MB.", summary_text
@@ -1833,48 +1999,52 @@ def _safe_read_file(path: Path, *, max_chars: int = 500_000) -> str:
 def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
     stamp = diagnostics_file_stamp()
     filename = f"vps-snapshot-{stamp}.zip"
-    bio = io.BytesIO()
-    added = 0
+    files: list[tuple[str, str]] = []
 
     try:
-        with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            _write_zip_text(zf, "meta/summary.txt", "\n".join([
-                f"Gerado em: {_now_stamp()}",
-                f"Repo root: {REPO_ROOT}",
-                f"Sistema: {platform.platform()}",
-                "Snapshot sanitizado da VPS para diagnóstico.",
-            ]) + "\n")
-            added += 1
+        files.append(("meta/summary.txt", "\n".join([
+            f"Gerado em: {_now_stamp()}",
+            f"Repo root: {REPO_ROOT}",
+            f"Sistema: {platform.platform()}",
+            "Snapshot sanitizado da VPS para diagnóstico.",
+        ]) + "\n"))
+        files.append(("meta/phone-worker.txt", _phone_worker_health_summary(timeout=2.5) + "\n"))
 
-            _write_zip_text(zf, "bot/env.sanitized.txt", _sanitized_env_text()); added += 1
-            for rel in ["config.py", "requirements.txt", "cogs/music.py", "cogs/utility.py"]:
-                path = REPO_ROOT / rel
-                if path.exists():
-                    _write_zip_text(zf, f"bot/{rel}", _safe_read_file(path)); added += 1
-            for folder in ["music_system", "utility"]:
-                root = REPO_ROOT / folder
-                if root.exists():
-                    for path in sorted(root.rglob("*.py")):
-                        try:
-                            arc = f"bot/{path.relative_to(REPO_ROOT)}"
-                        except Exception:
-                            arc = f"bot/{path.name}"
-                        _write_zip_text(zf, arc, _safe_read_file(path, max_chars=250_000)); added += 1
+        files.append(("bot/env.sanitized.txt", _sanitized_env_text()))
+        for rel in ["config.py", "requirements.txt", "cogs/music.py", "cogs/utility.py"]:
+            path = REPO_ROOT / rel
+            if path.exists():
+                files.append((f"bot/{rel}", _safe_read_file(path)))
+        for folder in ["music_system", "utility"]:
+            root = REPO_ROOT / folder
+            if root.exists():
+                for path in sorted(root.rglob("*.py")):
+                    try:
+                        arc = f"bot/{path.relative_to(REPO_ROOT)}"
+                    except Exception:
+                        arc = f"bot/{path.name}"
+                    files.append((arc, _safe_read_file(path, max_chars=250_000)))
 
-            app_path = Path("/opt/lavalink/application.yml")
-            _write_zip_text(zf, "lavalink/application.sanitized.yml", _safe_read_file(app_path, max_chars=500_000)); added += 1
-            _write_zip_text(zf, "lavalink/listing.txt", _run_cmd(["bash", "-lc", "ls -lah /opt/lavalink; echo; ls -lah /opt/lavalink/plugins"], timeout=8.0)); added += 1
+        app_path = Path("/opt/lavalink/application.yml")
+        files.append(("lavalink/application.sanitized.yml", _safe_read_file(app_path, max_chars=500_000)))
+        files.append(("lavalink/listing.txt", _run_cmd(["bash", "-lc", "ls -lah /opt/lavalink; echo; ls -lah /opt/lavalink/plugins"], timeout=8.0)))
 
-            _write_zip_text(zf, "db/musicnode.snapshot.txt", _db_snapshot()[0]); added += 1
-            _write_zip_text(zf, "systemd/services.txt", _run_cmd(["systemctl", "cat", *_systemd_units_for_diagnostics()], timeout=8.0)); added += 1
-            _write_zip_text(zf, "meta/system.txt", _system_status_report()); added += 1
-            _write_zip_text(zf, "logs/tts-bot.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u tts-bot.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|deezer|fallback|TrackException|LoadException|ChannelTimeout|erro|falhou|exception|traceback' || true"], timeout=8.0)); added += 1
-            _write_zip_text(zf, "logs/lavalink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u lavalink.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|master|403|404|error|exception|failed|TrackException' || true"], timeout=8.0)); added += 1
-            _write_zip_text(zf, "logs/local-bot-logs.txt", _local_log_tail()); added += 1
+        files.append(("db/musicnode.snapshot.txt", _db_snapshot()[0]))
+        files.append(("systemd/services.txt", _run_cmd(["systemctl", "cat", *_systemd_units_for_diagnostics()], timeout=8.0)))
+        files.append(("meta/system.txt", _system_status_report()))
+        files.append(("logs/tts-bot.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u tts-bot.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|deezer|fallback|TrackException|LoadException|ChannelTimeout|erro|falhou|exception|traceback|phone-worker|phone-lavalink' || true"], timeout=8.0)))
+        files.append(("logs/lavalink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u lavalink.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|master|403|404|error|exception|failed|TrackException' || true"], timeout=8.0)))
+        files.append(("logs/phone-worker-watch.log", _run_cmd(["bash", "-lc", "journalctl -u phone-worker-watch.service --since '2 hours ago' -n 220 --no-pager -o cat || true"], timeout=6.0)))
+        files.append(("logs/phone-lavalink-watch.log", _run_cmd(["bash", "-lc", "journalctl -u phone-lavalink-watch.service --since '2 hours ago' -n 220 --no-pager -o cat || true"], timeout=6.0)))
+        files.append(("logs/local-bot-logs.txt", _local_log_tail()))
+
+        payload, worker_status = _phone_worker_zip_texts(files, filename=filename, compresslevel=6)
+        if payload is None:
+            files.append(("meta/phone-worker-fallback.txt", worker_status + "\nSnapshot compactado localmente na VPS.\n"))
+            payload = _zip_texts_local(files, compresslevel=6)
     except Exception as exc:
         return None, filename, f"Falha ao montar snapshot da VPS: {type(exc).__name__}: {exc}"
 
-    payload = bio.getvalue()
     if len(payload) > VPS_SNAPSHOT_MAX_BYTES:
         return None, filename, f"Snapshot ficou grande demais para anexar com segurança: {len(payload) / (1024 * 1024):.1f} MB."
     return payload, filename, f"Snapshot da VPS anexado ({len(payload)} bytes)."
