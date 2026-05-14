@@ -1466,6 +1466,33 @@ def _journalctl_full_tail() -> str:
     return "\n\n".join(parts)
 
 
+
+def _run_cmd_body(args: list[str], *, timeout: float = 8.0, cwd: Path | None = None, max_chars: int = 4000) -> str:
+    try:
+        cp = subprocess.run(
+            args,
+            cwd=str(cwd or REPO_ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+        body = (cp.stdout or "").strip()
+        if cp.returncode != 0 and not body:
+            body = f"exit={cp.returncode}"
+        if len(body) > max_chars:
+            body = body[:max_chars] + "\n[cortado por tamanho]"
+        return redact(body)
+    except subprocess.TimeoutExpired as exc:
+        body = exc.stdout or ""
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", "replace")
+        return redact((body.strip() or f"TIMEOUT após {timeout}s")[:max_chars])
+    except Exception as exc:
+        return f"ERRO: {type(exc).__name__}: {exc}"
+
+
 def _system_status_report() -> str:
     units = _systemd_units_for_diagnostics()
     parts = [
@@ -1481,6 +1508,33 @@ def _system_status_report() -> str:
     ]
     parts.append("Backends de música ativos: Lavalink e fallback local/yt-dlp. Processos Node.js em outras portas são features independentes, como Sinuca Activity; veja o inventário acima.")
     return "\n\n".join(parts)
+
+
+def build_quick_vps_status_report_sync() -> str:
+    """Resumo curto do estado da VPS para o /vps sem gerar zip pesado."""
+    services = " ".join(_systemd_units_for_diagnostics())
+    sections: list[tuple[str, str]] = [
+        ("gerado", _now_stamp()),
+        ("uptime", _run_cmd_body(["uptime", "-p"], timeout=5.0, max_chars=200)),
+        ("ram", _run_cmd_body(["bash", "-lc", "free -h | awk 'NR==1 || NR==2'"], timeout=5.0, max_chars=240)),
+        ("disco", _run_cmd_body(["bash", "-lc", "df -h / /home /home/ubuntu/bot 2>/dev/null | awk 'NR==1 || !seen[$6]++'"], timeout=6.0, max_chars=360)),
+        ("pastas", _run_cmd_body(["bash", "-lc", "for p in . 'activity ' assets data logs tmp_audio .venv; do [ -e \"$p\" ] && du -sh \"$p\"; done"], timeout=8.0, max_chars=420)),
+        ("serviços", _run_cmd_body(["bash", "-lc", f"for u in {services}; do printf '%-24s ' \"$u\"; systemctl is-active \"$u\" 2>/dev/null || true; done"], timeout=8.0, max_chars=420)),
+        ("git", _run_cmd_body(["bash", "-lc", "printf 'branch: '; git rev-parse --abbrev-ref HEAD 2>/dev/null; printf 'head: '; git log -1 --pretty='%h %s' 2>/dev/null; printf 'status:\n'; git status --short 2>/dev/null | head -20"], timeout=8.0, max_chars=520)),
+        ("erros recentes", _run_cmd_body(["bash", "-lc", "journalctl -u tts-bot.service --since '30 minutes ago' -n 80 --no-pager -o cat 2>/dev/null | grep -Ei 'critical|error|exception|traceback|falhou|erro|timeout' | tail -10 || true"], timeout=8.0, max_chars=520)),
+    ]
+    lines: list[str] = []
+    for title, body in sections:
+        clean = (body or "").strip() or "sem dados"
+        lines.append(f"[{title}]\n{clean}")
+    report = "\n\n".join(lines).strip() + "\n"
+    if len(report) > 2200:
+        report = report[:2200] + "\n[cortado por tamanho]\n"
+    return redact(report)
+
+
+async def build_quick_vps_status_report() -> str:
+    return await asyncio.to_thread(build_quick_vps_status_report_sync)
 
 
 def build_full_vps_diagnostics_report_sync(router: Any, options: DiagnosticsOptions) -> str:
