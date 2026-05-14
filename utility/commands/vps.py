@@ -228,17 +228,14 @@ class VpsCommandMixin:
 
         if action == "base_git":
             try:
-                payload, filename, summary, manifest = await self._with_vps_timeout("base Git", build_git_tracked_base_archive(), timeout=VPS_BASE_TIMEOUT_SECONDS)
+                payload, filename, summary, _manifest = await self._with_vps_timeout("base Git", build_git_tracked_base_archive(), timeout=VPS_BASE_TIMEOUT_SECONDS)
                 if payload and filename:
                     files.append(discord.File(io.BytesIO(payload), filename=filename))
-                    lines.append("`📦` Base Git rastreada anexada.")
+                    lines.append("`📦` Base Git leve anexada.")
                     if summary:
                         lines.append(f"`ℹ️` {summary}")
                 else:
                     lines.append(f"`⚠️` {summary or 'Não consegui gerar a base Git.'}")
-                if manifest:
-                    manifest_payload = manifest.encode("utf-8", "replace")
-                    files.append(discord.File(io.BytesIO(manifest_payload), filename=f"vps-base-manifest-{stamp}.txt"))
             except Exception as exc:
                 logger.exception("[utility/vps] falha ao gerar base git")
                 lines.append(f"`⚠️` Base Git falhou: {type(exc).__name__}: {str(exc)[:300]}")

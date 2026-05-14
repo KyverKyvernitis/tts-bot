@@ -982,6 +982,47 @@ BASE_ARCHIVE_SENSITIVE_SUFFIXES = (
     ".pfx",
 )
 
+# A base gerada pelo /vps é enviada para análise de código, não para deploy.
+# Mantemos ela leve pulando assets binários, builds e manifestos gerados.
+BASE_ARCHIVE_ASSET_EXTENSIONS = {
+    ".apng",
+    ".avif",
+    ".bmp",
+    ".flac",
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".m4a",
+    ".mp3",
+    ".ogg",
+    ".opus",
+    ".otf",
+    ".png",
+    ".svg",
+    ".ttf",
+    ".wav",
+    ".webm",
+    ".webp",
+    ".woff",
+    ".woff2",
+}
+BASE_ARCHIVE_ASSET_DIR_NAMES = {
+    "assets",
+    "audio",
+    "fonts",
+    "images",
+    "media",
+    "sounds",
+    "sfx",
+}
+BASE_ARCHIVE_MANIFEST_NAMES = {
+    "asset-manifest.json",
+    "manifest.json",
+    "manifest.webmanifest",
+    "site.webmanifest",
+}
+
 
 def _git_cmd(args: list[str], *, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -1003,8 +1044,7 @@ def _is_sensitive_tracked_file(rel: str) -> bool:
         return True
 
     # .env real e variantes locais são sensíveis.
-    # .env.example/.env.sample/.env.template são exemplos rastreados e devem ir no zip,
-    # para a base anexada ficar equivalente à base baixada do GitHub.
+    # .env.example/.env.sample/.env.template são exemplos rastreados e devem ir no zip.
     allowed_env_examples = {".env.example", ".env.sample", ".env.template"}
     if name.startswith(".env") and name not in allowed_env_examples:
         return True
@@ -1019,14 +1059,38 @@ def _is_sensitive_tracked_file(rel: str) -> bool:
     return False
 
 
+def _is_base_archive_asset_or_manifest(rel: str) -> bool:
+    normalized = rel.replace("\\", "/").lstrip("/")
+    parts = [part.lower() for part in normalized.split("/") if part]
+    name = parts[-1] if parts else ""
+    suffix = Path(name).suffix.lower()
+
+    if name in BASE_ARCHIVE_MANIFEST_NAMES:
+        return True
+    if len(parts) >= 2 and parts[-2] == ".vite" and name == "manifest.json":
+        return True
+    if suffix in BASE_ARCHIVE_ASSET_EXTENSIONS:
+        return True
+
+    # Diretórios de mídia ficam fora mesmo quando algum arquivo não tem extensão.
+    # Evita mandar assets da Activity, SFX gerais e builds públicos pesados no /vps.
+    if any(part in BASE_ARCHIVE_ASSET_DIR_NAMES for part in parts):
+        return True
+    if "dist" in parts and any(part in {"assets", "audio", "images", "media"} for part in parts):
+        return True
+    if "public" in parts and any(part in {"audio", "images", "assets", "media"} for part in parts):
+        return True
+    return False
+
+
 def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
     """Cria um zip com os arquivos rastreados pelo git no estado atual do disco.
 
     Usa `git ls-files`, então pega apenas arquivos rastreados pelo repositório,
     mas com o conteúdo atual da VPS, inclusive mudanças ainda não commitadas.
-    Arquivos sensíveis rastreados por engano são pulados e listados no manifesto
-    retornado para o relatório de diagnóstico. O manifesto não entra no zip,
-    para a base ficar igual ao zip baixado do GitHub.
+    Arquivos sensíveis, assets e manifestos gerados são pulados.
+    A base do /vps deve ser leve e voltada para análise de código; por isso
+    nenhum manifesto separado é retornado/anexado junto da base.
     """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"tts-bot-base-git-tracked-{stamp}.zip"
@@ -1063,7 +1127,7 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
                 f"Branch: {(branch.stdout or '').strip() if branch.returncode == 0 else 'desconhecida'}",
                 f"Commit HEAD: {(commit.stdout or '').strip() if commit.returncode == 0 else 'desconhecido'}",
                 "Conteúdo: arquivos retornados por `git ls-files`, usando o conteúdo atual do disco.",
-                "Arquivos sensíveis rastreados por engano são pulados.",
+                "Arquivos sensíveis, assets e manifestos gerados são pulados.",
                 "",
                 "# git status --short",
                 (status.stdout or "limpo").rstrip() if status.returncode == 0 else redact(status.stderr or status.stdout),
@@ -1077,7 +1141,10 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
                     skipped.append(rel)
                     continue
                 if _is_sensitive_tracked_file(safe_rel):
-                    skipped.append(safe_rel)
+                    skipped.append(f"{safe_rel} (sensível)")
+                    continue
+                if _is_base_archive_asset_or_manifest(safe_rel):
+                    skipped.append(f"{safe_rel} (asset/manifesto)")
                     continue
                 src = REPO_ROOT / safe_rel
                 if not src.is_file():
@@ -1095,10 +1162,13 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
     payload = bio.getvalue()
     if len(payload) > BASE_ARCHIVE_MAX_BYTES:
         size_mb = len(payload) / (1024 * 1024)
-        return None, filename, f"Base zip ficou grande demais para anexar com segurança no Discord: {size_mb:.1f} MB.", manifest_text
+        return None, filename, f"Base zip ficou grande demais para anexar com segurança no Discord: {size_mb:.1f} MB.", ""
 
-    summary = f"Base git-tracked anexada: {added} arquivos; {len(skipped)} pulado(s); tamanho {len(payload) / (1024 * 1024):.2f} MB."
-    return payload, filename, summary, manifest_text
+    summary = (
+        f"Base git-tracked leve anexada: {added} arquivos; {len(skipped)} pulado(s); "
+        f"sem assets/manifestos; tamanho {len(payload) / (1024 * 1024):.2f} MB."
+    )
+    return payload, filename, summary, ""
 
 
 async def build_git_tracked_base_archive() -> tuple[bytes | None, str, str, str]:
