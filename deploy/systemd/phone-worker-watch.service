@@ -1,0 +1,12 @@
+[Unit]
+Description=Try to wake/restart phone worker helper
+Documentation=https://tailscale.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bot
+ExecStart=/home/ubuntu/bot/scripts/phone-worker-watch.sh
+Nice=5
