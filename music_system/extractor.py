@@ -77,9 +77,12 @@ MUSIC_YOUTUBE_DIRECT_FAST_ENQUEUE = bool(getattr(config, "MUSIC_YOUTUBE_DIRECT_F
 MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS = max(0.5, float(getattr(config, "MUSIC_YOUTUBE_DIRECT_METADATA_TIMEOUT_SECONDS", 1.4)))
 MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE = bool(getattr(config, "MUSIC_LOCAL_YOUTUBE_FAST_RESOLVE", True))
 MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST = bool(getattr(config, "MUSIC_LOCAL_YOUTUBE_COOKIES_FIRST", True))
-MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS = max(3.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS", 9.0)))
-MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS", 2.5)))
-MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS = max(6.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS", 14.0)))
+# O resolver local do YouTube roda em subprocesso com ``python -m yt_dlp``.
+# Dentro do bot, o yt-dlp pode levar bem mais que o teste manual por causa de
+# concorrência/IO da VPS. Valores menores causavam falso erro de falha local.
+MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS = max(30.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS", 30.0)))
+MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS = max(5.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS", 5.0)))
+MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS = max(75.0, float(getattr(config, "MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS", 75.0)))
 
 
 def _client_tuple(value: object, default: tuple[str, ...] = ("android", "web")) -> tuple[str, ...]:
@@ -675,10 +678,16 @@ class MusicExtractor:
 
     def _youtube_cli_error_message(self, detail: str) -> MusicExtractionError:
         detail = self._compact_cli_output(detail, limit=500)
+        detail_lower = detail.lower()
         if self._youtube_cli_failure_is_auth(detail):
             return MusicExtractionError(
                 "YouTube bloqueou a reprodução local por anti-bot/cookies.",
                 detail=detail or "O yt-dlp retornou falha de autenticação sem entregar URL de stream.",
+            )
+        if "rc=timeout" in detail_lower or "stderr=timeout" in detail_lower:
+            return MusicExtractionError(
+                "O yt-dlp local demorou demais para retornar a URL do YouTube.",
+                detail=detail or "O subprocesso do yt-dlp atingiu o timeout antes de entregar uma URL googlevideo/http.",
             )
         return MusicExtractionError(
             "Não consegui obter URL direta do YouTube pelo yt-dlp local.",
@@ -758,12 +767,16 @@ class MusicExtractor:
             cookie_modes.append(False)
         selectors = list(_YOUTUBE_CLI_SELECTORS)
         timeout = max(3.0, min(MUSIC_LOCAL_YOUTUBE_RESOLVE_ATTEMPT_TIMEOUT_SECONDS, MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS))
+        no_cookie_timeout = max(1.0, min(timeout, MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS))
         errors: list[str] = []
 
         logger.info(
-            "[music.local] youtube_cli_resolve_start | cookies=%s selectors=%s source=youtube",
+            "[music.local] youtube_cli_resolve_start | cookies=%s selectors=%s attempt_timeout=%.1fs no_cookie_timeout=%.1fs total_timeout=%.1fs source=youtube",
             "on" if cookies_file else "off",
             ";".join(selectors),
+            timeout,
+            no_cookie_timeout,
+            MUSIC_LOCAL_YOUTUBE_RESOLVE_TOTAL_TIMEOUT_SECONDS,
         )
 
         for use_cookies in cookie_modes:
@@ -773,7 +786,6 @@ class MusicExtractor:
                     "-m",
                     "yt_dlp",
                     "--no-playlist",
-                    "--no-cache-dir",
                     "-f",
                     selector,
                     "-g",
@@ -790,14 +802,18 @@ class MusicExtractor:
                 try:
                     stdout_b, stderr_b = await asyncio.wait_for(
                         proc.communicate(),
-                        timeout=timeout if use_cookies else min(timeout, MUSIC_LOCAL_YOUTUBE_NO_COOKIE_TIMEOUT_SECONDS),
+                        timeout=timeout if use_cookies else no_cookie_timeout,
                     )
                 except asyncio.TimeoutError:
                     with contextlib.suppress(ProcessLookupError):
                         proc.kill()
                     with contextlib.suppress(Exception):
                         await proc.communicate()
-                    msg = f"selector={selector} cookies={'on' if use_cookies else 'off'} rc=timeout stdout_url=no auth=no stderr=timeout"
+                    attempt_timeout = timeout if use_cookies else no_cookie_timeout
+                    msg = (
+                        f"selector={selector} cookies={'on' if use_cookies else 'off'} "
+                        f"rc=timeout timeout={attempt_timeout:.1f}s stdout_url=no auth=no stderr=timeout"
+                    )
                     errors.append(msg)
                     logger.info("[music.local] youtube_cli_resolve_failed | %s", msg)
                     continue
