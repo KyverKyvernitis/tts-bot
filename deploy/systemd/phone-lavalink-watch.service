@@ -1,0 +1,12 @@
+[Unit]
+Description=Try to wake/restart phone Lavalink helper
+Documentation=https://tailscale.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bot
+ExecStart=/home/ubuntu/bot/scripts/phone-lavalink-watch.sh
+Nice=5

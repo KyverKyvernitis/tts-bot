@@ -156,3 +156,7 @@ update-bot.sh.disabled
 *.tgz
 *.7z
 *.rar
+
+# Config local do watcher do Lavalink auxiliar no celular
+.phone-lavalink.env
+phone-lavalink-watch.log

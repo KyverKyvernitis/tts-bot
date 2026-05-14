@@ -33,11 +33,13 @@ CALLKEEPER_CHANGED=0
 REQUIREMENTS_CHANGED=0
 AUDIO_SYSTEMD_CHANGED=0
 CLEANUP_CHANGED=0
+PHONE_LAVALINK_WATCH_CHANGED=0
 
 BOT_HEALTHCHECK_STATUS="não verificado"
 CALLKEEPER_STATUS="não alterado"
 AUDIO_SERVICES_STATUS="não alterado"
 CLEANUP_STATUS="não alterada"
+PHONE_LAVALINK_WATCH_STATUS="não alterado"
 FRONT_STATUS="não alterado"
 BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
@@ -490,9 +492,62 @@ deploy_cleanup_timer() {
 }
 
 
+deploy_phone_lavalink_watch() {
+  if (( PHONE_LAVALINK_WATCH_CHANGED == 0 )); then
+    PHONE_LAVALINK_WATCH_STATUS="não alterado"
+    return 0
+  fi
+
+  STAGE="configuração do watcher do Lavalink auxiliar"
+  local installed=0
+
+  if [[ -f "$REPO_DIR/deploy/systemd/phone-lavalink-watch.service" ]]; then
+    cp "$REPO_DIR/deploy/systemd/phone-lavalink-watch.service" /etc/systemd/system/phone-lavalink-watch.service
+    installed=1
+  fi
+  if [[ -f "$REPO_DIR/deploy/systemd/phone-lavalink-watch.timer" ]]; then
+    cp "$REPO_DIR/deploy/systemd/phone-lavalink-watch.timer" /etc/systemd/system/phone-lavalink-watch.timer
+    installed=1
+  fi
+
+  if (( installed == 0 )); then
+    PHONE_LAVALINK_WATCH_STATUS="units não encontradas"
+    return 0
+  fi
+
+  systemctl daemon-reload
+
+  local watch_value=""
+  if [[ -f "$REPO_DIR/.env" ]]; then
+    watch_value="$(grep -E '^PHONE_LAVALINK_WATCH_ENABLED=' "$REPO_DIR/.env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d ' "' || true)"
+    watch_value="${watch_value,,}"
+  fi
+
+  if [[ "$watch_value" == "0" || "$watch_value" == "false" || "$watch_value" == "no" || "$watch_value" == "off" || "$watch_value" == "nao" || "$watch_value" == "não" ]]; then
+    systemctl disable --now phone-lavalink-watch.timer >/dev/null 2>&1 || true
+    PHONE_LAVALINK_WATCH_STATUS="timer desativado por PHONE_LAVALINK_WATCH_ENABLED=false"
+    return 0
+  fi
+
+  if env_truthy AUX_LAVALINK_ENABLED; then
+    systemctl enable --now phone-lavalink-watch.timer >/dev/null 2>&1 || true
+    systemctl start phone-lavalink-watch.service >/dev/null 2>&1 || true
+    if systemctl is-active --quiet phone-lavalink-watch.timer; then
+      PHONE_LAVALINK_WATCH_STATUS="timer ativo"
+    else
+      PHONE_LAVALINK_WATCH_STATUS="timer instalado, mas não ativo"
+    fi
+  else
+    systemctl disable --now phone-lavalink-watch.timer >/dev/null 2>&1 || true
+    PHONE_LAVALINK_WATCH_STATUS="instalado; inativo porque AUX_LAVALINK_ENABLED=false"
+  fi
+}
+
+
 deploy_bot() {
   deploy_audio_services
   deploy_cleanup_timer
+  deploy_phone_lavalink_watch
 
   if (( REQUIREMENTS_CHANGED == 1 )); then
     STAGE="dependências do bot"
@@ -816,6 +871,9 @@ if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd/(lavalink|tts-
 fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(cleanup-audio-temp\.sh|deploy/systemd/cleanup-audio-temp\.(service|timer))$'; then
   CLEANUP_CHANGED=1
+fi
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/phone-lavalink-watch\.sh|deploy/systemd/phone-lavalink-watch\.(service|timer)|deploy/termux/phone-lavalink/)'; then
+  PHONE_LAVALINK_WATCH_CHANGED=1
 fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callkeeper_runtime/|deploy/systemd/callkeeper\.service|config\.py|db\.py|requirements\.txt)$'; then
   CALLKEEPER_CHANGED=1

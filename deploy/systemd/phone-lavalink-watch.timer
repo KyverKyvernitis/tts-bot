@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic phone Lavalink helper check
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
