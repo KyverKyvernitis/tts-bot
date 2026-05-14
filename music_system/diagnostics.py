@@ -5,6 +5,7 @@ import base64
 import contextlib
 import importlib.metadata
 import io
+import logging
 import json
 import os
 import platform
@@ -28,6 +29,8 @@ import discord
 
 import config
 
+
+logger = logging.getLogger(__name__)
 
 SENSITIVE_PATTERNS = (
     r"(?i)(password\s*[:=]\s*)[^\s\"']+",
@@ -238,12 +241,131 @@ def _phone_worker_zip_texts(
         if not raw_b64:
             return None, "phone-worker não retornou data_b64."
         data = base64.b64decode(raw_b64.encode("ascii"), validate=True)
-        return data, (
+        status = (
             "phone-worker usado para compactação "
             f"(entrada={result.get('input_size', total_in)} bytes; saída={len(data)} bytes)."
         )
+        logger.info("[phone-worker] compactação remota concluída | arquivo=%s entrada=%s saída=%s", filename, result.get("input_size", total_in), len(data))
+        return data, status
     except Exception as exc:
-        return None, f"phone-worker falhou: {type(exc).__name__}: {str(exc)[:260]}"
+        status = f"phone-worker falhou: {type(exc).__name__}: {str(exc)[:260]}"
+        logger.info("[phone-worker] compactação remota indisponível; usando fallback local | arquivo=%s motivo=%s", filename, status)
+        return None, status
+
+
+def _local_log_extract_text(text: str, *, pattern: str, max_lines: int) -> tuple[list[str], int]:
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except Exception:
+        regex = re.compile(r"error|exception|traceback|falhou|failed|fatal|timeout", re.IGNORECASE)
+    matches = [line for line in str(text or "").splitlines() if regex.search(line or "")]
+    max_lines = max(1, min(500, int(max_lines or 120)))
+    return matches[-max_lines:], len(matches)
+
+
+def _phone_worker_log_extract_text(
+    text: str,
+    *,
+    source: str,
+    pattern: str = r"error|exception|traceback|falhou|failed|fatal|timeout|TrackException|LoadException|fallback|restart|crash",
+    max_lines: int | None = None,
+    timeout: float | None = None,
+) -> str:
+    """Extrai linhas importantes usando o celular quando possível, com fallback local."""
+    max_lines = max_lines if max_lines is not None else _env_int("PHONE_WORKER_LOG_MAX_LINES", 160)
+    max_input_mb = max(1, _env_int("PHONE_WORKER_LOG_MAX_INPUT_MB", 8))
+    timeout = timeout if timeout is not None else max(2.0, _env_float("PHONE_WORKER_LOG_TIMEOUT_SECONDS", 8.0))
+    raw = redact(text or "")
+    raw_bytes = raw.encode("utf-8", "replace")
+    truncated = False
+    if len(raw_bytes) > max_input_mb * 1024 * 1024:
+        raw_bytes = raw_bytes[-max_input_mb * 1024 * 1024:]
+        raw = raw_bytes.decode("utf-8", "replace")
+        truncated = True
+
+    if _env_bool("PHONE_WORKER_ENABLED", False) and _phone_worker_base_url():
+        try:
+            result = _phone_worker_request_json(
+                "/task",
+                payload={"task": "log_extract", "text": raw, "pattern": pattern, "max_lines": max_lines},
+                timeout=timeout,
+            )
+            if result.get("ok"):
+                matches = [str(item) for item in (result.get("matches") or [])]
+                count = int(result.get("count") or len(matches))
+                logger.info("[phone-worker] extração de logs concluída no celular | fonte=%s total=%s retornadas=%s", source, count, len(matches))
+                header = [
+                    f"fonte: {source}",
+                    "processamento: phone-worker",
+                    f"linhas encontradas: {count}",
+                    f"linhas retornadas: {len(matches)}",
+                ]
+                if truncated:
+                    header.append(f"entrada enviada ao worker foi cortada para os últimos {max_input_mb} MB")
+                return "\n".join(header + ["", *(matches or ["nenhuma linha relevante encontrada"])]) + "\n"
+            logger.info("[phone-worker] extração de logs respondeu falha; fallback local | fonte=%s resposta=%s", source, redact(result))
+        except Exception as exc:
+            logger.info("[phone-worker] extração de logs indisponível; fallback local | fonte=%s motivo=%s: %s", source, type(exc).__name__, str(exc)[:180])
+
+    matches, count = _local_log_extract_text(raw, pattern=pattern, max_lines=max_lines)
+    header = [
+        f"fonte: {source}",
+        "processamento: local na VPS",
+        f"linhas encontradas: {count}",
+        f"linhas retornadas: {len(matches)}",
+    ]
+    if truncated:
+        header.append(f"entrada local foi cortada para os últimos {max_input_mb} MB")
+    return "\n".join(header + ["", *(matches or ["nenhuma linha relevante encontrada"])]) + "\n"
+
+
+def _phone_worker_text_stats_summary(text: str, *, source: str, timeout: float | None = None) -> str:
+    raw = redact(text or "")
+    if not raw.strip():
+        return f"fonte: {source}\nsem texto para analisar\n"
+    max_input_mb = max(1, _env_int("PHONE_WORKER_TEXT_STATS_MAX_INPUT_MB", 8))
+    raw_bytes = raw.encode("utf-8", "replace")
+    truncated = False
+    if len(raw_bytes) > max_input_mb * 1024 * 1024:
+        raw_bytes = raw_bytes[-max_input_mb * 1024 * 1024:]
+        raw = raw_bytes.decode("utf-8", "replace")
+        truncated = True
+    timeout = timeout if timeout is not None else max(2.0, _env_float("PHONE_WORKER_TEXT_STATS_TIMEOUT_SECONDS", 6.0))
+    if _env_bool("PHONE_WORKER_ENABLED", False) and _phone_worker_base_url():
+        try:
+            result = _phone_worker_request_json("/task", payload={"task": "text_stats", "text": raw}, timeout=timeout)
+            if result.get("ok"):
+                logger.info("[phone-worker] estatísticas de texto calculadas no celular | fonte=%s bytes=%s linhas=%s", source, result.get("bytes"), result.get("lines"))
+                lines = [
+                    f"fonte: {source}",
+                    "processamento: phone-worker",
+                    f"bytes: {result.get('bytes')}",
+                    f"caracteres: {result.get('chars')}",
+                    f"linhas: {result.get('lines')}",
+                    f"palavras: {result.get('words')}",
+                    f"sha256: {result.get('sha256')}",
+                ]
+                if truncated:
+                    lines.append(f"entrada enviada ao worker foi cortada para os últimos {max_input_mb} MB")
+                return "\n".join(lines) + "\n"
+            logger.info("[phone-worker] text_stats respondeu falha; fallback local | fonte=%s resposta=%s", source, redact(result))
+        except Exception as exc:
+            logger.info("[phone-worker] text_stats indisponível; fallback local | fonte=%s motivo=%s: %s", source, type(exc).__name__, str(exc)[:180])
+    words = raw.split()
+    lines = raw.splitlines()
+    import hashlib
+    out = [
+        f"fonte: {source}",
+        "processamento: local na VPS",
+        f"bytes: {len(raw.encode('utf-8', 'replace'))}",
+        f"caracteres: {len(raw)}",
+        f"linhas: {len(lines)}",
+        f"palavras: {len(words)}",
+        f"sha256: {hashlib.sha256(raw.encode('utf-8', 'replace')).hexdigest()}",
+    ]
+    if truncated:
+        out.append(f"entrada local foi cortada para os últimos {max_input_mb} MB")
+    return "\n".join(out) + "\n"
 
 
 def _zip_texts_local(files: list[tuple[str, str]], *, compresslevel: int = 6) -> bytes:
@@ -383,6 +505,11 @@ def _read_env_flags() -> dict[str, Any]:
         "PHONE_WORKER_ZIP_TIMEOUT_SECONDS",
         "PHONE_WORKER_ZIP_MAX_INPUT_MB",
         "PHONE_WORKER_ZIP_MAX_FILES",
+        "PHONE_WORKER_LOG_TIMEOUT_SECONDS",
+        "PHONE_WORKER_LOG_MAX_INPUT_MB",
+        "PHONE_WORKER_LOG_MAX_LINES",
+        "PHONE_WORKER_TEXT_STATS_TIMEOUT_SECONDS",
+        "PHONE_WORKER_TEXT_STATS_MAX_INPUT_MB",
         "PHONE_LAVALINK_WATCH_ENABLED",
         "PHONE_LAVALINK_HOST",
         "PHONE_LAVALINK_PORT",
@@ -1592,22 +1719,30 @@ def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOption
         for arc, _title, body in sections:
             files.append((arc, body))
         files.append(("bot/env.sanitized.txt", _sanitized_env_text()))
+        collected_log_texts: list[str] = []
         for arc, cmd in _diagnostic_log_commands().items():
             timeout = 10.0 if "/raw/" in arc else 8.0
-            files.append((arc, _run_cmd(cmd, timeout=timeout)))
+            text = _run_cmd(cmd, timeout=timeout)
+            files.append((arc, text))
+            collected_log_texts.append(f"# {arc}\n{text}")
         for arc, text in _local_logs_archive_text().items():
             files.append((arc, text))
+            collected_log_texts.append(f"# {arc}\n{text}")
+        if collected_log_texts:
+            combined_logs = "\n\n".join(collected_log_texts)
+            files.append(("logs/phone-worker/error-highlights.txt", _phone_worker_log_extract_text(combined_logs, source="diagnóstico musical")))
+            files.append(("logs/phone-worker/text-stats.txt", _phone_worker_text_stats_summary(combined_logs, source="diagnóstico musical")))
         # Informações úteis para diagnosticar peso/IO sem tornar o relatório síncrono demais.
         files.append(("system/disk-and-process.txt", _run_cmd(["bash", "-lc", "df -h; echo; free -m; echo; ps -eo pid,ppid,%cpu,%mem,etime,cmd --sort=-%cpu | head -40"], timeout=8.0)))
 
         payload, worker_status = _phone_worker_zip_texts(files, filename=filename, compresslevel=6)
         if payload is None:
+            logger.info("[phone-worker] diagnóstico musical compactado localmente | motivo=%s", worker_status)
             files.append(("system/phone-worker-fallback.txt", worker_status + "\nCompactação feita localmente na VPS.\n"))
             payload = _zip_texts_local(files, compresslevel=6)
         else:
-            # O status detalhado já foi registrado em system/phone-worker.txt; manter
-            # o nome/tamanho do anexo igual para não poluir o /vps.
-            pass
+            logger.info("[phone-worker] diagnóstico musical compactado no celular")
+            files.append(("system/phone-worker-zip.txt", worker_status + "\nCompactação feita no celular.\n"))
     except Exception as exc:
         return None, filename, f"Falha ao montar diagnóstico musical modular: {type(exc).__name__}: {exc}", summary_text
 
@@ -1950,8 +2085,13 @@ def build_full_vps_diagnostics_report_sync(router: Any, options: DiagnosticsOpti
     sections.append(("Teste yt-dlp local com cookies", _yt_dlp_test()))
     sections.append(("application.yml do Lavalink (sanitizado)", _application_yml_head()))
     sections.append(("Status do sistema e services", _system_status_report()))
-    sections.append(("Logs locais completas/cortadas", _local_log_tail_full()))
-    sections.append(("journalctl completo/cortado", _journalctl_full_tail()))
+    local_logs_full = _local_log_tail_full()
+    journal_full = _journalctl_full_tail()
+    combined_full_logs = "\n\n# Logs locais completas/cortadas\n" + local_logs_full + "\n\n# journalctl completo/cortado\n" + journal_full
+    sections.append(("Phone-worker: destaques de erros nas logs completas", _phone_worker_log_extract_text(combined_full_logs, source="diagnóstico completo")))
+    sections.append(("Phone-worker: estatísticas das logs completas", _phone_worker_text_stats_summary(combined_full_logs, source="diagnóstico completo")))
+    sections.append(("Logs locais completas/cortadas", local_logs_full))
+    sections.append(("journalctl completo/cortado", journal_full))
 
     body_parts = [f"\n\n# {title}\n{redact(body)}" for title, body in sections]
     report = "".join(body_parts).strip() + "\n"
@@ -2032,16 +2172,30 @@ def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
         files.append(("db/musicnode.snapshot.txt", _db_snapshot()[0]))
         files.append(("systemd/services.txt", _run_cmd(["systemctl", "cat", *_systemd_units_for_diagnostics()], timeout=8.0)))
         files.append(("meta/system.txt", _system_status_report()))
-        files.append(("logs/tts-bot.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u tts-bot.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|deezer|fallback|TrackException|LoadException|ChannelTimeout|erro|falhou|exception|traceback|phone-worker|phone-lavalink' || true"], timeout=8.0)))
-        files.append(("logs/lavalink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u lavalink.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|master|403|404|error|exception|failed|TrackException' || true"], timeout=8.0)))
-        files.append(("logs/phone-worker-watch.log", _run_cmd(["bash", "-lc", "journalctl -u phone-worker-watch.service --since '2 hours ago' -n 220 --no-pager -o cat || true"], timeout=6.0)))
-        files.append(("logs/phone-lavalink-watch.log", _run_cmd(["bash", "-lc", "journalctl -u phone-lavalink-watch.service --since '2 hours ago' -n 220 --no-pager -o cat || true"], timeout=6.0)))
-        files.append(("logs/local-bot-logs.txt", _local_log_tail()))
+        snapshot_log_blocks: list[str] = []
+        log_entries = [
+            ("logs/tts-bot.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u tts-bot.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'music|lavalink|spotify|soundcloud|youtube|yt-dlp|deezer|fallback|TrackException|LoadException|ChannelTimeout|erro|falhou|exception|traceback|phone-worker|phone-lavalink' || true"], timeout=8.0)),
+            ("logs/lavalink.filtered.log", _run_cmd(["bash", "-lc", "journalctl -u lavalink.service --since '2 hours ago' -n 900 --no-pager -o cat | grep -Ei 'ready|lavasrc|spotify|soundcloud|deezer|youtube|loadtracks|master|403|404|error|exception|failed|TrackException' || true"], timeout=8.0)),
+            ("logs/phone-worker-watch.log", _run_cmd(["bash", "-lc", "journalctl -u phone-worker-watch.service --since '2 hours ago' -n 220 --no-pager -o cat || true"], timeout=6.0)),
+            ("logs/phone-lavalink-watch.log", _run_cmd(["bash", "-lc", "journalctl -u phone-lavalink-watch.service --since '2 hours ago' -n 220 --no-pager -o cat || true"], timeout=6.0)),
+            ("logs/local-bot-logs.txt", _local_log_tail()),
+        ]
+        for arc, text in log_entries:
+            files.append((arc, text))
+            snapshot_log_blocks.append(f"# {arc}\n{text}")
+        if snapshot_log_blocks:
+            combined_snapshot_logs = "\n\n".join(snapshot_log_blocks)
+            files.append(("logs/phone-worker/error-highlights.txt", _phone_worker_log_extract_text(combined_snapshot_logs, source="snapshot da VPS")))
+            files.append(("logs/phone-worker/text-stats.txt", _phone_worker_text_stats_summary(combined_snapshot_logs, source="snapshot da VPS")))
 
         payload, worker_status = _phone_worker_zip_texts(files, filename=filename, compresslevel=6)
         if payload is None:
+            logger.info("[phone-worker] snapshot compactado localmente | motivo=%s", worker_status)
             files.append(("meta/phone-worker-fallback.txt", worker_status + "\nSnapshot compactado localmente na VPS.\n"))
             payload = _zip_texts_local(files, compresslevel=6)
+        else:
+            logger.info("[phone-worker] snapshot compactado no celular")
+            files.append(("meta/phone-worker-zip.txt", worker_status + "\nSnapshot compactado no celular.\n"))
     except Exception as exc:
         return None, filename, f"Falha ao montar snapshot da VPS: {type(exc).__name__}: {exc}"
 
