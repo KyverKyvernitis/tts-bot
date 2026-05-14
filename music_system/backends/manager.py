@@ -49,10 +49,122 @@ class MusicBackendManager:
         return "lavalink" if _normalize_provider(getattr(config, "MUSIC_NODE_PROVIDER", "lavalink")) in {"lavalink", "auto"} else "lavalink"
 
     def _node_config_for_guild(self, guild_id: int | None = None) -> LavalinkConfig:
-        """Retorna o node Lavalink que deve ser usado agora."""
+        """Retorna o node Lavalink principal/VPS que deve ser usado agora."""
         cfg = self.lavalink_store.load(guild_id=guild_id)
         cfg.provider = "lavalink"
         return cfg
+
+    def _aux_node_config_for_guild(self, guild_id: int | None = None) -> LavalinkConfig:
+        """Configura o node auxiliar opcional, sem substituir o node principal.
+
+        O modo vem do node principal/guild para respeitar `_musicnode`: se o
+        servidor não está em Lavalink/Auto, o auxiliar também não entra.
+        """
+        primary = self._node_config_for_guild(guild_id)
+        return LavalinkConfig(
+            enabled=bool(getattr(config, "AUX_LAVALINK_ENABLED", False)),
+            mode=primary.mode if primary.mode in {"lavalink", "auto"} else "off",
+            host=str(getattr(config, "AUX_LAVALINK_HOST", "") or "").strip(),
+            port=max(1, int(getattr(config, "AUX_LAVALINK_PORT", 2333) or 2333)),
+            password=str(getattr(config, "AUX_LAVALINK_PASSWORD", "") or "").strip(),
+            secure=bool(getattr(config, "AUX_LAVALINK_SECURE", False)),
+            node_name=str(getattr(config, "AUX_LAVALINK_NODE_NAME", "phone") or "phone").strip() or "phone",
+            timeout_seconds=max(1.0, float(getattr(config, "AUX_LAVALINK_TIMEOUT_SECONDS", 3.0) or 3.0)),
+            provider="lavalink",
+        )
+
+    def _looks_like_youtube_input(self, value: object) -> bool:
+        text = str(value or "").strip().lower()
+        return bool("youtube.com" in text or "youtu.be" in text or text.startswith(("ytsearch:", "ytmsearch:")))
+
+    def _track_looks_like_youtube(self, track: Any | None) -> bool:
+        if track is None:
+            return False
+        for attr in ("original_url", "webpage_url", "stream_url", "source", "extractor", "lavalink_query"):
+            if self._looks_like_youtube_input(getattr(track, attr, "")):
+                return True
+        return False
+
+    def _aux_lavalink_allowed(
+        self,
+        guild_id: int | None,
+        *,
+        purpose: str = "music",
+        query: object = "",
+        track: Any | None = None,
+    ) -> bool:
+        """Decide se o node auxiliar deve ser tentado antes da VPS.
+
+        Ele é uma extensão opcional: não entra para TTS nem para YouTube direto,
+        e é ignorado durante cooldown para não adicionar atraso quando o celular
+        desconectar ou estiver em rede ruim.
+        """
+        if str(purpose or "music").lower() == "tts":
+            return False
+        if self._looks_like_youtube_input(query) or self._track_looks_like_youtube(track):
+            return False
+        try:
+            primary = self._node_config_for_guild(guild_id)
+            if not (primary.enabled and primary.configured and primary.mode in {"lavalink", "auto"}):
+                return False
+            aux = self._aux_node_config_for_guild(guild_id)
+            if not (aux.enabled and aux.configured and aux.mode in {"lavalink", "auto"}):
+                return False
+            probe = LavalinkBackend.from_config(aux)
+            try:
+                if probe.failure_cooldown_remaining() > 0:
+                    return False
+            finally:
+                with contextlib.suppress(Exception):
+                    # Apenas sessão HTTP, sem mexer no Pool global.
+                    pass
+            return bool(self.lavalink._wavelink_installed())
+        except Exception:
+            logger.debug("[music/lavalink-aux] falha ao avaliar node auxiliar", exc_info=True)
+            return False
+
+    def _lavalink_configs_for_operation(
+        self,
+        guild_id: int | None,
+        *,
+        purpose: str = "music",
+        query: object = "",
+        track: Any | None = None,
+    ) -> list[tuple[str, LavalinkConfig]]:
+        primary = self._node_config_for_guild(guild_id)
+        configs: list[tuple[str, LavalinkConfig]] = []
+        if self._aux_lavalink_allowed(guild_id, purpose=purpose, query=query, track=track):
+            configs.append(("auxiliar", self._aux_node_config_for_guild(guild_id)))
+        configs.append(("principal", primary))
+        return configs
+
+    async def _close_backend_session(self, backend: LavalinkBackend) -> None:
+        with contextlib.suppress(Exception):
+            await backend.close()
+
+    async def _reset_pool_after_aux_failure(self, guild: Any | None, backend: LavalinkBackend) -> None:
+        """Limpa resquícios do node auxiliar antes de cair para a VPS.
+
+        Se o auxiliar falha durante connect/play, pode sobrar um Player Wavelink
+        da guild ou um node no Pool global. A limpeza acontece só em falha do
+        auxiliar para evitar que a VPS toque usando o node errado.
+        """
+        with contextlib.suppress(Exception):
+            await backend.close_wavelink_pool()
+        player = getattr(guild, "voice_client", None) if guild is not None else None
+        if player is not None:
+            with contextlib.suppress(Exception):
+                stop = getattr(player, "stop", None)
+                if callable(stop):
+                    result = stop()
+                    if hasattr(result, "__await__"):
+                        await result
+            with contextlib.suppress(Exception):
+                await player.disconnect(force=True)
+
+    def _mark_aux_failure(self, backend: LavalinkBackend, exc: BaseException) -> None:
+        with contextlib.suppress(Exception):
+            backend._mark_node_failure(exc, seconds=float(getattr(config, "AUX_LAVALINK_COOLDOWN_SECONDS", 300.0) or 300.0))
 
     def node_provider_for_guild(self, guild_id: int | None = None) -> str:
         try:
@@ -271,18 +383,48 @@ class MusicBackendManager:
     ) -> ExtractedBatch:
         if not self.should_use_lavalink_real(guild_id):
             raise RuntimeError("Playback real via node de áudio não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
-        lavalink_backend = LavalinkBackend.from_config(self._node_config_for_guild(guild_id))
-        try:
-            return await lavalink_backend.extract_tracks_for_selection(
-                self.bot,
-                query,
-                requester_id=requester_id,
-                requester_name=requester_name,
-                limit=limit,
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                await lavalink_backend.close()
+        last_error: Exception | None = None
+        for label, cfg in self._lavalink_configs_for_operation(guild_id, purpose="music", query=query):
+            lavalink_backend = LavalinkBackend.from_config(cfg)
+            try:
+                batch = await lavalink_backend.extract_tracks_for_selection(
+                    self.bot,
+                    query,
+                    requester_id=requester_id,
+                    requester_name=requester_name,
+                    limit=limit,
+                )
+                if batch.tracks or label == "principal":
+                    if label == "auxiliar":
+                        logger.info(
+                            "[music/lavalink-aux] busca atendida pelo node auxiliar | guild=%s query=%r tracks=%s",
+                            guild_id,
+                            query,
+                            len(batch.tracks),
+                        )
+                    return batch
+                logger.info(
+                    "[music/lavalink-aux] busca vazia no node auxiliar; tentando VPS | guild=%s query=%r",
+                    guild_id,
+                    query,
+                )
+            except Exception as exc:
+                last_error = exc
+                if label == "auxiliar":
+                    self._mark_aux_failure(lavalink_backend, exc)
+                    logger.warning(
+                        "[music/lavalink-aux] busca falhou; fallback para VPS | guild=%s query=%r erro=%s",
+                        guild_id,
+                        query,
+                        exc,
+                    )
+                    continue
+                raise
+            finally:
+                await self._close_backend_session(lavalink_backend)
+        if last_error is not None:
+            raise last_error
+        return ExtractedBatch(tracks=[], query=query, is_playlist=False)
 
     async def resolve_lavalink_direct_tracks(
         self,
@@ -295,28 +437,87 @@ class MusicBackendManager:
     ) -> ExtractedBatch:
         if not self.should_use_lavalink_real(guild_id):
             raise RuntimeError("Playback real via node de áudio não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
-        lavalink_backend = LavalinkBackend.from_config(self._node_config_for_guild(guild_id))
-        try:
-            return await lavalink_backend.extract_direct_tracks(
-                self.bot,
-                query,
-                requester_id=requester_id,
-                requester_name=requester_name,
-                limit=limit,
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                await lavalink_backend.close()
+        last_error: Exception | None = None
+        for label, cfg in self._lavalink_configs_for_operation(guild_id, purpose="music", query=query):
+            lavalink_backend = LavalinkBackend.from_config(cfg)
+            try:
+                batch = await lavalink_backend.extract_direct_tracks(
+                    self.bot,
+                    query,
+                    requester_id=requester_id,
+                    requester_name=requester_name,
+                    limit=limit,
+                )
+                if batch.tracks or label == "principal":
+                    if label == "auxiliar":
+                        logger.info(
+                            "[music/lavalink-aux] link resolvido pelo node auxiliar | guild=%s query=%r tracks=%s",
+                            guild_id,
+                            query,
+                            len(batch.tracks),
+                        )
+                    return batch
+                logger.info(
+                    "[music/lavalink-aux] link sem tracks no node auxiliar; tentando VPS | guild=%s query=%r",
+                    guild_id,
+                    query,
+                )
+            except Exception as exc:
+                last_error = exc
+                if label == "auxiliar":
+                    self._mark_aux_failure(lavalink_backend, exc)
+                    logger.warning(
+                        "[music/lavalink-aux] resolução direta falhou; fallback para VPS | guild=%s query=%r erro=%s",
+                        guild_id,
+                        query,
+                        exc,
+                    )
+                    continue
+                raise
+            finally:
+                await self._close_backend_session(lavalink_backend)
+        if last_error is not None:
+            raise last_error
+        return ExtractedBatch(tracks=[], query=query, is_playlist=False)
 
     async def play_lavalink_track(self, guild, voice_channel, track, *, volume: float = 1.0):
-        if not self.should_use_lavalink_real(getattr(guild, "id", None)):
+        guild_id = getattr(guild, "id", None)
+        if not self.should_use_lavalink_real(guild_id):
             raise RuntimeError("Playback real via node de áudio não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
-        lavalink_backend = LavalinkBackend.from_config(self._node_config_for_guild(getattr(guild, "id", None)))
-        try:
-            return await lavalink_backend.play_track(self.bot, guild, voice_channel, track, volume=volume)
-        finally:
-            with contextlib.suppress(Exception):
-                await lavalink_backend.close()
+        last_error: Exception | None = None
+        for label, cfg in self._lavalink_configs_for_operation(guild_id, purpose="music", track=track):
+            lavalink_backend = LavalinkBackend.from_config(cfg)
+            try:
+                player, playable, meta = await lavalink_backend.play_track(self.bot, guild, voice_channel, track, volume=volume)
+                if isinstance(meta, dict):
+                    meta.setdefault("node_label", label)
+                    meta.setdefault("node_name", cfg.node_name)
+                if label == "auxiliar":
+                    logger.info(
+                        "[music/lavalink-aux] playback iniciado no node auxiliar | guild=%s track=%r node=%s",
+                        guild_id,
+                        getattr(track, "title", ""),
+                        cfg.node_name,
+                    )
+                return player, playable, meta
+            except Exception as exc:
+                last_error = exc
+                if label == "auxiliar":
+                    self._mark_aux_failure(lavalink_backend, exc)
+                    logger.warning(
+                        "[music/lavalink-aux] playback falhou; fallback para VPS | guild=%s track=%r erro=%s",
+                        guild_id,
+                        getattr(track, "title", ""),
+                        exc,
+                    )
+                    await self._reset_pool_after_aux_failure(guild, lavalink_backend)
+                    continue
+                raise
+            finally:
+                await self._close_backend_session(lavalink_backend)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Lavalink não conseguiu iniciar o playback.")
 
 
     async def play_lavalink_tts(
@@ -367,6 +568,8 @@ class MusicBackendManager:
         cfg_summary = self.lavalink_config_summary(guild_id=guild_id)
         cfg = self._node_config_for_guild(guild_id)
         node_probe = LavalinkBackend.from_config(cfg)
+        aux_cfg = self._aux_node_config_for_guild(guild_id)
+        aux_probe = LavalinkBackend.from_config(aux_cfg)
         return {
             "configured_backend": self.mode,
             "active_backend": self.playback_backend_for_guild(guild_id),
@@ -383,5 +586,9 @@ class MusicBackendManager:
             "audio_node_name": cfg.node_name,
             "audio_node_host": cfg.safe_host_label,
             "audio_node_cooldown_seconds": round(node_probe.failure_cooldown_remaining(), 1),
+            "aux_lavalink_enabled": bool(aux_cfg.enabled),
+            "aux_lavalink_configured": bool(aux_cfg.configured),
+            "aux_lavalink_host": aux_cfg.safe_host_label,
+            "aux_lavalink_cooldown_seconds": round(aux_probe.failure_cooldown_remaining(), 1),
             "music_node_provider_env": str(getattr(config, "MUSIC_NODE_PROVIDER", "lavalink") or "lavalink"),
         }

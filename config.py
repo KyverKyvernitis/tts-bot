@@ -335,6 +335,20 @@ LAVALINK_PASSWORD = (os.getenv("LAVALINK_PASSWORD", "") or "").strip()
 LAVALINK_SECURE = _parse_bool(os.getenv("LAVALINK_SECURE", "false"), False)
 LAVALINK_NODE_NAME = (os.getenv("LAVALINK_NODE_NAME", "main") or "main").strip() or "main"
 LAVALINK_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("LAVALINK_TIMEOUT_SECONDS", "8.0"), 8.0))
+
+# Lavalink auxiliar opcional — pensado para um node externo/celular via Tailscale.
+# Ele nunca é obrigatório: se ficar offline, lento ou falhar, o bot volta para o
+# Lavalink principal/VPS. TTS via Lavalink continua no node principal porque os
+# arquivos temporários normalmente usam URL interna/local da VPS.
+AUX_LAVALINK_ENABLED = _parse_bool(os.getenv("AUX_LAVALINK_ENABLED", "false"), False)
+AUX_LAVALINK_HOST = (os.getenv("AUX_LAVALINK_HOST", "") or "").strip()
+AUX_LAVALINK_PORT = _parse_int(os.getenv("AUX_LAVALINK_PORT", "2333"), 2333)
+AUX_LAVALINK_PASSWORD = (os.getenv("AUX_LAVALINK_PASSWORD", "") or "").strip()
+AUX_LAVALINK_SECURE = _parse_bool(os.getenv("AUX_LAVALINK_SECURE", "false"), False)
+AUX_LAVALINK_NODE_NAME = (os.getenv("AUX_LAVALINK_NODE_NAME", "phone") or "phone").strip() or "phone"
+AUX_LAVALINK_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("AUX_LAVALINK_TIMEOUT_SECONDS", "3.0"), 3.0))
+AUX_LAVALINK_COOLDOWN_SECONDS = max(10.0, _parse_float(os.getenv("AUX_LAVALINK_COOLDOWN_SECONDS", "300"), 300.0))
+
 # Node de áudio compatível com Lavalink API.
 # Qualquer valor legado de MUSIC_NODE_PROVIDER cai para Lavalink.
 _MUSIC_NODE_PROVIDER_RAW = (os.getenv("MUSIC_NODE_PROVIDER", "lavalink") or "lavalink").strip().lower()
