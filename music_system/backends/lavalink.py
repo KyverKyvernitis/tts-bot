@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import inspect
 import json
 import logging
 import os
@@ -782,6 +783,79 @@ class LavalinkBackend:
             "Lavalink recebeu a música, mas não conectou à voz do Discord "
             f"(state={state!r}, voice_keys={voice_keys})."
         )
+
+    def _rest_voice_missing_or_incomplete(self, payload: dict[str, Any] | None) -> tuple[bool, str]:
+        if not isinstance(payload, dict):
+            return True, "payload ausente"
+        state = payload.get("state") if isinstance(payload, dict) else None
+        voice = payload.get("voice") if isinstance(payload, dict) else None
+        if self._lavalink_state_connected(payload):
+            return False, "conectado"
+        if not isinstance(voice, dict) or not voice:
+            return True, f"voice vazio; state={state!r}"
+        missing: list[str] = []
+        if not str(voice.get("token") or "").strip():
+            missing.append("token")
+        if not str(voice.get("endpoint") or "").strip():
+            missing.append("endpoint")
+        if not str(voice.get("sessionId") or voice.get("session_id") or "").strip():
+            missing.append("sessionId")
+        if missing:
+            return True, f"voice incompleto: {','.join(missing)}; state={state!r}"
+        return True, f"voice presente, mas não conectado; state={state!r}"
+
+    def _looks_like_rest_voice_not_connected(self, exc: BaseException | str) -> bool:
+        text = str(exc or "").lower()
+        return (
+            "não conectou à voz" in text
+            or "nao conectou a voz" in text
+            or "voice_keys=[]" in text
+            or "state=none" in text
+            or "state={'time'" in text
+        )
+
+    async def _ensure_tts_voice_player(
+        self,
+        bot: Any,
+        guild: Any,
+        channel: Any,
+        player: Any | None,
+        *,
+        force_voice_reconnect: bool = False,
+        reason: str = "",
+    ) -> Any:
+        if channel is None:
+            raise RuntimeError("Canal de voz não encontrado para tocar TTS via Lavalink.")
+        needs_connect = bool(
+            force_voice_reconnect
+            or player is None
+            or not self._is_wavelink_player(player)
+            or not bool(getattr(player, "connected", False))
+        )
+        if needs_connect:
+            if force_voice_reconnect:
+                logger.info(
+                    "[music/lavalink] TTS forçando nova conexão de voz | guild=%s channel=%s reason=%s",
+                    getattr(guild, "id", None),
+                    getattr(channel, "id", None),
+                    reason or "voz REST inválida",
+                )
+            player = await self.connect_player(
+                bot,
+                guild,
+                channel,
+                force_reconnect=force_voice_reconnect,
+                force_voice_reconnect=force_voice_reconnect,
+            )
+        else:
+            current_channel_id = getattr(getattr(player, "channel", None), "id", None)
+            target_channel_id = getattr(channel, "id", None)
+            if target_channel_id and current_channel_id != target_channel_id:
+                with contextlib.suppress(Exception):
+                    await player.move_to(channel)
+            with contextlib.suppress(Exception):
+                await guild.change_voice_state(channel=channel, self_deaf=True)
+        return player
 
     def _node_failure_key(self) -> str:
         return "|".join([self.provider, self.cfg.node_name, self.cfg.base_url, str(bool(self.cfg.secure))])
@@ -1718,20 +1792,31 @@ class LavalinkBackend:
     async def _release_local_voice_client_for_lavalink(self, player: Any, guild: Any) -> None:
         # TTS/local voice client não pode coexistir com Wavelink na mesma guild.
         # Se ele estiver preso desde o boot ou durante uma tentativa anterior, pare e
-        # desconecte para o Lavalink assumir a única conexão de voz do bot.
+        # desconecte para o Lavalink assumir a única conexão de voz do bot. Também
+        # é usado como recuperação quando o Wavelink parece conectado no Discord,
+        # mas o REST do Lavalink perdeu token/endpoint/sessionId.
         if player is None:
             return
         with contextlib.suppress(Exception):
             stopper = getattr(player, "stop", None)
             if callable(stopper):
-                stopper()
+                result = stopper()
+                if inspect.isawaitable(result):
+                    await result
         with contextlib.suppress(Exception):
             await guild.change_voice_state(channel=None)
         with contextlib.suppress(Exception):
-            await player.disconnect(force=True)
-        await asyncio.sleep(0.35)
+            disconnect = getattr(player, "disconnect", None)
+            if callable(disconnect):
+                try:
+                    result = disconnect(force=True)
+                except TypeError:
+                    result = disconnect()
+                if inspect.isawaitable(result):
+                    await result
+        await asyncio.sleep(0.45)
 
-    async def connect_player(self, bot, guild: Any, channel: Any, *, force_reconnect: bool = False):
+    async def connect_player(self, bot, guild: Any, channel: Any, *, force_reconnect: bool = False, force_voice_reconnect: bool = False):
         wavelink, _node = await self.ensure_wavelink_pool(bot, force_reconnect=force_reconnect)
         player_cls = getattr(wavelink, "Player", None)
         player = self._bot_voice_client_for_guild(bot, guild)
@@ -1743,6 +1828,15 @@ class LavalinkBackend:
             player = self._bot_voice_client_for_guild(bot, guild)
             if player is not None and not isinstance(player, player_cls):
                 player = None
+
+        if force_voice_reconnect and player is not None:
+            logger.info(
+                "[music/lavalink] voice reconnect forçado | guild=%s channel=%s",
+                getattr(guild, "id", None),
+                getattr(channel, "id", None),
+            )
+            await self._release_local_voice_client_for_lavalink(player, guild)
+            player = None
 
         if player is None or not bool(getattr(player, "connected", False)):
             try:
@@ -2288,32 +2382,34 @@ class LavalinkBackend:
         if channel is None:
             raise RuntimeError("Canal de voz não encontrado para tocar TTS via Lavalink.")
 
-        needs_connect = bool(player is None or not self._is_wavelink_player(player) or not bool(getattr(player, "connected", False)))
-        if needs_connect:
-            player = await self.connect_player(bot, guild, channel, force_reconnect=True)
-        else:
-            current_channel_id = getattr(getattr(player, "channel", None), "id", None)
-            target_channel_id = getattr(channel, "id", None)
-            if target_channel_id and current_channel_id != target_channel_id:
-                with contextlib.suppress(Exception):
-                    await player.move_to(channel)
-
-        # Pré-checagem leve: se já existe payload REST e ele está sem conexão,
-        # tente curar com channelId. Se o payload ainda não existe (404/None),
-        # não falhe aqui; o /play logo abaixo cria o player no Lavalink.
-        with contextlib.suppress(Exception):
-            payload = await self._get_rest_player(player, guild)
-            if payload is not None and not self._lavalink_state_connected(payload):
-                await self._wait_for_rest_voice_connected(
-                    player,
-                    guild,
-                    channel,
-                    timeout=3.0,
-                )
+        # Capture antes de qualquer reconnect. Se o REST do Lavalink perdeu a voz,
+        # pode ser necessário recriar o voice client; ainda assim precisamos saber
+        # qual faixa restaurar depois do TTS.
         previous_playable = self._player_current_track(player) or resume_playable
         previous_position = self._player_position_ms(player)
         was_paused = self._player_bool(player, "paused", "is_paused")
         music_volume = self._player_volume_percent(player, resume_volume)
+
+        player = await self._ensure_tts_voice_player(bot, guild, channel, player)
+
+        # Pré-checagem leve: se já existe payload REST e ele está sem voice
+        # completo, recrie a conexão de voz antes de pausar/substituir a faixa.
+        # Quando o payload ainda não existe, o /play abaixo cria o player REST.
+        with contextlib.suppress(Exception):
+            payload = await self._get_rest_player(player, guild)
+            missing, reason = self._rest_voice_missing_or_incomplete(payload)
+            if payload is not None and missing:
+                try:
+                    await self._wait_for_rest_voice_connected(player, guild, channel, timeout=2.5)
+                except Exception as voice_exc:
+                    player = await self._ensure_tts_voice_player(
+                        bot,
+                        guild,
+                        channel,
+                        player,
+                        force_voice_reconnect=True,
+                        reason=f"precheck: {reason}; {voice_exc}",
+                    )
         tts_volume = max(0, min(150, int(round(float(volume or 1.0) * 100))))
         pause_before_tts = bool(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_ENABLED", True)) and previous_playable is not None and not was_paused
         pause_grace = max(0.05, float(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS", 0.35) or 0.35))
@@ -2343,13 +2439,35 @@ class LavalinkBackend:
         restored = False
         restore_error: Exception | None = None
         try:
-            await self._play_with_compat(player, tts_playable, start=0, volume=tts_volume, add_history=False)
-            await self._wait_for_rest_voice_connected(
-                player,
-                guild,
-                channel,
-                timeout=max(6.0, min(12.0, float(timeout or 120.0))),
-            )
+            async def _play_tts_once(current_player: Any, *, attempt: int) -> Any:
+                await self._play_with_compat(current_player, tts_playable, start=0, volume=tts_volume, add_history=False)
+                await self._wait_for_rest_voice_connected(
+                    current_player,
+                    guild,
+                    channel,
+                    timeout=max(5.0, min(8.0, float(timeout or 120.0))),
+                )
+                return current_player
+
+            try:
+                player = await _play_tts_once(player, attempt=1)
+            except Exception as play_exc:
+                if not self._looks_like_rest_voice_not_connected(play_exc):
+                    raise
+                logger.warning(
+                    "[music/lavalink] TTS abortou porque voz REST não ficou pronta; tentando nova conexão uma vez | guild=%s erro=%s",
+                    getattr(guild, "id", None),
+                    play_exc,
+                )
+                player = await self._ensure_tts_voice_player(
+                    bot,
+                    guild,
+                    channel,
+                    player,
+                    force_voice_reconnect=True,
+                    reason=f"tts_play_retry: {play_exc}",
+                )
+                player = await _play_tts_once(player, attempt=2)
             # O player pode permanecer pausado porque pausamos a música anterior
             # antes de substituir a faixa. Sem este resume explícito, o payload REST
             # fica com ``paused: true`` e o TTS HTTP carrega, mas nunca toca.
@@ -2422,19 +2540,41 @@ class LavalinkBackend:
                     start_volume = music_volume
                     if bool(getattr(config, "MUSIC_TTS_LAVALINK_VOLUME_RAMP_ENABLED", True)) and not was_paused and ramp_ms > 0:
                         start_volume = max(0, min(music_volume, int(round(music_volume * (ramp_floor / 100.0)))))
-                    await self._play_with_compat(
-                        player,
-                        previous_playable,
-                        start=resume_position,
-                        volume=start_volume,
-                        add_history=False,
-                    )
-                    await self._wait_for_rest_voice_connected(
-                        player,
-                        guild,
-                        getattr(player, "channel", None) or getattr(guild, "voice_client", None),
-                        timeout=6.0,
-                    )
+                    async def _restore_previous_once(current_player: Any, *, attempt: int) -> Any:
+                        await self._play_with_compat(
+                            current_player,
+                            previous_playable,
+                            start=resume_position,
+                            volume=start_volume,
+                            add_history=False,
+                        )
+                        await self._wait_for_rest_voice_connected(
+                            current_player,
+                            guild,
+                            channel,
+                            timeout=5.0,
+                        )
+                        return current_player
+
+                    try:
+                        player = await _restore_previous_once(player, attempt=1)
+                    except Exception as restore_voice_exc:
+                        if not self._looks_like_rest_voice_not_connected(restore_voice_exc):
+                            raise
+                        logger.warning(
+                            "[music/lavalink] restauração pós-TTS sem voz REST; recriando conexão uma vez | guild=%s erro=%s",
+                            getattr(guild, "id", None),
+                            restore_voice_exc,
+                        )
+                        player = await self._ensure_tts_voice_player(
+                            bot,
+                            guild,
+                            channel,
+                            player,
+                            force_voice_reconnect=True,
+                            reason=f"tts_restore_retry: {restore_voice_exc}",
+                        )
+                        player = await _restore_previous_once(player, attempt=2)
                     if was_paused:
                         await self._pause_player(player, True)
                     elif start_volume != music_volume:
