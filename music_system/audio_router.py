@@ -2513,6 +2513,10 @@ class AudioRouter:
         if exc is None:
             return ""
         text = str(exc or "").strip()
+        detail = str(getattr(exc, "detail", "") or "").strip()
+        if detail and detail not in text:
+            compact_detail = " ".join(detail.split())[:180]
+            text = f"{text} — {compact_detail}" if text else compact_detail
         name = exc.__class__.__name__
         return f"{name}: {text}" if text else name
 
