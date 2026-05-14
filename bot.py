@@ -101,6 +101,8 @@ REMOVED_SLASH_COMMANDS = {
     "form_status",
     # O CallKeeper agora é apenas comando de prefixo; remove o grupo slash antigo.
     "callkeeper",
+    # O painel técnico de TTS foi movido para /vps > TTS.
+    "health",
 }
 
 def _cfg(*names: str, default=None):
@@ -329,7 +331,7 @@ class BotLocal(commands.Bot):
                     # Isso apaga da árvore local TODOS os comandos guild-specific,
                     # incluindo os Groups com `guild_ids=[...]` que estão
                     # registrados nativamente pra essa guild (ex: /chatbotadmin
-                    # registrado pra MANAGEMENT_GUILD_ID, /health da Utility).
+                    # registrado pra MANAGEMENT_GUILD_ID, /vps da Utility).
                     # Depois do clear, copy_global_to só repõe os globais —
                     # os guild-restricted desaparecem do sync e o usuário não
                     # vê os comandos no autocomplete.
@@ -347,7 +349,7 @@ class BotLocal(commands.Bot):
                         print(f"[SYNC][GUILD {guild_id}] /{name}")
         else:
             print("[SYNC] Pulado no boot (defina SYNC_SLASH_COMMANDS=true para sincronizar no startup)")
-            print("[SYNC] Observação: comandos limitados por guild, como /health, só aparecem após sync da guild correspondente.")
+            print("[SYNC] Observação: comandos limitados por guild, como /vps, só aparecem após sync da guild correspondente.")
 
     def get_health_snapshot(self) -> dict[str, object]:
         snapshot = dict(self.health_state)

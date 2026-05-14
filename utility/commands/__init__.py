@@ -2,7 +2,6 @@
 
 __all__ = [
     "help",
-    "health",
     "ping",
     "vps",
 ]
