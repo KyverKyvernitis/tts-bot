@@ -1651,26 +1651,61 @@ def _quick_git_lines() -> list[str]:
     commit = _first_nonempty_line(_run_cmd_body(["git", "log", "-1", "--pretty=%h %s"], timeout=5.0, max_chars=220)) or "desconhecido"
     if len(commit) > 72:
         commit = commit[:69].rstrip() + "..."
-    raw_count = _first_nonempty_line(_run_cmd_body(["bash", "-lc", "git status --short 2>/dev/null | wc -l"], timeout=6.0, max_chars=80))
-    try:
-        count = max(0, int(raw_count))
-    except Exception:
-        count = 0
-    return [f"{branch} · {commit}", f"Alterações locais: {count}"]
+    return [f"{branch} · {commit}"]
+
+
+def _format_journal_time(raw_time: str) -> str:
+    text = str(raw_time or "").strip()
+    if not text:
+        return datetime.now(_diagnostics_timezone()).strftime("%d/%m %H:%M")
+    # journalctl -o short-iso costuma emitir: 2026-05-14T16:21:03+0000
+    normalized = text.replace("Z", "+00:00")
+    if re.search(r"[+-]\d{4}$", normalized):
+        normalized = normalized[:-5] + normalized[-5:-2] + ":" + normalized[-2:]
+    with contextlib.suppress(Exception):
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(_diagnostics_timezone()).strftime("%d/%m %H:%M")
+    return text[:16]
+
+
+def _clean_journal_error_message(line: str) -> tuple[str, str]:
+    text = str(line or "").strip()
+    timestamp = ""
+    match = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$", text)
+    if match:
+        timestamp = match.group(1)
+        text = match.group(2).strip()
+
+    # Remove prefixos comuns do journal: host process[pid]: mensagem
+    text = re.sub(r"^[\w.\-]+\s+", "", text, count=1)
+    text = re.sub(r"^[\w@./+\-]+(?:\[\d+\])?:\s*", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return timestamp, text or "erro sem mensagem"
+
 
 def _quick_recent_errors_lines() -> list[str]:
-    cmd = (
-        "journalctl -u tts-bot.service --since '30 minutes ago' -n 120 --no-pager -o cat 2>/dev/null "
-        "| grep -Ei 'critical|error|exception|traceback|falhou|erro|timeout' "
-        "| tail -2 || true"
+    pattern = re.compile(r"critical|error|exception|traceback|falhou|erro|timeout", re.IGNORECASE)
+    raw = _run_cmd_body(
+        ["journalctl", "-u", "tts-bot.service", "--since", "2 hours ago", "-n", "260", "--no-pager", "-o", "short-iso"],
+        timeout=10.0,
+        max_chars=8000,
     )
-    raw = _run_cmd_body(["bash", "-lc", cmd], timeout=10.0, max_chars=450)
-    clean = [line.strip() for line in raw.splitlines() if line.strip()]
-    if not clean:
+    matches: list[str] = []
+    for line in raw.splitlines():
+        if pattern.search(line or ""):
+            matches.append(line.strip())
+    if not matches:
         return ["Nenhum erro recente encontrado."]
-    if len(clean) == 1:
-        return [clean[0][:180]]
-    return [line[:160] for line in clean[-2:]]
+
+    result: list[str] = []
+    for line in matches[-3:]:
+        raw_time, message = _clean_journal_error_message(line)
+        when = _format_journal_time(raw_time)
+        message = message[:135].rstrip()
+        result.append(f"{when} · {message}")
+    return result or ["Nenhum erro recente encontrado."]
 
 def build_quick_vps_status_report_sync() -> str:
     """Resumo curto, legível e pronto para Components V2."""

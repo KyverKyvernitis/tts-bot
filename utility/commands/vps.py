@@ -29,13 +29,14 @@ logger = logging.getLogger(__name__)
 VPS_COMMAND_GUILD_ID = 927002914449424404
 VPS_COMMAND_GUILD = discord.Object(id=VPS_COMMAND_GUILD_ID)
 
-VpsItem = Literal["quick_status", "base_git", "music_diag", "full_diag", "snapshot"]
+VpsItem = Literal["quick_status", "base_git", "music_diag", "full_diag", "snapshot", "servers"]
 
 VPS_QUICK_STATUS_TIMEOUT_SECONDS = 22.0
 VPS_BASE_TIMEOUT_SECONDS = 70.0
 VPS_MUSIC_DIAG_TIMEOUT_SECONDS = 115.0
 VPS_FULL_DIAG_TIMEOUT_SECONDS = 150.0
 VPS_SNAPSHOT_TIMEOUT_SECONDS = 75.0
+VPS_SERVERS_TIMEOUT_SECONDS = 25.0
 
 
 def _get_audio_router(bot: commands.Bot) -> AudioRouter:
@@ -73,9 +74,9 @@ def _format_attachment_size(size_bytes: int | None) -> str:
 class VpsModal(discord.ui.Modal, title="Painel da VPS"):
     """Modal simples do /vps.
 
-    Usa Checkboxes quando disponíveis no discord.py 2.7 para permitir múltipla
-    escolha. Se o runtime não tiver esses componentes por algum motivo, cai para
-    TextInput para não quebrar o comando.
+    Usa select multi-escolha em Components V2 para comportar mais de 5 opções.
+    Se o runtime do Discord recusar o componente, cai para TextInput para não
+    quebrar o comando.
     """
 
     def __init__(self, cog: "VpsCommandMixin", *, force_text_fallback: bool = False):
@@ -83,57 +84,91 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
         self.cog = cog
         self._ui_mode = "fallback_text"
 
-        checkbox_cls = None if force_text_fallback else getattr(discord.ui, "Checkbox", None)
         label_cls = None if force_text_fallback else getattr(discord.ui, "Label", None)
+        select_cls = None if force_text_fallback else (getattr(discord.ui, "StringSelect", None) or getattr(discord.ui, "Select", None))
 
-        if checkbox_cls is not None and label_cls is not None:
+        # Com mais de 5 opções, checkboxes individuais estouram o limite prático
+        # de componentes do modal. Um select multi-escolha mantém o modal leve e
+        # deixa espaço para futuras opções sem voltar para escolha única.
+        if select_cls is not None and label_cls is not None:
             try:
-                self.base_git = checkbox_cls(custom_id="vps_base_git", default=True)
-                self.music_diag = checkbox_cls(custom_id="vps_music_diag", default=False)
-                self.full_diag = checkbox_cls(custom_id="vps_full_diag", default=False)
-                self.snapshot = checkbox_cls(custom_id="vps_snapshot", default=False)
-                self.quick_status = checkbox_cls(custom_id="vps_quick_status", default=False)
-
+                self.items_select = select_cls(
+                    custom_id="vps_items",
+                    placeholder="Escolha uma ou mais opções",
+                    min_values=1,
+                    max_values=6,
+                    options=[
+                        discord.SelectOption(
+                            label="Base Git leve",
+                            description="Código rastreado pelo Git, sem assets e sem manifestos.",
+                            value="base_git",
+                            emoji="📦",
+                            default=True,
+                        ),
+                        discord.SelectOption(
+                            label="Diagnóstico musical",
+                            description="Lavalink, LavaSrc, yt-dlp, players, filas e logs musicais.",
+                            value="music_diag",
+                            emoji="🎵",
+                        ),
+                        discord.SelectOption(
+                            label="Diagnóstico completo",
+                            description="Logs gerais, serviços, memória, disco e resumo da VPS.",
+                            value="full_diag",
+                            emoji="🧾",
+                        ),
+                        discord.SelectOption(
+                            label="Snapshot da VPS",
+                            description="Configs sanitizadas, services, DB musicnode e logs filtradas.",
+                            value="snapshot",
+                            emoji="🧰",
+                        ),
+                        discord.SelectOption(
+                            label="Status rápido",
+                            description="RAM, disco, serviços, Git e 3 erros recentes.",
+                            value="quick_status",
+                            emoji="⚡",
+                        ),
+                        discord.SelectOption(
+                            label="Servidores",
+                            description="Guilds, membros e TTS sintetizados por engine.",
+                            value="servers",
+                            emoji="🌐",
+                        ),
+                    ],
+                )
                 self.add_item(label_cls(
-                    text="Base Git leve",
-                    description="Código rastreado pelo Git, sem assets e sem manifestos.",
-                    component=self.base_git,
+                    text="O que enviar?",
+                    description="Marque uma ou mais opções no seletor.",
+                    component=self.items_select,
                 ))
-                self.add_item(label_cls(
-                    text="Diagnóstico musical",
-                    description="Lavalink, LavaSrc, yt-dlp, players, filas e logs musicais.",
-                    component=self.music_diag,
-                ))
-                self.add_item(label_cls(
-                    text="Diagnóstico completo",
-                    description="Logs gerais do bot, serviços, memória, disco e resumo da VPS.",
-                    component=self.full_diag,
-                ))
-                self.add_item(label_cls(
-                    text="Snapshot da VPS",
-                    description="Configs sanitizadas, services, DB musicnode e logs filtradas em .zip.",
-                    component=self.snapshot,
-                ))
-                self.add_item(label_cls(
-                    text="Status rápido",
-                    description="Resumo em texto: RAM, disco, serviços, Git status e erros recentes.",
-                    component=self.quick_status,
-                ))
-                self._ui_mode = "checkboxes"
+                self._ui_mode = "select"
                 return
             except Exception:
-                logger.exception("[utility/vps] falha ao montar modal com Checkboxes; usando fallback")
+                logger.exception("[utility/vps] falha ao montar modal com select multi-escolha; usando fallback")
 
         self.items_input = discord.ui.TextInput(
             label="O que enviar?",
-            placeholder="base, musica, completo, snapshot, status",
+            placeholder="base, musica, completo, snapshot, status, servidores",
             required=True,
             default="base",
-            max_length=120,
+            max_length=160,
         )
         self.add_item(self.items_input)
 
     def _selected_items(self) -> list[VpsItem]:
+        if self._ui_mode == "select":
+            values = []
+            with contextlib.suppress(Exception):
+                values = list(getattr(self.items_select, "values") or [])
+            selected: list[VpsItem] = []
+            valid: set[str] = {"quick_status", "base_git", "music_diag", "full_diag", "snapshot", "servers"}
+            for value in values:
+                value = str(value or "").strip()
+                if value in valid and value not in selected:
+                    selected.append(value)  # type: ignore[arg-type]
+            return selected
+
         if self._ui_mode == "checkboxes":
             selected: list[VpsItem] = []
             mapping: list[tuple[str, VpsItem]] = [
@@ -142,6 +177,7 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
                 ("music_diag", "music_diag"),
                 ("full_diag", "full_diag"),
                 ("snapshot", "snapshot"),
+                ("servers", "servers"),
             ]
             for attr, item in mapping:
                 if bool(_safe_get_value(getattr(self, attr, None), default=False)):
@@ -176,6 +212,10 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
             "status rapido": "quick_status",
             "quick": "quick_status",
             "quick_status": "quick_status",
+            "servidores": "servers",
+            "servers": "servers",
+            "guilds": "servers",
+            "guildas": "servers",
         }
         for token in tokens:
             item = aliases.get(token)
@@ -204,7 +244,7 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
 class VpsResultView(discord.ui.LayoutView):
     """Resposta final do /vps em Components V2."""
 
-    def __init__(self, *, status_report: str | None, attachment_lines: list[str], error_lines: list[str]):
+    def __init__(self, *, status_report: str | None, servers_report: str | None, attachment_lines: list[str], error_lines: list[str]):
         super().__init__(timeout=None)
 
         # Não usa card de título separado: ele ocupava espaço no mobile e não
@@ -214,6 +254,14 @@ class VpsResultView(discord.ui.LayoutView):
                 discord.ui.Container(
                     discord.ui.TextDisplay(status_report.strip()),
                     accent_color=discord.Color.green(),
+                )
+            )
+
+        if servers_report:
+            self.add_item(
+                discord.ui.Container(
+                    discord.ui.TextDisplay(servers_report.strip()),
+                    accent_color=discord.Color.blurple(),
                 )
             )
 
@@ -233,7 +281,7 @@ class VpsResultView(discord.ui.LayoutView):
                 )
             )
 
-        if not status_report and not attachment_lines and not error_lines:
+        if not status_report and not servers_report and not attachment_lines and not error_lines:
             self.add_item(
                 discord.ui.Container(
                     discord.ui.TextDisplay("⚠️ Nenhum arquivo ou status foi gerado."),
@@ -280,6 +328,122 @@ class VpsCommandMixin:
             logger.warning("[utility/vps] %s excedeu timeout de %.1fs", label, timeout)
             raise TimeoutError(f"{label} excedeu {timeout:.0f}s") from exc
 
+    @staticmethod
+    def _format_vps_int(value: int | None) -> str:
+        try:
+            number = max(0, int(value or 0))
+        except Exception:
+            number = 0
+        return f"{number:,}".replace(",", ".")
+
+    @staticmethod
+    def _shorten_vps_name(value: object, *, limit: int = 42) -> str:
+        text = str(value or "Servidor sem nome").replace("\n", " ").strip() or "Servidor sem nome"
+        if len(text) > limit:
+            text = text[: max(1, limit - 1)].rstrip() + "…"
+        with contextlib.suppress(Exception):
+            text = discord.utils.escape_markdown(text)
+        return text
+
+    async def _collect_tts_synt_stats(self) -> dict[int, dict[str, int]]:
+        db = getattr(self.bot, "settings_db", None)
+        getter = getattr(db, "get_all_tts_synt_stats", None)
+        if not callable(getter):
+            return {}
+        try:
+            raw = getter()
+            if asyncio.iscoroutine(raw):
+                raw = await raw
+        except Exception:
+            logger.exception("[utility/vps] falha ao ler estatísticas persistentes de synts")
+            return {}
+
+        result: dict[int, dict[str, int]] = {}
+        for guild_id, stats in dict(raw or {}).items():
+            try:
+                gid = int(guild_id)
+            except Exception:
+                continue
+            if not isinstance(stats, dict):
+                continue
+            normalized: dict[str, int] = {}
+            for engine in ("edge", "google", "gtts"):
+                try:
+                    normalized[engine] = max(0, int(stats.get(engine, 0) or 0))
+                except Exception:
+                    normalized[engine] = 0
+            result[gid] = normalized
+        return result
+
+    async def _build_vps_servers_report(self) -> str:
+        synt_stats = await self._collect_tts_synt_stats()
+        guilds = list(getattr(self.bot, "guilds", []) or [])
+        guilds.sort(key=lambda guild: (-(int(getattr(guild, "member_count", 0) or 0)), str(getattr(guild, "name", "")).casefold()))
+
+        total_members = 0
+        total_synts = 0
+        rows: list[str] = []
+        for index, guild in enumerate(guilds[:18], start=1):
+            guild_id = int(getattr(guild, "id", 0) or 0)
+            member_count = int(getattr(guild, "member_count", 0) or 0)
+            if member_count <= 0:
+                with contextlib.suppress(Exception):
+                    member_count = len(getattr(guild, "members", []) or [])
+            total_members += member_count
+
+            stats = synt_stats.get(guild_id, {})
+            edge = int(stats.get("edge", 0) or 0)
+            google = int(stats.get("google", 0) or 0)
+            gtts = int(stats.get("gtts", 0) or 0)
+            guild_synts = edge + google + gtts
+            total_synts += guild_synts
+
+            engine_parts: list[str] = []
+            if edge:
+                engine_parts.append(f"Edge: {self._format_vps_int(edge)}")
+            if google:
+                engine_parts.append(f"Google: {self._format_vps_int(google)}")
+            if gtts:
+                engine_parts.append(f"gTTS: {self._format_vps_int(gtts)}")
+
+            synt_line = f"Synts: {self._format_vps_int(guild_synts)}"
+            if engine_parts:
+                synt_line += " · " + " · ".join(engine_parts)
+
+            rows.append(
+                f"**{index}. {self._shorten_vps_name(getattr(guild, 'name', None))}**\n"
+                f"Membros: {self._format_vps_int(member_count)} · {synt_line}"
+            )
+
+        # Soma membros/synts de guilds que não couberam no painel também.
+        for guild in guilds[18:]:
+            guild_id = int(getattr(guild, "id", 0) or 0)
+            member_count = int(getattr(guild, "member_count", 0) or 0)
+            if member_count <= 0:
+                with contextlib.suppress(Exception):
+                    member_count = len(getattr(guild, "members", []) or [])
+            total_members += member_count
+            stats = synt_stats.get(guild_id, {})
+            total_synts += int(stats.get("edge", 0) or 0) + int(stats.get("google", 0) or 0) + int(stats.get("gtts", 0) or 0)
+
+        lines = [
+            "## 🌐 Servidores",
+            f"Total: {self._format_vps_int(len(guilds))} servidor(es)",
+            f"Membros somados: {self._format_vps_int(total_members)}",
+            f"Synts totais: {self._format_vps_int(total_synts)}",
+        ]
+        if rows:
+            lines.extend(["", *rows])
+        else:
+            lines.append("Nenhum servidor encontrado no cache do bot.")
+        if len(guilds) > 18:
+            lines.append(f"… +{self._format_vps_int(len(guilds) - 18)} servidor(es) oculto(s) para manter o painel compacto.")
+
+        report = "\n".join(lines).strip()
+        if len(report) > 3500:
+            report = report[:3500].rstrip() + "\n[cortado por tamanho]"
+        return report
+
     async def _run_vps_action(self, interaction: discord.Interaction, *, selected_items: list[VpsItem]) -> None:
         if interaction.guild is None or int(getattr(interaction.guild, "id", 0) or 0) != VPS_COMMAND_GUILD_ID:
             await interaction.response.send_message("Esse painel só funciona na guilda de teste configurada.")
@@ -299,7 +463,7 @@ class VpsCommandMixin:
             return
 
         ordered_items: list[VpsItem] = [
-            item for item in ["quick_status", "base_git", "music_diag", "full_diag", "snapshot"] if item in selected_items
+            item for item in ["quick_status", "servers", "base_git", "music_diag", "full_diag", "snapshot"] if item in selected_items
         ]
 
         stamp = diagnostics_file_stamp()
@@ -307,6 +471,7 @@ class VpsCommandMixin:
         attachment_lines: list[str] = []
         error_lines: list[str] = []
         status_report: str | None = None
+        servers_report: str | None = None
         generated_any = False
 
         for item in ordered_items:
@@ -323,6 +488,15 @@ class VpsCommandMixin:
                 except Exception as exc:
                     logger.exception("[utility/vps] falha ao gerar status rápido")
                     error_lines.append(f"Status rápido falhou: {type(exc).__name__}: {str(exc)[:300]}")
+                continue
+
+            if item == "servers":
+                try:
+                    servers_report = await self._with_vps_timeout("servidores", self._build_vps_servers_report(), timeout=VPS_SERVERS_TIMEOUT_SECONDS)
+                    generated_any = True
+                except Exception as exc:
+                    logger.exception("[utility/vps] falha ao gerar lista de servidores")
+                    error_lines.append(f"Servidores falhou: {type(exc).__name__}: {str(exc)[:300]}")
                 continue
 
             if item == "base_git":
@@ -410,7 +584,7 @@ class VpsCommandMixin:
             error_lines.append("Nenhum arquivo ou status foi gerado.")
 
         try:
-            view = VpsResultView(status_report=status_report, attachment_lines=attachment_lines, error_lines=error_lines)
+            view = VpsResultView(status_report=status_report, servers_report=servers_report, attachment_lines=attachment_lines, error_lines=error_lines)
             # Components V2 e anexos no mesmo followup podem não renderizar os
             # arquivos em alguns runtimes/clientes. Envia o painel bonito em uma
             # mensagem e os arquivos em outra para garantir que os anexos apareçam.
@@ -428,6 +602,8 @@ class VpsCommandMixin:
             fallback_lines: list[str] = []
             if status_report:
                 fallback_lines.append(status_report.strip())
+            if servers_report:
+                fallback_lines.append(servers_report.strip())
             fallback_lines.extend(attachment_lines)
             if error_lines:
                 fallback_lines.append("`⚠️` Avisos:")

@@ -606,12 +606,31 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return UserIntent(kind="audio_request")
         return UserIntent(kind="normal_chat")
 
+    async def _record_chatbot_tts_synt(self, guild_id: int | None, engine: str = "edge") -> None:
+        try:
+            gid = int(guild_id or 0)
+        except Exception:
+            gid = 0
+        if gid <= 0:
+            return
+        db = getattr(self.bot, "settings_db", None)
+        increment = getattr(db, "increment_tts_synt_count", None)
+        if not callable(increment):
+            return
+        try:
+            result = increment(gid, engine, 1)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            log.exception("chatbot: falha ao persistir synt TTS | guild=%s engine=%s", gid, engine)
+
     async def _maybe_generate_tts(
         self,
         *,
         content: str,
         reply: str,
         profile: ChatbotProfile,
+        guild_id: int | None = None,
     ) -> Optional[discord.File]:
         """Se bater condições, gera TTS do reply e retorna discord.File.
 
@@ -682,6 +701,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
         if not audio_bytes:
             return None
+
+        await self._record_chatbot_tts_synt(guild_id, "edge")
 
         # Nome do arquivo: usa o nome do profile pra dar identidade
         safe_name = "".join(c for c in profile.name if c.isalnum())[:20] or "audio"
@@ -1511,6 +1532,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 content=content,  # texto original do user
                 reply=reply,
                 profile=profile,
+                guild_id=(message.guild.id if message.guild else None),
             )
             reply = self._sanitize_audio_capability_claim(
                 reply,

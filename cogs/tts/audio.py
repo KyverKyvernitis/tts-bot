@@ -475,6 +475,26 @@ class TTSAudioMixin:
             )
             self._maybe_send_engine_alert(f"slow:{engine}", "warn", title, body)
 
+    async def _record_persistent_synt_success(self, guild_id: int | None, engine: str) -> None:
+        try:
+            gid = int(guild_id or 0)
+        except Exception:
+            gid = 0
+        if gid <= 0:
+            return
+
+        db = getattr(getattr(self, "bot", None), "settings_db", None)
+        increment = getattr(db, "increment_tts_synt_count", None)
+        if not callable(increment):
+            return
+
+        try:
+            result = increment(gid, engine, 1)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("[tts_voice] Falha ao persistir synt TTS | guild=%s engine=%s", gid, engine)
+
     def _record_engine_failure(self, engine: str, error: Exception, duration_ms: float | None = None) -> None:
         engine_metrics = self._get_engine_metrics(engine)
         engine_metrics["synth_failures"] = int(engine_metrics.get("synth_failures", 0) or 0) + 1
@@ -1005,7 +1025,7 @@ class TTSAudioMixin:
             if inflight.get(key) is task:
                 inflight.pop(key, None)
 
-    async def _run_timed_generation(self, engine: str, factory) -> str:
+    async def _run_timed_generation(self, engine: str, factory, *, guild_id: int | None = None) -> str:
         started_at = time.monotonic()
         try:
             result = await factory()
@@ -1015,6 +1035,7 @@ class TTSAudioMixin:
             raise
         duration_ms = (time.monotonic() - started_at) * 1000.0
         self._record_engine_success(engine, duration_ms)
+        await self._record_persistent_synt_success(guild_id, engine)
         return result
 
     async def _generate_audio_file(self, item: QueueItem) -> str:
@@ -1023,12 +1044,14 @@ class TTSAudioMixin:
                 return await self._run_timed_generation(
                     "edge",
                     lambda: self._generate_edge_file(item.text, item.voice, item.rate, item.pitch),
+                    guild_id=item.guild_id,
                 )
             except Exception as e:
                 logger.warning("[tts_voice] Edge falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
                 return await self._run_timed_generation(
                     "gtts",
                     lambda: self._generate_gtts_file(item.text, item.language),
+                    guild_id=item.guild_id,
                 )
 
         if item.engine == "gcloud":
@@ -1036,17 +1059,20 @@ class TTSAudioMixin:
                 return await self._run_timed_generation(
                     "gcloud",
                     lambda: self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch),
+                    guild_id=item.guild_id,
                 )
             except Exception as e:
                 logger.warning("[tts_voice] Google Cloud TTS falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
                 return await self._run_timed_generation(
                     "gtts",
                     lambda: self._generate_gtts_file(item.text, item.language),
+                    guild_id=item.guild_id,
                 )
 
         return await self._run_timed_generation(
             "gtts",
             lambda: self._generate_gtts_file(item.text, item.language),
+            guild_id=item.guild_id,
         )
 
     async def _resolve_audio_path(self, state: GuildTTSState, item: QueueItem) -> tuple[str, bool]:

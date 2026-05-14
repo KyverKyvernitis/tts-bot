@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime, timezone, timedelta
 from copy import deepcopy
 from zoneinfo import ZoneInfo
@@ -2280,3 +2282,113 @@ async def _settingsdb_set_forms_config(self, guild_id: int, config: Dict[str, An
 
 SettingsDB.get_forms_config = _settingsdb_get_forms_config
 SettingsDB.set_forms_config = _settingsdb_set_forms_config
+
+
+# -----------------------------------------------------------------------------
+# Estatísticas persistentes de TTS sintetizado por guild/engine.
+# Usado pelo /vps > Servidores. Fica no mesmo documento de guild do Mongo para
+# sobreviver a reinícios sem criar outro storage.
+# -----------------------------------------------------------------------------
+
+_TTS_SYNT_ENGINE_ALIASES = {
+    "edge": "edge",
+    "edge-tts": "edge",
+    "microsoft": "edge",
+    "gtts": "gtts",
+    "google": "google",
+    "gcloud": "google",
+    "google_cloud": "google",
+    "google-cloud": "google",
+    "googlecloud": "google",
+}
+
+
+def _normalize_tts_synt_engine(engine: object) -> str:
+    value = str(engine or "gtts").strip().lower().replace(" ", "_")
+    return _TTS_SYNT_ENGINE_ALIASES.get(value, "gtts")
+
+
+def _normalize_tts_synt_stats(raw: object) -> Dict[str, int]:
+    data = raw if isinstance(raw, dict) else {}
+    engines = data.get("engines") if isinstance(data.get("engines"), dict) else data
+    result = {"edge": 0, "google": 0, "gtts": 0}
+    for key, value in dict(engines or {}).items():
+        engine = _normalize_tts_synt_engine(key)
+        try:
+            amount = max(0, int(value or 0))
+        except Exception:
+            amount = 0
+        result[engine] = int(result.get(engine, 0) or 0) + amount
+    return result
+
+
+async def _settingsdb_increment_tts_synt_count(self, guild_id: int, engine: str, amount: int = 1):
+    try:
+        gid = int(guild_id)
+        delta = max(1, int(amount or 1))
+    except Exception:
+        return
+    if gid <= 0:
+        return
+
+    engine_key = _normalize_tts_synt_engine(engine)
+    lock = getattr(self, "_tts_synts_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        setattr(self, "_tts_synts_lock", lock)
+
+    async with lock:
+        doc = self.guild_cache.get(gid)
+        if doc is None:
+            doc = {"type": "guild", "guild_id": gid}
+            self.guild_cache[gid] = doc
+
+        current = _normalize_tts_synt_stats(doc.get("tts_synts"))
+        current[engine_key] = int(current.get(engine_key, 0) or 0) + delta
+        total = sum(int(current.get(key, 0) or 0) for key in ("edge", "google", "gtts"))
+        doc["tts_synts"] = {
+            "engines": current,
+            "total": total,
+            "updated_at": time.time(),
+        }
+
+        await self.coll.update_one(
+            {"type": "guild", "guild_id": gid},
+            {
+                "$set": {
+                    "type": "guild",
+                    "guild_id": gid,
+                    "tts_synts.updated_at": doc["tts_synts"]["updated_at"],
+                },
+                "$inc": {
+                    f"tts_synts.engines.{engine_key}": delta,
+                    "tts_synts.total": delta,
+                },
+            },
+            upsert=True,
+        )
+
+
+def _settingsdb_get_tts_synt_stats(self, guild_id: int) -> Dict[str, int]:
+    try:
+        gid = int(guild_id)
+    except Exception:
+        return {"edge": 0, "google": 0, "gtts": 0}
+    doc = self.guild_cache.get(gid, {})
+    return _normalize_tts_synt_stats(doc.get("tts_synts"))
+
+
+def _settingsdb_get_all_tts_synt_stats(self) -> Dict[int, Dict[str, int]]:
+    result: Dict[int, Dict[str, int]] = {}
+    for guild_id, doc in list(self.guild_cache.items()):
+        try:
+            gid = int(guild_id)
+        except Exception:
+            continue
+        result[gid] = _normalize_tts_synt_stats((doc or {}).get("tts_synts"))
+    return result
+
+
+SettingsDB.increment_tts_synt_count = _settingsdb_increment_tts_synt_count
+SettingsDB.get_tts_synt_stats = _settingsdb_get_tts_synt_stats
+SettingsDB.get_all_tts_synt_stats = _settingsdb_get_all_tts_synt_stats
