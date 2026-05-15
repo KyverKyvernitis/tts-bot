@@ -35,7 +35,7 @@ JOBS_FAILED = 0
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.5.2"
+PHONE_WORKER_VERSION = "1.5.3"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -273,10 +273,53 @@ def _run_json_command(command: list[str], *, timeout: float = 2.0) -> dict[str, 
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _read_text_file(path: str | Path, *, limit: int = 4096) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")[:limit].strip()
+    except Exception:
+        return ""
+
+
+def _sysfs_battery_snapshot() -> dict[str, Any]:
+    # Fallback leve quando Termux:API não está instalado ou sem permissão.
+    base_candidates = [Path("/sys/class/power_supply/battery")]
+    base_candidates.extend(Path("/sys/class/power_supply").glob("BAT*"))
+    for base in base_candidates:
+        if not base.exists():
+            continue
+        result: dict[str, Any] = {}
+        capacity = _read_text_file(base / "capacity", limit=32)
+        status = _read_text_file(base / "status", limit=64).lower()
+        plugged = _read_text_file(base / "type", limit=64).lower()
+        temp = _read_text_file(base / "temp", limit=32)
+        try:
+            if capacity:
+                result["level"] = max(0, min(100, int(float(capacity))))
+        except Exception:
+            pass
+        if status:
+            result["status"] = status[:32]
+            result["charging"] = status in {"charging", "full"}
+        if plugged:
+            result["source"] = "sysfs"
+        try:
+            if temp:
+                raw_temp = float(temp)
+                # Android costuma expor décimos de °C.
+                if raw_temp > 1000:
+                    raw_temp = raw_temp / 10.0
+                result["temperature_c"] = round(raw_temp, 1)
+        except Exception:
+            pass
+        if result:
+            return result
+    return {}
+
+
 def _battery_snapshot() -> dict[str, Any]:
     raw = _run_json_command(["termux-battery-status"], timeout=2.0)
     if not raw:
-        return {}
+        return _sysfs_battery_snapshot()
     level = raw.get("percentage")
     charging = None
     status = str(raw.get("status") or "").strip().lower()
@@ -285,7 +328,7 @@ def _battery_snapshot() -> dict[str, Any]:
         charging = status in {"charging", "full"}
     elif plugged:
         charging = plugged not in {"unplugged", "none", "unknown"}
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {"source": "termux-api"}
     try:
         if level is not None:
             result["level"] = int(float(level))
@@ -297,6 +340,12 @@ def _battery_snapshot() -> dict[str, Any]:
         result["status"] = status[:32]
     if plugged:
         result["plugged"] = plugged[:32]
+    try:
+        temp = raw.get("temperature")
+        if temp is not None:
+            result["temperature_c"] = round(float(temp), 1)
+    except Exception:
+        pass
     return result
 
 
@@ -328,12 +377,37 @@ def _mask_ipv4(value: str) -> str:
     return _short_text(text, limit=64)
 
 
+def _base_url_host() -> str:
+    base_url, _token, _worker_id = _core_worker_auth_parts()
+    if not base_url:
+        return ""
+    try:
+        return urllib.parse.urlparse(base_url).hostname or ""
+    except Exception:
+        return ""
+
+
+def _looks_like_tailscale_host(host: str) -> bool:
+    text = str(host or "").strip()
+    if re.fullmatch(r"100\.(?:\d{1,3}\.){2}\d{1,3}", text):
+        return True
+    # MagicDNS/headscale costumam usar nomes internos. Não marca como conectado,
+    # só ajuda a explicar que a rota parece privada.
+    return text.endswith(".ts.net") or text.endswith(".tailnet")
+
+
 def _tailscale_snapshot(*, probe_vps: bool = False) -> dict[str, Any]:
+    base_url, _token, _worker_id = _core_worker_auth_parts()
+    base_host = _base_url_host()
+    base_looks_tailscale = _looks_like_tailscale_host(base_host)
     result: dict[str, Any] = {
         "cli_available": bool(shutil.which("tailscale")),
         "connected": False,
         "state": "unknown",
+        "via_vps_url": bool(base_looks_tailscale),
     }
+    if base_host:
+        result["vps_host_masked"] = _mask_ipv4(base_host)
     ip = ""
     if result["cli_available"]:
         code, stdout, stderr = _run_text_command(["tailscale", "ip", "-4"], timeout=2.5, max_bytes=4096)
@@ -365,9 +439,17 @@ def _tailscale_snapshot(*, probe_vps: bool = False) -> dict[str, Any]:
         elif code != 127 and stderr:
             result["status_error"] = _short_text(stderr, limit=160)
     else:
-        result["note"] = "CLI tailscale não encontrada no Termux; use o app oficial e valide pela rota da VPS"
+        # No Android é comum usar o app oficial do Tailscale como VPN, sem CLI no Termux.
+        # Se a VPS configurada é 100.x.x.x ou MagicDNS, o heartbeat bem-sucedido já prova
+        # que o Termux alcança a VPS por uma rota privada/VPN; não mostrar como "off".
+        if base_looks_tailscale:
+            result["connected"] = True
+            result["state"] = "app/vpn"
+            result["note"] = "CLI tailscale ausente; conexão inferida pelo endpoint privado da VPS"
+        else:
+            result["state"] = "no-cli"
+            result["note"] = "CLI tailscale não encontrada no Termux; use o app oficial para a VPN"
 
-    base_url, _token, _worker_id = _core_worker_auth_parts()
     if probe_vps and base_url:
         health_url = base_url.rstrip("/") + "/health"
         started = time.time()
@@ -389,11 +471,13 @@ def _tailscale_snapshot(*, probe_vps: bool = False) -> dict[str, Any]:
             result["vps_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
     return result
 
+
 def _network_snapshot() -> dict[str, Any]:
     result: dict[str, Any] = {}
     wifi = _run_json_command(["termux-wifi-connectioninfo"], timeout=2.0)
     if wifi:
         result["type"] = "wifi"
+        result["source"] = "termux-api"
         ssid = str(wifi.get("ssid") or "").strip()
         if ssid and ssid != "<unknown ssid>":
             result["name"] = _short_text(ssid, limit=48)
@@ -402,13 +486,19 @@ def _network_snapshot() -> dict[str, Any]:
         except Exception:
             pass
     else:
-        result["type"] = "unknown"
+        # Sem Termux:API, ainda conseguimos dizer que há conectividade se o worker
+        # está alcançando a VPS por heartbeat/poll.
+        result["type"] = "connected" if _heartbeat_configured() else "unknown"
+        result["source"] = "inferred"
     tailscale = _tailscale_snapshot(probe_vps=False)
     result["tailscale"] = bool(tailscale.get("connected"))
     result["tailscale_cli"] = bool(tailscale.get("cli_available"))
     result["tailscale_state"] = _short_text(tailscale.get("state"), limit=48, default="unknown")
+    result["tailscale_via_vps_url"] = bool(tailscale.get("via_vps_url"))
     if tailscale.get("ip_masked"):
         result["tailscale_ip_masked"] = tailscale.get("ip_masked")
+    elif tailscale.get("vps_host_masked") and tailscale.get("via_vps_url"):
+        result["tailscale_ip_masked"] = tailscale.get("vps_host_masked")
     if tailscale.get("note"):
         result["tailscale_note"] = _short_text(tailscale.get("note"), limit=100)
     return result

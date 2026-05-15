@@ -179,7 +179,7 @@ def _public_base_url() -> str:
 def _battery_text(worker: dict[str, Any]) -> str:
     battery = worker.get("battery") if isinstance(worker.get("battery"), dict) else {}
     if not battery:
-        return "bateria n/a"
+        return "bat n/a"
     level = battery.get("level") or battery.get("percent") or battery.get("percentage")
     charging = battery.get("charging")
     parts: list[str] = []
@@ -189,10 +189,18 @@ def _battery_text(worker: dict[str, Any]) -> str:
     except Exception:
         pass
     if isinstance(charging, bool):
-        parts.append("carregando" if charging else "sem carga")
+        parts.append("⚡" if charging else "🔋")
     elif charging is not None:
-        parts.append(_shorten(charging, limit=18))
-    return " ".join(parts) if parts else "bateria n/a"
+        parts.append(_shorten(charging, limit=12))
+    try:
+        temp = battery.get("temperature_c") or battery.get("temperature")
+        if temp is not None:
+            temp_f = float(temp)
+            if 0 < temp_f < 90:
+                parts.append(f"{temp_f:.0f}°C")
+    except Exception:
+        pass
+    return " ".join(parts) if parts else "bat n/a"
 
 
 def _network_text(worker: dict[str, Any]) -> str:
@@ -201,17 +209,28 @@ def _network_text(worker: dict[str, Any]) -> str:
         return "rede n/a"
     kind = network.get("type") or network.get("kind") or network.get("transport") or network.get("name")
     tailscale = network.get("tailscale")
-    tailscale_state = network.get("tailscale_state")
+    tailscale_state = str(network.get("tailscale_state") or "").strip().lower()
+    tailscale_cli = bool(network.get("tailscale_cli"))
+    via_vps = bool(network.get("tailscale_via_vps_url"))
     parts: list[str] = []
-    if kind:
-        parts.append(_shorten(kind, limit=18))
-    if isinstance(tailscale, bool):
-        label = "tailscale ok" if tailscale else "tailscale off"
-        if tailscale_state and str(tailscale_state).lower() not in {"unknown", ""}:
-            label += f"/{_shorten(tailscale_state, limit=18)}"
+    if kind and str(kind).lower() not in {"unknown", ""}:
+        label = "rede ok" if str(kind).lower() == "connected" else _shorten(kind, limit=16)
         parts.append(label)
-    elif tailscale_state:
-        parts.append(f"tailscale {_shorten(tailscale_state, limit=18)}")
+    if isinstance(tailscale, bool):
+        if tailscale:
+            if tailscale_cli:
+                label = "ts cli ok"
+            elif via_vps or tailscale_state in {"app/vpn", "vpn", "app"}:
+                label = "ts app ok"
+            else:
+                label = "ts ok"
+        else:
+            label = "ts n/a" if not tailscale_cli else "ts off"
+        if tailscale_state and tailscale_state not in {"unknown", "no-cli", "app/vpn"}:
+            label += f"/{_shorten(tailscale_state, limit=12)}"
+        parts.append(label)
+    elif tailscale_state and tailscale_state not in {"unknown", ""}:
+        parts.append(f"ts {_shorten(tailscale_state, limit=14)}")
     if network.get("tailscale_ip_masked"):
         parts.append(str(network.get("tailscale_ip_masked")))
     return " · ".join(parts) if parts else "rede n/a"
@@ -575,9 +594,12 @@ class WorkersPanelView(discord.ui.LayoutView):
     def _action_specs_for_selected(self) -> list[dict[str, Any]]:
         supported = self._selected_supported_tasks()
         specs: list[dict[str, Any]] = []
+        # Ações do próprio painel ficam no select para manter o card compacto.
+        specs.append({"label": "Parear novo worker", "value": "_create_pairing", "description": "Gera código temporário", "emoji": "🔐", "panel_action": "pair"})
+        specs.append({"label": "Limpar jobs", "value": "_cleanup_jobs", "description": "Remove jobs travados/antigos", "emoji": "🧹", "panel_action": "cleanup"})
         if self._selected_worker() is not None:
-            specs.append({"label": "Ver último resultado", "value": "_show_last_result", "description": "Mostra o último resultado completo", "emoji": "📄", "panel_action": "last_result"})
-            specs.append({"label": "Renomear worker", "value": "_rename_worker", "description": "Troca o nome exibido no painel", "emoji": "✏️", "panel_action": "rename"})
+            specs.append({"label": "Ver último resultado", "value": "_show_last_result", "description": "Mostra detalhes completos", "emoji": "📄", "panel_action": "last_result"})
+            specs.append({"label": "Renomear worker", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename"})
         for spec in WORKER_ACTION_SPECS:
             job_type = _task_name(spec.get("job_type"))
             requires_declared = bool(spec.get("requires_declared"))
@@ -697,7 +719,9 @@ class WorkersPanelView(discord.ui.LayoutView):
                 discord.ui.ActionRow(worker_select),
                 discord.ui.ActionRow(action_select),
             ])
-        components.append(discord.ui.ActionRow(refresh, pairing, cleanup_jobs))
+            components.append(discord.ui.ActionRow(refresh))
+        else:
+            components.append(discord.ui.ActionRow(refresh, pairing, cleanup_jobs))
         if not _has_online_registry_worker(snapshot):
             components.append(discord.ui.ActionRow(wake))
         container = discord.ui.Container(*components, accent_color=snapshot.accent)
@@ -772,6 +796,12 @@ class WorkersPanelView(discord.ui.LayoutView):
         action = str((values or [""])[0] or "")
         if action == "_unsupported":
             await interaction.response.send_message("Esse worker está desatualizado ou não declarou suporte para ações seguras.", ephemeral=True)
+            return
+        if action == "_create_pairing":
+            await self._create_pairing(interaction)
+            return
+        if action == "_cleanup_jobs":
+            await self._cleanup_jobs(interaction)
             return
         if action == "_show_last_result":
             await self._show_last_result(interaction)
