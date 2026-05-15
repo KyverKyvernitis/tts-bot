@@ -46,17 +46,26 @@ LEGACY_WORKER_ID = "__legacy_phone_worker__"
 AUTO_WORKER_ID = "__auto_core_worker__"
 
 WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
-    {"label": "Testar worker", "value": "ping", "job_type": "ping", "payload": {}, "summary": "teste manual pelo painel workers", "description": "Ping seguro no worker selecionado", "emoji": "🧪"},
-    {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede, Tailscale e sistema", "emoji": "🩺"},
-    {"label": "Atualizar agent", "value": "worker_update", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Aplica a versão atual e reinicia", "emoji": "⬆️", "requires_declared": True},
-    {"label": "Reparar scripts", "value": "worker_repair_scripts", "job_type": "worker_update", "payload": {"scripts_only": True}, "summary": "reinstalar scripts auxiliares do worker", "description": "Reinstala start/watch/pair", "emoji": "🛠️", "requires_declared": True},
-    {"label": "Logs", "value": "worker_logs", "job_type": "worker_logs", "payload": {"lines": 140}, "summary": "logs recentes do phone-worker", "description": "Busca logs recentes", "emoji": "📜"},
-    {"label": "Tailscale", "value": "tailscale_status", "job_type": "tailscale_status", "payload": {}, "summary": "status Tailscale e alcance da VPS", "description": "Verifica Tailscale e VPS", "emoji": "🌐"},
-    {"label": "Status serviços", "value": "service_status", "job_type": "service_status", "payload": {"service": "phone-worker"}, "summary": "status de serviços do celular", "description": "Mostra serviços permitidos", "emoji": "🧰"},
-    {"label": "Iniciar watchdog", "value": "service_start_watch", "job_type": "service_start", "payload": {"service": "phone-worker-watch"}, "summary": "iniciar watchdog do phone-worker", "description": "Inicia phone-worker-watch", "emoji": "▶️"},
-    {"label": "Parar watchdog", "value": "service_stop_watch", "job_type": "service_stop", "payload": {"service": "phone-worker-watch"}, "summary": "parar watchdog do phone-worker", "description": "Para phone-worker-watch", "emoji": "⏹️"},
-    {"label": "Reiniciar worker", "value": "service_restart_worker", "job_type": "service_restart", "payload": {"service": "phone-worker"}, "summary": "reiniciar phone-worker no celular", "description": "Reinicia após responder", "emoji": "🔁"},
-    {"label": "Parar worker", "value": "service_stop_worker", "job_type": "service_stop", "payload": {"service": "phone-worker"}, "summary": "parar phone-worker no celular", "description": "Para após responder", "emoji": "🛑"},
+    {"label": "Testar worker", "value": "ping", "job_type": "ping", "payload": {}, "summary": "teste manual pelo painel workers", "description": "Testa comunicação", "emoji": "🧪", "category": "quick"},
+    {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede e sistema", "emoji": "🩺", "category": "quick"},
+    {"label": "Atualizar agent", "value": "worker_update", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Atualiza e reinicia", "emoji": "⬆️", "requires_declared": True, "category": "maintenance"},
+    {"label": "Reparar scripts", "value": "worker_repair_scripts", "job_type": "worker_update", "payload": {"scripts_only": True}, "summary": "reinstalar scripts auxiliares do worker", "description": "Reinstala scripts", "emoji": "🛠️", "requires_declared": True, "category": "maintenance"},
+    {"label": "Logs", "value": "worker_logs", "job_type": "worker_logs", "payload": {"lines": 140}, "summary": "logs recentes do phone-worker", "description": "Mostra logs recentes", "emoji": "📜", "category": "quick"},
+    {"label": "Tailscale", "value": "tailscale_status", "job_type": "tailscale_status", "payload": {}, "summary": "status Tailscale e alcance da VPS", "description": "Rede privada/VPS", "emoji": "🌐", "category": "monitor"},
+    {"label": "Status serviços", "value": "service_status", "job_type": "service_status", "payload": {"service": "phone-worker"}, "summary": "status de serviços do celular", "description": "Serviços permitidos", "emoji": "🧰", "category": "monitor"},
+    {"label": "Iniciar watchdog", "value": "service_start_watch", "job_type": "service_start", "payload": {"service": "phone-worker-watch"}, "summary": "iniciar watchdog do phone-worker", "description": "Inicia watchdog", "emoji": "▶️", "category": "maintenance"},
+    {"label": "Parar watchdog", "value": "service_stop_watch", "job_type": "service_stop", "payload": {"service": "phone-worker-watch"}, "summary": "parar watchdog do phone-worker", "description": "Para watchdog", "emoji": "⏹️", "category": "maintenance"},
+    {"label": "Reiniciar worker", "value": "service_restart_worker", "job_type": "service_restart", "payload": {"service": "phone-worker"}, "summary": "reiniciar phone-worker no celular", "description": "Reinicia agent", "emoji": "🔁", "category": "maintenance"},
+    {"label": "Parar worker", "value": "service_stop_worker", "job_type": "service_stop", "payload": {"service": "phone-worker"}, "summary": "parar phone-worker no celular", "description": "Para agent", "emoji": "🛑", "category": "maintenance"},
+)
+
+
+WORKER_ACTION_CATEGORIES: tuple[dict[str, str], ...] = (
+    {"label": "Ações rápidas", "value": "quick", "description": "Teste, saúde, logs", "emoji": "⚡"},
+    {"label": "Monitoramento", "value": "monitor", "description": "Rede, Tailscale, serviços", "emoji": "📊"},
+    {"label": "Manutenção", "value": "maintenance", "description": "Atualizar, reparar, reiniciar", "emoji": "🛠️"},
+    {"label": "Organizar", "value": "organize", "description": "Nome, funções, pausar/remover", "emoji": "🧩"},
+    {"label": "Adicionar celular", "value": "add", "description": "Pareamento e guia simples", "emoji": "📲"},
 )
 
 
@@ -161,6 +170,25 @@ def _parse_roles(raw: str | None, *, status: dict[str, Any] | None = None) -> li
     if status.get("ffprobe") and "ffprobe" not in roles:
         roles.append("ffprobe")
     return roles[:16]
+
+
+def _normalize_worker_profile(value: object, *, default: str = "midia") -> str:
+    clean = str(value or "").strip().lower().replace("í", "i").replace("_", "-")
+    aliases = {
+        "media": "midia",
+        "mídia": "midia",
+        "midia": "midia",
+        "leve": "leve",
+        "lite": "leve",
+        "completo": "completo",
+        "complete": "completo",
+        "full": "completo",
+        "bedrock": "bedrock",
+    }
+    clean = aliases.get(clean, clean)
+    if clean not in WORKER_ROLE_PROFILES:
+        return default if default in WORKER_ROLE_PROFILES else "midia"
+    return clean
 
 
 def _host_label(host: str) -> str:
@@ -552,12 +580,16 @@ class WorkersPanelView(discord.ui.LayoutView):
         owner_id: int,
         snapshot: WorkerSnapshot,
         selected_worker_id: str = "",
+        selected_action_category: str = "quick",
     ):
         super().__init__(timeout=WORKERS_PANEL_TIMEOUT_SECONDS)
         self.cog = cog
         self.owner_id = int(owner_id)
         self.snapshot = snapshot
         self.selected_worker_id = str(selected_worker_id or "")
+        self.selected_action_category = str(selected_action_category or "quick")
+        if self.selected_action_category not in {str(item.get("value")) for item in WORKER_ACTION_CATEGORIES}:
+            self.selected_action_category = "quick"
         self.message: discord.Message | None = None
         self._ensure_selected_worker()
         self._rebuild_layout()
@@ -707,26 +739,40 @@ class WorkersPanelView(discord.ui.LayoutView):
         # None = worker registrado antigo/externo sem declarar suporte; manter ações visíveis.
         return supported or None
 
-    def _action_specs_for_selected(self) -> list[dict[str, Any]]:
-        supported = self._selected_supported_tasks()
-        specs: list[dict[str, Any]] = []
-        # Ações do próprio painel ficam no select para manter o card compacto.
-        specs.append({"label": "Parear novo worker", "value": "_create_pairing", "description": "Gera código temporário", "emoji": "🔐", "panel_action": "pair"})
-        specs.append({"label": "Guia novo celular", "value": "_onboarding_guide", "description": "Passos de instalação/pareamento", "emoji": "📲", "panel_action": "onboarding"})
-        specs.append({"label": "Teste failover", "value": "_failover_test", "description": "Job sem alvo no melhor worker", "emoji": "🧪", "panel_action": "failover"})
-        specs.append({"label": "Limpar jobs", "value": "_cleanup_jobs", "description": "Remove jobs travados/antigos", "emoji": "🧹", "panel_action": "cleanup"})
+    def _panel_action_specs_for_selected(self) -> list[dict[str, Any]]:
         selected_worker = self._selected_worker()
+        specs: list[dict[str, Any]] = [
+            {"label": "Gerar código", "value": "_pairing_modal", "description": "Parear novo celular", "emoji": "🔐", "panel_action": "pair", "category": "add"},
+            {"label": "Como adicionar", "value": "_onboarding_guide", "description": "Guia simples", "emoji": "📲", "panel_action": "onboarding", "category": "add"},
+            {"label": "Testar troca automática", "value": "_failover_test", "description": "Precisa de 2+ workers", "emoji": "🧪", "panel_action": "failover", "category": "add"},
+            {"label": "Limpar jobs", "value": "_cleanup_jobs", "description": "Remove travados/antigos", "emoji": "🧹", "panel_action": "cleanup", "category": "organize"},
+        ]
         if selected_worker is not None:
-            specs.append({"label": "Ver último resultado", "value": "_show_last_result", "description": "Mostra detalhes completos", "emoji": "📄", "panel_action": "last_result"})
-            specs.append({"label": "Renomear worker", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename"})
-            specs.append({"label": "Editar roles", "value": "_edit_roles", "description": "Define roles/capacidades", "emoji": "🧩", "panel_action": "roles"})
+            specs.extend([
+                {"label": "Ver último resultado", "value": "_show_last_result", "description": "Detalhes completos", "emoji": "📄", "panel_action": "last_result", "category": "quick"},
+                {"label": "Renomear celular", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename", "category": "organize"},
+                {"label": "Editar funções", "value": "_edit_roles", "description": "Roles/capacidades", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
+            ])
             if selected_worker.get("enabled", True):
-                specs.append({"label": "Pausar worker", "value": "_pause_worker", "description": "Não entrega novos jobs", "emoji": "⏸️", "panel_action": "pause"})
+                specs.append({"label": "Pausar celular", "value": "_pause_worker", "description": "Não recebe jobs", "emoji": "⏸️", "panel_action": "pause", "category": "organize"})
             else:
-                specs.append({"label": "Ativar worker", "value": "_resume_worker", "description": "Volta a receber jobs", "emoji": "▶️", "panel_action": "resume"})
+                specs.append({"label": "Ativar celular", "value": "_resume_worker", "description": "Volta a receber jobs", "emoji": "▶️", "panel_action": "resume", "category": "organize"})
             if not selected_worker.get("online"):
-                specs.append({"label": "Remover worker offline", "value": "_delete_worker", "description": "Remove do registry", "emoji": "🗑️", "panel_action": "delete"})
+                specs.append({"label": "Remover offline", "value": "_delete_worker", "description": "Remove do registry", "emoji": "🗑️", "panel_action": "delete", "category": "organize"})
+        return specs
+
+    def _action_specs_for_selected(self, *, category: str | None = None) -> list[dict[str, Any]]:
+        supported = self._selected_supported_tasks()
+        wanted_category = category or self.selected_action_category or "quick"
+        specs: list[dict[str, Any]] = []
+
+        for spec in self._panel_action_specs_for_selected():
+            if str(spec.get("category") or "quick") == wanted_category:
+                specs.append(dict(spec))
+
         for spec in WORKER_ACTION_SPECS:
+            if str(spec.get("category") or "quick") != wanted_category:
+                continue
             job_type = _task_name(spec.get("job_type"))
             requires_declared = bool(spec.get("requires_declared"))
             if requires_declared and (supported is None or job_type not in supported):
@@ -736,13 +782,25 @@ class WorkersPanelView(discord.ui.LayoutView):
             specs.append(dict(spec))
         return specs
 
+    def _category_select_options(self) -> list[discord.SelectOption]:
+        return [
+            discord.SelectOption(
+                label=str(category["label"])[:100],
+                value=str(category["value"])[:100],
+                description=_shorten(category.get("description"), limit=100),
+                emoji=str(category.get("emoji") or "📁"),
+                default=(str(category.get("value")) == self.selected_action_category),
+            )
+            for category in WORKER_ACTION_CATEGORIES
+        ]
+
     def _action_select_options(self) -> list[discord.SelectOption]:
-        specs = self._action_specs_for_selected()
+        specs = self._action_specs_for_selected(category=self.selected_action_category)
         if not specs:
             return [discord.SelectOption(
-                label="Worker sem ações compatíveis",
+                label="Sem ações nessa categoria",
                 value="_unsupported",
-                description="Atualize/reinicie o phone-worker para liberar ações",
+                description="Escolha outra categoria ou atualize o worker",
                 emoji="⚠️",
             )]
         return [
@@ -795,10 +853,11 @@ class WorkersPanelView(discord.ui.LayoutView):
 
         worker_options = self._worker_select_options()
         worker_select = None
+        category_select = None
         action_select = None
         if worker_options:
             worker_select = self._new_select(
-                placeholder="Escolha um worker",
+                placeholder="Escolha um celular",
                 min_values=1,
                 max_values=1,
                 options=worker_options,
@@ -806,10 +865,20 @@ class WorkersPanelView(discord.ui.LayoutView):
             )
             worker_select.callback = self._select_worker
 
+            category_select = self._new_select(
+                placeholder="Escolha uma categoria",
+                min_values=1,
+                max_values=1,
+                options=self._category_select_options(),
+                disabled=False,
+            )
+            category_select.callback = self._select_action_category
+
             action_options = self._action_select_options()
             action_disabled = bool(action_options and str(action_options[0].value) == "_unsupported")
+            action_label = next((str(item.get("label")) for item in WORKER_ACTION_CATEGORIES if str(item.get("value")) == self.selected_action_category), "Ações")
             action_select = self._new_select(
-                placeholder="Escolha uma ação segura" if not action_disabled else "Worker desatualizado/sem ações compatíveis",
+                placeholder=f"Ação de {action_label.lower()}" if not action_disabled else "Sem ações nessa categoria",
                 min_values=1,
                 max_values=1,
                 options=action_options,
@@ -839,10 +908,11 @@ class WorkersPanelView(discord.ui.LayoutView):
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(self._selected_worker_lines(snapshot))),
         ]
-        if worker_select is not None and action_select is not None:
+        if worker_select is not None and category_select is not None and action_select is not None:
             components.extend([
                 discord.ui.Separator(),
                 discord.ui.ActionRow(worker_select),
+                discord.ui.ActionRow(category_select),
                 discord.ui.ActionRow(action_select),
             ])
             components.append(discord.ui.ActionRow(refresh))
@@ -926,6 +996,18 @@ class WorkersPanelView(discord.ui.LayoutView):
         self._rebuild_layout()
         await interaction.response.edit_message(view=self)
 
+    async def _select_action_category(self, interaction: discord.Interaction):
+        values = list(getattr(getattr(interaction, "data", None), "get", lambda _k, _d=None: _d)("values", []) or [])
+        if not values:
+            with contextlib.suppress(Exception):
+                values = list(getattr(interaction, "values", []) or [])
+        category = str((values or [""])[0] or "")
+        if category not in {str(item.get("value")) for item in WORKER_ACTION_CATEGORIES}:
+            category = "quick"
+        self.selected_action_category = category
+        self._rebuild_layout()
+        await interaction.response.edit_message(view=self)
+
     async def _select_action(self, interaction: discord.Interaction):
         values = list(getattr(getattr(interaction, "data", None), "get", lambda _k, _d=None: _d)("values", []) or [])
         if not values:
@@ -937,6 +1019,9 @@ class WorkersPanelView(discord.ui.LayoutView):
             return
         if action == "_create_pairing":
             await self._create_pairing(interaction)
+            return
+        if action == "_pairing_modal":
+            await self._open_pairing_modal(interaction)
             return
         if action == "_cleanup_jobs":
             await self._cleanup_jobs(interaction)
@@ -965,7 +1050,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         if action == "_delete_worker":
             await self._delete_selected_worker(interaction)
             return
-        specs = {str(spec.get("value")): spec for spec in self._action_specs_for_selected()}
+        specs = {str(spec.get("value")): spec for spec in self._action_specs_for_selected(category=self.selected_action_category)}
         spec = specs.get(action)
         if spec is None:
             await interaction.response.send_message("Ação indisponível para esse worker.", ephemeral=True)
@@ -976,6 +1061,16 @@ class WorkersPanelView(discord.ui.LayoutView):
             payload=dict(spec.get("payload") or {}),
             summary=str(spec.get("summary") or spec.get("label") or action),
         )
+
+    async def _edit_panel_after_response(self, interaction: discord.Interaction) -> None:
+        try:
+            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            return
+        except Exception:
+            pass
+        if self.message is not None:
+            with contextlib.suppress(Exception):
+                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
 
     async def _refresh(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -1000,52 +1095,87 @@ class WorkersPanelView(discord.ui.LayoutView):
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
-    async def _create_pairing(self, interaction: discord.Interaction):
+    async def _open_pairing_modal(self, interaction: discord.Interaction):
+        view = self
+
+        class PairWorkerModal(discord.ui.Modal, title="Adicionar celular"):
+            worker_name = discord.ui.TextInput(
+                label="Nome do celular",
+                placeholder="Ex.: Xiaomi principal",
+                default="Core Worker 2",
+                min_length=2,
+                max_length=48,
+                required=True,
+            )
+            profile = discord.ui.TextInput(
+                label="Perfil",
+                placeholder="leve, midia, completo ou bedrock",
+                default="midia",
+                min_length=3,
+                max_length=16,
+                required=True,
+            )
+
+            async def on_submit(self, modal_interaction: discord.Interaction) -> None:
+                await view._create_pairing(
+                    modal_interaction,
+                    worker_name=str(self.worker_name.value or "Core Worker 2"),
+                    profile=str(self.profile.value or "midia"),
+                )
+
+        await interaction.response.send_modal(PairWorkerModal())
+
+    async def _create_pairing(self, interaction: discord.Interaction, *, worker_name: str = "Core Worker 2", profile: str = "midia"):
         await interaction.response.defer(thinking=False)
         try:
             pairing = await self.cog._create_core_worker_pairing(interaction.user)
             code = str(pairing.get("code") or "")
             expires = _format_seconds(max(0, float(pairing.get("expires_at") or 0) - time.time()))
             base_url = _public_base_url()
-            default_name = "Core Worker 2"
-            default_profile = "midia"
+            default_name = _shorten(worker_name or "Core Worker 2", limit=48)
+            default_profile = _normalize_worker_profile(profile)
             bootstrap_cmd = f'cd ~/phone-worker && bash ./bootstrap-phone-worker.sh {code} {base_url} "{default_name}" {default_profile}'
             pair_cmd = f'~/phone-worker/pair-phone-worker.sh {code} {base_url} "{default_name}" {default_profile}'
+            profile_roles = ", ".join(WORKER_ROLE_PROFILES.get(default_profile, ()))
             msg = (
-                "## 🔐 Parear novo Core Worker\n"
+                "## 🔐 Código para adicionar celular\n"
                 f"**Código:** `{code}` · expira em `{expires}`\n"
-                "-# Fluxo temporário para Termux. No APK Core Worker, isso será automático com botão/QR.\n\n"
-                "**Comando principal para o novo celular:**\n"
+                f"**Nome:** `{default_name}` · **perfil:** `{default_profile}`\n"
+                "-# Temporário via Termux. No APK Core Worker, isso vira um botão/QR.\n\n"
+                "**No Termux do celular novo, cole:**\n"
                 f"{_termux_command_block(bootstrap_cmd)}"
-                "**Se o worker já estiver instalado:**\n"
-                f"{_termux_command_block(pair_cmd)}"
-                f"Perfil: `{default_profile}` · altere o nome entre aspas se quiser.\n"
-                "-# Perfis: `leve`, `midia`, `completo`, `bedrock`. O token fica só em `~/.phone-worker.env`."
+                "Depois espere aparecer `pareado` e toque **Atualizar** no painel.\n\n"
+                f"Funções desse perfil: `{_shorten(profile_roles, limit=220)}`\n"
+                "-# Se o worker já estiver instalado, use `pair-phone-worker.sh` no lugar do bootstrap."
             )
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"código de pareamento gerado: {code}")
             self._ensure_selected_worker()
             self._rebuild_layout()
-            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            await self._edit_panel_after_response(interaction)
             await interaction.followup.send(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha ao gerar pareamento: {_compact_failure(exc)}")
             self._ensure_selected_worker()
             self._rebuild_layout()
-            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            await self._edit_panel_after_response(interaction)
             await interaction.followup.send("Não consegui gerar o pareamento agora.", ephemeral=True)
 
     async def _show_onboarding_guide(self, interaction: discord.Interaction):
         base_url = _public_base_url()
         msg = (
-            "## 📲 Novo celular como Core Worker\n"
-            "Este guia é temporário para Termux. No APK Core Worker, o app fará pareamento, token, heartbeat e start automaticamente.\n\n"
-            "**Fluxo manual atual:**\n"
-            "1. Conecte o celular no Tailscale.\n"
-            "2. Copie/instale `~/phone-worker`.\n"
-            "3. Use **Parear novo worker** para gerar código e comando pronto.\n\n"
-            f"**URL da VPS detectada:** `{base_url}`\n"
-            "**Perfis:** `leve`, `midia`, `completo`, `bedrock`\n\n"
-            "Com 2+ workers online, use **Teste failover** para validar a escolha automática."
+            "## 📲 Como adicionar um celular\n"
+            "Este é o modo temporário via **Termux**. No futuro, o APK Core Worker fará estes passos sozinho com um botão ou QR.\n\n"
+            "**Antes de começar no celular novo:**\n"
+            "1. Instale o **Termux**.\n"
+            "2. Conecte o **Tailscale** na mesma rede da VPS.\n"
+            "3. Tenha a pasta `~/phone-worker` no Termux.\n\n"
+            "**Depois, neste painel:**\n"
+            "1. Escolha a categoria **Adicionar celular**.\n"
+            "2. Use **Gerar código**.\n"
+            "3. Copie o comando pronto e cole no Termux do celular novo.\n"
+            "4. Quando terminar, toque **Atualizar**.\n\n"
+            f"VPS detectada: `{base_url}`\n"
+            "Perfis disponíveis: `leve`, `midia`, `completo`, `bedrock`."
         )
         await interaction.response.send_message(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
