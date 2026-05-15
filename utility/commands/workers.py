@@ -329,6 +329,64 @@ def _compact_failure(exc: BaseException) -> str:
     return _shorten(text, limit=110)
 
 
+def _job_result_note(job_type: object, job: dict[str, Any] | None) -> str:
+    kind = _task_name(job_type)
+    if not isinstance(job, dict) or not job:
+        return f"`{kind}` enviado; aguardando resultado"
+    status = str(job.get("status") or "queued").strip().lower()
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    summary = _shorten(result.get("summary") or job.get("summary") or job.get("error") or status, limit=72)
+    if status == "succeeded":
+        return f"✅ `{kind}` concluído: {summary}"
+    if status == "failed":
+        return f"❌ `{kind}` falhou: {summary}"
+    if status == "running":
+        return f"⏳ `{kind}` em execução"
+    if status == "queued":
+        return f"⏳ `{kind}` aguardando worker"
+    return f"`{kind}`: {summary}"
+
+
+def _job_detail_text(job: dict[str, Any] | None) -> str:
+    if not isinstance(job, dict) or not job:
+        return "Nenhum resultado recente encontrado para este worker."
+    status = str(job.get("status") or "desconhecido")
+    kind = str(job.get("type") or "job")
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    lines = [
+        f"## Resultado do worker",
+        f"Tipo: `{_shorten(kind, limit=48)}`",
+        f"Status: `{_shorten(status, limit=32)}`",
+    ]
+    summary = result.get("summary") or job.get("summary") or job.get("error")
+    if summary:
+        lines.append(f"Resumo: {_shorten(_redact(summary), limit=240)}")
+    if job.get("error"):
+        lines.append(f"Erro: `{_shorten(_redact(job.get('error')), limit=220)}`")
+    interesting_keys = [
+        "version", "target_version", "scripts", "battery", "network", "tailscale",
+        "services", "ffmpeg", "ffprobe", "lines", "error_lines", "path",
+    ]
+    shown = 0
+    for key in interesting_keys:
+        if key not in result:
+            continue
+        value = result.get(key)
+        if isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        else:
+            text = str(value)
+        lines.append(f"`{key}`: {_shorten(_redact(text), limit=420)}")
+        shown += 1
+        if shown >= 6:
+            break
+    tail = result.get("tail")
+    if isinstance(tail, str) and tail.strip():
+        tail = _redact(tail.strip())
+        lines.append("```txt\n" + tail[-1400:] + "\n```")
+    return "\n".join(lines)[:1900]
+
+
 def _has_online_registry_worker(snapshot: "WorkerSnapshot") -> bool:
     summary = (snapshot.registry_snapshot or {}).get("summary") if isinstance(snapshot.registry_snapshot, dict) else {}
     try:
@@ -517,6 +575,9 @@ class WorkersPanelView(discord.ui.LayoutView):
     def _action_specs_for_selected(self) -> list[dict[str, Any]]:
         supported = self._selected_supported_tasks()
         specs: list[dict[str, Any]] = []
+        if self._selected_worker() is not None:
+            specs.append({"label": "Ver último resultado", "value": "_show_last_result", "description": "Mostra o último resultado completo", "emoji": "📄", "panel_action": "last_result"})
+            specs.append({"label": "Renomear worker", "value": "_rename_worker", "description": "Troca o nome exibido no painel", "emoji": "✏️", "panel_action": "rename"})
         for spec in WORKER_ACTION_SPECS:
             job_type = _task_name(spec.get("job_type"))
             requires_declared = bool(spec.get("requires_declared"))
@@ -614,13 +675,6 @@ class WorkersPanelView(discord.ui.LayoutView):
         pairing = discord.ui.Button(label="Parear worker", emoji="🔐", style=discord.ButtonStyle.success)
         pairing.callback = self._create_pairing
 
-        update_worker = discord.ui.Button(
-            label="Atualizar worker",
-            emoji="⬆️",
-            style=discord.ButtonStyle.secondary,
-        )
-        update_worker.callback = self._sync_worker
-
         wake = discord.ui.Button(
             label="Acordar phone-worker",
             emoji="📡",
@@ -643,8 +697,9 @@ class WorkersPanelView(discord.ui.LayoutView):
                 discord.ui.ActionRow(worker_select),
                 discord.ui.ActionRow(action_select),
             ])
-        components.append(discord.ui.ActionRow(refresh, pairing, update_worker))
-        components.append(discord.ui.ActionRow(wake, cleanup_jobs))
+        components.append(discord.ui.ActionRow(refresh, pairing, cleanup_jobs))
+        if not _has_online_registry_worker(snapshot):
+            components.append(discord.ui.ActionRow(wake))
         container = discord.ui.Container(*components, accent_color=snapshot.accent)
         self.add_item(container)
 
@@ -717,6 +772,12 @@ class WorkersPanelView(discord.ui.LayoutView):
         action = str((values or [""])[0] or "")
         if action == "_unsupported":
             await interaction.response.send_message("Esse worker está desatualizado ou não declarou suporte para ações seguras.", ephemeral=True)
+            return
+        if action == "_show_last_result":
+            await self._show_last_result(interaction)
+            return
+        if action == "_rename_worker":
+            await self._open_rename_modal(interaction)
             return
         specs = {str(spec.get("value")): spec for spec in self._action_specs_for_selected()}
         spec = specs.get(action)
@@ -809,14 +870,65 @@ class WorkersPanelView(discord.ui.LayoutView):
                     target_worker_id=target_worker_id,
                 )
                 job = result.get("job") if isinstance(result, dict) else {}
+                job_id = str((job or {}).get("job_id") or "")
                 target_label = _shorten(target_worker_id or "worker online", limit=32)
-                status = _shorten((job or {}).get("status") or "queued", limit=18)
-                self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"`{job_type}` enfileirado para {target_label} ({status})")
+                self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"⏳ `{job_type}` enviado para {target_label}; aguardando resultado")
+                self._ensure_selected_worker()
+                self._rebuild_layout()
+                await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+                final_job = await self.cog._wait_core_worker_job(job_id, timeout=_env_float("WORKERS_PANEL_ACTION_WAIT_SECONDS", 12.0)) if job_id else None
+                self.snapshot = await self.cog._collect_workers_snapshot(action_note=_job_result_note(job_type, final_job))
         except Exception as exc:
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha em `{job_type}`: {_compact_failure(exc)}")
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _show_last_result(self, interaction: discord.Interaction):
+        worker_id = self._job_target_worker_id()
+        if not worker_id:
+            await interaction.response.send_message("Selecione um worker registrado para ver resultados.", ephemeral=True)
+            return
+        try:
+            job = await self.cog._latest_core_worker_job(worker_id)
+            await interaction.response.send_message(_job_detail_text(job), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as exc:
+            await interaction.response.send_message(f"Não consegui buscar o resultado: {_compact_failure(exc)}", ephemeral=True)
+
+    async def _open_rename_modal(self, interaction: discord.Interaction):
+        worker = self._selected_worker()
+        if not worker:
+            await interaction.response.send_message("Selecione um worker registrado para renomear.", ephemeral=True)
+            return
+        view = self
+        current_name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=64)
+        worker_id = str(worker.get("worker_id") or "")
+
+        class RenameWorkerModal(discord.ui.Modal, title="Renomear Core Worker"):
+            new_name = discord.ui.TextInput(
+                label="Novo nome",
+                placeholder="Ex.: Redmi Worker",
+                default=current_name[:100],
+                min_length=2,
+                max_length=64,
+                required=True,
+            )
+
+            async def on_submit(self, modal_interaction: discord.Interaction) -> None:
+                await modal_interaction.response.defer(thinking=False)
+                try:
+                    await view.cog._rename_core_worker(worker_id, str(self.new_name.value or ""))
+                    view.snapshot = await view.cog._collect_workers_snapshot(action_note=f"worker renomeado para {_shorten(self.new_name.value, limit=40)}")
+                except Exception as exc:
+                    view.snapshot = await view.cog._collect_workers_snapshot(action_note=f"falha ao renomear: {_compact_failure(exc)}")
+                view._ensure_selected_worker()
+                view._rebuild_layout()
+                if view.message is not None:
+                    await view.message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+                with contextlib.suppress(Exception):
+                    await modal_interaction.followup.send("Nome do worker atualizado.", ephemeral=True)
+
+        await interaction.response.send_modal(RenameWorkerModal())
 
     async def _cleanup_jobs(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -1052,6 +1164,39 @@ class WorkersCommandMixin:
             max_attempts=2,
             summary=summary or job_type,
         )
+
+    async def _get_core_worker_job(self, job_id: str) -> dict[str, Any] | None:
+        if not job_id:
+            return None
+        registry = get_core_workers_registry()
+        try:
+            result = await asyncio.to_thread(registry.get_job, job_id)
+        except Exception:
+            return None
+        job = result.get("job") if isinstance(result, dict) else None
+        return job if isinstance(job, dict) else None
+
+    async def _wait_core_worker_job(self, job_id: str, *, timeout: float = 7.0) -> dict[str, Any] | None:
+        deadline = time.monotonic() + max(0.5, float(timeout or 0))
+        last: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            job = await self._get_core_worker_job(job_id)
+            if isinstance(job, dict):
+                last = job
+                if str(job.get("status") or "").lower() in {"succeeded", "failed", "expired"}:
+                    return job
+            await asyncio.sleep(0.8)
+        return last
+
+    async def _latest_core_worker_job(self, worker_id: str) -> dict[str, Any] | None:
+        registry = get_core_workers_registry()
+        result = await asyncio.to_thread(registry.latest_job_for_worker, worker_id)
+        job = result.get("job") if isinstance(result, dict) else None
+        return job if isinstance(job, dict) else None
+
+    async def _rename_core_worker(self, worker_id: str, name: str) -> dict[str, Any]:
+        registry = get_core_workers_registry()
+        return await asyncio.to_thread(registry.rename_worker, worker_id, name)
 
     async def _cleanup_core_worker_jobs(self) -> dict[str, Any]:
         registry = get_core_workers_registry()

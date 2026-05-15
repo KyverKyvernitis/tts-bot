@@ -35,7 +35,7 @@ JOBS_FAILED = 0
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.5.1"
+PHONE_WORKER_VERSION = "1.5.2"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -205,11 +205,44 @@ def _update_env_file(path: str | None, updates: dict[str, Any]) -> Path:
     return env_path
 
 
+def _android_prop(name: str) -> str:
+    if not shutil.which("getprop"):
+        return ""
+    try:
+        proc = subprocess.run(["getprop", name], capture_output=True, text=True, timeout=1.2)
+        return (proc.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _default_worker_name() -> str:
+    configured = str(os.getenv("CORE_WORKER_NAME") or os.getenv("PHONE_WORKER_NAME") or "").strip()
+    if configured and configured.lower() not in {"localhost", "localhost.localdomain", "termux"}:
+        return configured
+    manufacturer = _android_prop("ro.product.manufacturer")
+    model = _android_prop("ro.product.model")
+    device = _android_prop("ro.product.device")
+    parts = []
+    if manufacturer and manufacturer.lower() not in str(model).lower():
+        parts.append(manufacturer)
+    if model:
+        parts.append(model)
+    elif device:
+        parts.append(device)
+    label = " ".join(part.strip() for part in parts if part.strip())
+    if label:
+        return label[:64]
+    node = str(platform.node() or "").strip()
+    if node and node.lower() not in {"localhost", "localhost.localdomain"}:
+        return node[:64]
+    return "Core Phone Worker"
+
+
 def _default_worker_id() -> str:
     raw = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
     if raw:
         return raw
-    name = str(os.getenv("CORE_WORKER_NAME") or os.getenv("PHONE_WORKER_NAME") or platform.node() or "phone-worker").strip().lower()
+    name = _default_worker_name().strip().lower()
     name = re.sub(r"[^a-z0-9_.:-]+", "-", name).strip("-._:") or "phone-worker"
     seed = f"{platform.node()}|{Path.home()}".encode("utf-8", errors="ignore")
     suffix = hashlib.sha256(seed).hexdigest()[:8]
@@ -440,7 +473,7 @@ def _post_core_worker_json(path: str, payload: dict[str, Any], *, timeout: float
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     status = _system_status()
     worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
-    name = str(os.getenv("CORE_WORKER_NAME") or os.getenv("PHONE_WORKER_NAME") or platform.node() or "Core Phone Worker").strip()
+    name = _default_worker_name()
     endpoint = str(os.getenv("CORE_WORKER_ENDPOINT") or os.getenv("PHONE_WORKER_ENDPOINT") or "").strip()
     if not endpoint and host not in {"", "0.0.0.0", "::"}:
         endpoint = f"http://{host}:{port}"
@@ -504,7 +537,7 @@ def _pair_core_worker(
         return False
 
     selected_worker_id = str(worker_id or _default_worker_id()).strip()
-    selected_name = str(name or os.getenv("CORE_WORKER_NAME") or os.getenv("PHONE_WORKER_NAME") or platform.node() or "Core Phone Worker").strip()
+    selected_name = str(name or _default_worker_name()).strip()
     payload = _core_worker_payload(host=host, port=port)
     payload.update({
         "code": normalized_code,

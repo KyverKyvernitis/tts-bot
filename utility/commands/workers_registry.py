@@ -742,6 +742,65 @@ class CoreWorkersRegistry:
             public = _compact_job_public(job, include_result=True, now=ts)
         return {"ok": True, "job": public}
 
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        safe_id = _short_text(job_id, limit=64)
+        if not safe_id:
+            raise CoreWorkerRegistryError("job_id ausente", status=400)
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            self._cleanup_jobs_unlocked(data, now=ts)
+            jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            job = jobs.get(safe_id)
+            if not isinstance(job, Mapping):
+                raise CoreWorkerRegistryError("job não encontrado", status=404)
+            public = _compact_job_public(job, include_result=True, now=ts)
+        return {"ok": True, "job": public}
+
+    def latest_job_for_worker(self, worker_id: str) -> dict[str, Any]:
+        safe_worker_id = _safe_worker_id(worker_id)
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            self._cleanup_jobs_unlocked(data, now=ts)
+            jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            candidates = []
+            for job in jobs.values():
+                if not isinstance(job, Mapping):
+                    continue
+                assigned = str(job.get("worker_id") or job.get("target_worker_id") or "")
+                if safe_worker_id and assigned and assigned != safe_worker_id:
+                    continue
+                if safe_worker_id and not assigned:
+                    continue
+                candidates.append(job)
+            candidates.sort(key=lambda job: float(job.get("finished_at") or job.get("updated_at") or job.get("created_at") or 0.0), reverse=True)
+            if not candidates:
+                return {"ok": True, "job": None}
+            return {"ok": True, "job": _compact_job_public(candidates[0], include_result=True, now=ts)}
+
+    def rename_worker(self, worker_id: str, name: str) -> dict[str, Any]:
+        safe_worker_id = _safe_worker_id(worker_id)
+        clean_name = _short_text(name, limit=64)
+        if not clean_name:
+            raise CoreWorkerRegistryError("nome ausente", status=400)
+        if len(clean_name) < 2:
+            raise CoreWorkerRegistryError("nome curto demais", status=400)
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+            worker = workers.get(safe_worker_id)
+            if not isinstance(worker, dict):
+                raise CoreWorkerRegistryError("worker não encontrado", status=404)
+            worker["name"] = clean_name
+            worker["updated_at"] = ts
+            workers[safe_worker_id] = worker
+            data["workers"] = workers
+            self._save_unlocked(data)
+            public = _compact_worker_public(worker, now=ts)
+        return {"ok": True, "worker": public}
+
     def snapshot(self) -> dict[str, Any]:
         ts = _now()
         with self._lock:
