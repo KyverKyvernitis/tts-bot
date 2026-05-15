@@ -5,4 +5,5 @@ __all__ = [
     "ping",
     "vps",
     "workers",
+    "workers_registry",
 ]

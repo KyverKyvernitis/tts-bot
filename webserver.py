@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, abort, send_file
+from flask import Flask, jsonify, abort, send_file, request
 from waitress import serve
 import os
 import threading
@@ -63,6 +63,28 @@ def health():
                 "error": str(e),
             }), 500
     return jsonify({"ok": True}), 200
+
+
+@app.post("/core-worker/pair")
+def core_worker_pair():
+    from utility.commands.workers_registry import redeem_core_worker_pairing_http
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    status, body = redeem_core_worker_pairing_http(payload, remote_addr=request.remote_addr or "")
+    return jsonify(body), status
+
+
+@app.post("/core-worker/heartbeat")
+def core_worker_heartbeat():
+    from utility.commands.workers_registry import core_worker_heartbeat_http
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    status, body = core_worker_heartbeat_http(request.headers, payload, remote_addr=request.remote_addr or "")
+    return jsonify(body), status
 
 
 @app.get("/tts-audio/<token>")

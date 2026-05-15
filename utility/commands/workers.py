@@ -16,6 +16,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utility.commands.workers_registry import get_core_workers_registry
+
 
 WORKERS_COMMAND_GUILD_ID = 927002914449424404
 WORKERS_COMMAND_GUILD = discord.Object(id=WORKERS_COMMAND_GUILD_ID)
@@ -34,7 +36,9 @@ WORKERS_DEFAULT_ROLES = (
 _SECRET_PATTERNS = (
     re.compile(r"(Authorization:\s*Bearer\s+)[^\s]+", re.IGNORECASE),
     re.compile(r"(PHONE_WORKER_TOKEN\s*=\s*)[^\s]+", re.IGNORECASE),
+    re.compile(r"(CORE_WORKER_TOKEN\s*=\s*)[^\s]+", re.IGNORECASE),
     re.compile(r"(X-Phone-Worker-Token:\s*)[^\s]+", re.IGNORECASE),
+    re.compile(r"(X-Core-Worker-Token:\s*)[^\s]+", re.IGNORECASE),
 )
 
 
@@ -56,6 +60,7 @@ def _env_float(name: str, default: float) -> float:
 
 def _shorten(text: object, *, limit: int = 80) -> str:
     value = str(text or "").replace("\n", " ").strip()
+    value = re.sub(r"\s+", " ", value)
     if len(value) > limit:
         return value[: max(1, limit - 1)].rstrip() + "…"
     return value
@@ -86,6 +91,18 @@ def _format_seconds(value: object) -> str:
     if secs or not parts:
         parts.append(f"{secs}s")
     return " ".join(parts[:3])
+
+
+def _format_age(value: object) -> str:
+    if value is None:
+        return "nunca"
+    try:
+        seconds = max(0.0, float(value))
+    except Exception:
+        return "desconhecido"
+    if seconds < 2:
+        return "agora"
+    return f"há {_format_seconds(seconds)}"
 
 
 def _format_bytes(value: object) -> str:
@@ -123,8 +140,8 @@ def _host_label(host: str) -> str:
     host = str(host or "").strip()
     if not host:
         return "não configurado"
-    # Tailscale costuma usar 100.x.y.z. Não é segredo, mas evitar mostrar tudo
-    # em painel técnico reduz vazamento acidental em prints.
+    # Tailscale costuma usar 100.x.y.z. Não é segredo, mas mascarar reduz
+    # vazamento acidental em print do painel.
     if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host):
         parts = host.split(".")
         return f"{parts[0]}.{parts[1]}.x.x"
@@ -136,6 +153,50 @@ def _host_label(host: str) -> str:
 def _repo_root() -> Path:
     # utility/commands/workers.py -> repo root
     return Path(__file__).resolve().parents[2]
+
+
+def _public_base_url() -> str:
+    return str(os.getenv("CORE_WORKER_PUBLIC_BASE_URL") or os.getenv("VPS_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+
+
+def _battery_text(worker: dict[str, Any]) -> str:
+    battery = worker.get("battery") if isinstance(worker.get("battery"), dict) else {}
+    if not battery:
+        return "bateria n/a"
+    level = battery.get("level") or battery.get("percent") or battery.get("percentage")
+    charging = battery.get("charging")
+    parts: list[str] = []
+    try:
+        if level is not None:
+            parts.append(f"{int(float(level))}%")
+    except Exception:
+        pass
+    if isinstance(charging, bool):
+        parts.append("carregando" if charging else "sem carga")
+    elif charging is not None:
+        parts.append(_shorten(charging, limit=18))
+    return " ".join(parts) if parts else "bateria n/a"
+
+
+def _network_text(worker: dict[str, Any]) -> str:
+    network = worker.get("network") if isinstance(worker.get("network"), dict) else {}
+    if not network:
+        return "rede n/a"
+    kind = network.get("type") or network.get("kind") or network.get("transport") or network.get("name")
+    tailscale = network.get("tailscale")
+    parts: list[str] = []
+    if kind:
+        parts.append(_shorten(kind, limit=18))
+    if isinstance(tailscale, bool):
+        parts.append("tailscale ok" if tailscale else "tailscale off")
+    return " · ".join(parts) if parts else "rede n/a"
+
+
+def _role_text(roles: list[str], *, limit: int = 8) -> str:
+    selected = [str(role) for role in roles[:limit] if role]
+    if not selected:
+        return "`nenhuma`"
+    return " ".join(f"`{_shorten(role, limit=24)}`" for role in selected)
 
 
 @dataclass(slots=True)
@@ -153,6 +214,8 @@ class WorkerSnapshot:
     checked_at: float = field(default_factory=time.time)
     action_note: str = ""
     watch_output: str = ""
+    registry_snapshot: dict[str, Any] = field(default_factory=dict)
+    registry_error: str = ""
 
     @property
     def base_url_label(self) -> str:
@@ -162,17 +225,21 @@ class WorkerSnapshot:
 
     @property
     def state_label(self) -> str:
-        if not self.enabled:
-            return "⚫ desativado"
-        if not self.configured:
-            return "🟠 incompleto"
+        registered_online = int(((self.registry_snapshot or {}).get("summary") or {}).get("online") or 0)
+        if registered_online > 0:
+            return f"🟢 {registered_online} worker(s) online"
         if self.online:
-            return "🟢 online"
-        return "🔴 offline"
+            return "🟢 phone-worker online"
+        if not self.enabled:
+            return "⚫ phone-worker desativado"
+        if not self.configured:
+            return "🟠 phone-worker incompleto"
+        return "🔴 nenhum worker online"
 
     @property
     def accent(self) -> discord.Color:
-        if self.online:
+        summary = (self.registry_snapshot or {}).get("summary") if isinstance(self.registry_snapshot, dict) else {}
+        if int((summary or {}).get("online") or 0) > 0 or self.online:
             return discord.Color.green()
         if self.configured and self.enabled:
             return discord.Color.orange()
@@ -221,29 +288,29 @@ class WorkersPanelView(discord.ui.LayoutView):
             ))
             return
 
+        summary = (snapshot.registry_snapshot or {}).get("summary") if isinstance(snapshot.registry_snapshot, dict) else {}
         header = discord.ui.TextDisplay(
             "# 📱 Core Workers\n"
             f"-# Painel privado do orquestrador · guild `{WORKERS_COMMAND_GUILD_ID}`\n"
-            f"**Estado:** {snapshot.state_label} · **Worker:** `{_shorten(snapshot.name, limit=40)}`"
+            f"**Estado:** {snapshot.state_label}\n"
+            f"**Registry:** `{int((summary or {}).get('registered') or 0)}` registrado(s) · "
+            f"`{int((summary or {}).get('online') or 0)}` online · "
+            f"`{int((summary or {}).get('pairings_active') or 0)}` pareamento(s) ativo(s)"
         )
-
-        status_lines = self._status_lines(snapshot)
-        role_lines = self._role_lines(snapshot)
-        action_lines = self._action_lines(snapshot)
 
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary)
         refresh.callback = self._refresh
 
+        pairing = discord.ui.Button(label="Parear APK", emoji="🔐", style=discord.ButtonStyle.success)
+        pairing.callback = self._create_pairing
+
         wake = discord.ui.Button(
-            label="Acordar worker",
+            label="Acordar phone-worker",
             emoji="📡",
-            style=discord.ButtonStyle.success,
+            style=discord.ButtonStyle.secondary,
             disabled=not snapshot.configured,
         )
         wake.callback = self._wake_worker
-
-        pairing = discord.ui.Button(label="Pareamento APK", emoji="🔐", style=discord.ButtonStyle.secondary)
-        pairing.callback = self._pairing_info
 
         close = discord.ui.Button(label="Fechar", emoji="✖️", style=discord.ButtonStyle.danger)
         close.callback = self._close
@@ -251,17 +318,57 @@ class WorkersPanelView(discord.ui.LayoutView):
         container = discord.ui.Container(
             header,
             discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(status_lines)),
+            discord.ui.TextDisplay("\n".join(self._registry_lines(snapshot))),
             discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(role_lines)),
+            discord.ui.TextDisplay("\n".join(self._legacy_status_lines(snapshot))),
             discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(action_lines)),
-            discord.ui.ActionRow(refresh, wake, pairing, close),
+            discord.ui.TextDisplay("\n".join(self._action_lines(snapshot))),
+            discord.ui.ActionRow(refresh, pairing, wake, close),
             accent_color=snapshot.accent,
         )
         self.add_item(container)
 
-    def _status_lines(self, snapshot: WorkerSnapshot) -> list[str]:
+    def _registry_lines(self, snapshot: WorkerSnapshot) -> list[str]:
+        if snapshot.registry_error:
+            return [
+                "## 🧬 Registry multi-worker",
+                f"Erro lendo registry: `{_shorten(_redact(snapshot.registry_error), limit=180)}`",
+            ]
+        registry = snapshot.registry_snapshot or {}
+        workers = registry.get("workers") if isinstance(registry.get("workers"), list) else []
+        pairings = registry.get("pairings") if isinstance(registry.get("pairings"), list) else []
+        lines = ["## 🧬 Registry multi-worker"]
+        if not workers:
+            lines.append("Nenhum Core Worker pareado ainda. Use **Parear APK** para gerar um código temporário.")
+        else:
+            for worker in workers[:5]:
+                if not isinstance(worker, dict):
+                    continue
+                icon = "🟢" if worker.get("online") else "🔴"
+                name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=32)
+                worker_id = _shorten(worker.get("worker_id"), limit=22)
+                roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=5)
+                seen = _format_age(worker.get("last_seen_age_seconds"))
+                battery = _battery_text(worker)
+                network = _network_text(worker)
+                version = _shorten(worker.get("version"), limit=24) or "sem versão"
+                lines.append(f"{icon} **{name}** · `{worker_id}`")
+                lines.append(f"-# {roles} · visto {seen} · {battery} · {network} · {version}")
+            hidden = max(0, len(workers) - 5)
+            if hidden:
+                lines.append(f"-# … +{hidden} worker(s) oculto(s) para manter o painel compacto.")
+        if pairings:
+            active = []
+            for pair in pairings[:3]:
+                try:
+                    ttl = _format_seconds(pair.get("ttl_left_seconds"))
+                except Exception:
+                    ttl = "?"
+                active.append(f"`{ttl}`")
+            lines.append("-# Pareamentos ativos expiram em: " + " · ".join(active))
+        return lines
+
+    def _legacy_status_lines(self, snapshot: WorkerSnapshot) -> list[str]:
         status = snapshot.status or {}
         disk = status.get("disk_home") if isinstance(status.get("disk_home"), dict) else {}
         free = _format_bytes(disk.get("free")) if isinstance(disk, dict) else "desconhecido"
@@ -273,7 +380,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             load_text = "indisponível"
 
         lines = [
-            "## 🩺 Saúde",
+            "## 🩺 Phone-worker atual",
             f"Endpoint: `{snapshot.base_url_label}`",
             f"Configurado no `.env`: **{'sim' if snapshot.configured else 'não'}** · habilitado: **{'sim' if snapshot.enabled else 'não'}**",
         ]
@@ -282,35 +389,25 @@ class WorkersPanelView(discord.ui.LayoutView):
                 f"Uptime: `{_format_seconds(status.get('uptime_seconds'))}` · PID: `{status.get('pid', '?')}`",
                 f"Jobs: `{status.get('jobs_started', 0)}` iniciados · `{status.get('jobs_failed', 0)}` falhas",
                 f"Disco home: `{used}` usado · `{free}` livre · load: `{load_text}`",
-                f"Python: `{_shorten(status.get('python'), limit=22)}` · máquina: `{_shorten(status.get('machine'), limit=18)}`",
+                f"Roles: {_role_text(snapshot.roles, limit=8)}",
+                f"Capacidades: ffmpeg {'✅' if status.get('ffmpeg') else '❌'} · ffprobe {'✅' if status.get('ffprobe') else '❌'}",
             ])
         elif snapshot.error:
             lines.append(f"Erro: `{_shorten(_redact(snapshot.error), limit=180)}`")
         else:
-            lines.append("Ainda não há resposta do worker atual.")
+            lines.append("Ainda não há resposta do phone-worker direto.")
         return lines
 
-    def _role_lines(self, snapshot: WorkerSnapshot) -> list[str]:
-        status = snapshot.status or {}
-        roles = snapshot.roles or []
-        role_text = " · ".join(f"`{role}`" for role in roles[:12]) or "`nenhuma`"
-        capability_bits = [
-            f"ffmpeg {'✅' if status.get('ffmpeg') else '❌'}",
-            f"ffprobe {'✅' if status.get('ffprobe') else '❌'}",
-        ]
-        return [
-            "## 🧩 Roles e capacidades",
-            role_text,
-            "-# " + " · ".join(capability_bits),
-            "-# Esta versão ainda lê o phone-worker atual. O registro multi-celular entra na próxima etapa do Core Worker.",
-        ]
-
     def _action_lines(self, snapshot: WorkerSnapshot) -> list[str]:
+        base_url = _public_base_url()
+        pair_route = f"{base_url}/core-worker/pair" if base_url else "/core-worker/pair"
+        heartbeat_route = f"{base_url}/core-worker/heartbeat" if base_url else "/core-worker/heartbeat"
         lines = [
             "## 🕹️ Controle",
-            "`Atualizar` consulta `/status` sem expor token.",
-            "`Acordar worker` chama o watchdog seguro da VPS (`scripts/phone-worker-watch.sh`).",
-            "`Pareamento APK` mostra o fluxo planejado para o Core Worker privado.",
+            "`Atualizar` consulta o registry e o `/status` do phone-worker sem mostrar token.",
+            "`Parear APK` gera código temporário; a VPS salva só hash do código/token.",
+            f"Rotas do APK/agent: `POST {pair_route}` · `POST {heartbeat_route}`",
+            "`Acordar phone-worker` chama o watchdog seguro da VPS (`scripts/phone-worker-watch.sh`).",
         ]
         if snapshot.action_note:
             lines.append(f"\n**Última ação:** {_shorten(_redact(snapshot.action_note), limit=220)}")
@@ -331,19 +428,35 @@ class WorkersPanelView(discord.ui.LayoutView):
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
-    async def _pairing_info(self, interaction: discord.Interaction):
-        message = (
-            "## 🔐 Pareamento planejado do Core Worker APK\n"
-            "1. `/workers` gera um código temporário.\n"
-            "2. O APK lê o código/QR e pede um token limitado para aquele celular.\n"
-            "3. A VPS salva só o hash do token e as roles do aparelho.\n"
-            "4. O celular aparece no painel com bateria, rede, roles, logs e saúde.\n\n"
-            "Nada de token do Discord, GitHub token ou segredo global dentro do APK/GitHub."
-        )
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
+    async def _create_pairing(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=False)
+        try:
+            pairing = await self.cog._create_core_worker_pairing(interaction.user)
+            code = str(pairing.get("code") or "")
+            ttl = _format_seconds(pairing.get("ttl_seconds"))
+            expires = _format_seconds(max(0, float(pairing.get("expires_at") or 0) - time.time()))
+            base_url = _public_base_url() or "URL do webserver da VPS/Tailscale"
+            msg = (
+                "## 🔐 Pareamento Core Worker\n"
+                f"Código temporário: `{code}`\n"
+                f"Validade: `{ttl}` · expira em `{expires}`\n\n"
+                "No APK/agent, use esse código para chamar:\n"
+                f"`POST {base_url}/core-worker/pair`\n\n"
+                "Payload mínimo planejado:\n"
+                "```json\n"
+                f"{{\"code\":\"{code}\",\"name\":\"Meu celular\",\"roles\":[\"tts\",\"ffmpeg\"]}}\n"
+                "```\n"
+                "A resposta entrega o token do worker **uma única vez**. Salve localmente no APK/agent; não suba isso para GitHub."
+            )
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"código de pareamento gerado: {code}")
+            self._rebuild_layout()
+            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            await interaction.followup.send(msg, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as exc:
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha ao gerar pareamento: {type(exc).__name__}: {exc}")
+            self._rebuild_layout()
+            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            await interaction.followup.send("Não consegui gerar o pareamento agora.", ephemeral=True)
 
     async def _close(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -356,9 +469,8 @@ class WorkersPanelView(discord.ui.LayoutView):
 class WorkersCommandMixin:
     """Comando `/workers` da cog Utility.
 
-    É um painel único em Components V2 para controlar a camada Core Worker.
-    Nesta primeira etapa ele monitora o phone-worker atual do Termux e deixa a
-    base pronta para evoluir para registry multi-celular sem expor segredos.
+    Painel único em Components V2 para o Core Worker: mostra o phone-worker atual,
+    o registry multi-celular, gera pareamento temporário e prepara a ponte do APK.
     """
 
     async def _can_use_workers(self, interaction: discord.Interaction) -> bool:
@@ -397,6 +509,14 @@ class WorkersCommandMixin:
             raise RuntimeError("resposta não é JSON object")
         return parsed
 
+    async def _collect_registry_snapshot(self) -> tuple[dict[str, Any], str]:
+        try:
+            registry = get_core_workers_registry()
+            snapshot = await asyncio.to_thread(registry.snapshot)
+            return snapshot, ""
+        except Exception as exc:
+            return {}, f"{type(exc).__name__}: {exc}"
+
     async def _collect_workers_snapshot(self, *, action_note: str = "", watch_output: str = "") -> WorkerSnapshot:
         enabled, configured, host, port, scheme, name = self._worker_base_config()
         timeout = max(0.8, _env_float("WORKERS_PANEL_STATUS_TIMEOUT_SECONDS", _env_float("PHONE_WORKER_QUICK_STATUS_TIMEOUT_SECONDS", 1.6)))
@@ -409,6 +529,7 @@ class WorkersCommandMixin:
                 online = bool(status.get("ok", True))
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
+        registry_snapshot, registry_error = await self._collect_registry_snapshot()
         roles = _parse_roles(os.getenv("PHONE_WORKER_ROLES") or os.getenv("CORE_WORKER_ROLES"), status=status)
         return WorkerSnapshot(
             enabled=enabled,
@@ -423,6 +544,16 @@ class WorkersCommandMixin:
             error=error,
             action_note=action_note,
             watch_output=watch_output,
+            registry_snapshot=registry_snapshot,
+            registry_error=registry_error,
+        )
+
+    async def _create_core_worker_pairing(self, owner: discord.abc.User) -> dict[str, Any]:
+        registry = get_core_workers_registry()
+        return await asyncio.to_thread(
+            registry.create_pairing,
+            created_by_id=int(getattr(owner, "id", 0) or 0),
+            created_by_name=str(getattr(owner, "display_name", None) or getattr(owner, "name", "") or ""),
         )
 
     async def _wake_phone_worker(self) -> WorkerSnapshot:
@@ -434,6 +565,7 @@ class WorkersCommandMixin:
         started = time.perf_counter()
         note = "watchdog executado"
         output = ""
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "bash",
@@ -451,10 +583,11 @@ class WorkersCommandMixin:
             note = f"watchdog finalizou com código {proc.returncode} em {elapsed:.1f}s"
         except asyncio.TimeoutError:
             note = f"watchdog excedeu {timeout:.0f}s"
-            with contextlib.suppress(Exception):
-                proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.communicate()
+            if proc is not None:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.communicate()
         except Exception as exc:
             note = f"watchdog falhou: {type(exc).__name__}: {exc}"
         return await self._collect_workers_snapshot(action_note=note, watch_output=output)
