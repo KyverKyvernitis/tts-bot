@@ -130,6 +130,55 @@ def normalize_roles(value: object, *, default: list[str] | None = None, limit: i
     return roles
 
 
+
+
+def normalize_job_types(value: object, *, default: list[str] | None = None, limit: int = 64) -> list[str]:
+    """Normaliza tipos de jobs/tasks preservando underscore.
+
+    `normalize_roles()` troca `_` por `-`, o que é correto para roles, mas
+    quebra tasks como `service_status`. Esta função aceita tanto
+    `service-status` quanto `service_status` e devolve sempre underscore.
+    """
+    raw_items: list[object]
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = re.split(r"[,;\s]+", str(value or ""))
+
+    tasks: list[str] = []
+    for item in raw_items:
+        task = str(item or "").strip().lower().replace("-", "_")
+        task = re.sub(r"[^a-z0-9_]+", "_", task).strip("_")
+        if not task:
+            continue
+        if task not in tasks:
+            tasks.append(task[:48])
+        if len(tasks) >= limit:
+            break
+    if not tasks and default:
+        for task in normalize_job_types(default, limit=limit):
+            if task not in tasks:
+                tasks.append(task)
+            if len(tasks) >= limit:
+                break
+    return tasks
+
+
+def _job_type_set(value: object) -> set[str]:
+    return set(normalize_job_types(value, limit=96))
+
+
+def _normalize_job_type(value: object) -> str:
+    items = normalize_job_types([value], limit=1)
+    return items[0] if items else ""
+
+
+def _worker_status_dict(worker: dict[str, Any]) -> dict[str, Any]:
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    clean = dict(status)
+    worker["status"] = clean
+    return clean
+
 def _safe_dict(value: object, *, max_items: int = 32, max_string: int = 8192) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -207,7 +256,7 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "last_heartbeat_at": record.get("last_heartbeat_at"),
         "roles": normalize_roles(record.get("roles"), limit=16),
         "capabilities": normalize_roles(record.get("capabilities"), limit=24),
-        "supported_tasks": normalize_roles(record.get("supported_tasks"), limit=48),
+        "supported_tasks": normalize_job_types(record.get("supported_tasks"), limit=64),
         "version": _short_text(record.get("version"), limit=48),
         "source": _short_text(record.get("source"), limit=32, default="apk"),
         "endpoint": _short_text(record.get("endpoint"), limit=160),
@@ -346,7 +395,7 @@ class CoreWorkersRegistry:
                 "paired_by_name": _short_text(match.get("created_by_name"), limit=80),
                 "roles": roles,
                 "capabilities": capabilities,
-                "supported_tasks": normalize_roles(payload.get("supported_tasks"), limit=48),
+                "supported_tasks": normalize_job_types(payload.get("supported_tasks"), limit=64),
                 "endpoint": endpoint,
                 "version": version,
                 "source": source,
@@ -390,7 +439,7 @@ class CoreWorkersRegistry:
             if "capabilities" in payload:
                 record["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities")), limit=24)
             if "supported_tasks" in payload:
-                record["supported_tasks"] = normalize_roles(payload.get("supported_tasks"), default=normalize_roles(record.get("supported_tasks")), limit=48)
+                record["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=64)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
                 if key in payload:
                     record[key] = _safe_dict(payload.get(key), max_items=max_items)
@@ -493,6 +542,15 @@ class CoreWorkersRegistry:
         with self._lock:
             data = self._load_unlocked()
             self._cleanup_jobs_unlocked(data, now=ts)
+            workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+            if record["target_worker_id"]:
+                target = workers.get(record["target_worker_id"])
+                if not isinstance(target, Mapping):
+                    raise CoreWorkerRegistryError("worker alvo não encontrado", status=404)
+                if not _compact_worker_public(target, now=ts).get("online"):
+                    raise CoreWorkerRegistryError("worker alvo está offline", status=409)
+                if not self._job_matches_worker(record, str(record["target_worker_id"]), target):
+                    raise CoreWorkerRegistryError("worker alvo não suporta este job", status=409)
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
             jobs[job_id] = record
             data["jobs"] = jobs
@@ -541,8 +599,8 @@ class CoreWorkersRegistry:
             return False
         if required_capabilities and not required_capabilities.issubset(capabilities):
             return False
-        supported_tasks = set(normalize_roles(worker.get("supported_tasks"), limit=64))
-        job_type = str(job.get("type") or "").strip().lower().replace("-", "_")
+        supported_tasks = _job_type_set(worker.get("supported_tasks"))
+        job_type = _normalize_job_type(job.get("type"))
         if supported_tasks and job_type and job_type not in supported_tasks:
             return False
         return True
@@ -563,7 +621,7 @@ class CoreWorkersRegistry:
             if "capabilities" in payload:
                 worker["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(worker.get("capabilities")), limit=24)
             if "supported_tasks" in payload:
-                worker["supported_tasks"] = normalize_roles(payload.get("supported_tasks"), default=normalize_roles(worker.get("supported_tasks")), limit=48)
+                worker["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(worker.get("supported_tasks")), limit=64)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
                 if key in payload:
                     worker[key] = _safe_dict(payload.get(key), max_items=max_items)
@@ -574,14 +632,25 @@ class CoreWorkersRegistry:
                 key=lambda job: float(job.get("created_at") or 0.0),
             )
             selected: dict[str, Any] | None = None
+            skipped_reasons: list[str] = []
             for job in candidates:
                 expires_at = float(job.get("expires_at") or 0.0)
                 if expires_at and expires_at <= ts:
+                    skipped_reasons.append(f"{job.get('job_id')}:expirado")
                     continue
                 if not self._job_matches_worker(job, worker_id, worker):
+                    skipped_reasons.append(f"{job.get('job_id')}:{_normalize_job_type(job.get('type')) or 'job'} incompatível")
                     continue
                 selected = job
                 break
+
+            status_dict = _worker_status_dict(worker)
+            queue_status = status_dict.get("core_worker_jobs") if isinstance(status_dict.get("core_worker_jobs"), dict) else {}
+            queue_status.update({
+                "last_poll_at": ts,
+                "last_poll_queued_seen": len(candidates),
+                "last_poll_worker_id": worker_id,
+            })
 
             if selected is not None:
                 selected["status"] = "running"
@@ -592,6 +661,18 @@ class CoreWorkersRegistry:
                 selected["started_at"] = selected.get("started_at") or ts
                 selected["updated_at"] = ts
                 jobs[str(selected.get("job_id"))] = selected
+                queue_status.update({
+                    "last_poll_state": "delivered",
+                    "last_job_id": str(selected.get("job_id") or ""),
+                    "last_job_type": _normalize_job_type(selected.get("type")),
+                    "last_poll_reason": "",
+                })
+            else:
+                queue_status.update({
+                    "last_poll_state": "no_job" if not candidates else "no_compatible_job",
+                    "last_poll_reason": "; ".join(skipped_reasons[:3]),
+                })
+            status_dict["core_worker_jobs"] = queue_status
             data["workers"][worker_id] = worker
             data["jobs"] = jobs
             self._save_unlocked(data)
@@ -643,6 +724,16 @@ class CoreWorkersRegistry:
             worker["updated_at"] = ts
             worker["last_heartbeat_at"] = ts
             worker["remote_addr"] = _short_text(remote_addr, limit=64)
+            status_dict = _worker_status_dict(worker)
+            queue_status = status_dict.get("core_worker_jobs") if isinstance(status_dict.get("core_worker_jobs"), dict) else {}
+            queue_status.update({
+                "last_result_at": ts,
+                "last_result_job_id": job_id,
+                "last_result_type": _normalize_job_type(job.get("type")),
+                "last_result_status": status,
+                "last_result_summary": _short_text(job.get("summary") or payload.get("summary") or payload.get("error"), limit=120),
+            })
+            status_dict["core_worker_jobs"] = queue_status
             data["workers"][worker_id] = worker
             jobs[job_id] = job
             data["jobs"] = jobs
@@ -656,7 +747,8 @@ class CoreWorkersRegistry:
         with self._lock:
             data = self._load_unlocked()
             expired = self._cleanup_pairings_unlocked(data, now=ts)
-            if expired:
+            job_cleanup = self._cleanup_jobs_unlocked(data, now=ts)
+            if expired or any(int(v or 0) for v in job_cleanup.values()):
                 self._save_unlocked(data)
             pairings_raw = data.get("pairings") if isinstance(data.get("pairings"), dict) else {}
             jobs_raw = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}

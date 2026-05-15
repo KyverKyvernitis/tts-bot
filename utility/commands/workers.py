@@ -239,6 +239,49 @@ def _script_health_label(worker: dict[str, Any]) -> str:
     return "scripts incompletos"
 
 
+
+
+def _queue_status_text(worker: dict[str, Any]) -> str:
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    queue = status.get("core_worker_jobs") if isinstance(status.get("core_worker_jobs"), dict) else {}
+    if not queue:
+        return ""
+
+    parts: list[str] = []
+    now = time.time()
+    last_poll_at = queue.get("last_poll_at")
+    try:
+        if last_poll_at:
+            parts.append(f"poll {_format_age(max(0.0, now - float(last_poll_at)))}")
+    except Exception:
+        pass
+
+    state = str(queue.get("last_poll_state") or "").strip().lower()
+    last_job_type = str(queue.get("last_job_type") or "").strip()
+    if state == "delivered" and last_job_type:
+        parts.append(f"entregou `{_shorten(last_job_type, limit=32)}`")
+    elif state == "no_compatible_job":
+        parts.append("sem job compatível")
+    elif state == "no_job":
+        parts.append("sem job")
+
+    last_result_at = queue.get("last_result_at")
+    result_status = str(queue.get("last_result_status") or "").strip().lower()
+    result_type = str(queue.get("last_result_type") or "").strip()
+    try:
+        if last_result_at:
+            label = "ok" if result_status == "succeeded" else (result_status or "resultado")
+            suffix = f" `{_shorten(result_type, limit=32)}`" if result_type else ""
+            parts.append(f"resultado {label}{suffix} {_format_age(max(0.0, now - float(last_result_at)))}")
+    except Exception:
+        pass
+
+    reason = _shorten(queue.get("last_poll_reason"), limit=70)
+    if reason and state == "no_compatible_job":
+        parts.append(f"motivo: {reason}")
+
+    return " · ".join(parts[:4])
+
 def _role_text(roles: list[str], *, limit: int = 8) -> str:
     selected = [str(role) for role in roles[:limit] if role]
     if not selected:
@@ -625,6 +668,9 @@ class WorkersPanelView(discord.ui.LayoutView):
             lines.append(f"{icon} **{name}** · `{worker_id}`")
             lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)}")
             lines.append(f"Roles: {roles}")
+            queue_text = _queue_status_text(worker)
+            if queue_text:
+                lines.append(f"-# Fila: {queue_text}")
         elif self._selected_is_legacy():
             roles = _role_text(snapshot.roles, limit=6)
             version = _shorten((snapshot.status or {}).get("version") or "sem versão", limit=24)
@@ -763,9 +809,9 @@ class WorkersPanelView(discord.ui.LayoutView):
                     target_worker_id=target_worker_id,
                 )
                 job = result.get("job") if isinstance(result, dict) else {}
-                job_id = _shorten((job or {}).get("job_id"), limit=24)
-                target_label = _shorten(target_worker_id or "qualquer worker online", limit=32)
-                self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"job `{job_type}` criado para {target_label}: {job_id}")
+                target_label = _shorten(target_worker_id or "worker online", limit=32)
+                status = _shorten((job or {}).get("status") or "queued", limit=18)
+                self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"`{job_type}` enfileirado para {target_label} ({status})")
         except Exception as exc:
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha em `{job_type}`: {_compact_failure(exc)}")
         self._ensure_selected_worker()
