@@ -42,6 +42,27 @@ WORKER_ROLE_PROFILES: dict[str, tuple[str, ...]] = {
     # Futuro: usar só quando o worker realmente tiver servidor Bedrock configurado.
     "bedrock": ("phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"),
 }
+
+WORKER_ROLE_LABELS: dict[str, str] = {
+    "phone-worker": "Base do worker",
+    "diagnostics": "Diagnósticos",
+    "log-summary": "Resumo de logs",
+    "maintenance-plan": "Plano de manutenção",
+    "zip-validate": "Validar ZIP",
+    "ffmpeg": "FFmpeg",
+    "ffprobe": "FFprobe",
+    "tts-convert": "Converter/cache TTS",
+    "bedrock": "Minecraft Bedrock",
+    "bedrock-logs": "Logs Bedrock",
+    "bedrock-backup": "Backup Bedrock",
+}
+
+WORKER_ROLE_PROFILE_DESCRIPTIONS: dict[str, str] = {
+    "leve": "diagnósticos e logs",
+    "midia": "logs, ZIP, FFmpeg/FFprobe e TTS",
+    "completo": "mídia + plano de manutenção",
+    "bedrock": "Minecraft Bedrock futuro",
+}
 LEGACY_WORKER_ID = "__legacy_phone_worker__"
 AUTO_WORKER_ID = "__auto_core_worker__"
 
@@ -170,6 +191,23 @@ def _parse_roles(raw: str | None, *, status: dict[str, Any] | None = None) -> li
     if status.get("ffprobe") and "ffprobe" not in roles:
         roles.append("ffprobe")
     return roles[:16]
+
+
+def _split_role_list(raw: object, *, limit: int = 24) -> list[str]:
+    roles: list[str] = []
+    for item in re.split(r"[,;\s]+", str(raw or "")):
+        clean = item.strip().lower().replace("_", "-")
+        clean = re.sub(r"[^a-z0-9_.:-]+", "-", clean).strip("-._:")
+        if clean and clean not in roles:
+            roles.append(clean[:32])
+        if len(roles) >= limit:
+            break
+    return roles
+
+
+def _role_label(role: object) -> str:
+    key = str(role or "").strip().lower().replace("_", "-")
+    return WORKER_ROLE_LABELS.get(key, key or "função")
 
 
 def _normalize_worker_profile(value: object, *, default: str = "midia") -> str:
@@ -517,6 +555,50 @@ def _job_detail_text(job: dict[str, Any] | None) -> str:
     return "\n".join(lines)[:1900]
 
 
+def _worker_detail_text(worker: dict[str, Any] | None) -> str:
+    if not isinstance(worker, dict) or not worker:
+        return "Selecione um celular registrado para ver os detalhes."
+    name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=64)
+    worker_id = _shorten(worker.get("worker_id") or "", limit=72)
+    online = "online" if worker.get("online") else "offline"
+    seen = _format_age(worker.get("last_seen_age_seconds"))
+    version = _shorten(worker.get("version") or "sem versão", limit=32)
+    roles = [str(role) for role in (worker.get("roles") or []) if role]
+    caps = [str(role) for role in (worker.get("capabilities") or []) if role]
+    supported = [str(task) for task in (worker.get("supported_tasks") or []) if task]
+    lines = [
+        f"## 📱 {name}",
+        f"**Estado:** {online} · visto {seen}",
+        f"**Versão:** `{version}`",
+        f"**Bateria:** {_battery_text(worker)}",
+        f"**Rede:** {_network_text(worker)}",
+        f"**Scripts:** {_script_health_label(worker)}",
+        "",
+        "### Funções",
+        _role_text(roles, limit=16),
+    ]
+    if caps and caps != roles:
+        lines.extend(["", "### Capacidades", _role_text(caps, limit=16)])
+    if supported:
+        compact_tasks = ", ".join(f"`{_shorten(task, limit=28)}`" for task in supported[:18])
+        if len(supported) > 18:
+            compact_tasks += f" +{len(supported) - 18}"
+        lines.extend(["", "### Ações suportadas", compact_tasks])
+    lines.extend(["", "### Técnico", f"ID: `{worker_id}`"])
+    endpoint = worker.get("endpoint")
+    if endpoint:
+        lines.append(f"Endpoint: `{_shorten(endpoint, limit=120)}`")
+    return "\n".join(lines)[:1900]
+
+
+def _profile_help_text() -> str:
+    lines = ["Perfis disponíveis:"]
+    for key, roles in WORKER_ROLE_PROFILES.items():
+        label = WORKER_ROLE_PROFILE_DESCRIPTIONS.get(key, "")
+        lines.append(f"`{key}` — {label}: " + ", ".join(_role_label(role) for role in roles[:8]))
+    return "\n".join(lines)
+
+
 def _has_online_registry_worker(snapshot: "WorkerSnapshot") -> bool:
     summary = (snapshot.registry_snapshot or {}).get("summary") if isinstance(snapshot.registry_snapshot, dict) else {}
     try:
@@ -749,9 +831,10 @@ class WorkersPanelView(discord.ui.LayoutView):
         ]
         if selected_worker is not None:
             specs.extend([
-                {"label": "Ver último resultado", "value": "_show_last_result", "description": "Detalhes completos", "emoji": "📄", "panel_action": "last_result", "category": "quick"},
+                {"label": "Detalhes do celular", "value": "_worker_details", "description": "Resumo completo", "emoji": "📱", "panel_action": "details", "category": "quick"},
+                {"label": "Ver último resultado", "value": "_show_last_result", "description": "Detalhes do último job", "emoji": "📄", "panel_action": "last_result", "category": "quick"},
                 {"label": "Renomear celular", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename", "category": "organize"},
-                {"label": "Editar funções", "value": "_edit_roles", "description": "Roles/capacidades", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
+                {"label": "Editar funções", "value": "_edit_roles", "description": "Perfil + extras/remoções", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
             ])
             if selected_worker.get("enabled", True):
                 specs.append({"label": "Pausar celular", "value": "_pause_worker", "description": "Não recebe jobs", "emoji": "⏸️", "panel_action": "pause", "category": "organize"})
@@ -1032,6 +1115,9 @@ class WorkersPanelView(discord.ui.LayoutView):
         if action == "_failover_test":
             await self._run_failover_test(interaction)
             return
+        if action == "_worker_details":
+            await self._show_worker_details(interaction)
+            return
         if action == "_show_last_result":
             await self._show_last_result(interaction)
             return
@@ -1136,7 +1222,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             default_profile = _normalize_worker_profile(profile)
             bootstrap_cmd = f'cd ~/phone-worker && bash ./bootstrap-phone-worker.sh {code} {base_url} "{default_name}" {default_profile}'
             pair_cmd = f'~/phone-worker/pair-phone-worker.sh {code} {base_url} "{default_name}" {default_profile}'
-            profile_roles = ", ".join(WORKER_ROLE_PROFILES.get(default_profile, ()))
+            profile_roles = ", ".join(_role_label(role) for role in WORKER_ROLE_PROFILES.get(default_profile, ()))
             msg = (
                 "## 🔐 Código para adicionar celular\n"
                 f"**Código:** `{code}` · expira em `{expires}`\n"
@@ -1175,7 +1261,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             "3. Copie o comando pronto e cole no Termux do celular novo.\n"
             "4. Quando terminar, toque **Atualizar**.\n\n"
             f"VPS detectada: `{base_url}`\n"
-            "Perfis disponíveis: `leve`, `midia`, `completo`, `bedrock`."
+            "Perfis: `leve` (logs), `midia` (TTS/FFmpeg), `completo` (manutenção), `bedrock` (Minecraft Bedrock futuro)."
         )
         await interaction.response.send_message(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
@@ -1263,6 +1349,13 @@ class WorkersPanelView(discord.ui.LayoutView):
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
+    async def _show_worker_details(self, interaction: discord.Interaction):
+        worker = self._selected_worker()
+        if not worker:
+            await interaction.response.send_message("Selecione um celular registrado para ver detalhes.", ephemeral=True)
+            return
+        await interaction.response.send_message(_worker_detail_text(worker), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
     async def _show_last_result(self, interaction: discord.Interaction):
         worker_id = self._job_target_worker_id()
         if not worker_id:
@@ -1312,26 +1405,44 @@ class WorkersPanelView(discord.ui.LayoutView):
     async def _open_roles_modal(self, interaction: discord.Interaction):
         worker = self._selected_worker()
         if not worker:
-            await interaction.response.send_message("Selecione um worker registrado para editar roles.", ephemeral=True)
+            await interaction.response.send_message("Selecione um celular registrado para editar funções.", ephemeral=True)
             return
         view = self
         worker_id = str(worker.get("worker_id") or "")
-        current_roles = ", ".join(str(role) for role in (worker.get("roles") or []))
-        current_caps = ", ".join(str(role) for role in (worker.get("capabilities") or worker.get("roles") or []))
+        current_roles_list = [str(role) for role in (worker.get("roles") or []) if role]
+        current_caps_list = [str(role) for role in (worker.get("capabilities") or worker.get("roles") or []) if role]
+        current_roles = ", ".join(current_roles_list)
+        current_caps = ", ".join(current_caps_list)
 
-        class WorkerRolesModal(discord.ui.Modal, title="Editar roles do worker"):
-            roles = discord.ui.TextInput(
-                label="Roles",
-                placeholder="Ex.: phone-worker, diagnostics, tts-convert, zip-validate",
-                default=current_roles[:400],
-                min_length=2,
-                max_length=400,
+        class WorkerRolesModal(discord.ui.Modal, title="Editar funções do celular"):
+            profile = discord.ui.TextInput(
+                label="Perfil base",
+                placeholder="manter, leve, midia, completo ou bedrock",
+                default="manter",
+                min_length=4,
+                max_length=16,
                 required=True,
             )
+            add_roles = discord.ui.TextInput(
+                label="Adicionar funções extras",
+                placeholder="Ex.: ffmpeg, tts-convert, zip-validate; vazio = nenhuma extra",
+                default="",
+                min_length=0,
+                max_length=260,
+                required=False,
+            )
+            remove_roles = discord.ui.TextInput(
+                label="Remover funções",
+                placeholder="Ex.: maintenance-plan; vazio = não remove nada",
+                default="",
+                min_length=0,
+                max_length=260,
+                required=False,
+            )
             capabilities = discord.ui.TextInput(
-                label="Capacidades",
-                placeholder="Pode deixar igual às roles",
-                default=current_caps[:400],
+                label="Capacidades avançadas opcional",
+                placeholder="Vazio = igual às funções finais",
+                default=current_caps[:400] if current_caps and current_caps != current_roles else "",
                 min_length=0,
                 max_length=400,
                 required=False,
@@ -1340,16 +1451,35 @@ class WorkersPanelView(discord.ui.LayoutView):
             async def on_submit(self, modal_interaction: discord.Interaction) -> None:
                 await modal_interaction.response.defer(thinking=False)
                 try:
-                    await view.cog._update_core_worker_roles(worker_id, str(self.roles.value or ""), str(self.capabilities.value or ""))
-                    view.snapshot = await view.cog._collect_workers_snapshot(action_note="roles do worker atualizadas")
+                    raw_profile = str(self.profile.value or "manter").strip().lower().replace("í", "i")
+                    if raw_profile in {"manter", "atual", "current", "mesmo"}:
+                        roles = list(current_roles_list)
+                        profile_label = "mantido"
+                    else:
+                        profile_key = _normalize_worker_profile(raw_profile, default="midia")
+                        roles = list(WORKER_ROLE_PROFILES.get(profile_key, WORKER_ROLE_PROFILES["midia"]))
+                        profile_label = profile_key
+                    for role in _split_role_list(self.add_roles.value):
+                        if role not in roles:
+                            roles.append(role)
+                    for role in _split_role_list(self.remove_roles.value):
+                        roles = [item for item in roles if item != role]
+                    if "phone-worker" not in roles:
+                        roles.insert(0, "phone-worker")
+                    roles = roles[:16]
+                    caps = _split_role_list(self.capabilities.value, limit=24) or list(roles)
+                    await view.cog._update_core_worker_roles(worker_id, ", ".join(roles), ", ".join(caps))
+                    view.snapshot = await view.cog._collect_workers_snapshot(action_note=f"funções atualizadas · perfil {profile_label}")
+                    message = "Funções do celular atualizadas.\n" + _role_text(roles, limit=16)
                 except Exception as exc:
-                    view.snapshot = await view.cog._collect_workers_snapshot(action_note=f"falha editando roles: {_compact_failure(exc)}")
+                    view.snapshot = await view.cog._collect_workers_snapshot(action_note=f"falha editando funções: {_compact_failure(exc)}")
+                    message = f"Não consegui atualizar as funções: {_compact_failure(exc)}"
                 view._ensure_selected_worker()
                 view._rebuild_layout()
                 if view.message is not None:
                     await view.message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
                 with contextlib.suppress(Exception):
-                    await modal_interaction.followup.send("Roles do worker atualizadas.", ephemeral=True)
+                    await modal_interaction.followup.send(message[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
         await interaction.response.send_modal(WorkerRolesModal())
 
