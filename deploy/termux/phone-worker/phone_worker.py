@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.5.8"
+PHONE_WORKER_VERSION = "1.5.9"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -93,6 +93,29 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "boot_repair",
     "zip_validate",
 )
+
+CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
+    "leve": {
+        "label": "Leve",
+        "roles": ["phone-worker", "diagnostics", "log-summary"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "worker-logs", "network-probe", "tailscale-status"],
+    },
+    "midia": {
+        "label": "Mídia",
+        "roles": ["phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "worker-logs", "network-probe", "tailscale-status"],
+    },
+    "completo": {
+        "label": "Completo",
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+    },
+    "bedrock": {
+        "label": "Bedrock",
+        "roles": ["phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup", "worker-logs", "network-probe", "tailscale-status"],
+    },
+}
 
 
 
@@ -164,6 +187,32 @@ def _env_list(name: str, default: list[str] | None = None) -> list[str]:
         if clean and clean not in items:
             items.append(clean[:40])
     return items or default
+
+
+def _normalize_core_worker_profile(value: Any) -> str:
+    profile = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().lower()).strip("-_")
+    if profile in CORE_WORKER_PROFILE_PRESETS:
+        return profile
+    return "midia"
+
+
+def _core_worker_profile_label(profile: Any) -> str:
+    normalized = _normalize_core_worker_profile(profile)
+    return str(CORE_WORKER_PROFILE_PRESETS[normalized].get("label") or normalized.title())
+
+
+def _core_worker_profile_roles(profile: Any) -> list[str]:
+    normalized = _normalize_core_worker_profile(profile)
+    return list(CORE_WORKER_PROFILE_PRESETS[normalized].get("roles") or CORE_WORKER_PROFILE_PRESETS["midia"]["roles"])
+
+
+def _core_worker_profile_capabilities(profile: Any) -> list[str]:
+    normalized = _normalize_core_worker_profile(profile)
+    return list(CORE_WORKER_PROFILE_PRESETS[normalized].get("capabilities") or CORE_WORKER_PROFILE_PRESETS["midia"]["capabilities"])
+
+
+def _current_core_worker_profile() -> str:
+    return _normalize_core_worker_profile(os.getenv("CORE_WORKER_PROFILE") or os.getenv("PHONE_WORKER_PROFILE") or "midia")
 
 
 def _safe_env_key(value: Any) -> str:
@@ -710,8 +759,9 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     endpoint = str(os.getenv("CORE_WORKER_ENDPOINT") or os.getenv("PHONE_WORKER_ENDPOINT") or "").strip()
     if not endpoint and host not in {"", "0.0.0.0", "::"}:
         endpoint = f"http://{host}:{port}"
-    roles = _env_list("CORE_WORKER_ROLES", ["phone-worker", "diagnostics", "log-summary", "zip-validate", "tts-convert"])
-    capabilities = _env_list("CORE_WORKER_CAPABILITIES", roles + ["ffmpeg", "ffprobe"])
+    profile = _current_core_worker_profile()
+    roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
+    capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
     if status.get("ffmpeg") and "ffmpeg" not in capabilities:
         capabilities.append("ffmpeg")
     if status.get("ffprobe") and "ffprobe" not in capabilities:
@@ -721,6 +771,8 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "name": _short_text(name, limit=64, default="Core Phone Worker"),
         "source": "termux-phone-worker",
         "version": PHONE_WORKER_VERSION,
+        "profile": profile,
+        "profile_label": _core_worker_profile_label(profile),
         "endpoint": endpoint,
         "roles": roles[:16],
         "capabilities": capabilities[:24],
@@ -740,6 +792,8 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
         },
         "status": {
+            "profile": profile,
+            "profile_label": _core_worker_profile_label(profile),
             "http_host": host,
             "http_port": port,
             "python": status.get("python"),
@@ -908,6 +962,8 @@ def _system_status() -> dict[str, Any]:
         "ok": True,
         "worker": "phone-worker",
         "version": PHONE_WORKER_VERSION,
+        "profile": _current_core_worker_profile(),
+        "profile_label": _core_worker_profile_label(_current_core_worker_profile()),
         "core_worker_heartbeat": _heartbeat_configured(),
         "core_worker_jobs": _core_worker_jobs_configured(),
         "scripts": _script_inventory(),
@@ -933,8 +989,57 @@ def _system_status() -> dict[str, Any]:
     }
 
 
+def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
+    profile = _current_core_worker_profile()
+    status = _safe_telemetry("system", _system_status, {"ok": False})
+    return {
+        "ok": True,
+        "local_only": True,
+        "worker": "phone-worker",
+        "version": PHONE_WORKER_VERSION,
+        "profile": profile,
+        "profile_label": _core_worker_profile_label(profile),
+        "roles": _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))[:16],
+        "capabilities": _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))[:24],
+        "supported_tasks": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
+        "vps_configured": _heartbeat_configured(),
+        "jobs_configured": _core_worker_jobs_configured(),
+        "pid": os.getpid(),
+        "uptime_seconds": status.get("uptime_seconds"),
+        "endpoint": f"http://127.0.0.1:{port}",
+        "bind_host": host,
+        "bind_port": port,
+        "ffmpeg": bool(status.get("ffmpeg")),
+        "ffprobe": bool(status.get("ffprobe")),
+        "boot_ok": ((status.get("boot") or {}).get("ok") if isinstance(status.get("boot"), dict) else None),
+        "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
+        "note": "Rota local para o APK Core Worker; não executa shell e não expõe token.",
+    }
+
+
+def _apply_local_core_worker_profile(profile: Any) -> dict[str, Any]:
+    normalized = _normalize_core_worker_profile(profile)
+    roles = _core_worker_profile_roles(normalized)
+    capabilities = _core_worker_profile_capabilities(normalized)
+    env_path = _update_env_file(None, {
+        "CORE_WORKER_PROFILE": normalized,
+        "CORE_WORKER_ROLES": ",".join(roles),
+        "CORE_WORKER_CAPABILITIES": ",".join(capabilities),
+    })
+    return {
+        "ok": True,
+        "saved": True,
+        "profile": normalized,
+        "profile_label": _core_worker_profile_label(normalized),
+        "roles": roles,
+        "capabilities": capabilities,
+        "env_updated": True,
+        "env_file": str(env_path),
+    }
+
+
 class WorkerHandler(BaseHTTPRequestHandler):
-    server_version = "PhoneWorker/1.1"
+    server_version = "PhoneWorker/1.2"
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quiet default HTTP noise
         if _env_bool("PHONE_WORKER_HTTP_LOGS", False):
@@ -970,6 +1075,21 @@ class WorkerHandler(BaseHTTPRequestHandler):
         _error(self, HTTPStatus.FORBIDDEN, "token inválido")
         return False
 
+    def _is_local_client(self) -> bool:
+        host = str((self.client_address or ("", 0))[0] or "").strip().lower()
+        return host == "::1" or host == "localhost" or host.startswith("127.")
+
+    def _require_local_client(self) -> bool:
+        if self._is_local_client():
+            return True
+        _error(self, HTTPStatus.FORBIDDEN, "rota local disponível apenas em 127.0.0.1")
+        return False
+
+    def _bind_host_port(self) -> tuple[str, int]:
+        host = str(getattr(self.server, "phone_worker_host", "127.0.0.1") or "127.0.0.1")
+        port = int(getattr(self.server, "phone_worker_port", 8766) or 8766)
+        return host, port
+
     def _read_json(self) -> dict[str, Any] | None:
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
@@ -993,7 +1113,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return parsed
 
     def do_GET(self) -> None:
-        if self.path not in {"/", "/health", "/status"}:
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/local/status":
+            if not self._require_local_client():
+                return
+            host, port = self._bind_host_port()
+            _json_response(self, HTTPStatus.OK, _local_agent_status_payload(host=host, port=port))
+            return
+        if path not in {"/", "/health", "/status"}:
             _error(self, HTTPStatus.NOT_FOUND, "rota não encontrada")
             return
         if not self._require_auth():
@@ -1002,7 +1129,24 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         global JOBS_STARTED, JOBS_FAILED
-        if self.path != "/task":
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/local/profile":
+            if not self._require_local_client():
+                return
+            body = self._read_json()
+            if body is None:
+                return
+            try:
+                result = _apply_local_core_worker_profile(body.get("profile"))
+                host, port = self._bind_host_port()
+                result.update(_local_agent_status_payload(host=host, port=port))
+                result["synced_to_vps"] = _send_core_worker_heartbeat_once(host=host, port=port, timeout=5.0) if _heartbeat_configured() else False
+                result["message"] = "perfil atualizado no worker local"
+                _json_response(self, HTTPStatus.OK, result)
+            except Exception as exc:
+                _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")
+            return
+        if path != "/task":
             _error(self, HTTPStatus.NOT_FOUND, "rota não encontrada")
             return
         if not self._require_auth():
@@ -2182,6 +2326,8 @@ def main() -> int:
 
     server = ThreadingHTTPServer((args.host, args.port), WorkerHandler)
     server.worker_token = args.token
+    server.phone_worker_host = args.host
+    server.phone_worker_port = args.port
     server.max_body_bytes = max_body_bytes
     server.max_output_bytes = max_output_bytes
     server.job_timeout = job_timeout

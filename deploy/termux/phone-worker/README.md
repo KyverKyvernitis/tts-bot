@@ -7,6 +7,8 @@ Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e us
 ## O que ele expõe
 
 - `GET /health` e `GET /status`: saúde do worker.
+- `GET /local/status`: status básico para o APK, aceitando apenas localhost.
+- `POST /local/profile`: atualiza o perfil/roles/capabilities deste próprio worker pelo APK, aceitando apenas localhost.
 - `POST /task`: tarefas opcionais diretas usadas por partes antigas da VPS.
 - polling seguro no registry da VPS:
   - `POST /core-worker/jobs/poll` na VPS para buscar job pendente;
@@ -21,7 +23,7 @@ Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e us
   - `ffprobe_media` quando `ffprobe` estiver disponível junto do ffmpeg
   - `ffmpeg_convert` quando `ffmpeg` estiver instalado no Termux.
 
-Todas as rotas usam token via:
+As rotas remotas (`/health`, `/status` e `/task`) usam token. As rotas `/local/*` são exclusivas de localhost para integração com o APK e não retornam tokens. Para rotas remotas, use:
 
 ```txt
 Authorization: Bearer <PHONE_WORKER_TOKEN>
@@ -32,6 +34,27 @@ ou:
 ```txt
 X-Phone-Worker-Token: <PHONE_WORKER_TOKEN>
 ```
+
+
+## Ponte local com o APK Core Worker
+
+O APK v0.3.0 usa apenas rotas locais, sempre em `127.0.0.1`, para não transformar o app em painel avançado:
+
+```txt
+GET  http://127.0.0.1:8766/local/status
+POST http://127.0.0.1:8766/local/profile
+```
+
+Essas rotas:
+
+- só aceitam chamadas vindas de localhost/`127.x.x.x`/`::1`;
+- não exigem o `PHONE_WORKER_TOKEN`, porque não devem sair do próprio celular;
+- não retornam tokens;
+- não executam shell livre;
+- não expõem fila completa nem controle pesado;
+- só mostram status básico e permitem trocar o perfil do próprio worker (`leve`, `midia`, `completo`, `bedrock`).
+
+Quando o perfil é atualizado, o worker salva `CORE_WORKER_PROFILE`, `CORE_WORKER_ROLES` e `CORE_WORKER_CAPABILITIES` no `~/.phone-worker.env` e tenta mandar um heartbeat para a VPS se o registry já estiver configurado.
 
 ## Instalação no Termux
 

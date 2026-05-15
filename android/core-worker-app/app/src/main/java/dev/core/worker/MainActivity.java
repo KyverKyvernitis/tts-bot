@@ -43,7 +43,9 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.2.0";
+    private static final String APP_VERSION = "0.3.0";
+    private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
+    private static final String LOCAL_AGENT_PROFILE_URL = "http://127.0.0.1:8766/local/profile";
     private static final String PREFS = "core_worker_private";
     private static final int BG = Color.rgb(11, 16, 32);
     private static final int CARD = Color.rgb(21, 27, 46);
@@ -58,12 +60,20 @@ public class MainActivity extends Activity {
     private RadioGroup profileGroup;
     private TextView statusText;
     private TextView profileHintText;
+    private TextView localAgentText;
     private Button testButton;
     private Button pairButton;
     private Button saveProfileButton;
     private Button heartbeatButton;
+    private Button localAgentButton;
+    private Button termuxButton;
     private Button tailscaleButton;
     private Button clearButton;
+    private volatile boolean localAgentOnline = false;
+    private volatile String localAgentVersion = "";
+    private volatile String localAgentProfile = "";
+    private volatile String localAgentMessage = "ainda não verificado";
+    private volatile String vpsState = "não testada";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -72,7 +82,8 @@ public class MainActivity extends Activity {
         ensureWorkerId();
         buildUi();
         loadInputs();
-        refreshLocalStatus("Pronto. Conecte o Tailscale, gere um código no Discord e toque em Conectar.");
+        refreshLocalStatus("Pronto. Conecte a rede, gere um código no Discord e toque em Conectar.");
+        checkLocalAgent(false);
     }
 
     private void buildUi() {
@@ -97,7 +108,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("APK privado e leve. Ele só facilita conectar este celular, escolher o perfil e enviar status básico. O controle pesado continua no Discord/VPS.");
+        subtitle.setText("APK privado e leve. Ele facilita conectar este celular, escolher o perfil e conversar com o worker local do Termux. O controle pesado continua no Discord/VPS.");
         subtitle.setTextColor(MUTED);
         subtitle.setTextSize(14);
         subtitle.setPadding(0, dp(8), 0, dp(14));
@@ -173,9 +184,20 @@ public class MainActivity extends Activity {
         statusCard.addView(sectionTitle("3. Status básico"));
         statusCard.addView(smallText("Use estes botões só para confirmar conexão. Jobs, failover e controle avançado ficam no painel Discord."));
 
+        localAgentText = smallText("Worker local: ainda não verificado.");
+        statusCard.addView(localAgentText);
+
         heartbeatButton = button("Atualizar status básico");
         heartbeatButton.setOnClickListener(v -> sendHeartbeat());
         statusCard.addView(heartbeatButton);
+
+        localAgentButton = button("Verificar worker local");
+        localAgentButton.setOnClickListener(v -> checkLocalAgent(true));
+        statusCard.addView(localAgentButton);
+
+        termuxButton = button("Abrir Termux");
+        termuxButton.setOnClickListener(v -> openTermux());
+        statusCard.addView(termuxButton);
 
         tailscaleButton = button("Abrir Tailscale");
         tailscaleButton.setOnClickListener(v -> openTailscale());
@@ -301,6 +323,7 @@ public class MainActivity extends Activity {
         }
         runBusy("Testando VPS...", () -> {
             HttpResult result = request("GET", serverUrl + "/health", null, null);
+            vpsState = result.ok() ? "ok" : "falha HTTP " + result.status;
             double ping = measureTcpPingMs(serverUrl);
             String message = "VPS respondeu HTTP " + result.status;
             if (ping >= 0) {
@@ -351,7 +374,10 @@ public class MainActivity extends Activity {
                     .putString("worker_id", workerId)
                     .putString("worker_token", token)
                     .apply();
-            show("Celular conectado com sucesso.\nPerfil: " + profileLabel(profile) + "\nToken salvo localmente no APK.\n\nEnviando status inicial...");
+            vpsState = "ok";
+            boolean localSynced = syncProfileToLocalAgent(profile);
+            String localLine = localSynced ? "Perfil também enviado ao worker local." : "Worker local não respondeu; perfil ficou salvo no APK.";
+            show("Celular conectado com sucesso.\nPerfil: " + profileLabel(profile) + "\nToken salvo localmente no APK.\n" + localLine + "\n\nEnviando status inicial...");
             sendHeartbeatInternal(false);
         });
     }
@@ -359,12 +385,25 @@ public class MainActivity extends Activity {
     private void updateOwnProfile() {
         String profile = selectedProfile();
         saveLocalFields(profile);
-        runBusy("Salvando perfil deste celular...", () -> sendHeartbeatInternal(true, "Perfil salvo no painel: " + profileLabel(profile)));
+        runBusy("Salvando perfil deste celular...", () -> {
+            boolean localSynced = syncProfileToLocalAgent(profile);
+            String prefix = localSynced
+                    ? "Perfil salvo no APK e enviado ao worker local: " + profileLabel(profile)
+                    : "Perfil salvo no APK. Worker local offline; abra o Termux e inicie o worker.";
+            if (hasPairing()) {
+                sendHeartbeatInternal(true, prefix);
+            } else {
+                show(prefix + "\n\nEste celular ainda não está pareado com a VPS.");
+            }
+        });
     }
 
     private void sendHeartbeat() {
         saveLocalFields(selectedProfile());
-        runBusy("Atualizando status básico...", () -> sendHeartbeatInternal(true));
+        runBusy("Atualizando status básico...", () -> {
+            updateLocalAgentStatus(false);
+            sendHeartbeatInternal(true);
+        });
     }
 
     private void sendHeartbeatInternal(boolean showResult) throws Exception {
@@ -388,9 +427,11 @@ public class MainActivity extends Activity {
         payload.put("source", "core-worker-apk-companion");
         HttpResult result = request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
         if (!result.ok()) {
+            vpsState = "falha HTTP " + result.status;
             show("Falha ao atualizar: HTTP " + result.status + "\n\n" + result.body);
             return;
         }
+        vpsState = "ok";
         if (showResult) {
             String message = successPrefix == null ? "Status básico atualizado." : successPrefix;
             message += "\nHTTP " + result.status + "\n\n" + compactResultBody(result.body);
@@ -444,6 +485,11 @@ public class MainActivity extends Activity {
         status.put("android_sdk", Build.VERSION.SDK_INT);
         status.put("manufacturer", Build.MANUFACTURER);
         status.put("model", Build.MODEL);
+        status.put("local_agent_online", localAgentOnline);
+        if (localAgentOnline) {
+            status.put("local_agent_version", localAgentVersion);
+            status.put("local_agent_profile", localAgentProfile);
+        }
         return status;
     }
 
@@ -451,8 +497,9 @@ public class MainActivity extends Activity {
         JSONObject health = new JSONObject();
         health.put("ok", true);
         health.put("apk_version", APP_VERSION);
-        health.put("scope", "companion_onboarding_profile_only");
-        health.put("note", "APK leve: pareamento, perfil do próprio celular e status básico. Controle pesado fica no Discord/VPS.");
+        health.put("scope", "companion_local_agent_profile_only");
+        health.put("local_agent_online", localAgentOnline);
+        health.put("note", "APK leve: pareamento, perfil do próprio celular, status básico e integração local com Termux. Controle pesado fica no Discord/VPS.");
         return health;
     }
 
@@ -553,8 +600,9 @@ public class MainActivity extends Activity {
     private HttpResult request(String method, String url, JSONObject payload, String token) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setRequestMethod(method);
-        conn.setConnectTimeout(6000);
-        conn.setReadTimeout(9000);
+        boolean localRequest = url.startsWith("http://127.0.0.1") || url.startsWith("http://localhost");
+        conn.setConnectTimeout(localRequest ? 900 : 6000);
+        conn.setReadTimeout(localRequest ? 1800 : 9000);
         conn.setRequestProperty("Accept", "application/json");
         if (token != null && !token.trim().isEmpty()) {
             conn.setRequestProperty("Authorization", "Bearer " + token.trim());
@@ -591,6 +639,119 @@ public class MainActivity extends Activity {
         }
         reader.close();
         return builder.toString();
+    }
+
+    private void checkLocalAgent(boolean userVisible) {
+        runBusy(userVisible ? "Verificando worker local..." : "Verificando worker local...", () -> {
+            boolean ok = updateLocalAgentStatus(true);
+            if (userVisible) {
+                if (ok) {
+                    show("Worker local online.\nVersão: " + emptyFallback(localAgentVersion, "desconhecida") + "\nPerfil: " + emptyFallback(localAgentProfile, "não informado"));
+                } else {
+                    show("Worker local offline. Abra o Termux e inicie o phone-worker.");
+                }
+            }
+        });
+    }
+
+    private boolean updateLocalAgentStatus(boolean updateText) {
+        try {
+            HttpResult result = request("GET", LOCAL_AGENT_STATUS_URL, null, null);
+            if (!result.ok()) {
+                throw new Exception("HTTP " + result.status);
+            }
+            JSONObject body = new JSONObject(result.body);
+            applyLocalAgentStatus(body);
+            if (updateText) {
+                showLocalAgentText();
+            }
+            return true;
+        } catch (Exception exc) {
+            localAgentOnline = false;
+            localAgentVersion = "";
+            localAgentProfile = "";
+            localAgentMessage = "offline";
+            if (updateText) {
+                showLocalAgentText();
+            }
+            return false;
+        }
+    }
+
+    private boolean syncProfileToLocalAgent(String profile) {
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("profile", profile);
+            payload.put("profile_label", profileLabel(profile));
+            payload.put("roles", jsonArray(profileRoles(profile)));
+            payload.put("capabilities", jsonArray(profileRoles(profile)));
+            payload.put("source", "core-worker-apk-companion");
+            payload.put("apk_version", APP_VERSION);
+            HttpResult result = request("POST", LOCAL_AGENT_PROFILE_URL, payload, null);
+            if (!result.ok()) {
+                throw new Exception("HTTP " + result.status);
+            }
+            JSONObject body = new JSONObject(result.body);
+            applyLocalAgentStatus(body);
+            showLocalAgentText();
+            return true;
+        } catch (Exception exc) {
+            localAgentOnline = false;
+            localAgentVersion = "";
+            localAgentProfile = "";
+            localAgentMessage = "offline ao salvar perfil";
+            showLocalAgentText();
+            return false;
+        }
+    }
+
+    private void applyLocalAgentStatus(JSONObject body) {
+        localAgentOnline = body.optBoolean("ok", true);
+        localAgentVersion = body.optString("version", "");
+        localAgentProfile = body.optString("profile_label", body.optString("profile", ""));
+        if (localAgentOnline) {
+            String jobs = body.optBoolean("jobs_configured", false) ? "jobs ok" : "jobs pendentes";
+            String vps = body.optBoolean("vps_configured", false) ? "VPS ok" : "VPS pendente";
+            localAgentMessage = "online · " + vps + " · " + jobs;
+        } else {
+            localAgentMessage = "offline";
+        }
+    }
+
+    private void showLocalAgentText() {
+        runOnUiThread(() -> {
+            if (localAgentText != null) {
+                localAgentText.setText(localAgentLine());
+            }
+            refreshLocalStatus(null);
+        });
+    }
+
+    private String localAgentLine() {
+        if (!localAgentOnline) {
+            return "Worker local: offline. Abra o Termux e inicie o phone-worker.";
+        }
+        String version = emptyFallback(localAgentVersion, "versão ?");
+        String profile = emptyFallback(localAgentProfile, "perfil ?");
+        return "Worker local: online · " + version + " · " + profile + " · " + localAgentMessage;
+    }
+
+    private boolean hasPairing() {
+        String token = prefs.getString("worker_token", "");
+        String workerId = prefs.getString("worker_id", "");
+        return token != null && !token.isEmpty() && workerId != null && !workerId.isEmpty();
+    }
+
+    private void openTermux() {
+        try {
+            Intent launch = getPackageManager().getLaunchIntentForPackage("com.termux");
+            if (launch == null) {
+                throw new ActivityNotFoundException("Termux não encontrado");
+            }
+            startActivity(launch);
+        } catch (Exception exc) {
+            refreshLocalStatus("Não consegui abrir o Termux automaticamente. Abra o Termux manualmente e rode: ~/phone-worker/start-phone-worker.sh");
+        }
     }
 
     private void openTailscale() {
@@ -645,6 +806,8 @@ public class MainActivity extends Activity {
         if (pairButton != null) pairButton.setEnabled(enabled);
         if (saveProfileButton != null) saveProfileButton.setEnabled(enabled);
         if (heartbeatButton != null) heartbeatButton.setEnabled(enabled);
+        if (localAgentButton != null) localAgentButton.setEnabled(enabled);
+        if (termuxButton != null) termuxButton.setEnabled(enabled);
         if (tailscaleButton != null) tailscaleButton.setEnabled(enabled);
         if (clearButton != null) clearButton.setEnabled(enabled);
     }
@@ -654,15 +817,65 @@ public class MainActivity extends Activity {
         String token = prefs.getString("worker_token", "");
         String server = prefs.getString("server_url", normalizedServerUrl());
         String profile = prefs.getString("profile", selectedProfileSafe());
+        boolean paired = token != null && !token.isEmpty();
         StringBuilder builder = new StringBuilder();
+        builder.append("Checklist rápido\n");
+        builder.append(checkLine("Rede/Tailscale", networkChecklistLabel(server))).append('\n');
+        builder.append(checkLine("VPS", vpsChecklistLabel(server))).append('\n');
+        builder.append(checkLine("Worker local", localAgentOnline ? "ok" : localAgentMessage)).append('\n');
+        builder.append(checkLine("Pareamento", paired ? "ok" : "pendente")).append("\n\n");
         builder.append("Status deste celular\n");
-        builder.append("Conectado: ").append(token == null || token.isEmpty() ? "não" : "sim").append('\n');
+        builder.append("Conectado: ").append(paired ? "sim" : "não").append('\n');
         builder.append("Perfil: ").append(profileLabel(profile)).append('\n');
         builder.append("VPS: ").append(server == null || server.isEmpty() ? "não definida" : server).append('\n');
         builder.append("Worker ID: ").append(workerId).append('\n');
-        builder.append("Versão APK: ").append(APP_VERSION).append("\n\n");
-        builder.append(extra == null ? "" : extra);
+        builder.append("Versão APK: ").append(APP_VERSION).append('\n');
+        builder.append("Agent local: ").append(localAgentOnline ? emptyFallback(localAgentVersion, "online") : "offline").append("\n\n");
+        if (extra != null && !extra.trim().isEmpty()) {
+            builder.append(extra);
+        }
         statusText.setText(builder.toString());
+        if (localAgentText != null) {
+            localAgentText.setText(localAgentLine());
+        }
+    }
+
+    private String checkLine(String label, String value) {
+        return "• " + label + ": " + value;
+    }
+
+    private String vpsChecklistLabel(String server) {
+        if (server == null || server.trim().isEmpty()) {
+            return "não definida";
+        }
+        return vpsState == null || vpsState.isEmpty() ? "não testada" : vpsState;
+    }
+
+    private String networkChecklistLabel(String server) {
+        try {
+            ConnectivityManager connectivity = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (connectivity == null) {
+                return "desconhecida";
+            }
+            Network active = connectivity.getActiveNetwork();
+            NetworkCapabilities caps = active == null ? null : connectivity.getNetworkCapabilities(active);
+            if (caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                return "sem rede";
+            }
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                return "ok · VPN ativa";
+            }
+            if (isLikelyTailscale(server)) {
+                return "rede ok · confirme Tailscale";
+            }
+            return "rede ok";
+        } catch (Exception ignored) {
+            return "desconhecida";
+        }
+    }
+
+    private String emptyFallback(String value, String fallback) {
+        return value == null || value.trim().isEmpty() ? fallback : value.trim();
     }
 
     private String normalizedServerUrl() {
