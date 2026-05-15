@@ -4,4 +4,5 @@ __all__ = [
     "help",
     "ping",
     "vps",
+    "workers",
 ]

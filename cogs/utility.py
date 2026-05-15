@@ -14,6 +14,7 @@ from .tts.utils.app_commands import fetch_root_command_ids_cached, slash_mention
 from utility.commands.help import HelpCommandMixin
 from utility.commands.ping import PingCommandMixin
 from utility.commands.vps import VpsCommandMixin
+from utility.commands.workers import WorkersCommandMixin
 
 
 HELP_EXPIRE_AFTER_SECONDS = 600.0
@@ -267,7 +268,7 @@ class HelpPaginatorView(discord.ui.LayoutView):
 
 
 
-class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, commands.Cog):
+class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersCommandMixin, commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._app_command_id_cache: dict[object, tuple[float, dict[str, int]]] = {}
@@ -452,6 +453,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, commands.Cog)
         help_slash = slash_mention(root_ids, root="help", path="help")
         ping_slash = slash_mention(root_ids, root="ping", path="ping")
         vps_slash = slash_mention(root_ids, root="vps", path="vps")
+        workers_slash = slash_mention(root_ids, root="workers", path="workers")
         tts_menu_slash = slash_mention(root_ids, root="tts", path="tts menu")
         tts_status_slash = slash_mention(root_ids, root="tts", path="tts status")
         tts_user_slash = slash_mention(root_ids, root="tts", path="tts usuario")
@@ -662,6 +664,10 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, commands.Cog)
                 f"{vps_slash}\n"
                 "Abre o painel técnico da VPS na guilda de teste: base Git, diagnóstico musical, "
                 "diagnóstico completo e snapshot sanitizado.\n\n"
+                f"### Core Workers\n"
+                f"{workers_slash}\n"
+                "Abre o painel privado dos workers auxiliares: status do phone-worker, roles, "
+                "saúde e ação segura para acordar o worker pelo watchdog.\n\n"
                 f"### Help\n"
                 f"{help_slash} ou {prefix_help}\n"
                 "Abre esta central de ajuda. O número no centro do paginator "
