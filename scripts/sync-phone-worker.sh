@@ -18,7 +18,7 @@ fi
 PHONE_HOST="${PHONE_WORKER_HOST:-${PHONE_LAVALINK_HOST:-}}"
 PHONE_USER="${PHONE_WORKER_SSH_USER:-}"
 PHONE_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
-PHONE_START_COMMAND="${PHONE_WORKER_START_COMMAND:-/data/data/com.termux/files/home/start-phone-worker.sh}"
+PHONE_START_COMMAND="${PHONE_WORKER_START_COMMAND:-/data/data/com.termux/files/home/phone-worker/start-phone-worker.sh}"
 
 if [ -z "$PHONE_HOST" ] || [ -z "$PHONE_USER" ]; then
   log "config incompleta: PHONE_WORKER_HOST/PHONE_WORKER_SSH_USER ausente"
@@ -53,22 +53,28 @@ log "copiando arquivos do phone-worker"
   "$SRC_DIR/phone_worker.py" \
   "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/phone_worker.py"
 
+# Scripts auxiliares ficam em dois lugares:
+# - ~/phone-worker/*.sh para permitir `cd ~/phone-worker && bash ./start-phone-worker.sh`
+# - ~/*.sh para compatibilidade com instalações antigas e atalhos já existentes.
 for f in start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh install.sh README.md phone-worker.env.example; do
   if [ -f "$SRC_DIR/$f" ]; then
+    "${SCP_BASE[@]}" "$SRC_DIR/$f" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/$f"
     case "$f" in
       start-phone-worker.sh|watch-phone-worker.sh|pair-phone-worker.sh)
         "${SCP_BASE[@]}" "$SRC_DIR/$f" "$PHONE_USER@$PHONE_HOST:$REMOTE_HOME/$f"
-        ;;
-      *)
-        "${SCP_BASE[@]}" "$SRC_DIR/$f" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/$f"
         ;;
     esac
   fi
 done
 
+log "ajustando permissões no celular"
+"${SSH_BASE[@]}" "
+chmod +x '$REMOTE_DIR/phone_worker.py' '$REMOTE_DIR/start-phone-worker.sh' '$REMOTE_DIR/watch-phone-worker.sh' '$REMOTE_DIR/pair-phone-worker.sh' 2>/dev/null || true
+chmod +x '$REMOTE_HOME/start-phone-worker.sh' '$REMOTE_HOME/watch-phone-worker.sh' '$REMOTE_HOME/pair-phone-worker.sh' 2>/dev/null || true
+"
+
 log "reiniciando phone-worker no celular"
 "${SSH_BASE[@]}" "
-chmod +x '$REMOTE_HOME/start-phone-worker.sh' '$REMOTE_HOME/watch-phone-worker.sh' '$REMOTE_HOME/pair-phone-worker.sh' 2>/dev/null || true
 tmux kill-session -t phone-worker 2>/dev/null || true
 pkill -f '[p]hone_worker.py' 2>/dev/null || true
 sleep 1

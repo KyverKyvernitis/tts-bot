@@ -19,7 +19,7 @@ if [[ -z "$CODE" ]]; then
   read -r -p "Código CORE-XXXX: " CODE
 fi
 if [[ -z "$VPS_URL" ]]; then
-  read -r -p "URL da VPS/Tailscale (ex: http://100.x.x.x:8766): " VPS_URL
+  read -r -p "URL da VPS/Tailscale (ex: http://100.x.x.x:10000): " VPS_URL
 fi
 
 if [[ ! -f "$WORKER_DIR/phone_worker.py" ]]; then

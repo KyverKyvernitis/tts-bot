@@ -41,13 +41,13 @@ Copie esta pasta para o celular e rode:
 cd ~/phone-worker-install
 bash install.sh
 nano ~/.phone-worker.env
-~/start-phone-worker.sh
+~/phone-worker/start-phone-worker.sh
 ```
 
 Para manter em watchdog local:
 
 ```bash
-tmux new-session -d -s phone-worker-watch '~/watch-phone-worker.sh'
+tmux new-session -d -s phone-worker-watch '~/phone-worker/watch-phone-worker.sh'
 ```
 
 ## Variáveis da VPS
@@ -61,7 +61,7 @@ PHONE_WORKER_PORT=8766
 PHONE_WORKER_TOKEN=troque_essa_chave
 PHONE_WORKER_SSH_USER=u0_a000
 PHONE_WORKER_SSH_PORT=8022
-PHONE_WORKER_START_COMMAND=/data/data/com.termux/files/home/start-phone-worker.sh
+PHONE_WORKER_START_COMMAND=/data/data/com.termux/files/home/phone-worker/start-phone-worker.sh
 ```
 
 O timer da VPS chama `scripts/phone-worker-watch.sh` para manter o worker acordado quando possível.
@@ -110,20 +110,20 @@ Fluxo recomendado:
 3. No Termux atualizado, rode:
 
 ```bash
-~/pair-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:8766
+~/phone-worker/pair-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:10000
 ```
 
 Também é possível fazer direto pelo Python:
 
 ```bash
 cd ~/phone-worker
-python phone_worker.py --pair CORE-XXXX --vps-url http://IP_TAILSCALE_DA_VPS:8766
+python phone_worker.py --pair CORE-XXXX --vps-url http://IP_TAILSCALE_DA_VPS:10000
 ```
 
 O script chama `POST /core-worker/pair`, salva `CORE_WORKER_ID`, `CORE_WORKER_TOKEN`, `CORE_WORKER_VPS_URL`, ativa heartbeat/jobs em `~/.phone-worker.env` e nunca imprime o token. Reinicie o worker depois do pareamento:
 
 ```bash
-~/start-phone-worker.sh
+~/phone-worker/start-phone-worker.sh
 ```
 
 Teste manual sem iniciar servidor novo:
@@ -162,7 +162,7 @@ Workers pareados no registry que já declaram suporte a `worker_update` também 
 
 - `phone_worker.py` em `~/phone-worker/`;
 - `install.sh`, `README.md` e `phone-worker.env.example` em `~/phone-worker/`;
-- `start-phone-worker.sh` e `watch-phone-worker.sh` no `$HOME`.
+- `start-phone-worker.sh`, `watch-phone-worker.sh` e `pair-phone-worker.sh` em `~/phone-worker` e também no `$HOME` por compatibilidade.
 
 O update confere `sha256`, faz backup `.bak` quando possível e, por padrão, reinicia o phone-worker só depois de responder o resultado para a VPS.
 

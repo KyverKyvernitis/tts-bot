@@ -35,7 +35,7 @@ JOBS_FAILED = 0
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.5.0"
+PHONE_WORKER_VERSION = "1.5.1"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -469,6 +469,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "jobs_failed": status.get("jobs_failed"),
             "ffmpeg": status.get("ffmpeg"),
             "ffprobe": status.get("ffprobe"),
+            "scripts_ok": ((status.get("scripts") or {}).get("complete") if isinstance(status.get("scripts"), dict) else None),
         },
         "status": {
             "http_host": host,
@@ -477,6 +478,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "platform": status.get("platform"),
             "disk_home": status.get("disk_home"),
             "loadavg": status.get("loadavg"),
+            "scripts": status.get("scripts"),
         },
     }
 
@@ -622,6 +624,7 @@ def _system_status() -> dict[str, Any]:
         "version": PHONE_WORKER_VERSION,
         "core_worker_heartbeat": _heartbeat_configured(),
         "core_worker_jobs": _core_worker_jobs_configured(),
+        "scripts": _script_inventory(),
         "supported_tasks": list(SUPPORTED_DIRECT_TASKS),
         "supported_core_worker_jobs": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
         "pid": os.getpid(),
@@ -1167,6 +1170,44 @@ def _home_script(name: str) -> Path:
     return (Path.home() / name).expanduser()
 
 
+def _script_candidates(name: str) -> list[Path]:
+    # Preferir scripts dentro de ~/phone-worker, mas manter compatibilidade com ~/script.sh.
+    worker_path = (_phone_worker_dir() / name).expanduser()
+    home_path = _home_script(name)
+    if worker_path == home_path:
+        return [worker_path]
+    return [worker_path, home_path]
+
+
+def _best_script(name: str) -> Path:
+    for path in _script_candidates(name):
+        if path.exists():
+            return path
+    return _script_candidates(name)[0]
+
+
+def _script_inventory() -> dict[str, Any]:
+    scripts: dict[str, Any] = {}
+    complete = True
+    mirrored = True
+    for name in ("start-phone-worker.sh", "watch-phone-worker.sh", "pair-phone-worker.sh"):
+        worker_path = (_phone_worker_dir() / name).expanduser()
+        home_path = _home_script(name)
+        worker_exists = worker_path.exists()
+        home_exists = home_path.exists()
+        exists = worker_exists or home_exists
+        complete = complete and exists
+        mirrored = mirrored and worker_exists and home_exists
+        scripts[name] = {
+            "ok": exists,
+            "worker_dir": worker_exists,
+            "home": home_exists,
+            "executable": any(path.exists() and os.access(path, os.X_OK) for path in (worker_path, home_path)),
+            "preferred": str(_best_script(name)),
+        }
+    return {"complete": complete, "mirrored": mirrored, "scripts": scripts}
+
+
 def _tmux_session_exists(session: str) -> bool:
     if not session or not shutil.which("tmux"):
         return False
@@ -1217,6 +1258,8 @@ def _service_status(service: str) -> dict[str, Any]:
             "processes": _pgrep_count("phone_worker.py"),
             "uptime_seconds": status.get("uptime_seconds"),
             "log_file": str(_phone_worker_log_file()),
+            "scripts": _script_inventory(),
+            "start_script": str(_best_script("start-phone-worker.sh")),
         }
     if service == "phone-worker-watch":
         return {
@@ -1225,7 +1268,8 @@ def _service_status(service: str) -> dict[str, Any]:
             "manageable": True,
             "running": _tmux_session_exists(watch_session),
             "tmux_session": watch_session,
-            "script": str(_home_script("watch-phone-worker.sh")),
+            "script": str(_best_script("watch-phone-worker.sh")),
+            "scripts": _script_inventory(),
         }
     tailscale = _tailscale_snapshot(probe_vps=True)
     return {
@@ -1248,8 +1292,8 @@ def _run_service_action(service: str, action: str) -> dict[str, Any]:
 
     phone_session = str(os.getenv("PHONE_WORKER_TMUX_SESSION") or "phone-worker").strip() or "phone-worker"
     watch_session = str(os.getenv("PHONE_WORKER_WATCH_TMUX_SESSION") or "phone-worker-watch").strip() or "phone-worker-watch"
-    start_script = _home_script("start-phone-worker.sh")
-    watch_script = _home_script("watch-phone-worker.sh")
+    start_script = _best_script("start-phone-worker.sh")
+    watch_script = _best_script("watch-phone-worker.sh")
 
     if service == "tailscale":
         raise ValueError("Tailscale oficial no Android não pode ser iniciado/parado pelo Termux com segurança; use o app Tailscale")
@@ -1297,9 +1341,9 @@ def _run_service_action(service: str, action: str) -> dict[str, Any]:
 
 _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker.py": ("worker", "phone_worker.py", 0o755),
-    "start-phone-worker.sh": ("home", "start-phone-worker.sh", 0o755),
-    "watch-phone-worker.sh": ("home", "watch-phone-worker.sh", 0o755),
-    "pair-phone-worker.sh": ("home", "pair-phone-worker.sh", 0o755),
+    "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
+    "watch-phone-worker.sh": ("worker", "watch-phone-worker.sh", 0o755),
+    "pair-phone-worker.sh": ("worker", "pair-phone-worker.sh", 0o755),
     "install.sh": ("worker", "install.sh", 0o755),
     "README.md": ("worker", "README.md", 0o644),
     "phone-worker.env.example": ("worker", "phone-worker.env.example", 0o600),
@@ -1355,7 +1399,18 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
             tmp.write_bytes(raw)
             os.chmod(tmp, int(item.get("mode") or mode))
             tmp.replace(path)
-            updated.append({"target": path.name, "bytes": len(raw), "sha256": actual[:12]})
+            applied_paths = [path]
+            if path.name in {"start-phone-worker.sh", "watch-phone-worker.sh", "pair-phone-worker.sh"}:
+                # Espelhar scripts em ~/ também para instalações antigas e atalhos existentes.
+                home_copy = _home_script(path.name)
+                try:
+                    if home_copy != path:
+                        shutil.copy2(path, home_copy)
+                        os.chmod(home_copy, int(item.get("mode") or mode))
+                        applied_paths.append(home_copy)
+                except Exception as mirror_exc:
+                    errors.append(f"{target} mirror: {type(mirror_exc).__name__}: {_short_text(mirror_exc, limit=80)}")
+            updated.append({"target": path.name, "paths": [str(p) for p in applied_paths], "bytes": len(raw), "sha256": actual[:12]})
         except Exception as exc:
             errors.append(f"{target or '<sem alvo>'}: {type(exc).__name__}: {_short_text(exc, limit=100)}")
 
@@ -1375,7 +1430,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
             "deferred_restart": True,
             "_deferred_phone_worker_action": "restart",
             "_deferred_phone_worker_session": str(os.getenv("PHONE_WORKER_TMUX_SESSION") or "phone-worker"),
-            "_deferred_start_script": str(_home_script("start-phone-worker.sh")),
+            "_deferred_start_script": str(_best_script("start-phone-worker.sh")),
         })
     return result
 
@@ -1385,7 +1440,7 @@ def _launch_deferred_phone_worker_action(result: dict[str, Any]) -> None:
     if action not in {"stop", "restart"}:
         return
     session = str(result.pop("_deferred_phone_worker_session", "") or os.getenv("PHONE_WORKER_TMUX_SESSION") or "phone-worker")
-    start_script = Path(str(result.pop("_deferred_start_script", "") or _home_script("start-phone-worker.sh"))).expanduser()
+    start_script = Path(str(result.pop("_deferred_start_script", "") or _best_script("start-phone-worker.sh"))).expanduser()
     worker_dir = _phone_worker_dir()
     script = worker_dir / f".core-worker-deferred-{action}.sh"
     lines = [

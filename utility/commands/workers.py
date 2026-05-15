@@ -39,6 +39,7 @@ WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Testar worker", "value": "ping", "job_type": "ping", "payload": {}, "summary": "teste manual pelo painel workers", "description": "Ping seguro no worker selecionado", "emoji": "🧪"},
     {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede, Tailscale e sistema", "emoji": "🩺"},
     {"label": "Atualizar agent", "value": "worker_update", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Aplica a versão atual e reinicia", "emoji": "⬆️", "requires_declared": True},
+    {"label": "Reparar scripts", "value": "worker_repair_scripts", "job_type": "worker_update", "payload": {"scripts_only": True}, "summary": "reinstalar scripts auxiliares do worker", "description": "Reinstala start/watch/pair", "emoji": "🛠️", "requires_declared": True},
     {"label": "Logs", "value": "worker_logs", "job_type": "worker_logs", "payload": {"lines": 140}, "summary": "logs recentes do phone-worker", "description": "Busca logs recentes", "emoji": "📜"},
     {"label": "Tailscale", "value": "tailscale_status", "job_type": "tailscale_status", "payload": {}, "summary": "status Tailscale e alcance da VPS", "description": "Verifica Tailscale e VPS", "emoji": "🌐"},
     {"label": "Status serviços", "value": "service_status", "job_type": "service_status", "payload": {"service": "phone-worker"}, "summary": "status de serviços do celular", "description": "Mostra serviços permitidos", "emoji": "🧰"},
@@ -214,6 +215,28 @@ def _network_text(worker: dict[str, Any]) -> str:
     if network.get("tailscale_ip_masked"):
         parts.append(str(network.get("tailscale_ip_masked")))
     return " · ".join(parts) if parts else "rede n/a"
+
+
+def _script_health_label(worker: dict[str, Any]) -> str:
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    health = worker.get("health") if isinstance(worker.get("health"), dict) else {}
+    scripts = status.get("scripts") if isinstance(status.get("scripts"), dict) else {}
+    if not scripts and isinstance(health.get("scripts"), dict):
+        scripts = health.get("scripts")
+    if not scripts:
+        scripts_ok = health.get("scripts_ok")
+        if scripts_ok is True:
+            return "scripts ok"
+        if scripts_ok is False:
+            return "scripts incompletos"
+        return "scripts n/a"
+    complete = scripts.get("complete")
+    mirrored = scripts.get("mirrored")
+    if complete and mirrored:
+        return "scripts ok"
+    if complete:
+        return "scripts ok parcial"
+    return "scripts incompletos"
 
 
 def _role_text(roles: list[str], *, limit: int = 8) -> str:
@@ -600,13 +623,14 @@ class WorkersPanelView(discord.ui.LayoutView):
             roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=5)
             version = _shorten(worker.get("version") or "sem versão", limit=24)
             lines.append(f"{icon} **{name}** · `{worker_id}`")
-            lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)}")
+            lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)}")
             lines.append(f"Roles: {roles}")
         elif self._selected_is_legacy():
             roles = _role_text(snapshot.roles, limit=6)
             version = _shorten((snapshot.status or {}).get("version") or "sem versão", limit=24)
             lines.append(f"🟢 **{_shorten(snapshot.name or 'phone-worker direto', limit=36)}** · `direto`")
-            lines.append(f"-# endpoint local/Tailscale · v `{version}`")
+            status = snapshot.status if isinstance(snapshot.status, dict) else {}
+            lines.append(f"-# endpoint local/Tailscale · v `{version}` · {_script_health_label({'status': status})}")
             lines.append(f"Roles: {roles}")
         elif workers:
             lines.append("Selecione um worker.")
@@ -690,13 +714,13 @@ class WorkersPanelView(discord.ui.LayoutView):
             code = str(pairing.get("code") or "")
             ttl = _format_seconds(pairing.get("ttl_seconds"))
             expires = _format_seconds(max(0, float(pairing.get("expires_at") or 0) - time.time()))
-            base_url = _public_base_url() or "http://IP_TAILSCALE_DA_VPS:8766"
+            base_url = _public_base_url() or "http://IP_TAILSCALE_DA_VPS:10000"
             msg = (
                 "## 🔐 Pareamento Core Worker\n"
                 f"Código temporário: `{code}`\n"
                 f"Validade: `{ttl}` · expira em `{expires}`\n\n"
                 "No phone-worker/Termux atualizado, rode:\n"
-                f"`~/pair-phone-worker.sh {code} {base_url}`\n\n"
+                f"`~/phone-worker/pair-phone-worker.sh {code} {base_url}`\n\n"
                 "Ou pelo Python:\n"
                 f"`cd ~/phone-worker && python phone_worker.py --pair {code} --vps-url {base_url}`\n\n"
                 "O token é salvo automaticamente em `~/.phone-worker.env` e não aparece no GitHub."
@@ -725,7 +749,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         target_worker_id = self._job_target_worker_id()
         try:
             if _task_name(job_type) == "worker_update":
-                payload = await self.cog._build_worker_update_payload()
+                payload = await self.cog._build_worker_update_payload(scripts_only=bool((payload or {}).get("scripts_only")))
             if self._selected_is_legacy():
                 result = await self.cog._run_legacy_worker_action(job_type=job_type, payload=payload or {})
                 note = _shorten((result or {}).get("summary") or "ação direta concluída", limit=90)
@@ -837,10 +861,10 @@ class WorkersCommandMixin:
             raise RuntimeError(_shorten(_redact(parsed.get("error") or "worker retornou erro"), limit=120))
         return parsed
 
-    def _build_worker_update_payload_sync(self) -> dict[str, Any]:
+    def _build_worker_update_payload_sync(self, *, scripts_only: bool = False) -> dict[str, Any]:
         src_dir = _repo_root() / "deploy" / "termux" / "phone-worker"
         files: list[dict[str, Any]] = []
-        targets = (
+        all_targets = (
             ("phone_worker.py", 0o755),
             ("start-phone-worker.sh", 0o755),
             ("watch-phone-worker.sh", 0o755),
@@ -849,6 +873,13 @@ class WorkersCommandMixin:
             ("README.md", 0o644),
             ("phone-worker.env.example", 0o600),
         )
+        script_targets = (
+            ("start-phone-worker.sh", 0o755),
+            ("watch-phone-worker.sh", 0o755),
+            ("pair-phone-worker.sh", 0o755),
+            ("install.sh", 0o755),
+        )
+        targets = script_targets if scripts_only else all_targets
         version = ""
         version_re = re.compile(r'^PHONE_WORKER_VERSION\s*=\s*["\\\']([^"\\\']+)["\\\']', re.MULTILINE)
         for name, mode in targets:
@@ -869,10 +900,10 @@ class WorkersCommandMixin:
             })
         if not files:
             raise RuntimeError("arquivos do phone-worker não encontrados em deploy/termux/phone-worker")
-        return {"version": version or "desconhecida", "restart": True, "files": files}
+        return {"version": version or "desconhecida", "restart": not scripts_only, "scripts_only": scripts_only, "files": files}
 
-    async def _build_worker_update_payload(self) -> dict[str, Any]:
-        return await asyncio.to_thread(self._build_worker_update_payload_sync)
+    async def _build_worker_update_payload(self, *, scripts_only: bool = False) -> dict[str, Any]:
+        return await asyncio.to_thread(self._build_worker_update_payload_sync, scripts_only=scripts_only)
 
     async def _run_legacy_worker_action(self, *, job_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         kind = str(job_type or "").strip().lower().replace("-", "_")
