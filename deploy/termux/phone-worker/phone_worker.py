@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -34,7 +35,7 @@ JOBS_FAILED = 0
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.3.0"
+PHONE_WORKER_VERSION = "1.4.0"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -61,6 +62,7 @@ SUPPORTED_DIRECT_TASKS = (
     "text_stats",
     "worker_logs",
     "worker_self_check",
+    "worker_update",
     "zip",
     "zip_validate",
 )
@@ -82,6 +84,7 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "text_stats",
     "worker_logs",
     "worker_self_check",
+    "worker_update",
     "zip_validate",
 )
 
@@ -610,7 +613,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload.setdefault("summary", "status direto coletado")
             elif task in {"diagnostic_basic", "worker_self_check"}:
                 payload = _execute_core_worker_job({"type": "worker_self_check", "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
-            elif task in {"network_probe", "tailscale_status", "worker_logs", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
+            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
                 payload = _execute_core_worker_job({"type": task, "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
             elif task == "sha256":
                 payload = self._task_sha256(body)
@@ -1176,6 +1179,91 @@ def _run_service_action(service: str, action: str) -> dict[str, Any]:
     return status
 
 
+
+_WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
+    "phone_worker.py": ("worker", "phone_worker.py", 0o755),
+    "start-phone-worker.sh": ("home", "start-phone-worker.sh", 0o755),
+    "watch-phone-worker.sh": ("home", "watch-phone-worker.sh", 0o755),
+    "install.sh": ("worker", "install.sh", 0o755),
+    "README.md": ("worker", "README.md", 0o644),
+    "phone-worker.env.example": ("worker", "phone-worker.env.example", 0o600),
+}
+
+
+def _safe_update_target_path(target: str) -> tuple[Path, int]:
+    clean = str(target or "").replace("\\", "/").split("/")[-1].strip()
+    if clean not in _WORKER_UPDATE_TARGETS:
+        raise ValueError(f"arquivo de update não permitido: {clean or '<vazio>'}")
+    location, filename, mode = _WORKER_UPDATE_TARGETS[clean]
+    base = _phone_worker_dir() if location == "worker" else Path.home()
+    path = (base / filename).expanduser()
+    return path, mode
+
+
+def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
+    if not _env_bool("PHONE_WORKER_SELF_UPDATE_ENABLED", True):
+        raise PermissionError("self-update do phone-worker desativado por configuração")
+    files = payload.get("files")
+    if not isinstance(files, list) or not files:
+        raise ValueError("payload de update sem arquivos")
+    if len(files) > 8:
+        raise ValueError("arquivos demais no update")
+
+    updated: list[dict[str, Any]] = []
+    errors: list[str] = []
+    total = 0
+    max_file_bytes = max(1024, _env_int("PHONE_WORKER_UPDATE_MAX_FILE_BYTES", 512 * 1024))
+    max_total_bytes = max(max_file_bytes, _env_int("PHONE_WORKER_UPDATE_MAX_TOTAL_BYTES", 1024 * 1024))
+
+    for item in files:
+        if not isinstance(item, dict):
+            errors.append("item inválido")
+            continue
+        target = str(item.get("target") or item.get("name") or "").strip()
+        try:
+            path, mode = _safe_update_target_path(target)
+            raw = _b64decode(str(item.get("data_b64") or ""), max_bytes=max_file_bytes)
+            total += len(raw)
+            if total > max_total_bytes:
+                raise ValueError("update grande demais")
+            expected = str(item.get("sha256") or "").strip().lower()
+            actual = hashlib.sha256(raw).hexdigest()
+            if expected and expected != actual:
+                raise ValueError(f"sha256 divergente em {target}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                backup = path.with_suffix(path.suffix + ".bak")
+                with contextlib.suppress(Exception):
+                    shutil.copy2(path, backup)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_bytes(raw)
+            os.chmod(tmp, int(item.get("mode") or mode))
+            tmp.replace(path)
+            updated.append({"target": path.name, "bytes": len(raw), "sha256": actual[:12]})
+        except Exception as exc:
+            errors.append(f"{target or '<sem alvo>'}: {type(exc).__name__}: {_short_text(exc, limit=100)}")
+
+    if errors:
+        return {"ok": False, "summary": "update parcial/falhou", "updated": updated, "errors": errors[:8], "total_bytes": total}
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "summary": f"update aplicado: {len(updated)} arquivo(s)",
+        "updated": updated,
+        "total_bytes": total,
+        "current_version": PHONE_WORKER_VERSION,
+        "target_version": _short_text(payload.get("version"), limit=48, default="desconhecida"),
+    }
+    if _env_bool("PHONE_WORKER_UPDATE_RESTART", bool(payload.get("restart", True))):
+        result.update({
+            "deferred_restart": True,
+            "_deferred_phone_worker_action": "restart",
+            "_deferred_phone_worker_session": str(os.getenv("PHONE_WORKER_TMUX_SESSION") or "phone-worker"),
+            "_deferred_start_script": str(_home_script("start-phone-worker.sh")),
+        })
+    return result
+
+
 def _launch_deferred_phone_worker_action(result: dict[str, Any]) -> None:
     action = str(result.pop("_deferred_phone_worker_action", "") or "").strip().lower()
     if action not in {"stop", "restart"}:
@@ -1285,6 +1373,9 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
         elif kind == "worker_logs":
             result = _worker_logs_snapshot(payload)
             result.setdefault("summary", "logs do phone-worker coletadas" if result.get("ok") else "falha ao coletar logs")
+        elif kind == "worker_update":
+            result = _apply_worker_update(payload)
+            result.setdefault("summary", "arquivos do phone-worker atualizados")
         elif kind in {"service_status", "service_start", "service_stop", "service_restart"}:
             service = payload.get("service") or "phone-worker"
             action = kind.removeprefix("service_")

@@ -136,7 +136,7 @@ python phone_worker.py --heartbeat-once
 python phone_worker.py --jobs-once
 ```
 
-O heartbeat envia status, bateria/rede quando o Termux:API estiver disponível, ffmpeg/ffprobe, disco, saúde básica e um resumo do Tailscale quando a CLI existir. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `worker_self_check`, `worker_logs`, `network_probe`, `tailscale_status`, `service_status`, `service_start`, `service_stop`, `service_restart`, `ffmpeg_check`, `ffprobe_check`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
+O heartbeat envia status, bateria/rede quando o Termux:API estiver disponível, ffmpeg/ffprobe, disco, saúde básica e um resumo do Tailscale quando a CLI existir. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `worker_self_check`, `worker_logs`, `network_probe`, `tailscale_status`, `service_status`, `service_start`, `service_stop`, `service_restart`, `ffmpeg_check`, `ffprobe_check`, `worker_update`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
 
 ## Controle seguro de serviços
 
@@ -155,3 +155,24 @@ Botões novos no painel privado `/workers`:
 - **Iniciar/Parar watchdog**: controla a sessão `phone-worker-watch`.
 - **Reiniciar/Parar worker**: controla o `phone-worker` atual com ação deferida.
 
+
+## Auto-update seguro do phone-worker
+
+O painel privado `workers` agora tem **Atualizar worker**. Esse botão executa `scripts/sync-phone-worker.sh` na VPS para copiar a versão atual desta pasta para o Termux via SSH e reiniciar o worker. Ele não copia `~/.phone-worker.env` e não envia tokens para o GitHub.
+
+Workers pareados no registry que já declaram suporte a `worker_update` também podem receber o job **Atualizar agent**. Esse job só grava arquivos whitelisted:
+
+- `phone_worker.py` em `~/phone-worker/`;
+- `install.sh`, `README.md` e `phone-worker.env.example` em `~/phone-worker/`;
+- `start-phone-worker.sh` e `watch-phone-worker.sh` no `$HOME`.
+
+O update confere `sha256`, faz backup `.bak` quando possível e, por padrão, reinicia o phone-worker só depois de responder o resultado para a VPS.
+
+Variáveis locais opcionais:
+
+```env
+PHONE_WORKER_SELF_UPDATE_ENABLED=true
+PHONE_WORKER_UPDATE_RESTART=true
+PHONE_WORKER_UPDATE_MAX_FILE_BYTES=524288
+PHONE_WORKER_UPDATE_MAX_TOTAL_BYTES=1048576
+```

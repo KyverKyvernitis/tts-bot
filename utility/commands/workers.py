@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import contextlib
 import json
 import os
@@ -36,6 +38,7 @@ LEGACY_WORKER_ID = "__legacy_phone_worker__"
 WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Testar worker", "value": "ping", "job_type": "ping", "payload": {}, "summary": "teste manual pelo painel workers", "description": "Ping seguro no worker selecionado", "emoji": "🧪"},
     {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede, Tailscale e sistema", "emoji": "🩺"},
+    {"label": "Atualizar agent", "value": "worker_update", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Aplica a versão atual e reinicia", "emoji": "⬆️", "requires_declared": True},
     {"label": "Logs", "value": "worker_logs", "job_type": "worker_logs", "payload": {"lines": 140}, "summary": "logs recentes do phone-worker", "description": "Busca logs recentes", "emoji": "📜"},
     {"label": "Tailscale", "value": "tailscale_status", "job_type": "tailscale_status", "payload": {}, "summary": "status Tailscale e alcance da VPS", "description": "Verifica Tailscale e VPS", "emoji": "🌐"},
     {"label": "Status serviços", "value": "service_status", "job_type": "service_status", "payload": {"service": "phone-worker"}, "summary": "status de serviços do celular", "description": "Mostra serviços permitidos", "emoji": "🧰"},
@@ -448,6 +451,9 @@ class WorkersPanelView(discord.ui.LayoutView):
         specs: list[dict[str, Any]] = []
         for spec in WORKER_ACTION_SPECS:
             job_type = _task_name(spec.get("job_type"))
+            requires_declared = bool(spec.get("requires_declared"))
+            if requires_declared and (supported is None or job_type not in supported):
+                continue
             if supported is not None and job_type not in supported:
                 continue
             specs.append(dict(spec))
@@ -496,6 +502,9 @@ class WorkersPanelView(discord.ui.LayoutView):
         registered = int((summary or {}).get('registered') or 0)
         online = int((summary or {}).get('online') or 0)
         pairings = int((summary or {}).get('pairings_active') or 0)
+        registry_label = "nenhum APK pareado" if registered <= 0 else f"`{registered}` reg · `{online}` online"
+        if pairings:
+            registry_label += f" · `{pairings}` pair"
         jobs_label = f"`{queued}` pend · `{running}` rod"
         if queued and not online and not self._has_legacy_worker():
             jobs_label += " · sem worker"
@@ -503,7 +512,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             "# 📱 Core Workers\n"
             f"-# privado · `workers` / `worker` / `w` · guild `{WORKERS_COMMAND_GUILD_ID}`\n"
             f"**Estado:** {snapshot.state_label}\n"
-            f"**Registry:** `{registered}` reg · `{online}` online · `{pairings}` pair\n"
+            f"**Registry:** {registry_label}\n"
             f"**Jobs:** {jobs_label}"
         )
 
@@ -537,6 +546,13 @@ class WorkersPanelView(discord.ui.LayoutView):
         pairing = discord.ui.Button(label="Parear APK", emoji="🔐", style=discord.ButtonStyle.success)
         pairing.callback = self._create_pairing
 
+        update_worker = discord.ui.Button(
+            label="Atualizar worker",
+            emoji="⬆️",
+            style=discord.ButtonStyle.secondary,
+        )
+        update_worker.callback = self._sync_worker
+
         wake = discord.ui.Button(
             label="Acordar phone-worker",
             emoji="📡",
@@ -559,7 +575,8 @@ class WorkersPanelView(discord.ui.LayoutView):
                 discord.ui.ActionRow(worker_select),
                 discord.ui.ActionRow(action_select),
             ])
-        components.append(discord.ui.ActionRow(refresh, pairing, wake, cleanup_jobs))
+        components.append(discord.ui.ActionRow(refresh, pairing, update_worker))
+        components.append(discord.ui.ActionRow(wake, cleanup_jobs))
         container = discord.ui.Container(*components, accent_color=snapshot.accent)
         self.add_item(container)
 
@@ -579,13 +596,15 @@ class WorkersPanelView(discord.ui.LayoutView):
             worker_id = _shorten(worker.get("worker_id"), limit=24)
             seen = _format_age(worker.get("last_seen_age_seconds"))
             roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=5)
+            version = _shorten(worker.get("version") or "sem versão", limit=24)
             lines.append(f"{icon} **{name}** · `{worker_id}`")
-            lines.append(f"-# visto {seen} · {_battery_text(worker)} · {_network_text(worker)}")
+            lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)}")
             lines.append(f"Roles: {roles}")
         elif self._selected_is_legacy():
             roles = _role_text(snapshot.roles, limit=6)
+            version = _shorten((snapshot.status or {}).get("version") or "sem versão", limit=24)
             lines.append(f"🟢 **{_shorten(snapshot.name or 'phone-worker direto', limit=36)}** · `direto`")
-            lines.append(f"-# phone-worker antigo online via endpoint local/Tailscale")
+            lines.append(f"-# endpoint local/Tailscale · v `{version}`")
             lines.append(f"Roles: {roles}")
         elif workers:
             lines.append("Selecione um worker.")
@@ -654,6 +673,14 @@ class WorkersPanelView(discord.ui.LayoutView):
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
+    async def _sync_worker(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=False)
+        snapshot = await self.cog._sync_phone_worker()
+        self.snapshot = snapshot
+        self._ensure_selected_worker()
+        self._rebuild_layout()
+        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+
     async def _create_pairing(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
         try:
@@ -693,6 +720,8 @@ class WorkersPanelView(discord.ui.LayoutView):
         await interaction.response.defer(thinking=False)
         target_worker_id = self._job_target_worker_id()
         try:
+            if _task_name(job_type) == "worker_update":
+                payload = await self.cog._build_worker_update_payload()
             if self._selected_is_legacy():
                 result = await self.cog._run_legacy_worker_action(job_type=job_type, payload=payload or {})
                 note = _shorten((result or {}).get("summary") or "ação direta concluída", limit=90)
@@ -804,6 +833,42 @@ class WorkersCommandMixin:
             raise RuntimeError(_shorten(_redact(parsed.get("error") or "worker retornou erro"), limit=120))
         return parsed
 
+    def _build_worker_update_payload_sync(self) -> dict[str, Any]:
+        src_dir = _repo_root() / "deploy" / "termux" / "phone-worker"
+        files: list[dict[str, Any]] = []
+        targets = (
+            ("phone_worker.py", 0o755),
+            ("start-phone-worker.sh", 0o755),
+            ("watch-phone-worker.sh", 0o755),
+            ("install.sh", 0o755),
+            ("README.md", 0o644),
+            ("phone-worker.env.example", 0o600),
+        )
+        version = ""
+        version_re = re.compile(r'^PHONE_WORKER_VERSION\s*=\s*["\\\']([^"\\\']+)["\\\']', re.MULTILINE)
+        for name, mode in targets:
+            path = src_dir / name
+            if not path.is_file():
+                continue
+            data = path.read_bytes()
+            if name == "phone_worker.py":
+                with contextlib.suppress(Exception):
+                    match = version_re.search(data.decode("utf-8", errors="ignore"))
+                    if match:
+                        version = match.group(1)
+            files.append({
+                "target": name,
+                "mode": mode,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "data_b64": base64.b64encode(data).decode("ascii"),
+            })
+        if not files:
+            raise RuntimeError("arquivos do phone-worker não encontrados em deploy/termux/phone-worker")
+        return {"version": version or "desconhecida", "restart": True, "files": files}
+
+    async def _build_worker_update_payload(self) -> dict[str, Any]:
+        return await asyncio.to_thread(self._build_worker_update_payload_sync)
+
     async def _run_legacy_worker_action(self, *, job_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         kind = str(job_type or "").strip().lower().replace("-", "_")
         if kind in {"ping", "status", "diagnostic_basic", "worker_self_check"}:
@@ -816,6 +881,7 @@ class WorkersCommandMixin:
             "network_probe",
             "tailscale_status",
             "worker_logs",
+            "worker_update",
             "service_status",
             "service_start",
             "service_stop",
@@ -943,6 +1009,43 @@ class WorkersCommandMixin:
                     await proc.communicate()
         except Exception as exc:
             note = f"watchdog falhou: {type(exc).__name__}: {exc}"
+        return await self._collect_workers_snapshot(action_note=note, watch_output=output)
+
+    async def _sync_phone_worker(self) -> WorkerSnapshot:
+        script = _repo_root() / "scripts" / "sync-phone-worker.sh"
+        if not script.exists():
+            return await self._collect_workers_snapshot(action_note="sync não encontrado em scripts/sync-phone-worker.sh")
+
+        timeout = max(15.0, _env_float("WORKERS_PANEL_SYNC_TIMEOUT_SECONDS", 75.0))
+        started = time.perf_counter()
+        note = "sync executado"
+        output = ""
+        proc: asyncio.subprocess.Process | None = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bash",
+                str(script),
+                cwd=str(_repo_root()),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            elapsed = time.perf_counter() - started
+            out = (stdout or b"").decode("utf-8", errors="replace").strip()
+            err = (stderr or b"").decode("utf-8", errors="replace").strip()
+            merged = " | ".join(part for part in [out, err] if part)
+            output = merged or "sem saída"
+            if proc.returncode == 0:
+                note = f"phone-worker atualizado em {elapsed:.1f}s"
+            else:
+                note = f"sync retornou código {proc.returncode} em {elapsed:.1f}s"
+        except asyncio.TimeoutError:
+            note = f"sync excedeu {timeout:.0f}s"
+            if proc is not None:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+        except Exception as exc:
+            note = f"sync falhou: {_compact_failure(exc)}"
         return await self._collect_workers_snapshot(action_note=note, watch_output=output)
 
     async def _send_workers_panel_from_context(self, ctx: commands.Context) -> None:

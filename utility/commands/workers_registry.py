@@ -37,6 +37,7 @@ CORE_WORKER_JOB_TYPES = {
     "log_summary",
     "text_stats",
     "maintenance_plan",
+    "worker_update",
 }
 
 _ROLE_RE = re.compile(r"[^a-z0-9_.:-]+")
@@ -142,7 +143,13 @@ def _safe_dict(value: object, *, max_items: int = 32, max_string: int = 8192) ->
         elif isinstance(item, (int, float, bool)) or item is None:
             clean[k] = item
         elif isinstance(item, list):
-            clean[k] = [x for x in item[:24] if isinstance(x, (str, int, float, bool)) or x is None]
+            clean_list: list[Any] = []
+            for x in item[:24]:
+                if isinstance(x, Mapping):
+                    clean_list.append(_safe_dict(x, max_items=16, max_string=max_string))
+                elif isinstance(x, (str, int, float, bool)) or x is None:
+                    clean_list.append(x if not isinstance(x, str) or len(x) <= max_string else x[:max_string] + "…[truncated]")
+            clean[k] = clean_list
         elif isinstance(item, Mapping):
             clean[k] = _safe_dict(item, max_items=12, max_string=max_string)
         else:
