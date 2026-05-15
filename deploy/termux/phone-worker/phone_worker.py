@@ -39,6 +39,52 @@ DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
 
+SUPPORTED_DIRECT_TASKS = (
+    "diagnostic_basic",
+    "ffmpeg_check",
+    "ffmpeg_convert",
+    "ffprobe_check",
+    "ffprobe_media",
+    "health",
+    "log_extract",
+    "log_summary",
+    "maintenance_plan",
+    "network_probe",
+    "ping",
+    "service_restart",
+    "service_start",
+    "service_status",
+    "service_stop",
+    "sha256",
+    "status",
+    "tailscale_status",
+    "text_stats",
+    "worker_logs",
+    "worker_self_check",
+    "zip",
+    "zip_validate",
+)
+
+SUPPORTED_CORE_WORKER_JOB_TYPES = (
+    "diagnostic_basic",
+    "ffmpeg_check",
+    "ffprobe_check",
+    "log_summary",
+    "maintenance_plan",
+    "network_probe",
+    "ping",
+    "service_restart",
+    "service_start",
+    "service_status",
+    "service_stop",
+    "status",
+    "tailscale_status",
+    "text_stats",
+    "worker_logs",
+    "worker_self_check",
+    "zip_validate",
+)
+
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -348,6 +394,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "endpoint": endpoint,
         "roles": roles[:16],
         "capabilities": capabilities[:24],
+        "supported_tasks": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
         "battery": _battery_snapshot(),
         "network": _network_snapshot(),
         "health": {
@@ -457,6 +504,8 @@ def _system_status() -> dict[str, Any]:
         "version": PHONE_WORKER_VERSION,
         "core_worker_heartbeat": _heartbeat_configured(),
         "core_worker_jobs": _core_worker_jobs_configured(),
+        "supported_tasks": list(SUPPORTED_DIRECT_TASKS),
+        "supported_core_worker_jobs": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
         "pid": os.getpid(),
         "uptime_seconds": round(time.time() - START_TIME, 3),
         "platform": platform.platform(),
@@ -553,7 +602,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if body is None:
             return
 
-        task = str(body.get("task") or "").strip().lower()
+        task = str(body.get("task") or "").strip().lower().replace("-", "_")
         JOBS_STARTED += 1
         try:
             if task in {"ping", "health", "status"}:

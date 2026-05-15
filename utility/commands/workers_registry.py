@@ -200,6 +200,7 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "last_heartbeat_at": record.get("last_heartbeat_at"),
         "roles": normalize_roles(record.get("roles"), limit=16),
         "capabilities": normalize_roles(record.get("capabilities"), limit=24),
+        "supported_tasks": normalize_roles(record.get("supported_tasks"), limit=48),
         "version": _short_text(record.get("version"), limit=48),
         "source": _short_text(record.get("source"), limit=32, default="apk"),
         "endpoint": _short_text(record.get("endpoint"), limit=160),
@@ -338,6 +339,7 @@ class CoreWorkersRegistry:
                 "paired_by_name": _short_text(match.get("created_by_name"), limit=80),
                 "roles": roles,
                 "capabilities": capabilities,
+                "supported_tasks": normalize_roles(payload.get("supported_tasks"), limit=48),
                 "endpoint": endpoint,
                 "version": version,
                 "source": source,
@@ -380,6 +382,8 @@ class CoreWorkersRegistry:
                 record["roles"] = normalize_roles(payload.get("roles"), default=normalize_roles(record.get("roles")), limit=16)
             if "capabilities" in payload:
                 record["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities")), limit=24)
+            if "supported_tasks" in payload:
+                record["supported_tasks"] = normalize_roles(payload.get("supported_tasks"), default=normalize_roles(record.get("supported_tasks")), limit=48)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
                 if key in payload:
                     record[key] = _safe_dict(payload.get(key), max_items=max_items)
@@ -530,6 +534,10 @@ class CoreWorkersRegistry:
             return False
         if required_capabilities and not required_capabilities.issubset(capabilities):
             return False
+        supported_tasks = set(normalize_roles(worker.get("supported_tasks"), limit=64))
+        job_type = str(job.get("type") or "").strip().lower().replace("-", "_")
+        if supported_tasks and job_type and job_type not in supported_tasks:
+            return False
         return True
 
     def poll_job(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
@@ -547,6 +555,8 @@ class CoreWorkersRegistry:
                 worker["roles"] = normalize_roles(payload.get("roles"), default=normalize_roles(worker.get("roles")), limit=16)
             if "capabilities" in payload:
                 worker["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(worker.get("capabilities")), limit=24)
+            if "supported_tasks" in payload:
+                worker["supported_tasks"] = normalize_roles(payload.get("supported_tasks"), default=normalize_roles(worker.get("supported_tasks")), limit=48)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
                 if key in payload:
                     worker[key] = _safe_dict(payload.get(key), max_items=max_items)

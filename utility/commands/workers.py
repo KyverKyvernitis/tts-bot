@@ -33,6 +33,18 @@ WORKERS_DEFAULT_ROLES = (
 )
 LEGACY_WORKER_ID = "__legacy_phone_worker__"
 
+WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
+    {"label": "Testar worker", "value": "ping", "job_type": "ping", "payload": {}, "summary": "teste manual pelo painel workers", "description": "Ping seguro no worker selecionado", "emoji": "🧪"},
+    {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede, Tailscale e sistema", "emoji": "🩺"},
+    {"label": "Logs", "value": "worker_logs", "job_type": "worker_logs", "payload": {"lines": 140}, "summary": "logs recentes do phone-worker", "description": "Busca logs recentes", "emoji": "📜"},
+    {"label": "Tailscale", "value": "tailscale_status", "job_type": "tailscale_status", "payload": {}, "summary": "status Tailscale e alcance da VPS", "description": "Verifica Tailscale e VPS", "emoji": "🌐"},
+    {"label": "Status serviços", "value": "service_status", "job_type": "service_status", "payload": {"service": "phone-worker"}, "summary": "status de serviços do celular", "description": "Mostra serviços permitidos", "emoji": "🧰"},
+    {"label": "Iniciar watchdog", "value": "service_start_watch", "job_type": "service_start", "payload": {"service": "phone-worker-watch"}, "summary": "iniciar watchdog do phone-worker", "description": "Inicia phone-worker-watch", "emoji": "▶️"},
+    {"label": "Parar watchdog", "value": "service_stop_watch", "job_type": "service_stop", "payload": {"service": "phone-worker-watch"}, "summary": "parar watchdog do phone-worker", "description": "Para phone-worker-watch", "emoji": "⏹️"},
+    {"label": "Reiniciar worker", "value": "service_restart_worker", "job_type": "service_restart", "payload": {"service": "phone-worker"}, "summary": "reiniciar phone-worker no celular", "description": "Reinicia após responder", "emoji": "🔁"},
+    {"label": "Parar worker", "value": "service_stop_worker", "job_type": "service_stop", "payload": {"service": "phone-worker"}, "summary": "parar phone-worker no celular", "description": "Para após responder", "emoji": "🛑"},
+)
+
 
 _SECRET_PATTERNS = (
     re.compile(r"(Authorization:\s*Bearer\s+)[^\s]+", re.IGNORECASE),
@@ -208,6 +220,46 @@ def _role_text(roles: list[str], *, limit: int = 8) -> str:
     return " ".join(f"`{_shorten(role, limit=24)}`" for role in selected)
 
 
+def _task_name(value: object) -> str:
+    return re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower().replace("-", "_")).strip("_")
+
+
+def _task_set(value: object) -> set[str]:
+    if isinstance(value, (list, tuple, set)):
+        raw_items = value
+    elif isinstance(value, str):
+        raw_items = value.replace(";", ",").split(",")
+    else:
+        raw_items = []
+    result: set[str] = set()
+    for item in raw_items:
+        clean = _task_name(item)
+        if clean:
+            result.add(clean)
+    return result
+
+
+def _compact_failure(exc: BaseException) -> str:
+    text = _redact(str(exc) or type(exc).__name__)
+    match = re.search(r"HTTP\s+(\d+)\s*:\s*(\{.*\})", text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        code = match.group(1)
+        try:
+            data = json.loads(match.group(2))
+        except Exception:
+            data = {}
+        error = str((data or {}).get("error") or "").strip()
+        if error:
+            lowered = error.lower()
+            if "task não suportada" in lowered or "task nao suportada" in lowered:
+                return f"worker desatualizado/sem suporte para essa ação (HTTP {code})"
+            return f"HTTP {code}: {_shorten(error, limit=90)}"
+    lowered = text.lower()
+    if "task não suportada" in lowered or "task nao suportada" in lowered:
+        return "worker desatualizado/sem suporte para essa ação"
+    return _shorten(text, limit=110)
+
+
 def _has_online_registry_worker(snapshot: "WorkerSnapshot") -> bool:
     summary = (snapshot.registry_snapshot or {}).get("summary") if isinstance(snapshot.registry_snapshot, dict) else {}
     try:
@@ -372,17 +424,52 @@ class WorkersPanelView(discord.ui.LayoutView):
             ))
         return options
 
+    def _selected_supported_tasks(self) -> set[str] | None:
+        if self._selected_is_legacy():
+            status = self.snapshot.status if isinstance(self.snapshot.status, dict) else {}
+            supported = _task_set(status.get("supported_tasks"))
+            if supported:
+                return supported
+            # Worker legado antigo: liberar só ações que não dependem do /task novo.
+            return {"ping", "status", "worker_self_check", "diagnostic_basic"}
+        worker = self._selected_worker()
+        if not worker:
+            return set()
+        supported = _task_set(worker.get("supported_tasks"))
+        if not supported:
+            health = worker.get("health") if isinstance(worker.get("health"), dict) else {}
+            status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+            supported = _task_set(health.get("supported_tasks")) or _task_set(status.get("supported_tasks"))
+        # None = worker registrado antigo/externo sem declarar suporte; manter ações visíveis.
+        return supported or None
+
+    def _action_specs_for_selected(self) -> list[dict[str, Any]]:
+        supported = self._selected_supported_tasks()
+        specs: list[dict[str, Any]] = []
+        for spec in WORKER_ACTION_SPECS:
+            job_type = _task_name(spec.get("job_type"))
+            if supported is not None and job_type not in supported:
+                continue
+            specs.append(dict(spec))
+        return specs
+
     def _action_select_options(self) -> list[discord.SelectOption]:
+        specs = self._action_specs_for_selected()
+        if not specs:
+            return [discord.SelectOption(
+                label="Worker sem ações compatíveis",
+                value="_unsupported",
+                description="Atualize/reinicie o phone-worker para liberar ações",
+                emoji="⚠️",
+            )]
         return [
-            discord.SelectOption(label="Testar worker", value="ping", description="Cria um ping seguro no worker selecionado", emoji="🧪"),
-            discord.SelectOption(label="Saúde", value="worker_self_check", description="Coleta bateria, rede, Tailscale, serviços e sistema", emoji="🩺"),
-            discord.SelectOption(label="Logs", value="worker_logs", description="Busca logs recentes do phone-worker", emoji="📜"),
-            discord.SelectOption(label="Tailscale", value="tailscale_status", description="Verifica Tailscale e alcance da VPS", emoji="🌐"),
-            discord.SelectOption(label="Status serviços", value="service_status", description="Mostra status dos serviços permitidos", emoji="🧰"),
-            discord.SelectOption(label="Iniciar watchdog", value="service_start_watch", description="Inicia phone-worker-watch", emoji="▶️"),
-            discord.SelectOption(label="Parar watchdog", value="service_stop_watch", description="Para phone-worker-watch", emoji="⏹️"),
-            discord.SelectOption(label="Reiniciar worker", value="service_restart_worker", description="Reinicia phone-worker depois de responder o job", emoji="🔁"),
-            discord.SelectOption(label="Parar worker", value="service_stop_worker", description="Para phone-worker depois de responder o job", emoji="🛑"),
+            discord.SelectOption(
+                label=str(spec["label"])[:100],
+                value=str(spec["value"])[:100],
+                description=_shorten(spec.get("description"), limit=100),
+                emoji=str(spec.get("emoji") or "⚙️"),
+            )
+            for spec in specs[:25]
         ]
 
     def _new_select(self, **kwargs: Any):
@@ -433,12 +520,14 @@ class WorkersPanelView(discord.ui.LayoutView):
             )
             worker_select.callback = self._select_worker
 
+            action_options = self._action_select_options()
+            action_disabled = bool(action_options and str(action_options[0].value) == "_unsupported")
             action_select = self._new_select(
-                placeholder="Escolha uma ação segura",
+                placeholder="Escolha uma ação segura" if not action_disabled else "Worker desatualizado/sem ações compatíveis",
                 min_values=1,
                 max_values=1,
-                options=self._action_select_options(),
-                disabled=False,
+                options=action_options,
+                disabled=action_disabled,
             )
             action_select.callback = self._select_action
 
@@ -506,8 +595,14 @@ class WorkersPanelView(discord.ui.LayoutView):
         else:
             lines.append("Nenhum worker configurado ou pareado.")
 
+        supported = self._selected_supported_tasks()
+        if self._selected_is_legacy() and supported is not None and "service_status" not in supported:
+            lines.append("-# Ações avançadas ocultas: phone-worker legado/desatualizado.")
+        elif supported == set():
+            lines.append("-# Nenhuma ação compatível declarada por este worker.")
+
         if snapshot.action_note:
-            lines.append(f"-# Última ação: {_shorten(_redact(snapshot.action_note), limit=110)}")
+            lines.append(f"-# Última ação: {_shorten(_redact(snapshot.action_note), limit=80)}")
         if snapshot.watch_output:
             lines.append(f"-# Watchdog: `{_shorten(_redact(snapshot.watch_output), limit=90)}`")
         return lines
@@ -529,23 +624,20 @@ class WorkersPanelView(discord.ui.LayoutView):
             with contextlib.suppress(Exception):
                 values = list(getattr(interaction, "values", []) or [])
         action = str((values or [""])[0] or "")
-        mapping: dict[str, tuple[str, dict[str, Any], str]] = {
-            "ping": ("ping", {}, "teste manual pelo painel workers"),
-            "worker_self_check": ("worker_self_check", {}, "saúde completa pelo painel workers"),
-            "worker_logs": ("worker_logs", {"lines": 140}, "logs recentes do phone-worker"),
-            "tailscale_status": ("tailscale_status", {}, "status Tailscale e alcance da VPS"),
-            "service_status": ("service_status", {"service": "phone-worker"}, "status de serviços do celular"),
-            "service_start_watch": ("service_start", {"service": "phone-worker-watch"}, "iniciar watchdog do phone-worker"),
-            "service_stop_watch": ("service_stop", {"service": "phone-worker-watch"}, "parar watchdog do phone-worker"),
-            "service_restart_worker": ("service_restart", {"service": "phone-worker"}, "reiniciar phone-worker no celular"),
-            "service_stop_worker": ("service_stop", {"service": "phone-worker"}, "parar phone-worker no celular"),
-        }
-        job = mapping.get(action)
-        if job is None:
-            await interaction.response.send_message("Ação inválida.", ephemeral=True)
+        if action == "_unsupported":
+            await interaction.response.send_message("Esse worker está desatualizado ou não declarou suporte para ações seguras.", ephemeral=True)
             return
-        job_type, payload, summary = job
-        await self._queue_named_job(interaction, job_type=job_type, payload=payload, summary=summary)
+        specs = {str(spec.get("value")): spec for spec in self._action_specs_for_selected()}
+        spec = specs.get(action)
+        if spec is None:
+            await interaction.response.send_message("Ação indisponível para esse worker.", ephemeral=True)
+            return
+        await self._queue_named_job(
+            interaction,
+            job_type=str(spec.get("job_type") or action),
+            payload=dict(spec.get("payload") or {}),
+            summary=str(spec.get("summary") or spec.get("label") or action),
+        )
 
     async def _refresh(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -584,7 +676,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send(msg, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
-            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha ao gerar pareamento: {type(exc).__name__}: {exc}")
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha ao gerar pareamento: {_compact_failure(exc)}")
             self._ensure_selected_worker()
             self._rebuild_layout()
             await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
@@ -618,7 +710,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 target_label = _shorten(target_worker_id or "qualquer worker online", limit=32)
                 self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"job `{job_type}` criado para {target_label}: {job_id}")
         except Exception as exc:
-            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha em `{job_type}`: {type(exc).__name__}: {exc}")
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha em `{job_type}`: {_compact_failure(exc)}")
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
@@ -629,7 +721,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             result = await self.cog._cleanup_core_worker_jobs()
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"limpeza de jobs: {result}")
         except Exception as exc:
-            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha limpando jobs: {type(exc).__name__}: {exc}")
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha limpando jobs: {_compact_failure(exc)}")
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
@@ -696,11 +788,20 @@ class WorkersCommandMixin:
             with urllib.request.urlopen(req, timeout=max(0.8, timeout)) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
-            body_text = exc.read().decode("utf-8", errors="replace")[:240]
-            raise RuntimeError(f"HTTP {exc.code}: {_redact(body_text)}") from exc
+            body_text = exc.read().decode("utf-8", errors="replace")[:1024]
+            try:
+                parsed_error = json.loads(body_text or "{}")
+            except Exception:
+                parsed_error = {}
+            error_text = str((parsed_error or {}).get("error") or body_text or "erro HTTP").strip()
+            if "task não suportada" in error_text.lower() or "task nao suportada" in error_text.lower():
+                raise RuntimeError(f"HTTP {exc.code}: worker legado/desatualizado não suporta `{task}`") from exc
+            raise RuntimeError(f"HTTP {exc.code}: {_shorten(_redact(error_text), limit=120)}") from exc
         parsed = json.loads(raw.decode("utf-8", errors="replace"))
         if not isinstance(parsed, dict):
             raise RuntimeError("resposta não é JSON object")
+        if parsed.get("ok") is False:
+            raise RuntimeError(_shorten(_redact(parsed.get("error") or "worker retornou erro"), limit=120))
         return parsed
 
     async def _run_legacy_worker_action(self, *, job_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
