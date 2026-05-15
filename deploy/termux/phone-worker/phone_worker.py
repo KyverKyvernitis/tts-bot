@@ -35,7 +35,7 @@ JOBS_FAILED = 0
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.5.3"
+PHONE_WORKER_VERSION = "1.5.4"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -280,46 +280,98 @@ def _read_text_file(path: str | Path, *, limit: int = 4096) -> str:
         return ""
 
 
+def _empty_battery_snapshot(source: str = "unavailable", error: object = "") -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "available": False,
+        "source": _short_text(source, limit=48, default="unavailable"),
+        "level": None,
+        "charging": None,
+        "temperature_c": None,
+    }
+    if error:
+        result["error"] = _short_text(error, limit=120)
+    return result
+
+
+def _safe_path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except (PermissionError, OSError):
+        return False
+    except Exception:
+        return False
+
+
 def _sysfs_battery_snapshot() -> dict[str, Any]:
     # Fallback leve quando Termux:API não está instalado ou sem permissão.
-    base_candidates = [Path("/sys/class/power_supply/battery")]
-    base_candidates.extend(Path("/sys/class/power_supply").glob("BAT*"))
+    # Em alguns Androids/Termux, apenas chamar Path.exists() em /sys pode gerar
+    # PermissionError. Telemetria é sempre best-effort e nunca pode derrubar
+    # heartbeat/jobs.
+    base_candidates: list[Path] = []
+    primary = Path("/sys/class/power_supply/battery")
+    if _safe_path_exists(primary):
+        base_candidates.append(primary)
+    try:
+        for candidate in Path("/sys/class/power_supply").glob("BAT*"):
+            if _safe_path_exists(candidate) and candidate not in base_candidates:
+                base_candidates.append(candidate)
+    except (PermissionError, OSError):
+        return _empty_battery_snapshot("sysfs_permission_denied")
+    except Exception as exc:
+        return _empty_battery_snapshot("sysfs_error", exc)
+
     for base in base_candidates:
-        if not base.exists():
+        try:
+            result: dict[str, Any] = {"available": True, "source": "sysfs"}
+            capacity = _read_text_file(base / "capacity", limit=32)
+            status = _read_text_file(base / "status", limit=64).lower()
+            plugged = _read_text_file(base / "type", limit=64).lower()
+            temp = _read_text_file(base / "temp", limit=32)
+            try:
+                if capacity:
+                    result["level"] = max(0, min(100, int(float(capacity))))
+            except Exception:
+                pass
+            if status:
+                result["status"] = status[:32]
+                result["charging"] = status in {"charging", "full"}
+            if plugged:
+                result["plugged"] = plugged[:32]
+            try:
+                if temp:
+                    raw_temp = float(temp)
+                    # Android costuma expor décimos de °C.
+                    if raw_temp > 1000:
+                        raw_temp = raw_temp / 10.0
+                    result["temperature_c"] = round(raw_temp, 1)
+            except Exception:
+                pass
+            if any(key in result for key in ("level", "status", "charging", "temperature_c")):
+                return result
+        except (PermissionError, OSError):
             continue
-        result: dict[str, Any] = {}
-        capacity = _read_text_file(base / "capacity", limit=32)
-        status = _read_text_file(base / "status", limit=64).lower()
-        plugged = _read_text_file(base / "type", limit=64).lower()
-        temp = _read_text_file(base / "temp", limit=32)
-        try:
-            if capacity:
-                result["level"] = max(0, min(100, int(float(capacity))))
         except Exception:
-            pass
-        if status:
-            result["status"] = status[:32]
-            result["charging"] = status in {"charging", "full"}
-        if plugged:
-            result["source"] = "sysfs"
-        try:
-            if temp:
-                raw_temp = float(temp)
-                # Android costuma expor décimos de °C.
-                if raw_temp > 1000:
-                    raw_temp = raw_temp / 10.0
-                result["temperature_c"] = round(raw_temp, 1)
-        except Exception:
-            pass
-        if result:
-            return result
-    return {}
+            continue
+    return _empty_battery_snapshot("sysfs_unavailable")
 
 
 def _battery_snapshot() -> dict[str, Any]:
-    raw = _run_json_command(["termux-battery-status"], timeout=2.0)
+    try:
+        raw = _run_json_command(["termux-battery-status"], timeout=2.0)
+    except Exception as exc:
+        raw = {}
+        termux_error = exc
+    else:
+        termux_error = None
+
     if not raw:
-        return _sysfs_battery_snapshot()
+        try:
+            return _sysfs_battery_snapshot()
+        except (PermissionError, OSError) as exc:
+            return _empty_battery_snapshot("battery_permission_denied", exc)
+        except Exception as exc:
+            return _empty_battery_snapshot("battery_error", exc or termux_error)
+
     level = raw.get("percentage")
     charging = None
     status = str(raw.get("status") or "").strip().lower()
@@ -328,7 +380,7 @@ def _battery_snapshot() -> dict[str, Any]:
         charging = status in {"charging", "full"}
     elif plugged:
         charging = plugged not in {"unplugged", "none", "unknown"}
-    result: dict[str, Any] = {"source": "termux-api"}
+    result: dict[str, Any] = {"available": True, "source": "termux-api"}
     try:
         if level is not None:
             result["level"] = int(float(level))
@@ -349,6 +401,17 @@ def _battery_snapshot() -> dict[str, Any]:
     return result
 
 
+def _safe_telemetry(name: str, callback, default: Any) -> Any:
+    try:
+        return callback()
+    except Exception as exc:
+        print(f"[phone-worker] telemetria {name} indisponível: {type(exc).__name__}: {_short_text(exc, limit=100)}", flush=True)
+        if isinstance(default, dict):
+            fallback = dict(default)
+            fallback.setdefault("ok", False)
+            fallback.setdefault("error", f"{type(exc).__name__}: {_short_text(exc, limit=100)}")
+            return fallback
+        return default
 
 def _run_text_command(command: list[str], *, timeout: float = 3.0, max_bytes: int = 32768) -> tuple[int, str, str]:
     if not command or not shutil.which(command[0]):
@@ -561,7 +624,7 @@ def _post_core_worker_json(path: str, payload: dict[str, Any], *, timeout: float
 
 
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
-    status = _system_status()
+    status = _safe_telemetry("system", _system_status, {"ok": False})
     worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
     name = _default_worker_name()
     endpoint = str(os.getenv("CORE_WORKER_ENDPOINT") or os.getenv("PHONE_WORKER_ENDPOINT") or "").strip()
@@ -582,8 +645,8 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "roles": roles[:16],
         "capabilities": capabilities[:24],
         "supported_tasks": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
-        "battery": _battery_snapshot(),
-        "network": _network_snapshot(),
+        "battery": _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot()),
+        "network": _safe_telemetry("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}),
         "health": {
             "ok": True,
             "pid": status.get("pid"),
@@ -664,8 +727,8 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
     _base_url, _token, worker_id = _core_worker_auth_parts()
     if not _base_url or not _token or not worker_id:
         return False
-    payload = _core_worker_payload(host=host, port=port)
     try:
+        payload = _core_worker_payload(host=host, port=port)
         status, data = _post_core_worker_json("/core-worker/heartbeat", payload, timeout=timeout)
         if 200 <= status < 300 and data.get("ok", True):
             return True
@@ -1646,14 +1709,14 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
             result = {
                 "ok": True,
                 "summary": "saúde do worker coletada",
-                "system": _system_status(),
-                "battery": _battery_snapshot(),
-                "network": _network_snapshot(),
-                "tailscale": _tailscale_snapshot(probe_vps=True),
+                "system": _safe_telemetry("system", _system_status, {"ok": False}),
+                "battery": _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot()),
+                "network": _safe_telemetry("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}),
+                "tailscale": _safe_telemetry("tailscale", lambda: _tailscale_snapshot(probe_vps=True), {"connected": False, "state": "telemetry_failed"}),
                 "services": {
-                    "phone-worker": _service_status("phone-worker"),
-                    "phone-worker-watch": _service_status("phone-worker-watch"),
-                    "tailscale": _service_status("tailscale"),
+                    "phone-worker": _safe_telemetry("service phone-worker", lambda: _service_status("phone-worker"), {"ok": False}),
+                    "phone-worker-watch": _safe_telemetry("service phone-worker-watch", lambda: _service_status("phone-worker-watch"), {"ok": False}),
+                    "tailscale": _safe_telemetry("service tailscale", lambda: _service_status("tailscale"), {"ok": False}),
                 },
                 "ffmpeg": _command_version("ffmpeg"),
                 "ffprobe": _command_version("ffprobe"),
@@ -1661,9 +1724,9 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
                 "capabilities": _env_list("CORE_WORKER_CAPABILITIES", []),
             }
         elif kind == "network_probe":
-            result = {"ok": True, "summary": "rede testada", "network": _network_snapshot(), "tailscale": _tailscale_snapshot(probe_vps=True)}
+            result = {"ok": True, "summary": "rede testada", "network": _safe_telemetry("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}), "tailscale": _safe_telemetry("tailscale", lambda: _tailscale_snapshot(probe_vps=True), {"connected": False, "state": "telemetry_failed"})}
         elif kind == "tailscale_status":
-            result = {"ok": True, "summary": "status Tailscale coletado", "tailscale": _tailscale_snapshot(probe_vps=True)}
+            result = {"ok": True, "summary": "status Tailscale coletado", "tailscale": _safe_telemetry("tailscale", lambda: _tailscale_snapshot(probe_vps=True), {"connected": False, "state": "telemetry_failed"})}
         elif kind == "worker_logs":
             result = _worker_logs_snapshot(payload)
             result.setdefault("summary", "logs do phone-worker coletadas" if result.get("ok") else "falha ao coletar logs")

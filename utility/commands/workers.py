@@ -266,40 +266,13 @@ def _queue_status_text(worker: dict[str, Any]) -> str:
     if not queue:
         return ""
 
-    parts: list[str] = []
-    now = time.time()
-    last_poll_at = queue.get("last_poll_at")
-    try:
-        if last_poll_at:
-            parts.append(f"poll {_format_age(max(0.0, now - float(last_poll_at)))}")
-    except Exception:
-        pass
-
     state = str(queue.get("last_poll_state") or "").strip().lower()
-    last_job_type = str(queue.get("last_job_type") or "").strip()
-    if state == "delivered" and last_job_type:
-        parts.append(f"entregou `{_shorten(last_job_type, limit=32)}`")
-    elif state == "no_compatible_job":
-        parts.append("sem job compatível")
-    elif state == "no_job":
-        parts.append("sem job")
-
-    last_result_at = queue.get("last_result_at")
-    result_status = str(queue.get("last_result_status") or "").strip().lower()
-    result_type = str(queue.get("last_result_type") or "").strip()
-    try:
-        if last_result_at:
-            label = "ok" if result_status == "succeeded" else (result_status or "resultado")
-            suffix = f" `{_shorten(result_type, limit=32)}`" if result_type else ""
-            parts.append(f"resultado {label}{suffix} {_format_age(max(0.0, now - float(last_result_at)))}")
-    except Exception:
-        pass
-
-    reason = _shorten(queue.get("last_poll_reason"), limit=70)
-    if reason and state == "no_compatible_job":
-        parts.append(f"motivo: {reason}")
-
-    return " · ".join(parts[:4])
+    if state == "no_compatible_job":
+        reason = _shorten(queue.get("last_poll_reason"), limit=60)
+        return f"sem job compatível{f' · {reason}' if reason else ''}"
+    # Estados normais como "poll agora · sem job" poluem o card principal.
+    # Detalhes completos ficam em "Ver último resultado"/logs.
+    return ""
 
 def _role_text(roles: list[str], *, limit: int = 8) -> str:
     selected = [str(role) for role in roles[:limit] if role]
@@ -354,16 +327,20 @@ def _job_result_note(job_type: object, job: dict[str, Any] | None) -> str:
         return f"`{kind}` enviado; aguardando resultado"
     status = str(job.get("status") or "queued").strip().lower()
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
-    summary = _shorten(result.get("summary") or job.get("summary") or job.get("error") or status, limit=72)
+    raw_summary = result.get("summary") or job.get("summary") or job.get("error") or status
+    summary = _shorten(raw_summary, limit=72)
+    if summary.strip().lower() in {"succeeded", "success", "ok", "true"}:
+        summary = ""
+    suffix = f": {summary}" if summary else ""
     if status == "succeeded":
-        return f"✅ `{kind}` concluído: {summary}"
+        return f"✅ `{kind}` concluído{suffix}"
     if status == "failed":
-        return f"❌ `{kind}` falhou: {summary}"
+        return f"❌ `{kind}` falhou{suffix}"
     if status == "running":
         return f"⏳ `{kind}` em execução"
     if status == "queued":
         return f"⏳ `{kind}` aguardando worker"
-    return f"`{kind}`: {summary}"
+    return f"`{kind}`{suffix or f': {status}'}"
 
 
 def _job_detail_text(job: dict[str, Any] | None) -> str:
@@ -773,8 +750,7 @@ class WorkersPanelView(discord.ui.LayoutView):
 
         if snapshot.action_note:
             lines.append(f"-# Última ação: {_shorten(_redact(snapshot.action_note), limit=80)}")
-        if snapshot.watch_output:
-            lines.append(f"-# Watchdog: `{_shorten(_redact(snapshot.watch_output), limit=90)}`")
+        # Saídas completas de watchdog/sync ficam fora do painel principal para manter o card compacto.
         return lines
 
     async def _select_worker(self, interaction: discord.Interaction):
