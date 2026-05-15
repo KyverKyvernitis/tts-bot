@@ -1,0 +1,7 @@
+<resources>
+    <color name="core_bg">#0B1020</color>
+    <color name="core_card">#151B2E</color>
+    <color name="core_text">#F7F8FC</color>
+    <color name="core_muted">#B7BED4</color>
+    <color name="core_accent">#6EA8FE</color>
+</resources>

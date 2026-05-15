@@ -165,3 +165,15 @@ update-bot.sh.disabled
 # Config local do watcher do Lavalink auxiliar no celular
 .phone-lavalink.env
 phone-lavalink-watch.log
+
+# =========================
+# Android / Core Worker APK
+# =========================
+android/**/.gradle/
+android/**/build/
+android/**/local.properties
+android/**/*.iml
+android/**/captures/
+android/**/*.jks
+android/**/*.keystore
+android/**/keystore.properties

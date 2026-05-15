@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- APK privado: HTTP é permitido para uso dentro da rede Tailscale 100.x.x.x.
+         Para internet pública, prefira HTTPS na VPS antes de parear. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
