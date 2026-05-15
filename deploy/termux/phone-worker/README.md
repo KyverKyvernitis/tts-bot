@@ -99,33 +99,31 @@ O worker também pode ajudar fora do `/vps` em tarefas auxiliares da VPS:
 
 Essas tarefas são sempre opcionais. Se o celular estiver offline, a VPS continua usando o caminho local normal.
 
-## Heartbeat no Core Worker registry
+## Pareamento no Core Worker registry
 
-Depois do patch do `/workers`, o phone-worker pode aparecer no registry multi-worker da VPS.
+Depois do painel `workers`, o phone-worker pode entrar no registry multi-worker da VPS e deixar de aparecer apenas como worker direto/legacy.
 
 Fluxo recomendado:
 
-1. No Discord, use `/workers` na guild privada.
-2. Clique em **Parear APK** para gerar um código temporário.
-3. Faça o pareamento usando a rota `POST /core-worker/pair` ou o futuro APK.
-4. Copie para `~/.phone-worker.env` o `worker_id` e o `token` retornados.
-5. Ative o heartbeat e reinicie o worker.
+1. No Discord, use `workers` na guild privada.
+2. Clique em **Parear worker** para gerar um código temporário.
+3. No Termux atualizado, rode:
 
-Exemplo local no Termux:
+```bash
+~/pair-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:8766
+```
 
-```env
-CORE_WORKER_HEARTBEAT_ENABLED=true
-CORE_WORKER_VPS_URL=http://100.x.x.x:8000
-CORE_WORKER_ID=phone-redmi-01
-CORE_WORKER_TOKEN=token_retornado_no_pareamento
-CORE_WORKER_NAME=Redmi Worker 01
-CORE_WORKER_ROLES=phone-worker,diagnostics,log-summary,zip-validate,ffmpeg,ffprobe,tts-convert
-CORE_WORKER_CAPABILITIES=phone-worker,diagnostics,log-summary,maintenance-plan,zip-validate,ffmpeg,ffprobe,tts-convert,worker-logs,network-probe,tailscale-status,service-control
-CORE_WORKER_HEARTBEAT_INTERVAL_SECONDS=30
-CORE_WORKER_JOBS_ENABLED=true
-CORE_WORKER_JOB_POLL_INTERVAL_SECONDS=10
-CORE_WORKER_JOB_RESULT_MAX_BYTES=262144
-CORE_WORKER_LOG_LINES=140
+Também é possível fazer direto pelo Python:
+
+```bash
+cd ~/phone-worker
+python phone_worker.py --pair CORE-XXXX --vps-url http://IP_TAILSCALE_DA_VPS:8766
+```
+
+O script chama `POST /core-worker/pair`, salva `CORE_WORKER_ID`, `CORE_WORKER_TOKEN`, `CORE_WORKER_VPS_URL`, ativa heartbeat/jobs em `~/.phone-worker.env` e nunca imprime o token. Reinicie o worker depois do pareamento:
+
+```bash
+~/start-phone-worker.sh
 ```
 
 Teste manual sem iniciar servidor novo:
@@ -140,13 +138,13 @@ O heartbeat envia status, bateria/rede quando o Termux:API estiver disponível, 
 
 ## Controle seguro de serviços
 
-O `/workers` agora consegue criar jobs para serviços whitelisted do celular:
+O painel `workers` agora consegue criar jobs para serviços whitelisted do celular:
 
 - `phone-worker`: status, start, stop e restart do agente atual. Para `stop`/`restart`, o worker responde primeiro à VPS e só depois agenda a ação para não deixar o job preso.
 - `phone-worker-watch`: start, stop, restart e status do watchdog em `tmux`.
 - `tailscale`: diagnóstico/status apenas. Se você usa o app oficial do Tailscale no Android, start/stop continuam sendo feitos pelo próprio app/VPN do Android; o worker só testa conectividade e mostra se a VPS é alcançável.
 
-Botões novos no painel privado `/workers`:
+Ações no painel privado `workers`:
 
 - **Saúde**: cria `worker_self_check`.
 - **Logs**: cria `worker_logs`.

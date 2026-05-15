@@ -10,17 +10,19 @@ mkdir -p "$WORKER_DIR"
 cp "$SRC_DIR/phone_worker.py" "$WORKER_DIR/phone_worker.py"
 cp "$SRC_DIR/start-phone-worker.sh" "$HOME/start-phone-worker.sh"
 cp "$SRC_DIR/watch-phone-worker.sh" "$HOME/watch-phone-worker.sh"
-chmod +x "$WORKER_DIR/phone_worker.py" "$HOME/start-phone-worker.sh" "$HOME/watch-phone-worker.sh"
+cp "$SRC_DIR/pair-phone-worker.sh" "$HOME/pair-phone-worker.sh"
+chmod +x "$WORKER_DIR/phone_worker.py" "$HOME/start-phone-worker.sh" "$HOME/watch-phone-worker.sh" "$HOME/pair-phone-worker.sh"
 
 if [[ ! -f "$HOME/.phone-worker.env" ]]; then
   cp "$SRC_DIR/phone-worker.env.example" "$HOME/.phone-worker.env"
   chmod 600 "$HOME/.phone-worker.env"
   echo "Criado: $HOME/.phone-worker.env"
   echo "Edite PHONE_WORKER_TOKEN antes de iniciar."
-  echo "Depois do pareamento no /workers, preencha CORE_WORKER_* para ativar heartbeat na VPS."
+  echo "Depois do pareamento em workers, o script ~/pair-phone-worker.sh preenche CORE_WORKER_* automaticamente."
 fi
 
 echo "Instalado. Para iniciar:"
 echo "  nano ~/.phone-worker.env"
+echo "  ~/pair-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:8766"
 echo "  ~/start-phone-worker.sh"
 echo "  tmux new-session -d -s phone-worker-watch '~/watch-phone-worker.sh'"

@@ -35,7 +35,7 @@ JOBS_FAILED = 0
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.4.0"
+PHONE_WORKER_VERSION = "1.5.0"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -132,7 +132,11 @@ def _load_env_file(path: str | None = None) -> None:
             continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
+            if value[0] == '"':
+                with contextlib.suppress(Exception):
+                    value = json.loads(value)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
         os.environ.setdefault(key, value)
 
 
@@ -154,6 +158,62 @@ def _env_list(name: str, default: list[str] | None = None) -> list[str]:
         if clean and clean not in items:
             items.append(clean[:40])
     return items or default
+
+
+def _safe_env_key(value: Any) -> str:
+    key = str(value or "").strip()
+    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key):
+        raise ValueError(f"chave de env inválida: {key or '<vazia>'}")
+    return key
+
+
+def _format_env_value(value: Any) -> str:
+    text = str(value if value is not None else "")
+    if re.fullmatch(r"[A-Za-z0-9_./:@%+=,;-]*", text):
+        return text
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _update_env_file(path: str | None, updates: dict[str, Any]) -> Path:
+    env_path = Path(path or os.getenv("PHONE_WORKER_ENV") or str(Path.home() / ".phone-worker.env")).expanduser()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    wanted = {_safe_env_key(k): str(v if v is not None else "") for k, v in updates.items()}
+    existing = env_path.read_text(encoding="utf-8", errors="ignore").splitlines() if env_path.exists() else []
+    seen: set[str] = set()
+    output: list[str] = []
+    assign_re = re.compile(r"^(?:export\s+)?([A-Z_][A-Z0-9_]*)=")
+    for line in existing:
+        match = assign_re.match(line.strip())
+        if match and match.group(1) in wanted:
+            key = match.group(1)
+            output.append(f"{key}={_format_env_value(wanted[key])}")
+            seen.add(key)
+        else:
+            output.append(line)
+    missing = [key for key in wanted if key not in seen]
+    if missing:
+        if output and output[-1].strip():
+            output.append("")
+        output.append("# Core Worker pareado automaticamente. Não envie estes valores ao GitHub.")
+        for key in missing:
+            output.append(f"{key}={_format_env_value(wanted[key])}")
+    env_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    with contextlib.suppress(Exception):
+        env_path.chmod(0o600)
+    for key, value in wanted.items():
+        os.environ[key] = value
+    return env_path
+
+
+def _default_worker_id() -> str:
+    raw = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
+    if raw:
+        return raw
+    name = str(os.getenv("CORE_WORKER_NAME") or os.getenv("PHONE_WORKER_NAME") or platform.node() or "phone-worker").strip().lower()
+    name = re.sub(r"[^a-z0-9_.:-]+", "-", name).strip("-._:") or "phone-worker"
+    seed = f"{platform.node()}|{Path.home()}".encode("utf-8", errors="ignore")
+    suffix = hashlib.sha256(seed).hexdigest()[:8]
+    return f"phone-{name[:28]}-{suffix}"
 
 
 def _short_text(value: Any, *, limit: int = 120, default: str = "") -> str:
@@ -344,22 +404,16 @@ def _core_worker_auth_parts() -> tuple[str, str, str]:
     return base_url, token, worker_id
 
 
-def _post_core_worker_json(path: str, payload: dict[str, Any], *, timeout: float = 8.0) -> tuple[int, dict[str, Any]]:
-    base_url, token, _worker_id = _core_worker_auth_parts()
-    if not base_url or not token:
-        return 0, {"ok": False, "error": "Core Worker não configurado"}
+def _post_json_url(url: str, payload: dict[str, Any], *, token: str = "", timeout: float = 8.0) -> tuple[int, dict[str, Any]]:
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url}{path}",
-        data=body,
-        headers={
-            "Content-Type": "application/json; charset=utf-8",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
-        },
-        method="POST",
-    )
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json",
+        "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp:
             raw = resp.read(1024 * 1024)
@@ -374,6 +428,13 @@ def _post_core_worker_json(path: str, payload: dict[str, Any], *, timeout: float
     except Exception as exc:
         parsed = {"ok": False, "error": f"JSON inválido da VPS: {type(exc).__name__}"}
     return status, parsed
+
+
+def _post_core_worker_json(path: str, payload: dict[str, Any], *, timeout: float = 8.0) -> tuple[int, dict[str, Any]]:
+    base_url, token, _worker_id = _core_worker_auth_parts()
+    if not base_url or not token:
+        return 0, {"ok": False, "error": "Core Worker não configurado"}
+    return _post_json_url(f"{base_url}{path}", payload, token=token, timeout=timeout)
 
 
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
@@ -418,6 +479,60 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "loadavg": status.get("loadavg"),
         },
     }
+
+
+def _pair_core_worker(
+    *,
+    code: str,
+    vps_url: str,
+    host: str,
+    port: int,
+    worker_id: str = "",
+    name: str = "",
+    env_file: str | None = None,
+    timeout: float = 10.0,
+) -> bool:
+    normalized_code = str(code or "").strip().upper()
+    base_url = str(vps_url or "").strip().rstrip("/")
+    if not normalized_code:
+        print("[core-worker-pair] informe o código CORE-XXXX", flush=True)
+        return False
+    if not base_url:
+        print("[core-worker-pair] informe a URL da VPS/Tailscale com --vps-url", flush=True)
+        return False
+
+    selected_worker_id = str(worker_id or _default_worker_id()).strip()
+    selected_name = str(name or os.getenv("CORE_WORKER_NAME") or os.getenv("PHONE_WORKER_NAME") or platform.node() or "Core Phone Worker").strip()
+    payload = _core_worker_payload(host=host, port=port)
+    payload.update({
+        "code": normalized_code,
+        "worker_id": selected_worker_id,
+        "name": _short_text(selected_name, limit=64, default="Core Phone Worker"),
+        "source": "termux-phone-worker",
+    })
+
+    status, data = _post_json_url(f"{base_url}/core-worker/pair", payload, timeout=timeout)
+    if not (200 <= status < 300) or not data.get("ok", False):
+        print(f"[core-worker-pair] HTTP {status}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
+        return False
+
+    token = str(data.get("token") or "").strip()
+    returned_worker_id = str(data.get("worker_id") or selected_worker_id).strip()
+    if not token or not returned_worker_id:
+        print("[core-worker-pair] resposta sem worker_id/token", flush=True)
+        return False
+
+    env_path = _update_env_file(env_file, {
+        "CORE_WORKER_HEARTBEAT_ENABLED": "true",
+        "CORE_WORKER_JOBS_ENABLED": "true",
+        "CORE_WORKER_VPS_URL": base_url,
+        "CORE_WORKER_ID": returned_worker_id,
+        "CORE_WORKER_TOKEN": token,
+        "CORE_WORKER_NAME": payload.get("name") or selected_name,
+    })
+    print(f"[core-worker-pair] pareado como {returned_worker_id}; token salvo em {env_path}", flush=True)
+    print("[core-worker-pair] reinicie o phone-worker para ativar heartbeat/jobs registrados.", flush=True)
+    return True
 
 
 def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6.0) -> bool:
@@ -1184,6 +1299,7 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker.py": ("worker", "phone_worker.py", 0o755),
     "start-phone-worker.sh": ("home", "start-phone-worker.sh", 0o755),
     "watch-phone-worker.sh": ("home", "watch-phone-worker.sh", 0o755),
+    "pair-phone-worker.sh": ("home", "pair-phone-worker.sh", 0o755),
     "install.sh": ("worker", "install.sh", 0o755),
     "README.md": ("worker", "README.md", 0o644),
     "phone-worker.env.example": ("worker", "phone-worker.env.example", 0o600),
@@ -1494,12 +1610,29 @@ def main() -> int:
     parser.add_argument("--job-timeout", type=int, default=_env_int("PHONE_WORKER_JOB_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
     parser.add_argument("--heartbeat-once", action="store_true", help="envia um heartbeat para a VPS e encerra")
     parser.add_argument("--jobs-once", action="store_true", help="faz um poll de job na VPS, executa no máximo um job e encerra")
+    parser.add_argument("--pair", "--pair-code", dest="pair_code", default="", help="pareia este phone-worker com o registry usando um código CORE-XXXX")
+    parser.add_argument("--vps-url", default=os.getenv("CORE_WORKER_VPS_URL", ""), help="URL base da VPS/Tailscale para pareamento, ex: http://100.x.x.x:8766")
+    parser.add_argument("--worker-id", default=os.getenv("CORE_WORKER_ID", ""), help="ID estável deste worker; opcional")
+    parser.add_argument("--name", default=os.getenv("CORE_WORKER_NAME", os.getenv("PHONE_WORKER_NAME", "")), help="nome exibido no painel")
+    parser.add_argument("--env-file", default=os.getenv("PHONE_WORKER_ENV", str(Path.home() / ".phone-worker.env")), help="arquivo .env local a atualizar no pareamento")
     args = parser.parse_args()
 
     max_body_bytes = max(1, args.max_body_mb) * 1024 * 1024
     max_output_bytes = max(1, args.max_output_mb) * 1024 * 1024
     job_timeout = max(3, args.job_timeout)
 
+    if args.pair_code:
+        ok = _pair_core_worker(
+            code=args.pair_code,
+            vps_url=args.vps_url,
+            host=args.host,
+            port=args.port,
+            worker_id=args.worker_id,
+            name=args.name,
+            env_file=args.env_file,
+            timeout=10.0,
+        )
+        return 0 if ok else 1
     if args.heartbeat_once:
         ok = _send_core_worker_heartbeat_once(host=args.host, port=args.port, timeout=8.0)
         return 0 if ok else 1

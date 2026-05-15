@@ -362,7 +362,9 @@ class WorkersPanelView(discord.ui.LayoutView):
         return [worker for worker in workers if isinstance(worker, dict)]
 
     def _has_legacy_worker(self) -> bool:
-        return bool(self.snapshot.configured and self.snapshot.online)
+        # O phone-worker direto é só fallback. Quando há worker registrado online,
+        # o painel deve focar no registry para evitar duplicidade visual.
+        return bool(self.snapshot.configured and self.snapshot.online and not _has_online_registry_worker(self.snapshot))
 
     def _worker_choices_exist(self) -> bool:
         return bool(self._registry_workers() or self._has_legacy_worker())
@@ -502,7 +504,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         registered = int((summary or {}).get('registered') or 0)
         online = int((summary or {}).get('online') or 0)
         pairings = int((summary or {}).get('pairings_active') or 0)
-        registry_label = "nenhum APK pareado" if registered <= 0 else f"`{registered}` reg · `{online}` online"
+        registry_label = "nenhum worker pareado" if registered <= 0 else f"`{registered}` reg · `{online}` online"
         if pairings:
             registry_label += f" · `{pairings}` pair"
         jobs_label = f"`{queued}` pend · `{running}` rod"
@@ -543,7 +545,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary)
         refresh.callback = self._refresh
 
-        pairing = discord.ui.Button(label="Parear APK", emoji="🔐", style=discord.ButtonStyle.success)
+        pairing = discord.ui.Button(label="Parear worker", emoji="🔐", style=discord.ButtonStyle.success)
         pairing.callback = self._create_pairing
 
         update_worker = discord.ui.Button(
@@ -610,7 +612,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             lines.append("Selecione um worker.")
         elif snapshot.configured:
             legacy_state = "🟢 direto online" if snapshot.online else "🔴 direto offline"
-            lines.append(f"{legacy_state}. Nenhum APK pareado ainda.")
+            lines.append(f"{legacy_state}. Nenhum worker pareado ainda.")
         else:
             lines.append("Nenhum worker configurado ou pareado.")
 
@@ -688,14 +690,16 @@ class WorkersPanelView(discord.ui.LayoutView):
             code = str(pairing.get("code") or "")
             ttl = _format_seconds(pairing.get("ttl_seconds"))
             expires = _format_seconds(max(0, float(pairing.get("expires_at") or 0) - time.time()))
-            base_url = _public_base_url() or "URL do webserver da VPS/Tailscale"
+            base_url = _public_base_url() or "http://IP_TAILSCALE_DA_VPS:8766"
             msg = (
                 "## 🔐 Pareamento Core Worker\n"
                 f"Código temporário: `{code}`\n"
                 f"Validade: `{ttl}` · expira em `{expires}`\n\n"
-                "No APK/agent, use esse código na rota:\n"
-                f"`POST {base_url}/core-worker/pair`\n\n"
-                "O token do worker é entregue uma única vez e deve ficar só no celular."
+                "No phone-worker/Termux atualizado, rode:\n"
+                f"`~/pair-phone-worker.sh {code} {base_url}`\n\n"
+                "Ou pelo Python:\n"
+                f"`cd ~/phone-worker && python phone_worker.py --pair {code} --vps-url {base_url}`\n\n"
+                "O token é salvo automaticamente em `~/.phone-worker.env` e não aparece no GitHub."
             )
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"código de pareamento gerado: {code}")
             self._ensure_selected_worker()
@@ -840,6 +844,7 @@ class WorkersCommandMixin:
             ("phone_worker.py", 0o755),
             ("start-phone-worker.sh", 0o755),
             ("watch-phone-worker.sh", 0o755),
+            ("pair-phone-worker.sh", 0o755),
             ("install.sh", 0o755),
             ("README.md", 0o644),
             ("phone-worker.env.example", 0o600),
