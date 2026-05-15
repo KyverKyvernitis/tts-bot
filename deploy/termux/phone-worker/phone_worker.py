@@ -11,6 +11,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import shlex
 import stat
 from collections import Counter
@@ -31,11 +32,12 @@ from types import SimpleNamespace
 START_TIME = time.time()
 JOBS_STARTED = 0
 JOBS_FAILED = 0
+_PING_CACHE: dict[str, Any] = {}
 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.5.4"
+PHONE_WORKER_VERSION = "1.5.5"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -373,6 +375,8 @@ def _battery_snapshot() -> dict[str, Any]:
             return _empty_battery_snapshot("battery_error", exc or termux_error)
 
     level = raw.get("percentage")
+    if level is None:
+        level = raw.get("level")
     charging = None
     status = str(raw.get("status") or "").strip().lower()
     plugged = str(raw.get("plugged") or "").strip().lower()
@@ -383,7 +387,10 @@ def _battery_snapshot() -> dict[str, Any]:
     result: dict[str, Any] = {"available": True, "source": "termux-api"}
     try:
         if level is not None:
-            result["level"] = int(float(level))
+            clean_level = max(0, min(100, int(float(level))))
+            result["level"] = clean_level
+            result["percentage"] = clean_level
+            result["percent"] = clean_level
     except Exception:
         pass
     if charging is not None:
@@ -535,6 +542,59 @@ def _tailscale_snapshot(*, probe_vps: bool = False) -> dict[str, Any]:
     return result
 
 
+
+def _vps_tcp_ping_snapshot(*, timeout: float = 2.5, cache_ttl: float = 6.0) -> dict[str, Any]:
+    """Mede RTT TCP do worker até a VPS/orquestrador.
+
+    Não usa ICMP/root. Apenas abre uma conexão TCP curta para a URL já
+    configurada em CORE_WORKER_VPS_URL. Resultado é cacheado por poucos
+    segundos porque o payload também é usado no polling de jobs.
+    """
+    base_url, _token, _worker_id = _core_worker_auth_parts()
+    if not base_url:
+        return {"available": False, "reachable": False, "source": "not_configured"}
+    try:
+        parsed = urllib.parse.urlparse(base_url)
+        host = parsed.hostname or ""
+        port = int(parsed.port or (443 if parsed.scheme == "https" else 80))
+    except Exception as exc:
+        return {"available": False, "reachable": False, "source": "invalid_url", "error": _short_text(exc, limit=100)}
+    if not host:
+        return {"available": False, "reachable": False, "source": "missing_host"}
+
+    cache_key = f"{host}:{port}"
+    now = time.monotonic()
+    cached = _PING_CACHE.get(cache_key)
+    if isinstance(cached, dict) and now - float(cached.get("monotonic_at") or 0.0) <= max(0.5, cache_ttl):
+        result = dict(cached.get("result") or {})
+        result["cached"] = True
+        return result
+
+    started = time.perf_counter()
+    result: dict[str, Any] = {
+        "available": True,
+        "source": "tcp_connect",
+        "host_masked": _mask_ipv4(host),
+        "port": port,
+    }
+    try:
+        with socket.create_connection((host, port), timeout=max(0.3, timeout)):
+            pass
+        latency_ms = round((time.perf_counter() - started) * 1000, 1)
+        result.update({
+            "reachable": True,
+            "ping_ms": latency_ms,
+            "latency_ms": latency_ms,
+            "vps_ping_ms": latency_ms,
+        })
+    except Exception as exc:
+        result.update({
+            "reachable": False,
+            "error": f"{type(exc).__name__}: {_short_text(exc, limit=100)}",
+        })
+    _PING_CACHE[cache_key] = {"monotonic_at": now, "result": dict(result)}
+    return result
+
 def _network_snapshot() -> dict[str, Any]:
     result: dict[str, Any] = {}
     wifi = _run_json_command(["termux-wifi-connectioninfo"], timeout=2.0)
@@ -564,6 +624,22 @@ def _network_snapshot() -> dict[str, Any]:
         result["tailscale_ip_masked"] = tailscale.get("vps_host_masked")
     if tailscale.get("note"):
         result["tailscale_note"] = _short_text(tailscale.get("note"), limit=100)
+    ping = _safe_telemetry("vps ping", _vps_tcp_ping_snapshot, {"available": False, "reachable": False, "source": "telemetry_failed"})
+    if isinstance(ping, dict):
+        result["vps_reachable"] = bool(ping.get("reachable"))
+        result["vps_ping_available"] = bool(ping.get("available", True))
+        if ping.get("ping_ms") is not None:
+            result["vps_ping_ms"] = ping.get("ping_ms")
+            result["ping_ms"] = ping.get("ping_ms")
+        elif ping.get("latency_ms") is not None:
+            result["vps_ping_ms"] = ping.get("latency_ms")
+            result["ping_ms"] = ping.get("latency_ms")
+        if ping.get("host_masked"):
+            result["vps_host_masked"] = ping.get("host_masked")
+        if ping.get("port"):
+            result["vps_port"] = ping.get("port")
+        if ping.get("error"):
+            result["vps_ping_error"] = _short_text(ping.get("error"), limit=120)
     return result
 
 
@@ -1712,6 +1788,7 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
                 "system": _safe_telemetry("system", _system_status, {"ok": False}),
                 "battery": _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot()),
                 "network": _safe_telemetry("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}),
+                "ping": _safe_telemetry("vps ping", _vps_tcp_ping_snapshot, {"available": False, "reachable": False, "source": "telemetry_failed"}),
                 "tailscale": _safe_telemetry("tailscale", lambda: _tailscale_snapshot(probe_vps=True), {"connected": False, "state": "telemetry_failed"}),
                 "services": {
                     "phone-worker": _safe_telemetry("service phone-worker", lambda: _service_status("phone-worker"), {"ok": False}),

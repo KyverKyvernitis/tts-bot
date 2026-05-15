@@ -203,6 +203,20 @@ def _battery_text(worker: dict[str, Any]) -> str:
     return " ".join(parts) if parts else "bat n/a"
 
 
+
+def _ping_text(network: dict[str, Any]) -> str:
+    for key in ("vps_ping_ms", "ping_ms", "latency_ms", "vps_latency_ms"):
+        value = network.get(key)
+        if value is None:
+            continue
+        try:
+            return f"ping {float(value):.0f}ms"
+        except Exception:
+            continue
+    if network.get("vps_reachable") is False or network.get("vps_ping_error"):
+        return "ping n/a"
+    return ""
+
 def _network_text(worker: dict[str, Any]) -> str:
     network = worker.get("network") if isinstance(worker.get("network"), dict) else {}
     if not network:
@@ -231,6 +245,9 @@ def _network_text(worker: dict[str, Any]) -> str:
         parts.append(label)
     elif tailscale_state and tailscale_state not in {"unknown", ""}:
         parts.append(f"ts {_shorten(tailscale_state, limit=14)}")
+    ping_label = _ping_text(network)
+    if ping_label:
+        parts.append(ping_label)
     if network.get("tailscale_ip_masked"):
         parts.append(str(network.get("tailscale_ip_masked")))
     return " · ".join(parts) if parts else "rede n/a"
@@ -360,7 +377,7 @@ def _job_detail_text(job: dict[str, Any] | None) -> str:
     if job.get("error"):
         lines.append(f"Erro: `{_shorten(_redact(job.get('error')), limit=220)}`")
     interesting_keys = [
-        "version", "target_version", "scripts", "battery", "network", "tailscale",
+        "version", "target_version", "scripts", "battery", "network", "ping", "tailscale",
         "services", "ffmpeg", "ffprobe", "lines", "error_lines", "path",
     ]
     shown = 0
