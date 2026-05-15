@@ -31,6 +31,8 @@ WORKERS_DEFAULT_ROLES = (
     "ffprobe",
     "tts-convert",
 )
+LEGACY_WORKER_ID = "__legacy_phone_worker__"
+
 
 _SECRET_PATTERNS = (
     re.compile(r"(Authorization:\s*Bearer\s+)[^\s]+", re.IGNORECASE),
@@ -304,17 +306,26 @@ class WorkersPanelView(discord.ui.LayoutView):
         workers = registry.get("workers") if isinstance(registry.get("workers"), list) else []
         return [worker for worker in workers if isinstance(worker, dict)]
 
+    def _has_legacy_worker(self) -> bool:
+        return bool(self.snapshot.configured and self.snapshot.online)
+
+    def _worker_choices_exist(self) -> bool:
+        return bool(self._registry_workers() or self._has_legacy_worker())
+
     def _ensure_selected_worker(self) -> None:
         workers = self._registry_workers()
         worker_ids = [str(worker.get("worker_id") or "") for worker in workers if worker.get("worker_id")]
-        if self.selected_worker_id and self.selected_worker_id in worker_ids:
+        if self.selected_worker_id and (self.selected_worker_id in worker_ids or (self.selected_worker_id == LEGACY_WORKER_ID and self._has_legacy_worker())):
             return
         online = next((worker for worker in workers if worker.get("online") and worker.get("worker_id")), None)
         if isinstance(online, dict):
             self.selected_worker_id = str(online.get("worker_id") or "")
             return
         first = next((worker for worker in workers if worker.get("worker_id")), None)
-        self.selected_worker_id = str((first or {}).get("worker_id") or "")
+        if isinstance(first, dict):
+            self.selected_worker_id = str(first.get("worker_id") or "")
+            return
+        self.selected_worker_id = LEGACY_WORKER_ID if self._has_legacy_worker() else ""
 
     def _selected_worker(self) -> dict[str, Any] | None:
         wanted = str(self.selected_worker_id or "")
@@ -323,7 +334,12 @@ class WorkersPanelView(discord.ui.LayoutView):
                 return worker
         return None
 
+    def _selected_is_legacy(self) -> bool:
+        return self.selected_worker_id == LEGACY_WORKER_ID and self._has_legacy_worker()
+
     def _job_target_worker_id(self) -> str:
+        if self._selected_is_legacy():
+            return ""
         worker = self._selected_worker()
         if not worker:
             return ""
@@ -331,7 +347,7 @@ class WorkersPanelView(discord.ui.LayoutView):
 
     def _worker_select_options(self) -> list[discord.SelectOption]:
         options: list[discord.SelectOption] = []
-        for worker in self._registry_workers()[:25]:
+        for worker in self._registry_workers()[:24]:
             worker_id = str(worker.get("worker_id") or "").strip()
             if not worker_id:
                 continue
@@ -344,6 +360,15 @@ class WorkersPanelView(discord.ui.LayoutView):
                 description=_shorten(f"{('online' if worker.get('online') else 'offline')} · {seen} · {roles}", limit=100),
                 emoji="🟢" if worker.get("online") else "🔴",
                 default=(worker_id == self.selected_worker_id),
+            ))
+        if self._has_legacy_worker():
+            roles = ", ".join(self.snapshot.roles[:3]) or "phone-worker"
+            options.append(discord.SelectOption(
+                label=_shorten(self.snapshot.name or "phone-worker direto", limit=100),
+                value=LEGACY_WORKER_ID,
+                description=_shorten(f"direto online · {roles}", limit=100),
+                emoji="🟢",
+                default=(self.selected_worker_id == LEGACY_WORKER_ID),
             ))
         return options
 
@@ -379,37 +404,43 @@ class WorkersPanelView(discord.ui.LayoutView):
 
         self._ensure_selected_worker()
         summary = (snapshot.registry_snapshot or {}).get("summary") if isinstance(snapshot.registry_snapshot, dict) else {}
+        queued = int((summary or {}).get('jobs_queued') or 0)
+        running = int((summary or {}).get('jobs_running') or 0)
+        registered = int((summary or {}).get('registered') or 0)
+        online = int((summary or {}).get('online') or 0)
+        pairings = int((summary or {}).get('pairings_active') or 0)
+        jobs_label = f"`{queued}` pend · `{running}` rod"
+        if queued and not online and not self._has_legacy_worker():
+            jobs_label += " · sem worker"
         header = discord.ui.TextDisplay(
             "# 📱 Core Workers\n"
-            f"-# Prefixo privado: `workers` / `worker` / `w` · guild `{WORKERS_COMMAND_GUILD_ID}`\n"
+            f"-# privado · `workers` / `worker` / `w` · guild `{WORKERS_COMMAND_GUILD_ID}`\n"
             f"**Estado:** {snapshot.state_label}\n"
-            f"**Registry:** `{int((summary or {}).get('registered') or 0)}` reg · "
-            f"`{int((summary or {}).get('online') or 0)}` online · "
-            f"`{int((summary or {}).get('pairings_active') or 0)}` pair\n"
-            f"**Jobs:** `{int((summary or {}).get('jobs_queued') or 0)}` Q · "
-            f"`{int((summary or {}).get('jobs_running') or 0)}` R · "
-            f"`{int((summary or {}).get('jobs_succeeded') or 0)}` ok · "
-            f"`{int((summary or {}).get('jobs_failed') or 0)}` falha"
+            f"**Registry:** `{registered}` reg · `{online}` online · `{pairings}` pair\n"
+            f"**Jobs:** {jobs_label}"
         )
 
         worker_options = self._worker_select_options()
-        worker_select = self._new_select(
-            placeholder="Escolha um worker" if worker_options else "Nenhum worker registrado",
-            min_values=1,
-            max_values=1,
-            options=worker_options or [discord.SelectOption(label="Nenhum worker", value="none", description="Use Parear APK para registrar um celular", emoji="⚫")],
-            disabled=not bool(worker_options),
-        )
-        worker_select.callback = self._select_worker
+        worker_select = None
+        action_select = None
+        if worker_options:
+            worker_select = self._new_select(
+                placeholder="Escolha um worker",
+                min_values=1,
+                max_values=1,
+                options=worker_options,
+                disabled=False,
+            )
+            worker_select.callback = self._select_worker
 
-        action_select = self._new_select(
-            placeholder="Escolha uma ação segura",
-            min_values=1,
-            max_values=1,
-            options=self._action_select_options(),
-            disabled=not bool(worker_options),
-        )
-        action_select.callback = self._select_action
+            action_select = self._new_select(
+                placeholder="Escolha uma ação segura",
+                min_values=1,
+                max_values=1,
+                options=self._action_select_options(),
+                disabled=False,
+            )
+            action_select.callback = self._select_action
 
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary)
         refresh.callback = self._refresh
@@ -428,54 +459,57 @@ class WorkersPanelView(discord.ui.LayoutView):
         cleanup_jobs = discord.ui.Button(label="Limpar jobs", emoji="🧹", style=discord.ButtonStyle.secondary)
         cleanup_jobs.callback = self._cleanup_jobs
 
-        container = discord.ui.Container(
+        components: list[Any] = [
             header,
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(self._selected_worker_lines(snapshot))),
-            discord.ui.Separator(),
-            discord.ui.ActionRow(worker_select),
-            discord.ui.ActionRow(action_select),
-            discord.ui.ActionRow(refresh, pairing, wake, cleanup_jobs),
-            accent_color=snapshot.accent,
-        )
+        ]
+        if worker_select is not None and action_select is not None:
+            components.extend([
+                discord.ui.Separator(),
+                discord.ui.ActionRow(worker_select),
+                discord.ui.ActionRow(action_select),
+            ])
+        components.append(discord.ui.ActionRow(refresh, pairing, wake, cleanup_jobs))
+        container = discord.ui.Container(*components, accent_color=snapshot.accent)
         self.add_item(container)
 
     def _selected_worker_lines(self, snapshot: WorkerSnapshot) -> list[str]:
         if snapshot.registry_error:
             return [
-                "## Worker selecionado",
-                f"Registry indisponível: `{_shorten(_redact(snapshot.registry_error), limit=160)}`",
+                "## Worker",
+                f"Registry indisponível: `{_shorten(_redact(snapshot.registry_error), limit=120)}`",
             ]
 
         workers = self._registry_workers()
         worker = self._selected_worker()
-        lines = ["## Worker selecionado"]
+        lines = ["## Worker"]
         if worker:
             icon = "🟢" if worker.get("online") else "🔴"
-            name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=42)
-            worker_id = _shorten(worker.get("worker_id"), limit=30)
+            name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=36)
+            worker_id = _shorten(worker.get("worker_id"), limit=24)
             seen = _format_age(worker.get("last_seen_age_seconds"))
-            battery = _battery_text(worker)
-            network = _network_text(worker)
-            version = _shorten(worker.get("version"), limit=24) or "sem versão"
-            roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=6)
-            caps = _role_text([str(r) for r in (worker.get("capabilities") or [])], limit=5)
+            roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=5)
             lines.append(f"{icon} **{name}** · `{worker_id}`")
-            lines.append(f"-# visto {seen} · {battery} · {network} · {version}")
+            lines.append(f"-# visto {seen} · {_battery_text(worker)} · {_network_text(worker)}")
             lines.append(f"Roles: {roles}")
-            lines.append(f"Caps: {caps}")
+        elif self._selected_is_legacy():
+            roles = _role_text(snapshot.roles, limit=6)
+            lines.append(f"🟢 **{_shorten(snapshot.name or 'phone-worker direto', limit=36)}** · `direto`")
+            lines.append(f"-# phone-worker antigo online via endpoint local/Tailscale")
+            lines.append(f"Roles: {roles}")
         elif workers:
-            lines.append("Selecione um worker no menu abaixo.")
+            lines.append("Selecione um worker.")
+        elif snapshot.configured:
+            legacy_state = "🟢 direto online" if snapshot.online else "🔴 direto offline"
+            lines.append(f"{legacy_state}. Nenhum APK pareado ainda.")
         else:
-            lines.append("Nenhum Core Worker pareado ainda. Use **Parear APK** para gerar um código temporário.")
+            lines.append("Nenhum worker configurado ou pareado.")
 
-        # Mantém o status direto do phone-worker antigo em uma linha curta, sem ocupar o painel inteiro.
-        legacy_state = "🟢 direto online" if snapshot.online else ("🔴 direto offline" if snapshot.configured else "⚫ direto não configurado")
-        lines.append(f"-# Phone-worker VPS: {legacy_state} · `{snapshot.base_url_label}`")
         if snapshot.action_note:
-            lines.append(f"-# Última ação: {_shorten(_redact(snapshot.action_note), limit=140)}")
+            lines.append(f"-# Última ação: {_shorten(_redact(snapshot.action_note), limit=110)}")
         if snapshot.watch_output:
-            lines.append(f"-# Watchdog: `{_shorten(_redact(snapshot.watch_output), limit=120)}`")
+            lines.append(f"-# Watchdog: `{_shorten(_redact(snapshot.watch_output), limit=90)}`")
         return lines
 
     async def _select_worker(self, interaction: discord.Interaction):
@@ -567,19 +601,24 @@ class WorkersPanelView(discord.ui.LayoutView):
         await interaction.response.defer(thinking=False)
         target_worker_id = self._job_target_worker_id()
         try:
-            result = await self.cog._queue_core_worker_job(
-                interaction.user,
-                job_type=job_type,
-                payload=payload or {},
-                summary=summary or job_type,
-                target_worker_id=target_worker_id,
-            )
-            job = result.get("job") if isinstance(result, dict) else {}
-            job_id = _shorten((job or {}).get("job_id"), limit=24)
-            target_label = _shorten(target_worker_id or "qualquer worker online", limit=32)
-            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"job `{job_type}` criado para {target_label}: {job_id}")
+            if self._selected_is_legacy():
+                result = await self.cog._run_legacy_worker_action(job_type=job_type, payload=payload or {})
+                note = _shorten((result or {}).get("summary") or "ação direta concluída", limit=90)
+                self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"direto `{job_type}`: {note}")
+            else:
+                result = await self.cog._queue_core_worker_job(
+                    interaction.user,
+                    job_type=job_type,
+                    payload=payload or {},
+                    summary=summary or job_type,
+                    target_worker_id=target_worker_id,
+                )
+                job = result.get("job") if isinstance(result, dict) else {}
+                job_id = _shorten((job or {}).get("job_id"), limit=24)
+                target_label = _shorten(target_worker_id or "qualquer worker online", limit=32)
+                self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"job `{job_type}` criado para {target_label}: {job_id}")
         except Exception as exc:
-            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha no job `{job_type}`: {type(exc).__name__}: {exc}")
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha em `{job_type}`: {type(exc).__name__}: {exc}")
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
@@ -638,6 +677,54 @@ class WorkersCommandMixin:
         if not isinstance(parsed, dict):
             raise RuntimeError("resposta não é JSON object")
         return parsed
+
+    def _request_worker_task_sync(self, task: str, payload: dict[str, Any] | None = None, *, timeout: float) -> dict[str, Any]:
+        enabled, configured, host, port, scheme, _name = self._worker_base_config()
+        if not enabled:
+            raise RuntimeError("PHONE_WORKER_ENABLED=false")
+        if not configured:
+            raise RuntimeError("PHONE_WORKER_HOST não configurado")
+        token = str(os.getenv("PHONE_WORKER_TOKEN") or "").strip()
+        body = dict(payload or {})
+        body["task"] = str(task or "").strip()
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(f"{scheme}://{host}:{port}/task", data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=max(0.8, timeout)) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read().decode("utf-8", errors="replace")[:240]
+            raise RuntimeError(f"HTTP {exc.code}: {_redact(body_text)}") from exc
+        parsed = json.loads(raw.decode("utf-8", errors="replace"))
+        if not isinstance(parsed, dict):
+            raise RuntimeError("resposta não é JSON object")
+        return parsed
+
+    async def _run_legacy_worker_action(self, *, job_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        kind = str(job_type or "").strip().lower().replace("-", "_")
+        if kind in {"ping", "status", "diagnostic_basic", "worker_self_check"}:
+            timeout = max(1.0, _env_float("WORKERS_PANEL_STATUS_TIMEOUT_SECONDS", 3.0))
+            result = await asyncio.to_thread(self._request_worker_status_sync, timeout=timeout)
+            result.setdefault("summary", "status direto coletado")
+            return result
+        timeout = max(3.0, _env_float("WORKERS_PANEL_DIRECT_TASK_TIMEOUT_SECONDS", 18.0))
+        direct_tasks = {
+            "network_probe",
+            "tailscale_status",
+            "worker_logs",
+            "service_status",
+            "service_start",
+            "service_stop",
+            "service_restart",
+            "ffmpeg_check",
+            "ffprobe_check",
+        }
+        if kind not in direct_tasks:
+            raise RuntimeError("ação direta não suportada pelo phone-worker legado")
+        return await asyncio.to_thread(self._request_worker_task_sync, kind, payload or {}, timeout=timeout)
 
     async def _collect_registry_snapshot(self) -> tuple[dict[str, Any], str]:
         try:
@@ -719,7 +806,7 @@ class WorkersCommandMixin:
 
     async def _cleanup_core_worker_jobs(self) -> dict[str, Any]:
         registry = get_core_workers_registry()
-        return await asyncio.to_thread(registry.cleanup_jobs)
+        return await asyncio.to_thread(registry.cleanup_jobs, clear_active=True)
 
     async def _wake_phone_worker(self) -> WorkerSnapshot:
         script = _repo_root() / "scripts" / "phone-worker-watch.sh"

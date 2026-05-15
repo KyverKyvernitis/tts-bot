@@ -556,8 +556,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
         task = str(body.get("task") or "").strip().lower()
         JOBS_STARTED += 1
         try:
-            if task in {"ping", "health"}:
+            if task in {"ping", "health", "status"}:
                 payload = _system_status()
+                payload.setdefault("summary", "status direto coletado")
+            elif task in {"diagnostic_basic", "worker_self_check"}:
+                payload = _execute_core_worker_job({"type": "worker_self_check", "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
+            elif task in {"network_probe", "tailscale_status", "worker_logs", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
+                payload = _execute_core_worker_job({"type": task, "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
             elif task == "sha256":
                 payload = self._task_sha256(body)
             elif task == "zip":
@@ -580,6 +585,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 raise ValueError("task não suportada")
             payload.setdefault("ok", True)
             _json_response(self, HTTPStatus.OK, payload)
+            _launch_deferred_phone_worker_action(payload)
         except Exception as exc:
             JOBS_FAILED += 1
             _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")

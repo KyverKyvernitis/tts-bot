@@ -488,13 +488,21 @@ class CoreWorkersRegistry:
             self._save_unlocked(data)
         return {"ok": True, "job": _compact_job_public(record, include_result=False, now=ts)}
 
-    def cleanup_jobs(self, *, keep_history: int | None = None) -> dict[str, Any]:
+    def cleanup_jobs(self, *, keep_history: int | None = None, clear_active: bool = False) -> dict[str, Any]:
         with self._lock:
             data = self._load_unlocked()
             counts = self._cleanup_jobs_unlocked(data, now=_now(), keep_history=keep_history)
+            removed_active = 0
+            if clear_active:
+                jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+                for job_id, job in list(jobs.items()):
+                    if isinstance(job, Mapping) and str(job.get("status") or "queued") in {"queued", "running"}:
+                        jobs.pop(job_id, None)
+                        removed_active += 1
+                data["jobs"] = jobs
             self._save_unlocked(data)
             total = len(data.get("jobs") if isinstance(data.get("jobs"), dict) else {})
-        return {"ok": True, "total_jobs": total, **counts}
+        return {"ok": True, "total_jobs": total, "removed_active": removed_active, **counts}
 
     def _authenticate_worker_unlocked(self, data: dict[str, Any], *, worker_id: object, token: str) -> tuple[str, dict[str, Any]]:
         safe_id = _safe_worker_id(worker_id)
