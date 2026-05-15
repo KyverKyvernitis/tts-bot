@@ -45,7 +45,7 @@ def request_json(url: str, token: str, *, payload: dict | None = None, timeout: 
 def main() -> int:
     env = read_env(Path(os.getenv("ENV_FILE", "/home/ubuntu/bot/.env")))
     parser = argparse.ArgumentParser(description="Cliente simples do phone-worker.")
-    parser.add_argument("command", choices=["health", "status", "sha256", "zip", "log-extract", "log-summary", "text-stats", "ffprobe", "ffmpeg-convert"])
+    parser.add_argument("command", choices=["health", "status", "sha256", "zip", "zip-validate", "maintenance-plan", "log-extract", "log-summary", "text-stats", "ffprobe", "ffmpeg-convert"])
     parser.add_argument("paths", nargs="*")
     parser.add_argument("--host", default=env.get("PHONE_WORKER_HOST") or env.get("AUX_LAVALINK_HOST") or "")
     parser.add_argument("--port", default=env.get("PHONE_WORKER_PORT", "8766"))
@@ -58,6 +58,7 @@ def main() -> int:
     parser.add_argument("--max-lines", type=int, default=120)
     parser.add_argument("--max-recent", type=int, default=12)
     parser.add_argument("--max-top", type=int, default=12)
+    parser.add_argument("--scan-root", default="/home/ubuntu/bot")
     args = parser.parse_args()
 
     if not args.host:
@@ -90,6 +91,42 @@ def main() -> int:
         out.write_bytes(data)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         print(f"salvo em: {out}")
+        return 0
+
+    if args.command == "zip-validate":
+        if not args.paths:
+            raise SystemExit("informe um arquivo .zip")
+        src = Path(args.paths[0])
+        payload = {
+            "task": "zip_validate",
+            "filename": src.name,
+            "data_b64": base64.b64encode(src.read_bytes()).decode("ascii"),
+        }
+        print(json.dumps(request_json(f"{base}/task", args.token, payload=payload, timeout=args.timeout), indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "maintenance-plan":
+        root = Path(args.paths[0] if args.paths else args.scan_root)
+        kinds = {
+            "tmp_audio": [root / "tmp_audio"],
+            "log": [root / "logs"],
+            "cache": [root / "tmp_audio" / "cache"],
+        }
+        entries = []
+        for kind, dirs in kinds.items():
+            for base_dir in dirs:
+                if not base_dir.exists():
+                    continue
+                for item in base_dir.rglob("*"):
+                    try:
+                        if not item.is_file():
+                            continue
+                        st = item.stat()
+                        entries.append({"path": str(item), "size": st.st_size, "mtime": st.st_mtime, "kind": kind})
+                    except Exception:
+                        continue
+        payload = {"task": "maintenance_plan", "entries": entries}
+        print(json.dumps(request_json(f"{base}/task", args.token, payload=payload, timeout=args.timeout), indent=2, ensure_ascii=False))
         return 0
 
     if args.command == "log-extract":

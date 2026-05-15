@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 import logging
 import logging.handlers
 import os
@@ -9,6 +11,8 @@ import tempfile
 import threading
 import traceback
 import zipfile
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -498,6 +502,66 @@ class BotLocal(commands.Bot):
 
         return best_strip
 
+    def _phone_worker_base_url(self) -> str | None:
+        if not bool(_cfg("PHONE_WORKER_ENABLED", default=False)):
+            return None
+        host = str(_cfg("PHONE_WORKER_HOST", default="") or "").strip()
+        if not host:
+            return None
+        scheme = str(_cfg("PHONE_WORKER_SCHEME", default="http") or "http").strip() or "http"
+        port = int(_cfg("PHONE_WORKER_PORT", default=8766) or 8766)
+        return f"{scheme}://{host}:{port}"
+
+    def _phone_worker_request_sync(self, task: str, payload: dict[str, object], *, timeout: float = 5.0) -> dict[str, object] | None:
+        base_url = self._phone_worker_base_url()
+        if not base_url:
+            return None
+        token = str(_cfg("PHONE_WORKER_TOKEN", default="") or "").strip()
+        payload = dict(payload)
+        payload["task"] = task
+        data = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(f"{base_url}/task", data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+            parsed = json.loads(raw.decode("utf-8"))
+            return parsed if isinstance(parsed, dict) else None
+        except Exception as exc:
+            logging.getLogger("zip_update").info("phone-worker indisponível para %s: %r", task, exc)
+            return None
+
+    def _phone_worker_validate_zip_sync(self, zip_path: Path) -> dict[str, object] | None:
+        if not bool(_cfg("PHONE_WORKER_ZIP_VALIDATE_ENABLED", default=True)):
+            return None
+        try:
+            max_mb = int(_cfg("PHONE_WORKER_ZIP_VALIDATE_MAX_MB", default=24) or 24)
+            if zip_path.stat().st_size > max_mb * 1024 * 1024:
+                logging.getLogger("zip_update").info("zip grande demais para validação phone-worker: %.2f MB", zip_path.stat().st_size / 1048576)
+                return None
+            timeout = float(_cfg("PHONE_WORKER_ZIP_VALIDATE_TIMEOUT_SECONDS", default=5.0) or 5.0)
+            result = self._phone_worker_request_sync(
+                "zip_validate",
+                {
+                    "filename": zip_path.name,
+                    "data_b64": base64.b64encode(zip_path.read_bytes()).decode("ascii"),
+                    "max_entries": 800,
+                    "max_preview": 40,
+                },
+                timeout=timeout,
+            )
+            if result:
+                logging.getLogger("zip_update").info(
+                    "phone-worker validou ZIP: ok=%s risk=%s files=%s size=%s",
+                    result.get("ok"), result.get("risk"), result.get("files"), result.get("size"),
+                )
+            return result
+        except Exception as exc:
+            logging.getLogger("zip_update").info("falha ao preparar validação phone-worker do ZIP: %r", exc)
+            return None
+
     def _safe_extract_patch(self, zip_path: Path, extract_dir: Path, repo_name_hint: str, branch_name: str) -> list[tuple[Path, Path]]:
         accepted: list[tuple[Path, Path]] = []
         with zipfile.ZipFile(zip_path) as zf:
@@ -589,6 +653,13 @@ class BotLocal(commands.Bot):
 
         try:
             repo_name_hint = self._guess_repo_name(origin_url)
+            worker_zip_validation = self._phone_worker_validate_zip_sync(zip_path)
+            if worker_zip_validation and not bool(worker_zip_validation.get("ok", True)):
+                errors = worker_zip_validation.get("errors") or []
+                if isinstance(errors, list) and errors:
+                    raise RuntimeError("ZIP bloqueado pelo phone-worker: " + "; ".join(str(item) for item in errors[:3]))
+                raise RuntimeError("ZIP bloqueado pelo phone-worker")
+
             extracted_files = self._safe_extract_patch(zip_path, extract_dir, repo_name_hint, branch_name)
 
             clone_result = self._run_cmd(["git", "clone", "--branch", branch_name, "--single-branch", origin_url, str(clone_dir)], work_dir, env=env)
@@ -648,6 +719,7 @@ class BotLocal(commands.Bot):
                 "commit_hash": commit_hash,
                 "triggered_update": triggered_update,
                 "branch": branch_name,
+                "phone_worker_zip_validation": worker_zip_validation,
             }
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -711,10 +783,16 @@ class BotLocal(commands.Bot):
                     preview_files += f"\n• ... e mais {len(changed_files) - 10} arquivo(s)"
                 short_hash = str(commit_hash)[:7] if commit_hash else "desconhecido"
                 update_line = "O commit foi enviado ao GitHub. O updater via systemd verificará e aplicará automaticamente em até 1 minuto." if triggered_update else "O commit foi enviado ao GitHub, mas o updater via systemd não foi encontrado nesta VPS."
+                worker_validation = result.get("phone_worker_zip_validation")
+                worker_line = ""
+                if isinstance(worker_validation, dict):
+                    risk = worker_validation.get("risk") or "ok"
+                    files = worker_validation.get("files")
+                    worker_line = f"\nValidação celular: **{risk}** ({files} arquivo(s))."
                 await self._send_zip_update_message(
                     message,
                     "✅ Update enviado para o GitHub",
-                    f"Branch: **{branch}**\nCommit: **{short_hash}**\nArquivos alterados: **{len(changed_files)}**\n\n{preview_files}\n\n{update_line}",
+                    f"Branch: **{branch}**\nCommit: **{short_hash}**\nArquivos alterados: **{len(changed_files)}**{worker_line}\n\n{preview_files}\n\n{update_line}",
                     discord.Color.green(),
                 )
             except zipfile.BadZipFile:

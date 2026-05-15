@@ -360,6 +360,12 @@ PHONE_WORKER_HOST = (os.getenv("PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = _parse_int(os.getenv("PHONE_WORKER_PORT", "8766"), 8766)
 PHONE_WORKER_SCHEME = (os.getenv("PHONE_WORKER_SCHEME", "http") or "http").strip().lower() or "http"
 PHONE_WORKER_TOKEN = (os.getenv("PHONE_WORKER_TOKEN", "") or "").strip()
+PHONE_WORKER_ZIP_VALIDATE_ENABLED = _parse_bool(os.getenv("PHONE_WORKER_ZIP_VALIDATE_ENABLED", "true"), True)
+PHONE_WORKER_ZIP_VALIDATE_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("PHONE_WORKER_ZIP_VALIDATE_TIMEOUT_SECONDS", "5.0"), 5.0))
+PHONE_WORKER_ZIP_VALIDATE_MAX_MB = max(1, _parse_int(os.getenv("PHONE_WORKER_ZIP_VALIDATE_MAX_MB", "24"), 24))
+PHONE_WORKER_UPDATE_LOG_SUMMARY_ENABLED = _parse_bool(os.getenv("PHONE_WORKER_UPDATE_LOG_SUMMARY_ENABLED", "true"), True)
+PHONE_WORKER_UPDATE_LOG_SUMMARY_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("PHONE_WORKER_UPDATE_LOG_SUMMARY_TIMEOUT_SECONDS", "4.0"), 4.0))
+PHONE_WORKER_MAINTENANCE_PLAN_ENABLED = _parse_bool(os.getenv("PHONE_WORKER_MAINTENANCE_PLAN_ENABLED", "true"), True)
 
 # Uso do phone-worker fora do /vps: preparação de áudio TTS para Lavalink.
 # A VPS sempre mantém fallback local.

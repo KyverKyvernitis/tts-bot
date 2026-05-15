@@ -120,6 +120,61 @@ collect_journal_excerpt() {
   printf '%s' "$logs" | trim_alert_text 1500
 }
 
+phone_worker_log_summary_text() {
+  if [[ ! -x "$REPO_DIR/scripts/phone-worker-client.py" && ! -f "$REPO_DIR/scripts/phone-worker-client.py" ]]; then
+    printf 'indisponível: cliente ausente'
+    return 0
+  fi
+  if ! env_truthy PHONE_WORKER_UPDATE_LOG_SUMMARY_ENABLED && ! env_truthy PHONE_WORKER_ENABLED; then
+    printf 'desativado'
+    return 0
+  fi
+  local source_file="${1:-$RUN_LOG_FILE}"
+  if [[ ! -s "$source_file" ]]; then
+    printf 'sem logs para analisar'
+    return 0
+  fi
+  local timeout_value="4"
+  if [[ -f "$REPO_DIR/.env" ]]; then
+    timeout_value="$(grep -E '^PHONE_WORKER_UPDATE_LOG_SUMMARY_TIMEOUT_SECONDS=' "$REPO_DIR/.env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d ' "' || true)"
+    [[ -n "$timeout_value" ]] || timeout_value="4"
+  fi
+  local raw summary
+  raw="$(sudo -u ubuntu -H python3 "$REPO_DIR/scripts/phone-worker-client.py" log-summary "$source_file" --timeout "$timeout_value" 2>/dev/null || true)"
+  if [[ -z "${raw//[[:space:]]/}" ]]; then
+    printf 'indisponível: sem resposta'
+    return 0
+  fi
+  summary="$(PHONE_WORKER_RAW="$raw" python3 - <<'PYJSON' 2>/dev/null || true
+import json, os
+try:
+    data = json.loads(os.environ.get('PHONE_WORKER_RAW') or '{}')
+except Exception:
+    raise SystemExit
+counts = data.get('counts') or {}
+top = data.get('top_messages') or []
+parts = []
+for key in ('critical','error','warning','timeout','traceback','exception','failed','lavalink','yt_dlp','rate_limit'):
+    value = int(counts.get(key) or 0)
+    if value:
+        parts.append(f'{key}={value}')
+if not parts:
+    parts.append('sem padrões críticos')
+if top:
+    msg = str((top[0] or {}).get('message') or '')[:140]
+    cnt = (top[0] or {}).get('count') or 1
+    if msg:
+        parts.append(f'top({cnt}x): {msg}')
+print(' | '.join(parts)[:900])
+PYJSON
+)"
+  if [[ -n "${summary//[[:space:]]/}" ]]; then
+    printf '%s' "$summary"
+  else
+    printf 'indisponível: resposta inválida'
+  fi
+}
+
 register_error_context() {
   LAST_ERROR_EXIT_CODE="${1:-1}"
   LAST_ERROR_COMMAND="${2:-desconhecido}"
@@ -952,6 +1007,7 @@ deploy_backend
 DURATION="$(human_duration "$SECONDS")"
 ROLLBACK_STATUS="não foi necessário"
 CHANGED_FILES="$(format_changed_files)"
+PHONE_WORKER_UPDATE_ANALYSIS="$(phone_worker_log_summary_text "$RUN_LOG_FILE")"
 
 OVERALL_OK=1
 [[ "$BOT_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_OK=0
@@ -984,6 +1040,7 @@ Serviços de áudio: $AUDIO_SERVICES_STATUS
 Limpeza de áudio: $CLEANUP_STATUS
 Watcher Lavalink celular: $PHONE_LAVALINK_WATCH_STATUS
 Phone worker: $PHONE_WORKER_WATCH_STATUS
+Análise phone-worker: $PHONE_WORKER_UPDATE_ANALYSIS
 CallKeeper: $CALLKEEPER_STATUS
 Frontend: $FRONT_STATUS
 Backend: $BACK_STATUS

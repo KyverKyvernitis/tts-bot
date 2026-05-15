@@ -84,3 +84,13 @@ MUSIC_TTS_PHONE_WORKER_CONVERT_MAX_MB=8
 
 Se o celular estiver offline, lento ou falhar no `ffmpeg`, a VPS converte localmente e o TTS continua funcionando.
 
+
+## Tarefas extras v5
+
+O worker também pode ajudar fora do `/vps` em tarefas auxiliares da VPS:
+
+- `zip_validate`: valida ZIPs de update antes de aplicar, detectando caminhos inseguros, symlinks, arquivos grandes, services/scripts e resumo por extensão.
+- `maintenance_plan`: analisa uma lista de arquivos enviada pela VPS e devolve candidatos de limpeza/maiores arquivos sem apagar nada sozinho.
+- `log_summary`: resume logs grandes para auto-update, rollback futuro e diagnósticos internos.
+
+Essas tarefas são sempre opcionais. Se o celular estiver offline, a VPS continua usando o caminho local normal.

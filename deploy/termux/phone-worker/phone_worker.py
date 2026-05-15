@@ -10,6 +10,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 from collections import Counter
 import subprocess
 import tempfile
@@ -203,6 +204,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_sha256(body)
             elif task == "zip":
                 payload = self._task_zip(body)
+            elif task == "zip_validate":
+                payload = self._task_zip_validate(body)
+            elif task == "maintenance_plan":
+                payload = self._task_maintenance_plan(body)
             elif task == "text_stats":
                 payload = self._task_text_stats(body)
             elif task == "log_extract":
@@ -252,6 +257,165 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "input_size": total_in,
             "size": len(data_out),
             "data_b64": _b64encode(data_out, max_bytes=self.max_output_bytes),
+        }
+
+    def _task_zip_validate(self, body: dict[str, Any]) -> dict[str, Any]:
+        data = _b64decode(str(body.get("data_b64") or ""), max_bytes=self.max_body_bytes)
+        filename = _safe_name(body.get("filename"), fallback="update.zip")
+        max_entries = max(1, min(2000, int(body.get("max_entries") or 600)))
+        max_preview = max(1, min(80, int(body.get("max_preview") or 30)))
+        warnings: list[str] = []
+        errors: list[str] = []
+        extensions: Counter[str] = Counter()
+        total_uncompressed = 0
+        file_count = 0
+        dir_count = 0
+        py_files: list[str] = []
+        shell_files: list[str] = []
+        large_files: list[dict[str, Any]] = []
+        assets = 0
+        manifests = 0
+        service_files = 0
+        script_files = 0
+        top_level: Counter[str] = Counter()
+        preview: list[str] = []
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                bad = zf.testzip()
+                if bad:
+                    errors.append(f"arquivo corrompido no ZIP: {bad}")
+                infos = zf.infolist()
+                if len(infos) > max_entries:
+                    warnings.append(f"muitos itens no ZIP: {len(infos)}")
+                for info in infos:
+                    raw_name = str(info.filename or "")
+                    normalized = raw_name.replace("\\", "/").lstrip("/")
+                    parts = [part for part in normalized.split("/") if part]
+                    if not parts:
+                        continue
+                    top_level[parts[0][:80]] += 1
+                    if len(preview) < max_preview:
+                        preview.append(normalized[:240])
+                    if normalized.startswith("/") or any(part == ".." for part in parts):
+                        errors.append(f"caminho inseguro: {raw_name}")
+                    mode = (info.external_attr >> 16) & 0o170000
+                    if mode == stat.S_IFLNK:
+                        errors.append(f"symlink não permitido: {raw_name}")
+                    if info.is_dir():
+                        dir_count += 1
+                        continue
+                    file_count += 1
+                    total_uncompressed += int(info.file_size or 0)
+                    suffix = Path(parts[-1]).suffix.lower() or "<sem_ext>"
+                    extensions[suffix] += 1
+                    path_lc = normalized.lower()
+                    if suffix == ".py":
+                        py_files.append(normalized)
+                    elif suffix in {".sh", ".bash", ".zsh"}:
+                        shell_files.append(normalized)
+                    if "/assets/" in f"/{path_lc}" or path_lc.startswith("assets/") or "/public/" in f"/{path_lc}":
+                        assets += 1
+                    if "manifest" in path_lc or path_lc.endswith(("package-lock.json", "pnpm-lock.yaml", "yarn.lock")):
+                        manifests += 1
+                    if path_lc.startswith("deploy/systemd/") or path_lc.endswith(".service") or path_lc.endswith(".timer"):
+                        service_files += 1
+                    if suffix in {".sh", ".py"} or path_lc.startswith("scripts/"):
+                        script_files += 1
+                    if int(info.file_size or 0) >= 1024 * 1024:
+                        large_files.append({"path": normalized[:240], "size": int(info.file_size or 0)})
+                    if total_uncompressed > self.max_output_bytes * 6:
+                        warnings.append("tamanho descompactado muito alto para validação leve")
+                        break
+        except zipfile.BadZipFile:
+            raise ValueError("ZIP inválido")
+
+        large_files.sort(key=lambda item: int(item.get("size") or 0), reverse=True)
+        risk = "ok"
+        if errors:
+            risk = "blocked"
+        elif warnings or large_files or service_files:
+            risk = "review"
+        return {
+            "ok": not errors,
+            "filename": filename,
+            "risk": risk,
+            "size": len(data),
+            "files": file_count,
+            "dirs": dir_count,
+            "total_uncompressed": total_uncompressed,
+            "extensions": dict(extensions.most_common(20)),
+            "top_level": dict(top_level.most_common(12)),
+            "python_files": len(py_files),
+            "shell_files": len(shell_files),
+            "assets": assets,
+            "manifests": manifests,
+            "service_files": service_files,
+            "script_files": script_files,
+            "large_files": large_files[:12],
+            "preview": preview,
+            "warnings": warnings[:20],
+            "errors": errors[:20],
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+
+    def _task_maintenance_plan(self, body: dict[str, Any]) -> dict[str, Any]:
+        entries = body.get("entries") or []
+        if not isinstance(entries, list):
+            raise ValueError("entries precisa ser lista")
+        max_entries = max(1, min(5000, int(body.get("max_entries") or 1000)))
+        now = float(body.get("now") or time.time())
+        scanned = 0
+        total_size = 0
+        by_kind: dict[str, dict[str, Any]] = {}
+        old_temp: list[dict[str, Any]] = []
+        old_logs: list[dict[str, Any]] = []
+        largest: list[dict[str, Any]] = []
+        for item in entries[:max_entries]:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")[:260]
+            kind = str(item.get("kind") or "other")[:40]
+            try:
+                size = int(item.get("size") or 0)
+            except Exception:
+                size = 0
+            try:
+                raw_mtime = item.get("mtime")
+                mtime = float(now if raw_mtime is None else raw_mtime)
+            except Exception:
+                mtime = now
+            age_seconds = max(0, int(now - mtime))
+            scanned += 1
+            total_size += max(0, size)
+            bucket = by_kind.setdefault(kind, {"count": 0, "size": 0})
+            bucket["count"] += 1
+            bucket["size"] += max(0, size)
+            record = {"path": path, "size": size, "age_seconds": age_seconds, "kind": kind}
+            largest.append(record)
+            path_lc = path.lower()
+            if kind in {"tmp_audio", "cache", "temp"} or "tmp_audio" in path_lc or "/cache/" in path_lc:
+                if age_seconds >= 3600:
+                    old_temp.append(record)
+            if kind == "log" or path_lc.endswith((".log", ".txt")):
+                if age_seconds >= 7 * 86400:
+                    old_logs.append(record)
+        largest.sort(key=lambda item: int(item.get("size") or 0), reverse=True)
+        old_temp.sort(key=lambda item: (int(item.get("age_seconds") or 0), int(item.get("size") or 0)), reverse=True)
+        old_logs.sort(key=lambda item: (int(item.get("age_seconds") or 0), int(item.get("size") or 0)), reverse=True)
+        reclaimable_temp = sum(int(item.get("size") or 0) for item in old_temp)
+        reclaimable_logs = sum(int(item.get("size") or 0) for item in old_logs)
+        return {
+            "ok": True,
+            "scanned": scanned,
+            "total_size": total_size,
+            "by_kind": by_kind,
+            "largest": largest[:30],
+            "old_temp_candidates": old_temp[:80],
+            "old_log_candidates": old_logs[:80],
+            "estimated_reclaimable": reclaimable_temp + reclaimable_logs,
+            "estimated_reclaimable_temp": reclaimable_temp,
+            "estimated_reclaimable_logs": reclaimable_logs,
         }
 
     def _task_text_stats(self, body: dict[str, Any]) -> dict[str, Any]:
