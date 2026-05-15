@@ -453,7 +453,6 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         help_slash = slash_mention(root_ids, root="help", path="help")
         ping_slash = slash_mention(root_ids, root="ping", path="ping")
         vps_slash = slash_mention(root_ids, root="vps", path="vps")
-        workers_slash = slash_mention(root_ids, root="workers", path="workers")
         tts_menu_slash = slash_mention(root_ids, root="tts", path="tts menu")
         tts_status_slash = slash_mention(root_ids, root="tts", path="tts status")
         tts_user_slash = slash_mention(root_ids, root="tts", path="tts usuario")
@@ -664,10 +663,6 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
                 f"{vps_slash}\n"
                 "Abre o painel técnico da VPS na guilda de teste: base Git, diagnóstico musical, "
                 "diagnóstico completo e snapshot sanitizado.\n\n"
-                f"### Core Workers\n"
-                f"{workers_slash}\n"
-                "Abre o painel privado dos workers auxiliares: registry multi-celular, "
-                "pareamento do APK, heartbeat, roles, saúde e ação segura para acordar o phone-worker.\n\n"
                 f"### Help\n"
                 f"{help_slash} ou {prefix_help}\n"
                 "Abre esta central de ajuda. O número no centro do paginator "

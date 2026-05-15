@@ -17,6 +17,7 @@ if [[ ! -f "$HOME/.phone-worker.env" ]]; then
   chmod 600 "$HOME/.phone-worker.env"
   echo "Criado: $HOME/.phone-worker.env"
   echo "Edite PHONE_WORKER_TOKEN antes de iniciar."
+  echo "Depois do pareamento no /workers, preencha CORE_WORKER_* para ativar heartbeat na VPS."
 fi
 
 echo "Instalado. Para iniciar:"

@@ -4,8 +4,10 @@ set -u
 
 ENV_FILE="${PHONE_WORKER_ENV:-$HOME/.phone-worker.env}"
 if [[ -f "$ENV_FILE" ]]; then
+  set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
+  set +a
 fi
 
 INTERVAL="${PHONE_WORKER_WATCH_INTERVAL_SECONDS:-60}"

@@ -114,6 +114,11 @@ vps-files-diagnostics-*.txt
 # Config local sensível do painel Lavalink
 data/music/lavalink_config.json
 
+# Estado local do Core Worker / pareamento privado
+data/core_workers_registry.json
+data/core_workers_registry.json.tmp
+data/runtime/
+
 # DB local sensível do painel Lavalink/MusicNode
 data/musicnode/*.db
 data/musicnode/*.db-shm

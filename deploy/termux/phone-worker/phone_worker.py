@@ -14,7 +14,10 @@ import stat
 from collections import Counter
 import subprocess
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
 import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +31,9 @@ JOBS_FAILED = 0
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
+PHONE_WORKER_VERSION = "1.2.0"
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
+
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -44,6 +50,241 @@ def _env_int(name: str, default: int) -> int:
         return int(str(os.getenv(name, default)).strip())
     except Exception:
         return default
+
+
+def _load_env_file(path: str | None = None) -> None:
+    """Carrega ~/.phone-worker.env sem sobrescrever variáveis já exportadas.
+
+    Isso deixa o worker funcionar mesmo quando o script de start roda dentro do
+    tmux sem exportar todas as variáveis CORE_WORKER_*.
+    """
+    raw_path = path or os.getenv("PHONE_WORKER_ENV") or str(Path.home() / ".phone-worker.env")
+    env_path = Path(raw_path).expanduser()
+    if not env_path.exists():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return
+    for line in lines:
+        clean = line.strip()
+        if not clean or clean.startswith("#") or "=" not in clean:
+            continue
+        if clean.startswith("export "):
+            clean = clean[len("export "):].strip()
+        key, value = clean.split("=", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(str(os.getenv(name, default)).strip().replace(",", "."))
+    except Exception:
+        return default
+
+
+def _env_list(name: str, default: list[str] | None = None) -> list[str]:
+    default = list(default or [])
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    items: list[str] = []
+    for item in raw.replace(";", ",").split(","):
+        clean = re.sub(r"[^a-zA-Z0-9_.:-]+", "-", item.strip().lower()).strip("-._:")
+        if clean and clean not in items:
+            items.append(clean[:40])
+    return items or default
+
+
+def _short_text(value: Any, *, limit: int = 120, default: str = "") -> str:
+    text = str(value or default).replace("\n", " ").strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > limit:
+        return text[: max(1, limit - 1)].rstrip() + "…"
+    return text
+
+
+def _run_json_command(command: list[str], *, timeout: float = 2.0) -> dict[str, Any]:
+    if not command or not shutil.which(command[0]):
+        return {}
+    try:
+        proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
+    except Exception:
+        return {}
+    if proc.returncode != 0:
+        return {}
+    try:
+        parsed = json.loads(proc.stdout.decode("utf-8", errors="replace") or "{}")
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _battery_snapshot() -> dict[str, Any]:
+    raw = _run_json_command(["termux-battery-status"], timeout=2.0)
+    if not raw:
+        return {}
+    level = raw.get("percentage")
+    charging = None
+    status = str(raw.get("status") or "").strip().lower()
+    plugged = str(raw.get("plugged") or "").strip().lower()
+    if status:
+        charging = status in {"charging", "full"}
+    elif plugged:
+        charging = plugged not in {"unplugged", "none", "unknown"}
+    result: dict[str, Any] = {}
+    try:
+        if level is not None:
+            result["level"] = int(float(level))
+    except Exception:
+        pass
+    if charging is not None:
+        result["charging"] = bool(charging)
+    if status:
+        result["status"] = status[:32]
+    if plugged:
+        result["plugged"] = plugged[:32]
+    return result
+
+
+def _network_snapshot() -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    wifi = _run_json_command(["termux-wifi-connectioninfo"], timeout=2.0)
+    if wifi:
+        result["type"] = "wifi"
+        ssid = str(wifi.get("ssid") or "").strip()
+        if ssid and ssid != "<unknown ssid>":
+            result["name"] = _short_text(ssid, limit=48)
+        try:
+            result["rssi"] = int(wifi.get("rssi"))
+        except Exception:
+            pass
+    else:
+        result["type"] = "unknown"
+    tailscale_ip = ""
+    if shutil.which("tailscale"):
+        try:
+            proc = subprocess.run(["tailscale", "ip", "-4"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2.0)
+            if proc.returncode == 0:
+                tailscale_ip = proc.stdout.decode("utf-8", errors="replace").strip().splitlines()[0].strip()
+        except Exception:
+            tailscale_ip = ""
+    result["tailscale"] = bool(tailscale_ip)
+    if tailscale_ip:
+        parts = tailscale_ip.split(".")
+        if len(parts) == 4:
+            result["tailscale_ip_masked"] = f"{parts[0]}.{parts[1]}.x.x"
+    return result
+
+
+def _heartbeat_configured() -> bool:
+    if not _env_bool("CORE_WORKER_HEARTBEAT_ENABLED", True):
+        return False
+    return bool(
+        str(os.getenv("CORE_WORKER_VPS_URL") or os.getenv("CORE_WORKER_BASE_URL") or "").strip()
+        and str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
+        and str(os.getenv("CORE_WORKER_TOKEN") or "").strip()
+    )
+
+
+def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
+    status = _system_status()
+    worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
+    name = str(os.getenv("CORE_WORKER_NAME") or os.getenv("PHONE_WORKER_NAME") or platform.node() or "Core Phone Worker").strip()
+    endpoint = str(os.getenv("CORE_WORKER_ENDPOINT") or os.getenv("PHONE_WORKER_ENDPOINT") or "").strip()
+    if not endpoint and host not in {"", "0.0.0.0", "::"}:
+        endpoint = f"http://{host}:{port}"
+    roles = _env_list("CORE_WORKER_ROLES", ["phone-worker", "diagnostics", "log-summary", "zip-validate", "tts-convert"])
+    capabilities = _env_list("CORE_WORKER_CAPABILITIES", roles + ["ffmpeg", "ffprobe"])
+    if status.get("ffmpeg") and "ffmpeg" not in capabilities:
+        capabilities.append("ffmpeg")
+    if status.get("ffprobe") and "ffprobe" not in capabilities:
+        capabilities.append("ffprobe")
+    return {
+        "worker_id": worker_id,
+        "name": _short_text(name, limit=64, default="Core Phone Worker"),
+        "source": "termux-phone-worker",
+        "version": PHONE_WORKER_VERSION,
+        "endpoint": endpoint,
+        "roles": roles[:16],
+        "capabilities": capabilities[:24],
+        "battery": _battery_snapshot(),
+        "network": _network_snapshot(),
+        "health": {
+            "ok": True,
+            "pid": status.get("pid"),
+            "uptime_seconds": status.get("uptime_seconds"),
+            "jobs_started": status.get("jobs_started"),
+            "jobs_failed": status.get("jobs_failed"),
+            "ffmpeg": status.get("ffmpeg"),
+            "ffprobe": status.get("ffprobe"),
+        },
+        "status": {
+            "http_host": host,
+            "http_port": port,
+            "python": status.get("python"),
+            "platform": status.get("platform"),
+            "disk_home": status.get("disk_home"),
+            "loadavg": status.get("loadavg"),
+        },
+    }
+
+
+def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6.0) -> bool:
+    base_url = str(os.getenv("CORE_WORKER_VPS_URL") or os.getenv("CORE_WORKER_BASE_URL") or "").strip().rstrip("/")
+    token = str(os.getenv("CORE_WORKER_TOKEN") or "").strip()
+    worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
+    if not base_url or not token or not worker_id:
+        return False
+    payload = _core_worker_payload(host=host, port=port)
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}/core-worker/heartbeat",
+        data=body,
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp:
+            resp.read(4096)
+        return True
+    except urllib.error.HTTPError as exc:
+        # Nunca loga token. O corpo pode conter só erro do registry.
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:180]
+        except Exception:
+            detail = ""
+        print(f"[core-worker-heartbeat] HTTP {exc.code}: {_short_text(detail, limit=180)}", flush=True)
+    except Exception as exc:
+        print(f"[core-worker-heartbeat] falhou: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
+    return False
+
+
+def _start_core_worker_heartbeat(*, host: str, port: int) -> None:
+    if not _heartbeat_configured():
+        print("[core-worker-heartbeat] desativado ou incompleto; defina CORE_WORKER_VPS_URL, CORE_WORKER_ID e CORE_WORKER_TOKEN", flush=True)
+        return
+    interval = max(10.0, min(300.0, _env_float("CORE_WORKER_HEARTBEAT_INTERVAL_SECONDS", DEFAULT_HEARTBEAT_INTERVAL_SECONDS)))
+
+    def loop() -> None:
+        while True:
+            _send_core_worker_heartbeat_once(host=host, port=port, timeout=6.0)
+            time.sleep(interval)
+
+    thread = threading.Thread(target=loop, name="core-worker-heartbeat", daemon=True)
+    thread.start()
+    print(f"[core-worker-heartbeat] ativo; intervalo={int(interval)}s", flush=True)
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -99,6 +340,8 @@ def _system_status() -> dict[str, Any]:
     return {
         "ok": True,
         "worker": "phone-worker",
+        "version": PHONE_WORKER_VERSION,
+        "core_worker_heartbeat": _heartbeat_configured(),
         "pid": os.getpid(),
         "uptime_seconds": round(time.time() - START_TIME, 3),
         "platform": platform.platform(),
@@ -593,6 +836,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    _load_env_file()
     parser = argparse.ArgumentParser(description="Worker auxiliar do celular para tarefas opcionais da VPS.")
     parser.add_argument("--host", default=os.getenv("PHONE_WORKER_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=_env_int("PHONE_WORKER_PORT", 8766))
@@ -600,14 +844,20 @@ def main() -> int:
     parser.add_argument("--max-body-mb", type=int, default=_env_int("PHONE_WORKER_MAX_BODY_MB", DEFAULT_MAX_BODY_MB))
     parser.add_argument("--max-output-mb", type=int, default=_env_int("PHONE_WORKER_MAX_OUTPUT_MB", DEFAULT_MAX_OUTPUT_MB))
     parser.add_argument("--job-timeout", type=int, default=_env_int("PHONE_WORKER_JOB_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
+    parser.add_argument("--heartbeat-once", action="store_true", help="envia um heartbeat para a VPS e encerra")
     args = parser.parse_args()
+
+    if args.heartbeat_once:
+        ok = _send_core_worker_heartbeat_once(host=args.host, port=args.port, timeout=8.0)
+        return 0 if ok else 1
 
     server = ThreadingHTTPServer((args.host, args.port), WorkerHandler)
     server.worker_token = args.token
     server.max_body_bytes = max(1, args.max_body_mb) * 1024 * 1024
     server.max_output_bytes = max(1, args.max_output_mb) * 1024 * 1024
     server.job_timeout = max(3, args.job_timeout)
-    print(f"[phone-worker] ouvindo em {args.host}:{args.port}; token={'sim' if args.token else 'não'}", flush=True)
+    print(f"[phone-worker] ouvindo em {args.host}:{args.port}; token={'sim' if args.token else 'não'}; versão={PHONE_WORKER_VERSION}", flush=True)
+    _start_core_worker_heartbeat(host=args.host, port=args.port)
     server.serve_forever()
     return 0
 

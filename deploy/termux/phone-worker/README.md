@@ -94,3 +94,38 @@ O worker também pode ajudar fora do `/vps` em tarefas auxiliares da VPS:
 - `log_summary`: resume logs grandes para auto-update, rollback futuro e diagnósticos internos.
 
 Essas tarefas são sempre opcionais. Se o celular estiver offline, a VPS continua usando o caminho local normal.
+
+## Heartbeat no Core Worker registry
+
+Depois do patch do `/workers`, o phone-worker pode aparecer no registry multi-worker da VPS.
+
+Fluxo recomendado:
+
+1. No Discord, use `/workers` na guild privada.
+2. Clique em **Parear APK** para gerar um código temporário.
+3. Faça o pareamento usando a rota `POST /core-worker/pair` ou o futuro APK.
+4. Copie para `~/.phone-worker.env` o `worker_id` e o `token` retornados.
+5. Ative o heartbeat e reinicie o worker.
+
+Exemplo local no Termux:
+
+```env
+CORE_WORKER_HEARTBEAT_ENABLED=true
+CORE_WORKER_VPS_URL=http://100.x.x.x:8000
+CORE_WORKER_ID=phone-redmi-01
+CORE_WORKER_TOKEN=token_retornado_no_pareamento
+CORE_WORKER_NAME=Redmi Worker 01
+CORE_WORKER_ROLES=phone-worker,diagnostics,log-summary,zip-validate,ffmpeg,ffprobe,tts-convert
+CORE_WORKER_CAPABILITIES=phone-worker,diagnostics,log-summary,maintenance-plan,zip-validate,ffmpeg,ffprobe,tts-convert
+CORE_WORKER_HEARTBEAT_INTERVAL_SECONDS=30
+```
+
+Teste manual sem iniciar servidor novo:
+
+```bash
+cd ~/phone-worker
+python phone_worker.py --heartbeat-once
+```
+
+O heartbeat envia status, bateria/rede quando o Termux:API estiver disponível, ffmpeg/ffprobe, disco e saúde básica. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
+
