@@ -123,6 +123,17 @@ LABEL_MAP = {
     "diagnostico": "Diagnóstico",
     "log": "Log",
     "log completo": "Log completo",
+    "serviços de áudio": "Serviços de áudio",
+    "servicos de audio": "Serviços de áudio",
+    "limpeza de áudio": "Limpeza de áudio",
+    "limpeza de audio": "Limpeza de áudio",
+    "watcher lavalink celular": "Watcher Lavalink celular",
+    "phone worker": "Phone-worker",
+    "phone-worker": "Phone-worker",
+    "phone-worker sync": "Phone-worker sync",
+    "análise phone-worker": "Análise phone-worker",
+    "analise phone-worker": "Análise phone-worker",
+    "callkeeper": "CallKeeper",
 }
 
 HEADER_FIELDS = {
@@ -145,8 +156,8 @@ HEADER_FIELDS = {
     "Estado ativo",
     "Subestado",
 }
-STATUS_FIELDS = {"Bot health", "Frontend", "Backend", "Activity"}
-DETAIL_FIELDS = {"Etapa", "Motivo", "URL", "Diagnóstico"}
+STATUS_FIELDS = {"Bot health", "Serviços de áudio", "Limpeza de áudio", "Watcher Lavalink celular", "Phone-worker", "Phone-worker sync", "CallKeeper", "Frontend", "Backend", "Activity"}
+DETAIL_FIELDS = {"Etapa", "Motivo", "URL", "Diagnóstico", "Análise phone-worker"}
 BULLET_FIELDS = {"Arquivos"}
 CODE_FIELDS = {"Últimas linhas", "Comando", "Stderr", "Status git", "Arquivos locais", "Log", "Log completo"}
 MAX_TEXT = 1800

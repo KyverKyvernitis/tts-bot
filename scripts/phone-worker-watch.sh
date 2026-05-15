@@ -66,6 +66,8 @@ START_COMMAND="$(env_value PHONE_WORKER_START_COMMAND '/data/data/com.termux/fil
 COOLDOWN_SECONDS="$(env_value PHONE_WORKER_KICK_COOLDOWN_SECONDS 60)"
 STATE_DIR="${STATE_DIR:-$REPO_DIR/data/runtime}"
 COOLDOWN_FILE="$STATE_DIR/phone-worker-last-kick"
+PENDING_SYNC_FILE="$STATE_DIR/phone-worker-sync-pending.flag"
+SYNC_SCRIPT="$REPO_DIR/scripts/sync-phone-worker.sh"
 
 if [[ -z "$PHONE_HOST" || -z "$PHONE_TOKEN" ]]; then
   log "host ou token não configurados; defina PHONE_WORKER_HOST e PHONE_WORKER_TOKEN"
@@ -78,8 +80,20 @@ worker_health_ok() {
   curl --max-time "$HEALTH_TIMEOUT" -fsS -H "Authorization: Bearer $PHONE_TOKEN" "$HEALTH_URL" >/dev/null 2>&1
 }
 
+try_pending_sync() {
+  if [[ -f "$PENDING_SYNC_FILE" && -x "$SYNC_SCRIPT" ]]; then
+    log "sync pendente detectado; tentando atualizar phone-worker no celular"
+    REPO_DIR="$REPO_DIR" ENV_FILE="$ENV_FILE" STATE_DIR="$STATE_DIR" "$SYNC_SCRIPT" || true
+  fi
+}
+
 if worker_health_ok; then
-  log "worker online em ${PHONE_HOST}:${PHONE_PORT}"
+  try_pending_sync
+  if [[ -f "$PENDING_SYNC_FILE" ]]; then
+    log "worker online em ${PHONE_HOST}:${PHONE_PORT}; sync ainda pendente"
+  else
+    log "worker online em ${PHONE_HOST}:${PHONE_PORT}"
+  fi
   exit 0
 fi
 
@@ -121,6 +135,7 @@ ssh -p "$SSH_PORT" \
 sleep "$START_WAIT"
 if worker_health_ok; then
   log "worker voltou"
+  try_pending_sync
 else
   log "celular respondeu ao SSH, mas worker ainda não ficou online"
 fi

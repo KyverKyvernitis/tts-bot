@@ -35,6 +35,7 @@ AUDIO_SYSTEMD_CHANGED=0
 CLEANUP_CHANGED=0
 PHONE_LAVALINK_WATCH_CHANGED=0
 PHONE_WORKER_WATCH_CHANGED=0
+PHONE_WORKER_SYNC_REQUIRED=0
 
 BOT_HEALTHCHECK_STATUS="não verificado"
 CALLKEEPER_STATUS="não alterado"
@@ -42,6 +43,7 @@ AUDIO_SERVICES_STATUS="não alterado"
 CLEANUP_STATUS="não alterada"
 PHONE_LAVALINK_WATCH_STATUS="não alterado"
 PHONE_WORKER_WATCH_STATUS="não alterado"
+PHONE_WORKER_SYNC_STATUS="sem mudanças"
 FRONT_STATUS="não alterado"
 BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
@@ -647,11 +649,40 @@ deploy_phone_worker_watch() {
 }
 
 
+deploy_phone_worker_sync() {
+  if (( PHONE_WORKER_SYNC_REQUIRED == 0 )); then
+    PHONE_WORKER_SYNC_STATUS="sem mudanças"
+    return 0
+  fi
+
+  STAGE="sincronização do phone-worker no celular"
+
+  if [[ ! -x "$REPO_DIR/scripts/sync-phone-worker.sh" ]]; then
+    PHONE_WORKER_SYNC_STATUS="não executado: scripts/sync-phone-worker.sh ausente"
+    return 0
+  fi
+
+  local output status_line
+  output="$(sudo -u ubuntu -H bash "$REPO_DIR/scripts/sync-phone-worker.sh" 2>&1 || true)"
+  status_line="$(printf '%s\n' "$output" | grep -E '\[phone-worker-sync\]' | tail -n 1 | sed -E 's/^\[phone-worker-sync\][[:space:]]*//' || true)"
+
+  if [[ -n "${status_line//[[:space:]]/}" ]]; then
+    PHONE_WORKER_SYNC_STATUS="$status_line"
+  else
+    PHONE_WORKER_SYNC_STATUS="executado; sem status legível"
+  fi
+
+  logger -t "$LOG_TAG" "Phone-worker sync: $PHONE_WORKER_SYNC_STATUS"
+  return 0
+}
+
+
 deploy_bot() {
   deploy_audio_services
   deploy_cleanup_timer
   deploy_phone_lavalink_watch
   deploy_phone_worker_watch
+  deploy_phone_worker_sync
 
   if (( REQUIREMENTS_CHANGED == 1 )); then
     STAGE="dependências do bot"
@@ -982,6 +1013,9 @@ fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/phone-worker-watch\.sh|scripts/phone-worker-client\.py|deploy/systemd/phone-worker-watch\.(service|timer)|deploy/termux/phone-worker/)'; then
   PHONE_WORKER_WATCH_CHANGED=1
 fi
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/termux/phone-worker/'; then
+  PHONE_WORKER_SYNC_REQUIRED=1
+fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callkeeper_runtime/|deploy/systemd/callkeeper\.service|config\.py|db\.py|requirements\.txt)$'; then
   CALLKEEPER_CHANGED=1
 fi
@@ -1040,6 +1074,7 @@ Serviços de áudio: $AUDIO_SERVICES_STATUS
 Limpeza de áudio: $CLEANUP_STATUS
 Watcher Lavalink celular: $PHONE_LAVALINK_WATCH_STATUS
 Phone worker: $PHONE_WORKER_WATCH_STATUS
+Phone-worker sync: $PHONE_WORKER_SYNC_STATUS
 Análise phone-worker: $PHONE_WORKER_UPDATE_ANALYSIS
 CallKeeper: $CALLKEEPER_STATUS
 Frontend: $FRONT_STATUS
