@@ -10,6 +10,7 @@ import os
 import platform
 import re
 import shutil
+import shlex
 import stat
 from collections import Counter
 import subprocess
@@ -17,6 +18,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from http import HTTPStatus
@@ -32,7 +34,7 @@ JOBS_FAILED = 0
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.2.0"
+PHONE_WORKER_VERSION = "1.3.0"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -156,6 +158,95 @@ def _battery_snapshot() -> dict[str, Any]:
     return result
 
 
+
+def _run_text_command(command: list[str], *, timeout: float = 3.0, max_bytes: int = 32768) -> tuple[int, str, str]:
+    if not command or not shutil.which(command[0]):
+        return 127, "", f"{command[0] if command else 'comando'} não encontrado"
+    try:
+        proc = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(0.5, timeout),
+        )
+        stdout = (proc.stdout or b"")[:max_bytes].decode("utf-8", errors="replace")
+        stderr = (proc.stderr or b"")[:max_bytes].decode("utf-8", errors="replace")
+        return int(proc.returncode), stdout.strip(), stderr.strip()
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+    except Exception as exc:
+        return 1, "", f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
+
+
+def _mask_ipv4(value: str) -> str:
+    text = str(value or "").strip()
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", text):
+        parts = text.split(".")
+        return f"{parts[0]}.{parts[1]}.x.x"
+    return _short_text(text, limit=64)
+
+
+def _tailscale_snapshot(*, probe_vps: bool = False) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "cli_available": bool(shutil.which("tailscale")),
+        "connected": False,
+        "state": "unknown",
+    }
+    ip = ""
+    if result["cli_available"]:
+        code, stdout, stderr = _run_text_command(["tailscale", "ip", "-4"], timeout=2.5, max_bytes=4096)
+        if code == 0 and stdout.strip():
+            ip = stdout.strip().splitlines()[0].strip()
+            result["connected"] = True
+            result["ip_present"] = True
+            result["ip_masked"] = _mask_ipv4(ip)
+        elif stderr:
+            result["ip_error"] = _short_text(stderr, limit=120)
+
+        code, stdout, stderr = _run_text_command(["tailscale", "status", "--json"], timeout=3.5, max_bytes=65536)
+        if code == 0 and stdout:
+            try:
+                parsed = json.loads(stdout)
+            except Exception:
+                parsed = {}
+            if isinstance(parsed, dict):
+                state = str(parsed.get("BackendState") or parsed.get("backendState") or "").strip()
+                if state:
+                    result["state"] = state[:48]
+                    result["connected"] = result["connected"] or state.lower() == "running"
+                self_info = parsed.get("Self") if isinstance(parsed.get("Self"), dict) else {}
+                if self_info:
+                    result["hostname"] = _short_text(self_info.get("HostName"), limit=64)
+                    result["online"] = bool(self_info.get("Online", result.get("connected")))
+                peers = parsed.get("Peer") if isinstance(parsed.get("Peer"), dict) else {}
+                result["peers"] = len(peers) if isinstance(peers, dict) else 0
+        elif code != 127 and stderr:
+            result["status_error"] = _short_text(stderr, limit=160)
+    else:
+        result["note"] = "CLI tailscale não encontrada no Termux; use o app oficial e valide pela rota da VPS"
+
+    base_url, _token, _worker_id = _core_worker_auth_parts()
+    if probe_vps and base_url:
+        health_url = base_url.rstrip("/") + "/health"
+        started = time.time()
+        try:
+            req = urllib.request.Request(health_url, headers={"Accept": "application/json"}, method="GET")
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                raw = resp.read(4096)
+                result["vps_reachable"] = True
+                result["vps_status"] = int(getattr(resp, "status", 200) or 200)
+                result["vps_latency_ms"] = round((time.time() - started) * 1000, 1)
+                try:
+                    data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+                    if isinstance(data, dict):
+                        result["vps_health_ok"] = bool(data.get("ok", True))
+                except Exception:
+                    pass
+        except Exception as exc:
+            result["vps_reachable"] = False
+            result["vps_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
+    return result
+
 def _network_snapshot() -> dict[str, Any]:
     result: dict[str, Any] = {}
     wifi = _run_json_command(["termux-wifi-connectioninfo"], timeout=2.0)
@@ -170,19 +261,14 @@ def _network_snapshot() -> dict[str, Any]:
             pass
     else:
         result["type"] = "unknown"
-    tailscale_ip = ""
-    if shutil.which("tailscale"):
-        try:
-            proc = subprocess.run(["tailscale", "ip", "-4"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2.0)
-            if proc.returncode == 0:
-                tailscale_ip = proc.stdout.decode("utf-8", errors="replace").strip().splitlines()[0].strip()
-        except Exception:
-            tailscale_ip = ""
-    result["tailscale"] = bool(tailscale_ip)
-    if tailscale_ip:
-        parts = tailscale_ip.split(".")
-        if len(parts) == 4:
-            result["tailscale_ip_masked"] = f"{parts[0]}.{parts[1]}.x.x"
+    tailscale = _tailscale_snapshot(probe_vps=False)
+    result["tailscale"] = bool(tailscale.get("connected"))
+    result["tailscale_cli"] = bool(tailscale.get("cli_available"))
+    result["tailscale_state"] = _short_text(tailscale.get("state"), limit=48, default="unknown")
+    if tailscale.get("ip_masked"):
+        result["tailscale_ip_masked"] = tailscale.get("ip_masked")
+    if tailscale.get("note"):
+        result["tailscale_note"] = _short_text(tailscale.get("note"), limit=100)
     return result
 
 
@@ -882,6 +968,206 @@ def _command_version(command: str) -> dict[str, Any]:
         return {"ok": False, "available": True, "command": command, "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"}
 
 
+
+def _sanitize_log_text(value: str, *, limit: int = 12000) -> str:
+    text = str(value or "")
+    for key in ("PHONE_WORKER_TOKEN", "CORE_WORKER_TOKEN"):
+        raw = str(os.getenv(key) or "").strip()
+        if raw:
+            text = text.replace(raw, "[redacted]")
+    text = re.sub(r"(Authorization:\s*Bearer\s+)[^\s]+", r"\1[redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r"(X-(?:Phone|Core)-Worker-Token:\s*)[^\s]+", r"\1[redacted]", text, flags=re.IGNORECASE)
+    if len(text) > limit:
+        return text[-limit:]
+    return text
+
+
+def _phone_worker_dir() -> Path:
+    return Path(os.getenv("PHONE_WORKER_DIR") or (Path.home() / "phone-worker")).expanduser()
+
+
+def _phone_worker_log_file() -> Path:
+    return Path(os.getenv("PHONE_WORKER_LOG_FILE") or (_phone_worker_dir() / "phone-worker.log")).expanduser()
+
+
+def _home_script(name: str) -> Path:
+    return (Path.home() / name).expanduser()
+
+
+def _tmux_session_exists(session: str) -> bool:
+    if not session or not shutil.which("tmux"):
+        return False
+    code, _stdout, _stderr = _run_text_command(["tmux", "has-session", "-t", session], timeout=2.0, max_bytes=1024)
+    return code == 0
+
+
+def _pgrep_count(pattern: str) -> int:
+    if not shutil.which("pgrep"):
+        return 0
+    code, stdout, _stderr = _run_text_command(["pgrep", "-f", pattern], timeout=2.0, max_bytes=4096)
+    if code != 0 or not stdout:
+        return 0
+    current = str(os.getpid())
+    return sum(1 for line in stdout.splitlines() if line.strip() and line.strip() != current)
+
+
+def _allowed_service_name(value: Any) -> str:
+    service = str(value or "phone-worker").strip().lower().replace("_", "-")
+    service = re.sub(r"[^a-z0-9.-]+", "-", service).strip("-.")
+    aliases = {
+        "worker": "phone-worker",
+        "core-worker": "phone-worker",
+        "phone": "phone-worker",
+        "watch": "phone-worker-watch",
+        "watchdog": "phone-worker-watch",
+    }
+    service = aliases.get(service, service)
+    if service not in {"phone-worker", "phone-worker-watch", "tailscale"}:
+        raise ValueError("serviço não permitido")
+    return service
+
+
+def _service_status(service: str) -> dict[str, Any]:
+    service = _allowed_service_name(service)
+    phone_session = str(os.getenv("PHONE_WORKER_TMUX_SESSION") or "phone-worker").strip() or "phone-worker"
+    watch_session = str(os.getenv("PHONE_WORKER_WATCH_TMUX_SESSION") or "phone-worker-watch").strip() or "phone-worker-watch"
+    if service == "phone-worker":
+        status = _system_status()
+        return {
+            "ok": True,
+            "service": service,
+            "manageable": True,
+            "running": True,
+            "current_pid": os.getpid(),
+            "tmux_session": phone_session,
+            "tmux_running": _tmux_session_exists(phone_session),
+            "processes": _pgrep_count("phone_worker.py"),
+            "uptime_seconds": status.get("uptime_seconds"),
+            "log_file": str(_phone_worker_log_file()),
+        }
+    if service == "phone-worker-watch":
+        return {
+            "ok": True,
+            "service": service,
+            "manageable": True,
+            "running": _tmux_session_exists(watch_session),
+            "tmux_session": watch_session,
+            "script": str(_home_script("watch-phone-worker.sh")),
+        }
+    tailscale = _tailscale_snapshot(probe_vps=True)
+    return {
+        "ok": True,
+        "service": service,
+        "manageable": False,
+        "running": bool(tailscale.get("connected")),
+        "tailscale": tailscale,
+        "note": "controle start/stop do Tailscale oficial deve ser feito no app Android; o worker só diagnostica",
+    }
+
+
+def _run_service_action(service: str, action: str) -> dict[str, Any]:
+    service = _allowed_service_name(service)
+    action = str(action or "status").strip().lower().replace("-", "_")
+    if action == "status":
+        return _service_status(service)
+    if action not in {"start", "stop", "restart"}:
+        raise ValueError("ação de serviço não permitida")
+
+    phone_session = str(os.getenv("PHONE_WORKER_TMUX_SESSION") or "phone-worker").strip() or "phone-worker"
+    watch_session = str(os.getenv("PHONE_WORKER_WATCH_TMUX_SESSION") or "phone-worker-watch").strip() or "phone-worker-watch"
+    start_script = _home_script("start-phone-worker.sh")
+    watch_script = _home_script("watch-phone-worker.sh")
+
+    if service == "tailscale":
+        raise ValueError("Tailscale oficial no Android não pode ser iniciado/parado pelo Termux com segurança; use o app Tailscale")
+
+    if service == "phone-worker-watch":
+        if action in {"stop", "restart"}:
+            if shutil.which("tmux"):
+                _run_text_command(["tmux", "kill-session", "-t", watch_session], timeout=3.0, max_bytes=4096)
+        if action in {"start", "restart"}:
+            if not watch_script.exists():
+                raise FileNotFoundError(str(watch_script))
+            if not shutil.which("tmux"):
+                raise RuntimeError("tmux não encontrado")
+            code, stdout, stderr = _run_text_command(["tmux", "new-session", "-d", "-s", watch_session, str(watch_script)], timeout=4.0, max_bytes=4096)
+            if code != 0 and "duplicate session" not in stderr.lower():
+                raise RuntimeError(stderr or stdout or f"tmux retornou {code}")
+        return _service_status(service) | {"action": action}
+
+    # phone-worker é o próprio processo atual. Parar/reiniciar precisa ser deferido
+    # para o resultado do job conseguir voltar para a VPS antes do tmux/pkill.
+    if action == "start":
+        if not start_script.exists():
+            raise FileNotFoundError(str(start_script))
+        proc = subprocess.run([str(start_script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20.0)
+        status = _service_status(service)
+        status.update({
+            "action": action,
+            "returncode": int(proc.returncode),
+            "stdout": _sanitize_log_text(proc.stdout.decode("utf-8", errors="replace"), limit=3000),
+            "stderr": _sanitize_log_text(proc.stderr.decode("utf-8", errors="replace"), limit=3000),
+        })
+        if proc.returncode != 0:
+            status["ok"] = False
+        return status
+    if action == "restart" and not start_script.exists():
+        raise FileNotFoundError(str(start_script))
+    status = _service_status(service)
+    status.update({"action": action, "deferred": True, "message": f"{action} agendado após envio do resultado"})
+    status["_deferred_phone_worker_action"] = action
+    status["_deferred_phone_worker_session"] = phone_session
+    status["_deferred_start_script"] = str(start_script)
+    return status
+
+
+def _launch_deferred_phone_worker_action(result: dict[str, Any]) -> None:
+    action = str(result.pop("_deferred_phone_worker_action", "") or "").strip().lower()
+    if action not in {"stop", "restart"}:
+        return
+    session = str(result.pop("_deferred_phone_worker_session", "") or os.getenv("PHONE_WORKER_TMUX_SESSION") or "phone-worker")
+    start_script = Path(str(result.pop("_deferred_start_script", "") or _home_script("start-phone-worker.sh"))).expanduser()
+    worker_dir = _phone_worker_dir()
+    script = worker_dir / f".core-worker-deferred-{action}.sh"
+    lines = [
+        "#!/data/data/com.termux/files/usr/bin/bash",
+        "set +e",
+        "sleep 1",
+        f"tmux kill-session -t {shlex.quote(session)} >/dev/null 2>&1 || true",
+        "pkill -f 'phone_worker.py' >/dev/null 2>&1 || true",
+    ]
+    if action == "restart":
+        lines.extend([
+            "sleep 1",
+            f"bash {shlex.quote(str(start_script))} >/dev/null 2>&1 &",
+        ])
+    try:
+        worker_dir.mkdir(parents=True, exist_ok=True)
+        script.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        script.chmod(0o700)
+        subprocess.Popen(["bash", str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception as exc:
+        print(f"[core-worker-service] falha ao agendar {action}: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
+
+
+def _worker_logs_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    lines = max(20, min(400, _env_int("CORE_WORKER_LOG_LINES", int(payload.get("lines") or 120))))
+    path = Path(str(payload.get("path") or _phone_worker_log_file())).expanduser()
+    if not path.exists() or not path.is_file():
+        return {"ok": False, "path": str(path), "error": "log não encontrado"}
+    try:
+        data = path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+    except Exception as exc:
+        return {"ok": False, "path": str(path), "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"}
+    text = _sanitize_log_text("\n".join(data), limit=16000)
+    return {
+        "ok": True,
+        "path": str(path),
+        "lines": len(data),
+        "tail": text,
+        "error_lines": sum(1 for line in data if re.search(r"error|erro|exception|traceback|falha|failed", line, re.IGNORECASE)),
+    }
+
 def _task_runner(max_body_bytes: int, max_output_bytes: int, job_timeout: int) -> WorkerHandler:
     runner = WorkerHandler.__new__(WorkerHandler)
     runner.server = SimpleNamespace(
@@ -919,21 +1205,42 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
     try:
         if kind in {"ping", "status"}:
             result = _system_status()
-        elif kind == "diagnostic_basic":
+        elif kind in {"diagnostic_basic", "worker_self_check"}:
             result = {
                 "ok": True,
+                "summary": "saúde do worker coletada",
                 "system": _system_status(),
                 "battery": _battery_snapshot(),
                 "network": _network_snapshot(),
+                "tailscale": _tailscale_snapshot(probe_vps=True),
+                "services": {
+                    "phone-worker": _service_status("phone-worker"),
+                    "phone-worker-watch": _service_status("phone-worker-watch"),
+                    "tailscale": _service_status("tailscale"),
+                },
                 "ffmpeg": _command_version("ffmpeg"),
                 "ffprobe": _command_version("ffprobe"),
                 "roles": _env_list("CORE_WORKER_ROLES", []),
                 "capabilities": _env_list("CORE_WORKER_CAPABILITIES", []),
             }
+        elif kind == "network_probe":
+            result = {"ok": True, "summary": "rede testada", "network": _network_snapshot(), "tailscale": _tailscale_snapshot(probe_vps=True)}
+        elif kind == "tailscale_status":
+            result = {"ok": True, "summary": "status Tailscale coletado", "tailscale": _tailscale_snapshot(probe_vps=True)}
+        elif kind == "worker_logs":
+            result = _worker_logs_snapshot(payload)
+            result.setdefault("summary", "logs do phone-worker coletadas" if result.get("ok") else "falha ao coletar logs")
+        elif kind in {"service_status", "service_start", "service_stop", "service_restart"}:
+            service = payload.get("service") or "phone-worker"
+            action = kind.removeprefix("service_")
+            result = _run_service_action(str(service), action)
+            result.setdefault("summary", f"{action} {result.get('service') or service}")
         elif kind == "ffmpeg_check":
             result = _command_version("ffmpeg")
+            result.setdefault("summary", "ffmpeg verificado")
         elif kind == "ffprobe_check":
             result = _command_version("ffprobe")
+            result.setdefault("summary", "ffprobe verificado")
         elif kind in {"zip_validate", "log_summary", "text_stats", "maintenance_plan"}:
             runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
             if kind == "zip_validate":
@@ -944,10 +1251,14 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
                 result = runner._task_text_stats(payload)
             else:
                 result = runner._task_maintenance_plan(payload)
+            result.setdefault("summary", kind)
         else:
             raise ValueError("job não permitido pelo worker")
         result.setdefault("ok", True)
-        return _sanitize_job_result(result)
+        deferred = {key: result.pop(key) for key in list(result.keys()) if key.startswith("_deferred_")}
+        clean = _sanitize_job_result(result)
+        clean.update(deferred)
+        return clean
     except Exception as exc:
         JOBS_FAILED += 1
         raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
@@ -957,12 +1268,14 @@ def _send_core_worker_job_result(*, job_id: str, status: str, result: dict[str, 
     _base_url, _token, worker_id = _core_worker_auth_parts()
     if not worker_id:
         return False
+    safe_result = dict(result or {})
     payload = {
         "worker_id": worker_id,
         "job_id": job_id,
         "status": status,
-        "result": result or {},
+        "result": safe_result,
         "error": _short_text(error, limit=240),
+        "summary": _short_text(safe_result.get("summary") or error or status, limit=160),
     }
     code, data = _post_core_worker_json("/core-worker/jobs/result", payload, timeout=timeout)
     if 200 <= code < 300 and data.get("ok", True):
@@ -990,7 +1303,9 @@ def _poll_core_worker_job_once(*, host: str, port: int, max_body_bytes: int, max
     print(f"[core-worker-jobs] executando {job_id} ({kind})", flush=True)
     try:
         result = _execute_core_worker_job(job, max_body_bytes=max_body_bytes, max_output_bytes=max_output_bytes, job_timeout=job_timeout)
-        _send_core_worker_job_result(job_id=job_id, status="succeeded", result=result, timeout=timeout)
+        ok = _send_core_worker_job_result(job_id=job_id, status="succeeded", result=result, timeout=timeout)
+        if ok:
+            _launch_deferred_phone_worker_action(result)
     except Exception as exc:
         _send_core_worker_job_result(job_id=job_id, status="failed", result={}, error=f"{type(exc).__name__}: {exc}", timeout=timeout)
     return True

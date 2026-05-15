@@ -120,11 +120,12 @@ CORE_WORKER_ID=phone-redmi-01
 CORE_WORKER_TOKEN=token_retornado_no_pareamento
 CORE_WORKER_NAME=Redmi Worker 01
 CORE_WORKER_ROLES=phone-worker,diagnostics,log-summary,zip-validate,ffmpeg,ffprobe,tts-convert
-CORE_WORKER_CAPABILITIES=phone-worker,diagnostics,log-summary,maintenance-plan,zip-validate,ffmpeg,ffprobe,tts-convert
+CORE_WORKER_CAPABILITIES=phone-worker,diagnostics,log-summary,maintenance-plan,zip-validate,ffmpeg,ffprobe,tts-convert,worker-logs,network-probe,tailscale-status,service-control
 CORE_WORKER_HEARTBEAT_INTERVAL_SECONDS=30
 CORE_WORKER_JOBS_ENABLED=true
 CORE_WORKER_JOB_POLL_INTERVAL_SECONDS=10
 CORE_WORKER_JOB_RESULT_MAX_BYTES=262144
+CORE_WORKER_LOG_LINES=140
 ```
 
 Teste manual sem iniciar servidor novo:
@@ -135,5 +136,22 @@ python phone_worker.py --heartbeat-once
 python phone_worker.py --jobs-once
 ```
 
-O heartbeat envia status, bateria/rede quando o Termux:API estiver disponível, ffmpeg/ffprobe, disco e saúde básica. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `ffmpeg_check`, `ffprobe_check`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
+O heartbeat envia status, bateria/rede quando o Termux:API estiver disponível, ffmpeg/ffprobe, disco, saúde básica e um resumo do Tailscale quando a CLI existir. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `worker_self_check`, `worker_logs`, `network_probe`, `tailscale_status`, `service_status`, `service_start`, `service_stop`, `service_restart`, `ffmpeg_check`, `ffprobe_check`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
+
+## Controle seguro de serviços
+
+O `/workers` agora consegue criar jobs para serviços whitelisted do celular:
+
+- `phone-worker`: status, start, stop e restart do agente atual. Para `stop`/`restart`, o worker responde primeiro à VPS e só depois agenda a ação para não deixar o job preso.
+- `phone-worker-watch`: start, stop, restart e status do watchdog em `tmux`.
+- `tailscale`: diagnóstico/status apenas. Se você usa o app oficial do Tailscale no Android, start/stop continuam sendo feitos pelo próprio app/VPN do Android; o worker só testa conectividade e mostra se a VPS é alcançável.
+
+Botões novos no painel privado `/workers`:
+
+- **Saúde**: cria `worker_self_check`.
+- **Logs**: cria `worker_logs`.
+- **Tailscale**: cria `tailscale_status`.
+- **Status serviços**: cria `service_status`.
+- **Iniciar/Parar watchdog**: controla a sessão `phone-worker-watch`.
+- **Reiniciar/Parar worker**: controla o `phone-worker` atual com ação deferida.
 

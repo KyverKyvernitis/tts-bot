@@ -184,11 +184,19 @@ def _network_text(worker: dict[str, Any]) -> str:
         return "rede n/a"
     kind = network.get("type") or network.get("kind") or network.get("transport") or network.get("name")
     tailscale = network.get("tailscale")
+    tailscale_state = network.get("tailscale_state")
     parts: list[str] = []
     if kind:
         parts.append(_shorten(kind, limit=18))
     if isinstance(tailscale, bool):
-        parts.append("tailscale ok" if tailscale else "tailscale off")
+        label = "tailscale ok" if tailscale else "tailscale off"
+        if tailscale_state and str(tailscale_state).lower() not in {"unknown", ""}:
+            label += f"/{_shorten(tailscale_state, limit=18)}"
+        parts.append(label)
+    elif tailscale_state:
+        parts.append(f"tailscale {_shorten(tailscale_state, limit=18)}")
+    if network.get("tailscale_ip_masked"):
+        parts.append(str(network.get("tailscale_ip_masked")))
     return " · ".join(parts) if parts else "rede n/a"
 
 
@@ -197,6 +205,14 @@ def _role_text(roles: list[str], *, limit: int = 8) -> str:
     if not selected:
         return "`nenhuma`"
     return " ".join(f"`{_shorten(role, limit=24)}`" for role in selected)
+
+
+def _has_online_registry_worker(snapshot: "WorkerSnapshot") -> bool:
+    summary = (snapshot.registry_snapshot or {}).get("summary") if isinstance(snapshot.registry_snapshot, dict) else {}
+    try:
+        return int((summary or {}).get("online") or 0) > 0
+    except Exception:
+        return False
 
 
 @dataclass(slots=True)
@@ -319,6 +335,30 @@ class WorkersPanelView(discord.ui.LayoutView):
         cleanup_jobs = discord.ui.Button(label="Limpar jobs", emoji="🧹", style=discord.ButtonStyle.secondary)
         cleanup_jobs.callback = self._cleanup_jobs
 
+        health = discord.ui.Button(label="Saúde", emoji="🩺", style=discord.ButtonStyle.secondary)
+        health.callback = self._queue_worker_health
+
+        logs = discord.ui.Button(label="Logs", emoji="📜", style=discord.ButtonStyle.secondary)
+        logs.callback = self._queue_worker_logs
+
+        tailscale = discord.ui.Button(label="Tailscale", emoji="🌐", style=discord.ButtonStyle.secondary)
+        tailscale.callback = self._queue_tailscale_status
+
+        service_status = discord.ui.Button(label="Status serviços", emoji="🧰", style=discord.ButtonStyle.secondary)
+        service_status.callback = self._queue_service_status
+
+        start_watch = discord.ui.Button(label="Iniciar watchdog", emoji="▶️", style=discord.ButtonStyle.secondary)
+        start_watch.callback = self._queue_start_watchdog
+
+        stop_watch = discord.ui.Button(label="Parar watchdog", emoji="⏹️", style=discord.ButtonStyle.secondary)
+        stop_watch.callback = self._queue_stop_watchdog
+
+        restart_worker = discord.ui.Button(label="Reiniciar worker", emoji="🔁", style=discord.ButtonStyle.danger)
+        restart_worker.callback = self._queue_restart_worker
+
+        stop_worker = discord.ui.Button(label="Parar worker", emoji="🛑", style=discord.ButtonStyle.danger)
+        stop_worker.callback = self._queue_stop_worker
+
         close = discord.ui.Button(label="Fechar", emoji="✖️", style=discord.ButtonStyle.danger)
         close.callback = self._close
 
@@ -327,10 +367,14 @@ class WorkersPanelView(discord.ui.LayoutView):
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(self._registry_lines(snapshot))),
             discord.ui.Separator(),
+            discord.ui.TextDisplay("\n".join(self._job_lines(snapshot))),
+            discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(self._legacy_status_lines(snapshot))),
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(self._action_lines(snapshot))),
             discord.ui.ActionRow(refresh, pairing, wake, close),
+            discord.ui.ActionRow(test_job, health, logs, tailscale, cleanup_jobs),
+            discord.ui.ActionRow(service_status, start_watch, stop_watch, restart_worker, stop_worker),
             accent_color=snapshot.accent,
         )
         self.add_item(container)
@@ -443,7 +487,8 @@ class WorkersPanelView(discord.ui.LayoutView):
         lines = [
             "## 🕹️ Controle",
             "`Atualizar` consulta o registry e o `/status` do phone-worker sem mostrar token.",
-            "`Testar worker` cria um job `ping` na fila; o celular executa por polling autenticado.",
+            "`Testar worker`, `Saúde`, `Logs`, `Tailscale` e `Status serviços` criam jobs seguros no worker por polling autenticado.",
+            "`Iniciar/Parar watchdog` e `Reiniciar/Parar worker` usam só serviços whitelisted, sem shell livre.",
             "`Parear APK` gera código temporário; a VPS salva só hash do código/token.",
             f"Rotas do APK/agent: `POST {pair_route}` · `POST {heartbeat_route}` · `POST {poll_route}` · `POST {result_route}`",
             "`Acordar phone-worker` chama o watchdog seguro da VPS (`scripts/phone-worker-watch.sh`).",
@@ -508,6 +553,49 @@ class WorkersPanelView(discord.ui.LayoutView):
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha ao criar job de teste: {type(exc).__name__}: {exc}")
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _queue_named_job(
+        self,
+        interaction: discord.Interaction,
+        *,
+        job_type: str,
+        payload: dict[str, Any] | None = None,
+        summary: str = "",
+    ):
+        await interaction.response.defer(thinking=False)
+        try:
+            result = await self.cog._queue_core_worker_job(interaction.user, job_type=job_type, payload=payload or {}, summary=summary or job_type)
+            job = result.get("job") if isinstance(result, dict) else {}
+            job_id = _shorten((job or {}).get("job_id"), limit=32)
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"job `{job_type}` criado: {job_id}")
+        except Exception as exc:
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha no job `{job_type}`: {type(exc).__name__}: {exc}")
+        self._rebuild_layout()
+        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _queue_worker_health(self, interaction: discord.Interaction):
+        await self._queue_named_job(interaction, job_type="worker_self_check", summary="saúde completa pelo painel /workers")
+
+    async def _queue_worker_logs(self, interaction: discord.Interaction):
+        await self._queue_named_job(interaction, job_type="worker_logs", payload={"lines": 140}, summary="logs recentes do phone-worker")
+
+    async def _queue_tailscale_status(self, interaction: discord.Interaction):
+        await self._queue_named_job(interaction, job_type="tailscale_status", summary="status Tailscale e alcance da VPS")
+
+    async def _queue_service_status(self, interaction: discord.Interaction):
+        await self._queue_named_job(interaction, job_type="service_status", payload={"service": "phone-worker"}, summary="status de serviços do celular")
+
+    async def _queue_start_watchdog(self, interaction: discord.Interaction):
+        await self._queue_named_job(interaction, job_type="service_start", payload={"service": "phone-worker-watch"}, summary="iniciar watchdog do phone-worker")
+
+    async def _queue_stop_watchdog(self, interaction: discord.Interaction):
+        await self._queue_named_job(interaction, job_type="service_stop", payload={"service": "phone-worker-watch"}, summary="parar watchdog do phone-worker")
+
+    async def _queue_restart_worker(self, interaction: discord.Interaction):
+        await self._queue_named_job(interaction, job_type="service_restart", payload={"service": "phone-worker"}, summary="reiniciar phone-worker no celular")
+
+    async def _queue_stop_worker(self, interaction: discord.Interaction):
+        await self._queue_named_job(interaction, job_type="service_stop", payload={"service": "phone-worker"}, summary="parar phone-worker no celular")
 
     async def _cleanup_jobs(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)

@@ -23,6 +23,14 @@ CORE_WORKER_JOB_TYPES = {
     "ping",
     "status",
     "diagnostic_basic",
+    "worker_self_check",
+    "worker_logs",
+    "network_probe",
+    "tailscale_status",
+    "service_status",
+    "service_start",
+    "service_stop",
+    "service_restart",
     "ffmpeg_check",
     "ffprobe_check",
     "zip_validate",
@@ -602,7 +610,10 @@ class CoreWorkersRegistry:
             job["worker_id"] = worker_id
             job["result"] = _safe_dict(payload.get("result"), max_items=48)
             job["error"] = _short_text(payload.get("error"), limit=240)
-            if not job.get("summary"):
+            submitted_summary = _short_text(payload.get("summary"), limit=160)
+            if submitted_summary:
+                job["summary"] = submitted_summary
+            elif not job.get("summary"):
                 job["summary"] = _short_text(payload.get("summary"), limit=160)
             worker["updated_at"] = ts
             worker["last_heartbeat_at"] = ts
