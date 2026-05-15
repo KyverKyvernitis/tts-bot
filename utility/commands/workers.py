@@ -33,6 +33,14 @@ WORKERS_DEFAULT_ROLES = (
     "ffprobe",
     "tts-convert",
 )
+
+WORKER_ROLE_PROFILES: dict[str, tuple[str, ...]] = {
+    "leve": ("phone-worker", "diagnostics", "log-summary"),
+    "midia": ("phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
+    "completo": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
+    # Futuro: usar só quando o worker realmente tiver servidor Bedrock configurado.
+    "bedrock": ("phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"),
+}
 LEGACY_WORKER_ID = "__legacy_phone_worker__"
 AUTO_WORKER_ID = "__auto_core_worker__"
 
@@ -665,6 +673,8 @@ class WorkersPanelView(discord.ui.LayoutView):
         specs: list[dict[str, Any]] = []
         # Ações do próprio painel ficam no select para manter o card compacto.
         specs.append({"label": "Parear novo worker", "value": "_create_pairing", "description": "Gera código temporário", "emoji": "🔐", "panel_action": "pair"})
+        specs.append({"label": "Guia novo celular", "value": "_onboarding_guide", "description": "Passos de instalação/pareamento", "emoji": "📲", "panel_action": "onboarding"})
+        specs.append({"label": "Teste failover", "value": "_failover_test", "description": "Job sem alvo no melhor worker", "emoji": "🧪", "panel_action": "failover"})
         specs.append({"label": "Limpar jobs", "value": "_cleanup_jobs", "description": "Remove jobs travados/antigos", "emoji": "🧹", "panel_action": "cleanup"})
         selected_worker = self._selected_worker()
         if selected_worker is not None:
@@ -892,6 +902,12 @@ class WorkersPanelView(discord.ui.LayoutView):
         if action == "_cleanup_jobs":
             await self._cleanup_jobs(interaction)
             return
+        if action == "_onboarding_guide":
+            await self._show_onboarding_guide(interaction)
+            return
+        if action == "_failover_test":
+            await self._run_failover_test(interaction)
+            return
         if action == "_show_last_result":
             await self._show_last_result(interaction)
             return
@@ -957,11 +973,11 @@ class WorkersPanelView(discord.ui.LayoutView):
                 "## 🔐 Pareamento Core Worker\n"
                 f"Código temporário: `{code}`\n"
                 f"Validade: `{ttl}` · expira em `{expires}`\n\n"
-                "No phone-worker/Termux atualizado, rode:\n"
-                f"`~/phone-worker/pair-phone-worker.sh {code} {base_url}`\n\n"
-                "Ou pelo Python:\n"
-                f"`cd ~/phone-worker && python phone_worker.py --pair {code} --vps-url {base_url}`\n\n"
-                "O token é salvo automaticamente em `~/.phone-worker.env` e não aparece no GitHub."
+                "### Celular já com `~/phone-worker`\n"
+                f"`~/phone-worker/pair-phone-worker.sh {code} {base_url} \"Meu Worker\" midia`\n\n"
+                "### Instalação/repair local no Termux\n"
+                f"`cd ~/phone-worker && bash ./bootstrap-phone-worker.sh {code} {base_url} \"Meu Worker\" midia`\n\n"
+                "Perfis: `leve`, `midia`, `completo`, `bedrock`. O token é salvo em `~/.phone-worker.env` e nunca é enviado ao GitHub."
             )
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"código de pareamento gerado: {code}")
             self._ensure_selected_worker()
@@ -974,6 +990,70 @@ class WorkersPanelView(discord.ui.LayoutView):
             self._rebuild_layout()
             await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send("Não consegui gerar o pareamento agora.", ephemeral=True)
+
+    async def _show_onboarding_guide(self, interaction: discord.Interaction):
+        base_url = _public_base_url() or "http://IP_TAILSCALE_DA_VPS:10000"
+        profiles = "\n".join(
+            f"- `{name}`: " + ", ".join(roles)
+            for name, roles in WORKER_ROLE_PROFILES.items()
+        )
+        msg = (
+            "## 📲 Novo celular como Core Worker\n"
+            "1. Instale/conecte o Tailscale no celular.\n"
+            "2. Copie a pasta `deploy/termux/phone-worker` para o Termux ou use o sync quando SSH estiver pronto.\n"
+            "3. Gere um código em **Parear novo worker**.\n"
+            "4. No Termux, rode um destes comandos:\n\n"
+            f"`cd ~/phone-worker && bash ./bootstrap-phone-worker.sh CORE-XXXX {base_url} \"Xiaomi Worker 2\" midia`\n"
+            f"`~/phone-worker/pair-phone-worker.sh CORE-XXXX {base_url} \"Xiaomi Worker 2\" midia`\n\n"
+            "### Perfis de roles\n"
+            f"{profiles}\n\n"
+            "Depois do pareamento, use **Teste failover** com 2 workers online para validar a escolha automática."
+        )
+        await interaction.response.send_message(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _run_failover_test(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=False)
+        online_workers = self._online_registry_workers()
+        if len(online_workers) < 2:
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note="teste failover precisa de 2 workers online")
+            self._ensure_selected_worker()
+            self._rebuild_layout()
+            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            await interaction.followup.send("O teste de failover real precisa de pelo menos 2 workers online. Com 1 worker, use `Testar worker`.", ephemeral=True)
+            return
+        try:
+            result = await self.cog._queue_core_worker_job(
+                interaction.user,
+                job_type="ping",
+                payload={"source": "workers_panel_failover_test"},
+                summary="teste failover multi-worker",
+                target_worker_id="",
+            )
+            job = result.get("job") if isinstance(result, dict) else {}
+            job_id = str((job or {}).get("job_id") or "")
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note="⏳ teste failover enviado; aguardando melhor worker")
+            self._ensure_selected_worker()
+            self._rebuild_layout()
+            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            final_job = await self.cog._wait_core_worker_job(job_id, timeout=_env_float("WORKERS_PANEL_ACTION_WAIT_SECONDS", 12.0)) if job_id else None
+            worker_id = str((final_job or {}).get("worker_id") or "")
+            worker_name = self._worker_name_by_id(worker_id) if worker_id else "worker desconhecido"
+            if isinstance(final_job, dict) and str(final_job.get("status") or "").lower() == "succeeded":
+                note = f"✅ failover ok: `{_shorten(worker_name, limit=32)}` executou"
+            else:
+                note = _job_result_note("failover", final_job)
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=note)
+        except Exception as exc:
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha no teste failover: {_compact_failure(exc)}")
+        self._ensure_selected_worker()
+        self._rebuild_layout()
+        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+    def _worker_name_by_id(self, worker_id: str) -> str:
+        for worker in self._registry_workers():
+            if str(worker.get("worker_id") or "") == str(worker_id or ""):
+                return str(worker.get("name") or worker_id)
+        return str(worker_id or "")
 
     async def _queue_named_job(
         self,
@@ -1236,6 +1316,7 @@ class WorkersCommandMixin:
             ("start-phone-worker.sh", 0o755),
             ("watch-phone-worker.sh", 0o755),
             ("pair-phone-worker.sh", 0o755),
+            ("bootstrap-phone-worker.sh", 0o755),
             ("install.sh", 0o755),
             ("README.md", 0o644),
             ("phone-worker.env.example", 0o600),
@@ -1244,6 +1325,7 @@ class WorkersCommandMixin:
             ("start-phone-worker.sh", 0o755),
             ("watch-phone-worker.sh", 0o755),
             ("pair-phone-worker.sh", 0o755),
+            ("bootstrap-phone-worker.sh", 0o755),
             ("install.sh", 0o755),
         )
         targets = script_targets if scripts_only else all_targets

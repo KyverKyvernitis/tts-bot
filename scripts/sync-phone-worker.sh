@@ -56,11 +56,11 @@ log "copiando arquivos do phone-worker"
 # Scripts auxiliares ficam em dois lugares:
 # - ~/phone-worker/*.sh para permitir `cd ~/phone-worker && bash ./start-phone-worker.sh`
 # - ~/*.sh para compatibilidade com instalações antigas e atalhos já existentes.
-for f in start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh install.sh README.md phone-worker.env.example; do
+for f in start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
   if [ -f "$SRC_DIR/$f" ]; then
     "${SCP_BASE[@]}" "$SRC_DIR/$f" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/$f"
     case "$f" in
-      start-phone-worker.sh|watch-phone-worker.sh|pair-phone-worker.sh)
+      start-phone-worker.sh|watch-phone-worker.sh|pair-phone-worker.sh|bootstrap-phone-worker.sh)
         "${SCP_BASE[@]}" "$SRC_DIR/$f" "$PHONE_USER@$PHONE_HOST:$REMOTE_HOME/$f"
         ;;
     esac
@@ -69,8 +69,8 @@ done
 
 log "ajustando permissões no celular"
 "${SSH_BASE[@]}" "
-chmod +x '$REMOTE_DIR/phone_worker.py' '$REMOTE_DIR/start-phone-worker.sh' '$REMOTE_DIR/watch-phone-worker.sh' '$REMOTE_DIR/pair-phone-worker.sh' 2>/dev/null || true
-chmod +x '$REMOTE_HOME/start-phone-worker.sh' '$REMOTE_HOME/watch-phone-worker.sh' '$REMOTE_HOME/pair-phone-worker.sh' 2>/dev/null || true
+chmod +x '$REMOTE_DIR/phone_worker.py' '$REMOTE_DIR/start-phone-worker.sh' '$REMOTE_DIR/watch-phone-worker.sh' '$REMOTE_DIR/pair-phone-worker.sh' '$REMOTE_DIR/bootstrap-phone-worker.sh' 2>/dev/null || true
+chmod +x '$REMOTE_HOME/start-phone-worker.sh' '$REMOTE_HOME/watch-phone-worker.sh' '$REMOTE_HOME/pair-phone-worker.sh' '$REMOTE_HOME/bootstrap-phone-worker.sh' 2>/dev/null || true
 "
 
 log "reiniciando phone-worker no celular"

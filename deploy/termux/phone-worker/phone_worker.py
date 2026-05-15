@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.5.5"
+PHONE_WORKER_VERSION = "1.5.6"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -753,6 +753,8 @@ def _pair_core_worker(
     port: int,
     worker_id: str = "",
     name: str = "",
+    roles: str = "",
+    capabilities: str = "",
     env_file: str | None = None,
     timeout: float = 10.0,
 ) -> bool:
@@ -774,6 +776,18 @@ def _pair_core_worker(
         "name": _short_text(selected_name, limit=64, default="Core Phone Worker"),
         "source": "termux-phone-worker",
     })
+    requested_roles = _env_list("CORE_WORKER_ROLES", []) if not roles else _env_list("CORE_WORKER_ROLES", [])
+    if roles:
+        os.environ["CORE_WORKER_ROLES"] = roles
+        requested_roles = _env_list("CORE_WORKER_ROLES", [])
+    requested_capabilities = _env_list("CORE_WORKER_CAPABILITIES", []) if not capabilities else _env_list("CORE_WORKER_CAPABILITIES", [])
+    if capabilities:
+        os.environ["CORE_WORKER_CAPABILITIES"] = capabilities
+        requested_capabilities = _env_list("CORE_WORKER_CAPABILITIES", [])
+    if requested_roles:
+        payload["roles"] = requested_roles[:16]
+    if requested_capabilities:
+        payload["capabilities"] = requested_capabilities[:24]
 
     status, data = _post_json_url(f"{base_url}/core-worker/pair", payload, timeout=timeout)
     if not (200 <= status < 300) or not data.get("ok", False):
@@ -793,6 +807,8 @@ def _pair_core_worker(
         "CORE_WORKER_ID": returned_worker_id,
         "CORE_WORKER_TOKEN": token,
         "CORE_WORKER_NAME": payload.get("name") or selected_name,
+        "CORE_WORKER_ROLES": ",".join(payload.get("roles") or _env_list("CORE_WORKER_ROLES", [])),
+        "CORE_WORKER_CAPABILITIES": ",".join(payload.get("capabilities") or _env_list("CORE_WORKER_CAPABILITIES", [])),
     })
     print(f"[core-worker-pair] pareado como {returned_worker_id}; token salvo em {env_path}", flush=True)
     print("[core-worker-pair] reinicie o phone-worker para ativar heartbeat/jobs registrados.", flush=True)
@@ -1606,6 +1622,7 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
     "watch-phone-worker.sh": ("worker", "watch-phone-worker.sh", 0o755),
     "pair-phone-worker.sh": ("worker", "pair-phone-worker.sh", 0o755),
+    "bootstrap-phone-worker.sh": ("worker", "bootstrap-phone-worker.sh", 0o755),
     "install.sh": ("worker", "install.sh", 0o755),
     "README.md": ("worker", "README.md", 0o644),
     "phone-worker.env.example": ("worker", "phone-worker.env.example", 0o600),
@@ -1662,7 +1679,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
             os.chmod(tmp, int(item.get("mode") or mode))
             tmp.replace(path)
             applied_paths = [path]
-            if path.name in {"start-phone-worker.sh", "watch-phone-worker.sh", "pair-phone-worker.sh"}:
+            if path.name in {"start-phone-worker.sh", "watch-phone-worker.sh", "pair-phone-worker.sh", "bootstrap-phone-worker.sh"}:
                 # Espelhar scripts em ~/ também para instalações antigas e atalhos existentes.
                 home_copy = _home_script(path.name)
                 try:
@@ -1932,6 +1949,8 @@ def main() -> int:
     parser.add_argument("--vps-url", default=os.getenv("CORE_WORKER_VPS_URL", ""), help="URL base da VPS/Tailscale para pareamento, ex: http://100.x.x.x:8766")
     parser.add_argument("--worker-id", default=os.getenv("CORE_WORKER_ID", ""), help="ID estável deste worker; opcional")
     parser.add_argument("--name", default=os.getenv("CORE_WORKER_NAME", os.getenv("PHONE_WORKER_NAME", "")), help="nome exibido no painel")
+    parser.add_argument("--roles", default=os.getenv("CORE_WORKER_ROLES", ""), help="roles do worker separadas por vírgula")
+    parser.add_argument("--capabilities", default=os.getenv("CORE_WORKER_CAPABILITIES", ""), help="capacidades do worker separadas por vírgula")
     parser.add_argument("--env-file", default=os.getenv("PHONE_WORKER_ENV", str(Path.home() / ".phone-worker.env")), help="arquivo .env local a atualizar no pareamento")
     args = parser.parse_args()
 
@@ -1947,6 +1966,8 @@ def main() -> int:
             port=args.port,
             worker_id=args.worker_id,
             name=args.name,
+            roles=args.roles,
+            capabilities=args.capabilities,
             env_file=args.env_file,
             timeout=10.0,
         )

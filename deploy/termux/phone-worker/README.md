@@ -174,3 +174,34 @@ PHONE_WORKER_UPDATE_RESTART=true
 PHONE_WORKER_UPDATE_MAX_FILE_BYTES=524288
 PHONE_WORKER_UPDATE_MAX_TOTAL_BYTES=1048576
 ```
+
+## Onboarding rápido de novo celular
+
+Para adicionar um segundo celular, o fluxo recomendado é:
+
+1. Conectar o celular no Tailscale.
+2. Copiar esta pasta para o Termux como `~/phone-worker` ou `~/phone-worker-install`.
+3. No painel privado `workers`, usar **Parear novo worker** para gerar `CORE-XXXX`.
+4. Rodar no Termux:
+
+```bash
+cd ~/phone-worker
+bash ./bootstrap-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:10000 "Xiaomi Worker 2" midia
+```
+
+O bootstrap instala/repara dependências básicas, copia scripts auxiliares, pareia, salva `~/.phone-worker.env`, inicia o worker e tenta um heartbeat.
+
+Perfis aceitos pelo `pair-phone-worker.sh` e pelo bootstrap:
+
+- `leve`: `phone-worker, diagnostics, log-summary`
+- `midia`: `phone-worker, diagnostics, log-summary, zip-validate, ffmpeg, ffprobe, tts-convert`
+- `completo`: `phone-worker, diagnostics, log-summary, maintenance-plan, zip-validate, ffmpeg, ffprobe, tts-convert`
+- `bedrock`: reservado para o futuro worker Bedrock (`bedrock`, `bedrock-logs`, `bedrock-backup`), não assume Java.
+
+Também é possível passar uma lista customizada no lugar do perfil:
+
+```bash
+~/phone-worker/pair-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:10000 "Worker Logs" "phone-worker,diagnostics,log-summary"
+```
+
+Com 2 ou mais workers online, o painel `workers` libera **Melhor worker disponível** e **Teste failover**. Jobs sem alvo fixo são entregues para qualquer worker compatível; se um job em execução perder lease, ele volta para a fila e outro worker compatível pode assumir.
