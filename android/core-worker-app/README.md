@@ -1,27 +1,39 @@
 # Core Worker APK privado
 
-Este diretório é a base inicial do APK privado **Core Worker**.
+Este diretório contém o APK privado **Core Worker**.
 
-Esta versão ainda é um **companion app**: ela facilita pareamento, status, bateria, rede e ping com a VPS. O worker pesado continua no Termux/phone-worker por enquanto. A próxima etapa será fazer o APK controlar melhor o agent e reduzir cada vez mais os comandos manuais.
+O APK é um **companion leve de onboarding**, não um painel completo de administração. Ele serve para facilitar o pareamento e fazer este celular aparecer como worker com o perfil correto. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
-## O que já faz
+## Escopo correto do APK
 
-- testa a conexão com a VPS/orquestrador;
-- pareia usando o código `CORE-XXXX` gerado no painel `workers` do Discord;
-- salva o token localmente no app, sem hardcode no GitHub;
-- envia heartbeat/status para `/core-worker/heartbeat`;
-- reporta bateria usando Android `BatteryManager`;
-- reporta rede e ping TCP até a VPS;
-- permite abrir o Tailscale oficial pelo botão;
-- tem perfis iniciais: `leve`, `midia`, `completo` e `bedrock`.
+O APK pode:
 
-## O que ainda não faz
+- testar conexão com a VPS pela rede Tailscale;
+- parear este celular usando o código `CORE-XXXX` gerado no painel `workers`;
+- salvar o token localmente no app, sem hardcode no GitHub;
+- mostrar/enviar status básico do próprio celular;
+- reportar bateria via Android `BatteryManager`;
+- reportar rede e ping TCP até a VPS;
+- abrir o app Tailscale;
+- editar o **perfil deste próprio celular** e reenviar roles/capabilities para a VPS.
 
-- ainda não substitui o Termux;
-- ainda não executa jobs da VPS;
-- ainda não inicia/para o phone-worker automaticamente;
-- ainda não embute Tailscale/VPN;
-- ainda não usa armazenamento criptografado avançado para o token.
+O APK não deve virar, por enquanto:
+
+- painel para gerenciar todos os workers;
+- tela de fila completa de jobs;
+- controle de failover;
+- gerenciador de logs grandes;
+- substituto do painel Discord;
+- runtime completo que substitui o Termux.
+
+## Perfis disponíveis
+
+- `leve`: diagnósticos e logs;
+- `midia`: logs, ZIP, FFmpeg, FFprobe e TTS/cache;
+- `completo`: mídia + manutenção;
+- `bedrock`: perfil futuro para Minecraft Bedrock, sem assumir Java.
+
+O APK altera apenas o perfil do celular onde ele está instalado.
 
 ## Fluxo de teste
 
@@ -32,9 +44,10 @@ Esta versão ainda é um **companion app**: ela facilita pareamento, status, bat
    - código `CORE-XXXX`;
    - nome do celular;
    - perfil.
-4. Toque em **Testar conexão com a VPS**.
-5. Toque em **Parear com código**.
-6. Volte no Discord e toque em **Atualizar**.
+4. Toque em **Testar VPS**.
+5. Toque em **Conectar / parear celular**.
+6. Para mudar o perfil depois, escolha outro perfil e toque em **Salvar perfil deste celular**.
+7. Volte no Discord e toque em **Atualizar**.
 
 > Use HTTP apenas dentro da rede privada Tailscale. Se a VPS ficar exposta publicamente, use HTTPS antes de parear.
 
@@ -69,11 +82,9 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## Futuro planejado
 
-- tela de logs e saúde completa;
-- controle start/stop/restart do agent;
-- integração mais forte com Termux enquanto o runtime próprio não existe;
 - QR code para pareamento;
-- serviço foreground para heartbeat contínuo;
+- detecção mais amigável de Tailscale/Termux;
+- integração para facilitar instalar/iniciar o agent Termux;
 - armazenamento via Android Keystore;
-- runtime próprio no APK ou Termux embutido/forkado em etapa futura;
-- role Minecraft Bedrock sem assumir Java.
+- tornar o processo “instalar APK → tocar conectar → virar worker” o mais automático possível;
+- manter o controle pesado no Discord/VPS.

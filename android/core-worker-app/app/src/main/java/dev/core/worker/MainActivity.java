@@ -43,7 +43,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.1.0";
+    private static final String APP_VERSION = "0.2.0";
     private static final String PREFS = "core_worker_private";
     private static final int BG = Color.rgb(11, 16, 32);
     private static final int CARD = Color.rgb(21, 27, 46);
@@ -57,8 +57,13 @@ public class MainActivity extends Activity {
     private EditText deviceNameInput;
     private RadioGroup profileGroup;
     private TextView statusText;
+    private TextView profileHintText;
+    private Button testButton;
     private Button pairButton;
+    private Button saveProfileButton;
     private Button heartbeatButton;
+    private Button tailscaleButton;
+    private Button clearButton;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -67,7 +72,7 @@ public class MainActivity extends Activity {
         ensureWorkerId();
         buildUi();
         loadInputs();
-        refreshLocalStatus("Pronto. Primeiro conecte o Tailscale, teste a VPS e pareie com o código do painel workers.");
+        refreshLocalStatus("Pronto. Conecte o Tailscale, gere um código no Discord e toque em Conectar.");
     }
 
     private void buildUi() {
@@ -92,62 +97,93 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("APK privado companion. Esta primeira versão pareia com a VPS, mostra status e prepara o caminho para automatizar o worker sem comandos manuais.");
+        subtitle.setText("APK privado e leve. Ele só facilita conectar este celular, escolher o perfil e enviar status básico. O controle pesado continua no Discord/VPS.");
         subtitle.setTextColor(MUTED);
         subtitle.setTextSize(14);
         subtitle.setPadding(0, dp(8), 0, dp(14));
         root.addView(subtitle);
 
-        LinearLayout card = card();
-        root.addView(card);
+        LinearLayout connectCard = card();
+        root.addView(connectCard);
+        connectCard.addView(sectionTitle("1. Conectar este celular"));
+        connectCard.addView(smallText("Gere um código no painel workers do Discord e cole aqui. No futuro, este processo será automático pelo APK/QR."));
 
         serverUrlInput = input("URL da VPS", "http://100.x.x.x:10000");
-        card.addView(label("URL da VPS/orquestrador"));
-        card.addView(serverUrlInput);
+        connectCard.addView(label("URL da VPS"));
+        connectCard.addView(serverUrlInput);
 
         pairCodeInput = input("Código CORE-XXXX", "CORE-XXXXXXXX");
         pairCodeInput.setAllCaps(true);
-        card.addView(label("Código de pareamento"));
-        card.addView(pairCodeInput);
+        connectCard.addView(label("Código de pareamento"));
+        connectCard.addView(pairCodeInput);
 
         deviceNameInput = input("Nome do celular", defaultDeviceName());
-        card.addView(label("Nome do celular"));
-        card.addView(deviceNameInput);
+        connectCard.addView(label("Nome deste celular"));
+        connectCard.addView(deviceNameInput);
 
-        card.addView(label("Perfil"));
+        testButton = button("Testar VPS");
+        testButton.setOnClickListener(v -> testServer());
+        connectCard.addView(testButton);
+
+        pairButton = button("Conectar / parear celular");
+        pairButton.setOnClickListener(v -> pairWorker());
+        connectCard.addView(pairButton);
+
+        LinearLayout profileCard = card();
+        LinearLayout.LayoutParams profileParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        profileParams.setMargins(0, dp(14), 0, 0);
+        root.addView(profileCard, profileParams);
+
+        profileCard.addView(sectionTitle("2. Perfil deste celular"));
+        profileCard.addView(smallText("Aqui você escolhe o que este celular pode oferecer para a VPS. O APK altera apenas o próprio celular, não gerencia outros workers."));
+
         profileGroup = new RadioGroup(this);
         profileGroup.setOrientation(RadioGroup.VERTICAL);
-        profileGroup.setPadding(0, 0, 0, dp(8));
+        profileGroup.setPadding(0, dp(6), 0, dp(6));
         addProfileRadio("leve", "Leve · diagnósticos e logs");
-        addProfileRadio("midia", "Mídia · logs, ZIP, FFmpeg e TTS");
+        addProfileRadio("midia", "Mídia · FFmpeg, TTS, logs e ZIP");
         addProfileRadio("completo", "Completo · mídia + manutenção");
-        addProfileRadio("bedrock", "Bedrock · futuro servidor Minecraft Bedrock");
-        card.addView(profileGroup);
+        addProfileRadio("bedrock", "Bedrock · Minecraft Bedrock futuro");
+        profileGroup.setOnCheckedChangeListener((group, checkedId) -> {
+            String profile = selectedProfile();
+            prefs.edit().putString("profile", profile).apply();
+            updateProfileHint(profile);
+            refreshLocalStatus("Perfil local selecionado: " + profileLabel(profile) + ". Toque em Salvar perfil para enviar ao painel.");
+        });
+        profileCard.addView(profileGroup);
 
-        LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.VERTICAL);
-        actions.setPadding(0, dp(4), 0, 0);
-        card.addView(actions);
+        profileHintText = smallText("");
+        profileCard.addView(profileHintText);
 
-        Button testButton = button("Testar conexão com a VPS");
-        testButton.setOnClickListener(v -> testServer());
-        actions.addView(testButton);
+        saveProfileButton = button("Salvar perfil deste celular");
+        saveProfileButton.setOnClickListener(v -> updateOwnProfile());
+        profileCard.addView(saveProfileButton);
 
-        pairButton = button("Parear com código");
-        pairButton.setOnClickListener(v -> pairWorker());
-        actions.addView(pairButton);
+        LinearLayout statusCard = card();
+        LinearLayout.LayoutParams statusCardParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        statusCardParams.setMargins(0, dp(14), 0, 0);
+        root.addView(statusCard, statusCardParams);
 
-        heartbeatButton = button("Enviar status agora");
+        statusCard.addView(sectionTitle("3. Status básico"));
+        statusCard.addView(smallText("Use estes botões só para confirmar conexão. Jobs, failover e controle avançado ficam no painel Discord."));
+
+        heartbeatButton = button("Atualizar status básico");
         heartbeatButton.setOnClickListener(v -> sendHeartbeat());
-        actions.addView(heartbeatButton);
+        statusCard.addView(heartbeatButton);
 
-        Button tailscaleButton = button("Abrir Tailscale");
+        tailscaleButton = button("Abrir Tailscale");
         tailscaleButton.setOnClickListener(v -> openTailscale());
-        actions.addView(tailscaleButton);
+        statusCard.addView(tailscaleButton);
 
-        Button clearButton = button("Limpar pareamento local");
+        clearButton = button("Esquecer conexão local");
         clearButton.setOnClickListener(v -> confirmClearPairing());
-        actions.addView(clearButton);
+        statusCard.addView(clearButton);
 
         statusText = new TextView(this);
         statusText.setTextColor(TEXT);
@@ -170,6 +206,25 @@ public class MainActivity extends Activity {
         card.setPadding(dp(14), dp(14), dp(14), dp(14));
         card.setBackgroundColor(CARD);
         return card;
+    }
+
+    private TextView sectionTitle(String value) {
+        TextView title = new TextView(this);
+        title.setText(value);
+        title.setTextColor(TEXT);
+        title.setTextSize(17);
+        title.setTypeface(null, 1);
+        title.setPadding(0, 0, 0, dp(6));
+        return title;
+    }
+
+    private TextView smallText(String value) {
+        TextView text = new TextView(this);
+        text.setText(value);
+        text.setTextColor(MUTED);
+        text.setTextSize(13);
+        text.setPadding(0, dp(2), 0, dp(6));
+        return text;
     }
 
     private TextView label(String value) {
@@ -235,6 +290,7 @@ public class MainActivity extends Activity {
                 break;
             }
         }
+        updateProfileHint(profile);
     }
 
     private void testServer() {
@@ -264,27 +320,21 @@ public class MainActivity extends Activity {
             refreshLocalStatus("Preencha URL da VPS, código CORE e nome do celular.");
             return;
         }
-        prefs.edit()
-                .putString("server_url", serverUrl)
-                .putString("device_name", name)
-                .putString("profile", profile)
-                .apply();
+        saveLocalFields(profile);
 
-        runBusy("Pareando com a VPS...", () -> {
+        runBusy("Pareando este celular com a VPS...", () -> {
             JSONObject payload = basePayload();
             payload.put("code", code);
             payload.put("name", name);
             payload.put("device_name", name);
             payload.put("worker_id", prefs.getString("worker_id", ensureWorkerId()));
-            payload.put("roles", jsonArray(profileRoles(profile)));
-            payload.put("capabilities", jsonArray(profileRoles(profile)));
-            payload.put("supported_tasks", new JSONArray());
+            putProfilePayload(payload, profile);
             payload.put("source", "core-worker-apk-companion");
             payload.put("version", APP_VERSION);
 
             HttpResult result = request("POST", serverUrl + "/core-worker/pair", payload, null);
             if (!result.ok()) {
-                show("Falha ao parear: HTTP " + result.status + "\n\n" + result.body);
+                show("Falha ao conectar: HTTP " + result.status + "\n\n" + result.body);
                 return;
             }
             JSONObject body = new JSONObject(result.body);
@@ -301,37 +351,77 @@ public class MainActivity extends Activity {
                     .putString("worker_id", workerId)
                     .putString("worker_token", token)
                     .apply();
-            show("Pareado com sucesso.\nWorker: " + workerId + "\nToken salvo localmente no APK.\n\nEnviando status inicial...");
+            show("Celular conectado com sucesso.\nPerfil: " + profileLabel(profile) + "\nToken salvo localmente no APK.\n\nEnviando status inicial...");
             sendHeartbeatInternal(false);
         });
     }
 
+    private void updateOwnProfile() {
+        String profile = selectedProfile();
+        saveLocalFields(profile);
+        runBusy("Salvando perfil deste celular...", () -> sendHeartbeatInternal(true, "Perfil salvo no painel: " + profileLabel(profile)));
+    }
+
     private void sendHeartbeat() {
-        runBusy("Enviando status...", () -> sendHeartbeatInternal(true));
+        saveLocalFields(selectedProfile());
+        runBusy("Atualizando status básico...", () -> sendHeartbeatInternal(true));
     }
 
     private void sendHeartbeatInternal(boolean showResult) throws Exception {
+        sendHeartbeatInternal(showResult, null);
+    }
+
+    private void sendHeartbeatInternal(boolean showResult, String successPrefix) throws Exception {
         String serverUrl = prefs.getString("server_url", normalizedServerUrl());
         String token = prefs.getString("worker_token", "");
         String workerId = prefs.getString("worker_id", "");
         if (serverUrl == null || serverUrl.isEmpty() || token.isEmpty() || workerId.isEmpty()) {
-            show("Ainda não há pareamento local. Gere um código no painel workers e toque em Parear com código.");
+            show("Este celular ainda não está conectado. Gere um código no painel workers e toque em Conectar.");
             return;
         }
+        String profile = prefs.getString("profile", "midia");
         JSONObject payload = basePayload();
         payload.put("worker_id", workerId);
         payload.put("name", prefs.getString("device_name", defaultDeviceName()));
-        payload.put("roles", jsonArray(profileRoles(prefs.getString("profile", "midia"))));
-        payload.put("capabilities", jsonArray(profileRoles(prefs.getString("profile", "midia"))));
-        payload.put("supported_tasks", new JSONArray());
+        putProfilePayload(payload, profile);
         payload.put("version", APP_VERSION);
         payload.put("source", "core-worker-apk-companion");
         HttpResult result = request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
-        if (showResult || !result.ok()) {
-            show("Status enviado: HTTP " + result.status + "\n\n" + result.body);
-        } else {
-            show("Pareamento concluído e status inicial enviado.\nAgora confira o painel workers no Discord.");
+        if (!result.ok()) {
+            show("Falha ao atualizar: HTTP " + result.status + "\n\n" + result.body);
+            return;
         }
+        if (showResult) {
+            String message = successPrefix == null ? "Status básico atualizado." : successPrefix;
+            message += "\nHTTP " + result.status + "\n\n" + compactResultBody(result.body);
+            show(message);
+        } else {
+            show("Celular conectado e status inicial enviado.\nAgora confira o painel workers no Discord.");
+        }
+    }
+
+    private void saveLocalFields(String profile) {
+        prefs.edit()
+                .putString("server_url", normalizedServerUrl())
+                .putString("device_name", deviceNameInput.getText().toString().trim())
+                .putString("profile", profile)
+                .apply();
+    }
+
+    private void putProfilePayload(JSONObject payload, String profile) throws Exception {
+        payload.put("profile", profile);
+        payload.put("profile_label", profileLabel(profile));
+        payload.put("roles", jsonArray(profileRoles(profile)));
+        payload.put("capabilities", jsonArray(profileRoles(profile)));
+        payload.put("supported_tasks", new JSONArray());
+        JSONObject profileStatus = payload.optJSONObject("status");
+        if (profileStatus == null) {
+            profileStatus = new JSONObject();
+        }
+        profileStatus.put("profile", profile);
+        profileStatus.put("profile_label", profileLabel(profile));
+        profileStatus.put("apk_scope", "onboarding_profile_only");
+        payload.put("status", profileStatus);
     }
 
     private JSONObject basePayload() throws Exception {
@@ -361,7 +451,8 @@ public class MainActivity extends Activity {
         JSONObject health = new JSONObject();
         health.put("ok", true);
         health.put("apk_version", APP_VERSION);
-        health.put("note", "APK companion inicial; execução de jobs ainda fica no Termux/agent.");
+        health.put("scope", "companion_onboarding_profile_only");
+        health.put("note", "APK leve: pareamento, perfil do próprio celular e status básico. Controle pesado fica no Discord/VPS.");
         return health;
     }
 
@@ -516,16 +607,16 @@ public class MainActivity extends Activity {
 
     private void confirmClearPairing() {
         new AlertDialog.Builder(this)
-                .setTitle("Limpar pareamento local?")
+                .setTitle("Esquecer conexão local?")
                 .setMessage("Isso remove o token salvo no APK. O registro na VPS não é apagado automaticamente.")
-                .setPositiveButton("Limpar", (dialog, which) -> {
+                .setPositiveButton("Esquecer", (dialog, which) -> {
                     prefs.edit()
                             .remove("worker_token")
                             .remove("server_url")
                             .remove("profile")
                             .apply();
                     loadInputs();
-                    refreshLocalStatus("Pareamento local removido.");
+                    refreshLocalStatus("Conexão local removida.");
                 })
                 .setNegativeButton("Cancelar", null)
                 .show();
@@ -550,19 +641,25 @@ public class MainActivity extends Activity {
     }
 
     private void setButtonsEnabled(boolean enabled) {
-        pairButton.setEnabled(enabled);
-        heartbeatButton.setEnabled(enabled);
+        if (testButton != null) testButton.setEnabled(enabled);
+        if (pairButton != null) pairButton.setEnabled(enabled);
+        if (saveProfileButton != null) saveProfileButton.setEnabled(enabled);
+        if (heartbeatButton != null) heartbeatButton.setEnabled(enabled);
+        if (tailscaleButton != null) tailscaleButton.setEnabled(enabled);
+        if (clearButton != null) clearButton.setEnabled(enabled);
     }
 
     private void refreshLocalStatus(String extra) {
         String workerId = prefs.getString("worker_id", ensureWorkerId());
         String token = prefs.getString("worker_token", "");
         String server = prefs.getString("server_url", normalizedServerUrl());
+        String profile = prefs.getString("profile", selectedProfileSafe());
         StringBuilder builder = new StringBuilder();
-        builder.append("Status local\n");
-        builder.append("Worker ID: ").append(workerId).append('\n');
-        builder.append("Pareado: ").append(token == null || token.isEmpty() ? "não" : "sim").append('\n');
+        builder.append("Status deste celular\n");
+        builder.append("Conectado: ").append(token == null || token.isEmpty() ? "não" : "sim").append('\n');
+        builder.append("Perfil: ").append(profileLabel(profile)).append('\n');
         builder.append("VPS: ").append(server == null || server.isEmpty() ? "não definida" : server).append('\n');
+        builder.append("Worker ID: ").append(workerId).append('\n');
         builder.append("Versão APK: ").append(APP_VERSION).append("\n\n");
         builder.append(extra == null ? "" : extra);
         statusText.setText(builder.toString());
@@ -584,6 +681,14 @@ public class MainActivity extends Activity {
             return String.valueOf(selected.getTag());
         }
         return "midia";
+    }
+
+    private String selectedProfileSafe() {
+        try {
+            return selectedProfile();
+        } catch (Exception ignored) {
+            return prefs.getString("profile", "midia");
+        }
     }
 
     private String ensureWorkerId() {
@@ -633,12 +738,49 @@ public class MainActivity extends Activity {
         return new String[]{"phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"};
     }
 
+    private String profileLabel(String profile) {
+        if ("leve".equals(profile)) return "Leve";
+        if ("completo".equals(profile)) return "Completo";
+        if ("bedrock".equals(profile)) return "Bedrock";
+        return "Mídia";
+    }
+
+    private String profileDescription(String profile) {
+        if ("leve".equals(profile)) {
+            return "Funções: diagnósticos e logs. Bom para celular fraco ou reserva.";
+        }
+        if ("completo".equals(profile)) {
+            return "Funções: mídia, ZIP, TTS, FFmpeg e manutenção. Bom para celular principal.";
+        }
+        if ("bedrock".equals(profile)) {
+            return "Funções futuras de Minecraft Bedrock. Não assume servidor Java.";
+        }
+        return "Funções: logs, ZIP, FFmpeg, FFprobe e TTS/cache. Perfil recomendado.";
+    }
+
+    private void updateProfileHint(String profile) {
+        if (profileHintText != null) {
+            profileHintText.setText(profileDescription(profile));
+        }
+    }
+
     private JSONArray jsonArray(String[] values) {
         JSONArray array = new JSONArray();
         for (String value : values) {
             array.put(value);
         }
         return array;
+    }
+
+    private String compactResultBody(String body) {
+        if (body == null || body.trim().isEmpty()) {
+            return "ok";
+        }
+        String compact = body.replace('\n', ' ').replace('\r', ' ').trim();
+        if (compact.length() > 320) {
+            return compact.substring(0, 320) + "...";
+        }
+        return compact;
     }
 
     private String batteryStatusLabel(int status) {
