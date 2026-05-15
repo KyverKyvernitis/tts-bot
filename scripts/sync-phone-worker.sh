@@ -71,6 +71,9 @@ log "ajustando permissões no celular"
 "${SSH_BASE[@]}" "
 chmod +x '$REMOTE_DIR/phone_worker.py' '$REMOTE_DIR/start-phone-worker.sh' '$REMOTE_DIR/watch-phone-worker.sh' '$REMOTE_DIR/pair-phone-worker.sh' '$REMOTE_DIR/bootstrap-phone-worker.sh' 2>/dev/null || true
 chmod +x '$REMOTE_HOME/start-phone-worker.sh' '$REMOTE_HOME/watch-phone-worker.sh' '$REMOTE_HOME/pair-phone-worker.sh' '$REMOTE_HOME/bootstrap-phone-worker.sh' 2>/dev/null || true
+mkdir -p '$REMOTE_HOME/.termux/boot'
+printf '%s\n' '#!/data/data/com.termux/files/usr/bin/sh' '# Auto-start do Core Worker pelo Termux:Boot.' '# Criado/reparado pelo sync do phone-worker. Não coloque segredos aqui.' 'termux-wake-lock 2>/dev/null || true' 'sleep "\${PHONE_WORKER_BOOT_DELAY_SECONDS:-25}"' 'cd "\$HOME/phone-worker" || exit 0' 'if [ -x "\$HOME/phone-worker/start-phone-worker.sh" ]; then' '  exec "\$HOME/phone-worker/start-phone-worker.sh"' 'fi' 'nohup python "\$HOME/phone-worker/phone_worker.py" >> "\$HOME/phone-worker.log" 2>&1 &' > '$REMOTE_HOME/.termux/boot/10-core-worker'
+chmod +x '$REMOTE_HOME/.termux/boot/10-core-worker' 2>/dev/null || true
 "
 
 log "reiniciando phone-worker no celular"

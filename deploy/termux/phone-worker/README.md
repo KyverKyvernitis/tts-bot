@@ -134,7 +134,27 @@ python phone_worker.py --heartbeat-once
 python phone_worker.py --jobs-once
 ```
 
-O heartbeat envia status, bateria real via Termux:API quando disponível, ping TCP até a VPS, rede, ffmpeg/ffprobe, disco, saúde básica e um resumo do Tailscale quando a CLI existir. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `worker_self_check`, `worker_logs`, `network_probe`, `tailscale_status`, `service_status`, `service_start`, `service_stop`, `service_restart`, `ffmpeg_check`, `ffprobe_check`, `worker_update`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
+O heartbeat envia status, bateria real via Termux:API quando disponível, ping TCP até a VPS, rede, ffmpeg/ffprobe, disco, saúde básica e um resumo do Tailscale quando a CLI existir. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `worker_self_check`, `worker_logs`, `network_probe`, `tailscale_status`, `service_status`, `service_start`, `service_stop`, `service_restart`, `ffmpeg_check`, `ffprobe_check`, `worker_update`, `boot_status`, `boot_repair`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
+
+
+## Boot automático pós-reboot
+
+O `install.sh`, o `bootstrap-phone-worker.sh`, o sync da VPS e a ação **Reparar boot automático** criam/reparam:
+
+```bash
+~/.termux/boot/10-core-worker
+```
+
+Esse script é lido pelo app **Termux:Boot** quando o Android inicia. Ele espera alguns segundos, segura wake-lock quando possível e chama `~/phone-worker/start-phone-worker.sh`.
+
+Depois de instalar/reparar, abra o app **Termux:Boot** uma vez e, no Android/MIUI, libere inicialização automática e bateria sem restrição para:
+
+- Termux
+- Termux:Boot
+- Termux:API
+- Tailscale
+
+O painel `workers` mostra `boot ok`, `boot faltando` ou `boot incompleto`. Se aparecer faltando/incompleto, use **Manutenção → Reparar boot automático**.
 
 ## Controle seguro de serviços
 
@@ -177,7 +197,7 @@ PHONE_WORKER_UPDATE_MAX_TOTAL_BYTES=1048576
 
 ## Onboarding rápido de novo celular
 
-Este fluxo é temporário enquanto o APK **Core Worker** não existe. No APK, o pareamento, token, start do agent, heartbeat e seleção de perfil serão feitos automaticamente por botão/QR.
+Este fluxo é temporário enquanto o APK **Core Worker** não existe. No APK, o pareamento, token, start do agent, heartbeat, boot automático e seleção de perfil serão feitos automaticamente por botão/QR.
 
 Para adicionar um segundo celular hoje:
 

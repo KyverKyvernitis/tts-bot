@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.5.6"
+PHONE_WORKER_VERSION = "1.5.7"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -65,6 +65,8 @@ SUPPORTED_DIRECT_TASKS = (
     "worker_logs",
     "worker_self_check",
     "worker_update",
+    "boot_status",
+    "boot_repair",
     "zip",
     "zip_validate",
 )
@@ -87,6 +89,8 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "worker_logs",
     "worker_self_check",
     "worker_update",
+    "boot_status",
+    "boot_repair",
     "zip_validate",
 )
 
@@ -732,6 +736,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "ffmpeg": status.get("ffmpeg"),
             "ffprobe": status.get("ffprobe"),
             "scripts_ok": ((status.get("scripts") or {}).get("complete") if isinstance(status.get("scripts"), dict) else None),
+            "boot_ok": ((status.get("boot") or {}).get("ok") if isinstance(status.get("boot"), dict) else None),
         },
         "status": {
             "http_host": host,
@@ -741,6 +746,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "disk_home": status.get("disk_home"),
             "loadavg": status.get("loadavg"),
             "scripts": status.get("scripts"),
+            "boot": status.get("boot"),
         },
     }
 
@@ -903,6 +909,7 @@ def _system_status() -> dict[str, Any]:
         "core_worker_heartbeat": _heartbeat_configured(),
         "core_worker_jobs": _core_worker_jobs_configured(),
         "scripts": _script_inventory(),
+        "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "supported_tasks": list(SUPPORTED_DIRECT_TASKS),
         "supported_core_worker_jobs": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
         "pid": os.getpid(),
@@ -1009,7 +1016,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload.setdefault("summary", "status direto coletado")
             elif task in {"diagnostic_basic", "worker_self_check"}:
                 payload = _execute_core_worker_job({"type": "worker_self_check", "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
-            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
+            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
                 payload = _execute_core_worker_job({"type": task, "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
             elif task == "sha256":
                 payload = self._task_sha256(body)
@@ -1444,6 +1451,93 @@ def _phone_worker_log_file() -> Path:
     return Path(os.getenv("PHONE_WORKER_LOG_FILE") or (_phone_worker_dir() / "phone-worker.log")).expanduser()
 
 
+def _termux_boot_script_path() -> Path:
+    return (Path.home() / ".termux" / "boot" / "10-core-worker").expanduser()
+
+
+def _termux_boot_script_content() -> str:
+    return "\n".join([
+        "#!/data/data/com.termux/files/usr/bin/sh",
+        "# Auto-start do Core Worker pelo Termux:Boot.",
+        "# Criado/reparado pelo phone-worker. Não coloque segredos aqui.",
+        "termux-wake-lock 2>/dev/null || true",
+        "sleep \"${PHONE_WORKER_BOOT_DELAY_SECONDS:-25}\"",
+        "cd \"$HOME/phone-worker\" || exit 0",
+        "if [ -x \"$HOME/phone-worker/start-phone-worker.sh\" ]; then",
+        "  exec \"$HOME/phone-worker/start-phone-worker.sh\"",
+        "fi",
+        "nohup python \"$HOME/phone-worker/phone_worker.py\" >> \"$HOME/phone-worker.log\" 2>&1 &",
+        "",
+    ])
+
+
+def _termux_boot_package_status() -> dict[str, Any]:
+    # Best-effort: Android 16 pode negar listagem completa de pacotes para o app,
+    # então falha aqui não deve marcar o boot como quebrado.
+    if not shutil.which("cmd"):
+        return {"available": None, "source": "cmd_missing"}
+    for command in (["cmd", "package", "path", "com.termux.boot"], ["pm", "path", "com.termux.boot"]):
+        code, stdout, stderr = _run_text_command(command, timeout=2.0, max_bytes=2048)
+        text = f"{stdout}\n{stderr}".strip()
+        if code == 0 and "package:" in stdout:
+            return {"available": True, "source": command[0]}
+        if "com.termux.boot" in text.lower() and "permission denial" not in text.lower():
+            return {"available": True, "source": command[0], "note": _short_text(text, limit=100)}
+        if "permission denial" in text.lower():
+            return {"available": None, "source": command[0], "note": "Android negou listagem de pacote"}
+    return {"available": False, "source": "pm", "note": "Termux:Boot não detectado"}
+
+
+def _termux_boot_status_snapshot() -> dict[str, Any]:
+    path = _termux_boot_script_path()
+    result: dict[str, Any] = {
+        "path": str(path),
+        "exists": False,
+        "executable": False,
+        "content_ok": False,
+        "ok": False,
+        "source": "termux-boot",
+    }
+    try:
+        exists = path.exists()
+        result["exists"] = bool(exists)
+        if exists:
+            result["executable"] = os.access(path, os.X_OK)
+            content = path.read_text(encoding="utf-8", errors="ignore")[:4096]
+            result["content_ok"] = "phone_worker.py" in content and "phone-worker" in content
+            result["size"] = path.stat().st_size
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {_short_text(exc, limit=100)}"
+    package = _termux_boot_package_status()
+    result["package"] = package
+    result["package_available"] = package.get("available")
+    result["ok"] = bool(result.get("exists") and result.get("executable") and result.get("content_ok"))
+    if result["ok"] and package.get("available") is False:
+        result["warning"] = "script ok, mas app Termux:Boot não detectado"
+    elif not result["ok"]:
+        result["warning"] = "script de boot ausente/incompleto"
+    return result
+
+
+def _repair_termux_boot_script() -> dict[str, Any]:
+    path = _termux_boot_script_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = _termux_boot_script_content()
+    changed = True
+    if path.exists():
+        with contextlib.suppress(Exception):
+            changed = path.read_text(encoding="utf-8", errors="ignore") != content
+    path.write_text(content, encoding="utf-8")
+    os.chmod(path, 0o755)
+    status = _termux_boot_status_snapshot()
+    status.update({
+        "ok": bool(status.get("ok")),
+        "changed": bool(changed),
+        "summary": "boot automático reparado" if status.get("ok") else "boot automático criado, verifique Termux:Boot",
+    })
+    return status
+
+
 def _home_script(name: str) -> Path:
     return (Path.home() / name).expanduser()
 
@@ -1827,6 +1921,12 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
         elif kind == "worker_update":
             result = _apply_worker_update(payload)
             result.setdefault("summary", "arquivos do phone-worker atualizados")
+        elif kind == "boot_status":
+            result = _termux_boot_status_snapshot()
+            result.setdefault("summary", "status do boot automático coletado")
+        elif kind == "boot_repair":
+            result = _repair_termux_boot_script()
+            result.setdefault("summary", "boot automático reparado")
         elif kind in {"service_status", "service_start", "service_stop", "service_restart"}:
             service = payload.get("service") or "phone-worker"
             action = kind.removeprefix("service_")

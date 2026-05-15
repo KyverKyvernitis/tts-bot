@@ -71,6 +71,8 @@ WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede e sistema", "emoji": "🩺", "category": "quick"},
     {"label": "Atualizar agent", "value": "worker_update", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Atualiza e reinicia", "emoji": "⬆️", "requires_declared": True, "category": "maintenance"},
     {"label": "Reparar scripts", "value": "worker_repair_scripts", "job_type": "worker_update", "payload": {"scripts_only": True}, "summary": "reinstalar scripts auxiliares do worker", "description": "Reinstala scripts", "emoji": "🛠️", "requires_declared": True, "category": "maintenance"},
+    {"label": "Reparar boot automático", "value": "boot_repair", "job_type": "boot_repair", "payload": {}, "summary": "reparar inicialização automática no Termux:Boot", "description": "Auto-start pós-reboot", "emoji": "🚀", "requires_declared": True, "category": "maintenance"},
+    {"label": "Status boot", "value": "boot_status", "job_type": "boot_status", "payload": {}, "summary": "verificar inicialização automática", "description": "Termux:Boot", "emoji": "🔎", "requires_declared": True, "category": "monitor"},
     {"label": "Logs", "value": "worker_logs", "job_type": "worker_logs", "payload": {"lines": 140}, "summary": "logs recentes do phone-worker", "description": "Mostra logs recentes", "emoji": "📜", "category": "quick"},
     {"label": "Tailscale", "value": "tailscale_status", "job_type": "tailscale_status", "payload": {}, "summary": "status Tailscale e alcance da VPS", "description": "Rede privada/VPS", "emoji": "🌐", "category": "monitor"},
     {"label": "Status serviços", "value": "service_status", "job_type": "service_status", "payload": {"service": "phone-worker"}, "summary": "status de serviços do celular", "description": "Serviços permitidos", "emoji": "🧰", "category": "monitor"},
@@ -432,6 +434,31 @@ def _script_health_label(worker: dict[str, Any]) -> str:
 
 
 
+def _boot_health_label(worker: dict[str, Any]) -> str:
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    health = worker.get("health") if isinstance(worker.get("health"), dict) else {}
+    boot = status.get("boot") if isinstance(status.get("boot"), dict) else {}
+    if not boot and isinstance(health.get("boot"), dict):
+        boot = health.get("boot")
+    if not boot:
+        boot_ok = health.get("boot_ok")
+        if boot_ok is True:
+            return "boot ok"
+        if boot_ok is False:
+            return "boot faltando"
+        return "boot n/a"
+    if boot.get("ok"):
+        package = boot.get("package") if isinstance(boot.get("package"), dict) else {}
+        if package.get("available") is False:
+            return "boot script ok · app?"
+        return "boot ok"
+    if boot.get("exists"):
+        return "boot incompleto"
+    return "boot faltando"
+
+
+
+
 def _queue_status_text(worker: dict[str, Any]) -> str:
     status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
     queue = status.get("core_worker_jobs") if isinstance(status.get("core_worker_jobs"), dict) else {}
@@ -573,6 +600,7 @@ def _worker_detail_text(worker: dict[str, Any] | None) -> str:
         f"**Bateria:** {_battery_text(worker)}",
         f"**Rede:** {_network_text(worker)}",
         f"**Scripts:** {_script_health_label(worker)}",
+        f"**Boot automático:** {_boot_health_label(worker)}",
         "",
         "### Funções",
         _role_text(roles, limit=16),
@@ -1037,7 +1065,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=5)
             version = _shorten(worker.get("version") or "sem versão", limit=24)
             lines.append(f"{icon} **{name}** · `{worker_id}`")
-            lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)}")
+            lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)} · {_boot_health_label(worker)}")
             lines.append(f"Roles: {roles}")
             queue_text = _queue_status_text(worker)
             if queue_text:
@@ -1047,7 +1075,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             version = _shorten((snapshot.status or {}).get("version") or "sem versão", limit=24)
             lines.append(f"🟢 **{_shorten(snapshot.name or 'phone-worker direto', limit=36)}** · `direto`")
             status = snapshot.status if isinstance(snapshot.status, dict) else {}
-            lines.append(f"-# endpoint local/Tailscale · v `{version}` · {_script_health_label({'status': status})}")
+            lines.append(f"-# endpoint local/Tailscale · v `{version}` · {_script_health_label({'status': status})} · {_boot_health_label({'status': status})}")
             lines.append(f"Roles: {roles}")
         elif workers:
             lines.append("Selecione um worker.")
@@ -1665,6 +1693,8 @@ class WorkersCommandMixin:
             "tailscale_status",
             "worker_logs",
             "worker_update",
+            "boot_status",
+            "boot_repair",
             "service_status",
             "service_start",
             "service_stop",

@@ -38,6 +38,8 @@ CORE_WORKER_JOB_TYPES = {
     "text_stats",
     "maintenance_plan",
     "worker_update",
+    "boot_status",
+    "boot_repair",
 }
 
 _ROLE_RE = re.compile(r"[^a-z0-9_.:-]+")
