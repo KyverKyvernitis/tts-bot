@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from utility.commands.workers_registry import get_core_workers_registry
@@ -263,12 +262,21 @@ class WorkerSnapshot:
 
 
 class WorkersPanelView(discord.ui.LayoutView):
-    def __init__(self, cog: "WorkersCommandMixin", *, owner_id: int, snapshot: WorkerSnapshot):
+    def __init__(
+        self,
+        cog: "WorkersCommandMixin",
+        *,
+        owner_id: int,
+        snapshot: WorkerSnapshot,
+        selected_worker_id: str = "",
+    ):
         super().__init__(timeout=WORKERS_PANEL_TIMEOUT_SECONDS)
         self.cog = cog
         self.owner_id = int(owner_id)
         self.snapshot = snapshot
+        self.selected_worker_id = str(selected_worker_id or "")
         self.message: discord.Message | None = None
+        self._ensure_selected_worker()
         self._rebuild_layout()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -291,6 +299,71 @@ class WorkersPanelView(discord.ui.LayoutView):
         for item in list(self.children):
             self.remove_item(item)
 
+    def _registry_workers(self) -> list[dict[str, Any]]:
+        registry = self.snapshot.registry_snapshot or {}
+        workers = registry.get("workers") if isinstance(registry.get("workers"), list) else []
+        return [worker for worker in workers if isinstance(worker, dict)]
+
+    def _ensure_selected_worker(self) -> None:
+        workers = self._registry_workers()
+        worker_ids = [str(worker.get("worker_id") or "") for worker in workers if worker.get("worker_id")]
+        if self.selected_worker_id and self.selected_worker_id in worker_ids:
+            return
+        online = next((worker for worker in workers if worker.get("online") and worker.get("worker_id")), None)
+        if isinstance(online, dict):
+            self.selected_worker_id = str(online.get("worker_id") or "")
+            return
+        first = next((worker for worker in workers if worker.get("worker_id")), None)
+        self.selected_worker_id = str((first or {}).get("worker_id") or "")
+
+    def _selected_worker(self) -> dict[str, Any] | None:
+        wanted = str(self.selected_worker_id or "")
+        for worker in self._registry_workers():
+            if str(worker.get("worker_id") or "") == wanted:
+                return worker
+        return None
+
+    def _job_target_worker_id(self) -> str:
+        worker = self._selected_worker()
+        if not worker:
+            return ""
+        return str(worker.get("worker_id") or "")
+
+    def _worker_select_options(self) -> list[discord.SelectOption]:
+        options: list[discord.SelectOption] = []
+        for worker in self._registry_workers()[:25]:
+            worker_id = str(worker.get("worker_id") or "").strip()
+            if not worker_id:
+                continue
+            name = _shorten(worker.get("name") or worker_id, limit=80)
+            seen = _format_age(worker.get("last_seen_age_seconds"))
+            roles = ", ".join(str(role) for role in (worker.get("roles") or [])[:3]) or "sem roles"
+            options.append(discord.SelectOption(
+                label=name[:100],
+                value=worker_id[:100],
+                description=_shorten(f"{('online' if worker.get('online') else 'offline')} · {seen} · {roles}", limit=100),
+                emoji="🟢" if worker.get("online") else "🔴",
+                default=(worker_id == self.selected_worker_id),
+            ))
+        return options
+
+    def _action_select_options(self) -> list[discord.SelectOption]:
+        return [
+            discord.SelectOption(label="Testar worker", value="ping", description="Cria um ping seguro no worker selecionado", emoji="🧪"),
+            discord.SelectOption(label="Saúde", value="worker_self_check", description="Coleta bateria, rede, Tailscale, serviços e sistema", emoji="🩺"),
+            discord.SelectOption(label="Logs", value="worker_logs", description="Busca logs recentes do phone-worker", emoji="📜"),
+            discord.SelectOption(label="Tailscale", value="tailscale_status", description="Verifica Tailscale e alcance da VPS", emoji="🌐"),
+            discord.SelectOption(label="Status serviços", value="service_status", description="Mostra status dos serviços permitidos", emoji="🧰"),
+            discord.SelectOption(label="Iniciar watchdog", value="service_start_watch", description="Inicia phone-worker-watch", emoji="▶️"),
+            discord.SelectOption(label="Parar watchdog", value="service_stop_watch", description="Para phone-worker-watch", emoji="⏹️"),
+            discord.SelectOption(label="Reiniciar worker", value="service_restart_worker", description="Reinicia phone-worker depois de responder o job", emoji="🔁"),
+            discord.SelectOption(label="Parar worker", value="service_stop_worker", description="Para phone-worker depois de responder o job", emoji="🛑"),
+        ]
+
+    def _new_select(self, **kwargs: Any):
+        select_cls = getattr(discord.ui, "StringSelect", None) or getattr(discord.ui, "Select")
+        return select_cls(**kwargs)
+
     def _rebuild_layout(self, *, expired: bool = False) -> None:
         self._clear_items()
         snapshot = self.snapshot
@@ -298,22 +371,45 @@ class WorkersPanelView(discord.ui.LayoutView):
             self.add_item(discord.ui.Container(
                 discord.ui.TextDisplay(
                     "# 📱 Core Workers\n"
-                    "Esse painel expirou. Use `/workers` de novo para atualizar o controle."
+                    "Painel expirado. Use `workers`, `worker` ou `w` para abrir novamente."
                 ),
                 accent_color=discord.Color.dark_grey(),
             ))
             return
 
+        self._ensure_selected_worker()
         summary = (snapshot.registry_snapshot or {}).get("summary") if isinstance(snapshot.registry_snapshot, dict) else {}
         header = discord.ui.TextDisplay(
             "# 📱 Core Workers\n"
-            f"-# Painel privado do orquestrador · guild `{WORKERS_COMMAND_GUILD_ID}`\n"
+            f"-# Prefixo privado: `workers` / `worker` / `w` · guild `{WORKERS_COMMAND_GUILD_ID}`\n"
             f"**Estado:** {snapshot.state_label}\n"
-            f"**Registry:** `{int((summary or {}).get('registered') or 0)}` registrado(s) · "
+            f"**Registry:** `{int((summary or {}).get('registered') or 0)}` reg · "
             f"`{int((summary or {}).get('online') or 0)}` online · "
-            f"`{int((summary or {}).get('pairings_active') or 0)}` pareamento(s) ativo(s) · "
-            f"jobs `Q:{int((summary or {}).get('jobs_queued') or 0)}`/`R:{int((summary or {}).get('jobs_running') or 0)}`"
+            f"`{int((summary or {}).get('pairings_active') or 0)}` pair\n"
+            f"**Jobs:** `{int((summary or {}).get('jobs_queued') or 0)}` Q · "
+            f"`{int((summary or {}).get('jobs_running') or 0)}` R · "
+            f"`{int((summary or {}).get('jobs_succeeded') or 0)}` ok · "
+            f"`{int((summary or {}).get('jobs_failed') or 0)}` falha"
         )
+
+        worker_options = self._worker_select_options()
+        worker_select = self._new_select(
+            placeholder="Escolha um worker" if worker_options else "Nenhum worker registrado",
+            min_values=1,
+            max_values=1,
+            options=worker_options or [discord.SelectOption(label="Nenhum worker", value="none", description="Use Parear APK para registrar um celular", emoji="⚫")],
+            disabled=not bool(worker_options),
+        )
+        worker_select.callback = self._select_worker
+
+        action_select = self._new_select(
+            placeholder="Escolha uma ação segura",
+            min_values=1,
+            max_values=1,
+            options=self._action_select_options(),
+            disabled=not bool(worker_options),
+        )
+        action_select.callback = self._select_action
 
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary)
         refresh.callback = self._refresh
@@ -329,179 +425,98 @@ class WorkersPanelView(discord.ui.LayoutView):
         )
         wake.callback = self._wake_worker
 
-        test_job = discord.ui.Button(label="Testar worker", emoji="🧪", style=discord.ButtonStyle.secondary)
-        test_job.callback = self._queue_worker_test
-
         cleanup_jobs = discord.ui.Button(label="Limpar jobs", emoji="🧹", style=discord.ButtonStyle.secondary)
         cleanup_jobs.callback = self._cleanup_jobs
-
-        health = discord.ui.Button(label="Saúde", emoji="🩺", style=discord.ButtonStyle.secondary)
-        health.callback = self._queue_worker_health
-
-        logs = discord.ui.Button(label="Logs", emoji="📜", style=discord.ButtonStyle.secondary)
-        logs.callback = self._queue_worker_logs
-
-        tailscale = discord.ui.Button(label="Tailscale", emoji="🌐", style=discord.ButtonStyle.secondary)
-        tailscale.callback = self._queue_tailscale_status
-
-        service_status = discord.ui.Button(label="Status serviços", emoji="🧰", style=discord.ButtonStyle.secondary)
-        service_status.callback = self._queue_service_status
-
-        start_watch = discord.ui.Button(label="Iniciar watchdog", emoji="▶️", style=discord.ButtonStyle.secondary)
-        start_watch.callback = self._queue_start_watchdog
-
-        stop_watch = discord.ui.Button(label="Parar watchdog", emoji="⏹️", style=discord.ButtonStyle.secondary)
-        stop_watch.callback = self._queue_stop_watchdog
-
-        restart_worker = discord.ui.Button(label="Reiniciar worker", emoji="🔁", style=discord.ButtonStyle.danger)
-        restart_worker.callback = self._queue_restart_worker
-
-        stop_worker = discord.ui.Button(label="Parar worker", emoji="🛑", style=discord.ButtonStyle.danger)
-        stop_worker.callback = self._queue_stop_worker
-
-        close = discord.ui.Button(label="Fechar", emoji="✖️", style=discord.ButtonStyle.danger)
-        close.callback = self._close
 
         container = discord.ui.Container(
             header,
             discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(self._registry_lines(snapshot))),
+            discord.ui.TextDisplay("\n".join(self._selected_worker_lines(snapshot))),
             discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(self._job_lines(snapshot))),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(self._legacy_status_lines(snapshot))),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(self._action_lines(snapshot))),
-            discord.ui.ActionRow(refresh, pairing, wake, close),
-            discord.ui.ActionRow(test_job, health, logs, tailscale, cleanup_jobs),
-            discord.ui.ActionRow(service_status, start_watch, stop_watch, restart_worker, stop_worker),
+            discord.ui.ActionRow(worker_select),
+            discord.ui.ActionRow(action_select),
+            discord.ui.ActionRow(refresh, pairing, wake, cleanup_jobs),
             accent_color=snapshot.accent,
         )
         self.add_item(container)
 
-    def _registry_lines(self, snapshot: WorkerSnapshot) -> list[str]:
+    def _selected_worker_lines(self, snapshot: WorkerSnapshot) -> list[str]:
         if snapshot.registry_error:
             return [
-                "## 🧬 Registry multi-worker",
-                f"Erro lendo registry: `{_shorten(_redact(snapshot.registry_error), limit=180)}`",
+                "## Worker selecionado",
+                f"Registry indisponível: `{_shorten(_redact(snapshot.registry_error), limit=160)}`",
             ]
-        registry = snapshot.registry_snapshot or {}
-        workers = registry.get("workers") if isinstance(registry.get("workers"), list) else []
-        pairings = registry.get("pairings") if isinstance(registry.get("pairings"), list) else []
-        lines = ["## 🧬 Registry multi-worker"]
-        if not workers:
+
+        workers = self._registry_workers()
+        worker = self._selected_worker()
+        lines = ["## Worker selecionado"]
+        if worker:
+            icon = "🟢" if worker.get("online") else "🔴"
+            name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=42)
+            worker_id = _shorten(worker.get("worker_id"), limit=30)
+            seen = _format_age(worker.get("last_seen_age_seconds"))
+            battery = _battery_text(worker)
+            network = _network_text(worker)
+            version = _shorten(worker.get("version"), limit=24) or "sem versão"
+            roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=6)
+            caps = _role_text([str(r) for r in (worker.get("capabilities") or [])], limit=5)
+            lines.append(f"{icon} **{name}** · `{worker_id}`")
+            lines.append(f"-# visto {seen} · {battery} · {network} · {version}")
+            lines.append(f"Roles: {roles}")
+            lines.append(f"Caps: {caps}")
+        elif workers:
+            lines.append("Selecione um worker no menu abaixo.")
+        else:
             lines.append("Nenhum Core Worker pareado ainda. Use **Parear APK** para gerar um código temporário.")
-        else:
-            for worker in workers[:5]:
-                if not isinstance(worker, dict):
-                    continue
-                icon = "🟢" if worker.get("online") else "🔴"
-                name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=32)
-                worker_id = _shorten(worker.get("worker_id"), limit=22)
-                roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=5)
-                seen = _format_age(worker.get("last_seen_age_seconds"))
-                battery = _battery_text(worker)
-                network = _network_text(worker)
-                version = _shorten(worker.get("version"), limit=24) or "sem versão"
-                lines.append(f"{icon} **{name}** · `{worker_id}`")
-                lines.append(f"-# {roles} · visto {seen} · {battery} · {network} · {version}")
-            hidden = max(0, len(workers) - 5)
-            if hidden:
-                lines.append(f"-# … +{hidden} worker(s) oculto(s) para manter o painel compacto.")
-        if pairings:
-            active = []
-            for pair in pairings[:3]:
-                try:
-                    ttl = _format_seconds(pair.get("ttl_left_seconds"))
-                except Exception:
-                    ttl = "?"
-                active.append(f"`{ttl}`")
-            lines.append("-# Pareamentos ativos expiram em: " + " · ".join(active))
-        return lines
 
-    def _job_lines(self, snapshot: WorkerSnapshot) -> list[str]:
-        registry = snapshot.registry_snapshot or {}
-        jobs = registry.get("jobs") if isinstance(registry.get("jobs"), list) else []
-        summary = registry.get("summary") if isinstance(registry.get("summary"), dict) else {}
-        lines = [
-            "## 🧾 Job Queue segura",
-            f"Fila: `{int((summary or {}).get('jobs_queued') or 0)}` aguardando · "
-            f"`{int((summary or {}).get('jobs_running') or 0)}` rodando · "
-            f"`{int((summary or {}).get('jobs_succeeded') or 0)}` ok · "
-            f"`{int((summary or {}).get('jobs_failed') or 0)}` falha",
-        ]
-        if not jobs:
-            lines.append("Nenhum job recente. Use **Testar worker** para criar um `ping` seguro.")
-            return lines
-        for job in jobs[:5]:
-            if not isinstance(job, dict):
-                continue
-            status = str(job.get("status") or "queued")
-            icon = {"queued": "🟡", "running": "🔵", "succeeded": "🟢", "failed": "🔴", "expired": "⚫"}.get(status, "⚪")
-            job_id = _shorten(job.get("job_id"), limit=18)
-            kind = _shorten(job.get("type"), limit=24)
-            worker = _shorten(job.get("worker_id") or job.get("target_worker_id") or "qualquer worker", limit=24)
-            age = _format_age(job.get("age_seconds"))
-            extra = _shorten(job.get("error") or job.get("summary") or "", limit=80)
-            lines.append(f"{icon} `{kind}` · `{job_id}` · `{status}` · {worker} · {age}")
-            if extra:
-                lines.append(f"-# {extra}")
-        return lines
-
-    def _legacy_status_lines(self, snapshot: WorkerSnapshot) -> list[str]:
-        status = snapshot.status or {}
-        disk = status.get("disk_home") if isinstance(status.get("disk_home"), dict) else {}
-        free = _format_bytes(disk.get("free")) if isinstance(disk, dict) else "desconhecido"
-        used = _format_bytes(disk.get("used")) if isinstance(disk, dict) else "desconhecido"
-        load = status.get("loadavg")
-        if isinstance(load, list) and load:
-            load_text = " / ".join(str(round(float(item), 2)) for item in load[:3] if isinstance(item, (int, float))) or "desconhecido"
-        else:
-            load_text = "indisponível"
-
-        lines = [
-            "## 🩺 Phone-worker atual",
-            f"Endpoint: `{snapshot.base_url_label}`",
-            f"Configurado no `.env`: **{'sim' if snapshot.configured else 'não'}** · habilitado: **{'sim' if snapshot.enabled else 'não'}**",
-        ]
-        if snapshot.online:
-            lines.extend([
-                f"Uptime: `{_format_seconds(status.get('uptime_seconds'))}` · PID: `{status.get('pid', '?')}`",
-                f"Jobs: `{status.get('jobs_started', 0)}` iniciados · `{status.get('jobs_failed', 0)}` falhas",
-                f"Disco home: `{used}` usado · `{free}` livre · load: `{load_text}`",
-                f"Roles: {_role_text(snapshot.roles, limit=8)}",
-                f"Capacidades: ffmpeg {'✅' if status.get('ffmpeg') else '❌'} · ffprobe {'✅' if status.get('ffprobe') else '❌'}",
-            ])
-        elif snapshot.error:
-            lines.append(f"Erro: `{_shorten(_redact(snapshot.error), limit=180)}`")
-        else:
-            lines.append("Ainda não há resposta do phone-worker direto.")
-        return lines
-
-    def _action_lines(self, snapshot: WorkerSnapshot) -> list[str]:
-        base_url = _public_base_url()
-        pair_route = f"{base_url}/core-worker/pair" if base_url else "/core-worker/pair"
-        heartbeat_route = f"{base_url}/core-worker/heartbeat" if base_url else "/core-worker/heartbeat"
-        poll_route = f"{base_url}/core-worker/jobs/poll" if base_url else "/core-worker/jobs/poll"
-        result_route = f"{base_url}/core-worker/jobs/result" if base_url else "/core-worker/jobs/result"
-        lines = [
-            "## 🕹️ Controle",
-            "`Atualizar` consulta o registry e o `/status` do phone-worker sem mostrar token.",
-            "`Testar worker`, `Saúde`, `Logs`, `Tailscale` e `Status serviços` criam jobs seguros no worker por polling autenticado.",
-            "`Iniciar/Parar watchdog` e `Reiniciar/Parar worker` usam só serviços whitelisted, sem shell livre.",
-            "`Parear APK` gera código temporário; a VPS salva só hash do código/token.",
-            f"Rotas do APK/agent: `POST {pair_route}` · `POST {heartbeat_route}` · `POST {poll_route}` · `POST {result_route}`",
-            "`Acordar phone-worker` chama o watchdog seguro da VPS (`scripts/phone-worker-watch.sh`).",
-        ]
+        # Mantém o status direto do phone-worker antigo em uma linha curta, sem ocupar o painel inteiro.
+        legacy_state = "🟢 direto online" if snapshot.online else ("🔴 direto offline" if snapshot.configured else "⚫ direto não configurado")
+        lines.append(f"-# Phone-worker VPS: {legacy_state} · `{snapshot.base_url_label}`")
         if snapshot.action_note:
-            lines.append(f"\n**Última ação:** {_shorten(_redact(snapshot.action_note), limit=220)}")
+            lines.append(f"-# Última ação: {_shorten(_redact(snapshot.action_note), limit=140)}")
         if snapshot.watch_output:
-            lines.append(f"-# `{_shorten(_redact(snapshot.watch_output), limit=260)}`")
+            lines.append(f"-# Watchdog: `{_shorten(_redact(snapshot.watch_output), limit=120)}`")
         return lines
+
+    async def _select_worker(self, interaction: discord.Interaction):
+        values = list(getattr(getattr(interaction, "data", None), "get", lambda _k, _d=None: _d)("values", []) or [])
+        if not values:
+            with contextlib.suppress(Exception):
+                values = list(getattr(interaction, "values", []) or [])
+        if values:
+            self.selected_worker_id = str(values[0] or "")
+        self._ensure_selected_worker()
+        self._rebuild_layout()
+        await interaction.response.edit_message(view=self)
+
+    async def _select_action(self, interaction: discord.Interaction):
+        values = list(getattr(getattr(interaction, "data", None), "get", lambda _k, _d=None: _d)("values", []) or [])
+        if not values:
+            with contextlib.suppress(Exception):
+                values = list(getattr(interaction, "values", []) or [])
+        action = str((values or [""])[0] or "")
+        mapping: dict[str, tuple[str, dict[str, Any], str]] = {
+            "ping": ("ping", {}, "teste manual pelo painel workers"),
+            "worker_self_check": ("worker_self_check", {}, "saúde completa pelo painel workers"),
+            "worker_logs": ("worker_logs", {"lines": 140}, "logs recentes do phone-worker"),
+            "tailscale_status": ("tailscale_status", {}, "status Tailscale e alcance da VPS"),
+            "service_status": ("service_status", {"service": "phone-worker"}, "status de serviços do celular"),
+            "service_start_watch": ("service_start", {"service": "phone-worker-watch"}, "iniciar watchdog do phone-worker"),
+            "service_stop_watch": ("service_stop", {"service": "phone-worker-watch"}, "parar watchdog do phone-worker"),
+            "service_restart_worker": ("service_restart", {"service": "phone-worker"}, "reiniciar phone-worker no celular"),
+            "service_stop_worker": ("service_stop", {"service": "phone-worker"}, "parar phone-worker no celular"),
+        }
+        job = mapping.get(action)
+        if job is None:
+            await interaction.response.send_message("Ação inválida.", ephemeral=True)
+            return
+        job_type, payload, summary = job
+        await self._queue_named_job(interaction, job_type=job_type, payload=payload, summary=summary)
 
     async def _refresh(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
         self.snapshot = await self.cog._collect_workers_snapshot()
+        self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
@@ -509,6 +524,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         await interaction.response.defer(thinking=False)
         snapshot = await self.cog._wake_phone_worker()
         self.snapshot = snapshot
+        self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
@@ -524,35 +540,21 @@ class WorkersPanelView(discord.ui.LayoutView):
                 "## 🔐 Pareamento Core Worker\n"
                 f"Código temporário: `{code}`\n"
                 f"Validade: `{ttl}` · expira em `{expires}`\n\n"
-                "No APK/agent, use esse código para chamar:\n"
+                "No APK/agent, use esse código na rota:\n"
                 f"`POST {base_url}/core-worker/pair`\n\n"
-                "Payload mínimo planejado:\n"
-                "```json\n"
-                f"{{\"code\":\"{code}\",\"name\":\"Meu celular\",\"roles\":[\"tts\",\"ffmpeg\"]}}\n"
-                "```\n"
-                "A resposta entrega o token do worker **uma única vez**. Salve localmente no APK/agent; não suba isso para GitHub."
+                "O token do worker é entregue uma única vez e deve ficar só no celular."
             )
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"código de pareamento gerado: {code}")
+            self._ensure_selected_worker()
             self._rebuild_layout()
             await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send(msg, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha ao gerar pareamento: {type(exc).__name__}: {exc}")
+            self._ensure_selected_worker()
             self._rebuild_layout()
             await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send("Não consegui gerar o pareamento agora.", ephemeral=True)
-
-    async def _queue_worker_test(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=False)
-        try:
-            result = await self.cog._queue_core_worker_job(interaction.user, job_type="ping", summary="teste manual pelo painel /workers")
-            job = result.get("job") if isinstance(result, dict) else {}
-            job_id = _shorten((job or {}).get("job_id"), limit=32)
-            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"job de teste criado: {job_id}")
-        except Exception as exc:
-            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha ao criar job de teste: {type(exc).__name__}: {exc}")
-        self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
     async def _queue_named_job(
         self,
@@ -563,39 +565,24 @@ class WorkersPanelView(discord.ui.LayoutView):
         summary: str = "",
     ):
         await interaction.response.defer(thinking=False)
+        target_worker_id = self._job_target_worker_id()
         try:
-            result = await self.cog._queue_core_worker_job(interaction.user, job_type=job_type, payload=payload or {}, summary=summary or job_type)
+            result = await self.cog._queue_core_worker_job(
+                interaction.user,
+                job_type=job_type,
+                payload=payload or {},
+                summary=summary or job_type,
+                target_worker_id=target_worker_id,
+            )
             job = result.get("job") if isinstance(result, dict) else {}
-            job_id = _shorten((job or {}).get("job_id"), limit=32)
-            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"job `{job_type}` criado: {job_id}")
+            job_id = _shorten((job or {}).get("job_id"), limit=24)
+            target_label = _shorten(target_worker_id or "qualquer worker online", limit=32)
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"job `{job_type}` criado para {target_label}: {job_id}")
         except Exception as exc:
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha no job `{job_type}`: {type(exc).__name__}: {exc}")
+        self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
-
-    async def _queue_worker_health(self, interaction: discord.Interaction):
-        await self._queue_named_job(interaction, job_type="worker_self_check", summary="saúde completa pelo painel /workers")
-
-    async def _queue_worker_logs(self, interaction: discord.Interaction):
-        await self._queue_named_job(interaction, job_type="worker_logs", payload={"lines": 140}, summary="logs recentes do phone-worker")
-
-    async def _queue_tailscale_status(self, interaction: discord.Interaction):
-        await self._queue_named_job(interaction, job_type="tailscale_status", summary="status Tailscale e alcance da VPS")
-
-    async def _queue_service_status(self, interaction: discord.Interaction):
-        await self._queue_named_job(interaction, job_type="service_status", payload={"service": "phone-worker"}, summary="status de serviços do celular")
-
-    async def _queue_start_watchdog(self, interaction: discord.Interaction):
-        await self._queue_named_job(interaction, job_type="service_start", payload={"service": "phone-worker-watch"}, summary="iniciar watchdog do phone-worker")
-
-    async def _queue_stop_watchdog(self, interaction: discord.Interaction):
-        await self._queue_named_job(interaction, job_type="service_stop", payload={"service": "phone-worker-watch"}, summary="parar watchdog do phone-worker")
-
-    async def _queue_restart_worker(self, interaction: discord.Interaction):
-        await self._queue_named_job(interaction, job_type="service_restart", payload={"service": "phone-worker"}, summary="reiniciar phone-worker no celular")
-
-    async def _queue_stop_worker(self, interaction: discord.Interaction):
-        await self._queue_named_job(interaction, job_type="service_stop", payload={"service": "phone-worker"}, summary="parar phone-worker no celular")
 
     async def _cleanup_jobs(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -604,27 +591,21 @@ class WorkersPanelView(discord.ui.LayoutView):
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"limpeza de jobs: {result}")
         except Exception as exc:
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha limpando jobs: {type(exc).__name__}: {exc}")
+        self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
-    async def _close(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=False)
-        self._rebuild_layout(expired=True)
-        with contextlib.suppress(Exception):
-            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
-        self.stop()
-
 
 class WorkersCommandMixin:
-    """Comando `/workers` da cog Utility.
+    """Comando prefixado `workers`/`worker`/`w` da cog Utility.
 
-    Painel único em Components V2 para o Core Worker: mostra o phone-worker atual,
-    o registry multi-celular, gera pareamento temporário e prepara a ponte do APK.
+    Painel único em Components V2 para o Core Worker. O comando é privado do
+    dono do bot e limitado à guild configurada; não é mais slash command.
     """
 
-    async def _can_use_workers(self, interaction: discord.Interaction) -> bool:
+    async def _can_use_workers_author(self, user: discord.abc.User) -> bool:
         with contextlib.suppress(Exception):
-            return bool(await self.bot.is_owner(interaction.user))
+            return bool(await self.bot.is_owner(user))
         return False
 
     def _worker_base_config(self) -> tuple[bool, bool, str, str, str, str]:
@@ -705,15 +686,23 @@ class WorkersCommandMixin:
             created_by_name=str(getattr(owner, "display_name", None) or getattr(owner, "name", "") or ""),
         )
 
-    async def _queue_core_worker_job(self, owner: discord.abc.User, *, job_type: str, payload: dict[str, Any] | None = None, summary: str = "") -> dict[str, Any]:
+    async def _queue_core_worker_job(
+        self,
+        owner: discord.abc.User,
+        *,
+        job_type: str,
+        payload: dict[str, Any] | None = None,
+        summary: str = "",
+        target_worker_id: str = "",
+    ) -> dict[str, Any]:
         registry = get_core_workers_registry()
-        snapshot = await asyncio.to_thread(registry.snapshot)
-        workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
-        target_worker_id = ""
-        for worker in workers:
-            if isinstance(worker, dict) and worker.get("online"):
-                target_worker_id = str(worker.get("worker_id") or "")
-                break
+        if not target_worker_id:
+            snapshot = await asyncio.to_thread(registry.snapshot)
+            workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
+            for worker in workers:
+                if isinstance(worker, dict) and worker.get("online"):
+                    target_worker_id = str(worker.get("worker_id") or "")
+                    break
         return await asyncio.to_thread(
             registry.create_job,
             job_type=job_type,
@@ -768,21 +757,24 @@ class WorkersCommandMixin:
             note = f"watchdog falhou: {type(exc).__name__}: {exc}"
         return await self._collect_workers_snapshot(action_note=note, watch_output=output)
 
-    async def _send_workers_panel(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or int(getattr(interaction.guild, "id", 0) or 0) != WORKERS_COMMAND_GUILD_ID:
-            await interaction.response.send_message("Esse painel só funciona na guilda configurada para workers.", ephemeral=True)
+    async def _send_workers_panel_from_context(self, ctx: commands.Context) -> None:
+        if ctx.guild is None or int(getattr(ctx.guild, "id", 0) or 0) != WORKERS_COMMAND_GUILD_ID:
+            with contextlib.suppress(Exception):
+                await ctx.message.delete()
             return
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        if not await self._can_use_workers(interaction):
-            await interaction.followup.send("Esse painel de workers é exclusivo do dono do bot.", ephemeral=True)
+        if not await self._can_use_workers_author(ctx.author):
+            with contextlib.suppress(Exception):
+                await ctx.message.delete()
             return
+
+        with contextlib.suppress(Exception):
+            await ctx.message.delete()
 
         snapshot = await self._collect_workers_snapshot()
-        view = WorkersPanelView(self, owner_id=int(interaction.user.id), snapshot=snapshot)
-        message = await interaction.followup.send(view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        view = WorkersPanelView(self, owner_id=int(ctx.author.id), snapshot=snapshot)
+        message = await ctx.send(view=view, allowed_mentions=discord.AllowedMentions.none())
         view.message = message
 
-    @app_commands.command(name="workers", description="Abre o painel Core Worker privado da VPS")
-    @app_commands.guilds(WORKERS_COMMAND_GUILD)
-    async def workers(self, interaction: discord.Interaction):
-        await self._send_workers_panel(interaction)
+    @commands.command(name="workers", aliases=["worker", "w"], hidden=True)
+    async def workers(self, ctx: commands.Context):
+        await self._send_workers_panel_from_context(ctx)

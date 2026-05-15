@@ -107,6 +107,8 @@ REMOVED_SLASH_COMMANDS = {
     "callkeeper",
     # O painel técnico de TTS foi movido para /vps > TTS.
     "health",
+    # Core Workers agora é comando privado de prefixo: workers/worker/w.
+    "workers",
 }
 
 def _cfg(*names: str, default=None):
