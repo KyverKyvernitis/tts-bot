@@ -177,19 +177,22 @@ PHONE_WORKER_UPDATE_MAX_TOTAL_BYTES=1048576
 
 ## Onboarding rápido de novo celular
 
-Para adicionar um segundo celular, o fluxo recomendado é:
+Este fluxo é temporário enquanto o APK **Core Worker** não existe. No APK, o pareamento, token, start do agent, heartbeat e seleção de perfil serão feitos automaticamente por botão/QR.
 
-1. Conectar o celular no Tailscale.
-2. Copiar esta pasta para o Termux como `~/phone-worker` ou `~/phone-worker-install`.
-3. No painel privado `workers`, usar **Parear novo worker** para gerar `CORE-XXXX`.
-4. Rodar no Termux:
+Para adicionar um segundo celular hoje:
+
+1. Conecte o celular no Tailscale.
+2. Copie/instale esta pasta como `~/phone-worker`.
+3. No painel privado `workers`, use **Parear novo worker**.
+4. O painel já gera um comando pronto com código temporário e URL real da VPS. Copie esse comando no Termux do novo celular.
+
+Exemplo do comando gerado:
 
 ```bash
-cd ~/phone-worker
-bash ./bootstrap-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:10000 "Xiaomi Worker 2" midia
+cd ~/phone-worker && bash ./bootstrap-phone-worker.sh CORE-XXXX http://100.x.x.x:10000 "Core Worker 2" midia
 ```
 
-O bootstrap instala/repara dependências básicas, copia scripts auxiliares, pareia, salva `~/.phone-worker.env`, inicia o worker e tenta um heartbeat.
+O bootstrap instala/repara dependências básicas, pareia, salva `~/.phone-worker.env`, inicia o worker e tenta um heartbeat. Se o worker já estiver instalado, o painel também mostra o comando curto com `pair-phone-worker.sh`.
 
 Perfis aceitos pelo `pair-phone-worker.sh` e pelo bootstrap:
 
@@ -201,7 +204,7 @@ Perfis aceitos pelo `pair-phone-worker.sh` e pelo bootstrap:
 Também é possível passar uma lista customizada no lugar do perfil:
 
 ```bash
-~/phone-worker/pair-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:10000 "Worker Logs" "phone-worker,diagnostics,log-summary"
+~/phone-worker/pair-phone-worker.sh CORE-XXXX http://100.x.x.x:10000 "Worker Logs" "phone-worker,diagnostics,log-summary"
 ```
 
 Com 2 ou mais workers online, o painel `workers` libera **Melhor worker disponível** e **Teste failover**. Jobs sem alvo fixo são entregues para qualquer worker compatível; se um job em execução perder lease, ele volta para a fila e outro worker compatível pode assumir.

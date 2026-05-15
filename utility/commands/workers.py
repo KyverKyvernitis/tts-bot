@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -182,7 +183,45 @@ def _repo_root() -> Path:
 
 
 def _public_base_url() -> str:
-    return str(os.getenv("CORE_WORKER_PUBLIC_BASE_URL") or os.getenv("VPS_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    """URL pública/privada que novos workers devem usar para parear.
+
+    Preferência:
+    1. CORE_WORKER_PUBLIC_BASE_URL/VPS_PUBLIC_BASE_URL explícito;
+    2. Tailscale da própria VPS + PORT;
+    3. placeholder curto para não mostrar comando errado.
+    """
+    explicit = str(os.getenv("CORE_WORKER_PUBLIC_BASE_URL") or os.getenv("VPS_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if explicit and "IP_TAILSCALE_DA_VPS" not in explicit:
+        return explicit
+    port = str(os.getenv("CORE_WORKER_PUBLIC_PORT") or os.getenv("PORT") or "10000").strip() or "10000"
+    host = str(os.getenv("CORE_WORKER_PUBLIC_HOST") or os.getenv("VPS_TAILSCALE_HOST") or "").strip()
+    if not host:
+        try:
+            proc = subprocess.run(
+                ["tailscale", "ip", "-4"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=1.5,
+                check=False,
+            )
+            for line in (proc.stdout or "").splitlines():
+                candidate = line.strip()
+                if re.fullmatch(r"100(?:\.\d{1,3}){3}", candidate):
+                    host = candidate
+                    break
+            if not host:
+                host = next((line.strip() for line in (proc.stdout or "").splitlines() if line.strip()), "")
+        except Exception:
+            host = ""
+    if host:
+        return f"http://{host}:{port}"
+    return f"http://IP_TAILSCALE_DA_VPS:{port}"
+
+
+def _termux_command_block(command: str) -> str:
+    command = re.sub(r"\s+", " ", str(command or "")).strip()
+    return f"```bash\n{command}\n```"
 
 
 def _battery_text(worker: dict[str, Any]) -> str:
@@ -966,24 +1005,28 @@ class WorkersPanelView(discord.ui.LayoutView):
         try:
             pairing = await self.cog._create_core_worker_pairing(interaction.user)
             code = str(pairing.get("code") or "")
-            ttl = _format_seconds(pairing.get("ttl_seconds"))
             expires = _format_seconds(max(0, float(pairing.get("expires_at") or 0) - time.time()))
-            base_url = _public_base_url() or "http://IP_TAILSCALE_DA_VPS:10000"
+            base_url = _public_base_url()
+            default_name = "Core Worker 2"
+            default_profile = "midia"
+            bootstrap_cmd = f'cd ~/phone-worker && bash ./bootstrap-phone-worker.sh {code} {base_url} "{default_name}" {default_profile}'
+            pair_cmd = f'~/phone-worker/pair-phone-worker.sh {code} {base_url} "{default_name}" {default_profile}'
             msg = (
-                "## 🔐 Pareamento Core Worker\n"
-                f"Código temporário: `{code}`\n"
-                f"Validade: `{ttl}` · expira em `{expires}`\n\n"
-                "### Celular já com `~/phone-worker`\n"
-                f"`~/phone-worker/pair-phone-worker.sh {code} {base_url} \"Meu Worker\" midia`\n\n"
-                "### Instalação/repair local no Termux\n"
-                f"`cd ~/phone-worker && bash ./bootstrap-phone-worker.sh {code} {base_url} \"Meu Worker\" midia`\n\n"
-                "Perfis: `leve`, `midia`, `completo`, `bedrock`. O token é salvo em `~/.phone-worker.env` e nunca é enviado ao GitHub."
+                "## 🔐 Parear novo Core Worker\n"
+                f"**Código:** `{code}` · expira em `{expires}`\n"
+                "-# Fluxo temporário para Termux. No APK Core Worker, isso será automático com botão/QR.\n\n"
+                "**Comando principal para o novo celular:**\n"
+                f"{_termux_command_block(bootstrap_cmd)}"
+                "**Se o worker já estiver instalado:**\n"
+                f"{_termux_command_block(pair_cmd)}"
+                f"Perfil: `{default_profile}` · altere o nome entre aspas se quiser.\n"
+                "-# Perfis: `leve`, `midia`, `completo`, `bedrock`. O token fica só em `~/.phone-worker.env`."
             )
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"código de pareamento gerado: {code}")
             self._ensure_selected_worker()
             self._rebuild_layout()
             await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
-            await interaction.followup.send(msg, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            await interaction.followup.send(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha ao gerar pareamento: {_compact_failure(exc)}")
             self._ensure_selected_worker()
@@ -992,22 +1035,17 @@ class WorkersPanelView(discord.ui.LayoutView):
             await interaction.followup.send("Não consegui gerar o pareamento agora.", ephemeral=True)
 
     async def _show_onboarding_guide(self, interaction: discord.Interaction):
-        base_url = _public_base_url() or "http://IP_TAILSCALE_DA_VPS:10000"
-        profiles = "\n".join(
-            f"- `{name}`: " + ", ".join(roles)
-            for name, roles in WORKER_ROLE_PROFILES.items()
-        )
+        base_url = _public_base_url()
         msg = (
             "## 📲 Novo celular como Core Worker\n"
-            "1. Instale/conecte o Tailscale no celular.\n"
-            "2. Copie a pasta `deploy/termux/phone-worker` para o Termux ou use o sync quando SSH estiver pronto.\n"
-            "3. Gere um código em **Parear novo worker**.\n"
-            "4. No Termux, rode um destes comandos:\n\n"
-            f"`cd ~/phone-worker && bash ./bootstrap-phone-worker.sh CORE-XXXX {base_url} \"Xiaomi Worker 2\" midia`\n"
-            f"`~/phone-worker/pair-phone-worker.sh CORE-XXXX {base_url} \"Xiaomi Worker 2\" midia`\n\n"
-            "### Perfis de roles\n"
-            f"{profiles}\n\n"
-            "Depois do pareamento, use **Teste failover** com 2 workers online para validar a escolha automática."
+            "Este guia é temporário para Termux. No APK Core Worker, o app fará pareamento, token, heartbeat e start automaticamente.\n\n"
+            "**Fluxo manual atual:**\n"
+            "1. Conecte o celular no Tailscale.\n"
+            "2. Copie/instale `~/phone-worker`.\n"
+            "3. Use **Parear novo worker** para gerar código e comando pronto.\n\n"
+            f"**URL da VPS detectada:** `{base_url}`\n"
+            "**Perfis:** `leve`, `midia`, `completo`, `bedrock`\n\n"
+            "Com 2+ workers online, use **Teste failover** para validar a escolha automática."
         )
         await interaction.response.send_message(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
