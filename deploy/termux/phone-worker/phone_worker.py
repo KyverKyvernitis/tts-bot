@@ -23,6 +23,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 START_TIME = time.time()
 JOBS_STARTED = 0
@@ -33,6 +34,8 @@ DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
 PHONE_WORKER_VERSION = "1.2.0"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
+DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
+DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
 
 
 
@@ -193,6 +196,51 @@ def _heartbeat_configured() -> bool:
     )
 
 
+def _core_worker_jobs_configured() -> bool:
+    if not _env_bool("CORE_WORKER_JOBS_ENABLED", True):
+        return False
+    return _heartbeat_configured()
+
+
+def _core_worker_auth_parts() -> tuple[str, str, str]:
+    base_url = str(os.getenv("CORE_WORKER_VPS_URL") or os.getenv("CORE_WORKER_BASE_URL") or "").strip().rstrip("/")
+    token = str(os.getenv("CORE_WORKER_TOKEN") or "").strip()
+    worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
+    return base_url, token, worker_id
+
+
+def _post_core_worker_json(path: str, payload: dict[str, Any], *, timeout: float = 8.0) -> tuple[int, dict[str, Any]]:
+    base_url, token, _worker_id = _core_worker_auth_parts()
+    if not base_url or not token:
+        return 0, {"ok": False, "error": "Core Worker não configurado"}
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}{path}",
+        data=body,
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp:
+            raw = resp.read(1024 * 1024)
+            status = int(getattr(resp, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read(16 * 1024)
+        status = int(exc.code)
+    parsed: dict[str, Any]
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+        parsed = data if isinstance(data, dict) else {"ok": False, "error": "resposta não é objeto"}
+    except Exception as exc:
+        parsed = {"ok": False, "error": f"JSON inválido da VPS: {type(exc).__name__}"}
+    return status, parsed
+
+
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     status = _system_status()
     worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
@@ -237,35 +285,15 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
 
 
 def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6.0) -> bool:
-    base_url = str(os.getenv("CORE_WORKER_VPS_URL") or os.getenv("CORE_WORKER_BASE_URL") or "").strip().rstrip("/")
-    token = str(os.getenv("CORE_WORKER_TOKEN") or "").strip()
-    worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
-    if not base_url or not token or not worker_id:
+    _base_url, _token, worker_id = _core_worker_auth_parts()
+    if not _base_url or not _token or not worker_id:
         return False
     payload = _core_worker_payload(host=host, port=port)
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url}/core-worker/heartbeat",
-        data=body,
-        headers={
-            "Content-Type": "application/json; charset=utf-8",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp:
-            resp.read(4096)
-        return True
-    except urllib.error.HTTPError as exc:
-        # Nunca loga token. O corpo pode conter só erro do registry.
-        try:
-            detail = exc.read().decode("utf-8", errors="replace")[:180]
-        except Exception:
-            detail = ""
-        print(f"[core-worker-heartbeat] HTTP {exc.code}: {_short_text(detail, limit=180)}", flush=True)
+        status, data = _post_core_worker_json("/core-worker/heartbeat", payload, timeout=timeout)
+        if 200 <= status < 300 and data.get("ok", True):
+            return True
+        print(f"[core-worker-heartbeat] HTTP {status}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
     except Exception as exc:
         print(f"[core-worker-heartbeat] falhou: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
     return False
@@ -342,6 +370,7 @@ def _system_status() -> dict[str, Any]:
         "worker": "phone-worker",
         "version": PHONE_WORKER_VERSION,
         "core_worker_heartbeat": _heartbeat_configured(),
+        "core_worker_jobs": _core_worker_jobs_configured(),
         "pid": os.getpid(),
         "uptime_seconds": round(time.time() - START_TIME, 3),
         "platform": platform.platform(),
@@ -835,6 +864,164 @@ class WorkerHandler(BaseHTTPRequestHandler):
         }
 
 
+
+def _command_version(command: str) -> dict[str, Any]:
+    if not shutil.which(command):
+        return {"ok": False, "available": False, "command": command}
+    try:
+        proc = subprocess.run([command, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4)
+        output = (proc.stdout or proc.stderr).decode("utf-8", errors="replace").splitlines()
+        return {
+            "ok": proc.returncode == 0,
+            "available": True,
+            "command": command,
+            "returncode": proc.returncode,
+            "version_line": _short_text(output[0] if output else "", limit=180),
+        }
+    except Exception as exc:
+        return {"ok": False, "available": True, "command": command, "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"}
+
+
+def _task_runner(max_body_bytes: int, max_output_bytes: int, job_timeout: int) -> WorkerHandler:
+    runner = WorkerHandler.__new__(WorkerHandler)
+    runner.server = SimpleNamespace(
+        max_body_bytes=max_body_bytes,
+        max_output_bytes=max_output_bytes,
+        job_timeout=job_timeout,
+        worker_token="",
+    )
+    return runner
+
+
+def _sanitize_job_result(result: dict[str, Any]) -> dict[str, Any]:
+    max_bytes = max(4096, _env_int("CORE_WORKER_JOB_RESULT_MAX_BYTES", DEFAULT_CORE_JOB_RESULT_MAX_BYTES))
+    try:
+        raw = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except Exception:
+        return {"ok": False, "error": "resultado não serializável"}
+    if len(raw) <= max_bytes:
+        return result
+    return {
+        "ok": bool(result.get("ok", True)),
+        "truncated": True,
+        "original_json_bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "keys": sorted(str(key)[:80] for key in result.keys())[:40],
+        "summary": "resultado grande demais para salvar no registry; use rota direta do phone-worker para payload pesado",
+    }
+
+
+def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_output_bytes: int, job_timeout: int) -> dict[str, Any]:
+    global JOBS_STARTED, JOBS_FAILED
+    kind = str(job.get("type") or "").strip().lower().replace("-", "_")
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    JOBS_STARTED += 1
+    try:
+        if kind in {"ping", "status"}:
+            result = _system_status()
+        elif kind == "diagnostic_basic":
+            result = {
+                "ok": True,
+                "system": _system_status(),
+                "battery": _battery_snapshot(),
+                "network": _network_snapshot(),
+                "ffmpeg": _command_version("ffmpeg"),
+                "ffprobe": _command_version("ffprobe"),
+                "roles": _env_list("CORE_WORKER_ROLES", []),
+                "capabilities": _env_list("CORE_WORKER_CAPABILITIES", []),
+            }
+        elif kind == "ffmpeg_check":
+            result = _command_version("ffmpeg")
+        elif kind == "ffprobe_check":
+            result = _command_version("ffprobe")
+        elif kind in {"zip_validate", "log_summary", "text_stats", "maintenance_plan"}:
+            runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
+            if kind == "zip_validate":
+                result = runner._task_zip_validate(payload)
+            elif kind == "log_summary":
+                result = runner._task_log_summary(payload)
+            elif kind == "text_stats":
+                result = runner._task_text_stats(payload)
+            else:
+                result = runner._task_maintenance_plan(payload)
+        else:
+            raise ValueError("job não permitido pelo worker")
+        result.setdefault("ok", True)
+        return _sanitize_job_result(result)
+    except Exception as exc:
+        JOBS_FAILED += 1
+        raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
+
+
+def _send_core_worker_job_result(*, job_id: str, status: str, result: dict[str, Any] | None = None, error: str = "", timeout: float = 8.0) -> bool:
+    _base_url, _token, worker_id = _core_worker_auth_parts()
+    if not worker_id:
+        return False
+    payload = {
+        "worker_id": worker_id,
+        "job_id": job_id,
+        "status": status,
+        "result": result or {},
+        "error": _short_text(error, limit=240),
+    }
+    code, data = _post_core_worker_json("/core-worker/jobs/result", payload, timeout=timeout)
+    if 200 <= code < 300 and data.get("ok", True):
+        return True
+    print(f"[core-worker-jobs] falha ao enviar resultado HTTP {code}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
+    return False
+
+
+def _poll_core_worker_job_once(*, host: str, port: int, max_body_bytes: int, max_output_bytes: int, job_timeout: int, timeout: float = 8.0) -> bool:
+    _base_url, _token, worker_id = _core_worker_auth_parts()
+    if not worker_id:
+        return False
+    payload = _core_worker_payload(host=host, port=port)
+    code, data = _post_core_worker_json("/core-worker/jobs/poll", payload, timeout=timeout)
+    if not (200 <= code < 300):
+        print(f"[core-worker-jobs] poll HTTP {code}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
+        return False
+    job = data.get("job") if isinstance(data.get("job"), dict) else None
+    if not job:
+        return False
+    job_id = str(job.get("job_id") or "").strip()
+    kind = str(job.get("type") or "").strip()
+    if not job_id:
+        return False
+    print(f"[core-worker-jobs] executando {job_id} ({kind})", flush=True)
+    try:
+        result = _execute_core_worker_job(job, max_body_bytes=max_body_bytes, max_output_bytes=max_output_bytes, job_timeout=job_timeout)
+        _send_core_worker_job_result(job_id=job_id, status="succeeded", result=result, timeout=timeout)
+    except Exception as exc:
+        _send_core_worker_job_result(job_id=job_id, status="failed", result={}, error=f"{type(exc).__name__}: {exc}", timeout=timeout)
+    return True
+
+
+def _start_core_worker_jobs(*, host: str, port: int, max_body_bytes: int, max_output_bytes: int, job_timeout: int) -> None:
+    if not _core_worker_jobs_configured():
+        print("[core-worker-jobs] desativado ou incompleto; habilite CORE_WORKER_HEARTBEAT_ENABLED/JOBS e configure URL, ID e TOKEN", flush=True)
+        return
+    interval = max(3.0, min(120.0, _env_float("CORE_WORKER_JOB_POLL_INTERVAL_SECONDS", DEFAULT_JOB_POLL_INTERVAL_SECONDS)))
+
+    def loop() -> None:
+        while True:
+            try:
+                ran_job = _poll_core_worker_job_once(
+                    host=host,
+                    port=port,
+                    max_body_bytes=max_body_bytes,
+                    max_output_bytes=max_output_bytes,
+                    job_timeout=job_timeout,
+                    timeout=8.0,
+                )
+                time.sleep(0.5 if ran_job else interval)
+            except Exception as exc:
+                print(f"[core-worker-jobs] loop falhou: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
+                time.sleep(interval)
+
+    thread = threading.Thread(target=loop, name="core-worker-jobs", daemon=True)
+    thread.start()
+    print(f"[core-worker-jobs] polling ativo; intervalo={int(interval)}s", flush=True)
+
 def main() -> int:
     _load_env_file()
     parser = argparse.ArgumentParser(description="Worker auxiliar do celular para tarefas opcionais da VPS.")
@@ -845,19 +1032,41 @@ def main() -> int:
     parser.add_argument("--max-output-mb", type=int, default=_env_int("PHONE_WORKER_MAX_OUTPUT_MB", DEFAULT_MAX_OUTPUT_MB))
     parser.add_argument("--job-timeout", type=int, default=_env_int("PHONE_WORKER_JOB_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
     parser.add_argument("--heartbeat-once", action="store_true", help="envia um heartbeat para a VPS e encerra")
+    parser.add_argument("--jobs-once", action="store_true", help="faz um poll de job na VPS, executa no máximo um job e encerra")
     args = parser.parse_args()
+
+    max_body_bytes = max(1, args.max_body_mb) * 1024 * 1024
+    max_output_bytes = max(1, args.max_output_mb) * 1024 * 1024
+    job_timeout = max(3, args.job_timeout)
 
     if args.heartbeat_once:
         ok = _send_core_worker_heartbeat_once(host=args.host, port=args.port, timeout=8.0)
         return 0 if ok else 1
+    if args.jobs_once:
+        ok = _poll_core_worker_job_once(
+            host=args.host,
+            port=args.port,
+            max_body_bytes=max_body_bytes,
+            max_output_bytes=max_output_bytes,
+            job_timeout=job_timeout,
+            timeout=8.0,
+        )
+        return 0 if ok else 1
 
     server = ThreadingHTTPServer((args.host, args.port), WorkerHandler)
     server.worker_token = args.token
-    server.max_body_bytes = max(1, args.max_body_mb) * 1024 * 1024
-    server.max_output_bytes = max(1, args.max_output_mb) * 1024 * 1024
-    server.job_timeout = max(3, args.job_timeout)
+    server.max_body_bytes = max_body_bytes
+    server.max_output_bytes = max_output_bytes
+    server.job_timeout = job_timeout
     print(f"[phone-worker] ouvindo em {args.host}:{args.port}; token={'sim' if args.token else 'não'}; versão={PHONE_WORKER_VERSION}", flush=True)
     _start_core_worker_heartbeat(host=args.host, port=args.port)
+    _start_core_worker_jobs(
+        host=args.host,
+        port=args.port,
+        max_body_bytes=max_body_bytes,
+        max_output_bytes=max_output_bytes,
+        job_timeout=job_timeout,
+    )
     server.serve_forever()
     return 0
 

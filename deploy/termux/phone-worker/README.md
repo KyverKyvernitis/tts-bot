@@ -7,6 +7,10 @@ Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e us
 ## O que ele expõe
 
 - `GET /health` e `GET /status`: saúde do worker.
+- `POST /task`: tarefas opcionais diretas usadas por partes antigas da VPS.
+- polling seguro no registry da VPS:
+  - `POST /core-worker/jobs/poll` na VPS para buscar job pendente;
+  - `POST /core-worker/jobs/result` na VPS para devolver resultado.
 - `POST /task`: tarefas opcionais:
   - `ping`
   - `sha256`
@@ -118,6 +122,9 @@ CORE_WORKER_NAME=Redmi Worker 01
 CORE_WORKER_ROLES=phone-worker,diagnostics,log-summary,zip-validate,ffmpeg,ffprobe,tts-convert
 CORE_WORKER_CAPABILITIES=phone-worker,diagnostics,log-summary,maintenance-plan,zip-validate,ffmpeg,ffprobe,tts-convert
 CORE_WORKER_HEARTBEAT_INTERVAL_SECONDS=30
+CORE_WORKER_JOBS_ENABLED=true
+CORE_WORKER_JOB_POLL_INTERVAL_SECONDS=10
+CORE_WORKER_JOB_RESULT_MAX_BYTES=262144
 ```
 
 Teste manual sem iniciar servidor novo:
@@ -125,7 +132,8 @@ Teste manual sem iniciar servidor novo:
 ```bash
 cd ~/phone-worker
 python phone_worker.py --heartbeat-once
+python phone_worker.py --jobs-once
 ```
 
-O heartbeat envia status, bateria/rede quando o Termux:API estiver disponível, ffmpeg/ffprobe, disco e saúde básica. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
+O heartbeat envia status, bateria/rede quando o Termux:API estiver disponível, ffmpeg/ffprobe, disco e saúde básica. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `ffmpeg_check`, `ffprobe_check`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
 

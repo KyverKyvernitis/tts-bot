@@ -87,6 +87,30 @@ def core_worker_heartbeat():
     return jsonify(body), status
 
 
+
+
+@app.post("/core-worker/jobs/poll")
+def core_worker_jobs_poll():
+    from utility.commands.workers_registry import core_worker_poll_job_http
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    status, body = core_worker_poll_job_http(request.headers, payload, remote_addr=request.remote_addr or "")
+    return jsonify(body), status
+
+
+@app.post("/core-worker/jobs/result")
+def core_worker_jobs_result():
+    from utility.commands.workers_registry import core_worker_job_result_http
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    status, body = core_worker_job_result_http(request.headers, payload, remote_addr=request.remote_addr or "")
+    return jsonify(body), status
+
+
 @app.get("/tts-audio/<token>")
 @app.get("/tts-audio/<token>.<ext>")
 def tts_audio(token: str, ext: str | None = None):

@@ -15,6 +15,21 @@ REGISTRY_VERSION = 1
 DEFAULT_PAIRING_TTL_SECONDS = 300
 DEFAULT_OFFLINE_AFTER_SECONDS = 90
 DEFAULT_MAX_WORKERS = 24
+DEFAULT_JOB_TTL_SECONDS = 900
+DEFAULT_JOB_LEASE_SECONDS = 120
+DEFAULT_JOB_HISTORY_LIMIT = 80
+
+CORE_WORKER_JOB_TYPES = {
+    "ping",
+    "status",
+    "diagnostic_basic",
+    "ffmpeg_check",
+    "ffprobe_check",
+    "zip_validate",
+    "log_summary",
+    "text_stats",
+    "maintenance_plan",
+}
 
 _ROLE_RE = re.compile(r"[^a-z0-9_.:-]+")
 _CODE_RE = re.compile(r"[^A-Z0-9]+")
@@ -106,7 +121,7 @@ def normalize_roles(value: object, *, default: list[str] | None = None, limit: i
     return roles
 
 
-def _safe_dict(value: object, *, max_items: int = 32) -> dict[str, Any]:
+def _safe_dict(value: object, *, max_items: int = 32, max_string: int = 8192) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     clean: dict[str, Any] = {}
@@ -114,16 +129,51 @@ def _safe_dict(value: object, *, max_items: int = 32) -> dict[str, Any]:
         k = _short_text(key, limit=48)
         if not k:
             continue
-        if isinstance(item, (str, int, float, bool)) or item is None:
+        if isinstance(item, str):
+            clean[k] = item if len(item) <= max_string else item[:max_string] + "…[truncated]"
+        elif isinstance(item, (int, float, bool)) or item is None:
             clean[k] = item
         elif isinstance(item, list):
             clean[k] = [x for x in item[:24] if isinstance(x, (str, int, float, bool)) or x is None]
         elif isinstance(item, Mapping):
-            clean[k] = _safe_dict(item, max_items=12)
+            clean[k] = _safe_dict(item, max_items=12, max_string=max_string)
         else:
             clean[k] = _short_text(item, limit=120)
     return clean
 
+
+
+
+def _safe_job_type(value: object) -> str:
+    job_type = str(value or "").strip().lower().replace("-", "_")
+    job_type = re.sub(r"[^a-z0-9_]+", "_", job_type).strip("_")
+    if job_type not in CORE_WORKER_JOB_TYPES:
+        raise CoreWorkerRegistryError("tipo de job não permitido", status=400)
+    return job_type
+
+
+def _compact_job_public(record: Mapping[str, Any], *, include_result: bool = False, now: float | None = None) -> dict[str, Any]:
+    ts = _now() if now is None else float(now)
+    created_at = float(record.get("created_at") or 0.0)
+    public = {
+        "job_id": str(record.get("job_id") or ""),
+        "type": _short_text(record.get("type"), limit=40),
+        "status": _short_text(record.get("status"), limit=24, default="queued"),
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+        "age_seconds": round(max(0.0, ts - created_at), 3) if created_at else None,
+        "worker_id": _short_text(record.get("worker_id"), limit=64),
+        "target_worker_id": _short_text(record.get("target_worker_id"), limit=64),
+        "attempts": int(record.get("attempts") or 0),
+        "max_attempts": int(record.get("max_attempts") or 1),
+        "expires_at": record.get("expires_at"),
+        "lease_until": record.get("lease_until"),
+        "summary": _short_text(record.get("summary"), limit=160),
+        "error": _short_text(record.get("error"), limit=180),
+    }
+    if include_result:
+        public["result"] = _safe_dict(record.get("result"), max_items=32)
+    return public
 
 def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = None) -> dict[str, Any]:
     ts = _now() if now is None else float(now)
@@ -166,7 +216,7 @@ class CoreWorkersRegistry:
         self._lock = threading.RLock()
 
     def _empty(self) -> dict[str, Any]:
-        return {"version": REGISTRY_VERSION, "pairings": {}, "workers": {}}
+        return {"version": REGISTRY_VERSION, "pairings": {}, "workers": {}, "jobs": {}}
 
     def _load_unlocked(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -182,6 +232,8 @@ class CoreWorkersRegistry:
             data["pairings"] = {}
         if not isinstance(data.get("workers"), dict):
             data["workers"] = {}
+        if not isinstance(data.get("jobs"), dict):
+            data["jobs"] = {}
         return data
 
     def _save_unlocked(self, data: dict[str, Any]) -> None:
@@ -309,11 +361,7 @@ class CoreWorkersRegistry:
         with self._lock:
             data = self._load_unlocked()
             workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
-            record = workers.get(worker_id)
-            if not isinstance(record, dict):
-                raise CoreWorkerRegistryError("worker não encontrado", status=404)
-            if str(record.get("token_hash") or "") != _hash_secret(token):
-                raise CoreWorkerRegistryError("token inválido", status=403)
+            worker_id, record = self._authenticate_worker_unlocked(data, worker_id=worker_id, token=token)
             record["updated_at"] = ts
             record["last_heartbeat_at"] = ts
             record["remote_addr"] = _short_text(remote_addr, limit=64)
@@ -333,6 +381,240 @@ class CoreWorkersRegistry:
             public = _compact_worker_public(record, now=ts)
         return {"ok": True, "worker": public}
 
+    def _cleanup_jobs_unlocked(self, data: dict[str, Any], *, now: float | None = None, keep_history: int | None = None) -> dict[str, int]:
+        ts = _now() if now is None else float(now)
+        keep = max(10, int(keep_history or _env_int("CORE_WORKER_JOB_HISTORY_LIMIT", DEFAULT_JOB_HISTORY_LIMIT)))
+        jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+        expired_running = 0
+        expired_queued = 0
+        for job in list(jobs.values()):
+            if not isinstance(job, dict):
+                continue
+            status = str(job.get("status") or "queued")
+            expires_at = float(job.get("expires_at") or 0.0)
+            lease_until = float(job.get("lease_until") or 0.0)
+            if status == "running" and lease_until and lease_until <= ts:
+                attempts = int(job.get("attempts") or 0)
+                max_attempts = int(job.get("max_attempts") or 1)
+                if attempts < max_attempts and (not expires_at or expires_at > ts):
+                    job["status"] = "queued"
+                    job["worker_id"] = ""
+                    job["lease_until"] = 0
+                    job["updated_at"] = ts
+                else:
+                    job["status"] = "failed"
+                    job["error"] = "lease expirou sem resultado"
+                    job["finished_at"] = ts
+                    job["updated_at"] = ts
+                expired_running += 1
+            elif status == "queued" and expires_at and expires_at <= ts:
+                job["status"] = "expired"
+                job["error"] = "job expirou antes de ser executado"
+                job["finished_at"] = ts
+                job["updated_at"] = ts
+                expired_queued += 1
+
+        ordered = sorted(
+            [(jid, job) for jid, job in jobs.items() if isinstance(job, Mapping)],
+            key=lambda item: float(item[1].get("updated_at") or item[1].get("created_at") or 0.0),
+            reverse=True,
+        )
+        active_status = {"queued", "running"}
+        active = [(jid, job) for jid, job in ordered if str(job.get("status") or "queued") in active_status]
+        done = [(jid, job) for jid, job in ordered if str(job.get("status") or "queued") not in active_status]
+        trimmed = 0
+        for jid, _job in done[keep:]:
+            jobs.pop(jid, None)
+            trimmed += 1
+        data["jobs"] = jobs
+        return {"expired_running": expired_running, "expired_queued": expired_queued, "trimmed": trimmed}
+
+    def create_job(
+        self,
+        *,
+        job_type: str,
+        payload: Mapping[str, Any] | None = None,
+        created_by_id: int = 0,
+        created_by_name: str = "",
+        target_worker_id: str = "",
+        required_roles: list[str] | None = None,
+        required_capabilities: list[str] | None = None,
+        ttl_seconds: int | None = None,
+        lease_seconds: int | None = None,
+        max_attempts: int = 1,
+        summary: str = "",
+    ) -> dict[str, Any]:
+        kind = _safe_job_type(job_type)
+        ts = _now()
+        ttl = max(30, min(3600, int(ttl_seconds or _env_int("CORE_WORKER_JOB_TTL_SECONDS", DEFAULT_JOB_TTL_SECONDS))))
+        lease = max(10, min(900, int(lease_seconds or _env_int("CORE_WORKER_JOB_LEASE_SECONDS", DEFAULT_JOB_LEASE_SECONDS))))
+        job_id = "job-" + secrets.token_hex(8)
+        record = {
+            "job_id": job_id,
+            "type": kind,
+            "payload": _safe_dict(payload or {}, max_items=64, max_string=131072),
+            "status": "queued",
+            "created_at": ts,
+            "updated_at": ts,
+            "expires_at": ts + ttl,
+            "lease_seconds": lease,
+            "lease_until": 0,
+            "created_by_id": int(created_by_id or 0),
+            "created_by_name": _short_text(created_by_name, limit=80),
+            "target_worker_id": _safe_worker_id(target_worker_id) if target_worker_id else "",
+            "worker_id": "",
+            "required_roles": normalize_roles(required_roles or [], limit=12),
+            "required_capabilities": normalize_roles(required_capabilities or [], limit=12),
+            "attempts": 0,
+            "max_attempts": max(1, min(5, int(max_attempts or 1))),
+            "summary": _short_text(summary or kind, limit=160),
+            "result": {},
+            "error": "",
+        }
+        with self._lock:
+            data = self._load_unlocked()
+            self._cleanup_jobs_unlocked(data, now=ts)
+            jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            jobs[job_id] = record
+            data["jobs"] = jobs
+            self._save_unlocked(data)
+        return {"ok": True, "job": _compact_job_public(record, include_result=False, now=ts)}
+
+    def cleanup_jobs(self, *, keep_history: int | None = None) -> dict[str, Any]:
+        with self._lock:
+            data = self._load_unlocked()
+            counts = self._cleanup_jobs_unlocked(data, now=_now(), keep_history=keep_history)
+            self._save_unlocked(data)
+            total = len(data.get("jobs") if isinstance(data.get("jobs"), dict) else {})
+        return {"ok": True, "total_jobs": total, **counts}
+
+    def _authenticate_worker_unlocked(self, data: dict[str, Any], *, worker_id: object, token: str) -> tuple[str, dict[str, Any]]:
+        safe_id = _safe_worker_id(worker_id)
+        if not token:
+            raise CoreWorkerRegistryError("token ausente", status=401)
+        workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+        record = workers.get(safe_id)
+        if not isinstance(record, dict):
+            raise CoreWorkerRegistryError("worker não encontrado", status=404)
+        if str(record.get("token_hash") or "") != _hash_secret(token):
+            raise CoreWorkerRegistryError("token inválido", status=403)
+        if not bool(record.get("enabled", True)):
+            raise CoreWorkerRegistryError("worker desativado", status=403)
+        return safe_id, record
+
+    def _job_matches_worker(self, job: Mapping[str, Any], worker_id: str, worker: Mapping[str, Any]) -> bool:
+        target = str(job.get("target_worker_id") or "").strip()
+        if target and target != worker_id:
+            return False
+        roles = set(normalize_roles(worker.get("roles"), limit=32))
+        capabilities = set(normalize_roles(worker.get("capabilities"), limit=48)) | roles
+        required_roles = set(normalize_roles(job.get("required_roles"), limit=16))
+        required_capabilities = set(normalize_roles(job.get("required_capabilities"), limit=16))
+        if required_roles and not required_roles.issubset(roles | capabilities):
+            return False
+        if required_capabilities and not required_capabilities.issubset(capabilities):
+            return False
+        return True
+
+    def poll_job(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
+        worker_id_from_payload = payload.get("worker_id") or payload.get("id")
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            self._cleanup_jobs_unlocked(data, now=ts)
+            worker_id, worker = self._authenticate_worker_unlocked(data, worker_id=worker_id_from_payload, token=token)
+            # Poll também conta como sinal de vida, para o painel não depender só do heartbeat separado.
+            worker["updated_at"] = ts
+            worker["last_heartbeat_at"] = ts
+            worker["remote_addr"] = _short_text(remote_addr, limit=64)
+            if "roles" in payload:
+                worker["roles"] = normalize_roles(payload.get("roles"), default=normalize_roles(worker.get("roles")), limit=16)
+            if "capabilities" in payload:
+                worker["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(worker.get("capabilities")), limit=24)
+            for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
+                if key in payload:
+                    worker[key] = _safe_dict(payload.get(key), max_items=max_items)
+
+            jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            candidates = sorted(
+                [job for job in jobs.values() if isinstance(job, dict) and str(job.get("status") or "queued") == "queued"],
+                key=lambda job: float(job.get("created_at") or 0.0),
+            )
+            selected: dict[str, Any] | None = None
+            for job in candidates:
+                expires_at = float(job.get("expires_at") or 0.0)
+                if expires_at and expires_at <= ts:
+                    continue
+                if not self._job_matches_worker(job, worker_id, worker):
+                    continue
+                selected = job
+                break
+
+            if selected is not None:
+                selected["status"] = "running"
+                selected["worker_id"] = worker_id
+                selected["attempts"] = int(selected.get("attempts") or 0) + 1
+                lease = max(10, min(900, int(selected.get("lease_seconds") or DEFAULT_JOB_LEASE_SECONDS)))
+                selected["lease_until"] = ts + lease
+                selected["started_at"] = selected.get("started_at") or ts
+                selected["updated_at"] = ts
+                jobs[str(selected.get("job_id"))] = selected
+            data["workers"][worker_id] = worker
+            data["jobs"] = jobs
+            self._save_unlocked(data)
+
+        if selected is None:
+            return {"ok": True, "job": None}
+        return {
+            "ok": True,
+            "job": {
+                "job_id": str(selected.get("job_id") or ""),
+                "type": str(selected.get("type") or ""),
+                "payload": _safe_dict(selected.get("payload"), max_items=64, max_string=131072),
+                "lease_until": selected.get("lease_until"),
+                "attempts": int(selected.get("attempts") or 0),
+            },
+        }
+
+    def submit_job_result(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
+        worker_id_from_payload = payload.get("worker_id") or payload.get("id")
+        job_id = _short_text(payload.get("job_id"), limit=64)
+        if not job_id:
+            raise CoreWorkerRegistryError("job_id ausente", status=400)
+        status = str(payload.get("status") or "succeeded").strip().lower()
+        if status not in {"succeeded", "failed"}:
+            raise CoreWorkerRegistryError("status de job inválido", status=400)
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            worker_id, worker = self._authenticate_worker_unlocked(data, worker_id=worker_id_from_payload, token=token)
+            jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            job = jobs.get(job_id)
+            if not isinstance(job, dict):
+                raise CoreWorkerRegistryError("job não encontrado", status=404)
+            assigned = str(job.get("worker_id") or "")
+            if assigned and assigned != worker_id:
+                raise CoreWorkerRegistryError("job pertence a outro worker", status=403)
+            job["status"] = status
+            job["updated_at"] = ts
+            job["finished_at"] = ts
+            job["lease_until"] = 0
+            job["worker_id"] = worker_id
+            job["result"] = _safe_dict(payload.get("result"), max_items=48)
+            job["error"] = _short_text(payload.get("error"), limit=240)
+            if not job.get("summary"):
+                job["summary"] = _short_text(payload.get("summary"), limit=160)
+            worker["updated_at"] = ts
+            worker["last_heartbeat_at"] = ts
+            worker["remote_addr"] = _short_text(remote_addr, limit=64)
+            data["workers"][worker_id] = worker
+            jobs[job_id] = job
+            data["jobs"] = jobs
+            self._cleanup_jobs_unlocked(data, now=ts)
+            self._save_unlocked(data)
+            public = _compact_job_public(job, include_result=True, now=ts)
+        return {"ok": True, "job": public}
+
     def snapshot(self) -> dict[str, Any]:
         ts = _now()
         with self._lock:
@@ -341,6 +623,7 @@ class CoreWorkersRegistry:
             if expired:
                 self._save_unlocked(data)
             pairings_raw = data.get("pairings") if isinstance(data.get("pairings"), dict) else {}
+            jobs_raw = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
             workers_raw = data.get("workers") if isinstance(data.get("workers"), dict) else {}
             pairings = []
             for record in pairings_raw.values():
@@ -360,17 +643,33 @@ class CoreWorkersRegistry:
                 for record in workers_raw.values()
                 if isinstance(record, Mapping)
             ]
+            jobs = [
+                _compact_job_public(record, include_result=False, now=ts)
+                for record in jobs_raw.values()
+                if isinstance(record, Mapping)
+            ]
         workers.sort(key=lambda item: (not bool(item.get("online")), str(item.get("name") or "").casefold()))
+        jobs.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0.0), reverse=True)
+        queued = sum(1 for item in jobs if item.get("status") == "queued")
+        running = sum(1 for item in jobs if item.get("status") == "running")
+        failed = sum(1 for item in jobs if item.get("status") == "failed")
+        succeeded = sum(1 for item in jobs if item.get("status") == "succeeded")
         return {
             "ok": True,
             "path": str(self.path),
             "workers": workers,
             "pairings": sorted(pairings, key=lambda item: float(item.get("expires_at") or 0.0)),
+            "jobs": jobs[:12],
             "summary": {
                 "registered": len(workers),
                 "online": sum(1 for item in workers if item.get("online")),
                 "offline": sum(1 for item in workers if not item.get("online")),
                 "pairings_active": len(pairings),
+                "jobs_total": len(jobs),
+                "jobs_queued": queued,
+                "jobs_running": running,
+                "jobs_failed": failed,
+                "jobs_succeeded": succeeded,
             },
         }
 
@@ -406,6 +705,26 @@ def redeem_core_worker_pairing_http(payload: Mapping[str, Any], *, remote_addr: 
 def core_worker_heartbeat_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
     try:
         result = get_core_workers_registry().heartbeat(payload, token=_bearer_token(headers), remote_addr=remote_addr)
+        return 200, result
+    except CoreWorkerRegistryError as exc:
+        return exc.status, {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return 500, {"ok": False, "error": f"falha interna: {type(exc).__name__}"}
+
+
+def core_worker_poll_job_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
+    try:
+        result = get_core_workers_registry().poll_job(payload, token=_bearer_token(headers), remote_addr=remote_addr)
+        return 200, result
+    except CoreWorkerRegistryError as exc:
+        return exc.status, {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return 500, {"ok": False, "error": f"falha interna: {type(exc).__name__}"}
+
+
+def core_worker_job_result_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
+    try:
+        result = get_core_workers_registry().submit_job_result(payload, token=_bearer_token(headers), remote_addr=remote_addr)
         return 200, result
     except CoreWorkerRegistryError as exc:
         return exc.status, {"ok": False, "error": str(exc)}

@@ -295,7 +295,8 @@ class WorkersPanelView(discord.ui.LayoutView):
             f"**Estado:** {snapshot.state_label}\n"
             f"**Registry:** `{int((summary or {}).get('registered') or 0)}` registrado(s) · "
             f"`{int((summary or {}).get('online') or 0)}` online · "
-            f"`{int((summary or {}).get('pairings_active') or 0)}` pareamento(s) ativo(s)"
+            f"`{int((summary or {}).get('pairings_active') or 0)}` pareamento(s) ativo(s) · "
+            f"jobs `Q:{int((summary or {}).get('jobs_queued') or 0)}`/`R:{int((summary or {}).get('jobs_running') or 0)}`"
         )
 
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary)
@@ -311,6 +312,12 @@ class WorkersPanelView(discord.ui.LayoutView):
             disabled=not snapshot.configured,
         )
         wake.callback = self._wake_worker
+
+        test_job = discord.ui.Button(label="Testar worker", emoji="🧪", style=discord.ButtonStyle.secondary)
+        test_job.callback = self._queue_worker_test
+
+        cleanup_jobs = discord.ui.Button(label="Limpar jobs", emoji="🧹", style=discord.ButtonStyle.secondary)
+        cleanup_jobs.callback = self._cleanup_jobs
 
         close = discord.ui.Button(label="Fechar", emoji="✖️", style=discord.ButtonStyle.danger)
         close.callback = self._close
@@ -368,6 +375,35 @@ class WorkersPanelView(discord.ui.LayoutView):
             lines.append("-# Pareamentos ativos expiram em: " + " · ".join(active))
         return lines
 
+    def _job_lines(self, snapshot: WorkerSnapshot) -> list[str]:
+        registry = snapshot.registry_snapshot or {}
+        jobs = registry.get("jobs") if isinstance(registry.get("jobs"), list) else []
+        summary = registry.get("summary") if isinstance(registry.get("summary"), dict) else {}
+        lines = [
+            "## 🧾 Job Queue segura",
+            f"Fila: `{int((summary or {}).get('jobs_queued') or 0)}` aguardando · "
+            f"`{int((summary or {}).get('jobs_running') or 0)}` rodando · "
+            f"`{int((summary or {}).get('jobs_succeeded') or 0)}` ok · "
+            f"`{int((summary or {}).get('jobs_failed') or 0)}` falha",
+        ]
+        if not jobs:
+            lines.append("Nenhum job recente. Use **Testar worker** para criar um `ping` seguro.")
+            return lines
+        for job in jobs[:5]:
+            if not isinstance(job, dict):
+                continue
+            status = str(job.get("status") or "queued")
+            icon = {"queued": "🟡", "running": "🔵", "succeeded": "🟢", "failed": "🔴", "expired": "⚫"}.get(status, "⚪")
+            job_id = _shorten(job.get("job_id"), limit=18)
+            kind = _shorten(job.get("type"), limit=24)
+            worker = _shorten(job.get("worker_id") or job.get("target_worker_id") or "qualquer worker", limit=24)
+            age = _format_age(job.get("age_seconds"))
+            extra = _shorten(job.get("error") or job.get("summary") or "", limit=80)
+            lines.append(f"{icon} `{kind}` · `{job_id}` · `{status}` · {worker} · {age}")
+            if extra:
+                lines.append(f"-# {extra}")
+        return lines
+
     def _legacy_status_lines(self, snapshot: WorkerSnapshot) -> list[str]:
         status = snapshot.status or {}
         disk = status.get("disk_home") if isinstance(status.get("disk_home"), dict) else {}
@@ -402,11 +438,14 @@ class WorkersPanelView(discord.ui.LayoutView):
         base_url = _public_base_url()
         pair_route = f"{base_url}/core-worker/pair" if base_url else "/core-worker/pair"
         heartbeat_route = f"{base_url}/core-worker/heartbeat" if base_url else "/core-worker/heartbeat"
+        poll_route = f"{base_url}/core-worker/jobs/poll" if base_url else "/core-worker/jobs/poll"
+        result_route = f"{base_url}/core-worker/jobs/result" if base_url else "/core-worker/jobs/result"
         lines = [
             "## 🕹️ Controle",
             "`Atualizar` consulta o registry e o `/status` do phone-worker sem mostrar token.",
+            "`Testar worker` cria um job `ping` na fila; o celular executa por polling autenticado.",
             "`Parear APK` gera código temporário; a VPS salva só hash do código/token.",
-            f"Rotas do APK/agent: `POST {pair_route}` · `POST {heartbeat_route}`",
+            f"Rotas do APK/agent: `POST {pair_route}` · `POST {heartbeat_route}` · `POST {poll_route}` · `POST {result_route}`",
             "`Acordar phone-worker` chama o watchdog seguro da VPS (`scripts/phone-worker-watch.sh`).",
         ]
         if snapshot.action_note:
@@ -457,6 +496,28 @@ class WorkersPanelView(discord.ui.LayoutView):
             self._rebuild_layout()
             await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send("Não consegui gerar o pareamento agora.", ephemeral=True)
+
+    async def _queue_worker_test(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=False)
+        try:
+            result = await self.cog._queue_core_worker_job(interaction.user, job_type="ping", summary="teste manual pelo painel /workers")
+            job = result.get("job") if isinstance(result, dict) else {}
+            job_id = _shorten((job or {}).get("job_id"), limit=32)
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"job de teste criado: {job_id}")
+        except Exception as exc:
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha ao criar job de teste: {type(exc).__name__}: {exc}")
+        self._rebuild_layout()
+        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _cleanup_jobs(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=False)
+        try:
+            result = await self.cog._cleanup_core_worker_jobs()
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"limpeza de jobs: {result}")
+        except Exception as exc:
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha limpando jobs: {type(exc).__name__}: {exc}")
+        self._rebuild_layout()
+        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
     async def _close(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -555,6 +616,33 @@ class WorkersCommandMixin:
             created_by_id=int(getattr(owner, "id", 0) or 0),
             created_by_name=str(getattr(owner, "display_name", None) or getattr(owner, "name", "") or ""),
         )
+
+    async def _queue_core_worker_job(self, owner: discord.abc.User, *, job_type: str, payload: dict[str, Any] | None = None, summary: str = "") -> dict[str, Any]:
+        registry = get_core_workers_registry()
+        snapshot = await asyncio.to_thread(registry.snapshot)
+        workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
+        target_worker_id = ""
+        for worker in workers:
+            if isinstance(worker, dict) and worker.get("online"):
+                target_worker_id = str(worker.get("worker_id") or "")
+                break
+        return await asyncio.to_thread(
+            registry.create_job,
+            job_type=job_type,
+            payload=payload or {},
+            created_by_id=int(getattr(owner, "id", 0) or 0),
+            created_by_name=str(getattr(owner, "display_name", None) or getattr(owner, "name", "") or ""),
+            target_worker_id=target_worker_id,
+            required_capabilities=["phone-worker"],
+            ttl_seconds=900,
+            lease_seconds=120,
+            max_attempts=2,
+            summary=summary or job_type,
+        )
+
+    async def _cleanup_core_worker_jobs(self) -> dict[str, Any]:
+        registry = get_core_workers_registry()
+        return await asyncio.to_thread(registry.cleanup_jobs)
 
     async def _wake_phone_worker(self) -> WorkerSnapshot:
         script = _repo_root() / "scripts" / "phone-worker-watch.sh"
