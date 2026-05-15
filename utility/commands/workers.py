@@ -34,6 +34,7 @@ WORKERS_DEFAULT_ROLES = (
     "tts-convert",
 )
 LEGACY_WORKER_ID = "__legacy_phone_worker__"
+AUTO_WORKER_ID = "__auto_core_worker__"
 
 WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Testar worker", "value": "ping", "job_type": "ping", "payload": {}, "summary": "teste manual pelo painel workers", "description": "Ping seguro no worker selecionado", "emoji": "🧪"},
@@ -252,6 +253,47 @@ def _network_text(worker: dict[str, Any]) -> str:
         parts.append(str(network.get("tailscale_ip_masked")))
     return " · ".join(parts) if parts else "rede n/a"
 
+
+
+def _worker_ping_numeric(worker: dict[str, Any]) -> float | None:
+    network = worker.get("network") if isinstance(worker.get("network"), dict) else {}
+    for key in ("vps_ping_ms", "ping_ms", "latency_ms", "vps_latency_ms"):
+        value = network.get(key)
+        if value is None:
+            continue
+        try:
+            ms = float(value)
+            if 0 <= ms < 60000:
+                return ms
+        except Exception:
+            continue
+    return None
+
+
+def _worker_battery_numeric(worker: dict[str, Any]) -> float | None:
+    battery = worker.get("battery") if isinstance(worker.get("battery"), dict) else {}
+    for key in ("level", "percent", "percentage"):
+        value = battery.get(key)
+        if value is None:
+            continue
+        try:
+            pct = float(value)
+            if 0 <= pct <= 100:
+                return pct
+        except Exception:
+            continue
+    return None
+
+
+def _worker_score_key(worker: dict[str, Any]) -> tuple[Any, ...]:
+    ping = _worker_ping_numeric(worker)
+    battery = _worker_battery_numeric(worker)
+    return (
+        0 if worker.get("online") else 1,
+        ping if ping is not None else 999999.0,
+        -(battery if battery is not None else -1.0),
+        str(worker.get("name") or worker.get("worker_id") or "").casefold(),
+    )
 
 def _script_health_label(worker: dict[str, Any]) -> str:
     status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
@@ -498,6 +540,11 @@ class WorkersPanelView(discord.ui.LayoutView):
         workers = registry.get("workers") if isinstance(registry.get("workers"), list) else []
         return [worker for worker in workers if isinstance(worker, dict)]
 
+    def _online_registry_workers(self) -> list[dict[str, Any]]:
+        workers = [worker for worker in self._registry_workers() if worker.get("online")]
+        workers.sort(key=_worker_score_key)
+        return workers
+
     def _has_legacy_worker(self) -> bool:
         # O phone-worker direto é só fallback. Quando há worker registrado online,
         # o painel deve focar no registry para evitar duplicidade visual.
@@ -508,10 +555,16 @@ class WorkersPanelView(discord.ui.LayoutView):
 
     def _ensure_selected_worker(self) -> None:
         workers = self._registry_workers()
+        online_workers = self._online_registry_workers()
         worker_ids = [str(worker.get("worker_id") or "") for worker in workers if worker.get("worker_id")]
+        if self.selected_worker_id == AUTO_WORKER_ID and len(online_workers) >= 2:
+            return
         if self.selected_worker_id and (self.selected_worker_id in worker_ids or (self.selected_worker_id == LEGACY_WORKER_ID and self._has_legacy_worker())):
             return
-        online = next((worker for worker in workers if worker.get("online") and worker.get("worker_id")), None)
+        if len(online_workers) >= 2:
+            self.selected_worker_id = AUTO_WORKER_ID
+            return
+        online = online_workers[0] if online_workers else None
         if isinstance(online, dict):
             self.selected_worker_id = str(online.get("worker_id") or "")
             return
@@ -531,8 +584,11 @@ class WorkersPanelView(discord.ui.LayoutView):
     def _selected_is_legacy(self) -> bool:
         return self.selected_worker_id == LEGACY_WORKER_ID and self._has_legacy_worker()
 
+    def _selected_is_auto(self) -> bool:
+        return self.selected_worker_id == AUTO_WORKER_ID and len(self._online_registry_workers()) >= 2
+
     def _job_target_worker_id(self) -> str:
-        if self._selected_is_legacy():
+        if self._selected_is_legacy() or self._selected_is_auto():
             return ""
         worker = self._selected_worker()
         if not worker:
@@ -541,6 +597,17 @@ class WorkersPanelView(discord.ui.LayoutView):
 
     def _worker_select_options(self) -> list[discord.SelectOption]:
         options: list[discord.SelectOption] = []
+        online_workers = self._online_registry_workers()
+        if len(online_workers) >= 2:
+            best = online_workers[0]
+            best_name = _shorten(best.get("name") or best.get("worker_id") or "worker", limit=28)
+            options.append(discord.SelectOption(
+                label="Melhor worker disponível",
+                value=AUTO_WORKER_ID,
+                description=_shorten(f"failover ativo · melhor agora: {best_name}", limit=100),
+                emoji="⚙️",
+                default=(self.selected_worker_id == AUTO_WORKER_ID),
+            ))
         for worker in self._registry_workers()[:24]:
             worker_id = str(worker.get("worker_id") or "").strip()
             if not worker_id:
@@ -567,6 +634,14 @@ class WorkersPanelView(discord.ui.LayoutView):
         return options
 
     def _selected_supported_tasks(self) -> set[str] | None:
+        if self._selected_is_auto():
+            union: set[str] = set()
+            for worker in self._online_registry_workers():
+                supported = _task_set(worker.get("supported_tasks"))
+                if not supported:
+                    return None
+                union.update(supported)
+            return union
         if self._selected_is_legacy():
             status = self.snapshot.status if isinstance(self.snapshot.status, dict) else {}
             supported = _task_set(status.get("supported_tasks"))
@@ -591,9 +666,17 @@ class WorkersPanelView(discord.ui.LayoutView):
         # Ações do próprio painel ficam no select para manter o card compacto.
         specs.append({"label": "Parear novo worker", "value": "_create_pairing", "description": "Gera código temporário", "emoji": "🔐", "panel_action": "pair"})
         specs.append({"label": "Limpar jobs", "value": "_cleanup_jobs", "description": "Remove jobs travados/antigos", "emoji": "🧹", "panel_action": "cleanup"})
-        if self._selected_worker() is not None:
+        selected_worker = self._selected_worker()
+        if selected_worker is not None:
             specs.append({"label": "Ver último resultado", "value": "_show_last_result", "description": "Mostra detalhes completos", "emoji": "📄", "panel_action": "last_result"})
             specs.append({"label": "Renomear worker", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename"})
+            specs.append({"label": "Editar roles", "value": "_edit_roles", "description": "Define roles/capacidades", "emoji": "🧩", "panel_action": "roles"})
+            if selected_worker.get("enabled", True):
+                specs.append({"label": "Pausar worker", "value": "_pause_worker", "description": "Não entrega novos jobs", "emoji": "⏸️", "panel_action": "pause"})
+            else:
+                specs.append({"label": "Ativar worker", "value": "_resume_worker", "description": "Volta a receber jobs", "emoji": "▶️", "panel_action": "resume"})
+            if not selected_worker.get("online"):
+                specs.append({"label": "Remover worker offline", "value": "_delete_worker", "description": "Remove do registry", "emoji": "🗑️", "panel_action": "delete"})
         for spec in WORKER_ACTION_SPECS:
             job_type = _task_name(spec.get("job_type"))
             requires_declared = bool(spec.get("requires_declared"))
@@ -731,7 +814,20 @@ class WorkersPanelView(discord.ui.LayoutView):
         workers = self._registry_workers()
         worker = self._selected_worker()
         lines = ["## Worker"]
-        if worker:
+        if self._selected_is_auto():
+            online_workers = self._online_registry_workers()
+            best = online_workers[0] if online_workers else {}
+            best_name = _shorten(best.get("name") or best.get("worker_id") or "worker", limit=36) if isinstance(best, dict) else "worker"
+            lines.append("⚙️ **Melhor worker disponível** · `failover`")
+            lines.append(f"-# {len(online_workers)} online · melhor agora: {best_name} · jobs sem alvo podem migrar se um worker cair")
+            roles_union: list[str] = []
+            for item in online_workers:
+                for role in item.get("roles") or []:
+                    role_s = str(role)
+                    if role_s and role_s not in roles_union:
+                        roles_union.append(role_s)
+            lines.append(f"Roles: {_role_text(roles_union, limit=6)}")
+        elif worker:
             icon = "🟢" if worker.get("online") else "🔴"
             name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=36)
             worker_id = _shorten(worker.get("worker_id"), limit=24)
@@ -801,6 +897,18 @@ class WorkersPanelView(discord.ui.LayoutView):
             return
         if action == "_rename_worker":
             await self._open_rename_modal(interaction)
+            return
+        if action == "_edit_roles":
+            await self._open_roles_modal(interaction)
+            return
+        if action == "_pause_worker":
+            await self._set_selected_worker_enabled(interaction, enabled=False)
+            return
+        if action == "_resume_worker":
+            await self._set_selected_worker_enabled(interaction, enabled=True)
+            return
+        if action == "_delete_worker":
+            await self._delete_selected_worker(interaction)
             return
         specs = {str(spec.get("value")): spec for spec in self._action_specs_for_selected()}
         spec = specs.get(action)
@@ -894,7 +1002,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 )
                 job = result.get("job") if isinstance(result, dict) else {}
                 job_id = str((job or {}).get("job_id") or "")
-                target_label = _shorten(target_worker_id or "worker online", limit=32)
+                target_label = _shorten(target_worker_id or "melhor worker compatível", limit=40)
                 self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"⏳ `{job_type}` enviado para {target_label}; aguardando resultado")
                 self._ensure_selected_worker()
                 self._rebuild_layout()
@@ -952,6 +1060,84 @@ class WorkersPanelView(discord.ui.LayoutView):
                     await modal_interaction.followup.send("Nome do worker atualizado.", ephemeral=True)
 
         await interaction.response.send_modal(RenameWorkerModal())
+
+    async def _open_roles_modal(self, interaction: discord.Interaction):
+        worker = self._selected_worker()
+        if not worker:
+            await interaction.response.send_message("Selecione um worker registrado para editar roles.", ephemeral=True)
+            return
+        view = self
+        worker_id = str(worker.get("worker_id") or "")
+        current_roles = ", ".join(str(role) for role in (worker.get("roles") or []))
+        current_caps = ", ".join(str(role) for role in (worker.get("capabilities") or worker.get("roles") or []))
+
+        class WorkerRolesModal(discord.ui.Modal, title="Editar roles do worker"):
+            roles = discord.ui.TextInput(
+                label="Roles",
+                placeholder="Ex.: phone-worker, diagnostics, tts-convert, zip-validate",
+                default=current_roles[:400],
+                min_length=2,
+                max_length=400,
+                required=True,
+            )
+            capabilities = discord.ui.TextInput(
+                label="Capacidades",
+                placeholder="Pode deixar igual às roles",
+                default=current_caps[:400],
+                min_length=0,
+                max_length=400,
+                required=False,
+            )
+
+            async def on_submit(self, modal_interaction: discord.Interaction) -> None:
+                await modal_interaction.response.defer(thinking=False)
+                try:
+                    await view.cog._update_core_worker_roles(worker_id, str(self.roles.value or ""), str(self.capabilities.value or ""))
+                    view.snapshot = await view.cog._collect_workers_snapshot(action_note="roles do worker atualizadas")
+                except Exception as exc:
+                    view.snapshot = await view.cog._collect_workers_snapshot(action_note=f"falha editando roles: {_compact_failure(exc)}")
+                view._ensure_selected_worker()
+                view._rebuild_layout()
+                if view.message is not None:
+                    await view.message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+                with contextlib.suppress(Exception):
+                    await modal_interaction.followup.send("Roles do worker atualizadas.", ephemeral=True)
+
+        await interaction.response.send_modal(WorkerRolesModal())
+
+    async def _set_selected_worker_enabled(self, interaction: discord.Interaction, *, enabled: bool):
+        worker = self._selected_worker()
+        if not worker:
+            await interaction.response.send_message("Selecione um worker registrado.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=False)
+        worker_id = str(worker.get("worker_id") or "")
+        try:
+            await self.cog._set_core_worker_enabled(worker_id, enabled=enabled)
+            note = "worker ativado" if enabled else "worker pausado"
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=note)
+        except Exception as exc:
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha alterando worker: {_compact_failure(exc)}")
+        self._ensure_selected_worker()
+        self._rebuild_layout()
+        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _delete_selected_worker(self, interaction: discord.Interaction):
+        worker = self._selected_worker()
+        if not worker:
+            await interaction.response.send_message("Selecione um worker offline para remover.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=False)
+        worker_id = str(worker.get("worker_id") or "")
+        try:
+            await self.cog._delete_core_worker(worker_id)
+            self.selected_worker_id = ""
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note="worker offline removido")
+        except Exception as exc:
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha removendo worker: {_compact_failure(exc)}")
+        self._ensure_selected_worker()
+        self._rebuild_layout()
+        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
     async def _cleanup_jobs(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -1167,13 +1353,6 @@ class WorkersCommandMixin:
         target_worker_id: str = "",
     ) -> dict[str, Any]:
         registry = get_core_workers_registry()
-        if not target_worker_id:
-            snapshot = await asyncio.to_thread(registry.snapshot)
-            workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
-            for worker in workers:
-                if isinstance(worker, dict) and worker.get("online"):
-                    target_worker_id = str(worker.get("worker_id") or "")
-                    break
         return await asyncio.to_thread(
             registry.create_job,
             job_type=job_type,
@@ -1220,6 +1399,18 @@ class WorkersCommandMixin:
     async def _rename_core_worker(self, worker_id: str, name: str) -> dict[str, Any]:
         registry = get_core_workers_registry()
         return await asyncio.to_thread(registry.rename_worker, worker_id, name)
+
+    async def _update_core_worker_roles(self, worker_id: str, roles: str, capabilities: str = "") -> dict[str, Any]:
+        registry = get_core_workers_registry()
+        return await asyncio.to_thread(registry.update_worker_roles, worker_id, roles, capabilities or None)
+
+    async def _set_core_worker_enabled(self, worker_id: str, *, enabled: bool) -> dict[str, Any]:
+        registry = get_core_workers_registry()
+        return await asyncio.to_thread(registry.set_worker_enabled, worker_id, enabled)
+
+    async def _delete_core_worker(self, worker_id: str) -> dict[str, Any]:
+        registry = get_core_workers_registry()
+        return await asyncio.to_thread(registry.delete_worker, worker_id, only_offline=True)
 
     async def _cleanup_core_worker_jobs(self) -> dict[str, Any]:
         registry = get_core_workers_registry()

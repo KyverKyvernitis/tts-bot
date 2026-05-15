@@ -269,6 +269,56 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
     return public
 
 
+def _public_worker_ping_ms(worker: Mapping[str, Any]) -> float | None:
+    network = worker.get("network") if isinstance(worker.get("network"), Mapping) else {}
+    for key in ("vps_ping_ms", "ping_ms", "latency_ms", "vps_latency_ms"):
+        value = network.get(key)
+        if value is None:
+            continue
+        try:
+            ms = float(value)
+            if 0 <= ms < 60000:
+                return ms
+        except Exception:
+            continue
+    return None
+
+
+def _public_worker_battery_level(worker: Mapping[str, Any]) -> float | None:
+    battery = worker.get("battery") if isinstance(worker.get("battery"), Mapping) else {}
+    for key in ("level", "percent", "percentage"):
+        value = battery.get(key)
+        if value is None:
+            continue
+        try:
+            pct = float(value)
+            if 0 <= pct <= 100:
+                return pct
+        except Exception:
+            continue
+    return None
+
+
+def _public_worker_sort_key(worker: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Ordena workers para o painel e para preferências do failover.
+
+    Online vem primeiro; entre online, preferir menor ping e bateria maior.
+    Campos ausentes ficam no fim sem impedir uso do worker.
+    """
+    online = bool(worker.get("online"))
+    enabled = bool(worker.get("enabled", True))
+    ping = _public_worker_ping_ms(worker)
+    battery = _public_worker_battery_level(worker)
+    name = str(worker.get("name") or worker.get("worker_id") or "").casefold()
+    return (
+        0 if enabled else 1,
+        0 if online else 1,
+        ping if ping is not None else 999999.0,
+        -(battery if battery is not None else -1.0),
+        name,
+    )
+
+
 class CoreWorkersRegistry:
     """Registro leve dos Core Workers.
 
@@ -551,6 +601,20 @@ class CoreWorkersRegistry:
                     raise CoreWorkerRegistryError("worker alvo está offline", status=409)
                 if not self._job_matches_worker(record, str(record["target_worker_id"]), target):
                     raise CoreWorkerRegistryError("worker alvo não suporta este job", status=409)
+            else:
+                compatible_online: list[Mapping[str, Any]] = []
+                for wid, worker in workers.items():
+                    if not isinstance(worker, Mapping):
+                        continue
+                    public_worker = _compact_worker_public(worker, now=ts)
+                    if not public_worker.get("online"):
+                        continue
+                    if self._job_matches_worker(record, str(wid), worker):
+                        compatible_online.append(public_worker)
+                if not compatible_online:
+                    raise CoreWorkerRegistryError("nenhum worker online compatível para este job", status=409)
+                compatible_online.sort(key=_public_worker_sort_key)
+                record["preferred_worker_id"] = str(compatible_online[0].get("worker_id") or "")
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
             jobs[job_id] = record
             data["jobs"] = jobs
@@ -801,6 +865,74 @@ class CoreWorkersRegistry:
             public = _compact_worker_public(worker, now=ts)
         return {"ok": True, "worker": public}
 
+    def update_worker_roles(self, worker_id: str, roles: object, capabilities: object | None = None) -> dict[str, Any]:
+        safe_worker_id = _safe_worker_id(worker_id)
+        new_roles = normalize_roles(roles, limit=16)
+        if not new_roles:
+            raise CoreWorkerRegistryError("roles ausentes", status=400)
+        new_capabilities = normalize_roles(capabilities if capabilities is not None else new_roles, default=new_roles, limit=24)
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+            worker = workers.get(safe_worker_id)
+            if not isinstance(worker, dict):
+                raise CoreWorkerRegistryError("worker não encontrado", status=404)
+            worker["roles"] = new_roles
+            worker["capabilities"] = new_capabilities
+            worker["updated_at"] = ts
+            workers[safe_worker_id] = worker
+            data["workers"] = workers
+            self._save_unlocked(data)
+            public = _compact_worker_public(worker, now=ts)
+        return {"ok": True, "worker": public}
+
+    def set_worker_enabled(self, worker_id: str, enabled: bool) -> dict[str, Any]:
+        safe_worker_id = _safe_worker_id(worker_id)
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+            worker = workers.get(safe_worker_id)
+            if not isinstance(worker, dict):
+                raise CoreWorkerRegistryError("worker não encontrado", status=404)
+            worker["enabled"] = bool(enabled)
+            worker["updated_at"] = ts
+            workers[safe_worker_id] = worker
+            data["workers"] = workers
+            self._save_unlocked(data)
+            public = _compact_worker_public(worker, now=ts)
+        return {"ok": True, "worker": public}
+
+    def delete_worker(self, worker_id: str, *, only_offline: bool = True) -> dict[str, Any]:
+        safe_worker_id = _safe_worker_id(worker_id)
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+            worker = workers.get(safe_worker_id)
+            if not isinstance(worker, dict):
+                raise CoreWorkerRegistryError("worker não encontrado", status=404)
+            public = _compact_worker_public(worker, now=ts)
+            if only_offline and public.get("online"):
+                raise CoreWorkerRegistryError("não removo worker online", status=409)
+            workers.pop(safe_worker_id, None)
+            data["workers"] = workers
+            jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            for job in jobs.values():
+                if not isinstance(job, dict):
+                    continue
+                if str(job.get("target_worker_id") or "") == safe_worker_id and str(job.get("status") or "queued") in {"queued", "running"}:
+                    job["target_worker_id"] = ""
+                    job["worker_id"] = ""
+                    job["status"] = "queued"
+                    job["lease_until"] = 0
+                    job["updated_at"] = ts
+                    job["summary"] = _short_text(f"failover após remover {safe_worker_id}", limit=160)
+            data["jobs"] = jobs
+            self._save_unlocked(data)
+        return {"ok": True, "removed_worker_id": safe_worker_id}
+
     def snapshot(self) -> dict[str, Any]:
         ts = _now()
         with self._lock:
@@ -835,7 +967,7 @@ class CoreWorkersRegistry:
                 for record in jobs_raw.values()
                 if isinstance(record, Mapping)
             ]
-        workers.sort(key=lambda item: (not bool(item.get("online")), str(item.get("name") or "").casefold()))
+        workers.sort(key=_public_worker_sort_key)
         jobs.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0.0), reverse=True)
         queued = sum(1 for item in jobs if item.get("status") == "queued")
         running = sum(1 for item in jobs if item.get("status") == "running")
