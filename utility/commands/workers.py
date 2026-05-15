@@ -433,6 +433,25 @@ def _script_health_label(worker: dict[str, Any]) -> str:
 
 
 
+def _runtime_health_label(worker: dict[str, Any]) -> str:
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    health = worker.get("health") if isinstance(worker.get("health"), dict) else {}
+    supervisor = status.get("supervisor") if isinstance(status.get("supervisor"), dict) else {}
+    if not supervisor:
+        sup_ok = health.get("supervisor_ok")
+        if sup_ok is True:
+            return "runtime ok"
+        if sup_ok is False:
+            return "runtime atenção"
+        return "runtime n/a"
+    duplicates = supervisor.get("duplicates")
+    pid = supervisor.get("pid_file_pid") or supervisor.get("current_pid")
+    if supervisor.get("supervisor_ok") is False or (isinstance(duplicates, int) and duplicates > 0):
+        return f"runtime atenção{f' · dup {duplicates}' if isinstance(duplicates, int) and duplicates > 0 else ''}"
+    if pid:
+        return f"runtime ok · pid {pid}"
+    return "runtime ok"
+
 
 def _boot_health_label(worker: dict[str, Any]) -> str:
     status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
@@ -601,6 +620,7 @@ def _worker_detail_text(worker: dict[str, Any] | None) -> str:
         f"**Rede:** {_network_text(worker)}",
         f"**Scripts:** {_script_health_label(worker)}",
         f"**Boot automático:** {_boot_health_label(worker)}",
+        f"**Runtime:** {_runtime_health_label(worker)}",
         "",
         "### Funções",
         _role_text(roles, limit=16),
@@ -1065,7 +1085,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=5)
             version = _shorten(worker.get("version") or "sem versão", limit=24)
             lines.append(f"{icon} **{name}** · `{worker_id}`")
-            lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)} · {_boot_health_label(worker)}")
+            lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)} · {_boot_health_label(worker)} · {_runtime_health_label(worker)}")
             lines.append(f"Roles: {roles}")
             queue_text = _queue_status_text(worker)
             if queue_text:

@@ -14,7 +14,7 @@ install_core_worker_boot() {
 'if [ -x "$HOME/phone-worker/start-phone-worker.sh" ]; then' \
 '  exec "$HOME/phone-worker/start-phone-worker.sh"' \
 'fi' \
-'nohup python "$HOME/phone-worker/phone_worker.py" >> "$HOME/phone-worker.log" 2>&1 &' \
+'echo "[core-worker-boot] start-phone-worker.sh não encontrado" >> "$HOME/phone-worker.log"' \
 > "$HOME/.termux/boot/10-core-worker"
   chmod +x "$HOME/.termux/boot/10-core-worker"
 }
@@ -22,7 +22,7 @@ install_core_worker_boot() {
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 
-pkg install python tmux curl -y
+pkg install python tmux curl termux-api -y || pkg install python tmux curl -y
 mkdir -p "$WORKER_DIR"
 cp "$SRC_DIR/phone_worker.py" "$WORKER_DIR/phone_worker.py"
 cp "$SRC_DIR/start-phone-worker.sh" "$WORKER_DIR/start-phone-worker.sh"

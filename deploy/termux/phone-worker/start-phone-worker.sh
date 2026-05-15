@@ -1,5 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Inicia/reinicia o worker auxiliar do celular em Termux.
+# Supervisor local do Core Worker/phone-worker em Termux.
+# Garante um único processo, rotaciona logs e inicia sem depender de tmux.
 set -u
 
 ENV_FILE="${PHONE_WORKER_ENV:-$HOME/.phone-worker.env}"
@@ -14,14 +15,39 @@ WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 PORT="${PHONE_WORKER_PORT:-8766}"
 HOST="${PHONE_WORKER_HOST:-0.0.0.0}"
 TOKEN="${PHONE_WORKER_TOKEN:-}"
-SESSION="${PHONE_WORKER_TMUX_SESSION:-phone-worker}"
 PYTHON_BIN="${PHONE_WORKER_PYTHON:-python}"
 START_WAIT="${PHONE_WORKER_START_WAIT_SECONDS:-3}"
 LOG_FILE="${PHONE_WORKER_LOG_FILE:-$WORKER_DIR/phone-worker.log}"
+PID_FILE="${PHONE_WORKER_PID_FILE:-$WORKER_DIR/phone-worker.pid}"
+LOCK_DIR="${PHONE_WORKER_LOCK_DIR:-$WORKER_DIR/.phone-worker-start.lock}"
+STATUS_FILE="${PHONE_WORKER_STATUS_FILE:-$WORKER_DIR/phone-worker.status}"
+MAX_LOG_BYTES="${PHONE_WORKER_LOG_MAX_BYTES:-1048576}"
+KILL_DUPLICATES="${PHONE_WORKER_START_KILL_DUPLICATES:-true}"
 
 log() {
-  printf '[phone-worker] %s\n' "$*"
+  printf '[phone-worker-start] %s\n' "$*"
 }
+
+now_iso() {
+  date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date
+}
+
+mkdir -p "$WORKER_DIR"
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  log "start já em andamento; aguardando lock liberar"
+  waited=0
+  while [[ -d "$LOCK_DIR" && "$waited" -lt 20 ]]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [[ -d "$LOCK_DIR" ]]; then
+    log "lock antigo encontrado; removendo: $LOCK_DIR"
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    mkdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+fi
+trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
 termux-wake-lock 2>/dev/null || true
 
@@ -33,14 +59,56 @@ health_ok() {
   fi
 }
 
-if health_ok; then
-  log "Worker já está online."
-  exit 0
-fi
+list_worker_pids() {
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -f 'phone_worker.py' 2>/dev/null || true
+    return
+  fi
+  ps -ef 2>/dev/null | awk '/phone_worker\.py/ && !/awk/ {print $2}' || true
+}
 
-if ! command -v tmux >/dev/null 2>&1; then
-  log "tmux não encontrado. Rode: pkg install tmux -y"
-  exit 1
+worker_pid_count() {
+  list_worker_pids | awk 'NF {c++} END {print c+0}'
+}
+
+kill_worker_processes() {
+  list_worker_pids | while read -r pid; do
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [[ "$pid" != "$$" ]]; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+  sleep 1
+  list_worker_pids | while read -r pid; do
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [[ "$pid" != "$$" ]]; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+rotate_log_if_needed() {
+  mkdir -p "$(dirname "$LOG_FILE")"
+  if [[ -f "$LOG_FILE" ]]; then
+    size=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
+    if [[ "$size" -gt "$MAX_LOG_BYTES" ]]; then
+      mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
+      : > "$LOG_FILE"
+    fi
+  fi
+}
+
+write_status() {
+  mkdir -p "$(dirname "$STATUS_FILE")"
+  printf '%s\n' "$1" > "$STATUS_FILE" 2>/dev/null || true
+}
+
+if ! command -v curl >/dev/null 2>&1; then
+  log "curl não encontrado. Rode: pkg install curl -y"
 fi
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   log "python não encontrado. Rode: pkg install python -y"
@@ -51,19 +119,44 @@ if [[ ! -f "$WORKER_DIR/phone_worker.py" ]]; then
   exit 1
 fi
 
-mkdir -p "$WORKER_DIR"
-log "Worker offline. Reiniciando sessão $SESSION..."
-tmux kill-session -t "$SESSION" 2>/dev/null || true
-pkill -f 'phone_worker.py' 2>/dev/null || true
-
-tmux new-session -d -s "$SESSION" \
-  "cd '$WORKER_DIR' && PHONE_WORKER_TOKEN='$TOKEN' PHONE_WORKER_PORT='$PORT' PHONE_WORKER_HOST='$HOST' exec '$PYTHON_BIN' phone_worker.py --host '$HOST' --port '$PORT' >> '$LOG_FILE' 2>&1"
-
-sleep "$START_WAIT"
-if health_ok; then
-  log "Worker iniciado com sucesso."
+count="$(worker_pid_count)"
+if health_ok && [[ "$count" -le 1 ]]; then
+  log "worker já está online; pid(s)=$count"
+  write_status "ok already_online $(now_iso)"
   exit 0
 fi
 
-log "Falha ao iniciar worker. Veja: tmux attach -t $SESSION ou tail -n 80 '$LOG_FILE'"
+if [[ "$KILL_DUPLICATES" != "false" ]]; then
+  log "limpando processos antigos/duplicados do phone-worker"
+  kill_worker_processes
+fi
+
+rm -f "$PID_FILE" 2>/dev/null || true
+rotate_log_if_needed
+
+log "iniciando worker em $HOST:$PORT"
+(
+  cd "$WORKER_DIR" || exit 1
+  exec "$PYTHON_BIN" phone_worker.py --host "$HOST" --port "$PORT"
+) >> "$LOG_FILE" 2>&1 &
+child_pid=$!
+printf '%s\n' "$child_pid" > "$PID_FILE" 2>/dev/null || true
+write_status "starting pid=$child_pid $(now_iso)"
+
+sleep "$START_WAIT"
+
+if health_ok; then
+  log "worker iniciado com sucesso; pid=$child_pid"
+  write_status "ok pid=$child_pid $(now_iso)"
+  exit 0
+fi
+
+if kill -0 "$child_pid" 2>/dev/null; then
+  log "processo iniciou, mas health ainda não respondeu; pid=$child_pid"
+  write_status "starting_health_pending pid=$child_pid $(now_iso)"
+  exit 0
+fi
+
+log "falha ao iniciar worker. Veja: tail -n 80 '$LOG_FILE'"
+write_status "failed pid=$child_pid $(now_iso)"
 exit 1

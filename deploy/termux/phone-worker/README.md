@@ -137,6 +137,31 @@ python phone_worker.py --jobs-once
 O heartbeat envia status, bateria real via Termux:API quando disponível, ping TCP até a VPS, rede, ffmpeg/ffprobe, disco, saúde básica e um resumo do Tailscale quando a CLI existir. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `worker_self_check`, `worker_logs`, `network_probe`, `tailscale_status`, `service_status`, `service_start`, `service_stop`, `service_restart`, `ffmpeg_check`, `ffprobe_check`, `worker_update`, `boot_status`, `boot_repair`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
 
 
+## Supervisor local e anti-duplicação
+
+O `start-phone-worker.sh` agora atua como supervisor local:
+
+- usa lock para evitar duas inicializações ao mesmo tempo;
+- mata processos antigos/duplicados de `phone_worker.py` antes de iniciar;
+- grava PID em `~/phone-worker/phone-worker.pid`;
+- grava status curto em `~/phone-worker/phone-worker.status`;
+- rotaciona logs quando passam de `PHONE_WORKER_LOG_MAX_BYTES`;
+- inicia com `nohup` sem depender de `tmux`;
+- o `watch-phone-worker.sh` só chama o supervisor e aplica backoff quando houver falha.
+
+Variáveis úteis no `~/.phone-worker.env`:
+
+```env
+PHONE_WORKER_LOG_FILE=/data/data/com.termux/files/home/phone-worker/phone-worker.log
+PHONE_WORKER_PID_FILE=/data/data/com.termux/files/home/phone-worker/phone-worker.pid
+PHONE_WORKER_STATUS_FILE=/data/data/com.termux/files/home/phone-worker/phone-worker.status
+PHONE_WORKER_LOG_MAX_BYTES=1048576
+PHONE_WORKER_START_KILL_DUPLICATES=true
+PHONE_WORKER_WATCH_MAX_BACKOFF_SECONDS=300
+```
+
+No painel `workers`, a ação **Status serviços** mostra PID, duplicados, runtime e logs. Se aparecer `runtime atenção`, use **Manutenção → Reiniciar worker** ou **Manutenção → Reparar scripts**.
+
 ## Boot automático pós-reboot
 
 O `install.sh`, o `bootstrap-phone-worker.sh`, o sync da VPS e a ação **Reparar boot automático** criam/reparam:

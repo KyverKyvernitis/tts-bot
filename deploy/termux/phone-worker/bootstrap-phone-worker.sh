@@ -25,7 +25,7 @@ install_core_worker_boot() {
 'if [ -x "$HOME/phone-worker/start-phone-worker.sh" ]; then' \
 '  exec "$HOME/phone-worker/start-phone-worker.sh"' \
 'fi' \
-'nohup python "$HOME/phone-worker/phone_worker.py" >> "$HOME/phone-worker.log" 2>&1 &' \
+'echo "[core-worker-boot] start-phone-worker.sh não encontrado" >> "$HOME/phone-worker.log"' \
 > "$HOME/.termux/boot/10-core-worker"
   chmod +x "$HOME/.termux/boot/10-core-worker"
 }

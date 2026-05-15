@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.5.7"
+PHONE_WORKER_VERSION = "1.5.8"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -737,6 +737,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "ffprobe": status.get("ffprobe"),
             "scripts_ok": ((status.get("scripts") or {}).get("complete") if isinstance(status.get("scripts"), dict) else None),
             "boot_ok": ((status.get("boot") or {}).get("ok") if isinstance(status.get("boot"), dict) else None),
+            "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
         },
         "status": {
             "http_host": host,
@@ -747,6 +748,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "loadavg": status.get("loadavg"),
             "scripts": status.get("scripts"),
             "boot": status.get("boot"),
+            "supervisor": status.get("supervisor"),
         },
     }
 
@@ -910,6 +912,7 @@ def _system_status() -> dict[str, Any]:
         "core_worker_jobs": _core_worker_jobs_configured(),
         "scripts": _script_inventory(),
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
+        "supervisor": _safe_telemetry("supervisor", _runtime_supervisor_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "supported_tasks": list(SUPPORTED_DIRECT_TASKS),
         "supported_core_worker_jobs": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
         "pid": os.getpid(),
@@ -1451,6 +1454,92 @@ def _phone_worker_log_file() -> Path:
     return Path(os.getenv("PHONE_WORKER_LOG_FILE") or (_phone_worker_dir() / "phone-worker.log")).expanduser()
 
 
+def _phone_worker_pid_file() -> Path:
+    return Path(os.getenv("PHONE_WORKER_PID_FILE") or (_phone_worker_dir() / "phone-worker.pid")).expanduser()
+
+
+def _phone_worker_status_file() -> Path:
+    return Path(os.getenv("PHONE_WORKER_STATUS_FILE") or (_phone_worker_dir() / "phone-worker.status")).expanduser()
+
+
+def _phone_worker_start_lock_dir() -> Path:
+    return Path(os.getenv("PHONE_WORKER_LOCK_DIR") or (_phone_worker_dir() / ".phone-worker-start.lock")).expanduser()
+
+
+def _phone_worker_watch_log_file() -> Path:
+    return Path(os.getenv("PHONE_WORKER_WATCH_LOG_FILE") or (_phone_worker_dir() / "phone-worker-watch.log")).expanduser()
+
+
+def _phone_worker_watch_pid_file() -> Path:
+    return Path(os.getenv("PHONE_WORKER_WATCH_PID_FILE") or (_phone_worker_dir() / "phone-worker-watch.pid")).expanduser()
+
+
+def _read_pid_file(path: Path) -> int | None:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="ignore").strip().splitlines()[0]
+        pid = int(raw)
+        return pid if pid > 0 else None
+    except Exception:
+        return None
+
+
+def _pid_alive(pid: int | None) -> bool | None:
+    if not pid:
+        return None
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return None
+
+
+def _path_size(path: Path) -> int | None:
+    try:
+        return int(path.stat().st_size)
+    except Exception:
+        return None
+
+
+def _runtime_supervisor_snapshot() -> dict[str, Any]:
+    pid_file = _phone_worker_pid_file()
+    status_file = _phone_worker_status_file()
+    log_file = _phone_worker_log_file()
+    watch_log = _phone_worker_watch_log_file()
+    watch_pid_file = _phone_worker_watch_pid_file()
+    pid = _read_pid_file(pid_file)
+    watch_pid = _read_pid_file(watch_pid_file)
+    processes = _pgrep_count("phone_worker.py") if "_pgrep_count" in globals() else None
+    result: dict[str, Any] = {
+        "ok": True,
+        "current_pid": os.getpid(),
+        "pid_file": str(pid_file),
+        "pid_file_pid": pid,
+        "pid_file_alive": _pid_alive(pid),
+        "processes": processes,
+        "duplicates": (max(0, int(processes) - 1) if isinstance(processes, int) else None),
+        "lock_dir": str(_phone_worker_start_lock_dir()),
+        "lock_active": _phone_worker_start_lock_dir().exists(),
+        "log_file": str(log_file),
+        "log_size_bytes": _path_size(log_file),
+        "watch_log_file": str(watch_log),
+        "watch_log_size_bytes": _path_size(watch_log),
+        "watch_pid_file": str(watch_pid_file),
+        "watch_pid": watch_pid,
+        "watch_pid_alive": _pid_alive(watch_pid),
+        "status_file": str(status_file),
+        "status_text": _short_text(_read_text_file(status_file, limit=240), limit=160),
+    }
+    result["supervisor_ok"] = bool(
+        (result.get("pid_file_alive") in {True, None})
+        and (result.get("duplicates") in {0, None})
+    )
+    return result
+
+
 def _termux_boot_script_path() -> Path:
     return (Path.home() / ".termux" / "boot" / "10-core-worker").expanduser()
 
@@ -1466,7 +1555,7 @@ def _termux_boot_script_content() -> str:
         "if [ -x \"$HOME/phone-worker/start-phone-worker.sh\" ]; then",
         "  exec \"$HOME/phone-worker/start-phone-worker.sh\"",
         "fi",
-        "nohup python \"$HOME/phone-worker/phone_worker.py\" >> \"$HOME/phone-worker.log\" 2>&1 &",
+        "echo '[core-worker-boot] start-phone-worker.sh não encontrado' >> \"$HOME/phone-worker.log\"",
         "",
     ])
 
@@ -1504,7 +1593,7 @@ def _termux_boot_status_snapshot() -> dict[str, Any]:
         if exists:
             result["executable"] = os.access(path, os.X_OK)
             content = path.read_text(encoding="utf-8", errors="ignore")[:4096]
-            result["content_ok"] = "phone_worker.py" in content and "phone-worker" in content
+            result["content_ok"] = ("start-phone-worker.sh" in content or "phone_worker.py" in content) and "phone-worker" in content
             result["size"] = path.stat().st_size
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {_short_text(exc, limit=100)}"
@@ -1619,6 +1708,7 @@ def _service_status(service: str) -> dict[str, Any]:
     watch_session = str(os.getenv("PHONE_WORKER_WATCH_TMUX_SESSION") or "phone-worker-watch").strip() or "phone-worker-watch"
     if service == "phone-worker":
         status = _system_status()
+        supervisor = status.get("supervisor") if isinstance(status.get("supervisor"), dict) else {}
         return {
             "ok": True,
             "service": service,
@@ -1632,6 +1722,10 @@ def _service_status(service: str) -> dict[str, Any]:
             "log_file": str(_phone_worker_log_file()),
             "scripts": _script_inventory(),
             "start_script": str(_best_script("start-phone-worker.sh")),
+            "supervisor": supervisor,
+            "pid_file": supervisor.get("pid_file"),
+            "pid_file_pid": supervisor.get("pid_file_pid"),
+            "duplicates": supervisor.get("duplicates"),
         }
     if service == "phone-worker-watch":
         return {
