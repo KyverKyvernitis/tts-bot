@@ -58,7 +58,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.1";
+    private static final String APP_VERSION = "0.5.2";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -775,7 +775,7 @@ public class MainActivity extends Activity {
         }
         if (available && notificationRequested) {
             String notifyState = notifyUpdateAvailable();
-            reportUpdateNotification(serverUrl, notifyState, "displayed".equals(notifyState), notificationDetail(notifyState));
+            reportUpdateNotification(serverUrl, notifyState, "displayed".equals(notifyState) || "duplicate".equals(notifyState), notificationDetail(notifyState));
         }
         if (userVisible) {
             show(available ? "Atualização encontrada. Toque em Atualizar no topo do app." : "Nenhuma atualização nova encontrada.");
@@ -902,7 +902,7 @@ public class MainActivity extends Activity {
 
     private String notificationDetail(String state) {
         if ("displayed".equals(state)) return "notificação local exibida pelo APK";
-        if ("duplicate".equals(state)) return "notificação já exibida para essa versão";
+        if ("duplicate".equals(state)) return "notificação já exibida/confirmada para essa versão";
         if ("permission_missing".equals(state)) return "permissão POST_NOTIFICATIONS ausente";
         if ("manager_unavailable".equals(state)) return "NotificationManager indisponível";
         if ("failed".equals(state)) return "falha criando notificação local";

@@ -646,11 +646,13 @@ def _boot_health_label(worker: dict[str, Any]) -> str:
         return "boot n/a"
     if boot.get("ok"):
         package = boot.get("package") if isinstance(boot.get("package"), dict) else {}
+        mode = str(boot.get("mode") or "").strip()
         if package.get("available") is False:
-            return "boot script ok · app?"
-        return "boot ok"
+            return "boot script ok · Termux:Boot?"
+        return "boot ok" + (f" · {mode}" if mode and mode != "watchdog" else "")
     if boot.get("exists"):
-        return "boot incompleto"
+        mode = str(boot.get("mode") or "").strip()
+        return "boot incompleto" + (f" · {mode}" if mode else "")
     return "boot faltando"
 
 
@@ -751,6 +753,7 @@ def _core_worker_notification_status_text() -> str:
         return ""
     notification_id = str(latest.get("notificationId") or "").strip()
     version = str(latest.get("versionName") or "?")
+    published_at = latest.get("publishedAt")
     try:
         data = json.loads(notif_path.read_text(encoding="utf-8")) if notif_path.exists() else {}
     except Exception:
@@ -759,11 +762,25 @@ def _core_worker_notification_status_text() -> str:
     record = latest_by_id.get(notification_id) if notification_id else None
     if isinstance(record, dict):
         state = str(record.get("state") or "recebida")
-        delivered = bool(record.get("delivered"))
-        icon = "entregue" if delivered or state == "displayed" else state
-        return f"notif APK {version}: {icon}"
+        delivered = bool(record.get("delivered")) or state in {"displayed", "duplicate", "already_displayed"}
+        if delivered:
+            label = "entregue" if state != "duplicate" else "já exibida"
+        elif state == "permission_missing":
+            label = "sem permissão"
+        elif state == "manifest_seen":
+            label = "app viu manifesto"
+        else:
+            label = state
+        app_version = str(record.get("appVersion") or "").strip()
+        suffix = f" · app {app_version}" if app_version else ""
+        return f"notif APK {version}: {label}{suffix}"
+    if published_at:
+        try:
+            age = _format_age(max(0, time.time() - float(published_at)))
+            return f"notif APK {version}: pendente {age}"
+        except Exception:
+            pass
     return f"notif APK {version}: pendente"
-
 
 def _automation_status_text() -> str:
     """Resumo curto do pipeline automático agent/APK para mostrar no painel."""
@@ -1840,8 +1857,14 @@ class WorkersPanelView(discord.ui.LayoutView):
             else:
                 lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)} · {_boot_health_label(worker)} · {_runtime_health_label(worker)}")
             scripts = worker.get("status", {}).get("scripts") if isinstance(worker.get("status"), dict) else {}
-            if isinstance(scripts, dict) and scripts.get("duplicate_installations"):
-                lines.append("-# ⚠️ instalações duplicadas detectadas no Termux; use boot_repair/worker_update para alinhar `~/phone-worker`.")
+            if isinstance(scripts, dict):
+                installs = scripts.get("installations") if isinstance(scripts.get("installations"), dict) else {}
+                active_dups = installs.get("active_duplicates") if isinstance(installs.get("active_duplicates"), list) else []
+                dups = installs.get("duplicates") if isinstance(installs.get("duplicates"), list) else []
+                if active_dups:
+                    lines.append(f"-# ⚠️ duplicata ativa no Termux: `{_shorten(active_dups[0], limit=70)}` · boot_repair/worker_update alinham a oficial.")
+                elif dups:
+                    lines.append(f"-# ℹ️ duplicata inativa detectada: `{_shorten(dups[0], limit=72)}` · oficial: `~/phone-worker`.")
             lines.append(f"Roles: {roles}")
             queue_text = _queue_status_text(worker)
             if queue_text:

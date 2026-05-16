@@ -42,7 +42,7 @@ _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.7.4"
+PHONE_WORKER_VERSION = "1.7.5"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -1078,6 +1078,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "loadavg": status.get("loadavg"),
             "scripts": status.get("scripts"),
             "boot": status.get("boot"),
+            "auto_boot_repair": status.get("auto_boot_repair"),
             "supervisor": status.get("supervisor"),
         },
     }
@@ -1242,6 +1243,7 @@ def _safe_name(name: Any, fallback: str = "file.bin") -> str:
 
 
 def _system_status() -> dict[str, Any]:
+    auto_boot_repair = _auto_repair_local_boot_if_needed()
     disk = shutil.disk_usage(Path.home())
     load = None
     try:
@@ -1261,6 +1263,7 @@ def _system_status() -> dict[str, Any]:
         "core_worker_network": _core_worker_network_runtime_snapshot(),
         "scripts": _script_inventory(),
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
+        "auto_boot_repair": auto_boot_repair,
         "supervisor": _safe_telemetry("supervisor", _runtime_supervisor_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "supported_tasks": list(SUPPORTED_DIRECT_TASKS),
         "supported_core_worker_jobs": _supported_core_worker_job_types(),
@@ -2283,12 +2286,44 @@ def _duplicate_installations_snapshot() -> dict[str, Any]:
                 candidates.append(path)
         except Exception:
             continue
-    duplicates = [str(path) for path in candidates if path.resolve() != official.resolve()]
+
+    boot_text = ""
+    with contextlib.suppress(Exception):
+        boot_text = _termux_boot_script_path().read_text(encoding="utf-8", errors="ignore")[:8192]
+    env_dir = str(os.getenv("PHONE_WORKER_DIR") or "").strip()
+
+    duplicate_details: list[dict[str, Any]] = []
+    for path in candidates:
+        try:
+            if path.resolve() == official.resolve():
+                continue
+        except Exception:
+            continue
+        path_s = str(path)
+        active_reasons: list[str] = []
+        if path_s and path_s in boot_text:
+            active_reasons.append("referenciada pelo Termux:Boot")
+        if env_dir and str(Path(env_dir).expanduser()) == path_s:
+            active_reasons.append("PHONE_WORKER_DIR aponta para ela")
+        for script_name in ("start-phone-worker.sh", "watch-phone-worker.sh"):
+            script_path = path / script_name
+            if script_path.exists() and os.access(script_path, os.X_OK):
+                # Existir executável em duplicata não é ativo sozinho, mas ajuda no diagnóstico.
+                pass
+        duplicate_details.append({
+            "path": path_s,
+            "active": bool(active_reasons),
+            "reason": "; ".join(active_reasons) if active_reasons else "duplicata encontrada, mas boot oficial não aponta para ela",
+        })
+
     return {
         "official": str(official),
         "found": [str(path) for path in candidates],
-        "duplicates": duplicates,
-        "has_duplicates": bool(duplicates),
+        "duplicates": [item["path"] for item in duplicate_details],
+        "details": duplicate_details,
+        "has_duplicates": bool(duplicate_details),
+        "active_duplicates": [item["path"] for item in duplicate_details if item.get("active")],
+        "has_active_duplicates": any(bool(item.get("active")) for item in duplicate_details),
     }
 
 
@@ -2312,7 +2347,41 @@ def _script_inventory() -> dict[str, Any]:
             "preferred": str(_best_script(name)),
         }
     installs = _duplicate_installations_snapshot()
-    return {"complete": complete, "mirrored": mirrored, "scripts": scripts, "installations": installs, "duplicate_installations": bool(installs.get("has_duplicates"))}
+    return {
+        "complete": complete,
+        "mirrored": mirrored,
+        "scripts": scripts,
+        "installations": installs,
+        # Só marcamos como problema quando a duplicata parece ativa/referenciada.
+        # Diretórios antigos inativos continuam visíveis no diagnóstico sem poluir o card.
+        "duplicate_installations": bool(installs.get("has_active_duplicates")),
+        "duplicate_installations_found": bool(installs.get("has_duplicates")),
+    }
+
+
+def _local_boot_needs_repair() -> tuple[bool, str]:
+    boot = _termux_boot_status_snapshot()
+    scripts = _script_inventory()
+    reasons: list[str] = []
+    if not boot.get("ok"):
+        reasons.append(str(boot.get("warning") or "boot incompleto"))
+    installs = scripts.get("installations") if isinstance(scripts.get("installations"), dict) else {}
+    if installs.get("has_active_duplicates"):
+        reasons.append("duplicata ativa aponta para instalação antiga")
+    return bool(reasons), "; ".join(reasons)
+
+
+def _auto_repair_local_boot_if_needed() -> dict[str, Any]:
+    if not _env_bool("PHONE_WORKER_AUTO_BOOT_REPAIR", True):
+        return {"enabled": False}
+    try:
+        needed, reason = _local_boot_needs_repair()
+        if not needed:
+            return {"enabled": True, "changed": False, "reason": "ok"}
+        repaired = _repair_termux_boot_script()
+        return {"enabled": True, "changed": True, "reason": reason, "boot": repaired}
+    except Exception as exc:
+        return {"enabled": True, "changed": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"}
 
 
 def _tmux_session_exists(session: str) -> bool:
@@ -3042,6 +3111,8 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
             result.setdefault("summary", "status do boot automático coletado")
         elif kind == "boot_repair":
             result = _repair_termux_boot_script()
+            result["scripts"] = _script_inventory()
+            result["supervisor"] = _runtime_supervisor_snapshot()
             result.setdefault("summary", "boot automático reparado")
         elif kind in {"service_status", "service_start", "service_stop", "service_restart"}:
             service = payload.get("service") or "phone-worker"

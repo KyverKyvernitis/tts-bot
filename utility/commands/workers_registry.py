@@ -818,7 +818,7 @@ class CoreWorkersRegistry:
                 selected["status"] = "running"
                 selected["worker_id"] = worker_id
                 selected["attempts"] = int(selected.get("attempts") or 0) + 1
-                lease = max(10, min(900, int(selected.get("lease_seconds") or DEFAULT_JOB_LEASE_SECONDS)))
+                lease = max(10, min(7200, int(selected.get("lease_seconds") or DEFAULT_JOB_LEASE_SECONDS)))
                 selected["lease_until"] = ts + lease
                 selected["started_at"] = selected.get("started_at") or ts
                 selected["updated_at"] = ts

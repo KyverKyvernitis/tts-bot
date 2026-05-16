@@ -90,11 +90,13 @@ def _notification_event_id(*, version_name: str, version_code: int, sha256: str)
 def _append_core_worker_notification_event(event: dict) -> dict:
     path = _core_worker_notification_log_path()
     now = int(time.time())
+    state = _safe_short_text(event.get("state") or event.get("event"), 48)
+    delivered = bool(event.get("delivered", False)) or state in {"displayed", "duplicate", "already_displayed"}
     clean = {
         "receivedAt": now,
         "notificationId": _safe_short_text(event.get("notificationId"), 96),
-        "state": _safe_short_text(event.get("state") or event.get("event"), 48),
-        "delivered": bool(event.get("delivered", False)),
+        "state": state,
+        "delivered": delivered,
         "versionName": _safe_short_text(event.get("versionName"), 48),
         "versionCode": int(event.get("versionCode") or 0),
         "appVersion": _safe_short_text(event.get("appVersion"), 48),
@@ -134,9 +136,11 @@ def _latest_core_worker_notification_summary(notification_id: str) -> dict:
     latest = data.get("latestById") if isinstance(data, dict) and isinstance(data.get("latestById"), dict) else {}
     record = latest.get(str(notification_id or "")) if isinstance(latest, dict) else None
     if isinstance(record, dict):
+        state = str(record.get("state") or "")
+        delivered = bool(record.get("delivered", False)) or state in {"displayed", "duplicate", "already_displayed"}
         return {
             "lastState": record.get("state"),
-            "lastDelivered": bool(record.get("delivered", False)),
+            "lastDelivered": delivered,
             "lastReceivedAt": record.get("receivedAt"),
             "lastWorkerId": record.get("workerId"),
             "lastAppVersion": record.get("appVersion"),

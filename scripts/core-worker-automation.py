@@ -343,6 +343,68 @@ def _worker_supports(worker: dict[str, Any], task: str, required_capability: str
     return not tasks or task in tasks
 
 
+def _worker_needs_boot_repair(worker: dict[str, Any]) -> bool:
+    if not worker.get("online"):
+        return False
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    health = worker.get("health") if isinstance(worker.get("health"), dict) else {}
+    boot = status.get("boot") if isinstance(status.get("boot"), dict) else {}
+    if not boot and isinstance(health.get("boot"), dict):
+        boot = health.get("boot")
+    if boot and boot.get("ok") is False:
+        return True
+    if not boot and health.get("boot_ok") is False:
+        return True
+    scripts = status.get("scripts") if isinstance(status.get("scripts"), dict) else {}
+    installs = scripts.get("installations") if isinstance(scripts.get("installations"), dict) else {}
+    if installs.get("has_active_duplicates"):
+        return True
+    return False
+
+
+def queue_boot_repairs(*, only_worker_id: str = "") -> dict[str, Any]:
+    registry = get_core_workers_registry()
+    snapshot = _load_registry_snapshot()
+    workers = [w for w in snapshot.get("workers") or [] if isinstance(w, dict)]
+    queued: list[str] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+    for worker in workers:
+        worker_id = str(worker.get("worker_id") or "")
+        name = str(worker.get("name") or worker_id)
+        if not worker_id:
+            continue
+        if only_worker_id and worker_id != only_worker_id:
+            continue
+        if not _worker_needs_boot_repair(worker):
+            skipped.append(f"{name}: boot ok")
+            continue
+        if not _worker_supports(worker, "boot_repair", "phone-worker"):
+            skipped.append(f"{name}: sem suporte/offline")
+            continue
+        if _active_job_exists(job_type="boot_repair", target_worker_id=worker_id):
+            skipped.append(f"{name}: boot_repair já pendente")
+            continue
+        try:
+            result = registry.create_job(
+                job_type="boot_repair",
+                payload={"auto": True, "source": "vps-updater", "reason": "boot incompleto ou duplicata ativa"},
+                created_by_id=0,
+                created_by_name="VPS updater",
+                target_worker_id=worker_id,
+                required_capabilities=["phone-worker"],
+                ttl_seconds=900,
+                lease_seconds=120,
+                max_attempts=2,
+                summary="auto-repair boot Core Worker",
+            )
+            job = result.get("job") if isinstance(result, dict) else {}
+            queued.append(f"{name}:{job.get('job_id') or 'job'}")
+        except Exception as exc:
+            errors.append(f"{name}: {type(exc).__name__}: {_short(exc, 120)}")
+    return {"ok": True, "queued": queued, "skipped": skipped[:16], "errors": errors[:10]}
+
+
 def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dict[str, Any]:
     registry = get_core_workers_registry()
     snapshot = _load_registry_snapshot()
@@ -484,6 +546,9 @@ def queue_apk_build() -> dict[str, Any]:
 def process_pending(*, worker_id: str = "") -> dict[str, Any]:
     pending = _load_pending()
     result: dict[str, Any] = {"ok": True, "worker_id": worker_id, "processed_at": time.time()}
+    # Mesmo sem pendência explícita, heartbeat/poll de worker online deve reparar
+    # boot incompleto automaticamente. Isso evita depender do botão manual.
+    result["boot_repair"] = queue_boot_repairs(only_worker_id=worker_id)
     if pending.get("agent_update"):
         result["agent_update"] = queue_agent_updates(force=False, only_worker_id=worker_id)
     if pending.get("apk_build"):
@@ -539,6 +604,8 @@ def after_update(force_agent: bool = False) -> int:
     elif apk_changed:
         status["apk_build"] = {"ok": True, "skipped": ["desativado por CORE_WORKER_AUTO_APK_BUILD_ENABLED=false"]}
 
+    status["boot_repair"] = queue_boot_repairs()
+
     status["finished_at"] = time.time()
     write_status(status)
     state = dict(current)
@@ -555,6 +622,7 @@ def main() -> int:
     after.add_argument("--force-agent", action="store_true")
     sub.add_parser("queue-agent-update")
     sub.add_parser("queue-apk-build")
+    sub.add_parser("queue-boot-repair")
     process = sub.add_parser("process-pending")
     process.add_argument("--worker-id", default="")
     args = parser.parse_args()
@@ -568,6 +636,11 @@ def main() -> int:
     if args.command == "queue-apk-build":
         result = queue_apk_build()
         write_status({"manual": True, "apk_build": result, "pending": _load_pending(), "finished_at": time.time()})
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("ok") else 2
+    if args.command == "queue-boot-repair":
+        result = queue_boot_repairs()
+        write_status({"manual": True, "boot_repair": result, "finished_at": time.time()})
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 2
     if args.command == "process-pending":
