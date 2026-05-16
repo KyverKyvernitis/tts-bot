@@ -201,6 +201,23 @@ def _worker_status_dict(worker: dict[str, Any]) -> dict[str, Any]:
     worker["status"] = clean
     return clean
 
+
+def _merge_worker_status(worker: dict[str, Any], incoming: object) -> None:
+    """Atualiza status sem apagar subestado local mantido pelo registry."""
+    if not isinstance(incoming, Mapping):
+        return
+    current = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    merged = dict(current)
+    for key, value in _safe_dict(incoming, max_items=24).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            nested = dict(merged.get(key) or {})
+            nested.update(value)
+            merged[key] = nested
+        else:
+            merged[key] = value
+    worker["status"] = merged
+
+
 def _safe_dict(value: object, *, max_items: int = 32, max_string: int = 8192) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -516,17 +533,68 @@ class CoreWorkersRegistry:
             if "supported_tasks" in payload:
                 record["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=64)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
-                if key in payload:
+                if key not in payload:
+                    continue
+                if key == "status":
+                    _merge_worker_status(record, payload.get(key))
+                else:
                     record[key] = _safe_dict(payload.get(key), max_items=max_items)
             workers[worker_id] = record
             data["workers"] = workers
+            self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
             self._save_unlocked(data)
             public = _compact_worker_public(record, now=ts)
         return {"ok": True, "worker": public}
 
+    def _reconcile_jobs_from_worker_status_unlocked(self, data: dict[str, Any], *, now: float | None = None) -> int:
+        """Fecha jobs ativos quando o worker informa último resultado no status."""
+        ts = _now() if now is None else float(now)
+        jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+        workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+        changed = 0
+        for worker_id, worker in workers.items():
+            if not isinstance(worker, dict):
+                continue
+            status = worker.get("status") if isinstance(worker.get("status"), Mapping) else {}
+            queue = status.get("core_worker_jobs") if isinstance(status.get("core_worker_jobs"), Mapping) else {}
+            if not queue:
+                continue
+            job_id = _short_text(queue.get("last_result_job_id") or queue.get("last_completed_job_id"), limit=64)
+            final_status = str(queue.get("last_result_status") or queue.get("last_completed_status") or "").strip().lower()
+            if not job_id or final_status not in {"succeeded", "failed"}:
+                continue
+            job = jobs.get(job_id)
+            if not isinstance(job, dict):
+                continue
+            current = str(job.get("status") or "queued").strip().lower()
+            if current not in {"queued", "running"}:
+                continue
+            assigned = str(job.get("worker_id") or job.get("target_worker_id") or "")
+            if assigned and assigned != str(worker_id):
+                continue
+            summary = _short_text(queue.get("last_result_summary") or job.get("summary") or final_status, limit=160)
+            finished_at = queue.get("last_result_at") or queue.get("last_completed_at") or ts
+            job["status"] = final_status
+            job["worker_id"] = str(worker_id)
+            job["lease_until"] = 0
+            job["finished_at"] = finished_at
+            job["updated_at"] = ts
+            if summary:
+                job["summary"] = summary
+            if final_status == "failed" and not job.get("error"):
+                job["error"] = summary or "worker informou falha"
+            if not isinstance(job.get("result"), Mapping) or not job.get("result"):
+                job["result"] = {"ok": final_status == "succeeded", "summary": summary, "recovered_from_worker_status": True}
+            jobs[job_id] = job
+            changed += 1
+        data["jobs"] = jobs
+        return changed
+
     def _cleanup_jobs_unlocked(self, data: dict[str, Any], *, now: float | None = None, keep_history: int | None = None) -> dict[str, int]:
         ts = _now() if now is None else float(now)
         keep = max(10, int(keep_history or _env_int("CORE_WORKER_JOB_HISTORY_LIMIT", DEFAULT_JOB_HISTORY_LIMIT)))
+        jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+        reconciled = self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
         jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
         expired_running = 0
         expired_queued = 0
@@ -570,7 +638,7 @@ class CoreWorkersRegistry:
             jobs.pop(jid, None)
             trimmed += 1
         data["jobs"] = jobs
-        return {"expired_running": expired_running, "expired_queued": expired_queued, "trimmed": trimmed}
+        return {"expired_running": expired_running, "expired_queued": expired_queued, "trimmed": trimmed, "reconciled": reconciled}
 
     def create_job(
         self,
@@ -712,9 +780,14 @@ class CoreWorkersRegistry:
             if "supported_tasks" in payload:
                 worker["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(worker.get("supported_tasks")), limit=64)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
-                if key in payload:
+                if key not in payload:
+                    continue
+                if key == "status":
+                    _merge_worker_status(worker, payload.get(key))
+                else:
                     worker[key] = _safe_dict(payload.get(key), max_items=max_items)
 
+            self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
             candidates = sorted(
                 [job for job in jobs.values() if isinstance(job, dict) and str(job.get("status") or "queued") == "queued"],

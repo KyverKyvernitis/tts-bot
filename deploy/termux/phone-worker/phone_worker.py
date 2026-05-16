@@ -33,11 +33,15 @@ START_TIME = time.time()
 JOBS_STARTED = 0
 JOBS_FAILED = 0
 _PING_CACHE: dict[str, Any] = {}
+_CORE_JOB_LOCK = threading.RLock()
+_CORE_JOB_ACTIVE: dict[str, Any] = {}
+_CORE_JOB_LAST_RESULT: dict[str, Any] = {}
+_PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.7.0"
+PHONE_WORKER_VERSION = "1.7.1"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -881,6 +885,82 @@ def _post_core_worker_json(path: str, payload: dict[str, Any], *, timeout: float
     return _post_json_url(f"{base_url}{path}", payload, token=token, timeout=timeout)
 
 
+
+
+def _core_job_runtime_snapshot() -> dict[str, Any]:
+    with _CORE_JOB_LOCK:
+        active = dict(_CORE_JOB_ACTIVE)
+        last = dict(_CORE_JOB_LAST_RESULT)
+        pending = len(_PENDING_CORE_JOB_RESULTS)
+    return {
+        "configured": _core_worker_jobs_configured(),
+        "active": bool(active),
+        "active_job_id": active.get("job_id") or "",
+        "active_type": active.get("type") or "",
+        "active_since": active.get("started_at") or 0,
+        "last_result_job_id": last.get("job_id") or "",
+        "last_result_type": last.get("type") or "",
+        "last_result_status": last.get("status") or "",
+        "last_result_summary": last.get("summary") or "",
+        "last_result_at": last.get("finished_at") or 0,
+        "last_result_sent": bool(last.get("sent_ok")),
+        "pending_results": pending,
+    }
+
+
+def _set_core_job_active(job: dict[str, Any]) -> None:
+    with _CORE_JOB_LOCK:
+        _CORE_JOB_ACTIVE.clear()
+        _CORE_JOB_ACTIVE.update({
+            "job_id": str(job.get("job_id") or ""),
+            "type": str(job.get("type") or ""),
+            "started_at": time.time(),
+        })
+
+
+def _finish_core_job(job_id: str, kind: str, status: str, *, summary: str = "", sent_ok: bool = False) -> None:
+    with _CORE_JOB_LOCK:
+        _CORE_JOB_ACTIVE.clear()
+        _CORE_JOB_LAST_RESULT.clear()
+        _CORE_JOB_LAST_RESULT.update({
+            "job_id": str(job_id or ""),
+            "type": str(kind or ""),
+            "status": str(status or ""),
+            "summary": _short_text(summary or status, limit=160),
+            "finished_at": time.time(),
+            "sent_ok": bool(sent_ok),
+        })
+
+
+def _store_pending_core_job_result(payload: dict[str, Any]) -> None:
+    job_id = str(payload.get("job_id") or "").strip()
+    if not job_id:
+        return
+    with _CORE_JOB_LOCK:
+        _PENDING_CORE_JOB_RESULTS[job_id] = dict(payload)
+
+
+def _post_core_worker_job_result_payload(payload: dict[str, Any], *, timeout: float = 8.0) -> bool:
+    code, data = _post_core_worker_json("/core-worker/jobs/result", payload, timeout=timeout)
+    if 200 <= code < 300 and data.get("ok", True):
+        return True
+    print(f"[core-worker-jobs] falha ao enviar resultado HTTP {code}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
+    return False
+
+
+def _flush_pending_core_worker_job_results(*, timeout: float = 8.0) -> int:
+    with _CORE_JOB_LOCK:
+        pending = list(_PENDING_CORE_JOB_RESULTS.items())[:5]
+    sent = 0
+    for job_id, payload in pending:
+        if _post_core_worker_job_result_payload(payload, timeout=timeout):
+            with _CORE_JOB_LOCK:
+                _PENDING_CORE_JOB_RESULTS.pop(job_id, None)
+                if _CORE_JOB_LAST_RESULT.get("job_id") == job_id:
+                    _CORE_JOB_LAST_RESULT["sent_ok"] = True
+            sent += 1
+    return sent
+
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     status = _safe_telemetry("system", _system_status, {"ok": False})
     worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
@@ -921,6 +1001,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
         },
         "status": {
+            "core_worker_jobs": _core_job_runtime_snapshot(),
             "profile": profile,
             "profile_label": _core_worker_profile_label(profile),
             "http_host": host,
@@ -1108,7 +1189,7 @@ def _system_status() -> dict[str, Any]:
         "profile": _current_core_worker_profile(),
         "profile_label": _core_worker_profile_label(_current_core_worker_profile()),
         "core_worker_heartbeat": _heartbeat_configured(),
-        "core_worker_jobs": _core_worker_jobs_configured(),
+        "core_worker_jobs": {"configured": _core_worker_jobs_configured(), **_core_job_runtime_snapshot()},
         "scripts": _script_inventory(),
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "supervisor": _safe_telemetry("supervisor", _runtime_supervisor_snapshot, {"ok": False, "source": "telemetry_failed"}),
@@ -2823,17 +2904,17 @@ def _send_core_worker_job_result(*, job_id: str, status: str, result: dict[str, 
         "error": _short_text(error, limit=240),
         "summary": _short_text(safe_result.get("summary") or error or status, limit=160),
     }
-    code, data = _post_core_worker_json("/core-worker/jobs/result", payload, timeout=timeout)
-    if 200 <= code < 300 and data.get("ok", True):
-        return True
-    print(f"[core-worker-jobs] falha ao enviar resultado HTTP {code}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
-    return False
+    ok = _post_core_worker_job_result_payload(payload, timeout=timeout)
+    if not ok:
+        _store_pending_core_job_result(payload)
+    return ok
 
 
 def _poll_core_worker_job_once(*, host: str, port: int, max_body_bytes: int, max_output_bytes: int, job_timeout: int, timeout: float = 8.0) -> bool:
     _base_url, _token, worker_id = _core_worker_auth_parts()
     if not worker_id:
         return False
+    _flush_pending_core_worker_job_results(timeout=timeout)
     payload = _core_worker_payload(host=host, port=port)
     code, data = _post_core_worker_json("/core-worker/jobs/poll", payload, timeout=timeout)
     if not (200 <= code < 300):
@@ -2847,14 +2928,20 @@ def _poll_core_worker_job_once(*, host: str, port: int, max_body_bytes: int, max
     if not job_id:
         return False
     print(f"[core-worker-jobs] executando {job_id} ({kind})", flush=True)
+    _set_core_job_active(job)
     try:
         result = _execute_core_worker_job(job, max_body_bytes=max_body_bytes, max_output_bytes=max_output_bytes, job_timeout=job_timeout)
         result_ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
-        ok = _send_core_worker_job_result(job_id=job_id, status="succeeded" if result_ok else "failed", result=result, error="" if result_ok else str(result.get("summary") or "ação falhou"), timeout=timeout)
+        final_status = "succeeded" if result_ok else "failed"
+        summary = str(result.get("summary") or ("ok" if result_ok else "ação falhou"))
+        ok = _send_core_worker_job_result(job_id=job_id, status=final_status, result=result, error="" if result_ok else summary, timeout=timeout)
+        _finish_core_job(job_id, kind, final_status, summary=summary, sent_ok=ok)
         if ok and result_ok:
             _launch_deferred_phone_worker_action(result)
     except Exception as exc:
-        _send_core_worker_job_result(job_id=job_id, status="failed", result={}, error=f"{type(exc).__name__}: {exc}", timeout=timeout)
+        summary = f"{type(exc).__name__}: {exc}"
+        ok = _send_core_worker_job_result(job_id=job_id, status="failed", result={}, error=summary, timeout=timeout)
+        _finish_core_job(job_id, kind, "failed", summary=summary, sent_ok=ok)
     return True
 
 

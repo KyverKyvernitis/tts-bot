@@ -717,48 +717,172 @@ def _job_result_note(job_type: object, job: dict[str, Any] | None) -> str:
     return f"`{kind}`{suffix or f': {status}'}"
 
 
-def _job_detail_text(job: dict[str, Any] | None) -> str:
+def _status_badge(status: object) -> tuple[str, str]:
+    raw = str(status or "desconhecido").strip().lower()
+    if raw == "succeeded":
+        return "✅", "concluído"
+    if raw == "failed":
+        return "❌", "falhou"
+    if raw == "running":
+        return "⏳", "em execução"
+    if raw == "queued":
+        return "🕒", "aguardando"
+    if raw == "expired":
+        return "⌛", "expirado"
+    return "📄", raw or "desconhecido"
+
+
+def _check_text(value: object, *, ok_label: str = "ok", fail_label: str = "atenção") -> str:
+    if value is True:
+        return f"✅ {ok_label}"
+    if value is False:
+        return f"⚠️ {fail_label}"
+    return "—"
+
+
+def _job_elapsed_seconds(job: dict[str, Any], result: dict[str, Any]) -> float | None:
+    for key in ("duration_seconds", "elapsed_seconds"):
+        if result.get(key) is not None:
+            with contextlib.suppress(Exception):
+                return max(0.0, float(result.get(key)))
+        if job.get(key) is not None:
+            with contextlib.suppress(Exception):
+                return max(0.0, float(job.get(key)))
+    started = job.get("started_at") or result.get("started_at")
+    finished = job.get("finished_at") or result.get("finished_at") or job.get("updated_at")
+    if started and finished:
+        with contextlib.suppress(Exception):
+            return max(0.0, float(finished) - float(started))
+    return None
+
+
+def _apk_result_url(publish: dict[str, Any], apk: dict[str, Any]) -> str:
+    latest = publish.get("latest") if isinstance(publish.get("latest"), dict) else {}
+    for value in (publish.get("url"), publish.get("apk_url"), latest.get("apkUrl"), latest.get("apk_url")):
+        text = str(value or "").strip()
+        if text:
+            return text
+    rel = str(apk.get("relative_url") or apk.get("path") or "").strip()
+    if rel.startswith("/core-worker/"):
+        base = _public_base_url()
+        if base:
+            return base.rstrip("/") + rel
+        return rel
+    return ""
+
+
+def _append_job_technical_lines(lines: list[str], *, job: dict[str, Any], result: dict[str, Any]) -> None:
+    lines.append("")
+    lines.append("### Detalhes técnicos")
+    compact_job = {
+        key: job.get(key)
+        for key in ("job_id", "type", "status", "created_at", "updated_at", "started_at", "finished_at", "worker_id", "target_worker_id", "attempts", "lease_until")
+        if job.get(key) not in (None, "", [], {})
+    }
+    if compact_job:
+        lines.append("`job`: " + _shorten(_redact(json.dumps(compact_job, ensure_ascii=False, separators=(",", ":"))), limit=520))
+    interesting_keys = [
+        "version", "target_version", "current_version", "apk", "publish", "builder_environment",
+        "source", "scripts", "battery", "network", "ping", "tailscale", "services",
+        "ffmpeg", "ffprobe", "lines", "error_lines", "path", "work_dir",
+    ]
+    shown = 0
+    for key in interesting_keys:
+        if key not in result:
+            continue
+        value = result.get(key)
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":")) if isinstance(value, (dict, list)) else str(value)
+        lines.append(f"`{key}`: {_shorten(_redact(text), limit=520)}")
+        shown += 1
+        if shown >= 6:
+            break
+    for tail_key, label in (("stderr_tail", "stderr"), ("stdout_tail", "stdout"), ("tail", "log")):
+        tail = result.get(tail_key)
+        if isinstance(tail, str) and tail.strip():
+            tail = _redact(tail.strip())
+            nl = chr(10)
+            lines.append(f"```txt{nl}{label}:{nl}" + tail[-900:] + f"{nl}```")
+            break
+
+
+def _job_detail_text(job: dict[str, Any] | None, *, include_technical: bool = False) -> str:
     if not isinstance(job, dict) or not job:
         return "Nenhum resultado recente encontrado para este worker."
-    status = str(job.get("status") or "desconhecido")
+    raw_status = str(job.get("status") or "desconhecido").strip().lower()
     kind = _task_name(job.get("type") or "job")
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
-    if status.strip().lower() == "succeeded" and isinstance(result, dict) and result.get("ok") is False:
-        status = "failed"
-    status_label = {"succeeded": "concluído", "failed": "falhou", "running": "em execução", "queued": "aguardando"}.get(status.strip().lower(), status)
-    icon = {"concluído": "✅", "falhou": "❌", "em execução": "⏳", "aguardando": "🕒"}.get(status_label, "📄")
+    if raw_status == "succeeded" and isinstance(result, dict) and result.get("ok") is False:
+        raw_status = "failed"
+    icon, status_label = _status_badge(raw_status)
     lines = [
         f"## {icon} Resultado do worker",
-        f"Tipo: `{_shorten(kind, limit=48)}`",
-        f"Status: `{_shorten(status_label, limit=32)}`",
+        f"**Ação:** `{_shorten(kind, limit=48)}`",
+        f"**Status:** `{_shorten(status_label, limit=32)}`",
     ]
     worker_id = job.get("worker_id") or job.get("target_worker_id")
     if worker_id:
-        lines.append(f"Worker: `{_shorten(worker_id, limit=72)}`")
-    duration = result.get("duration_seconds") or job.get("duration_seconds")
+        lines.append(f"**Worker:** `{_shorten(worker_id, limit=72)}`")
+    duration = _job_elapsed_seconds(job, result)
     if duration is not None:
-        with contextlib.suppress(Exception):
-            lines.append(f"Duração: `{float(duration):.1f}s`")
+        lines.append(f"**Duração:** `{duration:.1f}s`")
     summary = result.get("summary") or job.get("summary") or job.get("error")
     if summary:
-        lines.append(f"Resumo: {_shorten(_redact(summary), limit=300)}")
-    if job.get("error"):
-        lines.append(f"Erro: `{_shorten(_redact(job.get('error')), limit=260)}`")
+        lines.append(f"**Resumo:** {_shorten(_redact(summary), limit=300)}")
+    if job.get("error") and job.get("error") != summary:
+        lines.append(f"**Erro:** `{_shorten(_redact(job.get('error')), limit=260)}`")
 
-    # Blocos específicos: deixam de ser só tipo/status e viram resultado útil.
-    if kind == "maintenance_plan" and result:
+    if kind == "apk_build_debug" and result:
+        apk = result.get("apk") if isinstance(result.get("apk"), dict) else {}
+        publish = result.get("publish") if isinstance(result.get("publish"), dict) else {}
+        validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
+        latest = publish.get("latest") if isinstance(publish.get("latest"), dict) else {}
+        version = apk.get("versionName") or apk.get("version_name") or result.get("versionName") or latest.get("versionName")
+        version_code = apk.get("versionCode") or apk.get("version_code") or result.get("versionCode") or latest.get("versionCode")
+        filename = apk.get("filename") or apk.get("name") or latest.get("apk")
+        size = apk.get("bytes") or apk.get("size_bytes") or latest.get("bytes")
+        url = _apk_result_url(publish, apk)
+        lines.append("")
+        lines.append("### APK")
+        if version or version_code:
+            label = f"v{version}" if version else "versão desconhecida"
+            if version_code:
+                label += f" · code {version_code}"
+            lines.append(f"**Versão:** `{_shorten(label, limit=90)}`")
+        if filename:
+            lines.append(f"**Arquivo:** `{_shorten(filename, limit=120)}`")
+        if size is not None:
+            lines.append(f"**Tamanho:** `{_format_bytes(size)}`")
+        if url:
+            lines.append(f"**URL:** `{_shorten(url, limit=180)}`")
+        checks = [
+            ("Build", result.get("ok") if result.get("ok") is not None else raw_status == "succeeded"),
+            ("Publicação", publish.get("ok") if publish else None),
+            ("Assinatura", apk.get("signed") if apk else None),
+            ("Validação", validation.get("ok") if validation else result.get("validated")),
+            ("Source ZIP", result.get("source_zip_ok") if result.get("source_zip_ok") is not None else result.get("source_ok")),
+        ]
+        useful_checks = [f"{name}: {_check_text(value)}" for name, value in checks if value is not None]
+        if useful_checks:
+            lines.append("**Validações:** " + " · ".join(useful_checks))
+        if publish and publish.get("ok") is False:
+            detail = publish.get("detail") or publish.get("error") or publish.get("hint")
+            if detail:
+                lines.append(f"**Publicação:** `{_shorten(_redact(detail), limit=260)}`")
+    elif kind == "maintenance_plan" and result:
         if result.get("scanned") is not None:
-            lines.append(f"Arquivos analisados: `{result.get('scanned')}`")
+            lines.append(f"**Arquivos analisados:** `{result.get('scanned')}`")
         if result.get("estimated_reclaimable") is not None:
-            lines.append(f"Recuperável estimado: `{_format_bytes(result.get('estimated_reclaimable'))}`")
+            lines.append(f"**Recuperável estimado:** `{_format_bytes(result.get('estimated_reclaimable'))}`")
         recommendations = result.get("recommendations") if isinstance(result.get("recommendations"), list) else []
         if recommendations:
-            lines.append("\n**Sugestões seguras:**")
+            lines.append("")
+            lines.append("### Sugestões seguras")
             for item in recommendations[:6]:
                 lines.append(f"- {_shorten(_redact(item), limit=180)}")
         largest = result.get("largest") if isinstance(result.get("largest"), list) else []
         if largest:
-            lines.append("\n**Maiores arquivos vistos:**")
+            lines.append("")
+            lines.append("### Maiores arquivos vistos")
             for item in largest[:4]:
                 if isinstance(item, dict):
                     lines.append(f"- `{_shorten(item.get('path'), limit=80)}` · {_format_bytes(item.get('size'))}")
@@ -769,15 +893,18 @@ def _job_detail_text(job: dict[str, Any] | None) -> str:
             ("Conteúdo", result.get("content_ok")),
             ("Termux:Boot", result.get("package_available")),
         ]
-        lines.append("\n**Boot:** " + " · ".join(f"{name} {'ok' if ok else 'atenção'}" for name, ok in checks))
+        lines.append("")
+        lines.append("### Boot")
+        lines.append(" · ".join(f"{name}: {_check_text(ok)}" for name, ok in checks))
         if result.get("path"):
-            lines.append(f"Caminho: `{_shorten(result.get('path'), limit=120)}`")
+            lines.append(f"**Caminho:** `{_shorten(result.get('path'), limit=120)}`")
         if result.get("warning"):
-            lines.append(f"Aviso: {_shorten(result.get('warning'), limit=220)}")
+            lines.append(f"**Aviso:** {_shorten(result.get('warning'), limit=220)}")
     elif kind == "endpoint_probe" and result:
         probes = result.get("results") if isinstance(result.get("results"), list) else []
         if probes:
-            lines.append("\n**Endpoints:**")
+            lines.append("")
+            lines.append("### Endpoints")
             for item in probes[:6]:
                 if not isinstance(item, dict):
                     continue
@@ -791,67 +918,36 @@ def _job_detail_text(job: dict[str, Any] | None) -> str:
         if counts:
             top_counts = ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: int(kv[1] or 0), reverse=True)[:8] if v)
             if top_counts:
-                lines.append(f"Contagens: `{_shorten(top_counts, limit=240)}`")
+                lines.append(f"**Contagens:** `{_shorten(top_counts, limit=240)}`")
         top_messages = result.get("top_messages") if isinstance(result.get("top_messages"), list) else []
         if top_messages:
-            lines.append("\n**Mais repetidos:**")
+            lines.append("")
+            lines.append("### Mais repetidos")
             for item in top_messages[:5]:
                 if isinstance(item, dict):
                     lines.append(f"- `{item.get('count')}`× {_shorten(_redact(item.get('message')), limit=160)}")
         recent = result.get("recent") if isinstance(result.get("recent"), list) else []
         if recent:
-            lines.append("\n**Recentes importantes:**")
+            lines.append("")
+            lines.append("### Recentes importantes")
             for item in recent[-5:]:
                 lines.append(f"- {_shorten(_redact(item), limit=170)}")
     elif kind in {"zip_validate", "zip_audit"} and result:
-        lines.append(f"ZIP: `{_shorten(result.get('filename') or 'arquivo', limit=80)}` · `{result.get('files', 0)}` arquivo(s) · risco `{result.get('risk', 'n/a')}`")
-        warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+        lines.append(f"**ZIP:** `{_shorten(result.get('filename') or 'arquivo', limit=80)}` · `{result.get('files', 0)}` arquivo(s) · risco `{result.get('risk', 'n/a')}`")
         errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+        warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
         if errors:
-            lines.append("Erros: " + "; ".join(_shorten(_redact(e), limit=120) for e in errors[:5]))
+            lines.append("**Erros:** " + "; ".join(_shorten(_redact(e), limit=120) for e in errors[:5]))
         if warnings:
-            lines.append("Avisos: " + "; ".join(_shorten(_redact(w), limit=120) for w in warnings[:5]))
-    elif kind == "apk_build_debug" and result:
-        apk = result.get("apk") if isinstance(result.get("apk"), dict) else {}
-        publish = result.get("publish") if isinstance(result.get("publish"), dict) else {}
-        if apk:
-            lines.append(f"APK: `{_shorten(apk.get('filename'), limit=96)}` · {_format_bytes(apk.get('bytes'))}")
-        if publish:
-            lines.append(f"Publicação: `{'ok' if publish.get('ok') else 'falhou'}`")
-            latest = publish.get("latest") if isinstance(publish.get("latest"), dict) else {}
-            if latest.get("apkUrl"):
-                lines.append(f"URL: `{_shorten(latest.get('apkUrl'), limit=120)}`")
+            lines.append("**Avisos:** " + "; ".join(_shorten(_redact(w), limit=120) for w in warnings[:5]))
 
-    interesting_keys = [
-        "version", "target_version", "current_version", "apk", "publish", "builder_environment",
-        "source", "scripts", "battery", "network", "ping", "tailscale", "services",
-        "ffmpeg", "ffprobe", "lines", "error_lines", "path", "work_dir",
-    ]
-    shown = 0
-    for key in interesting_keys:
-        if key not in result:
-            continue
-        value = result.get(key)
-        if isinstance(value, (dict, list)):
-            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        else:
-            text = str(value)
-        lines.append(f"`{key}`: {_shorten(_redact(text), limit=360)}")
-        shown += 1
-        if shown >= 4:
-            break
-    publish = result.get("publish") if isinstance(result.get("publish"), dict) else {}
-    if publish and publish.get("ok") is False:
-        detail = publish.get("detail") or publish.get("error") or publish.get("hint")
-        if detail:
-            lines.append(f"Publicação: `{_shorten(_redact(detail), limit=360)}`")
-    for tail_key, label in (("stderr_tail", "stderr"), ("stdout_tail", "stdout"), ("tail", "log")):
-        tail = result.get(tail_key)
-        if isinstance(tail, str) and tail.strip():
-            tail = _redact(tail.strip())
-            lines.append(f"```txt\n{label}:\n" + tail[-900:] + "\n```")
-            break
-    return "\n".join(lines)[:1900]
+    if include_technical:
+        _append_job_technical_lines(lines, job=job, result=result)
+    elif result:
+        lines.append("")
+        lines.append("-# Detalhes técnicos ocultos. Use o botão abaixo se precisar depurar.")
+    return chr(10).join(lines)[:3800 if include_technical else 1900]
+
 
 def _worker_detail_text(worker: dict[str, Any] | None) -> str:
     if not isinstance(worker, dict) or not worker:
@@ -1106,6 +1202,50 @@ class WorkerRolesEditorView(discord.ui.LayoutView):
 
     async def _cancel(self, interaction: discord.Interaction) -> None:
         self._rebuild(done="Edição fechada. Nada foi alterado.")
+        await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+
+class LastJobResultView(discord.ui.LayoutView):
+    def __init__(self, *, owner_id: int, job: dict[str, Any] | None):
+        super().__init__(timeout=120.0)
+        self.owner_id = int(owner_id or 0)
+        self.job = job if isinstance(job, dict) else None
+        self.show_technical = False
+        self._rebuild()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(getattr(interaction.user, "id", 0) or 0) == self.owner_id:
+            return True
+        if interaction.response.is_done():
+            await interaction.followup.send("Só quem abriu o painel pode ver esses detalhes.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Só quem abriu o painel pode ver esses detalhes.", ephemeral=True)
+        return False
+
+    def _clear_items(self) -> None:
+        for item in list(self.children):
+            self.remove_item(item)
+
+    def _rebuild(self) -> None:
+        self._clear_items()
+        if not self.job:
+            container = discord.ui.Container()
+            container.add_item(discord.ui.TextDisplay("Nenhum resultado recente encontrado para este worker."))
+            self.add_item(container)
+            return
+        container = discord.ui.Container()
+        container.add_item(discord.ui.TextDisplay(_job_detail_text(self.job, include_technical=self.show_technical)))
+        row = discord.ui.ActionRow()
+        label = "Ocultar detalhes técnicos" if self.show_technical else "Mostrar detalhes técnicos"
+        button = discord.ui.Button(label=label, emoji="🧾", style=discord.ButtonStyle.secondary)
+        button.callback = self._toggle_technical
+        row.add_item(button)
+        container.add_item(row)
+        self.add_item(container)
+
+    async def _toggle_technical(self, interaction: discord.Interaction) -> None:
+        self.show_technical = not self.show_technical
+        self._rebuild()
         await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
 
 class WorkersPanelView(discord.ui.LayoutView):
@@ -1532,17 +1672,8 @@ class WorkersPanelView(discord.ui.LayoutView):
                 values = list(getattr(interaction, "values", []) or [])
         if values:
             self.selected_worker_id = str(values[0] or "")
+        # Selecionar worker é navegação visual, não uma ação/job real.
         self._ensure_selected_worker()
-        worker = self._selected_worker()
-        if self._selected_is_auto():
-            selected_label = "melhor worker disponível"
-        elif worker:
-            selected_label = str(worker.get("name") or worker.get("worker_id") or "worker")
-        elif self._selected_is_legacy():
-            selected_label = "phone-worker direto"
-        else:
-            selected_label = "nenhum worker"
-        self.snapshot.action_note = f"selecionado: {_shorten(selected_label, limit=48)}"
         self._rebuild_layout()
         await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
 
@@ -1555,9 +1686,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         if category not in {str(item.get("value")) for item in WORKER_ACTION_CATEGORIES}:
             category = "quick"
         self.selected_action_category = category
-        label = next((str(item.get("label") or category) for item in WORKER_ACTION_CATEGORIES if str(item.get("value")) == category), category)
-        count = len(self._action_specs_for_selected(category=category))
-        self.snapshot.action_note = f"categoria `{label}` aberta · {count} ação(ões) disponíveis"
+        # Abrir categoria é só navegação; não altera a última ação útil do painel.
         self._rebuild_layout()
         await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
 
@@ -1651,11 +1780,11 @@ class WorkersPanelView(discord.ui.LayoutView):
 
     async def _refresh(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
-        self.snapshot = await self.cog._collect_workers_snapshot(action_note="painel atualizado manualmente")
+        previous_note = self.snapshot.action_note
+        self.snapshot = await self.cog._collect_workers_snapshot(action_note=previous_note)
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
-        await self._send_ephemeral(interaction, "🔄 Painel atualizado.")
 
     async def _wake_worker(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -1989,7 +2118,8 @@ class WorkersPanelView(discord.ui.LayoutView):
             return
         try:
             job = await self.cog._latest_core_worker_job(worker_id)
-            await interaction.response.send_message(_job_detail_text(job), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            view = LastJobResultView(owner_id=self.owner_id, job=job)
+            await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
             await interaction.response.send_message(f"Não consegui buscar o resultado: {_compact_failure(exc)}", ephemeral=True)
 
