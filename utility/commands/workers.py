@@ -70,6 +70,8 @@ WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Testar worker", "value": "ping", "job_type": "ping", "payload": {}, "summary": "teste manual pelo painel workers", "description": "Testa comunicação", "emoji": "🧪", "category": "quick"},
     {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede e sistema", "emoji": "🩺", "category": "quick"},
     {"label": "Atualizar agent", "value": "worker_update", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Atualiza e reinicia", "emoji": "⬆️", "requires_declared": True, "category": "maintenance"},
+    {"label": "Atualizar APK", "value": "apk_update", "job_type": "apk_update", "payload": {"mode": "download_install_prompt"}, "summary": "baixar APK novo e abrir instalação no celular", "description": "App pelo worker", "emoji": "📦", "requires_declared": True, "category": "maintenance"},
+    {"label": "Ver update APK", "value": "apk_update_check", "job_type": "apk_update_check", "payload": {}, "summary": "verificar atualização do APK neste celular", "description": "Consulta a VPS", "emoji": "🔎", "requires_declared": True, "category": "monitor"},
     {"label": "Reparar scripts", "value": "worker_repair_scripts", "job_type": "worker_update", "payload": {"scripts_only": True}, "summary": "reinstalar scripts auxiliares do worker", "description": "Reinstala scripts", "emoji": "🛠️", "requires_declared": True, "category": "maintenance"},
     {"label": "Reparar boot automático", "value": "boot_repair", "job_type": "boot_repair", "payload": {}, "summary": "reparar inicialização automática no Termux:Boot", "description": "Auto-start pós-reboot", "emoji": "🚀", "requires_declared": True, "category": "maintenance"},
     {"label": "Status boot", "value": "boot_status", "job_type": "boot_status", "payload": {}, "summary": "verificar inicialização automática", "description": "Termux:Boot", "emoji": "🔎", "requires_declared": True, "category": "monitor"},
@@ -877,6 +879,12 @@ class WorkersPanelView(discord.ui.LayoutView):
             {"label": "Testar troca automática", "value": "_failover_test", "description": "Precisa de 2+ workers", "emoji": "🧪", "panel_action": "failover", "category": "add"},
             {"label": "Limpar jobs", "value": "_cleanup_jobs", "description": "Remove travados/antigos", "emoji": "🧹", "panel_action": "cleanup", "category": "organize"},
         ]
+        online_apk_workers = [
+            worker for worker in self._online_registry_workers()
+            if "apk_update" in _task_set(worker.get("supported_tasks"))
+        ]
+        if online_apk_workers:
+            specs.append({"label": "Atualizar APKs online", "value": "_apk_update_all", "description": f"{len(online_apk_workers)} celular(es)", "emoji": "📦", "panel_action": "apk_update_all", "category": "maintenance"})
         if selected_worker is not None:
             specs.extend([
                 {"label": "Detalhes do celular", "value": "_worker_details", "description": "Resumo completo", "emoji": "📱", "panel_action": "details", "category": "quick"},
@@ -1157,6 +1165,9 @@ class WorkersPanelView(discord.ui.LayoutView):
         if action == "_cleanup_jobs":
             await self._cleanup_jobs(interaction)
             return
+        if action == "_apk_update_all":
+            await self._queue_apk_update_all(interaction)
+            return
         if action == "_onboarding_guide":
             await self._show_onboarding_guide(interaction)
             return
@@ -1393,6 +1404,43 @@ class WorkersPanelView(discord.ui.LayoutView):
                 self.snapshot = await self.cog._collect_workers_snapshot(action_note=_job_result_note(job_type, final_job))
         except Exception as exc:
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha em `{job_type}`: {_compact_failure(exc)}")
+        self._ensure_selected_worker()
+        self._rebuild_layout()
+        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _queue_apk_update_all(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=False)
+        online_workers = [
+            worker for worker in self._online_registry_workers()
+            if "apk_update" in _task_set(worker.get("supported_tasks"))
+        ]
+        if not online_workers:
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note="nenhum celular online suporta update do APK")
+            self._ensure_selected_worker()
+            self._rebuild_layout()
+            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            return
+        ok = 0
+        errors: list[str] = []
+        for worker in online_workers[:12]:
+            worker_id = str(worker.get("worker_id") or "")
+            if not worker_id:
+                continue
+            try:
+                await self.cog._queue_core_worker_job(
+                    interaction.user,
+                    job_type="apk_update",
+                    payload={"mode": "download_install_prompt", "source": "workers_panel_bulk_apk_update"},
+                    summary="baixar APK novo e abrir instalação no celular",
+                    target_worker_id=worker_id,
+                )
+                ok += 1
+            except Exception as exc:
+                errors.append(f"{_shorten(worker.get('name') or worker_id, limit=24)}: {_compact_failure(exc)}")
+        note = f"📦 update do APK enviado para {ok} celular(es)"
+        if errors:
+            note += f" · falhas: {_shorten('; '.join(errors), limit=100)}"
+        self.snapshot = await self.cog._collect_workers_snapshot(action_note=note)
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())

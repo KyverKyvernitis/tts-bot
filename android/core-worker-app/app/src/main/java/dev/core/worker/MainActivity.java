@@ -51,11 +51,12 @@ import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.4.0";
+    private static final String APP_VERSION = "0.4.1";
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
     private static final String LOCAL_AGENT_PROFILE_URL = "http://127.0.0.1:8766/local/profile";
     private static final String LOCAL_AGENT_PAIR_URL = "http://127.0.0.1:8766/local/pair";
     private static final String LOCAL_AGENT_HEARTBEAT_URL = "http://127.0.0.1:8766/local/heartbeat";
+    private static final String LOCAL_AGENT_APP_UPDATE_URL = "http://127.0.0.1:8766/local/app/update";
     private static final String PREFS = "core_worker_private";
 
     private static final int BG = Color.rgb(8, 12, 25);
@@ -217,18 +218,18 @@ public class MainActivity extends Activity {
 
         LinearLayout updateCard = cardWithTopMargin(root);
         updateCard.addView(sectionTitle("4. Sistema do app"));
-        updateCard.addView(smallText("Atualizações vêm da VPS. No Android comum, o app pode baixar e abrir a instalação, mas você ainda confirma a atualização na tela do sistema."));
+        updateCard.addView(smallText("Atualizações vêm da VPS. Quando o worker local está online, ele baixa o APK e abre o instalador; no Android comum você ainda confirma a atualização na tela do sistema."));
         updateText = smallText("Versão instalada: " + APP_VERSION + "\nAtualização: ainda não verificada.");
         updateText.setTextColor(TEXT);
         updateText.setBackgroundColor(CARD_SOFT);
         updateText.setPadding(dp(10), dp(10), dp(10), dp(10));
         updateCard.addView(updateText);
 
-        updateCheckButton = button("Procurar atualização na VPS");
+        updateCheckButton = button("Procurar atualização pelo worker");
         updateCheckButton.setOnClickListener(v -> checkForUpdate());
         updateCard.addView(updateCheckButton);
 
-        updateInstallButton = button("Baixar e instalar atualização");
+        updateInstallButton = button("Baixar e instalar pelo worker");
         updateInstallButton.setOnClickListener(v -> downloadAndInstallUpdate());
         updateCard.addView(updateInstallButton);
 
@@ -499,7 +500,20 @@ public class MainActivity extends Activity {
             return;
         }
         saveLocalFields(selectedProfileSafe());
-        runBusy("Procurando atualização na VPS...", () -> {
+        runBusy("Procurando atualização pelo worker local...", () -> {
+            boolean usedWorker = updateLocalAgentStatus(false);
+            if (usedWorker) {
+                JSONObject payload = updatePayload("check", serverUrl);
+                HttpResult local = request("POST", LOCAL_AGENT_APP_UPDATE_URL, payload, null);
+                if (local.ok()) {
+                    JSONObject body = new JSONObject(local.body);
+                    applyWorkerUpdateManifest(body, serverUrl);
+                    updateLatestUi(workerUpdateText(body, "worker local"));
+                    show("Worker local consultou a atualização na VPS.");
+                    return;
+                }
+            }
+
             HttpResult result = request("GET", serverUrl + "/core-worker/app/latest.json", null, null);
             if (!result.ok()) {
                 updateLatestUi("Atualização não publicada na VPS.\nConfigure /core-worker/app/latest.json depois de buildar o APK.\nHTTP " + result.status + " · " + compactResultBody(result.body));
@@ -540,7 +554,22 @@ public class MainActivity extends Activity {
             refreshLocalStatus("Informe a URL da VPS antes de baixar atualização.");
             return;
         }
-        runBusy("Baixando atualização...", () -> {
+        runBusy("Pedindo atualização ao worker local...", () -> {
+            boolean usedWorker = updateLocalAgentStatus(false);
+            if (usedWorker) {
+                JSONObject payload = updatePayload("update", serverUrl);
+                HttpResult local = request("POST", LOCAL_AGENT_APP_UPDATE_URL, payload, null);
+                if (local.ok()) {
+                    JSONObject body = new JSONObject(local.body);
+                    applyWorkerUpdateManifest(body, serverUrl);
+                    updateLatestUi(workerUpdateText(body, "worker local"));
+                    String path = body.optString("apk_path", "");
+                    show("O worker baixou o APK e tentou abrir o instalador.\nConfirme a atualização na tela do Android." + (path.isEmpty() ? "" : "\nArquivo: " + path));
+                    return;
+                }
+                updateLatestUi("Worker local não conseguiu atualizar pelo Termux.\nTentando fallback pelo próprio APK...\n" + compactResultBody(local.body));
+            }
+
             if (latestApkUrl == null || latestApkUrl.trim().isEmpty()) {
                 HttpResult manifest = request("GET", serverUrl + "/core-worker/app/latest.json", null, null);
                 if (!manifest.ok()) {
@@ -576,9 +605,58 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            updateLatestUi("Atualização baixada. O Android vai abrir a tela de instalação para você confirmar.\nArquivo: " + apkFile.getName());
+            updateLatestUi("Atualização baixada pelo APK. O Android vai abrir a tela de instalação para você confirmar.\nArquivo: " + apkFile.getName());
             openApkInstaller(apkFile);
         });
+    }
+
+    private JSONObject updatePayload(String action, String serverUrl) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("action", action);
+        payload.put("mode", action);
+        payload.put("vps_url", serverUrl);
+        payload.put("server_url", serverUrl);
+        payload.put("current_version", APP_VERSION);
+        payload.put("current_version_code", BuildConfig.VERSION_CODE);
+        payload.put("source", "core-worker-apk-companion");
+        payload.put("apk_version", APP_VERSION);
+        return payload;
+    }
+
+    private void applyWorkerUpdateManifest(JSONObject body, String serverUrl) {
+        latestVersionName = body.optString("version_name", body.optString("versionName", latestVersionName));
+        latestVersionCode = body.optInt("version_code", body.optInt("versionCode", latestVersionCode));
+        latestApkSha256 = body.optString("sha256", latestApkSha256);
+        latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("apk_url", body.optString("apkUrl", latestApkUrl)));
+        JSONArray changes = body.optJSONArray("changelog");
+        latestChangelog = changelogText(changes);
+    }
+
+    private String workerUpdateText(JSONObject body, String source) {
+        String versionName = body.optString("version_name", body.optString("versionName", latestVersionName));
+        int versionCode = body.optInt("version_code", body.optInt("versionCode", latestVersionCode));
+        boolean downloaded = body.optBoolean("downloaded", body.optString("apk_path", "").length() > 0);
+        String summary = body.optString("summary", "Atualização verificada.");
+        String path = body.optString("apk_path", body.optString("downloaded_path", ""));
+        StringBuilder text = new StringBuilder();
+        text.append("Versão instalada: ").append(APP_VERSION).append(" (").append(BuildConfig.VERSION_CODE).append(").\n");
+        text.append("Fonte: ").append(source).append(".\n");
+        text.append("Versão na VPS: ").append(emptyFallback(versionName, "sem nome"));
+        if (versionCode >= 0) text.append(" (").append(versionCode).append(")");
+        text.append(".\n");
+        if (versionCode > BuildConfig.VERSION_CODE || (!versionName.isEmpty() && !APP_VERSION.equals(versionName))) {
+            text.append("Atualização disponível.");
+        } else {
+            text.append("Este APK parece atualizado.");
+        }
+        text.append("\n").append(summary);
+        if (downloaded) {
+            text.append("\nAPK baixado pelo worker.");
+        }
+        if (!path.isEmpty()) {
+            text.append("\nArquivo: ").append(path);
+        }
+        return text.toString();
     }
 
     private void downloadFile(String url, File target) throws Exception {

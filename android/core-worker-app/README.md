@@ -10,9 +10,9 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
-## v0.4.0 — interface de onboarding + atualização pela VPS
+## v0.4.1 — atualização do APK pelo worker local
 
-A versão `0.4.0` deixa o app mais perto do caminho final:
+A versão `0.4.1` mantém a interface do `0.4.0` e adiciona atualização do APK passando pelo worker local:
 
 - tela principal reorganizada em passos humanos:
   - **Preparar este celular**;
@@ -35,11 +35,12 @@ APK -> /local/heartbeat -> Termux phone-worker -> /core-worker/heartbeat na VPS
 ```
 
 - o APK não cria worker próprio, não salva token de worker e não envia heartbeat direto;
-- o APK ganhou atualização semi-automática via VPS:
-  - procura `/core-worker/app/latest.json`;
-  - baixa o APK informado no manifesto;
+- o APK ganhou atualização semi-automática via VPS e worker local:
+  - o APK pede ao Termux worker local para consultar `/core-worker/app/latest.json`;
+  - o worker baixa o APK para a pasta de downloads do Android;
   - valida SHA-256 quando informado;
-  - abre a tela de instalação do Android para confirmação.
+  - abre a tela de instalação do Android para confirmação;
+  - se o worker local estiver offline, o APK ainda tenta o fallback antigo baixando por conta própria.
 
 No Android comum, a instalação ainda precisa de confirmação do usuário. Atualização silenciosa só deve ser considerada no futuro com cenário controlado, como device owner/profile owner ou distribuição gerenciada.
 
@@ -54,8 +55,8 @@ O APK pode:
 - passar o pareamento para o phone-worker real via `POST /local/pair`;
 - editar o **perfil deste próprio celular** por `POST /local/profile`;
 - pedir heartbeat/status básico ao worker local por `POST /local/heartbeat`;
-- procurar atualização privada do APK na VPS;
-- baixar atualização e abrir o instalador do Android;
+- procurar atualização privada do APK na VPS pelo worker local;
+- pedir para o worker baixar atualização e abrir o instalador do Android;
 - abrir Termux/Tailscale quando o Android permitir.
 
 O APK não deve virar, por enquanto:
@@ -112,6 +113,7 @@ GET  http://127.0.0.1:8766/local/status
 POST http://127.0.0.1:8766/local/profile
 POST http://127.0.0.1:8766/local/pair
 POST http://127.0.0.1:8766/local/heartbeat
+POST http://127.0.0.1:8766/local/app/update
 ```
 
 Essas rotas devem aceitar apenas localhost. Elas não expõem shell livre, token global, fila completa, controle pesado ou ações perigosas.
@@ -180,8 +182,8 @@ Depois de buildar o APK na VPS:
 ```bash
 cd /home/ubuntu/bot/android/core-worker-app
 mkdir -p releases
-cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.0-debug.apk
-sha256sum releases/CoreWorker-v0.4.0-debug.apk
+cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.1-debug.apk
+sha256sum releases/CoreWorker-v0.4.1-debug.apk
 ```
 
 Crie o manifesto:
@@ -189,31 +191,29 @@ Crie o manifesto:
 ```bash
 cat > releases/latest.json <<'JSON'
 {
-  "versionName": "0.4.0",
-  "versionCode": 5,
-  "apkUrl": "/core-worker/app/CoreWorker-v0.4.0-debug.apk",
+  "versionName": "0.4.1",
+  "versionCode": 6,
+  "apkUrl": "/core-worker/app/CoreWorker-v0.4.1-debug.apk",
   "sha256": "COLE_AQUI_O_SHA256",
-  "requiredAgentVersion": "1.6.0",
+  "requiredAgentVersion": "1.6.1",
   "changelog": [
     "Interface de onboarding mais simples",
     "Checklist de Termux, plugins e rede privada",
-    "Atualização privada do APK pela VPS"
+    "Atualização privada do APK pelo worker local"
   ]
 }
 JSON
 ```
 
-Reinicie o bot/webserver se necessário. No APK, toque em **Procurar atualização na VPS**.
+Reinicie o bot/webserver se necessário. No APK, toque em **Procurar atualização pelo worker**. Pelo painel `workers`, em **Manutenção**, também é possível pedir **Atualizar APK** para um celular ou **Atualizar APKs online** para todos os workers compatíveis.
 
 ## Build por terminal na VPS
 
-Em uma VPS fraca, pare o bot antes de buildar e use swap:
+Em uma VPS fraca, use swap de 4 GB e compile com baixa prioridade. Evite parar o bot se o callkeeper/monitor for religá-lo durante a build:
 
 ```bash
-sudo systemctl stop tts-bot.service
 cd /home/ubuntu/bot/android/core-worker-app
 nice -n 19 ionice -c3 gradle assembleDebug --no-daemon --max-workers=1
-sudo systemctl start tts-bot.service
 ```
 
 O APK debug ficará em:
