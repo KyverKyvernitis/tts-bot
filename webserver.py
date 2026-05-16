@@ -56,6 +56,25 @@ def _safe_release_filename(value: str, *, default: str = "CoreWorker.apk") -> st
     return filename[:120]
 
 
+
+
+def _external_core_worker_url(path: str) -> str:
+    path = str(path or "").strip()
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    if not path.startswith("/"):
+        path = "/" + path
+    try:
+        return request.url_root.rstrip("/") + path
+    except Exception:
+        base = str(os.getenv("CORE_WORKER_PUBLIC_BASE_URL") or os.getenv("CORE_WORKER_VPS_URL") or "").strip().rstrip("/")
+        return (base + path) if base else path
+
+
+def _core_worker_apk_url(filename: str) -> str:
+    return f"/core-worker/app/{_safe_release_filename(filename, default='CoreWorker.apk')}"
+
+
 def _json_field(value: str, fallback):
     try:
         parsed = json.loads(str(value or ""))
@@ -91,7 +110,7 @@ def _append_core_worker_notification_event(event: dict) -> dict:
     path = _core_worker_notification_log_path()
     now = int(time.time())
     state = _safe_short_text(event.get("state") or event.get("event"), 48)
-    delivered = bool(event.get("delivered", False)) or state in {"displayed", "duplicate", "already_displayed"}
+    delivered = bool(event.get("delivered", False)) or state in {"displayed", "duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened"}
     clean = {
         "receivedAt": now,
         "notificationId": _safe_short_text(event.get("notificationId"), 96),
@@ -137,7 +156,7 @@ def _latest_core_worker_notification_summary(notification_id: str) -> dict:
     record = latest.get(str(notification_id or "")) if isinstance(latest, dict) else None
     if isinstance(record, dict):
         state = str(record.get("state") or "")
-        delivered = bool(record.get("delivered", False)) or state in {"displayed", "duplicate", "already_displayed"}
+        delivered = bool(record.get("delivered", False)) or state in {"displayed", "duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened"}
         return {
             "lastState": record.get("state"),
             "lastDelivered": delivered,
@@ -503,11 +522,14 @@ def core_worker_app_publish():
     source_sha = str(form.get("sourceFingerprint") or form.get("source_fingerprint") or form.get("sourceSha256") or form.get("source_sha256") or "").strip().lower()[:96]
     notification_id = _safe_short_text(form.get("notificationId") or _notification_event_id(version_name=version_name, version_code=version_code, sha256=actual_sha), 96)
     notification_summary = _latest_core_worker_notification_summary(notification_id)
+    apk_url = _core_worker_apk_url(filename)
     manifest = {
         "ok": True,
         "versionName": version_name,
         "versionCode": version_code,
-        "apkUrl": f"/core-worker/app/{filename}",
+        "apkUrl": apk_url,
+        "downloadUrl": _external_core_worker_url(apk_url),
+        "directApkUrl": _external_core_worker_url(apk_url),
         "sha256": actual_sha,
         "uploadedSha256": upload_sha,
         "requiredAgentVersion": required_agent,
@@ -573,6 +595,10 @@ def core_worker_app_latest():
     try:
         data = json.loads(open(manifest, "r", encoding="utf-8").read())
         if isinstance(data, dict):
+            apk_url = str(data.get("apkUrl") or data.get("url") or "").strip()
+            if apk_url:
+                data["downloadUrl"] = _external_core_worker_url(apk_url)
+                data["directApkUrl"] = data["downloadUrl"]
             nid = str(data.get("notificationId") or "")
             if nid:
                 data["notificationStatus"] = _latest_core_worker_notification_summary(nid)
@@ -590,7 +616,7 @@ def core_worker_app_file(filename: str):
         abort(404)
     lowered = full.lower()
     if lowered.endswith(".apk"):
-        return send_file(full, mimetype="application/vnd.android.package-archive", conditional=True, max_age=0)
+        return send_file(full, mimetype="application/vnd.android.package-archive", as_attachment=True, download_name=os.path.basename(full), conditional=True, max_age=0)
     if lowered.endswith(".json"):
         return send_file(full, mimetype="application/json", conditional=True, max_age=0)
     if lowered.endswith(".zip"):
@@ -675,6 +701,9 @@ def core_worker_jobs_result():
     if not isinstance(payload, dict):
         payload = {}
     status, body = core_worker_job_result_http(request.headers, payload, remote_addr=request.remote_addr or "")
+    if status == 200 and isinstance(body, dict):
+        worker_id = str(payload.get("worker_id") or payload.get("id") or "")
+        _kick_core_worker_pending_automation(worker_id)
     return jsonify(body), status
 
 

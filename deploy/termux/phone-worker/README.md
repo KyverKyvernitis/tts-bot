@@ -4,9 +4,9 @@ Worker opcional para usar o celular como ajudante da VPS em tarefas que não sã
 
 Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e usa fallback local.
 
-## v1.7.5 — watchdog local obrigatório e update resistente a rota instável
+## v1.7.6 — comunicação confiável e auto-update garantido
 
-A versão `1.7.5` alinha o agent ao Patch 44. O Termux:Boot oficial passa a iniciar o `watch-phone-worker.sh`, não o start direto. O watchdog mantém `termux-wake-lock`, usa lock/pid próprio para evitar duplicatas, reinicia o worker localmente e grava status/logs do supervisor. O agent também tenta reparar automaticamente o boot quando detectar script incompleto ou duplicata ativa, sem depender de edição manual no Termux.
+A versão `1.7.6` alinha o agent ao Patch 45. O worker continua usando watchdog local, mas a VPS agora também reavalia mismatch de versão em cada heartbeat/poll e agenda `worker_update` mesmo se a pendência antiga tiver sumido. O agent mantém resultado pendente em disco e reenvia quando a rota/VPN voltar, evitando jobs invisíveis.
 
 O `worker_update` aplica os arquivos whitelisted em `~/phone-worker`, repara o boot para apontar ao watchdog, persiste resultados pendentes em disco e reinicia mesmo se a rota para a VPS cair antes da confirmação. Ao reconectar, o worker reenvia o resultado pendente e o painel consegue mostrar versão atual vs. versão esperada. Diretórios duplicados como `~/phone-worker-install` são reportados com caminho exato; se estiverem inativos, não bloqueiam o estado principal do worker.
 

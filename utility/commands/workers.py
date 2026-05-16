@@ -268,6 +268,17 @@ def _expected_phone_worker_version() -> str:
     return match.group(1) if match else ""
 
 
+def _expected_apk_version() -> tuple[str, int]:
+    path = _repo_root() / "android" / "core-worker-app" / "app" / "build.gradle"
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return "", 0
+    name = re.search(r'versionName\s+["\']([^"\']+)["\']', text)
+    code = re.search(r"versionCode\s+(\d+)", text)
+    return (name.group(1) if name else "", int(code.group(1)) if code else 0)
+
+
 def _version_tuple(value: object) -> tuple[int, ...]:
     parts = re.findall(r"\d+", str(value or ""))
     return tuple(int(part) for part in parts[:4]) if parts else (0,)
@@ -745,14 +756,23 @@ def _core_worker_notification_status_text() -> str:
     root = _repo_root()
     latest_path = root / "android" / "core-worker-app" / "releases" / "latest.json"
     notif_path = root / "data" / "core_worker_app_notifications.json"
+    expected_name, expected_code = _expected_apk_version()
     try:
         latest = json.loads(latest_path.read_text(encoding="utf-8")) if latest_path.exists() else {}
     except Exception:
         latest = {}
-    if not isinstance(latest, dict) or not latest.get("notificationRequested"):
+    if not isinstance(latest, dict) or not latest:
+        return f"APK {expected_name or '?'}: aguardando publicação" if expected_name else ""
+    version = str(latest.get("versionName") or "?")
+    try:
+        latest_code = int(latest.get("versionCode") or 0)
+    except Exception:
+        latest_code = 0
+    if expected_code and latest_code and latest_code < expected_code:
+        return f"APK {expected_name or expected_code}: latest antigo ({version}) · build pendente"
+    if not latest.get("notificationRequested"):
         return ""
     notification_id = str(latest.get("notificationId") or "").strip()
-    version = str(latest.get("versionName") or "?")
     published_at = latest.get("publishedAt")
     try:
         data = json.loads(notif_path.read_text(encoding="utf-8")) if notif_path.exists() else {}
@@ -762,13 +782,23 @@ def _core_worker_notification_status_text() -> str:
     record = latest_by_id.get(notification_id) if notification_id else None
     if isinstance(record, dict):
         state = str(record.get("state") or "recebida")
-        delivered = bool(record.get("delivered")) or state in {"displayed", "duplicate", "already_displayed"}
+        delivered = bool(record.get("delivered")) or state in {"displayed", "duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened"}
         if delivered:
-            label = "entregue" if state != "duplicate" else "já exibida"
+            labels = {
+                "duplicate": "já exibida",
+                "download_started": "download iniciado",
+                "download_verified": "APK baixado",
+                "install_intent_opened": "instalador aberto",
+            }
+            label = labels.get(state, "entregue")
         elif state == "permission_missing":
             label = "sem permissão"
         elif state == "manifest_seen":
             label = "app viu manifesto"
+        elif state == "install_permission_missing":
+            label = "sem permissão de instalar"
+        elif state in {"download_failed", "install_intent_failed"}:
+            label = "falha no update"
         else:
             label = state
         app_version = str(record.get("appVersion") or "").strip()

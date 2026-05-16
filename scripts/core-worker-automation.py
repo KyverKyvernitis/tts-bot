@@ -546,13 +546,33 @@ def queue_apk_build() -> dict[str, Any]:
 def process_pending(*, worker_id: str = "") -> dict[str, Any]:
     pending = _load_pending()
     result: dict[str, Any] = {"ok": True, "worker_id": worker_id, "processed_at": time.time()}
+    snapshot = _load_registry_snapshot()
+    current = _current_fingerprints()
+    target_agent = str(current.get("phone_worker_version") or "")
+    apk_version_code = int(current.get("apk_versionCode") or 0)
+    apk_source_hash = str(current.get("apk_source_hash") or "")
+
     # Mesmo sem pendência explícita, heartbeat/poll de worker online deve reparar
     # boot incompleto automaticamente. Isso evita depender do botão manual.
     result["boot_repair"] = queue_boot_repairs(only_worker_id=worker_id)
-    if pending.get("agent_update"):
+
+    # Patch 45: mismatch de versão não pode ficar apenas visual. Se a VPS espera
+    # uma versão mais nova e o worker voltou online, criamos o worker_update mesmo
+    # quando o arquivo de pendência foi apagado/ficou obsoleto.
+    agent_needed = _workers_need_agent_version(snapshot, target_agent)
+    if pending.get("agent_update") or agent_needed:
         result["agent_update"] = queue_agent_updates(force=False, only_worker_id=worker_id)
-    if pending.get("apk_build"):
+        if agent_needed:
+            result["agent_update_detected"] = {"target_version": target_agent, "reason": "worker abaixo da versão esperada"}
+
+    # Mesma regra para o APK: latest.json antigo ou source divergente precisa
+    # reagendar build automaticamente, sem depender de botão manual.
+    apk_needed = _apk_needs_build(apk_version_code, apk_source_hash)
+    if pending.get("apk_build") or apk_needed:
         result["apk_build"] = queue_apk_build()
+        if apk_needed:
+            result["apk_build_detected"] = {"versionCode": apk_version_code, "reason": "latest.json ausente/antigo ou source divergente"}
+
     write_status({"process_pending": result, "pending": _load_pending(), "finished_at": time.time()})
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return result

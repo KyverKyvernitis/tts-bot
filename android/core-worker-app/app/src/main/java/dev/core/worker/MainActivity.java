@@ -58,7 +58,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.2";
+    private static final String APP_VERSION = "0.5.3";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -112,6 +112,8 @@ public class MainActivity extends Activity {
     private volatile String localAgentProfile = "";
     private volatile String localAgentWorkerId = "";
     private volatile String localAgentMessage = "ainda não verificado";
+    private volatile boolean localAgentVpsConfigured = false;
+    private volatile boolean localAgentJobsConfigured = false;
     private volatile String vpsState = "não testada";
     private volatile String latestVersionName = "";
     private volatile int latestVersionCode = -1;
@@ -128,8 +130,9 @@ public class MainActivity extends Activity {
         buildUi();
         loadInputs();
         updatePermissionGate();
-        refreshLocalStatus("Pronto. Primeiro prepare este celular, depois gere um código no Discord e conecte à VPS.");
+        refreshLocalStatus("Pronto. O APK verifica automaticamente se este celular já está pareado pelo worker local.");
         checkLocalAgent(false);
+        autoVerifySavedPairing();
         autoCheckForUpdate();
     }
 
@@ -137,6 +140,8 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         updatePermissionGate();
+        autoVerifySavedPairing();
+        autoCheckForUpdate();
     }
 
     @Override
@@ -144,6 +149,9 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         updatePermissionGate();
         refreshLocalStatus(requestCode == 4103 ? "Permissão de notificação atualizada. Verifique as demais permissões necessárias." : null);
+        if (requestCode == 4103) {
+            autoCheckForUpdate();
+        }
     }
 
     private void buildUi() {
@@ -746,7 +754,7 @@ public class MainActivity extends Activity {
         latestVersionName = body.optString("versionName", body.optString("version", ""));
         latestVersionCode = body.optInt("versionCode", -1);
         latestApkSha256 = body.optString("sha256", "");
-        latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("apkUrl", body.optString("url", "")));
+        latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("downloadUrl", body.optString("directApkUrl", body.optString("apkUrl", body.optString("url", "")))));
         latestChangelog = changelogText(body.optJSONArray("changelog"));
         latestNotificationId = body.optString("notificationId", "");
         if (latestNotificationId.trim().isEmpty()) {
@@ -795,39 +803,49 @@ public class MainActivity extends Activity {
             refreshLocalStatus("Servidor da VPS não configurado no APK.");
             return;
         }
-        runBusy("Baixando atualização...", () -> {
-            if (latestApkUrl == null || latestApkUrl.trim().isEmpty() || !latestUpdateAvailable) {
-                checkForUpdateInternal(serverUrl, false);
-            }
-            if (!latestUpdateAvailable) {
-                show("Este APK já está em dia.");
-                return;
-            }
-            if (latestApkUrl == null || latestApkUrl.trim().isEmpty()) {
-                show("A VPS avisou atualização, mas o manifesto não tem apkUrl.");
-                return;
-            }
-            File filesBase = getExternalFilesDir(null);
-            if (filesBase == null) {
-                filesBase = getCacheDir();
-            }
-            File updateDir = new File(filesBase, "updates");
-            if (!updateDir.exists() && !updateDir.mkdirs()) {
-                show("Não consegui criar a pasta local de atualização.");
-                return;
-            }
-            File apkFile = new File(updateDir, safeLocalApkName());
-            downloadFile(latestApkUrl, apkFile);
-            if (latestApkSha256 != null && !latestApkSha256.trim().isEmpty()) {
-                String actual = sha256Of(apkFile);
-                if (!actual.equalsIgnoreCase(latestApkSha256.trim())) {
-                    apkFile.delete();
-                    show("Atualização baixada, mas o hash não confere. Instalação bloqueada por segurança.");
+        runBusy("Baixando atualização direto da VPS...", () -> {
+            try {
+                if (latestApkUrl == null || latestApkUrl.trim().isEmpty() || !latestUpdateAvailable) {
+                    checkForUpdateInternal(serverUrl, false);
+                }
+                if (!latestUpdateAvailable) {
+                    show("Este APK já está em dia.");
                     return;
                 }
+                if (latestApkUrl == null || latestApkUrl.trim().isEmpty()) {
+                    show("A VPS avisou atualização, mas o manifesto não tem URL direta do APK.");
+                    reportUpdateNotification(serverUrl, "download_failed", false, "manifesto sem downloadUrl/apkUrl");
+                    return;
+                }
+                reportUpdateNotification(serverUrl, "download_started", true, "usuário tocou em Atualizar; download direto iniciado pelo APK");
+                File filesBase = getExternalFilesDir(null);
+                if (filesBase == null) {
+                    filesBase = getCacheDir();
+                }
+                File updateDir = new File(filesBase, "updates");
+                if (!updateDir.exists() && !updateDir.mkdirs()) {
+                    show("Não consegui criar a pasta local de atualização.");
+                    reportUpdateNotification(serverUrl, "download_failed", false, "falha criando pasta local de atualização");
+                    return;
+                }
+                File apkFile = new File(updateDir, safeLocalApkName());
+                downloadFile(latestApkUrl, apkFile);
+                if (latestApkSha256 != null && !latestApkSha256.trim().isEmpty()) {
+                    String actual = sha256Of(apkFile);
+                    if (!actual.equalsIgnoreCase(latestApkSha256.trim())) {
+                        apkFile.delete();
+                        show("Atualização baixada, mas o hash não confere. Instalação bloqueada por segurança.");
+                        reportUpdateNotification(serverUrl, "download_failed", false, "sha256 divergente no APK baixado");
+                        return;
+                    }
+                }
+                reportUpdateNotification(serverUrl, "download_verified", true, "APK baixado direto e sha256 validado");
+                updateUpdateUi("Atualização baixada e verificada. Vou abrir o instalador do Android.\nArquivo: " + apkFile.getName() + "\nSe aparecer bloqueio, permita instalar apps desconhecidos para o Core Worker.", true, true);
+                openApkInstaller(apkFile);
+            } catch (Exception exc) {
+                reportUpdateNotification(serverUrl, "download_failed", false, exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage()));
+                throw exc;
             }
-            updateUpdateUi("Atualização baixada e verificada. Vou abrir o link direto da VPS ou o instalador local.\nArquivo: " + apkFile.getName() + "\nSe o Android não abrir o instalador, use o APK em Downloads/link direto.", true, true);
-            openApkInstaller(apkFile);
         });
     }
 
@@ -905,6 +923,12 @@ public class MainActivity extends Activity {
         if ("duplicate".equals(state)) return "notificação já exibida/confirmada para essa versão";
         if ("permission_missing".equals(state)) return "permissão POST_NOTIFICATIONS ausente";
         if ("manager_unavailable".equals(state)) return "NotificationManager indisponível";
+        if ("download_started".equals(state)) return "download direto iniciado pelo APK";
+        if ("download_verified".equals(state)) return "APK baixado e validado localmente";
+        if ("install_permission_missing".equals(state)) return "permissão de instalação ausente";
+        if ("install_intent_opened".equals(state)) return "instalador Android aberto";
+        if ("install_intent_failed".equals(state)) return "falha abrindo instalador Android";
+        if ("download_failed".equals(state)) return "falha no download direto";
         if ("failed".equals(state)) return "falha criando notificação local";
         return state;
     }
@@ -975,29 +999,16 @@ public class MainActivity extends Activity {
 
     private void openApkInstaller(File apkFile) {
         runOnUiThread(() -> {
+            String serverUrl = normalizedServerUrl();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
                 try {
                     Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()));
                     startActivity(settings);
-                    refreshLocalStatus("Autorize o Core Worker a instalar apps desconhecidos. Depois volte aqui e toque novamente em Atualizar.");
+                    reportUpdateNotification(serverUrl, "install_permission_missing", false, "Android bloqueou instalação por fonte desconhecida");
+                    refreshLocalStatus("Autorize o Core Worker a instalar apps desconhecidos. Depois volte aqui e toque novamente em Atualizar. O APK já foi baixado e validado localmente.");
                     return;
                 } catch (Exception ignored) {
-                    // Se a tela especial não abrir, ainda tentamos o link direto abaixo.
-                }
-            }
-
-            // Em alguns Android/MIUI o instalador rejeita APK aberto via FileProvider com
-            // “problema ao analisar o pacote”, mas o mesmo APK baixado pelo navegador instala.
-            // Por isso, quando há URL HTTP validada pelo sha256, preferimos abrir o link direto.
-            if (latestApkUrl != null && (latestApkUrl.startsWith("http://") || latestApkUrl.startsWith("https://"))) {
-                try {
-                    Intent direct = new Intent(Intent.ACTION_VIEW, Uri.parse(latestApkUrl));
-                    direct.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    startActivity(direct);
-                    refreshLocalStatus("APK verificado. Abri o link direto da VPS para o Android/navegador baixar e instalar com menos chance de erro de pacote.");
-                    return;
-                } catch (Exception ignored) {
-                    // Fallback local abaixo.
+                    // Continua para tentar abrir o instalador local.
                 }
             }
 
@@ -1008,8 +1019,11 @@ public class MainActivity extends Activity {
                 install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(install);
+                reportUpdateNotification(serverUrl, "install_intent_opened", true, "instalador Android aberto pelo APK usando arquivo local validado");
+                refreshLocalStatus("APK baixado e validado. Abri o instalador do Android usando o arquivo local, sem mandar para site intermediário.");
             } catch (Exception exc) {
-                refreshLocalStatus("Atualização baixada, mas não consegui abrir o instalador: " + exc.getClass().getSimpleName() + ". Abra o link direto da VPS ou o APK baixado manualmente.");
+                reportUpdateNotification(serverUrl, "install_intent_failed", false, exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage()));
+                refreshLocalStatus("Atualização baixada, mas não consegui abrir o instalador local: " + exc.getClass().getSimpleName() + ". Verifique a permissão de instalar apps desconhecidos para o Core Worker.");
             }
         });
     }
@@ -1287,6 +1301,8 @@ public class MainActivity extends Activity {
             localAgentVersion = "";
             localAgentProfile = "";
             localAgentWorkerId = "";
+            localAgentVpsConfigured = false;
+            localAgentJobsConfigured = false;
             localAgentMessage = "offline";
             if (updateText) {
                 showLocalAgentText();
@@ -1329,10 +1345,13 @@ public class MainActivity extends Activity {
         localAgentVersion = body.optString("version", "");
         localAgentProfile = body.optString("profile_label", body.optString("profile", ""));
         localAgentWorkerId = body.optString("worker_id", localAgentWorkerId);
+        localAgentVpsConfigured = body.optBoolean("vps_configured", false);
+        localAgentJobsConfigured = body.optBoolean("jobs_configured", false);
         if (localAgentOnline) {
-            String jobs = body.optBoolean("jobs_configured", false) ? "jobs ok" : "jobs pendentes";
-            String vps = body.optBoolean("vps_configured", false) ? "VPS ok" : "VPS pendente";
-            localAgentMessage = "online · " + vps + " · " + jobs;
+            String jobs = localAgentJobsConfigured ? "jobs ok" : "jobs pendentes";
+            String vps = localAgentVpsConfigured ? "VPS ok" : "VPS pendente";
+            String paired = autoPairFromLocalAgent() ? "pareado" : "pareamento local pendente";
+            localAgentMessage = "online · " + vps + " · " + jobs + " · " + paired;
         } else {
             localAgentMessage = "offline";
         }
@@ -1361,7 +1380,38 @@ public class MainActivity extends Activity {
         boolean pairedViaLocal = prefs.getBoolean("paired_via_local_agent", false);
         String serverUrl = prefs.getString("server_url", DEFAULT_VPS_URL);
         String workerId = prefs.getString("worker_id", "");
-        return pairedViaLocal && serverUrl != null && !serverUrl.isEmpty() && workerId != null && !workerId.isEmpty();
+        boolean saved = pairedViaLocal && serverUrl != null && !serverUrl.isEmpty() && workerId != null && !workerId.isEmpty();
+        boolean local = localAgentOnline && localAgentVpsConfigured && localAgentWorkerId != null && !localAgentWorkerId.trim().isEmpty();
+        return saved || local;
+    }
+
+    private boolean autoPairFromLocalAgent() {
+        if (!localAgentOnline || !localAgentVpsConfigured || localAgentWorkerId == null || localAgentWorkerId.trim().isEmpty()) {
+            return false;
+        }
+        String serverUrl = normalizedServerUrl();
+        prefs.edit()
+                .putString("server_url", serverUrl)
+                .putString("worker_id", localAgentWorkerId)
+                .putBoolean("paired_via_local_agent", true)
+                .apply();
+        return true;
+    }
+
+    private void autoVerifySavedPairing() {
+        new Thread(() -> {
+            try {
+                boolean ok = updateLocalAgentStatus(false);
+                if (ok && autoPairFromLocalAgent()) {
+                    vpsState = localAgentVpsConfigured ? "ok" : "pendente";
+                    show("Pareamento existente detectado automaticamente pelo worker local. Nenhum novo código é necessário.");
+                } else {
+                    show(null);
+                }
+            } catch (Exception ignored) {
+                show(null);
+            }
+        }).start();
     }
 
     private void openTermux() {
@@ -1451,7 +1501,7 @@ public class MainActivity extends Activity {
         builder.append(checkLine("Rede privada", networkChecklistLabel(server))).append('\n');
         builder.append(checkLine("VPS", vpsChecklistLabel(server))).append('\n');
         builder.append(checkLine("Worker local", localAgentOnline ? "ok" : localAgentMessage)).append('\n');
-        builder.append(checkLine("Pareamento", paired ? "ok" : "pendente")).append('\n');
+        builder.append(checkLine("Pareamento", paired ? (localAgentVpsConfigured ? "ok · validado automaticamente" : "ok") : "pendente")).append('\n');
         builder.append(checkLine("Atualizações", updateChecklistLabel())).append("\n\n");
         builder.append("Este celular\n");
         builder.append("Conectado: ").append(paired ? "sim" : "não").append('\n');
