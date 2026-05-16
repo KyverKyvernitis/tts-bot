@@ -4,6 +4,12 @@ Worker opcional para usar o celular como ajudante da VPS em tarefas que não sã
 
 Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e usa fallback local.
 
+## v1.7.4 — watchdog local obrigatório e update resistente a rota instável
+
+A versão `1.7.4` alinha o agent ao Patch 43. O Termux:Boot oficial passa a iniciar o `watch-phone-worker.sh`, não o start direto. O watchdog mantém `termux-wake-lock`, usa lock/pid próprio para evitar duplicatas, reinicia o worker localmente e grava status/logs do supervisor.
+
+O `worker_update` agora aplica os arquivos whitelisted em `~/phone-worker`, repara o boot para apontar ao watchdog, persiste resultados pendentes em disco e reinicia mesmo se a rota para a VPS cair antes da confirmação. Ao reconectar, o worker reenvia o resultado pendente e o painel consegue mostrar versão atual vs. versão esperada.
+
 ## v1.7.3 — pipeline automático, rede e boot mais confiáveis
 
 A versão `1.7.3` mantém o agent alinhado ao Patch 42: o worker informa estado de rede/rota até a VPS, detecta instalações duplicadas no Termux, usa boot oficial em `~/phone-worker` e envia metadados de build/notificação para a VPS validar APK, `latest.json` e entrega de atualização no app.
@@ -91,14 +97,10 @@ Copie esta pasta para o celular e rode:
 cd ~/phone-worker-install
 bash install.sh
 nano ~/.phone-worker.env
-~/phone-worker/start-phone-worker.sh
+nohup bash ~/phone-worker/watch-phone-worker.sh >> ~/phone-worker/phone-worker-watch.log 2>&1 &
 ```
 
-Para manter em watchdog local:
-
-```bash
-tmux new-session -d -s phone-worker-watch '~/phone-worker/watch-phone-worker.sh'
-```
+O `install.sh`, `bootstrap-phone-worker.sh` e o job `boot_repair` criam `~/.termux/boot/10-core-worker` apontando para esse watchdog. Não edite scripts manualmente; aplique sempre patches pelo fluxo da VPS/GitHub.
 
 ## Variáveis da VPS
 
@@ -178,10 +180,10 @@ cd ~/phone-worker
 python phone_worker.py --pair CORE-XXXX --vps-url http://IP_TAILSCALE_DA_VPS:10000
 ```
 
-O script chama `POST /core-worker/pair`, salva `CORE_WORKER_ID`, `CORE_WORKER_TOKEN`, `CORE_WORKER_VPS_URL`, ativa heartbeat/jobs em `~/.phone-worker.env` e nunca imprime o token. Reinicie o worker depois do pareamento:
+O script chama `POST /core-worker/pair`, salva `CORE_WORKER_ID`, `CORE_WORKER_TOKEN`, `CORE_WORKER_VPS_URL`, ativa heartbeat/jobs em `~/.phone-worker.env` e nunca imprime o token. Depois do pareamento, inicie o watchdog oficial:
 
 ```bash
-~/phone-worker/start-phone-worker.sh
+nohup bash ~/phone-worker/watch-phone-worker.sh >> ~/phone-worker/phone-worker-watch.log 2>&1 &
 ```
 
 Teste manual sem iniciar servidor novo:
@@ -197,15 +199,16 @@ O heartbeat envia status, bateria real via Termux:API quando disponível, ping T
 
 ## Supervisor local e anti-duplicação
 
-O `start-phone-worker.sh` agora atua como supervisor local:
+O `watch-phone-worker.sh` é o supervisor persistente local e chama `start-phone-worker.sh` para manter o agent vivo:
 
 - usa lock para evitar duas inicializações ao mesmo tempo;
 - mata processos antigos/duplicados de `phone_worker.py` antes de iniciar;
 - grava PID em `~/phone-worker/phone-worker.pid`;
 - grava status curto em `~/phone-worker/phone-worker.status`;
 - rotaciona logs quando passam de `PHONE_WORKER_LOG_MAX_BYTES`;
-- inicia com `nohup` sem depender de `tmux`;
-- o `watch-phone-worker.sh` só chama o supervisor e tenta novamente a cada intervalo configurado, mesmo quando houver falha.
+- `start-phone-worker.sh` inicia com `nohup` sem depender de `tmux`;
+- se o arquivo `phone_worker.py` no disco estiver em versão mais nova que o processo vivo, o start força restart para aplicar o update;
+- o watchdog segura wake-lock, tem lock/pid próprio e tenta novamente a cada intervalo configurado, mesmo quando houver falha.
 
 Variáveis úteis no `~/.phone-worker.env`:
 
@@ -215,6 +218,9 @@ PHONE_WORKER_PID_FILE=/data/data/com.termux/files/home/phone-worker/phone-worker
 PHONE_WORKER_STATUS_FILE=/data/data/com.termux/files/home/phone-worker/phone-worker.status
 PHONE_WORKER_LOG_MAX_BYTES=1048576
 PHONE_WORKER_START_KILL_DUPLICATES=true
+PHONE_WORKER_WATCH_LOCK_DIR=/data/data/com.termux/files/home/phone-worker/.phone-worker-watch.lock
+PHONE_WORKER_WATCH_PID_FILE=/data/data/com.termux/files/home/phone-worker/phone-worker-watch.pid
+PHONE_WORKER_PENDING_RESULTS_FILE=/data/data/com.termux/files/home/phone-worker/phone-worker-pending-results.json
 PHONE_WORKER_WATCH_MAX_BACKOFF_SECONDS=60
 ```
 
@@ -228,7 +234,7 @@ O `install.sh`, o `bootstrap-phone-worker.sh`, o sync da VPS e a ação **Repara
 ~/.termux/boot/10-core-worker
 ```
 
-Esse script é lido pelo app **Termux:Boot** quando o Android inicia. Ele espera alguns segundos, segura wake-lock quando possível e chama `~/phone-worker/start-phone-worker.sh`.
+Esse script é lido pelo app **Termux:Boot** quando o Android inicia. Ele espera alguns segundos, segura wake-lock quando possível e chama `~/phone-worker/watch-phone-worker.sh`. Boot que chama apenas `start-phone-worker.sh` é considerado incompleto.
 
 Depois de instalar/reparar, abra o app **Termux:Boot** uma vez e, no Android/MIUI, libere inicialização automática e bateria sem restrição para:
 
@@ -244,7 +250,7 @@ O painel `workers` mostra `boot ok`, `boot faltando` ou `boot incompleto`. Se ap
 O painel `workers` agora consegue criar jobs para serviços whitelisted do celular:
 
 - `phone-worker`: status, start, stop e restart do agente atual. Para `stop`/`restart`, o worker responde primeiro à VPS e só depois agenda a ação para não deixar o job preso.
-- `phone-worker-watch`: start, stop, restart e status do watchdog em `tmux`.
+- `phone-worker-watch`: start, stop, restart e status do watchdog local persistente, usando pid/lock próprio e `tmux` apenas como compatibilidade quando existir.
 - `tailscale`: diagnóstico/status apenas. Se você usa o app oficial do Tailscale no Android, start/stop continuam sendo feitos pelo próprio app/VPN do Android; o worker só testa conectividade e mostra se a VPS é alcançável.
 
 Ações no painel privado `workers`:

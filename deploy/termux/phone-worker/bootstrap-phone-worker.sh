@@ -15,23 +15,18 @@ log() { printf '[core-worker-bootstrap] %s\n' "$*"; }
 
 install_core_worker_boot() {
   mkdir -p "$HOME/.termux/boot"
-  printf '%s
-' \
+  printf '%s\n' \
 '#!/data/data/com.termux/files/usr/bin/sh' \
 '# Auto-start do Core Worker pelo Termux:Boot.' \
 '# Criado/reparado pelo instalador do phone-worker. Não coloque segredos aqui.' \
 'termux-wake-lock 2>/dev/null || true' \
 'sleep "${PHONE_WORKER_BOOT_DELAY_SECONDS:-25}"' \
 'cd "$HOME/phone-worker" || exit 0' \
-'if [ -x "$HOME/phone-worker/watch-phone-worker.sh" ]; then' \
-'  nohup "$HOME/phone-worker/watch-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.boot.log" 2>&1 &' \
+'if [ -f "$HOME/phone-worker/watch-phone-worker.sh" ]; then' \
+'  nohup /data/data/com.termux/files/usr/bin/bash "$HOME/phone-worker/watch-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.boot.log" 2>&1 &' \
 '  exit 0' \
 'fi' \
-'if [ -x "$HOME/phone-worker/start-phone-worker.sh" ]; then' \
-'  nohup "$HOME/phone-worker/start-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.boot.log" 2>&1 &' \
-'  exit 0' \
-'fi' \
-'echo "[core-worker-boot] scripts não encontrados" >> "$HOME/phone-worker.log"' \
+'echo "[core-worker-boot] watch-phone-worker.sh não encontrado" >> "$HOME/phone-worker.log"' \
 > "$HOME/.termux/boot/10-core-worker"
   chmod +x "$HOME/.termux/boot/10-core-worker"
 }
@@ -87,7 +82,7 @@ bash "$WORKER_DIR/pair-phone-worker.sh" "$CODE" "$VPS_URL" "$WORKER_NAME" "$PROF
 log "reiniciando worker"
 pkill -f '[p]hone_worker.py' 2>/dev/null || true
 sleep 1
-bash "$WORKER_DIR/start-phone-worker.sh"
+nohup bash "$WORKER_DIR/watch-phone-worker.sh" >> "$WORKER_DIR/phone-worker-watch.log" 2>&1 &
 sleep 2
 
 log "teste de heartbeat"

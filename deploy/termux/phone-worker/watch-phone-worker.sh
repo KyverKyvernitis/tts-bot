@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Watchdog local do Core Worker/phone-worker.
-# Chama o supervisor start-phone-worker.sh, com backoff e log pequeno.
+# Mantém o agent vivo no Termux e é o alvo oficial do Termux:Boot.
 set -u
 
 if [ -z "${BASH_VERSION:-}" ]; then
@@ -16,22 +16,32 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 INTERVAL="${PHONE_WORKER_WATCH_INTERVAL_SECONDS:-60}"
-# Patch 41: responsabilidades importantes devem tentar de novo a cada intervalo,
-# mesmo depois de falha. Mantemos a variável antiga só por compatibilidade,
-# mas o watchdog local não aumenta mais o intervalo sozinho.
-MAX_BACKOFF="${PHONE_WORKER_WATCH_MAX_BACKOFF_SECONDS:-60}"
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 START_SCRIPT="$WORKER_DIR/start-phone-worker.sh"
 WATCH_LOG="${PHONE_WORKER_WATCH_LOG_FILE:-$WORKER_DIR/phone-worker-watch.log}"
 WATCH_PID_FILE="${PHONE_WORKER_WATCH_PID_FILE:-$WORKER_DIR/phone-worker-watch.pid}"
+WATCH_LOCK_DIR="${PHONE_WORKER_WATCH_LOCK_DIR:-$WORKER_DIR/.phone-worker-watch.lock}"
+STATUS_FILE="${PHONE_WORKER_STATUS_FILE:-$WORKER_DIR/phone-worker.status}"
 MAX_LOG_BYTES="${PHONE_WORKER_LOG_MAX_BYTES:-1048576}"
 
 if [[ ! -x "$START_SCRIPT" && -x "$HOME/start-phone-worker.sh" ]]; then
   START_SCRIPT="$HOME/start-phone-worker.sh"
 fi
 
+mkdir -p "$WORKER_DIR"
+
 log() {
+  mkdir -p "$(dirname "$WATCH_LOG")"
   printf '[phone-worker-watch] %s\n' "$*" | tee -a "$WATCH_LOG" >/dev/null
+}
+
+now_iso() {
+  date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date
+}
+
+write_status() {
+  mkdir -p "$(dirname "$STATUS_FILE")"
+  printf '%s\n' "$1" > "$STATUS_FILE" 2>/dev/null || true
 }
 
 rotate_watch_log_if_needed() {
@@ -45,26 +55,43 @@ rotate_watch_log_if_needed() {
   fi
 }
 
-termux-wake-lock 2>/dev/null || true
-mkdir -p "$WORKER_DIR"
+# Impede múltiplos watchdogs competindo entre si. Lock velho é removido se o PID
+# gravado nele não existir mais.
+if ! mkdir "$WATCH_LOCK_DIR" 2>/dev/null; then
+  old_pid=""
+  [[ -f "$WATCH_PID_FILE" ]] && old_pid="$(cat "$WATCH_PID_FILE" 2>/dev/null | head -n 1)"
+  if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+    log "watchdog já ativo; pid=$old_pid"
+    write_status "watchdog_already_online pid=$old_pid $(now_iso)"
+    exit 0
+  fi
+  rm -rf "$WATCH_LOCK_DIR" 2>/dev/null || true
+  mkdir "$WATCH_LOCK_DIR" 2>/dev/null || true
+fi
+trap 'rm -rf "$WATCH_LOCK_DIR" "$WATCH_PID_FILE" 2>/dev/null || true' EXIT INT TERM
+
 printf '%s\n' "$$" > "$WATCH_PID_FILE" 2>/dev/null || true
-trap 'rm -f "$WATCH_PID_FILE" 2>/dev/null || true' EXIT INT TERM
+termux-wake-lock 2>/dev/null || true
+write_status "watchdog_running pid=$$ $(now_iso)"
+log "watchdog ativo; worker_dir=$WORKER_DIR intervalo=${INTERVAL}s"
 
 failures=0
 while true; do
   rotate_watch_log_if_needed
+  termux-wake-lock 2>/dev/null || true
   if [[ -x "$START_SCRIPT" ]]; then
     if "$START_SCRIPT" >> "$WATCH_LOG" 2>&1; then
       failures=0
-      sleep "$INTERVAL"
+      write_status "watchdog_ok pid=$$ $(now_iso)"
     else
       failures=$((failures + 1))
-      log "start falhou; nova tentativa em ${INTERVAL}s"
-      sleep "$INTERVAL"
+      log "start falhou; falhas=$failures; nova tentativa em ${INTERVAL}s"
+      write_status "watchdog_start_failed failures=$failures $(now_iso)"
     fi
   else
     failures=$((failures + 1))
     log "start script não encontrado: $START_SCRIPT"
-    sleep "$INTERVAL"
+    write_status "watchdog_missing_start failures=$failures $(now_iso)"
   fi
+  sleep "$INTERVAL"
 done

@@ -11,15 +11,11 @@ install_core_worker_boot() {
 'termux-wake-lock 2>/dev/null || true' \
 'sleep "${PHONE_WORKER_BOOT_DELAY_SECONDS:-25}"' \
 'cd "$HOME/phone-worker" || exit 0' \
-'if [ -x "$HOME/phone-worker/watch-phone-worker.sh" ]; then' \
-'  nohup "$HOME/phone-worker/watch-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.boot.log" 2>&1 &' \
+'if [ -f "$HOME/phone-worker/watch-phone-worker.sh" ]; then' \
+'  nohup /data/data/com.termux/files/usr/bin/bash "$HOME/phone-worker/watch-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.boot.log" 2>&1 &' \
 '  exit 0' \
 'fi' \
-'if [ -x "$HOME/phone-worker/start-phone-worker.sh" ]; then' \
-'  nohup "$HOME/phone-worker/start-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.boot.log" 2>&1 &' \
-'  exit 0' \
-'fi' \
-'echo "[core-worker-boot] scripts não encontrados" >> "$HOME/phone-worker.log"' \
+'echo "[core-worker-boot] watch-phone-worker.sh não encontrado" >> "$HOME/phone-worker.log"' \
 > "$HOME/.termux/boot/10-core-worker"
   chmod +x "$HOME/.termux/boot/10-core-worker"
 }
@@ -59,5 +55,4 @@ echo "  nano ~/.phone-worker.env"
 echo "  ~/phone-worker/pair-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:10000 \"Meu Worker\" midia"
 echo "  # ou tudo de uma vez:"
 echo "  ~/phone-worker/bootstrap-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:10000 \"Meu Worker\" midia"
-echo "  ~/phone-worker/start-phone-worker.sh"
-echo "  tmux new-session -d -s phone-worker-watch '~/phone-worker/watch-phone-worker.sh'"
+echo "  nohup bash ~/phone-worker/watch-phone-worker.sh >> ~/phone-worker/phone-worker-watch.log 2>&1 &"

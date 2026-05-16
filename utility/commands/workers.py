@@ -256,6 +256,33 @@ def _format_bytes(value: object) -> str:
     return f"{size:.1f} {units[index]}"
 
 
+
+
+def _expected_phone_worker_version() -> str:
+    path = _repo_root() / "deploy" / "termux" / "phone-worker" / "phone_worker.py"
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    match = re.search(r'^PHONE_WORKER_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def _version_tuple(value: object) -> tuple[int, ...]:
+    parts = re.findall(r"\d+", str(value or ""))
+    return tuple(int(part) for part in parts[:4]) if parts else (0,)
+
+
+def _agent_version_label(current: object) -> str:
+    version = _shorten(current or "sem versão", limit=24)
+    expected = _expected_phone_worker_version()
+    if expected and current and _version_tuple(current) < _version_tuple(expected):
+        return f"{version} → {expected} pendente"
+    if expected and not current:
+        return f"sem versão → {expected} pendente"
+    return version
+
+
 def _parse_roles(raw: str | None, *, status: dict[str, Any] | None = None) -> list[str]:
     roles: list[str] = []
     for item in str(raw or "").replace(";", ",").split(","):
@@ -1128,7 +1155,7 @@ def _worker_detail_text(worker: dict[str, Any] | None) -> str:
     worker_id = _shorten(worker.get("worker_id") or "", limit=72)
     online = "online" if worker.get("online") else "offline"
     seen = _format_age(worker.get("last_seen_age_seconds"))
-    version = _shorten(worker.get("version") or "sem versão", limit=32)
+    version = _agent_version_label(worker.get("version"))
     roles = [str(role) for role in (worker.get("roles") or []) if role]
     caps = [str(role) for role in (worker.get("capabilities") or []) if role]
     supported = [str(task) for task in (worker.get("supported_tasks") or []) if task]
@@ -1804,7 +1831,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             worker_id = _shorten(worker.get("worker_id"), limit=24)
             seen = _format_age(worker.get("last_seen_age_seconds"))
             roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=5)
-            version = _shorten(worker.get("version") or "sem versão", limit=24)
+            version = _agent_version_label(worker.get("version"))
             lines.append(f"{icon} **{name}** · `{worker_id}`")
             stale_note = _worker_stale_note(worker)
             if stale_note:
@@ -1841,7 +1868,9 @@ class WorkersPanelView(discord.ui.LayoutView):
             lines.append("-# Nenhuma ação compatível declarada por este worker.")
 
         if snapshot.action_note:
-            lines.append(f"-# Última ação: {_shorten(_redact(snapshot.action_note), limit=80)}")
+            note = _shorten(_redact(snapshot.action_note), limit=80)
+            label = "Última falha de wake" if _snapshot_has_online_worker(snapshot) and "worker ainda offline" in note.lower() else "Última ação"
+            lines.append(f"-# {label}: {note}")
         # Saídas completas de watchdog/sync ficam fora do painel principal para manter o card compacto.
         return lines
 

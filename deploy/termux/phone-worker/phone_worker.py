@@ -42,7 +42,7 @@ _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.7.3"
+PHONE_WORKER_VERSION = "1.7.4"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -993,8 +993,11 @@ def _store_pending_core_job_result(payload: dict[str, Any]) -> None:
     job_id = str(payload.get("job_id") or "").strip()
     if not job_id:
         return
+    safe_payload = dict(payload)
+    safe_payload.setdefault("stored_at", time.time())
     with _CORE_JOB_LOCK:
-        _PENDING_CORE_JOB_RESULTS[job_id] = dict(payload)
+        _PENDING_CORE_JOB_RESULTS[job_id] = safe_payload
+    _persist_pending_core_job_results()
 
 
 def _post_core_worker_job_result_payload(payload: dict[str, Any], *, timeout: float = 8.0) -> bool:
@@ -1006,16 +1009,21 @@ def _post_core_worker_job_result_payload(payload: dict[str, Any], *, timeout: fl
 
 
 def _flush_pending_core_worker_job_results(*, timeout: float = 8.0) -> int:
+    _load_persisted_pending_core_job_results()
     with _CORE_JOB_LOCK:
         pending = list(_PENDING_CORE_JOB_RESULTS.items())[:5]
     sent = 0
+    changed = False
     for job_id, payload in pending:
         if _post_core_worker_job_result_payload(payload, timeout=timeout):
             with _CORE_JOB_LOCK:
                 _PENDING_CORE_JOB_RESULTS.pop(job_id, None)
                 if _CORE_JOB_LAST_RESULT.get("job_id") == job_id:
                     _CORE_JOB_LAST_RESULT["sent_ok"] = True
+            changed = True
             sent += 1
+    if changed:
+        _persist_pending_core_job_results()
     return sent
 
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
@@ -1165,6 +1173,8 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
         payload = _core_worker_payload(host=host, port=port)
         status, data = _post_core_worker_json("/core-worker/heartbeat", payload, timeout=timeout)
         if 200 <= status < 300 and data.get("ok", True):
+            with contextlib.suppress(Exception):
+                _flush_pending_core_worker_job_results(timeout=min(5.0, max(1.0, timeout)))
             return True
         print(f"[core-worker-heartbeat] HTTP {status}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
     except Exception as exc:
@@ -2025,6 +2035,54 @@ def _phone_worker_watch_pid_file() -> Path:
     return Path(os.getenv("PHONE_WORKER_WATCH_PID_FILE") or (_phone_worker_dir() / "phone-worker-watch.pid")).expanduser()
 
 
+def _phone_worker_pending_results_file() -> Path:
+    return Path(os.getenv("PHONE_WORKER_PENDING_RESULTS_FILE") or (_phone_worker_dir() / "phone-worker-pending-results.json")).expanduser()
+
+
+def _phone_worker_update_status_file() -> Path:
+    return Path(os.getenv("PHONE_WORKER_UPDATE_STATUS_FILE") or (_phone_worker_dir() / "phone-worker-update.status.json")).expanduser()
+
+
+def _write_json_file_atomic(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_persisted_pending_core_job_results() -> None:
+    data = _read_json_file(_phone_worker_pending_results_file())
+    items = data.get("results") if isinstance(data.get("results"), dict) else {}
+    if not items:
+        return
+    with _CORE_JOB_LOCK:
+        for job_id, payload in list(items.items())[:20]:
+            if isinstance(payload, dict) and str(job_id or "").strip():
+                _PENDING_CORE_JOB_RESULTS[str(job_id)] = dict(payload)
+
+
+def _persist_pending_core_job_results() -> None:
+    path = _phone_worker_pending_results_file()
+    with _CORE_JOB_LOCK:
+        items = {k: v for k, v in _PENDING_CORE_JOB_RESULTS.items() if k and isinstance(v, dict)}
+    if not items:
+        with contextlib.suppress(Exception):
+            path.unlink()
+        return
+    try:
+        _write_json_file_atomic(path, {"updated_at": time.time(), "results": items})
+    except Exception as exc:
+        print(f"[core-worker-jobs] não consegui persistir resultado pendente: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
+
+
 def _read_pid_file(path: Path) -> int | None:
     try:
         raw = path.read_text(encoding="utf-8", errors="ignore").strip().splitlines()[0]
@@ -2084,9 +2142,12 @@ def _runtime_supervisor_snapshot() -> dict[str, Any]:
         "status_file": str(status_file),
         "status_text": _short_text(_read_text_file(status_file, limit=240), limit=160),
     }
+    watch_alive = result.get("watch_pid_alive") is True
+    result["watchdog_ok"] = bool(watch_alive)
     result["supervisor_ok"] = bool(
         (result.get("pid_file_alive") in {True, None})
         and (result.get("duplicates") in {0, None})
+        and watch_alive
     )
     return result
 
@@ -2097,22 +2158,18 @@ def _termux_boot_script_path() -> Path:
 
 def _termux_boot_script_content() -> str:
     return "\n".join([
-        "#!/data/data/com.termux/files/usr/bin/sh",
-        "# Auto-start do Core Worker pelo Termux:Boot.",
-        "# Criado/reparado pelo phone-worker. Não coloque segredos aqui.",
-        "termux-wake-lock 2>/dev/null || true",
-        "sleep \"${PHONE_WORKER_BOOT_DELAY_SECONDS:-25}\"",
-        "cd \"$HOME/phone-worker\" || exit 0",
-        "if [ -x \"$HOME/phone-worker/watch-phone-worker.sh\" ]; then",
-        "  nohup \"$HOME/phone-worker/watch-phone-worker.sh\" >> \"$HOME/phone-worker/phone-worker-watch.boot.log\" 2>&1 &",
-        "  exit 0",
-        "fi",
-        "if [ -x \"$HOME/phone-worker/start-phone-worker.sh\" ]; then",
-        "  nohup \"$HOME/phone-worker/start-phone-worker.sh\" >> \"$HOME/phone-worker/phone-worker-watch.boot.log\" 2>&1 &",
-        "  exit 0",
-        "fi",
-        "echo '[core-worker-boot] scripts não encontrados' >> \"$HOME/phone-worker.log\"",
-        "",
+        '#!/data/data/com.termux/files/usr/bin/sh',
+        '# Auto-start do Core Worker pelo Termux:Boot.',
+        '# Criado/reparado pelo phone-worker. Não coloque segredos aqui.',
+        'termux-wake-lock 2>/dev/null || true',
+        'sleep "${PHONE_WORKER_BOOT_DELAY_SECONDS:-25}"',
+        'cd "$HOME/phone-worker" || exit 0',
+        'if [ -f "$HOME/phone-worker/watch-phone-worker.sh" ]; then',
+        '  nohup /data/data/com.termux/files/usr/bin/bash "$HOME/phone-worker/watch-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.boot.log" 2>&1 &',
+        '  exit 0',
+        'fi',
+        'echo \'[core-worker-boot] watch-phone-worker.sh não encontrado\' >> "$HOME/phone-worker.log"',
+        ''
     ])
 
 
@@ -2149,7 +2206,12 @@ def _termux_boot_status_snapshot() -> dict[str, Any]:
         if exists:
             result["executable"] = os.access(path, os.X_OK)
             content = path.read_text(encoding="utf-8", errors="ignore")[:4096]
-            result["content_ok"] = ("watch-phone-worker.sh" in content or "start-phone-worker.sh" in content or "phone_worker.py" in content) and "phone-worker" in content
+            has_watch = "watch-phone-worker.sh" in content
+            direct_start = "start-phone-worker.sh" in content and not has_watch
+            result["mode"] = "watchdog" if has_watch else ("direct-start" if direct_start else "unknown")
+            result["content_ok"] = has_watch and "phone-worker" in content and "nohup" in content
+            result["uses_watchdog"] = bool(has_watch)
+            result["direct_start_only"] = bool(direct_start)
             result["size"] = path.stat().st_size
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {_short_text(exc, limit=100)}"
@@ -2160,11 +2222,11 @@ def _termux_boot_status_snapshot() -> dict[str, Any]:
     if result["ok"] and package.get("available") is False:
         result["warning"] = "script ok, mas app Termux:Boot não detectado"
     elif not result["ok"]:
-        result["warning"] = "script de boot ausente/incompleto"
+        result["warning"] = "script de boot ausente/incompleto ou não aponta para watchdog"
     pieces = [
         "script existe" if result.get("exists") else "script ausente",
         "executável" if result.get("executable") else "sem permissão de execução",
-        "conteúdo ok" if result.get("content_ok") else "conteúdo incompleto",
+        "watchdog" if result.get("uses_watchdog") else "sem watchdog",
         "Termux:Boot instalado" if package.get("available") else "Termux:Boot não detectado",
     ]
     result["summary"] = ("boot automático ok: " if result.get("ok") else "boot automático precisa atenção: ") + "; ".join(pieces)
@@ -2312,12 +2374,18 @@ def _service_status(service: str) -> dict[str, Any]:
             "duplicates": supervisor.get("duplicates"),
         }
     if service == "phone-worker-watch":
+        watch_pid = _read_pid_file(_phone_worker_watch_pid_file())
+        tmux_running = _tmux_session_exists(watch_session)
         return {
             "ok": True,
             "service": service,
             "manageable": True,
-            "running": _tmux_session_exists(watch_session),
+            "running": bool(_pid_alive(watch_pid) or tmux_running),
             "tmux_session": watch_session,
+            "tmux_running": tmux_running,
+            "watch_pid_file": str(_phone_worker_watch_pid_file()),
+            "watch_pid": watch_pid,
+            "watch_pid_alive": _pid_alive(watch_pid),
             "script": str(_best_script("watch-phone-worker.sh")),
             "scripts": _script_inventory(),
         }
@@ -2352,14 +2420,17 @@ def _run_service_action(service: str, action: str) -> dict[str, Any]:
         if action in {"stop", "restart"}:
             if shutil.which("tmux"):
                 _run_text_command(["tmux", "kill-session", "-t", watch_session], timeout=3.0, max_bytes=4096)
+            watch_pid = _read_pid_file(_phone_worker_watch_pid_file())
+            if watch_pid:
+                with contextlib.suppress(Exception):
+                    os.kill(int(watch_pid), 15)
+            with contextlib.suppress(Exception):
+                _phone_worker_watch_pid_file().unlink()
         if action in {"start", "restart"}:
             if not watch_script.exists():
                 raise FileNotFoundError(str(watch_script))
-            if not shutil.which("tmux"):
-                raise RuntimeError("tmux não encontrado")
-            code, stdout, stderr = _run_text_command(["tmux", "new-session", "-d", "-s", watch_session, str(watch_script)], timeout=4.0, max_bytes=4096)
-            if code != 0 and "duplicate session" not in stderr.lower():
-                raise RuntimeError(stderr or stdout or f"tmux retornou {code}")
+            subprocess.Popen(["bash", str(watch_script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            time.sleep(1)
         return _service_status(service) | {"action": action}
 
     # phone-worker é o próprio processo atual. Parar/reiniciar precisa ser deferido
@@ -2688,6 +2759,15 @@ def _safe_update_target_path(target: str) -> tuple[Path, int]:
     return path, mode
 
 
+def _read_phone_worker_version_from_path(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    match = re.search(r'^PHONE_WORKER_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
 def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
     if not _env_bool("PHONE_WORKER_SELF_UPDATE_ENABLED", True):
         raise PermissionError("self-update do phone-worker desativado por configuração")
@@ -2745,20 +2825,41 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
     if errors:
         return {"ok": False, "summary": "update parcial/falhou", "updated": updated, "errors": errors[:8], "total_bytes": total}
 
+    target_version = _short_text(payload.get("version"), limit=48, default="desconhecida")
+    applied_version = _read_phone_worker_version_from_path(_phone_worker_dir() / "phone_worker.py") or target_version
+    boot_status = _repair_termux_boot_script() if any(item.get("target") in {"start-phone-worker.sh", "watch-phone-worker.sh", "bootstrap-phone-worker.sh", "install.sh"} for item in updated) else _termux_boot_status_snapshot()
+    update_status = {
+        "ok": True,
+        "updated_at": time.time(),
+        "previous_runtime_version": PHONE_WORKER_VERSION,
+        "applied_file_version": applied_version,
+        "target_version": target_version,
+        "restart_requested": bool(payload.get("restart", True)),
+        "files": [item.get("target") for item in updated],
+        "boot_ok": bool(boot_status.get("ok")),
+    }
+    with contextlib.suppress(Exception):
+        _write_json_file_atomic(_phone_worker_update_status_file(), update_status)
+
     result: dict[str, Any] = {
         "ok": True,
-        "summary": f"update aplicado: {len(updated)} arquivo(s)",
+        "summary": f"update aplicado: {len(updated)} arquivo(s); reinício pelo watchdog",
         "updated": updated,
         "total_bytes": total,
         "current_version": PHONE_WORKER_VERSION,
-        "target_version": _short_text(payload.get("version"), limit=48, default="desconhecida"),
+        "applied_file_version": applied_version,
+        "target_version": target_version,
+        "boot": {"ok": bool(boot_status.get("ok")), "mode": boot_status.get("mode"), "summary": boot_status.get("summary")},
+        "update_status_file": str(_phone_worker_update_status_file()),
     }
     if _env_bool("PHONE_WORKER_UPDATE_RESTART", bool(payload.get("restart", True))):
         result.update({
             "deferred_restart": True,
+            "deferred_restart_mode": "watchdog",
             "_deferred_phone_worker_action": "restart",
             "_deferred_phone_worker_session": str(os.getenv("PHONE_WORKER_TMUX_SESSION") or "phone-worker"),
             "_deferred_start_script": str(_best_script("start-phone-worker.sh")),
+            "_deferred_watch_script": str(_best_script("watch-phone-worker.sh")),
         })
     return result
 
@@ -2769,12 +2870,14 @@ def _launch_deferred_phone_worker_action(result: dict[str, Any]) -> None:
         return
     session = str(result.pop("_deferred_phone_worker_session", "") or os.getenv("PHONE_WORKER_TMUX_SESSION") or "phone-worker")
     start_script = Path(str(result.pop("_deferred_start_script", "") or _best_script("start-phone-worker.sh"))).expanduser()
+    watch_script = Path(str(result.pop("_deferred_watch_script", "") or _best_script("watch-phone-worker.sh"))).expanduser()
     worker_dir = _phone_worker_dir()
     script = worker_dir / f".core-worker-deferred-{action}.sh"
     lines = [
         "#!/data/data/com.termux/files/usr/bin/bash",
         "set +e",
         "sleep 1",
+        "termux-wake-lock >/dev/null 2>&1 || true",
         f"tmux kill-session -t {shlex.quote(session)} >/dev/null 2>&1 || true",
         "pkill -f 'phone_worker.py' >/dev/null 2>&1 || true",
     ]
@@ -2782,6 +2885,7 @@ def _launch_deferred_phone_worker_action(result: dict[str, Any]) -> None:
         lines.extend([
             "sleep 1",
             f"bash {shlex.quote(str(start_script))} >/dev/null 2>&1 &",
+            f"nohup bash {shlex.quote(str(watch_script))} >> {shlex.quote(str(_phone_worker_watch_log_file()))} 2>&1 &",
         ])
     try:
         worker_dir.mkdir(parents=True, exist_ok=True)
@@ -3034,7 +3138,10 @@ def _poll_core_worker_job_once(*, host: str, port: int, max_body_bytes: int, max
         summary = str(result.get("summary") or ("ok" if result_ok else "ação falhou"))
         ok = _send_core_worker_job_result(job_id=job_id, status=final_status, result=result, error="" if result_ok else summary, timeout=timeout)
         _finish_core_job(job_id, kind, final_status, summary=summary, sent_ok=ok)
-        if ok and result_ok:
+        # Self-update/restart must happen even when the result could not be sent
+        # because the exact issue we are fixing is route/VPN failure during update.
+        # The result is persisted and retried after restart/reconnect.
+        if result_ok:
             _launch_deferred_phone_worker_action(result)
     except Exception as exc:
         summary = f"{type(exc).__name__}: {exc}"
@@ -3071,6 +3178,7 @@ def _start_core_worker_jobs(*, host: str, port: int, max_body_bytes: int, max_ou
 
 def main() -> int:
     _load_env_file()
+    _load_persisted_pending_core_job_results()
     parser = argparse.ArgumentParser(description="Worker auxiliar do celular para tarefas opcionais da VPS.")
     parser.add_argument("--host", default=os.getenv("PHONE_WORKER_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=_env_int("PHONE_WORKER_PORT", 8766))
