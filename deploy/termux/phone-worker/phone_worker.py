@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.5.9"
+PHONE_WORKER_VERSION = "1.6.0"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -819,15 +819,17 @@ def _pair_core_worker(
     capabilities: str = "",
     env_file: str | None = None,
     timeout: float = 10.0,
-) -> bool:
+) -> dict[str, Any]:
     normalized_code = str(code or "").strip().upper()
     base_url = str(vps_url or "").strip().rstrip("/")
     if not normalized_code:
-        print("[core-worker-pair] informe o código CORE-XXXX", flush=True)
-        return False
+        message = "informe o código CORE-XXXX"
+        print(f"[core-worker-pair] {message}", flush=True)
+        return {"ok": False, "error": message}
     if not base_url:
-        print("[core-worker-pair] informe a URL da VPS/Tailscale com --vps-url", flush=True)
-        return False
+        message = "informe a URL da VPS/Tailscale com --vps-url"
+        print(f"[core-worker-pair] {message}", flush=True)
+        return {"ok": False, "error": message}
 
     selected_worker_id = str(worker_id or _default_worker_id()).strip()
     selected_name = str(name or _default_worker_name()).strip()
@@ -853,14 +855,16 @@ def _pair_core_worker(
 
     status, data = _post_json_url(f"{base_url}/core-worker/pair", payload, timeout=timeout)
     if not (200 <= status < 300) or not data.get("ok", False):
-        print(f"[core-worker-pair] HTTP {status}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
-        return False
+        message = _short_text(data.get("error") or data, limit=180)
+        print(f"[core-worker-pair] HTTP {status}: {message}", flush=True)
+        return {"ok": False, "status": status, "error": message}
 
     token = str(data.get("token") or "").strip()
     returned_worker_id = str(data.get("worker_id") or selected_worker_id).strip()
     if not token or not returned_worker_id:
-        print("[core-worker-pair] resposta sem worker_id/token", flush=True)
-        return False
+        message = "resposta sem worker_id/token"
+        print(f"[core-worker-pair] {message}", flush=True)
+        return {"ok": False, "status": status, "error": message}
 
     env_path = _update_env_file(env_file, {
         "CORE_WORKER_HEARTBEAT_ENABLED": "true",
@@ -873,9 +877,17 @@ def _pair_core_worker(
         "CORE_WORKER_CAPABILITIES": ",".join(payload.get("capabilities") or _env_list("CORE_WORKER_CAPABILITIES", [])),
     })
     print(f"[core-worker-pair] pareado como {returned_worker_id}; token salvo em {env_path}", flush=True)
-    print("[core-worker-pair] reinicie o phone-worker para ativar heartbeat/jobs registrados.", flush=True)
-    return True
-
+    print("[core-worker-pair] heartbeat/jobs já podem usar o env atualizado; reiniciar ainda é recomendado se o supervisor estiver antigo.", flush=True)
+    return {
+        "ok": True,
+        "status": status,
+        "worker_id": returned_worker_id,
+        "name": payload.get("name") or selected_name,
+        "vps_url": base_url,
+        "env_updated": True,
+        "env_file": str(env_path),
+        "message": "worker local pareado com a VPS",
+    }
 
 def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6.0) -> bool:
     _base_url, _token, worker_id = _core_worker_auth_parts()
@@ -961,6 +973,8 @@ def _system_status() -> dict[str, Any]:
     return {
         "ok": True,
         "worker": "phone-worker",
+        "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+        "name": _default_worker_name(),
         "version": PHONE_WORKER_VERSION,
         "profile": _current_core_worker_profile(),
         "profile_label": _core_worker_profile_label(_current_core_worker_profile()),
@@ -996,6 +1010,8 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "ok": True,
         "local_only": True,
         "worker": "phone-worker",
+        "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+        "name": _default_worker_name(),
         "version": PHONE_WORKER_VERSION,
         "profile": profile,
         "profile_label": _core_worker_profile_label(profile),
@@ -1004,6 +1020,7 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "supported_tasks": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
         "vps_configured": _heartbeat_configured(),
         "jobs_configured": _core_worker_jobs_configured(),
+        "vps_url": str(os.getenv("CORE_WORKER_VPS_URL") or os.getenv("CORE_WORKER_BASE_URL") or "").strip(),
         "pid": os.getpid(),
         "uptime_seconds": status.get("uptime_seconds"),
         "endpoint": f"http://127.0.0.1:{port}",
@@ -1130,6 +1147,59 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         global JOBS_STARTED, JOBS_FAILED
         path = urllib.parse.urlparse(self.path).path
+        if path == "/local/pair":
+            if not self._require_local_client():
+                return
+            body = self._read_json()
+            if body is None:
+                return
+            try:
+                host, port = self._bind_host_port()
+                profile_result = _apply_local_core_worker_profile(body.get("profile"))
+                name = _short_text(body.get("name") or body.get("device_name") or _default_worker_name(), limit=64, default="Core Phone Worker")
+                pair_result = _pair_core_worker(
+                    code=str(body.get("code") or ""),
+                    vps_url=str(body.get("vps_url") or body.get("server_url") or ""),
+                    host=host,
+                    port=port,
+                    worker_id=str(os.getenv("CORE_WORKER_ID") or _default_worker_id()),
+                    name=name,
+                    roles=",".join(profile_result.get("roles") or []),
+                    capabilities=",".join(profile_result.get("capabilities") or []),
+                    env_file=None,
+                    timeout=10.0,
+                )
+                if not pair_result.get("ok"):
+                    _json_response(self, HTTPStatus.BAD_REQUEST, pair_result)
+                    return
+                heartbeat_ok = _send_core_worker_heartbeat_once(host=host, port=port, timeout=6.0)
+                result = _local_agent_status_payload(host=host, port=port)
+                result.update(pair_result)
+                result["profile"] = profile_result.get("profile")
+                result["profile_label"] = profile_result.get("profile_label")
+                result["roles"] = profile_result.get("roles") or result.get("roles")
+                result["capabilities"] = profile_result.get("capabilities") or result.get("capabilities")
+                result["synced_to_vps"] = bool(heartbeat_ok)
+                result["message"] = "worker local pareado; o APK não criou registro separado"
+                _json_response(self, HTTPStatus.OK, result)
+            except Exception as exc:
+                _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")
+            return
+        if path == "/local/heartbeat":
+            if not self._require_local_client():
+                return
+            body = self._read_json()
+            if body is None:
+                return
+            try:
+                host, port = self._bind_host_port()
+                result = _local_agent_status_payload(host=host, port=port)
+                result["synced_to_vps"] = _send_core_worker_heartbeat_once(host=host, port=port, timeout=6.0) if _heartbeat_configured() else False
+                result["message"] = "heartbeat solicitado ao worker local"
+                _json_response(self, HTTPStatus.OK, result)
+            except Exception as exc:
+                _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")
+            return
         if path == "/local/profile":
             if not self._require_local_client():
                 return
@@ -2297,7 +2367,7 @@ def main() -> int:
     job_timeout = max(3, args.job_timeout)
 
     if args.pair_code:
-        ok = _pair_core_worker(
+        result = _pair_core_worker(
             code=args.pair_code,
             vps_url=args.vps_url,
             host=args.host,
@@ -2309,7 +2379,7 @@ def main() -> int:
             env_file=args.env_file,
             timeout=10.0,
         )
-        return 0 if ok else 1
+        return 0 if result.get("ok") else 1
     if args.heartbeat_once:
         ok = _send_core_worker_heartbeat_once(host=args.host, port=args.port, timeout=8.0)
         return 0 if ok else 1

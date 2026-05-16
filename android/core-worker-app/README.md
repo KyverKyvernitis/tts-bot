@@ -28,14 +28,17 @@ O APK não deve virar, por enquanto:
 - substituto do painel Discord;
 - runtime completo que substitui o Termux.
 
-## v0.3.0 — integração leve com o Termux
+## v0.3.1 — integração leve com o Termux
 
-A versão `0.3.0` adiciona a ponte local APK ↔ phone-worker:
+A versão `0.3.1` corrige o pareamento para usar sempre o phone-worker real do Termux:
 
 - checklist simples de rede/Tailscale, VPS, worker local e pareamento;
 - detecção do worker local via `GET /local/status` em `127.0.0.1:8766`;
-- exibição da versão/perfil do agent local quando ele responde;
-- botão **Abrir Termux** para facilitar iniciar o worker;
+- pareamento pelo Termux worker real via `POST /local/pair`;
+- heartbeat manual pelo Termux worker real via `POST /local/heartbeat`;
+- o APK não chama mais `/core-worker/pair` nem `/core-worker/heartbeat` diretamente;
+- o APK não salva token de worker nem cria registro `apk-*` separado;
+- o botão de teste da VPS mostra resumo humano, sem despejar JSON gigante do `/health`;
 - ao salvar o perfil, o APK tenta enviar o perfil para o worker local;
 - se o worker local estiver offline, o perfil fica salvo no APK e o usuário recebe aviso simples.
 
@@ -62,7 +65,7 @@ O APK altera apenas o perfil do celular onde ele está instalado.
    - perfil.
 5. Toque em **Verificar worker local**.
 6. Toque em **Testar VPS**.
-7. Toque em **Conectar / parear celular**.
+7. Toque em **Conectar este worker local**.
 8. Para mudar o perfil depois, escolha outro perfil e toque em **Salvar perfil deste celular**.
 9. Volte no Discord e toque em **Atualizar**.
 
@@ -77,9 +80,25 @@ A ponte local esperada é:
 ```text
 APK Core Worker -> http://127.0.0.1:8766/local/status
 APK Core Worker -> http://127.0.0.1:8766/local/profile
+APK Core Worker -> http://127.0.0.1:8766/local/pair
+APK Core Worker -> http://127.0.0.1:8766/local/heartbeat
 ```
 
 O Discord/VPS continua sendo o cérebro/orquestrador. O APK não deve gerenciar outros celulares.
+
+
+## Identidade única APK + Termux
+
+O APK é companion. Ele não deve aparecer como outro worker no registry.
+
+Fluxo correto:
+
+```text
+APK -> /local/pair -> Termux phone-worker -> /core-worker/pair na VPS
+APK -> /local/heartbeat -> Termux phone-worker -> /core-worker/heartbeat na VPS
+```
+
+Assim o painel `workers` mostra apenas o celular real do Termux. Registros antigos `apk-*` criados por versões anteriores podem ser removidos/ignorados pelo painel, mas a versão atual não cria novos duplicados.
 
 ## Build pelo Android Studio
 

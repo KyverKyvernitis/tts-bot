@@ -43,9 +43,11 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.3.0";
+    private static final String APP_VERSION = "0.3.1";
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
     private static final String LOCAL_AGENT_PROFILE_URL = "http://127.0.0.1:8766/local/profile";
+    private static final String LOCAL_AGENT_PAIR_URL = "http://127.0.0.1:8766/local/pair";
+    private static final String LOCAL_AGENT_HEARTBEAT_URL = "http://127.0.0.1:8766/local/heartbeat";
     private static final String PREFS = "core_worker_private";
     private static final int BG = Color.rgb(11, 16, 32);
     private static final int CARD = Color.rgb(21, 27, 46);
@@ -72,6 +74,7 @@ public class MainActivity extends Activity {
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";
     private volatile String localAgentProfile = "";
+    private volatile String localAgentWorkerId = "";
     private volatile String localAgentMessage = "ainda não verificado";
     private volatile String vpsState = "não testada";
 
@@ -117,7 +120,7 @@ public class MainActivity extends Activity {
         LinearLayout connectCard = card();
         root.addView(connectCard);
         connectCard.addView(sectionTitle("1. Conectar este celular"));
-        connectCard.addView(smallText("Gere um código no painel workers do Discord e cole aqui. No futuro, este processo será automático pelo APK/QR."));
+        connectCard.addView(smallText("Gere um código no painel workers do Discord e cole aqui. O APK vai passar o código para o worker local do Termux, sem criar registro separado."));
 
         serverUrlInput = input("URL da VPS", "http://100.x.x.x:10000");
         connectCard.addView(label("URL da VPS"));
@@ -136,7 +139,7 @@ public class MainActivity extends Activity {
         testButton.setOnClickListener(v -> testServer());
         connectCard.addView(testButton);
 
-        pairButton = button("Conectar / parear celular");
+        pairButton = button("Conectar este worker local");
         pairButton.setOnClickListener(v -> pairWorker());
         connectCard.addView(pairButton);
 
@@ -325,11 +328,15 @@ public class MainActivity extends Activity {
             HttpResult result = request("GET", serverUrl + "/health", null, null);
             vpsState = result.ok() ? "ok" : "falha HTTP " + result.status;
             double ping = measureTcpPingMs(serverUrl);
-            String message = "VPS respondeu HTTP " + result.status;
+            String message = result.ok() ? "VPS online" : "VPS respondeu HTTP " + result.status;
             if (ping >= 0) {
-                message += " · ping TCP " + Math.round(ping) + "ms";
+                message += " · ping " + Math.round(ping) + "ms";
             }
-            message += "\n\n" + result.body;
+            if (result.ok()) {
+                message += " · bot saudável";
+            } else {
+                message += "\n" + compactResultBody(result.body);
+            }
             show(message);
         });
     }
@@ -345,40 +352,44 @@ public class MainActivity extends Activity {
         }
         saveLocalFields(profile);
 
-        runBusy("Pareando este celular com a VPS...", () -> {
-            JSONObject payload = basePayload();
+        runBusy("Pareando o worker local com a VPS...", () -> {
+            if (!updateLocalAgentStatus(true)) {
+                show("Worker local offline. Abra o Termux e inicie o phone-worker antes de parear.\n\nO APK não vai criar um worker separado.");
+                return;
+            }
+
+            JSONObject payload = new JSONObject();
             payload.put("code", code);
+            payload.put("vps_url", serverUrl);
             payload.put("name", name);
             payload.put("device_name", name);
-            payload.put("worker_id", prefs.getString("worker_id", ensureWorkerId()));
             putProfilePayload(payload, profile);
             payload.put("source", "core-worker-apk-companion");
-            payload.put("version", APP_VERSION);
+            payload.put("apk_version", APP_VERSION);
 
-            HttpResult result = request("POST", serverUrl + "/core-worker/pair", payload, null);
+            HttpResult result = request("POST", LOCAL_AGENT_PAIR_URL, payload, null);
             if (!result.ok()) {
-                show("Falha ao conectar: HTTP " + result.status + "\n\n" + result.body);
+                show("Falha ao parear pelo worker local: HTTP " + result.status + "\n\n" + compactResultBody(result.body));
                 return;
             }
             JSONObject body = new JSONObject(result.body);
-            String token = body.optString("token", "");
-            String workerId = body.optString("worker_id", prefs.getString("worker_id", ""));
-            if (token.isEmpty() || workerId.isEmpty()) {
-                show("A VPS respondeu sem token/worker_id.\n\n" + result.body);
+            if (!body.optBoolean("ok", false)) {
+                show("O worker local não conseguiu parear.\n\n" + compactResultBody(result.body));
                 return;
             }
+            String workerId = body.optString("worker_id", localAgentWorkerId);
             prefs.edit()
                     .putString("server_url", serverUrl)
                     .putString("device_name", name)
                     .putString("profile", profile)
                     .putString("worker_id", workerId)
-                    .putString("worker_token", token)
+                    .putBoolean("paired_via_local_agent", true)
+                    .remove("worker_token")
                     .apply();
+            applyLocalAgentStatus(body);
+            showLocalAgentText();
             vpsState = "ok";
-            boolean localSynced = syncProfileToLocalAgent(profile);
-            String localLine = localSynced ? "Perfil também enviado ao worker local." : "Worker local não respondeu; perfil ficou salvo no APK.";
-            show("Celular conectado com sucesso.\nPerfil: " + profileLabel(profile) + "\nToken salvo localmente no APK.\n" + localLine + "\n\nEnviando status inicial...");
-            sendHeartbeatInternal(false);
+            show("Worker local conectado com sucesso.\nPerfil: " + profileLabel(profile) + "\nRegistro usado: " + emptyFallback(workerId, "worker local") + "\n\nO APK não criou worker separado; quem envia heartbeat e executa jobs é o Termux worker.");
         });
     }
 
@@ -411,33 +422,27 @@ public class MainActivity extends Activity {
     }
 
     private void sendHeartbeatInternal(boolean showResult, String successPrefix) throws Exception {
-        String serverUrl = prefs.getString("server_url", normalizedServerUrl());
-        String token = prefs.getString("worker_token", "");
-        String workerId = prefs.getString("worker_id", "");
-        if (serverUrl == null || serverUrl.isEmpty() || token.isEmpty() || workerId.isEmpty()) {
-            show("Este celular ainda não está conectado. Gere um código no painel workers e toque em Conectar.");
+        if (!updateLocalAgentStatus(true)) {
+            show("Worker local offline. Abra o Termux e inicie o phone-worker.\n\nO APK não envia heartbeat próprio para não criar registro duplicado.");
             return;
         }
-        String profile = prefs.getString("profile", "midia");
-        JSONObject payload = basePayload();
-        payload.put("worker_id", workerId);
-        payload.put("name", prefs.getString("device_name", defaultDeviceName()));
-        putProfilePayload(payload, profile);
-        payload.put("version", APP_VERSION);
-        payload.put("source", "core-worker-apk-companion");
-        HttpResult result = request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
+        HttpResult result = request("POST", LOCAL_AGENT_HEARTBEAT_URL, new JSONObject(), null);
         if (!result.ok()) {
             vpsState = "falha HTTP " + result.status;
-            show("Falha ao atualizar: HTTP " + result.status + "\n\n" + result.body);
+            show("Falha ao pedir status ao worker local: HTTP " + result.status + "\n\n" + compactResultBody(result.body));
             return;
         }
-        vpsState = "ok";
+        JSONObject body = new JSONObject(result.body);
+        applyLocalAgentStatus(body);
+        showLocalAgentText();
+        boolean synced = body.optBoolean("synced_to_vps", false);
+        vpsState = synced ? "ok" : "pendente";
         if (showResult) {
-            String message = successPrefix == null ? "Status básico atualizado." : successPrefix;
-            message += "\nHTTP " + result.status + "\n\n" + compactResultBody(result.body);
+            String message = successPrefix == null ? "Status básico solicitado ao worker local." : successPrefix;
+            message += synced ? "\nVPS recebeu heartbeat do Termux worker." : "\nWorker local respondeu, mas ainda não confirmou heartbeat na VPS.";
             show(message);
         } else {
-            show("Celular conectado e status inicial enviado.\nAgora confira o painel workers no Discord.");
+            show("Worker local pareado. O Termux worker envia heartbeat e executa jobs.\nAgora confira o painel workers no Discord.");
         }
     }
 
@@ -670,6 +675,7 @@ public class MainActivity extends Activity {
             localAgentOnline = false;
             localAgentVersion = "";
             localAgentProfile = "";
+            localAgentWorkerId = "";
             localAgentMessage = "offline";
             if (updateText) {
                 showLocalAgentText();
@@ -709,6 +715,7 @@ public class MainActivity extends Activity {
         localAgentOnline = body.optBoolean("ok", true);
         localAgentVersion = body.optString("version", "");
         localAgentProfile = body.optString("profile_label", body.optString("profile", ""));
+        localAgentWorkerId = body.optString("worker_id", localAgentWorkerId);
         if (localAgentOnline) {
             String jobs = body.optBoolean("jobs_configured", false) ? "jobs ok" : "jobs pendentes";
             String vps = body.optBoolean("vps_configured", false) ? "VPS ok" : "VPS pendente";
@@ -737,9 +744,10 @@ public class MainActivity extends Activity {
     }
 
     private boolean hasPairing() {
-        String token = prefs.getString("worker_token", "");
+        boolean pairedViaLocal = prefs.getBoolean("paired_via_local_agent", false);
+        String serverUrl = prefs.getString("server_url", "");
         String workerId = prefs.getString("worker_id", "");
-        return token != null && !token.isEmpty() && workerId != null && !workerId.isEmpty();
+        return pairedViaLocal && serverUrl != null && !serverUrl.isEmpty() && workerId != null && !workerId.isEmpty();
     }
 
     private void openTermux() {
@@ -769,12 +777,13 @@ public class MainActivity extends Activity {
     private void confirmClearPairing() {
         new AlertDialog.Builder(this)
                 .setTitle("Esquecer conexão local?")
-                .setMessage("Isso remove o token salvo no APK. O registro na VPS não é apagado automaticamente.")
+                .setMessage("Isso remove a conexão salva no APK. O token real fica no Termux worker; o registro na VPS não é apagado automaticamente.")
                 .setPositiveButton("Esquecer", (dialog, which) -> {
                     prefs.edit()
                             .remove("worker_token")
                             .remove("server_url")
                             .remove("profile")
+                            .remove("paired_via_local_agent")
                             .apply();
                     loadInputs();
                     refreshLocalStatus("Conexão local removida.");
@@ -813,11 +822,10 @@ public class MainActivity extends Activity {
     }
 
     private void refreshLocalStatus(String extra) {
-        String workerId = prefs.getString("worker_id", ensureWorkerId());
-        String token = prefs.getString("worker_token", "");
+        String workerId = localAgentWorkerId != null && !localAgentWorkerId.trim().isEmpty() ? localAgentWorkerId : prefs.getString("worker_id", ensureWorkerId());
+        boolean paired = hasPairing();
         String server = prefs.getString("server_url", normalizedServerUrl());
         String profile = prefs.getString("profile", selectedProfileSafe());
-        boolean paired = token != null && !token.isEmpty();
         StringBuilder builder = new StringBuilder();
         builder.append("Checklist rápido\n");
         builder.append(checkLine("Rede/Tailscale", networkChecklistLabel(server))).append('\n');
@@ -829,6 +837,9 @@ public class MainActivity extends Activity {
         builder.append("Perfil: ").append(profileLabel(profile)).append('\n');
         builder.append("VPS: ").append(server == null || server.isEmpty() ? "não definida" : server).append('\n');
         builder.append("Worker ID: ").append(workerId).append('\n');
+        if (prefs.getBoolean("paired_via_local_agent", false)) {
+            builder.append("Modo: APK conectado ao Termux worker local\n");
+        }
         builder.append("Versão APK: ").append(APP_VERSION).append('\n');
         builder.append("Agent local: ").append(localAgentOnline ? emptyFallback(localAgentVersion, "online") : "offline").append("\n\n");
         if (extra != null && !extra.trim().isEmpty()) {
@@ -989,9 +1000,22 @@ public class MainActivity extends Activity {
         if (body == null || body.trim().isEmpty()) {
             return "ok";
         }
+        try {
+            JSONObject json = new JSONObject(body);
+            if (json.has("error")) {
+                return json.optString("error", "erro");
+            }
+            if (json.has("message")) {
+                return json.optString("message", "ok");
+            }
+            if (json.optBoolean("ok", false)) {
+                return "ok";
+            }
+        } catch (Exception ignored) {
+        }
         String compact = body.replace('\n', ' ').replace('\r', ' ').trim();
-        if (compact.length() > 320) {
-            return compact.substring(0, 320) + "...";
+        if (compact.length() > 180) {
+            return compact.substring(0, 180) + "...";
         }
         return compact;
     }

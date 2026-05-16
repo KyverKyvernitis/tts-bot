@@ -38,11 +38,13 @@ X-Phone-Worker-Token: <PHONE_WORKER_TOKEN>
 
 ## Ponte local com o APK Core Worker
 
-O APK v0.3.0 usa apenas rotas locais, sempre em `127.0.0.1`, para não transformar o app em painel avançado:
+O APK v0.3.1 usa apenas rotas locais, sempre em `127.0.0.1`, para não transformar o app em painel avançado:
 
 ```txt
 GET  http://127.0.0.1:8766/local/status
 POST http://127.0.0.1:8766/local/profile
+POST http://127.0.0.1:8766/local/pair
+POST http://127.0.0.1:8766/local/heartbeat
 ```
 
 Essas rotas:
@@ -55,6 +57,10 @@ Essas rotas:
 - só mostram status básico e permitem trocar o perfil do próprio worker (`leve`, `midia`, `completo`, `bedrock`).
 
 Quando o perfil é atualizado, o worker salva `CORE_WORKER_PROFILE`, `CORE_WORKER_ROLES` e `CORE_WORKER_CAPABILITIES` no `~/.phone-worker.env` e tenta mandar um heartbeat para a VPS se o registry já estiver configurado.
+
+Na versão `1.6.0`, o APK também pode pedir pareamento local por `POST /local/pair`. Essa rota recebe `vps_url`, `code`, `name` e `profile`, chama o pareamento real da VPS a partir do próprio Termux worker e salva `CORE_WORKER_ID`/`CORE_WORKER_TOKEN` apenas no `~/.phone-worker.env`. O token não volta para o APK. Assim o APK não cria um registro `apk-*` duplicado no registry.
+
+`POST /local/heartbeat` apenas pede para o Termux worker enviar um heartbeat imediato para a VPS. O APK não envia heartbeat próprio.
 
 ## Instalação no Termux
 
