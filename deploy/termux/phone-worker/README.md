@@ -4,11 +4,11 @@ Worker opcional para usar o celular como ajudante da VPS em tarefas que não sã
 
 Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e usa fallback local.
 
-## v1.6.9 — funções selecionáveis e matriz de jobs
+## v1.7.0 — resultados úteis para o painel
 
-A versão `1.6.9` alinha o agent ao painel `workers`: `builder` também pode receber manutenção segura, `turbo` declara assistência máxima e os jobs auxiliares (`maintenance_plan`, `vps_assist_probe`, `hash_batch`, `endpoint_probe`, `log_digest`, `zip_audit`, `media_probe`, `audio_convert`) ficam oficialmente na matriz do worker quando as capacidades correspondentes estão ativas.
+A versão `1.7.0` melhora os resultados enviados ao painel `workers`: `maintenance_plan` agora devolve resumo, bytes recuperáveis estimados e sugestões seguras; `boot_status` detalha script, permissão, conteúdo e Termux:Boot; e a matriz de jobs continua alinhada aos perfis `builder`/`turbo`.
 
-O painel Discord agora deve editar funções por seletores, não por lista digitada manualmente.
+O painel Discord deve editar uma única mensagem ephemeral por fluxo e usar **Ver último resultado** para mostrar dados completos, não apenas tipo/status.
 
 ## v1.6.6 — auto-update por jobs da VPS
 
@@ -364,7 +364,7 @@ O builder em Termux tende a funcionar melhor com Android SDK 34 e `aapt2` do pr�
 
 ## Worker Assist / aceleração da VPS
 
-A partir do phone-worker 1.6.7/1.6.9, o celular pode ajudar a VPS de forma oportunista, sem virar dependência obrigatória do bot.
+A partir do phone-worker 1.6.7/1.7.0, o celular pode ajudar a VPS de forma oportunista, sem virar dependência obrigatória do bot.
 
 Novas capacidades seguras:
 

@@ -721,21 +721,107 @@ def _job_detail_text(job: dict[str, Any] | None) -> str:
     if not isinstance(job, dict) or not job:
         return "Nenhum resultado recente encontrado para este worker."
     status = str(job.get("status") or "desconhecido")
-    kind = str(job.get("type") or "job")
+    kind = _task_name(job.get("type") or "job")
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
     if status.strip().lower() == "succeeded" and isinstance(result, dict) and result.get("ok") is False:
         status = "failed"
     status_label = {"succeeded": "concluído", "failed": "falhou", "running": "em execução", "queued": "aguardando"}.get(status.strip().lower(), status)
+    icon = {"concluído": "✅", "falhou": "❌", "em execução": "⏳", "aguardando": "🕒"}.get(status_label, "📄")
     lines = [
-        f"## Resultado do worker",
+        f"## {icon} Resultado do worker",
         f"Tipo: `{_shorten(kind, limit=48)}`",
         f"Status: `{_shorten(status_label, limit=32)}`",
     ]
+    worker_id = job.get("worker_id") or job.get("target_worker_id")
+    if worker_id:
+        lines.append(f"Worker: `{_shorten(worker_id, limit=72)}`")
+    duration = result.get("duration_seconds") or job.get("duration_seconds")
+    if duration is not None:
+        with contextlib.suppress(Exception):
+            lines.append(f"Duração: `{float(duration):.1f}s`")
     summary = result.get("summary") or job.get("summary") or job.get("error")
     if summary:
-        lines.append(f"Resumo: {_shorten(_redact(summary), limit=240)}")
+        lines.append(f"Resumo: {_shorten(_redact(summary), limit=300)}")
     if job.get("error"):
-        lines.append(f"Erro: `{_shorten(_redact(job.get('error')), limit=220)}`")
+        lines.append(f"Erro: `{_shorten(_redact(job.get('error')), limit=260)}`")
+
+    # Blocos específicos: deixam de ser só tipo/status e viram resultado útil.
+    if kind == "maintenance_plan" and result:
+        if result.get("scanned") is not None:
+            lines.append(f"Arquivos analisados: `{result.get('scanned')}`")
+        if result.get("estimated_reclaimable") is not None:
+            lines.append(f"Recuperável estimado: `{_format_bytes(result.get('estimated_reclaimable'))}`")
+        recommendations = result.get("recommendations") if isinstance(result.get("recommendations"), list) else []
+        if recommendations:
+            lines.append("\n**Sugestões seguras:**")
+            for item in recommendations[:6]:
+                lines.append(f"- {_shorten(_redact(item), limit=180)}")
+        largest = result.get("largest") if isinstance(result.get("largest"), list) else []
+        if largest:
+            lines.append("\n**Maiores arquivos vistos:**")
+            for item in largest[:4]:
+                if isinstance(item, dict):
+                    lines.append(f"- `{_shorten(item.get('path'), limit=80)}` · {_format_bytes(item.get('size'))}")
+    elif kind == "boot_status" and result:
+        checks = [
+            ("Script", result.get("exists")),
+            ("Executável", result.get("executable")),
+            ("Conteúdo", result.get("content_ok")),
+            ("Termux:Boot", result.get("package_available")),
+        ]
+        lines.append("\n**Boot:** " + " · ".join(f"{name} {'ok' if ok else 'atenção'}" for name, ok in checks))
+        if result.get("path"):
+            lines.append(f"Caminho: `{_shorten(result.get('path'), limit=120)}`")
+        if result.get("warning"):
+            lines.append(f"Aviso: {_shorten(result.get('warning'), limit=220)}")
+    elif kind == "endpoint_probe" and result:
+        probes = result.get("results") if isinstance(result.get("results"), list) else []
+        if probes:
+            lines.append("\n**Endpoints:**")
+            for item in probes[:6]:
+                if not isinstance(item, dict):
+                    continue
+                ok = "✅" if item.get("ok") else "❌"
+                status_code = item.get("status") or item.get("error") or "sem status"
+                latency = item.get("latency_ms")
+                suffix = f" · {latency}ms" if latency is not None else ""
+                lines.append(f"- {ok} `{_shorten(item.get('url'), limit=92)}` · {status_code}{suffix}")
+    elif kind in {"log_summary", "log_digest"} and result:
+        counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
+        if counts:
+            top_counts = ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: int(kv[1] or 0), reverse=True)[:8] if v)
+            if top_counts:
+                lines.append(f"Contagens: `{_shorten(top_counts, limit=240)}`")
+        top_messages = result.get("top_messages") if isinstance(result.get("top_messages"), list) else []
+        if top_messages:
+            lines.append("\n**Mais repetidos:**")
+            for item in top_messages[:5]:
+                if isinstance(item, dict):
+                    lines.append(f"- `{item.get('count')}`× {_shorten(_redact(item.get('message')), limit=160)}")
+        recent = result.get("recent") if isinstance(result.get("recent"), list) else []
+        if recent:
+            lines.append("\n**Recentes importantes:**")
+            for item in recent[-5:]:
+                lines.append(f"- {_shorten(_redact(item), limit=170)}")
+    elif kind in {"zip_validate", "zip_audit"} and result:
+        lines.append(f"ZIP: `{_shorten(result.get('filename') or 'arquivo', limit=80)}` · `{result.get('files', 0)}` arquivo(s) · risco `{result.get('risk', 'n/a')}`")
+        warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+        if errors:
+            lines.append("Erros: " + "; ".join(_shorten(_redact(e), limit=120) for e in errors[:5]))
+        if warnings:
+            lines.append("Avisos: " + "; ".join(_shorten(_redact(w), limit=120) for w in warnings[:5]))
+    elif kind == "apk_build_debug" and result:
+        apk = result.get("apk") if isinstance(result.get("apk"), dict) else {}
+        publish = result.get("publish") if isinstance(result.get("publish"), dict) else {}
+        if apk:
+            lines.append(f"APK: `{_shorten(apk.get('filename'), limit=96)}` · {_format_bytes(apk.get('bytes'))}")
+        if publish:
+            lines.append(f"Publicação: `{'ok' if publish.get('ok') else 'falhou'}`")
+            latest = publish.get("latest") if isinstance(publish.get("latest"), dict) else {}
+            if latest.get("apkUrl"):
+                lines.append(f"URL: `{_shorten(latest.get('apkUrl'), limit=120)}`")
+
     interesting_keys = [
         "version", "target_version", "current_version", "apk", "publish", "builder_environment",
         "source", "scripts", "battery", "network", "ping", "tailscale", "services",
@@ -750,9 +836,9 @@ def _job_detail_text(job: dict[str, Any] | None) -> str:
             text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         else:
             text = str(value)
-        lines.append(f"`{key}`: {_shorten(_redact(text), limit=420)}")
+        lines.append(f"`{key}`: {_shorten(_redact(text), limit=360)}")
         shown += 1
-        if shown >= 6:
+        if shown >= 4:
             break
     publish = result.get("publish") if isinstance(result.get("publish"), dict) else {}
     if publish and publish.get("ok") is False:
@@ -763,10 +849,9 @@ def _job_detail_text(job: dict[str, Any] | None) -> str:
         tail = result.get(tail_key)
         if isinstance(tail, str) and tail.strip():
             tail = _redact(tail.strip())
-            lines.append(f"```txt\n{label}:\n" + tail[-1200:] + "\n```")
+            lines.append(f"```txt\n{label}:\n" + tail[-900:] + "\n```")
             break
     return "\n".join(lines)[:1900]
-
 
 def _worker_detail_text(worker: dict[str, Any] | None) -> str:
     if not isinstance(worker, dict) or not worker:
@@ -1547,6 +1632,23 @@ class WorkersPanelView(discord.ui.LayoutView):
         with contextlib.suppress(Exception):
             await interaction.followup.send(message[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
+    async def _open_flow_message(self, interaction: discord.Interaction, message: str):
+        try:
+            return await interaction.followup.send(
+                message[:1900],
+                ephemeral=True,
+                wait=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            return None
+
+    async def _edit_flow_message(self, flow_message: Any, message: str) -> None:
+        if flow_message is None:
+            return
+        with contextlib.suppress(Exception):
+            await flow_message.edit(content=message[:1900], allowed_mentions=discord.AllowedMentions.none())
+
     async def _refresh(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
         self.snapshot = await self.cog._collect_workers_snapshot(action_note="painel atualizado manualmente")
@@ -1795,22 +1897,42 @@ class WorkersPanelView(discord.ui.LayoutView):
     ):
         await interaction.response.defer(thinking=False)
         target_worker_id = self._job_target_worker_id()
-        readable = summary or job_type
-        await self._send_ephemeral(interaction, f"⏳ Ação iniciada: `{_shorten(readable, limit=80)}`. Vou atualizar o painel e salvar em **Ver último resultado**.")
+        task = _task_name(job_type)
+        readable = summary or task
+        target_label = _shorten(target_worker_id or "melhor worker compatível", limit=40)
+        flow = await self._open_flow_message(
+            interaction,
+            f"## ⏳ {_shorten(readable, limit=80)}\n"
+            f"Status: preparando payload\n"
+            f"Worker: `{target_label}`\n"
+            "-# Esta mensagem será editada durante o fluxo. O painel também será atualizado.",
+        )
         final_note = ""
         try:
-            task = _task_name(job_type)
             if task == "worker_update":
                 payload = await self.cog._build_worker_update_payload(scripts_only=bool((payload or {}).get("scripts_only")))
             elif task == "apk_build_debug":
                 payload = await self.cog._build_apk_builder_payload(payload or {})
             else:
                 payload = await self._build_assist_payload(job_type, payload or {})
+
+            await self._edit_flow_message(
+                flow,
+                f"## 📨 {_shorten(readable, limit=80)}\n"
+                f"Status: enviando job `{task}`\n"
+                f"Worker: `{target_label}`",
+            )
+
             if self._selected_is_legacy():
                 result = await self.cog._run_legacy_worker_action(job_type=job_type, payload=payload or {})
-                note = _shorten((result or {}).get("summary") or "ação direta concluída", limit=90)
-                final_note = f"direto `{job_type}`: {note}"
+                note = _shorten((result or {}).get("summary") or "ação direta concluída", limit=120)
+                final_note = f"✅ `{task}` direto concluído: {note}"
                 self.snapshot = await self.cog._collect_workers_snapshot(action_note=final_note)
+                await self._edit_flow_message(
+                    flow,
+                    f"## ✅ {_shorten(readable, limit=80)}\n"
+                    f"Status: concluído\nResumo: {note}",
+                )
             else:
                 result = await self.cog._queue_core_worker_job(
                     interaction.user,
@@ -1821,22 +1943,37 @@ class WorkersPanelView(discord.ui.LayoutView):
                 )
                 job = result.get("job") if isinstance(result, dict) else {}
                 job_id = str((job or {}).get("job_id") or "")
-                target_label = _shorten(target_worker_id or "melhor worker compatível", limit=40)
-                self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"⏳ `{job_type}` enviado para {target_label}; aguardando resultado")
+                self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"⏳ `{task}` enviado para {target_label}; aguardando resultado")
                 self._ensure_selected_worker()
                 self._rebuild_layout()
                 await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
-                await self._send_ephemeral(interaction, f"📨 Job criado: `{job_id or 'sem id'}` para `{target_label}`.")
+                await self._edit_flow_message(
+                    flow,
+                    f"## ⚙️ {_shorten(readable, limit=80)}\n"
+                    f"Status: job criado e aguardando execução\n"
+                    f"Job: `{job_id or 'sem id'}`\n"
+                    f"Worker: `{target_label}`",
+                )
                 final_job = await self.cog._wait_core_worker_job(job_id, timeout=_env_float("WORKERS_PANEL_ACTION_WAIT_SECONDS", 12.0)) if job_id else None
                 final_note = _job_result_note(job_type, final_job)
                 self.snapshot = await self.cog._collect_workers_snapshot(action_note=final_note)
+                detail = _job_detail_text(final_job) if isinstance(final_job, dict) else final_note
+                await self._edit_flow_message(
+                    flow,
+                    f"{detail}\n\n-# Resultado salvo em Ver último resultado."
+                )
         except Exception as exc:
-            final_note = f"falha em `{job_type}`: {_compact_failure(exc)}"
+            final_note = f"❌ falha em `{task}`: {_compact_failure(exc)}"
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=final_note)
+            await self._edit_flow_message(
+                flow,
+                f"## ❌ {_shorten(readable, limit=80)}\n"
+                f"Status: falhou\nMotivo: `{_shorten(_compact_failure(exc), limit=260)}`",
+            )
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
-        await self._send_ephemeral(interaction, final_note or f"Ação `{job_type}` atualizada no painel.")
+
 
     async def _show_worker_details(self, interaction: discord.Interaction):
         worker = self._selected_worker()

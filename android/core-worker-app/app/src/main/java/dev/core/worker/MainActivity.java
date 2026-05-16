@@ -57,7 +57,7 @@ import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.4.9";
+    private static final String APP_VERSION = "0.5.0";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -816,7 +816,7 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            updateUpdateUi("Atualização baixada. Confirme a instalação na tela do Android.\nArquivo: " + apkFile.getName() + "\nSe o Android avisar conflito de pacote, a assinatura publicada pela VPS não combina com a versão instalada.", true, true);
+            updateUpdateUi("Atualização baixada e verificada. Vou abrir o link direto da VPS ou o instalador local.\nArquivo: " + apkFile.getName() + "\nSe o Android não abrir o instalador, use o APK em Downloads/link direto.", true, true);
             openApkInstaller(apkFile);
         });
     }
@@ -913,13 +913,33 @@ public class MainActivity extends Activity {
 
     private void openApkInstaller(File apkFile) {
         runOnUiThread(() -> {
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
+                try {
                     Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()));
                     startActivity(settings);
                     refreshLocalStatus("Autorize o Core Worker a instalar apps desconhecidos. Depois volte aqui e toque novamente em Atualizar.");
                     return;
+                } catch (Exception ignored) {
+                    // Se a tela especial não abrir, ainda tentamos o link direto abaixo.
                 }
+            }
+
+            // Em alguns Android/MIUI o instalador rejeita APK aberto via FileProvider com
+            // “problema ao analisar o pacote”, mas o mesmo APK baixado pelo navegador instala.
+            // Por isso, quando há URL HTTP validada pelo sha256, preferimos abrir o link direto.
+            if (latestApkUrl != null && (latestApkUrl.startsWith("http://") || latestApkUrl.startsWith("https://"))) {
+                try {
+                    Intent direct = new Intent(Intent.ACTION_VIEW, Uri.parse(latestApkUrl));
+                    direct.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(direct);
+                    refreshLocalStatus("APK verificado. Abri o link direto da VPS para o Android/navegador baixar e instalar com menos chance de erro de pacote.");
+                    return;
+                } catch (Exception ignored) {
+                    // Fallback local abaixo.
+                }
+            }
+
+            try {
                 Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".files", apkFile);
                 Intent install = new Intent(Intent.ACTION_VIEW);
                 install.setDataAndType(uri, "application/vnd.android.package-archive");
@@ -927,7 +947,7 @@ public class MainActivity extends Activity {
                 install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(install);
             } catch (Exception exc) {
-                refreshLocalStatus("Atualização baixada, mas não consegui abrir o instalador: " + exc.getClass().getSimpleName() + ". Abra o APK baixado manualmente. Se aparecer conflito de pacote, a assinatura do APK instalado e a assinatura publicada pela VPS não combinam.");
+                refreshLocalStatus("Atualização baixada, mas não consegui abrir o instalador: " + exc.getClass().getSimpleName() + ". Abra o link direto da VPS ou o APK baixado manualmente.");
             }
         });
     }

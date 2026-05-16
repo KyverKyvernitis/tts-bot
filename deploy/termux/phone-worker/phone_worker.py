@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.6.9"
+PHONE_WORKER_VERSION = "1.7.0"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -366,6 +366,21 @@ def _short_text(value: Any, *, limit: int = 120, default: str = "") -> str:
     if len(text) > limit:
         return text[: max(1, limit - 1)].rstrip() + "…"
     return text
+
+
+def _format_bytes(value: Any) -> str:
+    try:
+        size = float(value or 0)
+    except Exception:
+        size = 0.0
+    units = ["B", "KB", "MB", "GB", "TB"]
+    idx = 0
+    while abs(size) >= 1024 and idx < len(units) - 1:
+        size /= 1024.0
+        idx += 1
+    if idx == 0:
+        return f"{int(size)} {units[idx]}"
+    return f"{size:.1f} {units[idx]}"
 
 
 def _run_json_command(command: list[str], *, timeout: float = 2.0) -> dict[str, Any]:
@@ -1555,17 +1570,30 @@ class WorkerHandler(BaseHTTPRequestHandler):
         old_logs.sort(key=lambda item: (int(item.get("age_seconds") or 0), int(item.get("size") or 0)), reverse=True)
         reclaimable_temp = sum(int(item.get("size") or 0) for item in old_temp)
         reclaimable_logs = sum(int(item.get("size") or 0) for item in old_logs)
+        reclaimable = reclaimable_temp + reclaimable_logs
+        recommendations: list[str] = []
+        if old_temp:
+            recommendations.append(f"limpar {len(old_temp)} cache(s)/temporário(s) antigos com cerca de {_format_bytes(reclaimable_temp)}")
+        if old_logs:
+            recommendations.append(f"arquivar ou remover {len(old_logs)} log(s) antigos com cerca de {_format_bytes(reclaimable_logs)}")
+        if not recommendations:
+            recommendations.append("nenhuma limpeza automática necessária agora")
+        summary = f"{scanned} arquivo(s) analisados; {_format_bytes(reclaimable)} recuperável estimado; nada foi apagado"
         return {
             "ok": True,
+            "summary": summary,
+            "safe": True,
+            "note": "Plano apenas sugere limpeza; o worker não remove arquivos automaticamente.",
             "scanned": scanned,
             "total_size": total_size,
             "by_kind": by_kind,
             "largest": largest[:30],
             "old_temp_candidates": old_temp[:80],
             "old_log_candidates": old_logs[:80],
-            "estimated_reclaimable": reclaimable_temp + reclaimable_logs,
+            "estimated_reclaimable": reclaimable,
             "estimated_reclaimable_temp": reclaimable_temp,
             "estimated_reclaimable_logs": reclaimable_logs,
+            "recommendations": recommendations[:12],
         }
 
     def _task_text_stats(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1988,6 +2016,13 @@ def _termux_boot_status_snapshot() -> dict[str, Any]:
         result["warning"] = "script ok, mas app Termux:Boot não detectado"
     elif not result["ok"]:
         result["warning"] = "script de boot ausente/incompleto"
+    pieces = [
+        "script existe" if result.get("exists") else "script ausente",
+        "executável" if result.get("executable") else "sem permissão de execução",
+        "conteúdo ok" if result.get("content_ok") else "conteúdo incompleto",
+        "Termux:Boot instalado" if package.get("available") else "Termux:Boot não detectado",
+    ]
+    result["summary"] = ("boot automático ok: " if result.get("ok") else "boot automático precisa atenção: ") + "; ".join(pieces)
     return result
 
 

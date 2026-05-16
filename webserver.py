@@ -149,6 +149,71 @@ def _fixed_apk_signing_config() -> dict[str, str] | None:
     }
 
 
+def _validate_core_worker_apk(apk_path: str) -> dict[str, object]:
+    """Valida o APK antes de publicar latest.json.
+
+    A validação é intencionalmente local e barata: ZIP íntegro, manifest/classes
+    presentes, assinatura verificável quando apksigner existe e alinhamento quando
+    zipalign existe. Se falhar, a VPS não deve apontar latest.json para esse APK.
+    """
+    result: dict[str, object] = {"ok": False, "checks": []}
+    path = str(apk_path or "")
+    if not path or not os.path.isfile(path):
+        result["error"] = "APK não encontrado"
+        return result
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            bad = zf.testzip()
+            if bad:
+                result["error"] = f"ZIP corrompido em {bad}"
+                return result
+            names = set(zf.namelist())
+            missing = [name for name in ("AndroidManifest.xml", "classes.dex") if name not in names]
+            if missing:
+                result["error"] = "APK sem " + ", ".join(missing)
+                return result
+            result["checks"].append("zip")
+            result["checks"].append("manifest")
+            result["entries"] = len(names)
+    except Exception as exc:
+        result["error"] = f"ZIP inválido: {type(exc).__name__}: {exc}"
+        return result
+
+    zipalign = _find_android_build_tool("zipalign")
+    if zipalign:
+        proc = subprocess.run([zipalign, "-c", "-p", "4", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        result["zipalign"] = proc.returncode == 0
+        if proc.returncode != 0:
+            result["error"] = "zipalign -c falhou: " + (proc.stderr or proc.stdout or "sem saída")[-400:]
+            return result
+        result["checks"].append("zipalign")
+
+    apksigner = _find_android_build_tool("apksigner")
+    if apksigner:
+        proc = subprocess.run([apksigner, "verify", "--verbose", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        result["apksigner"] = proc.returncode == 0
+        result["apksigner_tail"] = (proc.stdout or proc.stderr or "")[-800:]
+        if proc.returncode != 0:
+            result["error"] = "apksigner verify falhou: " + (proc.stderr or proc.stdout or "sem saída")[-500:]
+            return result
+        result["checks"].append("apksigner")
+
+    aapt = _find_android_build_tool("aapt")
+    if aapt:
+        proc = subprocess.run([aapt, "dump", "badging", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        result["aapt"] = proc.returncode == 0
+        if proc.returncode != 0:
+            result["error"] = "aapt dump badging falhou: " + (proc.stderr or proc.stdout or "sem saída")[-500:]
+            return result
+        result["checks"].append("aapt")
+        first_line = next((line for line in (proc.stdout or "").splitlines() if line.startswith("package:")), "")
+        if first_line:
+            result["badging"] = first_line[:500]
+
+    result["ok"] = True
+    return result
+
+
 def _sign_core_worker_apk_with_vps_key(uploaded_apk: str, final_apk: str) -> dict[str, object]:
     cfg = _fixed_apk_signing_config()
     if cfg is None:
@@ -331,6 +396,17 @@ def core_worker_app_publish():
             os.remove(tmp)
         return jsonify({"ok": False, "error": f"falha salvando APK: {type(exc).__name__}"}), 500
 
+    validation = _validate_core_worker_apk(target)
+    if not bool(validation.get("ok")):
+        with contextlib.suppress(Exception):
+            os.remove(target)
+        return jsonify({
+            "ok": False,
+            "error": "APK assinado, mas falhou na validação antes da publicação",
+            "validation": validation,
+            "hint": "latest.json foi preservado; corrija o build/assinatura antes de publicar.",
+        }), 500
+
     final_raw = open(target, "rb").read()
     actual_sha = hashlib.sha256(final_raw).hexdigest()
     total = len(final_raw)
@@ -358,6 +434,7 @@ def core_worker_app_publish():
         "publishReason": "worker-builder-auto" if str(form.get("notifyUsers") or form.get("notificationRequested") or "").strip().lower() in {"1", "true", "yes", "on", "sim"} else "worker-builder",
         "bytes": total,
         "uploadedBytes": upload_total,
+        "validation": validation,
     }
     manifest_path = os.path.join(base, "latest.json")
     tmp_manifest = manifest_path + ".tmp"
@@ -365,7 +442,7 @@ def core_worker_app_publish():
         json.dump(manifest, fh, ensure_ascii=False, indent=2)
     os.replace(tmp_manifest, manifest_path)
     _kick_core_worker_pending_automation(str(worker.get("worker_id") or ""))
-    return jsonify({"ok": True, "filename": filename, "bytes": total, "sha256": actual_sha, "signedByVps": bool(signing_info.get("signedByVps")), "latest": manifest}), 200
+    return jsonify({"ok": True, "filename": filename, "bytes": total, "sha256": actual_sha, "signedByVps": bool(signing_info.get("signedByVps")), "validation": validation, "latest": manifest}), 200
 
 
 @app.get("/core-worker/app/latest.json")
