@@ -40,6 +40,13 @@ CORE_WORKER_JOB_TYPES = {
     "maintenance_plan",
     "worker_update",
     "apk_build_debug",
+    "vps_assist_probe",
+    "hash_batch",
+    "endpoint_probe",
+    "media_probe",
+    "audio_convert",
+    "log_digest",
+    "zip_audit",
     "boot_status",
     "boot_repair",
 }

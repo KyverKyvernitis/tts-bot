@@ -76,6 +76,11 @@ WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Atualizar agent", "value": "worker_update", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Atualiza e reinicia", "emoji": "⬆️", "requires_declared": True, "category": "maintenance"},
     {"label": "Reparar scripts", "value": "worker_repair_scripts", "job_type": "worker_update", "payload": {"scripts_only": True}, "summary": "reinstalar scripts auxiliares do worker", "description": "Reinstala scripts", "emoji": "🛠️", "requires_declared": True, "category": "maintenance"},
     {"label": "Buildar APK", "value": "apk_build_debug", "job_type": "apk_build_debug", "payload": {"source_zip_url": "auto", "publish": True}, "summary": "compilar APK Core Worker em worker builder", "description": "APK fora da VPS", "emoji": "🏗️", "requires_declared": True, "category": "maintenance"},
+    {"label": "Teste auxiliar", "value": "vps_assist_probe", "job_type": "vps_assist_probe", "payload": {}, "summary": "medir se este worker pode ajudar a VPS", "description": "Pronto para ajudar", "emoji": "🧠", "requires_declared": True, "category": "assist"},
+    {"label": "Resumir logs VPS", "value": "vps_log_digest", "job_type": "log_digest", "payload": {"source": "vps_logs_auto"}, "summary": "resumir logs recentes da VPS em worker", "description": "Logs fora da VPS", "emoji": "🧾", "requires_declared": True, "category": "assist"},
+    {"label": "Auditar patch ZIP", "value": "vps_zip_audit", "job_type": "zip_audit", "payload": {"source": "latest_update_zip"}, "summary": "auditar ZIP recente usando worker", "description": "Valida ZIP", "emoji": "🧪", "requires_declared": True, "category": "assist"},
+    {"label": "Plano de limpeza", "value": "vps_maintenance_plan", "job_type": "maintenance_plan", "payload": {"source": "vps_scan_auto"}, "summary": "planejar limpeza/caches com worker", "description": "Sugestão segura", "emoji": "🧹", "requires_declared": True, "category": "assist"},
+    {"label": "Testar VPS pelo celular", "value": "endpoint_probe", "job_type": "endpoint_probe", "payload": {"targets": ["auto"]}, "summary": "testar endpoints da VPS a partir do worker", "description": "Ping HTTP real", "emoji": "📡", "requires_declared": True, "category": "assist"},
     {"label": "Reparar boot automático", "value": "boot_repair", "job_type": "boot_repair", "payload": {}, "summary": "reparar inicialização automática no Termux:Boot", "description": "Auto-start pós-reboot", "emoji": "🚀", "requires_declared": True, "category": "maintenance"},
     {"label": "Status boot", "value": "boot_status", "job_type": "boot_status", "payload": {}, "summary": "verificar inicialização automática", "description": "Termux:Boot", "emoji": "🔎", "requires_declared": True, "category": "monitor"},
     {"label": "Logs", "value": "worker_logs", "job_type": "worker_logs", "payload": {"lines": 140}, "summary": "logs recentes do phone-worker", "description": "Mostra logs recentes", "emoji": "📜", "category": "quick"},
@@ -92,6 +97,7 @@ WORKER_ACTION_CATEGORIES: tuple[dict[str, str], ...] = (
     {"label": "Ações rápidas", "value": "quick", "description": "Teste, saúde, logs", "emoji": "⚡"},
     {"label": "Monitoramento", "value": "monitor", "description": "Rede, Tailscale, serviços", "emoji": "📊"},
     {"label": "Manutenção", "value": "maintenance", "description": "Reparar, reiniciar e boot", "emoji": "🛠️"},
+    {"label": "Ajudar VPS", "value": "assist", "description": "Tarefas auxiliares seguras", "emoji": "🧠"},
     {"label": "Organizar", "value": "organize", "description": "Nome, funções, pausar/remover", "emoji": "🧩"},
     {"label": "Adicionar celular", "value": "add", "description": "Pareamento e guia simples", "emoji": "📲"},
 )
@@ -1378,6 +1384,90 @@ class WorkersPanelView(discord.ui.LayoutView):
                 return str(worker.get("name") or worker_id)
         return str(worker_id or "")
 
+
+    def _read_vps_logs_payload_sync(self, *, max_bytes: int = 220_000) -> dict[str, Any]:
+        root = _repo_root()
+        candidates = [root / "logs" / "updater.log", root / "logs" / "bot.log"]
+        parts: list[str] = []
+        remaining = max(16_000, max_bytes)
+        for path in candidates:
+            if remaining <= 0:
+                break
+            if not path.is_file():
+                continue
+            try:
+                raw = path.read_bytes()[-remaining:]
+                text = raw.decode("utf-8", errors="replace")
+            except Exception as exc:
+                text = f"[falha lendo {path.name}: {type(exc).__name__}: {exc}]"
+            parts.append(f"===== {path.name} =====\n{text}")
+            remaining -= len(text.encode("utf-8", errors="ignore"))
+        if not parts:
+            parts.append("sem logs locais encontrados em logs/updater.log ou logs/bot.log")
+        return {"text": "\n\n".join(parts)[-max_bytes:], "max_recent": 18, "max_top": 14, "source": "vps_logs_auto"}
+
+    def _latest_update_zip_payload_sync(self) -> dict[str, Any]:
+        root = _repo_root()
+        candidates: list[Path] = []
+        for base in (root / "data", root / "logs", root):
+            if not base.exists():
+                continue
+            try:
+                candidates.extend([p for p in base.rglob("*.zip") if p.is_file() and "core-worker-app/releases" not in str(p)])
+            except Exception:
+                continue
+        candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+        if not candidates:
+            raise RuntimeError("nenhum ZIP recente encontrado para auditar")
+        path = candidates[0]
+        raw = path.read_bytes()
+        if len(raw) > 24 * 1024 * 1024:
+            raise RuntimeError(f"ZIP recente grande demais para payload seguro: {path.name}")
+        return {"filename": path.name, "data_b64": base64.b64encode(raw).decode("ascii"), "max_entries": 1200, "max_preview": 50, "source": "latest_update_zip"}
+
+    def _maintenance_plan_payload_sync(self) -> dict[str, Any]:
+        root = _repo_root()
+        now = time.time()
+        entries: list[dict[str, Any]] = []
+        scan_roots = [(root / "tmp_audio", "tmp_audio"), (root / "logs", "log"), (root / "android" / "core-worker-app" / "app" / "build", "build"), (root / "android" / "core-worker-app" / "releases", "release")]
+        for base, kind in scan_roots:
+            if not base.exists():
+                continue
+            try:
+                iterator = base.rglob("*")
+                for item in iterator:
+                    if not item.is_file():
+                        continue
+                    try:
+                        st = item.stat()
+                    except Exception:
+                        continue
+                    entries.append({"path": str(item.relative_to(root))[:260], "kind": kind, "size": int(st.st_size), "mtime": float(st.st_mtime)})
+                    if len(entries) >= 4000:
+                        break
+            except Exception:
+                continue
+        return {"entries": entries, "now": now, "max_entries": 4000, "source": "vps_scan_auto"}
+
+    async def _build_assist_payload(self, job_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(payload or {})
+        task = _task_name(job_type)
+        source = str(payload.get("source") or "")
+        if task in {"log_summary", "log_digest"} and source == "vps_logs_auto":
+            return await asyncio.to_thread(self._read_vps_logs_payload_sync)
+        if task in {"zip_validate", "zip_audit"} and source == "latest_update_zip":
+            return await asyncio.to_thread(self._latest_update_zip_payload_sync)
+        if task == "maintenance_plan" and source == "vps_scan_auto":
+            return await asyncio.to_thread(self._maintenance_plan_payload_sync)
+        if task == "endpoint_probe":
+            targets = payload.get("targets")
+            if targets == ["auto"] or targets == "auto" or not targets:
+                base = _public_base_url().rstrip("/")
+                payload["targets"] = [base + "/health", base + "/core-worker/app/latest.json"]
+                payload.setdefault("timeout_seconds", 3)
+            return payload
+        return payload
+
     async def _queue_named_job(
         self,
         interaction: discord.Interaction,
@@ -1393,6 +1483,8 @@ class WorkersPanelView(discord.ui.LayoutView):
                 payload = await self.cog._build_worker_update_payload(scripts_only=bool((payload or {}).get("scripts_only")))
             if _task_name(job_type) == "apk_build_debug":
                 payload = await self.cog._build_apk_builder_payload(payload or {})
+            else:
+                payload = await self._build_assist_payload(job_type, payload or {})
             if self._selected_is_legacy():
                 result = await self.cog._run_legacy_worker_action(job_type=job_type, payload=payload or {})
                 note = _shorten((result or {}).get("summary") or "ação direta concluída", limit=90)
@@ -1859,6 +1951,10 @@ class WorkersCommandMixin:
         registry = get_core_workers_registry()
         task = _task_name(job_type)
         is_apk_build = task == "apk_build_debug"
+        assist_tasks = {"vps_assist_probe", "hash_batch", "endpoint_probe", "media_probe", "audio_convert", "log_digest", "zip_audit", "maintenance_plan"}
+        required_caps = ["apk-builder"] if is_apk_build else (["vps-assist"] if task in assist_tasks else ["phone-worker"])
+        ttl = 7200 if is_apk_build else (1200 if task in assist_tasks or task in {"log_summary", "maintenance_plan", "zip_validate"} else 900)
+        lease = 7200 if is_apk_build else (240 if task in assist_tasks or task in {"log_summary", "maintenance_plan", "zip_validate"} else 120)
         return await asyncio.to_thread(
             registry.create_job,
             job_type=job_type,
@@ -1866,9 +1962,9 @@ class WorkersCommandMixin:
             created_by_id=int(getattr(owner, "id", 0) or 0),
             created_by_name=str(getattr(owner, "display_name", None) or getattr(owner, "name", "") or ""),
             target_worker_id=target_worker_id,
-            required_capabilities=["apk-builder"] if is_apk_build else ["phone-worker"],
-            ttl_seconds=7200 if is_apk_build else 900,
-            lease_seconds=7200 if is_apk_build else 120,
+            required_capabilities=required_caps,
+            ttl_seconds=ttl,
+            lease_seconds=lease,
             max_attempts=1 if is_apk_build else 2,
             summary=summary or job_type,
         )

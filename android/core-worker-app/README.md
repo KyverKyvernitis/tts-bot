@@ -304,3 +304,10 @@ CORE_WORKER_APK_KEY_PASSWORD=...
 ```
 
 Nunca envie keystore ou senhas para GitHub. O APK publicado no `latest.json` deve ser o APK já assinado pela VPS, não o APK assinado pelo worker.
+
+## Perfil Turbo / ajudar VPS
+
+O app agora oferece o perfil **Turbo**, pensado para um celular forte e confiável ajudar a VPS quando estiver disponível. Ele habilita capacidades como resumo de logs, auditoria de ZIP, testes de endpoint, mídia/FFmpeg e build de APK.
+
+A VPS não depende desse perfil para funcionar. Se o celular estiver offline, o bot continua com fallback local.
+

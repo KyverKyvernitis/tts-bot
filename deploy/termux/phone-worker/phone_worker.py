@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.6.6"
+PHONE_WORKER_VERSION = "1.6.7"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -66,6 +66,13 @@ SUPPORTED_DIRECT_TASKS = (
     "worker_self_check",
     "worker_update",
     "apk_build_debug",
+    "vps_assist_probe",
+    "hash_batch",
+    "endpoint_probe",
+    "media_probe",
+    "audio_convert",
+    "log_digest",
+    "zip_audit",
     "boot_status",
     "boot_repair",
     "zip",
@@ -91,6 +98,13 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "worker_self_check",
     "worker_update",
     "apk_build_debug",
+    "vps_assist_probe",
+    "hash_batch",
+    "endpoint_probe",
+    "media_probe",
+    "audio_convert",
+    "log_digest",
+    "zip_audit",
     "boot_status",
     "boot_repair",
     "zip_validate",
@@ -99,23 +113,28 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
 CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "leve": {
         "label": "Leve",
-        "roles": ["phone-worker", "diagnostics", "log-summary"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "worker-logs", "network-probe", "tailscale-status"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "vps-assist"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "vps-assist", "hash-worker", "endpoint-probe", "worker-logs", "network-probe", "tailscale-status"],
     },
     "midia": {
         "label": "Mídia",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "worker-logs", "network-probe", "tailscale-status"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "vps-assist"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "vps-assist", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status"],
     },
     "completo": {
         "label": "Completo",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "builder": {
         "label": "Builder",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate", "worker-logs", "network-probe", "tailscale-status"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "worker-logs", "network-probe", "tailscale-status"],
+    },
+    "turbo": {
+        "label": "Turbo",
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "apk-builder", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "apk-builder", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -227,10 +246,18 @@ def _current_core_worker_roles_and_capabilities() -> tuple[list[str], list[str]]
 
 def _supported_core_worker_job_types() -> list[str]:
     roles, capabilities = _current_core_worker_roles_and_capabilities()
+    caps = set(roles + capabilities)
     allowed = list(SUPPORTED_CORE_WORKER_JOB_TYPES)
     # Build Android é pesado e só deve aparecer para celular escolhido como builder.
-    if "apk-builder" not in set(roles + capabilities):
+    if "apk-builder" not in caps:
         allowed = [item for item in allowed if item != "apk_build_debug"]
+    # Funções de assistência só aparecem quando o perfil permite ajudar a VPS.
+    if "vps-assist" not in caps:
+        allowed = [item for item in allowed if item not in {"vps_assist_probe", "hash_batch", "endpoint_probe", "log_digest", "zip_audit"}]
+    if "ffprobe" not in caps and "media-probe" not in caps:
+        allowed = [item for item in allowed if item != "media_probe"]
+    if "ffmpeg" not in caps and "audio-convert" not in caps and "tts-convert" not in caps:
+        allowed = [item for item in allowed if item != "audio_convert"]
     return allowed
 
 
@@ -1314,7 +1341,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload.setdefault("summary", "status direto coletado")
             elif task in {"diagnostic_basic", "worker_self_check"}:
                 payload = _execute_core_worker_job({"type": "worker_self_check", "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
-            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "apk_build_debug", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
+            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "apk_build_debug", "vps_assist_probe", "hash_batch", "endpoint_probe", "media_probe", "audio_convert", "log_digest", "zip_audit", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
                 payload = _execute_core_worker_job({"type": task, "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
             elif task == "sha256":
                 payload = self._task_sha256(body)
@@ -1628,6 +1655,61 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "top_messages": top_messages,
             "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         }
+
+
+    def _task_hash_batch(self, body: dict[str, Any]) -> dict[str, Any]:
+        files = body.get("files") or []
+        if not isinstance(files, list) or not files:
+            raise ValueError("files vazio")
+        if len(files) > 64:
+            raise ValueError("arquivos demais para hash_batch")
+        total = 0
+        results: list[dict[str, Any]] = []
+        for index, item in enumerate(files, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f"files[{index}] inválido")
+            name = _safe_name(item.get("name"), fallback=f"file-{index}.bin")
+            data = _b64decode(str(item.get("data_b64") or ""), max_bytes=self.max_body_bytes)
+            total += len(data)
+            if total > self.max_body_bytes:
+                raise ValueError("entrada total grande demais")
+            results.append({"name": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        return {"ok": True, "summary": f"{len(results)} hash(es) calculados", "files": results, "total_bytes": total}
+
+    def _task_endpoint_probe(self, body: dict[str, Any]) -> dict[str, Any]:
+        raw_targets = body.get("targets") or body.get("urls") or []
+        if isinstance(raw_targets, str):
+            raw_targets = [raw_targets]
+        if not isinstance(raw_targets, list) or not raw_targets:
+            base_url, _token, _worker_id = _core_worker_auth_parts()
+            raw_targets = [base_url.rstrip("/") + "/health"] if base_url else []
+        if not raw_targets:
+            raise ValueError("nenhum endpoint informado")
+        timeout = max(0.5, min(8.0, float(body.get("timeout_seconds") or 3.0)))
+        max_targets = max(1, min(8, int(body.get("max_targets") or 4)))
+        results: list[dict[str, Any]] = []
+        for raw_url in raw_targets[:max_targets]:
+            url = str(raw_url or "").strip()
+            parsed = urllib.parse.urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                results.append({"url": _short_text(url, limit=120), "ok": False, "error": "URL inválida"})
+                continue
+            started = time.perf_counter()
+            try:
+                req = urllib.request.Request(url, headers={"Accept": "application/json,text/plain,*/*", "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}"}, method="GET")
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    sample = resp.read(512)
+                    status = int(getattr(resp, "status", 200) or 200)
+                results.append({
+                    "url": _short_text(url, limit=160),
+                    "ok": 200 <= status < 500,
+                    "status": status,
+                    "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "bytes_sampled": len(sample),
+                })
+            except Exception as exc:
+                results.append({"url": _short_text(url, limit=160), "ok": False, "latency_ms": round((time.perf_counter() - started) * 1000, 1), "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"})
+        return {"ok": any(item.get("ok") for item in results), "summary": "endpoints testados pelo worker", "results": results}
 
     def _task_ffprobe_media(self, body: dict[str, Any]) -> dict[str, Any]:
         ffprobe = shutil.which("ffprobe")
@@ -2482,6 +2564,56 @@ def _launch_deferred_phone_worker_action(result: dict[str, Any]) -> None:
         print(f"[core-worker-service] falha ao agendar {action}: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
 
 
+
+def _assist_readiness_snapshot(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    roles, capabilities = _current_core_worker_roles_and_capabilities()
+    battery = _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot())
+    network = _safe_telemetry("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"})
+    system = _safe_telemetry("system", _system_status, {"ok": False})
+    level = None
+    charging = False
+    try:
+        level = float((battery or {}).get("level") or (battery or {}).get("percent"))
+        charging = str((battery or {}).get("status") or "").lower() in {"charging", "full"} or bool((battery or {}).get("plugged"))
+    except Exception:
+        level = None
+    heavy_ok = True
+    reasons: list[str] = []
+    if level is not None and level < float(payload.get("min_battery_for_heavy") or 25) and not charging:
+        heavy_ok = False
+        reasons.append("bateria baixa para tarefa pesada")
+    if not bool((network or {}).get("vps_reachable", True)) and _heartbeat_configured():
+        reasons.append("VPS instável vista do worker")
+    caps = set(capabilities) | set(roles)
+    recommended: list[str] = ["log_summary", "zip_validate", "hash_batch", "endpoint_probe"]
+    if "ffprobe" in caps:
+        recommended.append("media_probe")
+    if "ffmpeg" in caps or "tts-convert" in caps:
+        recommended.append("audio_convert")
+    if "apk-builder" in caps and heavy_ok:
+        recommended.append("apk_build_debug")
+    return {
+        "ok": True,
+        "summary": "worker auxiliar pronto" if heavy_ok else "worker auxiliar só para tarefas leves",
+        "assist_enabled": _env_bool("CORE_WORKER_ASSIST_ENABLED", True),
+        "heavy_ok": heavy_ok,
+        "reasons": reasons[:6],
+        "profile": _current_core_worker_profile(),
+        "roles": roles,
+        "capabilities": capabilities,
+        "recommended_tasks": recommended,
+        "battery": battery,
+        "network": network,
+        "system": {
+            "uptime_seconds": system.get("uptime_seconds"),
+            "disk_home": system.get("disk_home"),
+            "loadavg": system.get("loadavg"),
+            "ffmpeg": system.get("ffmpeg"),
+            "ffprobe": system.get("ffprobe"),
+        },
+    }
+
 def _worker_logs_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     lines = max(20, min(400, _env_int("CORE_WORKER_LOG_LINES", int(payload.get("lines") or 120))))
     path = Path(str(payload.get("path") or _phone_worker_log_file())).expanduser()
@@ -2558,6 +2690,8 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
             }
         elif kind == "network_probe":
             result = {"ok": True, "summary": "rede testada", "network": _safe_telemetry("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}), "tailscale": _safe_telemetry("tailscale", lambda: _tailscale_snapshot(probe_vps=True), {"connected": False, "state": "telemetry_failed"})}
+        elif kind == "vps_assist_probe":
+            result = _assist_readiness_snapshot(payload)
         elif kind == "tailscale_status":
             result = {"ok": True, "summary": "status Tailscale coletado", "tailscale": _safe_telemetry("tailscale", lambda: _tailscale_snapshot(probe_vps=True), {"connected": False, "state": "telemetry_failed"})}
         elif kind == "worker_logs":
@@ -2586,12 +2720,28 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
         elif kind == "ffprobe_check":
             result = _command_version("ffprobe")
             result.setdefault("summary", "ffprobe verificado")
-        elif kind in {"zip_validate", "log_summary", "text_stats", "maintenance_plan"}:
+        elif kind in {"media_probe", "ffprobe_media"}:
+            runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
+            result = runner._task_ffprobe_media(payload)
+            result.setdefault("summary", "mídia analisada pelo worker")
+        elif kind in {"audio_convert", "ffmpeg_convert"}:
+            runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
+            result = runner._task_ffmpeg_convert(payload)
+            result.setdefault("summary", "áudio convertido pelo worker")
+        elif kind in {"zip_validate", "zip_audit", "log_summary", "log_digest", "text_stats", "maintenance_plan", "hash_batch", "endpoint_probe"}:
             runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
             if kind == "zip_validate":
                 result = runner._task_zip_validate(payload)
-            elif kind == "log_summary":
+            elif kind in {"log_summary", "log_digest"}:
                 result = runner._task_log_summary(payload)
+                result.setdefault("summary", "logs resumidos pelo worker")
+            elif kind == "zip_audit":
+                result = runner._task_zip_validate(payload)
+                result.setdefault("summary", "ZIP auditado pelo worker")
+            elif kind == "hash_batch":
+                result = runner._task_hash_batch(payload)
+            elif kind == "endpoint_probe":
+                result = runner._task_endpoint_probe(payload)
             elif kind == "text_stats":
                 result = runner._task_text_stats(payload)
             else:

@@ -353,3 +353,33 @@ PHONE_WORKER_APK_BUILD_DIR=/data/data/com.termux/files/home/core-worker-apk-buil
 Na versão `1.6.5`, o worker pode continuar usando o perfil `builder`/`apk-builder` para compilar o Core Worker fora da VPS. O worker compila e envia o APK para a VPS, mas a VPS deve re-assinar/publicar o APK com uma chave fixa local. A chave privada não deve ficar no Termux nem no GitHub.
 
 O builder em Termux tende a funcionar melhor com Android SDK 34 e `aapt2` do próprio Termux. Se o build falhar com `aapt2` ou `android.jar`, prepare o ambiente com SDK 34 e mantenha `android.aapt2FromMavenOverride` apontando para `/data/data/com.termux/files/usr/bin/aapt2`.
+
+## Worker Assist / aceleração da VPS
+
+A partir do phone-worker 1.6.7, o celular pode ajudar a VPS de forma oportunista, sem virar dependência obrigatória do bot.
+
+Novas capacidades seguras:
+
+- `vps-assist`: permite que a VPS envie tarefas auxiliares quando o worker estiver online.
+- `hash-worker`: cálculo de hashes em lote.
+- `endpoint-probe`: teste de endpoints da VPS visto do celular.
+- `media-probe`: análise de mídia com `ffprobe` quando disponível.
+- `audio-convert`: conversão curta com `ffmpeg` quando disponível.
+- `cache-worker`: preparação/validação de pacotes e caches.
+
+Novos jobs permitidos:
+
+- `vps_assist_probe`
+- `hash_batch`
+- `endpoint_probe`
+- `media_probe`
+- `audio_convert`
+- `log_digest`
+- `zip_audit`
+
+A VPS continua sendo o cérebro. Se nenhum worker estiver online, a VPS deve usar fallback local. Não existe shell livre nem execução arbitrária; apenas jobs whitelist.
+
+Perfil novo opcional:
+
+- `turbo`: modo forte para celular confiável, combinando mídia, builder e auxílio à VPS.
+

@@ -57,7 +57,7 @@ import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.4.6";
+    private static final String APP_VERSION = "0.4.7";
     private static final String DEFAULT_VPS_URL = "http://100.103.240.118:10000";
     private static final String DEFAULT_VPS_LABEL = "VPS principal · 100.103.240.118:10000";
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -264,6 +264,7 @@ public class MainActivity extends Activity {
         addProfileRadio("midia", "Mídia · recomendado para FFmpeg/TTS/ZIP");
         addProfileRadio("completo", "Completo · mídia + manutenção");
         addProfileRadio("builder", "Builder · compilar APK fora da VPS");
+        addProfileRadio("turbo", "Turbo · ajuda máxima para acelerar a VPS");
         addProfileRadio("bedrock", "Bedrock · Minecraft Bedrock futuro");
         profileGroup.setOnCheckedChangeListener((group, checkedId) -> {
             String profile = selectedProfile();
@@ -1519,7 +1520,10 @@ public class MainActivity extends Activity {
             return new String[]{"phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"};
         }
         if ("builder".equals(profile)) {
-            return new String[]{"phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate"};
+            return new String[]{"phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate", "vps-assist", "cache-worker"};
+        }
+        if ("turbo".equals(profile)) {
+            return new String[]{"phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "apk-builder", "vps-assist", "cache-worker"};
         }
         if ("bedrock".equals(profile)) {
             return new String[]{"phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"};
@@ -1531,6 +1535,7 @@ public class MainActivity extends Activity {
         if ("leve".equals(profile)) return "Leve";
         if ("completo".equals(profile)) return "Completo";
         if ("builder".equals(profile)) return "Builder";
+        if ("turbo".equals(profile)) return "Turbo";
         if ("bedrock".equals(profile)) return "Bedrock";
         return "Mídia";
     }
@@ -1544,6 +1549,9 @@ public class MainActivity extends Activity {
         }
         if ("builder".equals(profile)) {
             return "Compila APK do Core Worker em um celular builder para aliviar a VPS. Use só em aparelho forte.";
+        }
+        if ("turbo".equals(profile)) {
+            return "Modo mais forte: logs, ZIP, FFmpeg, cache, APK builder e tarefas auxiliares para deixar a VPS mais rápida quando este celular estiver disponível.";
         }
         if ("bedrock".equals(profile)) {
             return "Preparado para Minecraft Bedrock no futuro. Não assume Java.";
