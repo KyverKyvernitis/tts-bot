@@ -4,6 +4,12 @@ Worker opcional para usar o celular como ajudante da VPS em tarefas que não sã
 
 Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e usa fallback local.
 
+## v1.7.2 — wake confiável e watchdog de 1 minuto
+
+A versão `1.7.2` mantém o agent alinhado ao Patch 41: o watchdog local volta a tentar a cada `PHONE_WORKER_WATCH_INTERVAL_SECONDS` mesmo após falhas, sem backoff crescente que deixava o celular importante parado por vários minutos.
+
+Na VPS, o painel/loop de Core Workers usa `scripts/phone-worker-watch.sh` com confirmação real: código 0 do script não é tratado como “acordou”; o painel só mostra sucesso quando o worker volta a responder pelo registry/health.
+
 ## v1.7.1 — resultados úteis e limpeza de jobs
 
 A versão `1.7.1` melhora os resultados enviados ao painel `workers`: `maintenance_plan` agora devolve resumo, bytes recuperáveis estimados e sugestões seguras; `boot_status` detalha script, permissão, conteúdo e Termux:Boot; a matriz de jobs continua alinhada aos perfis `builder`/`turbo`; e o agent mantém estado local do último job para reenviar resultado se a VPS oscilar, evitando jobs presos como `running`.
@@ -108,7 +114,15 @@ PHONE_WORKER_SSH_PORT=8022
 PHONE_WORKER_START_COMMAND=/data/data/com.termux/files/home/phone-worker/start-phone-worker.sh
 ```
 
-O timer da VPS chama `scripts/phone-worker-watch.sh` para manter o worker acordado quando possível.
+O timer da VPS chama `scripts/phone-worker-watch.sh` para manter o worker acordado quando possível. O bot também tem um loop de auto-wake seguro para workers offline com responsabilidades importantes. Por padrão ele tenta a cada 60 segundos e não para por causa de falha anterior.
+
+```env
+CORE_WORKER_AUTO_WAKE_ENABLED=true
+CORE_WORKER_AUTO_WAKE_INTERVAL_SECONDS=60
+CORE_WORKER_WAKE_CONFIRM_SECONDS=8
+# O botão manual ignora cooldown; o timer/loop automático respeita este valor.
+PHONE_WORKER_KICK_COOLDOWN_SECONDS=60
+```
 
 Variáveis opcionais usadas pelos diagnósticos do bot:
 
@@ -191,7 +205,7 @@ O `start-phone-worker.sh` agora atua como supervisor local:
 - grava status curto em `~/phone-worker/phone-worker.status`;
 - rotaciona logs quando passam de `PHONE_WORKER_LOG_MAX_BYTES`;
 - inicia com `nohup` sem depender de `tmux`;
-- o `watch-phone-worker.sh` só chama o supervisor e aplica backoff quando houver falha.
+- o `watch-phone-worker.sh` só chama o supervisor e tenta novamente a cada intervalo configurado, mesmo quando houver falha.
 
 Variáveis úteis no `~/.phone-worker.env`:
 
@@ -201,7 +215,7 @@ PHONE_WORKER_PID_FILE=/data/data/com.termux/files/home/phone-worker/phone-worker
 PHONE_WORKER_STATUS_FILE=/data/data/com.termux/files/home/phone-worker/phone-worker.status
 PHONE_WORKER_LOG_MAX_BYTES=1048576
 PHONE_WORKER_START_KILL_DUPLICATES=true
-PHONE_WORKER_WATCH_MAX_BACKOFF_SECONDS=300
+PHONE_WORKER_WATCH_MAX_BACKOFF_SECONDS=60
 ```
 
 No painel `workers`, a ação **Status serviços** mostra PID, duplicados, runtime e logs. Se aparecer `runtime atenção`, use **Manutenção → Reiniciar worker** ou **Manutenção → Reparar scripts**.

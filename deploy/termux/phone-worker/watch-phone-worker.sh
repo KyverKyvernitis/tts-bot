@@ -12,7 +12,10 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 INTERVAL="${PHONE_WORKER_WATCH_INTERVAL_SECONDS:-60}"
-MAX_BACKOFF="${PHONE_WORKER_WATCH_MAX_BACKOFF_SECONDS:-300}"
+# Patch 41: responsabilidades importantes devem tentar de novo a cada intervalo,
+# mesmo depois de falha. Mantemos a variável antiga só por compatibilidade,
+# mas o watchdog local não aumenta mais o intervalo sozinho.
+MAX_BACKOFF="${PHONE_WORKER_WATCH_MAX_BACKOFF_SECONDS:-60}"
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 START_SCRIPT="$WORKER_DIR/start-phone-worker.sh"
 WATCH_LOG="${PHONE_WORKER_WATCH_LOG_FILE:-$WORKER_DIR/phone-worker-watch.log}"
@@ -52,12 +55,8 @@ while true; do
       sleep "$INTERVAL"
     else
       failures=$((failures + 1))
-      backoff=$((INTERVAL * failures))
-      if [[ "$backoff" -gt "$MAX_BACKOFF" ]]; then
-        backoff="$MAX_BACKOFF"
-      fi
-      log "start falhou; nova tentativa em ${backoff}s"
-      sleep "$backoff"
+      log "start falhou; nova tentativa em ${INTERVAL}s"
+      sleep "$INTERVAL"
     fi
   else
     failures=$((failures + 1))

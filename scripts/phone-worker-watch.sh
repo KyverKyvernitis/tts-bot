@@ -13,7 +13,14 @@ log() {
 }
 
 env_value() {
-  local key="${1:?}" default="${2:-}" value=""
+  local key="${1:?}" default="${2:-}" value="" env_current=""
+  # Variáveis passadas pelo systemd/bot devem poder sobrescrever o .env
+  # sem editar arquivo local. É usado pelo botão manual para furar cooldown.
+  env_current="${!key-}"
+  if [[ -n "$env_current" ]]; then
+    printf '%s' "$env_current"
+    return 0
+  fi
   if [[ -f "$ENV_FILE" ]]; then
     value="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" 2>/dev/null | tail -n 1 | sed -E 's/^[[:space:]]*export[[:space:]]+//' | cut -d= -f2- || true)"
     value="${value%$'\r'}"
@@ -50,6 +57,7 @@ fi
 WORKER_ENABLED="$(env_value PHONE_WORKER_ENABLED false)"
 if ! truthy "$WORKER_ENABLED"; then
   log "PHONE_WORKER_ENABLED=false; nada a fazer"
+  log "resultado: disabled"
   exit 0
 fi
 
@@ -64,6 +72,8 @@ SSH_PORT="$(env_value PHONE_WORKER_SSH_PORT "$(env_value PHONE_LAVALINK_SSH_PORT
 SSH_CONNECT_TIMEOUT="$(env_value PHONE_WORKER_SSH_CONNECT_TIMEOUT_SECONDS 5)"
 START_COMMAND="$(env_value PHONE_WORKER_START_COMMAND '/data/data/com.termux/files/home/start-phone-worker.sh')"
 COOLDOWN_SECONDS="$(env_value PHONE_WORKER_KICK_COOLDOWN_SECONDS 60)"
+FORCE_WAKE="$(env_value PHONE_WORKER_FORCE_WAKE false)"
+WAKE_REASON="$(env_value PHONE_WORKER_WATCH_REASON timer)"
 STATE_DIR="${STATE_DIR:-$REPO_DIR/data/runtime}"
 COOLDOWN_FILE="$STATE_DIR/phone-worker-last-kick"
 PENDING_SYNC_FILE="$STATE_DIR/phone-worker-sync-pending.flag"
@@ -71,6 +81,7 @@ SYNC_SCRIPT="$REPO_DIR/scripts/sync-phone-worker.sh"
 
 if [[ -z "$PHONE_HOST" || -z "$PHONE_TOKEN" ]]; then
   log "host ou token não configurados; defina PHONE_WORKER_HOST e PHONE_WORKER_TOKEN"
+  log "resultado: missing-config"
   exit 0
 fi
 
@@ -94,6 +105,7 @@ if worker_health_ok; then
   else
     log "worker online em ${PHONE_HOST}:${PHONE_PORT}"
   fi
+  log "resultado: online"
   exit 0
 fi
 
@@ -105,18 +117,24 @@ last_kick="0"
 if [[ -f "$COOLDOWN_FILE" ]]; then
   last_kick="$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)"
 fi
-if [[ "$last_kick" =~ ^[0-9]+$ ]] && (( now_epoch - last_kick < COOLDOWN_SECONDS )); then
+if ! truthy "$FORCE_WAKE" && [[ "$last_kick" =~ ^[0-9]+$ ]] && (( now_epoch - last_kick < COOLDOWN_SECONDS )); then
   log "cooldown ativo; VPS segue local"
+  log "resultado: cooldown"
   exit 0
+fi
+if truthy "$FORCE_WAKE"; then
+  log "wake forçado solicitado (${WAKE_REASON:-manual}); ignorando cooldown"
 fi
 printf '%s' "$now_epoch" > "$COOLDOWN_FILE" 2>/dev/null || true
 
 if [[ -z "$SSH_USER" ]]; then
   log "PHONE_WORKER_SSH_USER vazio; aguardando watchdog local do celular"
+  log "resultado: no-ssh-user"
   exit 0
 fi
 if ! command -v ssh >/dev/null 2>&1; then
   log "ssh não encontrado na VPS"
+  log "resultado: no-ssh-client"
   exit 0
 fi
 
@@ -129,15 +147,18 @@ ssh -p "$SSH_PORT" \
   "$SSH_USER@$PHONE_HOST" \
   "$START_COMMAND" >/dev/null 2>&1 || {
     log "não consegui acionar o phone-worker por SSH; fallback local continua"
+    log "resultado: ssh-failed"
     exit 0
   }
 
 sleep "$START_WAIT"
 if worker_health_ok; then
   log "worker voltou"
+  log "resultado: woke"
   try_pending_sync
 else
   log "celular respondeu ao SSH, mas worker ainda não ficou online"
+  log "resultado: ssh-ok-worker-offline"
 fi
 
 exit 0

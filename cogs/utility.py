@@ -275,6 +275,12 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         self._help_sessions_by_user: dict[tuple[int, int], HelpPaginatorView] = {}
         self._help_sessions_by_message: dict[int, HelpPaginatorView] = {}
         self._help_session_lock = asyncio.Lock()
+        self._core_worker_auto_wake_task: asyncio.Task | None = None
+        self._core_worker_wake_lock = asyncio.Lock()
+        self._start_core_worker_auto_wake_task()
+
+    def cog_unload(self):
+        self._stop_core_worker_auto_wake_task()
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)

@@ -4,8 +4,9 @@ Description=Periodic phone worker helper check
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=1min
-AccuracySec=10s
+AccuracySec=1s
 Persistent=true
+RandomizedDelaySec=0
 
 [Install]
 WantedBy=timers.target

@@ -35,6 +35,39 @@ WORKERS_DEFAULT_ROLES = (
     "ffprobe",
     "tts-convert",
 )
+CORE_WORKER_AUTO_WAKE_DEFAULT_INTERVAL_SECONDS = 60.0
+CORE_WORKER_IMPORTANT_WAKE_ROLES = {
+    "diagnostics",
+    "log-summary",
+    "maintenance-plan",
+    "zip-validate",
+    "ffmpeg",
+    "ffprobe",
+    "tts-convert",
+    "apk-builder",
+    "vps-assist",
+    "cache-worker",
+    "service-control",
+    "boot-repair",
+    "bedrock",
+}
+CORE_WORKER_IMPORTANT_WAKE_TASKS = {
+    "worker_self_check",
+    "worker_logs",
+    "log_digest",
+    "zip_audit",
+    "zip_validate",
+    "maintenance_plan",
+    "apk_build_debug",
+    "vps_assist_probe",
+    "endpoint_probe",
+    "service_status",
+    "service_start",
+    "service_stop",
+    "service_restart",
+    "boot_status",
+    "boot_repair",
+}
 
 WORKER_ROLE_PROFILES: dict[str, tuple[str, ...]] = {
     "leve": ("phone-worker", "diagnostics", "log-summary"),
@@ -691,6 +724,96 @@ def _automation_status_text() -> str:
                 msg = "publicado" if apk.get("already_published") else ("job criado" if apk.get("job") else "pendente")
                 parts.append(f"APK {apk.get('versionName') or '?'}: {msg}")
     return " · ".join(parts[:3])
+
+
+def _worker_wake_tokens(worker: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for key in ("roles", "capabilities", "supported_tasks"):
+        raw = worker.get(key) if isinstance(worker, dict) else None
+        if isinstance(raw, (list, tuple, set)):
+            items = raw
+        else:
+            items = re.split(r"[,;\s]+", str(raw or ""))
+        for item in items:
+            clean = str(item or "").strip().lower().replace("_", "-")
+            clean = re.sub(r"[^a-z0-9_.:-]+", "-", clean).strip("-._:")
+            if clean:
+                tokens.add(clean)
+                tokens.add(clean.replace("-", "_"))
+    return tokens
+
+
+def _worker_has_important_responsibility(worker: dict[str, Any]) -> bool:
+    tokens = _worker_wake_tokens(worker)
+    if tokens.intersection(CORE_WORKER_IMPORTANT_WAKE_ROLES):
+        return True
+    return bool(tokens.intersection(CORE_WORKER_IMPORTANT_WAKE_TASKS))
+
+
+def _offline_important_worker_labels(snapshot: "WorkerSnapshot") -> list[str]:
+    registry = snapshot.registry_snapshot if isinstance(snapshot.registry_snapshot, dict) else {}
+    workers = registry.get("workers") if isinstance(registry.get("workers"), list) else []
+    labels: list[str] = []
+    for worker in workers:
+        if not isinstance(worker, dict):
+            continue
+        if worker.get("online") or not bool(worker.get("enabled", True)):
+            continue
+        if not _worker_has_important_responsibility(worker):
+            continue
+        name = worker.get("name") or worker.get("worker_id") or "worker"
+        labels.append(_shorten(name, limit=36))
+    return labels
+
+
+def _snapshot_has_online_worker(snapshot: "WorkerSnapshot") -> bool:
+    summary = (snapshot.registry_snapshot or {}).get("summary") if isinstance(snapshot.registry_snapshot, dict) else {}
+    try:
+        if int((summary or {}).get("online") or 0) > 0:
+            return True
+    except Exception:
+        pass
+    return bool(snapshot.online)
+
+
+def _watch_output_note(output: object) -> str:
+    text = _redact(str(output or "")).strip()
+    lowered = text.lower()
+    if not text:
+        return "watchdog sem saída"
+    if "host ou token não configurados" in lowered:
+        return "host/token do phone-worker ausente no .env"
+    if "phone_worker_enabled=false" in lowered:
+        return "PHONE_WORKER_ENABLED=false"
+    if "cooldown ativo" in lowered:
+        return "cooldown ativo; tentativa não enviada"
+    if "phone_worker_ssh_user vazio" in lowered:
+        return "SSH do celular não configurado; aguardando watchdog local"
+    if "ssh não encontrado" in lowered or "ssh nao encontrado" in lowered:
+        return "SSH não encontrado na VPS"
+    if "não consegui acionar" in lowered or "nao consegui acionar" in lowered:
+        return "SSH falhou ou celular não respondeu"
+    if "celular respondeu ao ssh" in lowered:
+        return "SSH respondeu, mas o agent ainda não confirmou heartbeat"
+    if "worker voltou" in lowered:
+        return "script informou worker voltou"
+    if "worker online" in lowered:
+        return "script informou worker online"
+    return _shorten(text, limit=120)
+
+
+def _wake_attempt_note(*, before: "WorkerSnapshot" | None, after: "WorkerSnapshot", attempt: dict[str, Any], reason: str = "manual") -> str:
+    elapsed = attempt.get("elapsed_seconds")
+    elapsed_text = f" em {float(elapsed):.1f}s" if isinstance(elapsed, (int, float)) else ""
+    reason_label = "auto-wake" if reason == "auto" else "wake manual"
+    if before is not None and _snapshot_has_online_worker(before):
+        return f"✅ {reason_label}: worker já estava online"
+    if _snapshot_has_online_worker(after):
+        return f"✅ {reason_label}: worker voltou{elapsed_text}"
+    if attempt.get("timeout"):
+        return f"⚠️ {reason_label}: tentativa excedeu timeout; worker ainda offline"
+    detail = _watch_output_note(attempt.get("output") or attempt.get("error") or "")
+    return f"⚠️ {reason_label}: worker ainda offline · {detail}"
 
 
 def _job_result_note(job_type: object, job: dict[str, Any] | None) -> str:
@@ -1787,13 +1910,25 @@ class WorkersPanelView(discord.ui.LayoutView):
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
 
     async def _wake_worker(self, interaction: discord.Interaction):
+        # Responde imediatamente para o Discord não mostrar "Esta interação falhou".
         await interaction.response.defer(thinking=False)
-        snapshot = await self.cog._wake_phone_worker()
+        flow = await self._open_flow_message(
+            interaction,
+            "## 📡 Acordando phone-worker\n"
+            "Status: tentativa manual enviada ao watchdog da VPS.\n"
+            "-# O painel só marca sucesso se o worker voltar a responder heartbeat/health.",
+        )
+        snapshot = await self.cog._wake_phone_worker(force=True, reason="manual")
         self.snapshot = snapshot
         self._ensure_selected_worker()
         self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
-        await self._send_ephemeral(interaction, f"📡 Acordar phone-worker: {_shorten(snapshot.action_note or snapshot.error or 'verifique o painel', limit=120)}")
+        await self._edit_panel_after_response(interaction)
+        await self._edit_flow_message(
+            flow,
+            "## 📡 Acordar phone-worker\n"
+            f"Resultado: {_shorten(snapshot.action_note or snapshot.error or 'verifique o painel', limit=260)}\n"
+            "-# Saída técnica fica fora do painel principal para não vazar detalhes nem poluir a mensagem.",
+        )
 
     async def _sync_worker(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -2550,16 +2685,27 @@ class WorkersCommandMixin:
         registry = get_core_workers_registry()
         return await asyncio.to_thread(registry.cleanup_jobs, clear_active=True)
 
-    async def _wake_phone_worker(self) -> WorkerSnapshot:
+    def _get_core_worker_wake_lock(self) -> asyncio.Lock:
+        lock = getattr(self, "_core_worker_wake_lock", None)
+        if not isinstance(lock, asyncio.Lock):
+            lock = asyncio.Lock()
+            setattr(self, "_core_worker_wake_lock", lock)
+        return lock
+
+    async def _run_phone_worker_watch_script(self, *, force: bool = False, reason: str = "manual") -> dict[str, Any]:
         script = _repo_root() / "scripts" / "phone-worker-watch.sh"
         if not script.exists():
-            return await self._collect_workers_snapshot(action_note="watchdog não encontrado em scripts/phone-worker-watch.sh")
+            return {"ok": False, "missing": True, "output": "watchdog não encontrado em scripts/phone-worker-watch.sh"}
 
         timeout = max(5.0, _env_float("WORKERS_PANEL_WAKE_TIMEOUT_SECONDS", 28.0))
         started = time.perf_counter()
-        note = "watchdog executado"
-        output = ""
         proc: asyncio.subprocess.Process | None = None
+        env = dict(os.environ)
+        env["PHONE_WORKER_WATCH_REASON"] = str(reason or "manual")[:32]
+        if force:
+            env["PHONE_WORKER_FORCE_WAKE"] = "1"
+            # Botão manual não pode ficar preso no cooldown do timer.
+            env["PHONE_WORKER_KICK_COOLDOWN_SECONDS"] = "0"
         try:
             proc = await asyncio.create_subprocess_exec(
                 "bash",
@@ -2567,24 +2713,46 @@ class WorkersCommandMixin:
                 cwd=str(_repo_root()),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             elapsed = time.perf_counter() - started
             output_text = (stdout or b"").decode("utf-8", errors="replace").strip()
             error_text = (stderr or b"").decode("utf-8", errors="replace").strip()
             merged = " | ".join(part for part in [output_text, error_text] if part)
-            output = merged or "sem saída"
-            note = f"watchdog finalizou com código {proc.returncode} em {elapsed:.1f}s"
+            return {
+                "ok": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "elapsed_seconds": elapsed,
+                "output": merged or "sem saída",
+                "timeout": False,
+            }
         except asyncio.TimeoutError:
-            note = f"watchdog excedeu {timeout:.0f}s"
             if proc is not None:
                 with contextlib.suppress(Exception):
                     proc.kill()
                 with contextlib.suppress(Exception):
                     await proc.communicate()
+            return {"ok": False, "timeout": True, "elapsed_seconds": time.perf_counter() - started, "output": f"watchdog excedeu {timeout:.0f}s"}
         except Exception as exc:
-            note = f"watchdog falhou: {type(exc).__name__}: {exc}"
-        return await self._collect_workers_snapshot(action_note=note, watch_output=output)
+            return {"ok": False, "elapsed_seconds": time.perf_counter() - started, "output": f"watchdog falhou: {_compact_failure(exc)}"}
+
+    async def _wake_phone_worker(self, *, force: bool = False, reason: str = "manual") -> WorkerSnapshot:
+        lock = self._get_core_worker_wake_lock()
+        if lock.locked() and not force:
+            return await self._collect_workers_snapshot(action_note="auto-wake ignorado: já existe tentativa de wake em andamento")
+        async with lock:
+            before = await self._collect_workers_snapshot()
+            if _snapshot_has_online_worker(before):
+                return await self._collect_workers_snapshot(action_note=_wake_attempt_note(before=before, after=before, attempt={}, reason=reason))
+            attempt = await self._run_phone_worker_watch_script(force=force, reason=reason)
+            confirm_deadline = time.monotonic() + max(0.0, _env_float("CORE_WORKER_WAKE_CONFIRM_SECONDS", 8.0))
+            after = await self._collect_workers_snapshot(watch_output=str(attempt.get("output") or ""))
+            while not _snapshot_has_online_worker(after) and time.monotonic() < confirm_deadline:
+                await asyncio.sleep(1.5)
+                after = await self._collect_workers_snapshot(watch_output=str(attempt.get("output") or ""))
+            note = _wake_attempt_note(before=before, after=after, attempt=attempt, reason=reason)
+            return await self._collect_workers_snapshot(action_note=note, watch_output=str(attempt.get("output") or ""))
 
     async def _sync_phone_worker(self) -> WorkerSnapshot:
         script = _repo_root() / "scripts" / "sync-phone-worker.sh"
@@ -2622,6 +2790,59 @@ class WorkersCommandMixin:
         except Exception as exc:
             note = f"sync falhou: {_compact_failure(exc)}"
         return await self._collect_workers_snapshot(action_note=note, watch_output=output)
+
+    def _snapshot_needs_auto_wake(self, snapshot: WorkerSnapshot) -> bool:
+        if not _env_bool("CORE_WORKER_AUTO_WAKE_ENABLED", True):
+            return False
+        if not snapshot.enabled or not snapshot.configured:
+            return False
+        if _snapshot_has_online_worker(snapshot):
+            return False
+        offline_important = _offline_important_worker_labels(snapshot)
+        if offline_important:
+            return True
+        registry = snapshot.registry_snapshot if isinstance(snapshot.registry_snapshot, dict) else {}
+        workers = registry.get("workers") if isinstance(registry.get("workers"), list) else []
+        # Sem registry pareado ainda, o worker legado configurado também merece tentativa.
+        return not workers
+
+    async def _core_worker_auto_wake_loop(self) -> None:
+        with contextlib.suppress(Exception):
+            await self.bot.wait_until_ready()
+        while not getattr(self.bot, "is_closed", lambda: False)():
+            interval = max(30.0, _env_float("CORE_WORKER_AUTO_WAKE_INTERVAL_SECONDS", CORE_WORKER_AUTO_WAKE_DEFAULT_INTERVAL_SECONDS))
+            try:
+                snapshot = await self._collect_workers_snapshot()
+                if self._snapshot_needs_auto_wake(snapshot):
+                    labels = _offline_important_worker_labels(snapshot)
+                    label = ", ".join(labels[:3]) if labels else "phone-worker configurado"
+                    print(f"[core-worker-auto-wake] tentando acordar: {label}", flush=True)
+                    await self._wake_phone_worker(force=False, reason="auto")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[core-worker-auto-wake] falha: {_compact_failure(exc)}", flush=True)
+            await asyncio.sleep(interval)
+
+    def _start_core_worker_auto_wake_task(self) -> None:
+        if not _env_bool("CORE_WORKER_AUTO_WAKE_ENABLED", True):
+            return
+        task = getattr(self, "_core_worker_auto_wake_task", None)
+        if task is not None and not task.done():
+            return
+        self._core_worker_wake_lock = asyncio.Lock()
+        try:
+            self._core_worker_auto_wake_task = asyncio.create_task(self._core_worker_auto_wake_loop())
+        except RuntimeError:
+            # Em testes/imports sem loop rodando, não derruba a cog.
+            # Ao carregar pelo discord.py normalmente já existe loop ativo.
+            self._core_worker_auto_wake_task = None
+
+    def _stop_core_worker_auto_wake_task(self) -> None:
+        task = getattr(self, "_core_worker_auto_wake_task", None)
+        if task is not None:
+            task.cancel()
+        self._core_worker_auto_wake_task = None
 
     async def _send_workers_panel_from_context(self, ctx: commands.Context) -> None:
         if ctx.guild is None or int(getattr(ctx.guild, "id", 0) or 0) != WORKERS_COMMAND_GUILD_ID:
