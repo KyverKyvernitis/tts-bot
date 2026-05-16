@@ -2,22 +2,61 @@
 
 Este diretório contém o APK privado **Core Worker**.
 
-O APK é um **companion leve de onboarding**. Ele não é o painel completo de administração: serve para facilitar o pareamento, mostrar um status simples, escolher o perfil deste celular e conversar com o worker local do Termux. O controle pesado continua no Discord/VPS pelo painel `workers`.
+O APK está evoluindo para o objetivo final:
 
-## Escopo correto do APK
+```text
+instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
+```
+
+Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
+
+## v0.4.0 — interface de onboarding + atualização pela VPS
+
+A versão `0.4.0` deixa o app mais perto do caminho final:
+
+- tela principal reorganizada em passos humanos:
+  - **Preparar este celular**;
+  - **Conectar à VPS**;
+  - **Perfil deste celular**;
+  - **Sistema do app**;
+- checklist de preparação com Termux, Termux:API, Termux:Boot, rede privada/Tailscale e worker local;
+- textos menos técnicos na tela principal;
+- botões renomeados:
+  - `Verificar este celular`;
+  - `Testar conexão`;
+  - `Conectar este celular à VPS`;
+  - `Aplicar perfil`;
+  - `Atualizar status no painel`;
+- o APK continua pareando via Termux worker local:
+
+```text
+APK -> /local/pair -> Termux phone-worker -> /core-worker/pair na VPS
+APK -> /local/heartbeat -> Termux phone-worker -> /core-worker/heartbeat na VPS
+```
+
+- o APK não cria worker próprio, não salva token de worker e não envia heartbeat direto;
+- o APK ganhou atualização semi-automática via VPS:
+  - procura `/core-worker/app/latest.json`;
+  - baixa o APK informado no manifesto;
+  - valida SHA-256 quando informado;
+  - abre a tela de instalação do Android para confirmação.
+
+No Android comum, a instalação ainda precisa de confirmação do usuário. Atualização silenciosa só deve ser considerada no futuro com cenário controlado, como device owner/profile owner ou distribuição gerenciada.
+
+## Escopo correto do APK agora
 
 O APK pode:
 
+- detectar se Termux, Termux:API, Termux:Boot e Tailscale estão instalados;
+- detectar o worker local em `http://127.0.0.1:8766/local/status`;
 - testar conexão com a VPS pela rede privada atual;
 - parear este celular usando o código `CORE-XXXX` gerado no painel `workers`;
-- salvar o token localmente no app, sem hardcode no GitHub;
-- mostrar/enviar status básico do próprio celular;
-- reportar bateria via Android `BatteryManager`;
-- reportar rede e ping TCP até a VPS;
-- abrir o app Tailscale;
-- abrir o Termux ou orientar o comando de início;
-- detectar o agent local em `http://127.0.0.1:8766/local/status`;
-- editar o **perfil deste próprio celular** e tentar sincronizar com o phone-worker real por `POST /local/profile`.
+- passar o pareamento para o phone-worker real via `POST /local/pair`;
+- editar o **perfil deste próprio celular** por `POST /local/profile`;
+- pedir heartbeat/status básico ao worker local por `POST /local/heartbeat`;
+- procurar atualização privada do APK na VPS;
+- baixar atualização e abrir o instalador do Android;
+- abrir Termux/Tailscale quando o Android permitir.
 
 O APK não deve virar, por enquanto:
 
@@ -26,23 +65,56 @@ O APK não deve virar, por enquanto:
 - controle de failover;
 - gerenciador de logs grandes;
 - substituto do painel Discord;
-- runtime completo que substitui o Termux.
+- runtime completo que substitui o Termux;
+- VPN embutida ainda.
 
-## v0.3.1 — integração leve com o Termux
+## Relação com Termux, plugins e rede privada
 
-A versão `0.3.1` corrige o pareamento para usar sempre o phone-worker real do Termux:
+Estado atual:
 
-- checklist simples de rede/Tailscale, VPS, worker local e pareamento;
-- detecção do worker local via `GET /local/status` em `127.0.0.1:8766`;
-- pareamento pelo Termux worker real via `POST /local/pair`;
-- heartbeat manual pelo Termux worker real via `POST /local/heartbeat`;
-- o APK não chama mais `/core-worker/pair` nem `/core-worker/heartbeat` diretamente;
-- o APK não salva token de worker nem cria registro `apk-*` separado;
-- o botão de teste da VPS mostra resumo humano, sem despejar JSON gigante do `/health`;
-- ao salvar o perfil, o APK tenta enviar o perfil para o worker local;
-- se o worker local estiver offline, o perfil fica salvo no APK e o usuário recebe aviso simples.
+```text
+Core Worker APK
+  -> guia/prepara
+  -> fala com o phone-worker local
 
-As rotas locais existem só para o próprio celular. Elas não expõem shell livre, token global, fila completa, controle pesado ou ações perigosas.
+Termux + phone_worker.py
+  -> executa jobs reais
+  -> heartbeat
+  -> fila segura
+  -> scripts/ffmpeg/diagnóstico
+
+Termux:API
+  -> bateria/recursos do Android para o worker
+
+Termux:Boot
+  -> boot automático do worker
+
+Tailscale externo
+  -> rede privada atual entre celular e VPS
+```
+
+Direção futura:
+
+```text
+Core Worker APK
+  -> onboarding
+  -> worker cada vez mais embutido
+  -> plugins/recursos cada vez menos manuais
+  -> rede privada própria estilo VPN/WireGuard/userspace
+```
+
+A VPS/Discord continua sendo o cérebro/orquestrador.
+
+## Rotas locais esperadas no phone-worker
+
+```text
+GET  http://127.0.0.1:8766/local/status
+POST http://127.0.0.1:8766/local/profile
+POST http://127.0.0.1:8766/local/pair
+POST http://127.0.0.1:8766/local/heartbeat
+```
+
+Essas rotas devem aceitar apenas localhost. Elas não expõem shell livre, token global, fila completa, controle pesado ou ações perigosas.
 
 ## Perfis disponíveis
 
@@ -53,67 +125,95 @@ As rotas locais existem só para o próprio celular. Elas não expõem shell liv
 
 O APK altera apenas o perfil do celular onde ele está instalado.
 
-## Fluxo de teste
+## Fluxo de uso
 
-1. No Termux, deixe o phone-worker atualizado e rodando.
-2. No Discord, abra o painel `workers`.
-3. Vá em **Adicionar celular → Gerar código**.
-4. No APK, preencha:
+1. Abra o app **Core Worker**.
+2. Em **Preparar este celular**, toque em **Verificar este celular**.
+3. Se faltar algo:
+   - abra/instale Termux;
+   - instale Termux:API;
+   - instale Termux:Boot para boot automático;
+   - conecte no Tailscale.
+4. No Discord, abra o painel `workers`.
+5. Vá em **Adicionar celular → Gerar código**.
+6. No APK, preencha:
    - URL da VPS, exemplo: `http://100.x.x.x:10000`;
    - código `CORE-XXXX`;
-   - nome do celular;
-   - perfil.
-5. Toque em **Verificar worker local**.
-6. Toque em **Testar VPS**.
-7. Toque em **Conectar este worker local**.
-8. Para mudar o perfil depois, escolha outro perfil e toque em **Salvar perfil deste celular**.
-9. Volte no Discord e toque em **Atualizar**.
+   - nome do celular.
+7. Toque em **Testar conexão**.
+8. Toque em **Conectar este celular à VPS**.
+9. Escolha o perfil e toque em **Aplicar perfil**.
+10. No Discord, toque em **Atualizar**.
 
 > Use HTTP apenas dentro da rede privada Tailscale/rede privada equivalente. Se a VPS ficar exposta publicamente, use HTTPS antes de parear.
 
-## Relação com o phone-worker
+## Atualização privada pela VPS
 
-Hoje o Termux worker ainda executa os jobs reais. O APK apenas ajuda a conectar, verificar, parear e ajustar o próprio perfil do celular.
-
-A ponte local esperada é:
+O APK procura atualização aqui:
 
 ```text
-APK Core Worker -> http://127.0.0.1:8766/local/status
-APK Core Worker -> http://127.0.0.1:8766/local/profile
-APK Core Worker -> http://127.0.0.1:8766/local/pair
-APK Core Worker -> http://127.0.0.1:8766/local/heartbeat
+GET /core-worker/app/latest.json
 ```
 
-O Discord/VPS continua sendo o cérebro/orquestrador. O APK não deve gerenciar outros celulares.
+E baixa o APK pelo `apkUrl` indicado no manifesto.
 
+### Endpoint na VPS
 
-## Identidade única APK + Termux
-
-O APK é companion. Ele não deve aparecer como outro worker no registry.
-
-Fluxo correto:
+`webserver.py` serve arquivos a partir de:
 
 ```text
-APK -> /local/pair -> Termux phone-worker -> /core-worker/pair na VPS
-APK -> /local/heartbeat -> Termux phone-worker -> /core-worker/heartbeat na VPS
+CORE_WORKER_APK_DIR
 ```
 
-Assim o painel `workers` mostra apenas o celular real do Termux. Registros antigos `apk-*` criados por versões anteriores podem ser removidos/ignorados pelo painel, mas a versão atual não cria novos duplicados.
+Se a variável não existir, o padrão é:
 
-## Build pelo Android Studio
+```text
+/home/ubuntu/bot/android/core-worker-app/releases
+```
 
-1. Abra `android/core-worker-app` no Android Studio.
-2. Aguarde o Gradle sincronizar.
-3. Selecione **Build > Build APK(s)**.
-4. Instale o APK apenas nos seus celulares.
+considerando que o bot rode a partir de `/home/ubuntu/bot`.
 
-## Build por terminal
+### Publicar uma versão nova
 
-Em uma máquina com Android SDK/Gradle configurado:
+Depois de buildar o APK na VPS:
 
 ```bash
-cd android/core-worker-app
-gradle :app:assembleDebug
+cd /home/ubuntu/bot/android/core-worker-app
+mkdir -p releases
+cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.0-debug.apk
+sha256sum releases/CoreWorker-v0.4.0-debug.apk
+```
+
+Crie o manifesto:
+
+```bash
+cat > releases/latest.json <<'JSON'
+{
+  "versionName": "0.4.0",
+  "versionCode": 5,
+  "apkUrl": "/core-worker/app/CoreWorker-v0.4.0-debug.apk",
+  "sha256": "COLE_AQUI_O_SHA256",
+  "requiredAgentVersion": "1.6.0",
+  "changelog": [
+    "Interface de onboarding mais simples",
+    "Checklist de Termux, plugins e rede privada",
+    "Atualização privada do APK pela VPS"
+  ]
+}
+JSON
+```
+
+Reinicie o bot/webserver se necessário. No APK, toque em **Procurar atualização na VPS**.
+
+## Build por terminal na VPS
+
+Em uma VPS fraca, pare o bot antes de buildar e use swap:
+
+```bash
+sudo systemctl stop tts-bot.service
+cd /home/ubuntu/bot/android/core-worker-app
+nice -n 19 ionice -c3 gradle assembleDebug --no-daemon --max-workers=1
+sudo systemctl start tts-bot.service
 ```
 
 O APK debug ficará em:
@@ -122,22 +222,30 @@ O APK debug ficará em:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+## Build pelo Android Studio
+
+1. Abra `android/core-worker-app` no Android Studio.
+2. Aguarde o Gradle sincronizar.
+3. Selecione **Build > Build APK(s)**.
+4. Instale o APK apenas nos seus celulares.
+
 ## Segurança
 
 - Não coloque token da VPS, token Discord ou segredo no código Android.
-- O token de worker é gerado pela VPS no pareamento e salvo localmente no app.
+- O APK não salva token de worker; o token real fica no `~/.phone-worker.env` do Termux.
 - Não suba keystore privado para GitHub.
 - O APK é privado para uso nos seus celulares.
-- As rotas locais do phone-worker devem aceitar apenas chamadas vindas de `127.0.0.1`/localhost.
+- Atualização pela VPS deve ser usada pela rede privada.
+- Sempre valide SHA-256 no `latest.json`.
+- As rotas locais do phone-worker devem aceitar apenas `127.0.0.1`/localhost.
 
 ## Futuro planejado
 
-Objetivo final: **instalou o APK → pareou → o celular virou worker da VPS**.
-
 Fases esperadas:
 
-1. APK companion leve com Termux/Tailscale existentes.
-2. APK ajudando cada vez mais o setup, validação e recuperação do worker.
-3. Futuro: reduzir ou substituir dependências manuais, incluindo uma rede privada embutida/própria estilo VPN, provavelmente baseada em WireGuard/userspace ou equivalente.
+1. APK companion com Termux/Tailscale existentes.
+2. APK guiando e automatizando cada vez mais setup, validação, atualização e recuperação.
+3. APK reduzindo dependência manual de Termux/plugins.
+4. Futuro grande: rede privada embutida/própria estilo VPN, provavelmente WireGuard/userspace ou equivalente.
 
 Mesmo no futuro, a VPS/Discord deve continuar como cérebro/orquestrador e segredos devem continuar fora do GitHub.

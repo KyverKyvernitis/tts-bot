@@ -12,6 +12,32 @@ _tts_audio_lock = threading.RLock()
 _tts_audio_files: dict[str, tuple[str, float]] = {}
 
 
+def _core_worker_apk_dir() -> str:
+    """Diretório local usado para publicar atualizações privadas do Core Worker APK.
+
+    O caminho pode ser definido por CORE_WORKER_APK_DIR. Por padrão fica dentro do
+    repositório para facilitar publicar o APK buildado pela própria VPS.
+    """
+    base = os.getenv("CORE_WORKER_APK_DIR")
+    if not base:
+        base = os.path.join(os.getcwd(), "android", "core-worker-app", "releases")
+    return os.path.abspath(base)
+
+
+def _safe_core_worker_apk_file(filename: str) -> str | None:
+    filename = str(filename or "").strip().replace("\\", "/")
+    if not filename or filename.startswith("/") or ".." in filename.split("/"):
+        return None
+    lowered = filename.lower()
+    if not lowered.endswith((".apk", ".json", ".txt")):
+        return None
+    base = _core_worker_apk_dir()
+    full = os.path.abspath(os.path.join(base, filename))
+    if full != base and not full.startswith(base + os.sep):
+        return None
+    return full
+
+
 def set_health_provider(provider):
     global _health_provider
     _health_provider = provider
@@ -63,6 +89,40 @@ def health():
                 "error": str(e),
             }), 500
     return jsonify({"ok": True}), 200
+
+
+@app.get("/core-worker/app/latest.json")
+def core_worker_app_latest():
+    """Manifesto privado de atualização do Core Worker APK.
+
+    Publique um arquivo latest.json em CORE_WORKER_APK_DIR contendo versionCode,
+    versionName, apkUrl e sha256. Este endpoint não usa segredos e deve ser usado
+    preferencialmente apenas pela rede privada/Tailscale.
+    """
+    base = _core_worker_apk_dir()
+    manifest = os.path.join(base, "latest.json")
+    if not os.path.isfile(manifest):
+        return jsonify({
+            "ok": False,
+            "error": "Core Worker APK ainda não publicado na VPS.",
+            "expected": manifest,
+            "hint": "Crie latest.json e coloque o APK no diretório de releases.",
+        }), 404
+    return send_file(manifest, mimetype="application/json", conditional=True, max_age=0)
+
+
+@app.get("/core-worker/app/<path:filename>")
+def core_worker_app_file(filename: str):
+    """Serve APKs privados do Core Worker a partir do diretório de releases."""
+    full = _safe_core_worker_apk_file(filename)
+    if not full or not os.path.isfile(full):
+        abort(404)
+    lowered = full.lower()
+    if lowered.endswith(".apk"):
+        return send_file(full, mimetype="application/vnd.android.package-archive", conditional=True, max_age=0)
+    if lowered.endswith(".json"):
+        return send_file(full, mimetype="application/json", conditional=True, max_age=0)
+    return send_file(full, mimetype="text/plain", conditional=True, max_age=0)
 
 
 @app.post("/core-worker/pair")
