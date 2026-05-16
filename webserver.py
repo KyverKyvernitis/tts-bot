@@ -364,6 +364,7 @@ def core_worker_app_publish():
     with open(tmp_manifest, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2)
     os.replace(tmp_manifest, manifest_path)
+    _kick_core_worker_pending_automation(str(worker.get("worker_id") or ""))
     return jsonify({"ok": True, "filename": filename, "bytes": total, "sha256": actual_sha, "signedByVps": bool(signing_info.get("signedByVps")), "latest": manifest}), 200
 
 
@@ -403,6 +404,32 @@ def core_worker_app_file(filename: str):
     return send_file(full, mimetype="text/plain", conditional=True, max_age=0)
 
 
+
+
+def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
+    """Agenda processamento leve das pendências de agent/APK após heartbeat.
+
+    Não bloqueia o /heartbeat: se um worker antigo voltar online depois do update
+    da VPS, o script tenta entregar worker_update/apk_build pendentes em segundo
+    plano. A VPS continua sendo a fonte de decisão; o worker só executa jobs
+    whitelist.
+    """
+    worker_id = str(worker_id or "").strip()
+    script = os.path.join(os.getcwd(), "scripts", "core-worker-automation.py")
+    if not os.path.isfile(script):
+        return
+    py = os.path.join(os.getcwd(), ".venv", "bin", "python")
+    if not os.path.isfile(py):
+        py = shutil.which("python3") or "python3"
+    cmd = [py, script, "process-pending"]
+    if worker_id:
+        cmd.extend(["--worker-id", worker_id])
+    try:
+        subprocess.Popen(cmd, cwd=os.getcwd(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception:
+        pass
+
+
 @app.post("/core-worker/pair")
 def core_worker_pair():
     from utility.commands.workers_registry import redeem_core_worker_pairing_http
@@ -422,6 +449,10 @@ def core_worker_heartbeat():
     if not isinstance(payload, dict):
         payload = {}
     status, body = core_worker_heartbeat_http(request.headers, payload, remote_addr=request.remote_addr or "")
+    if status == 200 and isinstance(body, dict):
+        worker = body.get("worker") if isinstance(body.get("worker"), dict) else {}
+        worker_id = str(worker.get("worker_id") or payload.get("worker_id") or payload.get("id") or "")
+        _kick_core_worker_pending_automation(worker_id)
     return jsonify(body), status
 
 

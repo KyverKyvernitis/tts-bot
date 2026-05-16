@@ -10,9 +10,9 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
-## v0.4.8 — URL privada injetada no build
+## v0.4.9 — URL privada injetada no build
 
-A versão `0.4.8` remove IP/porta reais do código versionado. O APK final privado continua usando a VPS atual do projeto, mas a URL agora entra no build por `CORE_WORKER_VPS_URL`/`CORE_WORKER_VPS_LABEL`, variáveis locais ou propriedades Gradle que não devem ir para o GitHub.
+A versão `0.4.9` remove IP/porta reais do código versionado. O APK final privado continua usando a VPS atual do projeto, mas a URL agora entra no build por `CORE_WORKER_VPS_URL`/`CORE_WORKER_VPS_LABEL`, variáveis locais ou propriedades Gradle que não devem ir para o GitHub.
 
 Exemplo de build privado:
 

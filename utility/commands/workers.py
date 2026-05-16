@@ -657,6 +657,42 @@ def _compact_failure(exc: BaseException) -> str:
     return _shorten(text, limit=110)
 
 
+
+
+def _automation_status_text() -> str:
+    """Resumo curto do pipeline automático agent/APK para mostrar no painel."""
+    root = _repo_root()
+    pending_path = root / "data" / "core_worker_automation_pending.json"
+    status_path = root / "data" / "core_worker_automation_status.json"
+    parts: list[str] = []
+    try:
+        pending = json.loads(pending_path.read_text(encoding="utf-8")) if pending_path.exists() else {}
+    except Exception:
+        pending = {}
+    if isinstance(pending, dict):
+        agent = pending.get("agent_update") if isinstance(pending.get("agent_update"), dict) else {}
+        apk = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
+        if agent:
+            parts.append(f"agent {agent.get('target_version') or '?'} pendente")
+        if apk:
+            parts.append(f"APK {apk.get('versionName') or '?'} pendente")
+    if not parts:
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
+        except Exception:
+            status = {}
+        if isinstance(status, dict):
+            root_status = status.get("process_pending") if isinstance(status.get("process_pending"), dict) else status
+            agent = root_status.get("agent_update") if isinstance(root_status.get("agent_update"), dict) else {}
+            apk = root_status.get("apk_build") if isinstance(root_status.get("apk_build"), dict) else {}
+            if agent:
+                parts.append(f"agent: {len(agent.get('queued') or [])} job(s)")
+            if apk:
+                msg = "publicado" if apk.get("already_published") else ("job criado" if apk.get("job") else "pendente")
+                parts.append(f"APK {apk.get('versionName') or '?'}: {msg}")
+    return " · ".join(parts[:3])
+
+
 def _job_result_note(job_type: object, job: dict[str, Any] | None) -> str:
     kind = _task_name(job_type)
     if not isinstance(job, dict) or not job:
@@ -1259,12 +1295,15 @@ class WorkersPanelView(discord.ui.LayoutView):
         jobs_label = f"`{queued}` pend · `{running}` rod"
         if queued and not online and not self._has_legacy_worker():
             jobs_label += " · sem worker"
+        automation_label = _automation_status_text()
+        automation_line = f"\n**Automação:** {_shorten(automation_label, limit=120)}" if automation_label else ""
         header = discord.ui.TextDisplay(
             "# 📱 Core Workers\n"
             f"-# privado · `workers` / `worker` / `w` · guild `{WORKERS_COMMAND_GUILD_ID}`\n"
             f"**Estado:** {snapshot.state_label}\n"
             f"**Registry:** {registry_label}\n"
             f"**Jobs:** {jobs_label}"
+            f"{automation_line}"
         )
 
         worker_options = self._worker_select_options()
@@ -1409,8 +1448,18 @@ class WorkersPanelView(discord.ui.LayoutView):
         if values:
             self.selected_worker_id = str(values[0] or "")
         self._ensure_selected_worker()
+        worker = self._selected_worker()
+        if self._selected_is_auto():
+            selected_label = "melhor worker disponível"
+        elif worker:
+            selected_label = str(worker.get("name") or worker.get("worker_id") or "worker")
+        elif self._selected_is_legacy():
+            selected_label = "phone-worker direto"
+        else:
+            selected_label = "nenhum worker"
+        self.snapshot.action_note = f"selecionado: {_shorten(selected_label, limit=48)}"
         self._rebuild_layout()
-        await interaction.response.edit_message(view=self)
+        await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
 
     async def _select_action_category(self, interaction: discord.Interaction):
         values = list(getattr(getattr(interaction, "data", None), "get", lambda _k, _d=None: _d)("values", []) or [])
@@ -1421,8 +1470,11 @@ class WorkersPanelView(discord.ui.LayoutView):
         if category not in {str(item.get("value")) for item in WORKER_ACTION_CATEGORIES}:
             category = "quick"
         self.selected_action_category = category
+        label = next((str(item.get("label") or category) for item in WORKER_ACTION_CATEGORIES if str(item.get("value")) == category), category)
+        count = len(self._action_specs_for_selected(category=category))
+        self.snapshot.action_note = f"categoria `{label}` aberta · {count} ação(ões) disponíveis"
         self._rebuild_layout()
-        await interaction.response.edit_message(view=self)
+        await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
 
     async def _select_action(self, interaction: discord.Interaction):
         values = list(getattr(getattr(interaction, "data", None), "get", lambda _k, _d=None: _d)("values", []) or [])
@@ -1491,12 +1543,17 @@ class WorkersPanelView(discord.ui.LayoutView):
             with contextlib.suppress(Exception):
                 await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
 
+    async def _send_ephemeral(self, interaction: discord.Interaction, message: str) -> None:
+        with contextlib.suppress(Exception):
+            await interaction.followup.send(message[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
     async def _refresh(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
-        self.snapshot = await self.cog._collect_workers_snapshot()
+        self.snapshot = await self.cog._collect_workers_snapshot(action_note="painel atualizado manualmente")
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._send_ephemeral(interaction, "🔄 Painel atualizado.")
 
     async def _wake_worker(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -1505,6 +1562,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._send_ephemeral(interaction, f"📡 Acordar phone-worker: {_shorten(snapshot.action_note or snapshot.error or 'verifique o painel', limit=120)}")
 
     async def _sync_worker(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -1513,6 +1571,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._send_ephemeral(interaction, f"🔁 Sync phone-worker: {_shorten(snapshot.action_note or snapshot.error or 'verifique o painel', limit=120)}")
 
     async def _open_pairing_modal(self, interaction: discord.Interaction):
         view = self
@@ -1736,17 +1795,22 @@ class WorkersPanelView(discord.ui.LayoutView):
     ):
         await interaction.response.defer(thinking=False)
         target_worker_id = self._job_target_worker_id()
+        readable = summary or job_type
+        await self._send_ephemeral(interaction, f"⏳ Ação iniciada: `{_shorten(readable, limit=80)}`. Vou atualizar o painel e salvar em **Ver último resultado**.")
+        final_note = ""
         try:
-            if _task_name(job_type) == "worker_update":
+            task = _task_name(job_type)
+            if task == "worker_update":
                 payload = await self.cog._build_worker_update_payload(scripts_only=bool((payload or {}).get("scripts_only")))
-            if _task_name(job_type) == "apk_build_debug":
+            elif task == "apk_build_debug":
                 payload = await self.cog._build_apk_builder_payload(payload or {})
             else:
                 payload = await self._build_assist_payload(job_type, payload or {})
             if self._selected_is_legacy():
                 result = await self.cog._run_legacy_worker_action(job_type=job_type, payload=payload or {})
                 note = _shorten((result or {}).get("summary") or "ação direta concluída", limit=90)
-                self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"direto `{job_type}`: {note}")
+                final_note = f"direto `{job_type}`: {note}"
+                self.snapshot = await self.cog._collect_workers_snapshot(action_note=final_note)
             else:
                 result = await self.cog._queue_core_worker_job(
                     interaction.user,
@@ -1762,13 +1826,17 @@ class WorkersPanelView(discord.ui.LayoutView):
                 self._ensure_selected_worker()
                 self._rebuild_layout()
                 await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+                await self._send_ephemeral(interaction, f"📨 Job criado: `{job_id or 'sem id'}` para `{target_label}`.")
                 final_job = await self.cog._wait_core_worker_job(job_id, timeout=_env_float("WORKERS_PANEL_ACTION_WAIT_SECONDS", 12.0)) if job_id else None
-                self.snapshot = await self.cog._collect_workers_snapshot(action_note=_job_result_note(job_type, final_job))
+                final_note = _job_result_note(job_type, final_job)
+                self.snapshot = await self.cog._collect_workers_snapshot(action_note=final_note)
         except Exception as exc:
-            self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha em `{job_type}`: {_compact_failure(exc)}")
+            final_note = f"falha em `{job_type}`: {_compact_failure(exc)}"
+            self.snapshot = await self.cog._collect_workers_snapshot(action_note=final_note)
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._send_ephemeral(interaction, final_note or f"Ação `{job_type}` atualizada no painel.")
 
     async def _show_worker_details(self, interaction: discord.Interaction):
         worker = self._selected_worker()
@@ -1850,6 +1918,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._send_ephemeral(interaction, self.snapshot.action_note or "Estado do worker atualizado.")
 
     async def _delete_selected_worker(self, interaction: discord.Interaction):
         worker = self._selected_worker()
@@ -1867,6 +1936,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._send_ephemeral(interaction, self.snapshot.action_note or "Worker removido/atualizado.")
 
     async def _cleanup_jobs(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
@@ -1878,6 +1948,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         self._ensure_selected_worker()
         self._rebuild_layout()
         await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._send_ephemeral(interaction, self.snapshot.action_note or "Jobs limpos/atualizados.")
 
 
 class WorkersCommandMixin:

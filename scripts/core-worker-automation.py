@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import zipfile
+import contextlib
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -33,6 +34,25 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
 
 PENDING_PATH = ROOT / "data" / "core_worker_automation_pending.json"
 STATUS_PATH = ROOT / "data" / "core_worker_automation_status.json"
+
+
+def _load_repo_env() -> None:
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key or ""):
+            continue
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+_load_repo_env()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -85,7 +105,7 @@ def _version_tuple(value: Any) -> tuple[int, ...]:
 
 
 def _public_base_url() -> str:
-    explicit = str(os.getenv("CORE_WORKER_PUBLIC_BASE_URL") or os.getenv("VPS_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    explicit = str(os.getenv("CORE_WORKER_PUBLIC_BASE_URL") or os.getenv("CORE_WORKER_VPS_URL") or os.getenv("VPS_PUBLIC_BASE_URL") or "").strip().rstrip("/")
     if explicit and "IP_TAILSCALE_DA_VPS" not in explicit:
         return explicit
     port = str(os.getenv("CORE_WORKER_PUBLIC_PORT") or os.getenv("PORT") or "10000").strip() or "10000"
@@ -165,6 +185,67 @@ def _load_registry_snapshot() -> dict[str, Any]:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "workers": [], "jobs": []}
 
 
+def _load_pending() -> dict[str, Any]:
+    if not PENDING_PATH.exists():
+        return {}
+    try:
+        data = json.loads(PENDING_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_pending(data: dict[str, Any]) -> None:
+    PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    clean = {k: v for k, v in (data or {}).items() if v}
+    if not clean:
+        with contextlib.suppress(Exception):
+            PENDING_PATH.unlink()
+        return
+    tmp = PENDING_PATH.with_suffix(PENDING_PATH.suffix + ".tmp")
+    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(PENDING_PATH)
+
+
+def _manifest_version_code() -> int:
+    manifest = ROOT / "android" / "core-worker-app" / "releases" / "latest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return int(data.get("versionCode") or 0)
+    except Exception:
+        return 0
+
+
+def _registry_raw() -> dict[str, Any]:
+    try:
+        path = get_core_workers_registry().path
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _active_job_exists(*, job_type: str, target_worker_id: str = "", summary_contains: str = "") -> bool:
+    data = _registry_raw()
+    jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+    wanted = str(job_type or "").replace("-", "_")
+    target_worker_id = str(target_worker_id or "")
+    summary_contains = str(summary_contains or "")
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("status") or "queued") not in {"queued", "running"}:
+            continue
+        if str(job.get("type") or "").replace("-", "_") != wanted:
+            continue
+        if target_worker_id and str(job.get("target_worker_id") or job.get("worker_id") or "") not in {target_worker_id, ""}:
+            continue
+        if summary_contains and summary_contains not in str(job.get("summary") or ""):
+            continue
+        return True
+    return False
+
+
 def _worker_supports(worker: dict[str, Any], task: str, required_capability: str = "phone-worker") -> bool:
     if not worker.get("online"):
         return False
@@ -176,12 +257,24 @@ def _worker_supports(worker: dict[str, Any], task: str, required_capability: str
     return not tasks or task in tasks
 
 
-def queue_agent_updates(*, force: bool = False) -> dict[str, Any]:
+def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dict[str, Any]:
     registry = get_core_workers_registry()
     snapshot = _load_registry_snapshot()
     workers = [w for w in snapshot.get("workers") or [] if isinstance(w, dict)]
     payload = _build_worker_update_payload()
     target_version = str(payload.get("version") or "desconhecida")
+
+    pending = _load_pending()
+    pending["agent_update"] = {
+        "type": "worker_update",
+        "target_version": target_version,
+        "payload": payload,
+        "created_at": float((pending.get("agent_update") or {}).get("created_at") or time.time()) if isinstance(pending.get("agent_update"), dict) else time.time(),
+        "updated_at": time.time(),
+        "message": "agent update pendente; será aplicado quando workers compatíveis aparecerem",
+    }
+    _save_pending(pending)
+
     queued: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
@@ -190,12 +283,17 @@ def queue_agent_updates(*, force: bool = False) -> dict[str, Any]:
         name = str(worker.get("name") or worker_id)
         if not worker_id:
             continue
+        if only_worker_id and worker_id != only_worker_id:
+            continue
         if not _worker_supports(worker, "worker_update", "phone-worker"):
             skipped.append(f"{name}: incompatível/offline")
             continue
         current_version = str(worker.get("version") or "")
         if not force and current_version and _version_tuple(current_version) >= _version_tuple(target_version):
             skipped.append(f"{name}: já em {current_version}")
+            continue
+        if _active_job_exists(job_type="worker_update", target_worker_id=worker_id, summary_contains=target_version):
+            skipped.append(f"{name}: job já pendente")
             continue
         try:
             result = registry.create_job(
@@ -214,8 +312,15 @@ def queue_agent_updates(*, force: bool = False) -> dict[str, Any]:
             queued.append(f"{name}:{job.get('job_id') or 'job'}")
         except Exception as exc:
             errors.append(f"{name}: {type(exc).__name__}: {_short(exc, 120)}")
-    return {"ok": not errors, "target_version": target_version, "queued": queued, "skipped": skipped[:12], "errors": errors[:8]}
-
+    # Se todos os workers conhecidos já estão na versão alvo, limpar a pendência
+    # para o painel não ficar mostrando update eterno. Se houver offline, erro ou
+    # incompatível, mantemos para tentar de novo quando o worker aparecer.
+    if not only_worker_id and not queued and not errors and workers and skipped and all(": já em " in item for item in skipped):
+        pending = _load_pending()
+        pending.pop("agent_update", None)
+        _save_pending(pending)
+        return {"ok": True, "target_version": target_version, "queued": [], "skipped": skipped[:16], "errors": [], "pending": False, "message": "todos os agents conhecidos já estão atualizados"}
+    return {"ok": True, "target_version": target_version, "queued": queued, "skipped": skipped[:16], "errors": errors[:10], "pending": True}
 
 def queue_apk_build() -> dict[str, Any]:
     registry = get_core_workers_registry()
@@ -232,12 +337,33 @@ def queue_apk_build() -> dict[str, Any]:
         "filename": f"CoreWorker-v{version_name}-debug.apk",
         "notifyUsers": True,
         "notificationRequested": True,
+        "coreWorkerVpsUrl": _public_base_url(),
+        "coreWorkerVpsLabel": os.getenv("CORE_WORKER_VPS_LABEL") or "VPS principal",
         "changelog": [
             "APK compilado automaticamente por worker builder",
             "VPS assina e publica o resultado",
             "O app mostra Atualizar no topo quando estiver disponível",
         ],
     }
+    pending = _load_pending()
+    pending["apk_build"] = {
+        "type": "apk_build_debug",
+        "versionName": version_name,
+        "versionCode": version_code,
+        "payload": payload,
+        "source": source,
+        "created_at": float((pending.get("apk_build") or {}).get("created_at") or time.time()) if isinstance(pending.get("apk_build"), dict) else time.time(),
+        "updated_at": time.time(),
+        "message": "build do APK pendente; será executado quando um worker apk-builder/turbo estiver online",
+    }
+    _save_pending(pending)
+
+    if _manifest_version_code() >= int(version_code or 0):
+        pending.pop("apk_build", None)
+        _save_pending(pending)
+        return {"ok": True, "versionName": version_name, "versionCode": version_code, "already_published": True, "message": "latest.json já está publicado nessa versão"}
+    if _active_job_exists(job_type="apk_build_debug", summary_contains=version_name):
+        return {"ok": True, "versionName": version_name, "versionCode": version_code, "pending": True, "message": "build do APK já está na fila"}
     try:
         result = registry.create_job(
             job_type="apk_build_debug",
@@ -250,23 +376,31 @@ def queue_apk_build() -> dict[str, Any]:
             max_attempts=1,
             summary=f"build automático APK {version_name}",
         )
-        return {"ok": True, "versionName": version_name, "versionCode": version_code, "source": source, "job": result.get("job")}
+        return {"ok": True, "versionName": version_name, "versionCode": version_code, "source": source, "job": result.get("job"), "pending": True}
     except Exception as exc:
-        PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
-        pending = {
+        pending = _load_pending()
+        item = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
+        item.update({
             "ok": False,
-            "type": "apk_build_debug",
-            "versionName": version_name,
-            "versionCode": version_code,
-            "payload": payload,
-            "source": source,
             "error": f"{type(exc).__name__}: {exc}",
-            "created_at": time.time(),
+            "updated_at": time.time(),
             "message": "build do APK pendente; nenhum worker apk-builder online compatível agora",
-        }
-        PENDING_PATH.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
-        return pending
+        })
+        pending["apk_build"] = item
+        _save_pending(pending)
+        return item
 
+
+def process_pending(*, worker_id: str = "") -> dict[str, Any]:
+    pending = _load_pending()
+    result: dict[str, Any] = {"ok": True, "worker_id": worker_id, "processed_at": time.time()}
+    if pending.get("agent_update"):
+        result["agent_update"] = queue_agent_updates(force=False, only_worker_id=worker_id)
+    if pending.get("apk_build"):
+        result["apk_build"] = queue_apk_build()
+    write_status({"process_pending": result, "pending": _load_pending(), "finished_at": time.time()})
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return result
 
 def write_status(status: dict[str, Any]) -> None:
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -308,6 +442,8 @@ def main() -> int:
     after.add_argument("--force-agent", action="store_true")
     sub.add_parser("queue-agent-update")
     sub.add_parser("queue-apk-build")
+    process = sub.add_parser("process-pending")
+    process.add_argument("--worker-id", default="")
     args = parser.parse_args()
     if args.command == "after-update":
         return after_update(force_agent=bool(args.force_agent))
@@ -318,8 +454,11 @@ def main() -> int:
         return 0 if result.get("ok") else 1
     if args.command == "queue-apk-build":
         result = queue_apk_build()
-        write_status({"manual": True, "apk_build": result, "finished_at": time.time()})
+        write_status({"manual": True, "apk_build": result, "pending": _load_pending(), "finished_at": time.time()})
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("ok") else 2
+    if args.command == "process-pending":
+        result = process_pending(worker_id=str(getattr(args, "worker_id", "") or ""))
         return 0 if result.get("ok") else 2
     return 1
 

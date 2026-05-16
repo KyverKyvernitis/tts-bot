@@ -57,7 +57,7 @@ import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.4.8";
+    private static final String APP_VERSION = "0.4.9";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
