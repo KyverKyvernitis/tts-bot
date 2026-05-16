@@ -4,9 +4,9 @@ Worker opcional para usar o celular como ajudante da VPS em tarefas que não sã
 
 Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e usa fallback local.
 
-## v1.7.2 — wake confiável e watchdog de 1 minuto
+## v1.7.3 — pipeline automático, rede e boot mais confiáveis
 
-A versão `1.7.2` mantém o agent alinhado ao Patch 41: o watchdog local volta a tentar a cada `PHONE_WORKER_WATCH_INTERVAL_SECONDS` mesmo após falhas, sem backoff crescente que deixava o celular importante parado por vários minutos.
+A versão `1.7.3` mantém o agent alinhado ao Patch 42: o worker informa estado de rede/rota até a VPS, detecta instalações duplicadas no Termux, usa boot oficial em `~/phone-worker` e envia metadados de build/notificação para a VPS validar APK, `latest.json` e entrega de atualização no app.
 
 Na VPS, o painel/loop de Core Workers usa `scripts/phone-worker-watch.sh` com confirmação real: código 0 do script não é tratado como “acordou”; o painel só mostra sucesso quando o worker volta a responder pelo registry/health.
 

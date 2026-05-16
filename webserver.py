@@ -64,6 +64,87 @@ def _json_field(value: str, fallback):
         return fallback
 
 
+def _repo_data_dir() -> str:
+    base = os.getenv("CORE_WORKER_DATA_DIR") or os.path.join(os.getcwd(), "data")
+    path = os.path.abspath(os.path.expanduser(base))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _safe_short_text(value, limit: int = 160) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:limit].rstrip() if len(text) > limit else text
+
+
+def _core_worker_notification_log_path() -> str:
+    return os.path.join(_repo_data_dir(), "core_worker_app_notifications.json")
+
+
+def _notification_event_id(*, version_name: str, version_code: int, sha256: str) -> str:
+    seed = f"{version_name}:{version_code}:{sha256}"
+    digest = hashlib.sha256(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"apk-{int(version_code or 0)}-{digest}"
+
+
+def _append_core_worker_notification_event(event: dict) -> dict:
+    path = _core_worker_notification_log_path()
+    now = int(time.time())
+    clean = {
+        "receivedAt": now,
+        "notificationId": _safe_short_text(event.get("notificationId"), 96),
+        "state": _safe_short_text(event.get("state") or event.get("event"), 48),
+        "delivered": bool(event.get("delivered", False)),
+        "versionName": _safe_short_text(event.get("versionName"), 48),
+        "versionCode": int(event.get("versionCode") or 0),
+        "appVersion": _safe_short_text(event.get("appVersion"), 48),
+        "appVersionCode": int(event.get("appVersionCode") or 0),
+        "workerId": _safe_short_text(event.get("workerId"), 80),
+        "installId": _safe_short_text(event.get("installId"), 80),
+        "permission": _safe_short_text(event.get("permission"), 40),
+        "detail": _safe_short_text(event.get("detail"), 180),
+        "remoteAddr": _safe_short_text(request.remote_addr or "", 64),
+    }
+    try:
+        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    events = data.get("events") if isinstance(data.get("events"), list) else []
+    events.append(clean)
+    events = events[-120:]
+    latest_by_id = data.get("latestById") if isinstance(data.get("latestById"), dict) else {}
+    nid = clean.get("notificationId") or "unknown"
+    latest_by_id[nid] = clean
+    data = {"ok": True, "updatedAt": now, "events": events, "latestById": latest_by_id}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+    return clean
+
+
+def _latest_core_worker_notification_summary(notification_id: str) -> dict:
+    path = _core_worker_notification_log_path()
+    try:
+        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+    except Exception:
+        data = {}
+    latest = data.get("latestById") if isinstance(data, dict) and isinstance(data.get("latestById"), dict) else {}
+    record = latest.get(str(notification_id or "")) if isinstance(latest, dict) else None
+    if isinstance(record, dict):
+        return {
+            "lastState": record.get("state"),
+            "lastDelivered": bool(record.get("delivered", False)),
+            "lastReceivedAt": record.get("receivedAt"),
+            "lastWorkerId": record.get("workerId"),
+            "lastAppVersion": record.get("appVersion"),
+            "lastDetail": record.get("detail"),
+        }
+    return {"lastState": "pending", "lastDelivered": False}
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = str(os.getenv(name, "")).strip().lower()
     if not raw:
@@ -415,6 +496,9 @@ def core_worker_app_publish():
     if not isinstance(changelog, list):
         changelog = [str(changelog)[:160]]
     required_agent = str(form.get("requiredAgentVersion") or "").strip()[:48]
+    source_sha = str(form.get("sourceFingerprint") or form.get("source_fingerprint") or form.get("sourceSha256") or form.get("source_sha256") or "").strip().lower()[:96]
+    notification_id = _safe_short_text(form.get("notificationId") or _notification_event_id(version_name=version_name, version_code=version_code, sha256=actual_sha), 96)
+    notification_summary = _latest_core_worker_notification_summary(notification_id)
     manifest = {
         "ok": True,
         "versionName": version_name,
@@ -426,6 +510,9 @@ def core_worker_app_publish():
         "updateAvailable": True,
         "notifyUsers": True,
         "notificationRequested": True,
+        "notificationId": notification_id,
+        "notificationStatus": notification_summary,
+        "sourceSha256": source_sha,
         "signedByVps": bool(signing_info.get("signedByVps")),
         "signingMode": str(signing_info.get("signingMode") or "unknown"),
         "changelog": [str(item)[:180] for item in changelog[:8]],
@@ -445,6 +532,23 @@ def core_worker_app_publish():
     return jsonify({"ok": True, "filename": filename, "bytes": total, "sha256": actual_sha, "signedByVps": bool(signing_info.get("signedByVps")), "validation": validation, "latest": manifest}), 200
 
 
+@app.post("/core-worker/app/notification")
+def core_worker_app_notification():
+    """Recebe confirmação best-effort do APK privado sobre notificação local.
+
+    O app ainda é privado e fica atrás da rede da VPS/Tailscale. Não recebe
+    tokens aqui; o endpoint só armazena telemetria curta, sem segredos.
+    """
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    state = _safe_short_text(payload.get("state") or payload.get("event"), 48)
+    if not state:
+        return jsonify({"ok": False, "error": "state ausente"}), 400
+    event = _append_core_worker_notification_event(payload)
+    return jsonify({"ok": True, "event": event}), 200
+
+
 @app.get("/core-worker/app/latest.json")
 def core_worker_app_latest():
     """Manifesto privado de atualização do Core Worker APK.
@@ -462,6 +566,15 @@ def core_worker_app_latest():
             "expected": manifest,
             "hint": "Crie latest.json e coloque o APK no diretório de releases.",
         }), 404
+    try:
+        data = json.loads(open(manifest, "r", encoding="utf-8").read())
+        if isinstance(data, dict):
+            nid = str(data.get("notificationId") or "")
+            if nid:
+                data["notificationStatus"] = _latest_core_worker_notification_summary(nid)
+            return jsonify(data), 200
+    except Exception:
+        pass
     return send_file(manifest, mimetype="application/json", conditional=True, max_age=0)
 
 
@@ -543,6 +656,10 @@ def core_worker_jobs_poll():
     if not isinstance(payload, dict):
         payload = {}
     status, body = core_worker_poll_job_http(request.headers, payload, remote_addr=request.remote_addr or "")
+    if status == 200 and isinstance(body, dict):
+        worker_id = str(payload.get("worker_id") or payload.get("id") or "")
+        if worker_id:
+            _kick_core_worker_pending_automation(worker_id)
     return jsonify(body), status
 
 

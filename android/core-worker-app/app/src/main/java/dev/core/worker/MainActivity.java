@@ -55,9 +55,10 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
+import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.0";
+    private static final String APP_VERSION = "0.5.1";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -117,6 +118,7 @@ public class MainActivity extends Activity {
     private volatile String latestApkUrl = "";
     private volatile String latestApkSha256 = "";
     private volatile String latestChangelog = "";
+    private volatile String latestNotificationId = "";
     private volatile boolean latestUpdateAvailable = false;
 
     @Override
@@ -746,6 +748,10 @@ public class MainActivity extends Activity {
         latestApkSha256 = body.optString("sha256", "");
         latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("apkUrl", body.optString("url", "")));
         latestChangelog = changelogText(body.optJSONArray("changelog"));
+        latestNotificationId = body.optString("notificationId", "");
+        if (latestNotificationId.trim().isEmpty()) {
+            latestNotificationId = "apk-" + latestVersionCode + "-" + emptyFallback(latestApkSha256, latestVersionName);
+        }
         String requiredAgent = body.optString("requiredAgentVersion", body.optString("minAgentVersion", ""));
         boolean notificationRequested = body.optBoolean("notificationRequested", body.optBoolean("notifyUsers", false));
         boolean available = isLatestUpdateAvailable();
@@ -764,8 +770,12 @@ public class MainActivity extends Activity {
             text.append("\n\nMudanças:\n").append(latestChangelog);
         }
         updateUpdateUi(text.toString(), available, true);
+        if (notificationRequested) {
+            reportUpdateNotification(serverUrl, "manifest_seen", false, available ? "manifesto lido; atualização disponível" : "manifesto lido; app em dia");
+        }
         if (available && notificationRequested) {
-            notifyUpdateAvailable();
+            String notifyState = notifyUpdateAvailable();
+            reportUpdateNotification(serverUrl, notifyState, "displayed".equals(notifyState), notificationDetail(notifyState));
         }
         if (userVisible) {
             show(available ? "Atualização encontrada. Toque em Atualizar no topo do app." : "Nenhuma atualização nova encontrada.");
@@ -846,20 +856,21 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void notifyUpdateAvailable() {
+    private String notifyUpdateAvailable() {
         try {
             String version = emptyFallback(latestVersionName, "nova versão");
+            String notificationKey = emptyFallback(latestNotificationId, version);
             String already = prefs.getString("last_update_notification", "");
-            if (version.equals(already)) {
-                return;
+            if (notificationKey.equals(already)) {
+                return "duplicate";
             }
             if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4103);
-                return;
+                return "permission_missing";
             }
             NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             if (manager == null) {
-                return;
+                return "manager_unavailable";
             }
             String channelId = "core_worker_updates";
             if (Build.VERSION.SDK_INT >= 26) {
@@ -882,9 +893,60 @@ public class MainActivity extends Activity {
                     .setContentIntent(pending)
                     .setAutoCancel(true);
             manager.notify(4102, builder.build());
-            prefs.edit().putString("last_update_notification", version).apply();
+            prefs.edit().putString("last_update_notification", notificationKey).apply();
+            return "displayed";
+        } catch (Exception ignored) {
+            return "failed";
+        }
+    }
+
+    private String notificationDetail(String state) {
+        if ("displayed".equals(state)) return "notificação local exibida pelo APK";
+        if ("duplicate".equals(state)) return "notificação já exibida para essa versão";
+        if ("permission_missing".equals(state)) return "permissão POST_NOTIFICATIONS ausente";
+        if ("manager_unavailable".equals(state)) return "NotificationManager indisponível";
+        if ("failed".equals(state)) return "falha criando notificação local";
+        return state;
+    }
+
+    private void reportUpdateNotification(String serverUrl, String state, boolean delivered, String detail) {
+        try {
+            String id = emptyFallback(latestNotificationId, "apk-" + latestVersionCode + "-" + latestVersionName);
+            String prefKey = "notification_reported_" + sanitizePrefKey(id) + "_" + sanitizePrefKey(state);
+            if (prefs.getBoolean(prefKey, false)) {
+                return;
+            }
+            JSONObject payload = new JSONObject();
+            payload.put("notificationId", id);
+            payload.put("state", state);
+            payload.put("delivered", delivered);
+            payload.put("versionName", latestVersionName);
+            payload.put("versionCode", latestVersionCode);
+            payload.put("appVersion", APP_VERSION);
+            payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+            payload.put("workerId", localAgentWorkerId);
+            payload.put("installId", installId());
+            payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
+            payload.put("detail", detail);
+            HttpResult result = request("POST", serverUrl + "/core-worker/app/notification", payload, null);
+            if (result.ok()) {
+                prefs.edit().putBoolean(prefKey, true).apply();
+            }
         } catch (Exception ignored) {
         }
+    }
+
+    private String sanitizePrefKey(String value) {
+        return String.valueOf(value == null ? "" : value).replaceAll("[^A-Za-z0-9_.-]+", "_");
+    }
+
+    private String installId() {
+        String id = prefs.getString("install_id", "");
+        if (id == null || id.trim().isEmpty()) {
+            id = UUID.randomUUID().toString();
+            prefs.edit().putString("install_id", id).apply();
+        }
+        return id;
     }
 
     private void downloadFile(String url, File target) throws Exception {

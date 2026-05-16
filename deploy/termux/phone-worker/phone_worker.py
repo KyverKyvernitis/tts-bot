@@ -33,6 +33,7 @@ START_TIME = time.time()
 JOBS_STARTED = 0
 JOBS_FAILED = 0
 _PING_CACHE: dict[str, Any] = {}
+_CORE_WORKER_NETWORK_STATE: dict[str, Any] = {"last_ok_at": 0.0, "last_error_at": 0.0, "last_error": "", "last_error_kind": ""}
 _CORE_JOB_LOCK = threading.RLock()
 _CORE_JOB_ACTIVE: dict[str, Any] = {}
 _CORE_JOB_LAST_RESULT: dict[str, Any] = {}
@@ -41,7 +42,7 @@ _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.7.2"
+PHONE_WORKER_VERSION = "1.7.3"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -794,6 +795,49 @@ def _core_worker_auth_parts() -> tuple[str, str, str]:
     return base_url, token, worker_id
 
 
+def _classify_core_worker_network_error(exc: BaseException | str) -> str:
+    text = str(exc or "").lower()
+    if "no route to host" in text or "errno 113" in text:
+        return "no_route_to_vps"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    if "network is unreachable" in text or "errno 101" in text:
+        return "network_unreachable"
+    if "name or service not known" in text or "temporary failure in name resolution" in text:
+        return "dns_failed"
+    if "connection refused" in text:
+        return "connection_refused"
+    return "request_failed"
+
+
+def _remember_core_worker_network_ok() -> None:
+    _CORE_WORKER_NETWORK_STATE.update({
+        "last_ok_at": time.time(),
+        "last_error": "",
+        "last_error_kind": "",
+    })
+
+
+def _remember_core_worker_network_error(exc: BaseException | str) -> None:
+    _CORE_WORKER_NETWORK_STATE.update({
+        "last_error_at": time.time(),
+        "last_error": _short_text(exc, limit=160),
+        "last_error_kind": _classify_core_worker_network_error(exc),
+    })
+
+
+def _core_worker_network_runtime_snapshot() -> dict[str, Any]:
+    now = time.time()
+    last_ok = float(_CORE_WORKER_NETWORK_STATE.get("last_ok_at") or 0.0)
+    last_error = float(_CORE_WORKER_NETWORK_STATE.get("last_error_at") or 0.0)
+    return {
+        "last_ok_age_seconds": round(now - last_ok, 3) if last_ok else None,
+        "last_error_age_seconds": round(now - last_error, 3) if last_error else None,
+        "last_error_kind": _CORE_WORKER_NETWORK_STATE.get("last_error_kind") or "",
+        "last_error": _CORE_WORKER_NETWORK_STATE.get("last_error") or "",
+    }
+
+
 def _post_json_url(url: str, payload: dict[str, Any], *, token: str = "", timeout: float = 8.0) -> tuple[int, dict[str, Any]]:
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     headers = {
@@ -808,9 +852,14 @@ def _post_json_url(url: str, payload: dict[str, Any], *, token: str = "", timeou
         with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp:
             raw = resp.read(1024 * 1024)
             status = int(getattr(resp, "status", 200) or 200)
+            _remember_core_worker_network_ok()
     except urllib.error.HTTPError as exc:
         raw = exc.read(16 * 1024)
         status = int(exc.code)
+        _remember_core_worker_network_ok()
+    except Exception as exc:
+        _remember_core_worker_network_error(exc)
+        raise
     parsed: dict[str, Any]
     try:
         data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
@@ -830,9 +879,14 @@ def _get_json_url(url: str, *, timeout: float = 8.0, max_bytes: int = 1024 * 102
         with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp:
             raw = resp.read(max_bytes + 1)
             status = int(getattr(resp, "status", 200) or 200)
+            _remember_core_worker_network_ok()
     except urllib.error.HTTPError as exc:
         raw = exc.read(16 * 1024)
         status = int(exc.code)
+        _remember_core_worker_network_ok()
+    except Exception as exc:
+        _remember_core_worker_network_error(exc)
+        raise
     if len(raw) > max_bytes:
         return status, {"ok": False, "error": "resposta JSON grande demais"}
     try:
@@ -856,6 +910,7 @@ def _download_url_to_file(url: str, target: Path, *, timeout: float = 35.0, max_
     try:
         with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp, tmp.open("wb") as fh:
             status = int(getattr(resp, "status", 200) or 200)
+            _remember_core_worker_network_ok()
             while True:
                 chunk = resp.read(64 * 1024)
                 if not chunk:
@@ -866,11 +921,13 @@ def _download_url_to_file(url: str, target: Path, *, timeout: float = 35.0, max_
                 digest.update(chunk)
                 fh.write(chunk)
     except urllib.error.HTTPError as exc:
+        _remember_core_worker_network_ok()
         body = exc.read(8 * 1024).decode("utf-8", errors="replace")
         with contextlib.suppress(Exception):
             tmp.unlink()
         return {"ok": False, "status": int(exc.code), "error": _short_text(body or exc, limit=180)}
-    except Exception:
+    except Exception as exc:
+        _remember_core_worker_network_error(exc)
         with contextlib.suppress(Exception):
             tmp.unlink()
         raise
@@ -1002,6 +1059,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         },
         "status": {
             "core_worker_jobs": _core_job_runtime_snapshot(),
+            "core_worker_network": _core_worker_network_runtime_snapshot(),
             "profile": profile,
             "profile_label": _core_worker_profile_label(profile),
             "http_host": host,
@@ -1190,6 +1248,7 @@ def _system_status() -> dict[str, Any]:
         "profile_label": _core_worker_profile_label(_current_core_worker_profile()),
         "core_worker_heartbeat": _heartbeat_configured(),
         "core_worker_jobs": {"configured": _core_worker_jobs_configured(), **_core_job_runtime_snapshot()},
+        "core_worker_network": _core_worker_network_runtime_snapshot(),
         "scripts": _script_inventory(),
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "supervisor": _safe_telemetry("supervisor", _runtime_supervisor_snapshot, {"ok": False, "source": "telemetry_failed"}),
@@ -2044,10 +2103,15 @@ def _termux_boot_script_content() -> str:
         "termux-wake-lock 2>/dev/null || true",
         "sleep \"${PHONE_WORKER_BOOT_DELAY_SECONDS:-25}\"",
         "cd \"$HOME/phone-worker\" || exit 0",
-        "if [ -x \"$HOME/phone-worker/start-phone-worker.sh\" ]; then",
-        "  exec \"$HOME/phone-worker/start-phone-worker.sh\"",
+        "if [ -x \"$HOME/phone-worker/watch-phone-worker.sh\" ]; then",
+        "  nohup \"$HOME/phone-worker/watch-phone-worker.sh\" >> \"$HOME/phone-worker/phone-worker-watch.boot.log\" 2>&1 &",
+        "  exit 0",
         "fi",
-        "echo '[core-worker-boot] start-phone-worker.sh não encontrado' >> \"$HOME/phone-worker.log\"",
+        "if [ -x \"$HOME/phone-worker/start-phone-worker.sh\" ]; then",
+        "  nohup \"$HOME/phone-worker/start-phone-worker.sh\" >> \"$HOME/phone-worker/phone-worker-watch.boot.log\" 2>&1 &",
+        "  exit 0",
+        "fi",
+        "echo '[core-worker-boot] scripts não encontrados' >> \"$HOME/phone-worker.log\"",
         "",
     ])
 
@@ -2085,7 +2149,7 @@ def _termux_boot_status_snapshot() -> dict[str, Any]:
         if exists:
             result["executable"] = os.access(path, os.X_OK)
             content = path.read_text(encoding="utf-8", errors="ignore")[:4096]
-            result["content_ok"] = ("start-phone-worker.sh" in content or "phone_worker.py" in content) and "phone-worker" in content
+            result["content_ok"] = ("watch-phone-worker.sh" in content or "start-phone-worker.sh" in content or "phone_worker.py" in content) and "phone-worker" in content
             result["size"] = path.stat().st_size
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {_short_text(exc, limit=100)}"
@@ -2146,6 +2210,26 @@ def _best_script(name: str) -> Path:
     return _script_candidates(name)[0]
 
 
+def _duplicate_installations_snapshot() -> dict[str, Any]:
+    home = Path.home().expanduser()
+    official = _phone_worker_dir().expanduser()
+    candidates: list[Path] = []
+    for path in (official, home / "phone-worker-install", home / "phone-worker"):
+        try:
+            resolved = path.resolve()
+            if path.exists() and (path / "phone_worker.py").exists() and all(resolved != existing.resolve() for existing in candidates):
+                candidates.append(path)
+        except Exception:
+            continue
+    duplicates = [str(path) for path in candidates if path.resolve() != official.resolve()]
+    return {
+        "official": str(official),
+        "found": [str(path) for path in candidates],
+        "duplicates": duplicates,
+        "has_duplicates": bool(duplicates),
+    }
+
+
 def _script_inventory() -> dict[str, Any]:
     scripts: dict[str, Any] = {}
     complete = True
@@ -2165,7 +2249,8 @@ def _script_inventory() -> dict[str, Any]:
             "executable": any(path.exists() and os.access(path, os.X_OK) for path in (worker_path, home_path)),
             "preferred": str(_best_script(name)),
         }
-    return {"complete": complete, "mirrored": mirrored, "scripts": scripts}
+    installs = _duplicate_installations_snapshot()
+    return {"complete": complete, "mirrored": mirrored, "scripts": scripts, "installations": installs, "duplicate_installations": bool(installs.get("has_duplicates"))}
 
 
 def _tmux_session_exists(session: str) -> bool:
@@ -2401,7 +2486,7 @@ def _read_android_version(project_dir: Path) -> tuple[str, int]:
     return version_name, version_code
 
 
-def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str, version_code: int, sha256: str, publish_url: str, changelog: list[str] | None = None) -> dict[str, Any]:
+def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str, version_code: int, sha256: str, publish_url: str, changelog: list[str] | None = None, source_sha256: str = "", source_fingerprint: str = "", notification_id: str = "") -> dict[str, Any]:
     base_url, token, worker_id = _core_worker_auth_parts()
     if not token or not worker_id:
         return {"ok": False, "error": "worker não pareado; não posso publicar APK"}
@@ -2425,6 +2510,9 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
         field("requiredAgentVersion", PHONE_WORKER_VERSION),
         field("notifyUsers", "true"),
         field("notificationRequested", "true"),
+        field("sourceSha256", source_sha256),
+        field("sourceFingerprint", source_fingerprint or source_sha256),
+        field("notificationId", notification_id),
         field("changelog", json.dumps(changelog or ["APK compilado por worker builder"], ensure_ascii=False)),
         (
             f"--{boundary}\r\n"
@@ -2449,11 +2537,16 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
     try:
         with urllib.request.urlopen(req, timeout=max(5.0, _env_float("PHONE_WORKER_APK_PUBLISH_TIMEOUT_SECONDS", 60.0))) as resp:
             raw = resp.read(256 * 1024)
+            _remember_core_worker_network_ok()
             data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
             return data if isinstance(data, dict) else {"ok": False, "error": "resposta inválida da VPS"}
     except urllib.error.HTTPError as exc:
+        _remember_core_worker_network_ok()
         raw = exc.read(64 * 1024).decode("utf-8", errors="replace")
         return {"ok": False, "status": int(exc.code), "error": _short_text(raw or exc, limit=240)}
+    except Exception as exc:
+        _remember_core_worker_network_error(exc)
+        raise
 
 
 def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2536,11 +2629,13 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
         filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or f"CoreWorker-v{version_name}-debug.apk")).strip("-._")
         if not filename.lower().endswith(".apk"):
             filename += ".apk"
+        notification_id = str(payload.get("notificationId") or payload.get("notification_id") or f"apk-{version_code}-{apk_sha[:12]}").strip()
         result: dict[str, Any] = {
             "ok": True,
             "summary": f"APK {version_name} compilado pelo worker",
             "versionName": version_name,
             "versionCode": version_code,
+            "notificationId": notification_id,
             "apk": {"filename": filename, "bytes": len(raw), "sha256": apk_sha},
             "source": {"url": source_url, "bytes": download.get("bytes"), "sha256": download.get("sha256"), "files": members},
             "builder_environment": builder_environment,
@@ -2557,6 +2652,9 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 sha256=apk_sha,
                 publish_url=publish_url or f"{base_url}/core-worker/app/publish",
                 changelog=list(payload.get("changelog") or ["APK compilado por worker builder"]),
+                source_sha256=str(download.get("sha256") or expected_source_sha or ""),
+                source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or download.get("sha256") or expected_source_sha or ""),
+                notification_id=notification_id,
             )
             result["publish"] = publish
             if not bool(publish.get("ok", False)):
@@ -2983,7 +3081,7 @@ def main() -> int:
     parser.add_argument("--heartbeat-once", action="store_true", help="envia um heartbeat para a VPS e encerra")
     parser.add_argument("--jobs-once", action="store_true", help="faz um poll de job na VPS, executa no máximo um job e encerra")
     parser.add_argument("--pair", "--pair-code", dest="pair_code", default="", help="pareia este phone-worker com o registry usando um código CORE-XXXX")
-    parser.add_argument("--vps-url", default=os.getenv("CORE_WORKER_VPS_URL", ""), help="URL base da VPS/Tailscale para pareamento, ex: http://100.x.x.x:8766")
+    parser.add_argument("--vps-url", default=os.getenv("CORE_WORKER_VPS_URL", ""), help="URL base da VPS/Tailscale para pareamento, ex: http://100.x.x.x:10000")
     parser.add_argument("--worker-id", default=os.getenv("CORE_WORKER_ID", ""), help="ID estável deste worker; opcional")
     parser.add_argument("--name", default=os.getenv("CORE_WORKER_NAME", os.getenv("PHONE_WORKER_NAME", "")), help="nome exibido no painel")
     parser.add_argument("--roles", default=os.getenv("CORE_WORKER_ROLES", ""), help="roles do worker separadas por vírgula")

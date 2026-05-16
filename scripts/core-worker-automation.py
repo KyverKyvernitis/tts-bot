@@ -34,6 +34,7 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
 
 PENDING_PATH = ROOT / "data" / "core_worker_automation_pending.json"
 STATUS_PATH = ROOT / "data" / "core_worker_automation_status.json"
+STATE_PATH = ROOT / "data" / "core_worker_automation_state.json"
 
 
 def _load_repo_env() -> None:
@@ -82,6 +83,62 @@ def _changed_files_from_env() -> list[str]:
 
 def _has_changed(changed_files: Iterable[str], prefix: str) -> bool:
     return any(str(item).startswith(prefix) for item in changed_files)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(128 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _hash_tree(root: Path, *, exclude_dirs: set[str] | None = None) -> str:
+    exclude_dirs = set(exclude_dirs or set())
+    digest = hashlib.sha256()
+    if not root.exists():
+        return ""
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root)
+        if any(part in exclude_dirs for part in rel.parts):
+            continue
+        if not path.is_file():
+            continue
+        digest.update(rel.as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(_sha256_file(path).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _current_fingerprints() -> dict[str, Any]:
+    phone_dir = ROOT / "deploy" / "termux" / "phone-worker"
+    android_dir = ROOT / "android" / "core-worker-app"
+    version_name, version_code = _read_android_version()
+    return {
+        "phone_worker_version": _read_phone_worker_version(),
+        "phone_worker_hash": _hash_tree(phone_dir),
+        "apk_versionName": version_name,
+        "apk_versionCode": version_code,
+        "apk_source_hash": _hash_tree(android_dir, exclude_dirs={"build", ".gradle", "releases"}),
+    }
+
+
+def _load_state() -> dict[str, Any]:
+    if not STATE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_state(data: dict[str, Any]) -> None:
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_PATH.with_suffix(STATE_PATH.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(STATE_PATH)
 
 
 def _read_phone_worker_version() -> str:
@@ -216,6 +273,35 @@ def _manifest_version_code() -> int:
         return 0
 
 
+def _manifest_source_sha() -> str:
+    manifest = ROOT / "android" / "core-worker-app" / "releases" / "latest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("sourceSha256") or data.get("source_sha256") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _workers_need_agent_version(snapshot: dict[str, Any], target_version: str) -> bool:
+    workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
+    for worker in workers:
+        if not isinstance(worker, dict):
+            continue
+        current = str(worker.get("version") or "")
+        if not current or _version_tuple(current) < _version_tuple(target_version):
+            return True
+    return False
+
+
+def _apk_needs_build(version_code: int, source_sha: str) -> bool:
+    if _manifest_version_code() < int(version_code or 0):
+        return True
+    manifest_source = _manifest_source_sha()
+    if source_sha and not manifest_source:
+        return True
+    return bool(source_sha and manifest_source and manifest_source != source_sha)
+
+
 def _registry_raw() -> dict[str, Any]:
     try:
         path = get_core_workers_registry().path
@@ -326,9 +412,12 @@ def queue_apk_build() -> dict[str, Any]:
     registry = get_core_workers_registry()
     version_name, version_code = _read_android_version()
     source = _prepare_apk_source_zip()
+    source_fingerprint = str(_current_fingerprints().get("apk_source_hash") or source["sha256"])
+    notification_id = f"apk-{version_code}-{source_fingerprint[:12]}"
     payload = {
         "source_zip_url": source["url"],
         "source_sha256": source["sha256"],
+        "sourceFingerprint": source_fingerprint,
         "source_bytes": source["bytes"],
         "project_subdir": "android/core-worker-app",
         "publish": True,
@@ -337,6 +426,7 @@ def queue_apk_build() -> dict[str, Any]:
         "filename": f"CoreWorker-v{version_name}-debug.apk",
         "notifyUsers": True,
         "notificationRequested": True,
+        "notificationId": notification_id,
         "coreWorkerVpsUrl": _public_base_url(),
         "coreWorkerVpsLabel": os.getenv("CORE_WORKER_VPS_LABEL") or "VPS principal",
         "changelog": [
@@ -358,10 +448,10 @@ def queue_apk_build() -> dict[str, Any]:
     }
     _save_pending(pending)
 
-    if _manifest_version_code() >= int(version_code or 0):
+    if not _apk_needs_build(version_code, source_fingerprint):
         pending.pop("apk_build", None)
         _save_pending(pending)
-        return {"ok": True, "versionName": version_name, "versionCode": version_code, "already_published": True, "message": "latest.json já está publicado nessa versão"}
+        return {"ok": True, "versionName": version_name, "versionCode": version_code, "already_published": True, "sourceSha256": source.get("sha256"), "sourceFingerprint": source_fingerprint, "message": "latest.json já está publicado nessa versão/source"}
     if _active_job_exists(job_type="apk_build_debug", summary_contains=version_name):
         return {"ok": True, "versionName": version_name, "versionCode": version_code, "pending": True, "message": "build do APK já está na fila"}
     try:
@@ -409,13 +499,33 @@ def write_status(status: dict[str, Any]) -> None:
 
 def after_update(force_agent: bool = False) -> int:
     changed = _changed_files_from_env()
-    phone_changed = _has_changed(changed, "deploy/termux/phone-worker/")
-    apk_changed = _has_changed(changed, "android/core-worker-app/")
+    snapshot = _load_registry_snapshot()
+    current = _current_fingerprints()
+    previous = _load_state()
+    phone_hash_changed = bool(previous.get("phone_worker_hash") and previous.get("phone_worker_hash") != current.get("phone_worker_hash"))
+    apk_hash_changed = bool(previous.get("apk_source_hash") and previous.get("apk_source_hash") != current.get("apk_source_hash"))
+    phone_changed = (
+        _has_changed(changed, "deploy/termux/phone-worker/")
+        or force_agent
+        or phone_hash_changed
+        or _workers_need_agent_version(snapshot, str(current.get("phone_worker_version") or ""))
+    )
+    apk_changed = (
+        _has_changed(changed, "android/core-worker-app/")
+        or apk_hash_changed
+        or _apk_needs_build(int(current.get("apk_versionCode") or 0), str(current.get("apk_source_hash") or ""))
+    )
     status: dict[str, Any] = {
         "ok": True,
         "changed_files": changed[:80],
+        "fingerprints": current,
+        "previous_fingerprints_present": bool(previous),
+        "phone_worker_hash_changed": phone_hash_changed,
+        "apk_source_hash_changed": apk_hash_changed,
         "phone_worker_changed": phone_changed,
         "apk_changed": apk_changed,
+        "workers_need_agent": _workers_need_agent_version(snapshot, str(current.get("phone_worker_version") or "")),
+        "apk_needs_build": _apk_needs_build(int(current.get("apk_versionCode") or 0), str(current.get("apk_source_hash") or "")),
         "started_at": time.time(),
         "base_url": _public_base_url(),
     }
@@ -431,6 +541,9 @@ def after_update(force_agent: bool = False) -> int:
 
     status["finished_at"] = time.time()
     write_status(status)
+    state = dict(current)
+    state["updated_at"] = status["finished_at"]
+    _save_state(state)
     print(json.dumps(status, ensure_ascii=False, separators=(",", ":")))
     return 0
 

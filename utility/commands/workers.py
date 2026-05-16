@@ -643,6 +643,26 @@ def _queue_status_text(worker: dict[str, Any]) -> str:
     # Detalhes completos ficam em "Ver último resultado"/logs.
     return ""
 
+def _worker_stale_note(worker: dict[str, Any]) -> str:
+    age = worker.get("last_seen_age_seconds")
+    try:
+        age_f = float(age)
+    except Exception:
+        age_f = 999999.0
+    if bool(worker.get("online")) and age_f <= 120:
+        return ""
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    net_runtime = status.get("core_worker_network") if isinstance(status.get("core_worker_network"), dict) else {}
+    network = worker.get("network") if isinstance(worker.get("network"), dict) else {}
+    issue = str(net_runtime.get("last_error_kind") or "").replace("_", " ")
+    if not issue and network.get("vps_ping_error"):
+        issue = "rota/ping VPS falhou"
+    prefix = f"offline { _format_age(age) }" if age is not None else "offline"
+    if issue:
+        return f"{prefix} · último erro: {issue}"
+    return f"{prefix} · dados abaixo são último estado conhecido"
+
+
 def _role_text(roles: list[str], *, limit: int = 8) -> str:
     selected = [str(role) for role in roles[:limit] if role]
     if not selected:
@@ -692,6 +712,32 @@ def _compact_failure(exc: BaseException) -> str:
 
 
 
+def _core_worker_notification_status_text() -> str:
+    root = _repo_root()
+    latest_path = root / "android" / "core-worker-app" / "releases" / "latest.json"
+    notif_path = root / "data" / "core_worker_app_notifications.json"
+    try:
+        latest = json.loads(latest_path.read_text(encoding="utf-8")) if latest_path.exists() else {}
+    except Exception:
+        latest = {}
+    if not isinstance(latest, dict) or not latest.get("notificationRequested"):
+        return ""
+    notification_id = str(latest.get("notificationId") or "").strip()
+    version = str(latest.get("versionName") or "?")
+    try:
+        data = json.loads(notif_path.read_text(encoding="utf-8")) if notif_path.exists() else {}
+    except Exception:
+        data = {}
+    latest_by_id = data.get("latestById") if isinstance(data, dict) and isinstance(data.get("latestById"), dict) else {}
+    record = latest_by_id.get(notification_id) if notification_id else None
+    if isinstance(record, dict):
+        state = str(record.get("state") or "recebida")
+        delivered = bool(record.get("delivered"))
+        icon = "entregue" if delivered or state == "displayed" else state
+        return f"notif APK {version}: {icon}"
+    return f"notif APK {version}: pendente"
+
+
 def _automation_status_text() -> str:
     """Resumo curto do pipeline automático agent/APK para mostrar no painel."""
     root = _repo_root()
@@ -723,7 +769,10 @@ def _automation_status_text() -> str:
             if apk:
                 msg = "publicado" if apk.get("already_published") else ("job criado" if apk.get("job") else "pendente")
                 parts.append(f"APK {apk.get('versionName') or '?'}: {msg}")
-    return " · ".join(parts[:3])
+    notif = _core_worker_notification_status_text()
+    if notif:
+        parts.append(notif)
+    return " · ".join(parts[:4])
 
 
 def _worker_wake_tokens(worker: dict[str, Any]) -> set[str]:
@@ -1757,7 +1806,15 @@ class WorkersPanelView(discord.ui.LayoutView):
             roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=5)
             version = _shorten(worker.get("version") or "sem versão", limit=24)
             lines.append(f"{icon} **{name}** · `{worker_id}`")
-            lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)} · {_boot_health_label(worker)} · {_runtime_health_label(worker)}")
+            stale_note = _worker_stale_note(worker)
+            if stale_note:
+                lines.append(f"-# {stale_note}")
+                lines.append(f"-# último estado: v `{version}` · {_battery_text(worker)} · {_network_text(worker)}")
+            else:
+                lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)} · {_boot_health_label(worker)} · {_runtime_health_label(worker)}")
+            scripts = worker.get("status", {}).get("scripts") if isinstance(worker.get("status"), dict) else {}
+            if isinstance(scripts, dict) and scripts.get("duplicate_installations"):
+                lines.append("-# ⚠️ instalações duplicadas detectadas no Termux; use boot_repair/worker_update para alinhar `~/phone-worker`.")
             lines.append(f"Roles: {roles}")
             queue_text = _queue_status_text(worker)
             if queue_text:

@@ -11,10 +11,15 @@ install_core_worker_boot() {
 'termux-wake-lock 2>/dev/null || true' \
 'sleep "${PHONE_WORKER_BOOT_DELAY_SECONDS:-25}"' \
 'cd "$HOME/phone-worker" || exit 0' \
-'if [ -x "$HOME/phone-worker/start-phone-worker.sh" ]; then' \
-'  exec "$HOME/phone-worker/start-phone-worker.sh"' \
+'if [ -x "$HOME/phone-worker/watch-phone-worker.sh" ]; then' \
+'  nohup "$HOME/phone-worker/watch-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.boot.log" 2>&1 &' \
+'  exit 0' \
 'fi' \
-'echo "[core-worker-boot] start-phone-worker.sh não encontrado" >> "$HOME/phone-worker.log"' \
+'if [ -x "$HOME/phone-worker/start-phone-worker.sh" ]; then' \
+'  nohup "$HOME/phone-worker/start-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.boot.log" 2>&1 &' \
+'  exit 0' \
+'fi' \
+'echo "[core-worker-boot] scripts não encontrados" >> "$HOME/phone-worker.log"' \
 > "$HOME/.termux/boot/10-core-worker"
   chmod +x "$HOME/.termux/boot/10-core-worker"
 }

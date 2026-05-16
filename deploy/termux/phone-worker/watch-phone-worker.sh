@@ -3,6 +3,10 @@
 # Chama o supervisor start-phone-worker.sh, com backoff e log pequeno.
 set -u
 
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+
 ENV_FILE="${PHONE_WORKER_ENV:-$HOME/.phone-worker.env}"
 if [[ -f "$ENV_FILE" ]]; then
   set -a
