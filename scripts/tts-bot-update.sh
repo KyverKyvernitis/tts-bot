@@ -8,6 +8,7 @@ CALLKEEPER_SERVICE="callkeeper"
 LAVALINK_SERVICE="lavalink"
 LOG_TAG="tts-bot-updater"
 DIRTY_MARKER_FILE="$REPO_DIR/.fatal-update-dirty"
+LOCAL_CHANGES_MARKER_FILE="$REPO_DIR/.fatal-update-local-changes"
 
 FRONT_DIR="$REPO_DIR/activity /sinuca"
 BACK_DIR="$REPO_DIR/activity /sinuca-server"
@@ -419,6 +420,30 @@ format_changed_files() {
   fi
 }
 
+cleanup_known_generated_update_artifacts() {
+  # Estes arquivos/pastas são gerados por build/publicação do Core Worker e
+  # não devem bloquear o auto updater. Não remove código fonte nem registry.
+  rm -rf "$REPO_DIR/android/core-worker-app/app/build" 2>/dev/null || true
+  rm -rf "$REPO_DIR/android/core-worker-app/.gradle" 2>/dev/null || true
+  rm -f "$REPO_DIR/android/core-worker-app/app/build.gradle.bak"* 2>/dev/null || true
+}
+
+local_changes_fingerprint() {
+  {
+    sudo -u ubuntu -H git status --short --untracked-files=no 2>/dev/null || true
+    sudo -u ubuntu -H git diff --name-only 2>/dev/null || true
+    sudo -u ubuntu -H git diff --name-only --cached 2>/dev/null || true
+  } | sha256sum | awk '{print $1}'
+}
+
+clear_local_changes_marker_if_clean() {
+  local status_text
+  status_text="$(collect_local_tracked_changes)"
+  if [[ -z "${status_text//[[:space:]]/}" ]]; then
+    rm -f "$LOCAL_CHANGES_MARKER_FILE" 2>/dev/null || true
+  fi
+}
+
 collect_local_tracked_changes() {
   # Untracked locais como data/, cookies e healthcheck não bloqueiam o merge.
   # O que bloqueia o git pull são mudanças em arquivos rastreados.
@@ -439,9 +464,26 @@ fail_local_changes_before_pull() {
     return 0
   fi
 
+  local fingerprint previous_fingerprint
+  fingerprint="$(local_changes_fingerprint)"
+  previous_fingerprint=""
+  if [[ -f "$LOCAL_CHANGES_MARKER_FILE" ]]; then
+    previous_fingerprint="$(awk -F= '$1 == "FINGERPRINT" { sub($1 "=", ""); print; exit }' "$LOCAL_CHANGES_MARKER_FILE" 2>/dev/null || true)"
+  fi
+  if [[ -n "$fingerprint" && "$fingerprint" == "$previous_fingerprint" ]]; then
+    logger -t "$LOG_TAG" "Alterações locais ainda bloqueiam o update; alerta já enviado para este mesmo estado."
+    exit 1
+  fi
   MANUAL_FAILURE_ALERT_SENT=1
   files_text="$(collect_local_tracked_files)"
   duration="$(human_duration "$SECONDS")"
+  cat > "$LOCAL_CHANGES_MARKER_FILE" <<EOM
+FINGERPRINT=$fingerprint
+REMOTE_COMMIT=$REMOTE_COMMIT
+CURRENT_COMMIT=$CURRENT_COMMIT
+AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+EOM
+  chown ubuntu:ubuntu "$LOCAL_CHANGES_MARKER_FILE" 2>/dev/null || true
 
   body="Resumo: O updater parou antes do git pull porque existem alterações locais em arquivos rastreados. O Git bloqueou o merge para não sobrescrever seus testes na VPS.
 Host: $HOSTNAME
@@ -461,7 +503,7 @@ Arquivos locais:
 ${files_text:-nenhum arquivo listado}
 Status git:
 $status_text
-Ação sugerida: Rode git stash push -u -m \"backup-local-before-auto-update-$(date +%F-%H%M%S)\" antes de liberar o updater, ou commit/reverta manualmente as alterações locais.
+Ação sugerida: deixe o repo limpo antes do updater. Normalmente: git restore <arquivo> e rm -rf android/core-worker-app/app/build android/core-worker-app/releases. Se a alteração for intencional, envie como patch oficial em ZIP.
 Duração: $duration
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
@@ -1020,7 +1062,11 @@ if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callk
   CALLKEEPER_CHANGED=1
 fi
 
+STAGE="limpeza de artefatos gerados"
+cleanup_known_generated_update_artifacts
+
 STAGE="verificação de alterações locais"
+clear_local_changes_marker_if_clean
 fail_local_changes_before_pull
 
 logger -t "$LOG_TAG" "Atualizando de $CURRENT_COMMIT para $REMOTE_COMMIT"

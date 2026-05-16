@@ -448,6 +448,26 @@ class BotLocal(commands.Bot):
         posix = PurePosixPath(raw_name.replace("\\", "/"))
         return tuple(part for part in posix.parts if part not in ("", "."))
 
+    def _zip_update_should_ignore_generated_file(self, rel_path: Path) -> bool:
+        """Ignora lixo de build que não deve virar commit pelo auto updater."""
+        parts = tuple(str(part) for part in rel_path.parts)
+        name = parts[-1] if parts else ""
+        if not parts:
+            return True
+        if any(part in {"__pycache__", ".gradle", ".idea"} for part in parts):
+            return True
+        if name.endswith((".pyc", ".pyo", ".tmp")):
+            return True
+        if name.startswith("build.gradle.bak") or name.endswith(".bak-sdk35"):
+            return True
+        core_worker_prefix = ("android", "core-worker-app")
+        if parts[:2] == core_worker_prefix:
+            if len(parts) >= 4 and parts[2] == "app" and parts[3] == "build":
+                return True
+            if len(parts) >= 3 and parts[2] == "releases":
+                return True
+        return False
+
     def _guess_repo_name(self, origin_url: str) -> str:
         cleaned = (origin_url or "").strip().rstrip("/")
         if cleaned.endswith(".git"):
@@ -601,6 +621,8 @@ class BotLocal(commands.Bot):
                     raise RuntimeError(f"Symlink não é permitido no ZIP: {info.filename}")
 
                 target_rel = Path(*normalized.parts)
+                if self._zip_update_should_ignore_generated_file(target_rel):
+                    continue
                 if info.is_dir():
                     (extract_dir / target_rel).mkdir(parents=True, exist_ok=True)
                     continue
@@ -761,7 +783,7 @@ class BotLocal(commands.Bot):
                 await self._send_zip_update_message(
                     message,
                     "📦 ZIP recebido",
-                    "Arquivo baixado fora do repositório. Vou validar, aplicar em clone temporário, enviar para o GitHub e deixar o updater via systemd aplicar automaticamente.",
+                    "Arquivo baixado fora do repositório. Vou validar, ignorar lixo de build, aplicar em clone temporário, enviar para o GitHub e deixar o updater via systemd aplicar automaticamente.",
                     discord.Color.blurple(),
                 )
 

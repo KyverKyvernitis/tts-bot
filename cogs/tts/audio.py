@@ -1553,6 +1553,17 @@ class TTSAudioMixin:
                         continue
 
                     current_path, should_cleanup = await active_audio_task
+                    if not current_path or not os.path.isfile(current_path) or os.path.getsize(current_path) <= 0:
+                        logger.warning(
+                            "[tts_voice] áudio temporário sumiu antes do playback; descartando item sem resetar voice | guild=%s channel=%s path=%s",
+                            guild_id,
+                            item.channel_id,
+                            current_path,
+                        )
+                        if should_cleanup and current_path:
+                            with contextlib.suppress(Exception):
+                                os.remove(current_path)
+                        continue
 
                     dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
                     queue_wait_ms = max(0.0, (dequeue_started_at - float(getattr(item, "enqueued_at_monotonic", dequeue_started_at))) * 1000.0)

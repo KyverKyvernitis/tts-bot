@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.6.4"
+PHONE_WORKER_VERSION = "1.6.5"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -2151,6 +2151,11 @@ def _prepare_termux_android_build(project_dir: Path, env: dict[str, str]) -> dic
         info["android_home"] = str(default_sdk)
 
     sdk_fallback = str(os.getenv("PHONE_WORKER_APK_BUILD_TERMUX_SDK") or "34").strip()
+    android_home = Path(env.get("ANDROID_HOME") or env.get("ANDROID_SDK_ROOT") or default_sdk).expanduser()
+    if sdk_fallback:
+        android_jar = android_home / "platforms" / f"android-{sdk_fallback}" / "android.jar"
+        info["android_jar"] = str(android_jar)
+        info["android_jar_ok"] = bool(android_jar.is_file() and android_jar.stat().st_size > 1024 * 1024)
     build_gradle = project_dir / "app" / "build.gradle"
     if sdk_fallback and build_gradle.exists():
         text = build_gradle.read_text(encoding="utf-8", errors="ignore")

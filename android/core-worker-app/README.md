@@ -10,9 +10,9 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
-## v0.4.4 — VPS fixa e assinatura pela VPS
+## v0.4.5 — updater robusto e worker builder sem sujeira local
 
-A versão `0.4.4` corrige dois pontos importantes: a URL da VPS não aparece mais como campo editável na tela normal, e APKs compilados por worker builder devem ser assinados/publicados pela VPS com uma chave fixa local para evitar conflito de pacote no Android.
+A versão `0.4.5` mantém a URL da VPS fixa na tela normal, reforça o banner único de atualização no topo e documenta que builds feitos por worker devem ser publicados/assinados pela VPS sem deixar artefatos locais no repositório.
 
 A VPS só publica/sinaliza que existe uma versão nova, e o APK cuida da experiência humana:
 
@@ -177,8 +177,8 @@ Depois de buildar o APK na VPS:
 ```bash
 cd /home/ubuntu/bot/android/core-worker-app
 mkdir -p releases
-cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.4-debug.apk
-sha256sum releases/CoreWorker-v0.4.4-debug.apk
+cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.5-debug.apk
+sha256sum releases/CoreWorker-v0.4.5-debug.apk
 ```
 
 Crie o manifesto:
@@ -186,11 +186,11 @@ Crie o manifesto:
 ```bash
 cat > releases/latest.json <<'JSON'
 {
-  "versionName": "0.4.4",
+  "versionName": "0.4.5",
   "versionCode": 9,
-  "apkUrl": "/core-worker/app/CoreWorker-v0.4.4-debug.apk",
+  "apkUrl": "/core-worker/app/CoreWorker-v0.4.5-debug.apk",
   "sha256": "COLE_AQUI_O_SHA256",
-  "requiredAgentVersion": "1.6.4",
+  "requiredAgentVersion": "1.6.5",
   "changelog": [
     "Botão Atualizar no topo apenas quando houver versão nova",
     "Notificação local quando a VPS publica atualização",

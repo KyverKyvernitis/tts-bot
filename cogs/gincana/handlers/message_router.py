@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import os
 import re
 
 import discord
@@ -9,14 +11,40 @@ _ROB_TRIGGER_RE = re.compile(r"^\s*(?:roubar|rob)\s+<@!?\d+>\s*$", re.IGNORECASE
 
 
 class GincanaMessageRouterMixin:
+    def _message_router_timeout_seconds(self) -> float:
+        try:
+            return max(1.0, float(os.getenv("GINCANA_MESSAGE_HANDLER_TIMEOUT_SECONDS", "8.0") or "8.0"))
+        except Exception:
+            return 8.0
+
     async def _safe_route_call(self, handler_name: str, message: discord.Message) -> bool:
         handler = getattr(self, handler_name, None)
         if handler is None:
             return False
+        heavy_handlers = {
+            "_handle_race_trigger",
+            "_handle_buckshot_trigger",
+            "_handle_corrida_trigger",
+            "_handle_poker_trigger",
+            "_handle_truco_trigger",
+            "_handle_carta_trigger",
+            "_handle_roleta_trigger",
+        }
         try:
-            return bool(await handler(message))
+            if handler_name in heavy_handlers:
+                return bool(await handler(message))
+            return bool(await asyncio.wait_for(handler(message), timeout=self._message_router_timeout_seconds()))
+        except asyncio.TimeoutError:
+            logging.getLogger("gincana.router").warning(
+                "handler de mensagem ignorado por timeout | handler=%s guild=%s channel=%s author=%s",
+                handler_name,
+                getattr(getattr(message, "guild", None), "id", None),
+                getattr(getattr(message, "channel", None), "id", None),
+                getattr(getattr(message, "author", None), "id", None),
+            )
+            return False
         except Exception as e:
-            print(f"[gincana][router] {handler_name} falhou: {e!r}")
+            logging.getLogger("gincana.router").warning("%s falhou: %r", handler_name, e)
             return False
 
     def _matches_exact_trigger(self, content: str | None, trigger: str) -> bool:
@@ -159,16 +187,21 @@ class GincanaMessageRouterMixin:
 
         content = message.content or ""
         normalized_content = content.strip().casefold()
+        trigger_match = bool(TRIGGER_WORD and normalized_content == TRIGGER_WORD.casefold())
+        mute_match = bool(MUTE_TOGGLE_WORD and normalized_content == MUTE_TOGGLE_WORD.casefold())
+        if not trigger_match and not mute_match:
+            return
+
         targets = self._resolve_targets(message.guild, voice_channel)
         if not targets:
             return
 
         target_ids = {member.id for member in targets}
         author_is_target = message.author.id in target_ids
-        author_is_focused_non_staff = self._is_focused_non_staff_member(message.author)
+        author_is_focused_non_staff = self._is_focused_non_staff_member(message.author) if mute_match else False
         did_trigger_action = False
 
-        if TRIGGER_WORD and normalized_content == TRIGGER_WORD.casefold():
+        if trigger_match:
             did_trigger_action = True
             trigger_voice_channel = voice_channel if isinstance(voice_channel, discord.VoiceChannel) else None
 
@@ -193,7 +226,7 @@ class GincanaMessageRouterMixin:
                     except Exception:
                         pass
 
-        if MUTE_TOGGLE_WORD and normalized_content == MUTE_TOGGLE_WORD.casefold():
+        if mute_match:
             if author_is_focused_non_staff:
                 return
             did_trigger_action = True

@@ -341,6 +341,6 @@ PHONE_WORKER_APK_BUILD_DIR=/data/data/com.termux/files/home/core-worker-apk-buil
 
 ## Builder de APK
 
-Na versão `1.6.4`, o worker pode continuar usando o perfil `builder`/`apk-builder` para compilar o Core Worker fora da VPS. O worker compila e envia o APK para a VPS, mas a VPS deve re-assinar/publicar o APK com uma chave fixa local. A chave privada não deve ficar no Termux nem no GitHub.
+Na versão `1.6.5`, o worker pode continuar usando o perfil `builder`/`apk-builder` para compilar o Core Worker fora da VPS. O worker compila e envia o APK para a VPS, mas a VPS deve re-assinar/publicar o APK com uma chave fixa local. A chave privada não deve ficar no Termux nem no GitHub.
 
 O builder em Termux tende a funcionar melhor com Android SDK 34 e `aapt2` do próprio Termux. Se o build falhar com `aapt2` ou `android.jar`, prepare o ambiente com SDK 34 e mantenha `android.aapt2FromMavenOverride` apontando para `/data/data/com.termux/files/usr/bin/aapt2`.

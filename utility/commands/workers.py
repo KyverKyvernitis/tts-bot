@@ -591,8 +591,9 @@ def _job_detail_text(job: dict[str, Any] | None) -> str:
     if job.get("error"):
         lines.append(f"Erro: `{_shorten(_redact(job.get('error')), limit=220)}`")
     interesting_keys = [
-        "version", "target_version", "scripts", "battery", "network", "ping", "tailscale",
-        "services", "ffmpeg", "ffprobe", "lines", "error_lines", "path",
+        "version", "target_version", "current_version", "apk", "publish", "builder_environment",
+        "source", "scripts", "battery", "network", "ping", "tailscale", "services",
+        "ffmpeg", "ffprobe", "lines", "error_lines", "path", "work_dir",
     ]
     shown = 0
     for key in interesting_keys:
@@ -607,10 +608,17 @@ def _job_detail_text(job: dict[str, Any] | None) -> str:
         shown += 1
         if shown >= 6:
             break
-    tail = result.get("tail")
-    if isinstance(tail, str) and tail.strip():
-        tail = _redact(tail.strip())
-        lines.append("```txt\n" + tail[-1400:] + "\n```")
+    publish = result.get("publish") if isinstance(result.get("publish"), dict) else {}
+    if publish and publish.get("ok") is False:
+        detail = publish.get("detail") or publish.get("error") or publish.get("hint")
+        if detail:
+            lines.append(f"Publicação: `{_shorten(_redact(detail), limit=360)}`")
+    for tail_key, label in (("stderr_tail", "stderr"), ("stdout_tail", "stdout"), ("tail", "log")):
+        tail = result.get(tail_key)
+        if isinstance(tail, str) and tail.strip():
+            tail = _redact(tail.strip())
+            lines.append(f"```txt\n{label}:\n" + tail[-1200:] + "\n```")
+            break
     return "\n".join(lines)[:1900]
 
 

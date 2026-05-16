@@ -56,7 +56,7 @@ import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.4.4";
+    private static final String APP_VERSION = "0.4.5";
     private static final String DEFAULT_VPS_URL = "http://100.103.240.118:10000";
     private static final String DEFAULT_VPS_LABEL = "VPS principal · 100.103.240.118:10000";
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -633,7 +633,7 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            updateUpdateUi("Atualização baixada. Confirme a instalação na tela do Android.\nArquivo: " + apkFile.getName(), true, true);
+            updateUpdateUi("Atualização baixada. Confirme a instalação na tela do Android.\nArquivo: " + apkFile.getName() + "\nSe o Android avisar conflito de pacote, a assinatura publicada pela VPS não combina com a versão instalada.", true, true);
             openApkInstaller(apkFile);
         });
     }
@@ -744,7 +744,7 @@ public class MainActivity extends Activity {
                 install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(install);
             } catch (Exception exc) {
-                refreshLocalStatus("Atualização baixada, mas não consegui abrir o instalador: " + exc.getClass().getSimpleName() + ". Abra o APK baixado manualmente nas configurações/arquivos do Android.");
+                refreshLocalStatus("Atualização baixada, mas não consegui abrir o instalador: " + exc.getClass().getSimpleName() + ". Abra o APK baixado manualmente. Se aparecer conflito de pacote, a assinatura do APK instalado e a assinatura publicada pela VPS não combinam.");
             }
         });
     }
