@@ -11,6 +11,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ WORKER_ROLE_PROFILES: dict[str, tuple[str, ...]] = {
     "leve": ("phone-worker", "diagnostics", "log-summary"),
     "midia": ("phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
     "completo": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
+    "builder": ("phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate"),
     # Futuro: usar só quando o worker realmente tiver servidor Bedrock configurado.
     "bedrock": ("phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"),
 }
@@ -55,12 +57,14 @@ WORKER_ROLE_LABELS: dict[str, str] = {
     "bedrock": "Minecraft Bedrock",
     "bedrock-logs": "Logs Bedrock",
     "bedrock-backup": "Backup Bedrock",
+    "apk-builder": "Compilar APK",
 }
 
 WORKER_ROLE_PROFILE_DESCRIPTIONS: dict[str, str] = {
     "leve": "diagnósticos e logs",
     "midia": "logs, ZIP, FFmpeg/FFprobe e TTS",
     "completo": "mídia + plano de manutenção",
+    "builder": "compilar APK fora da VPS",
     "bedrock": "Minecraft Bedrock futuro",
 }
 LEGACY_WORKER_ID = "__legacy_phone_worker__"
@@ -71,6 +75,7 @@ WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede e sistema", "emoji": "🩺", "category": "quick"},
     {"label": "Atualizar agent", "value": "worker_update", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Atualiza e reinicia", "emoji": "⬆️", "requires_declared": True, "category": "maintenance"},
     {"label": "Reparar scripts", "value": "worker_repair_scripts", "job_type": "worker_update", "payload": {"scripts_only": True}, "summary": "reinstalar scripts auxiliares do worker", "description": "Reinstala scripts", "emoji": "🛠️", "requires_declared": True, "category": "maintenance"},
+    {"label": "Buildar APK", "value": "apk_build_debug", "job_type": "apk_build_debug", "payload": {"source_zip_url": "auto", "publish": True}, "summary": "compilar APK Core Worker em worker builder", "description": "APK fora da VPS", "emoji": "🏗️", "requires_declared": True, "category": "maintenance"},
     {"label": "Reparar boot automático", "value": "boot_repair", "job_type": "boot_repair", "payload": {}, "summary": "reparar inicialização automática no Termux:Boot", "description": "Auto-start pós-reboot", "emoji": "🚀", "requires_declared": True, "category": "maintenance"},
     {"label": "Status boot", "value": "boot_status", "job_type": "boot_status", "payload": {}, "summary": "verificar inicialização automática", "description": "Termux:Boot", "emoji": "🔎", "requires_declared": True, "category": "monitor"},
     {"label": "Logs", "value": "worker_logs", "job_type": "worker_logs", "payload": {"lines": 140}, "summary": "logs recentes do phone-worker", "description": "Mostra logs recentes", "emoji": "📜", "category": "quick"},
@@ -223,6 +228,9 @@ def _normalize_worker_profile(value: object, *, default: str = "midia") -> str:
         "completo": "completo",
         "complete": "completo",
         "full": "completo",
+        "builder": "builder",
+        "build": "builder",
+        "apk-builder": "builder",
         "bedrock": "bedrock",
     }
     clean = aliases.get(clean, clean)
@@ -1248,7 +1256,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             )
             profile = discord.ui.TextInput(
                 label="Perfil",
-                placeholder="leve, midia, completo ou bedrock",
+                placeholder="leve, midia, completo, builder ou bedrock",
                 default="midia",
                 min_length=3,
                 max_length=16,
@@ -1314,7 +1322,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             "3. Copie o comando pronto e cole no Termux do celular novo.\n"
             "4. Quando terminar, toque **Atualizar**.\n\n"
             f"VPS detectada: `{base_url}`\n"
-            "Perfis: `leve` (logs), `midia` (TTS/FFmpeg), `completo` (manutenção), `bedrock` (Minecraft Bedrock futuro)."
+            "Perfis: `leve` (logs), `midia` (TTS/FFmpeg), `completo` (manutenção), `builder` (compila APK), `bedrock` (Minecraft Bedrock futuro)."
         )
         await interaction.response.send_message(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
@@ -1375,6 +1383,8 @@ class WorkersPanelView(discord.ui.LayoutView):
         try:
             if _task_name(job_type) == "worker_update":
                 payload = await self.cog._build_worker_update_payload(scripts_only=bool((payload or {}).get("scripts_only")))
+            if _task_name(job_type) == "apk_build_debug":
+                payload = await self.cog._build_apk_builder_payload(payload or {})
             if self._selected_is_legacy():
                 result = await self.cog._run_legacy_worker_action(job_type=job_type, payload=payload or {})
                 note = _shorten((result or {}).get("summary") or "ação direta concluída", limit=90)
@@ -1470,7 +1480,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         class WorkerRolesModal(discord.ui.Modal, title="Editar funções do celular"):
             profile = discord.ui.TextInput(
                 label="Perfil base",
-                placeholder="manter, leve, midia, completo ou bedrock",
+                placeholder="manter, leve, midia, completo, builder ou bedrock",
                 default="manter",
                 min_length=4,
                 max_length=16,
@@ -1778,6 +1788,57 @@ class WorkersCommandMixin:
             created_by_name=str(getattr(owner, "display_name", None) or getattr(owner, "name", "") or ""),
         )
 
+    def _read_core_worker_app_version(self) -> tuple[str, int]:
+        build_gradle = _repo_root() / "android" / "core-worker-app" / "app" / "build.gradle"
+        text = build_gradle.read_text(encoding="utf-8", errors="ignore") if build_gradle.exists() else ""
+        name_match = re.search(r"versionName\s+[\"']([^\"']+)[\"']", text)
+        code_match = re.search(r"versionCode\s+(\d+)", text)
+        return (name_match.group(1) if name_match else "0.0.0", int(code_match.group(1)) if code_match else 0)
+
+    def _prepare_core_worker_source_zip_sync(self) -> dict[str, Any]:
+        root = _repo_root()
+        project = root / "android" / "core-worker-app"
+        if not project.is_dir():
+            raise FileNotFoundError(str(project))
+        release_dir = project / "releases"
+        release_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = release_dir / "source-core-worker-app.zip"
+        excluded_dirs = {"build", ".gradle", "releases"}
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for path in sorted(project.rglob("*")):
+                rel_project = path.relative_to(project)
+                if any(part in excluded_dirs for part in rel_project.parts):
+                    continue
+                if path.is_dir():
+                    continue
+                arcname = Path("android/core-worker-app") / rel_project
+                zf.write(path, arcname.as_posix())
+        raw = zip_path.read_bytes()
+        return {
+            "path": str(zip_path),
+            "filename": zip_path.name,
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "url": f"{_public_base_url()}/core-worker/app/{zip_path.name}",
+        }
+
+    async def _build_apk_builder_payload(self, base_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(base_payload or {})
+        source = await asyncio.to_thread(self._prepare_core_worker_source_zip_sync)
+        version_name, version_code = self._read_core_worker_app_version()
+        payload.update({
+            "source_zip_url": source["url"],
+            "source_sha256": source["sha256"],
+            "source_bytes": source["bytes"],
+            "project_subdir": "android/core-worker-app",
+            "publish": True,
+            "versionName": version_name,
+            "versionCode": version_code,
+            "filename": f"CoreWorker-v{version_name}-debug.apk",
+            "changelog": ["APK compilado por worker builder", "VPS apenas publicou o resultado"],
+        })
+        return payload
+
     async def _queue_core_worker_job(
         self,
         owner: discord.abc.User,
@@ -1788,6 +1849,8 @@ class WorkersCommandMixin:
         target_worker_id: str = "",
     ) -> dict[str, Any]:
         registry = get_core_workers_registry()
+        task = _task_name(job_type)
+        is_apk_build = task == "apk_build_debug"
         return await asyncio.to_thread(
             registry.create_job,
             job_type=job_type,
@@ -1795,10 +1858,10 @@ class WorkersCommandMixin:
             created_by_id=int(getattr(owner, "id", 0) or 0),
             created_by_name=str(getattr(owner, "display_name", None) or getattr(owner, "name", "") or ""),
             target_worker_id=target_worker_id,
-            required_capabilities=["phone-worker"],
-            ttl_seconds=900,
-            lease_seconds=120,
-            max_attempts=2,
+            required_capabilities=["apk-builder"] if is_apk_build else ["phone-worker"],
+            ttl_seconds=7200 if is_apk_build else 900,
+            lease_seconds=7200 if is_apk_build else 120,
+            max_attempts=1 if is_apk_build else 2,
             summary=summary or job_type,
         )
 

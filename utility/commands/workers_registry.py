@@ -38,6 +38,7 @@ CORE_WORKER_JOB_TYPES = {
     "text_stats",
     "maintenance_plan",
     "worker_update",
+    "apk_build_debug",
     "boot_status",
     "boot_repair",
 }
@@ -566,8 +567,8 @@ class CoreWorkersRegistry:
     ) -> dict[str, Any]:
         kind = _safe_job_type(job_type)
         ts = _now()
-        ttl = max(30, min(3600, int(ttl_seconds or _env_int("CORE_WORKER_JOB_TTL_SECONDS", DEFAULT_JOB_TTL_SECONDS))))
-        lease = max(10, min(900, int(lease_seconds or _env_int("CORE_WORKER_JOB_LEASE_SECONDS", DEFAULT_JOB_LEASE_SECONDS))))
+        ttl = max(30, min(7200, int(ttl_seconds or _env_int("CORE_WORKER_JOB_TTL_SECONDS", DEFAULT_JOB_TTL_SECONDS))))
+        lease = max(10, min(7200, int(lease_seconds or _env_int("CORE_WORKER_JOB_LEASE_SECONDS", DEFAULT_JOB_LEASE_SECONDS))))
         job_id = "job-" + secrets.token_hex(8)
         record = {
             "job_id": job_id,
@@ -845,6 +846,14 @@ class CoreWorkersRegistry:
                 return {"ok": True, "job": None}
             return {"ok": True, "job": _compact_job_public(candidates[0], include_result=True, now=ts)}
 
+    def authenticate_worker(self, worker_id: str, token: str) -> dict[str, Any]:
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            safe_worker_id, worker = self._authenticate_worker_unlocked(data, worker_id=worker_id, token=token)
+            public = _compact_worker_public(worker, now=ts)
+        return {"ok": True, "worker_id": safe_worker_id, "worker": public}
+
     def rename_worker(self, worker_id: str, name: str) -> dict[str, Any]:
         safe_worker_id = _safe_worker_id(worker_id)
         clean_name = _short_text(name, limit=64)
@@ -1011,6 +1020,17 @@ def _bearer_token(headers: Mapping[str, Any]) -> str:
         if value:
             return value
     return ""
+
+
+def core_worker_authenticate_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
+    try:
+        worker_id = payload.get("worker_id") or payload.get("id")
+        result = get_core_workers_registry().authenticate_worker(str(worker_id or ""), token=_bearer_token(headers))
+        return 200, result
+    except CoreWorkerRegistryError as exc:
+        return exc.status, {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return 500, {"ok": False, "error": f"falha interna: {type(exc).__name__}"}
 
 
 def redeem_core_worker_pairing_http(payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:

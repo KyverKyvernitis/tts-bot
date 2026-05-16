@@ -298,3 +298,42 @@ Também é possível passar uma lista customizada no lugar do perfil:
 ```
 
 Com 2 ou mais workers online, o painel `workers` libera **Melhor worker disponível** e **Teste failover**. Jobs sem alvo fixo são entregues para qualquer worker compatível; se um job em execução perder lease, ele volta para a fila e outro worker compatível pode assumir.
+
+
+## Builder de APK em worker
+
+O worker pode ser marcado como `builder`/`apk-builder` para compilar o APK Core Worker fora da VPS. Isso é pensado para aliviar a VPS Oracle de 1 GB RAM.
+
+Fluxo:
+
+```text
+painel workers -> job apk_build_debug
+VPS cria source-core-worker-app.zip leve
+worker builder baixa o source zip
+worker roda gradle assembleDebug
+worker envia o APK + sha256 para /core-worker/app/publish
+VPS publica latest.json
+APK mostra Atualizar no topo quando abrir/verificar
+```
+
+Segurança:
+
+- não existe shell livre;
+- só job whitelisted `apk_build_debug`;
+- só worker com role/capability `apk-builder` recebe esse job;
+- o endpoint de publicação exige token do worker;
+- a VPS só aceita publicação de worker autenticado e com `apk-builder`.
+
+Requisitos no celular builder:
+
+- Java/Gradle/Android SDK command-line tools instalados no Termux ou ambiente compatível;
+- espaço livre suficiente;
+- perfil `builder` aplicado no APK ou funções `apk-builder` adicionadas pelo painel.
+
+Variáveis úteis:
+
+```env
+PHONE_WORKER_APK_BUILD_ENABLED=true
+PHONE_WORKER_APK_BUILD_TIMEOUT_SECONDS=3600
+PHONE_WORKER_APK_BUILD_DIR=/data/data/com.termux/files/home/core-worker-apk-builds
+```

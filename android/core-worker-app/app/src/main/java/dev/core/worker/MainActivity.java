@@ -56,7 +56,7 @@ import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.4.2";
+    private static final String APP_VERSION = "0.4.3";
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
     private static final String LOCAL_AGENT_PROFILE_URL = "http://127.0.0.1:8766/local/profile";
     private static final String LOCAL_AGENT_PAIR_URL = "http://127.0.0.1:8766/local/pair";
@@ -224,6 +224,7 @@ public class MainActivity extends Activity {
         addProfileRadio("leve", "Leve · reserva, diagnóstico e logs");
         addProfileRadio("midia", "Mídia · recomendado para FFmpeg/TTS/ZIP");
         addProfileRadio("completo", "Completo · mídia + manutenção");
+        addProfileRadio("builder", "Builder · compilar APK fora da VPS");
         addProfileRadio("bedrock", "Bedrock · Minecraft Bedrock futuro");
         profileGroup.setOnCheckedChangeListener((group, checkedId) -> {
             String profile = selectedProfile();
@@ -1332,6 +1333,9 @@ public class MainActivity extends Activity {
         if ("completo".equals(profile)) {
             return new String[]{"phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"};
         }
+        if ("builder".equals(profile)) {
+            return new String[]{"phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate"};
+        }
         if ("bedrock".equals(profile)) {
             return new String[]{"phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"};
         }
@@ -1341,6 +1345,7 @@ public class MainActivity extends Activity {
     private String profileLabel(String profile) {
         if ("leve".equals(profile)) return "Leve";
         if ("completo".equals(profile)) return "Completo";
+        if ("builder".equals(profile)) return "Builder";
         if ("bedrock".equals(profile)) return "Bedrock";
         return "Mídia";
     }
@@ -1351,6 +1356,9 @@ public class MainActivity extends Activity {
         }
         if ("completo".equals(profile)) {
             return "Principal forte: mídia, ZIP, TTS, FFmpeg e manutenção.";
+        }
+        if ("builder".equals(profile)) {
+            return "Compila APK do Core Worker em um celular builder para aliviar a VPS. Use só em aparelho forte.";
         }
         if ("bedrock".equals(profile)) {
             return "Preparado para Minecraft Bedrock no futuro. Não assume Java.";

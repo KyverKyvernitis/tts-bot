@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.6.2"
+PHONE_WORKER_VERSION = "1.6.3"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -65,6 +65,7 @@ SUPPORTED_DIRECT_TASKS = (
     "worker_logs",
     "worker_self_check",
     "worker_update",
+    "apk_build_debug",
     "boot_status",
     "boot_repair",
     "zip",
@@ -89,6 +90,7 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "worker_logs",
     "worker_self_check",
     "worker_update",
+    "apk_build_debug",
     "boot_status",
     "boot_repair",
     "zip_validate",
@@ -109,6 +111,11 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "label": "Completo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"],
         "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+    },
+    "builder": {
+        "label": "Builder",
+        "roles": ["phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate", "worker-logs", "network-probe", "tailscale-status"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -209,6 +216,22 @@ def _core_worker_profile_roles(profile: Any) -> list[str]:
 def _core_worker_profile_capabilities(profile: Any) -> list[str]:
     normalized = _normalize_core_worker_profile(profile)
     return list(CORE_WORKER_PROFILE_PRESETS[normalized].get("capabilities") or CORE_WORKER_PROFILE_PRESETS["midia"]["capabilities"])
+
+
+def _current_core_worker_roles_and_capabilities() -> tuple[list[str], list[str]]:
+    profile = _current_core_worker_profile()
+    roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
+    capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
+    return roles, capabilities
+
+
+def _supported_core_worker_job_types() -> list[str]:
+    roles, capabilities = _current_core_worker_roles_and_capabilities()
+    allowed = list(SUPPORTED_CORE_WORKER_JOB_TYPES)
+    # Build Android é pesado e só deve aparecer para celular escolhido como builder.
+    if "apk-builder" not in set(roles + capabilities):
+        allowed = [item for item in allowed if item != "apk_build_debug"]
+    return allowed
 
 
 def _current_core_worker_profile() -> str:
@@ -834,7 +857,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "endpoint": endpoint,
         "roles": roles[:16],
         "capabilities": capabilities[:24],
-        "supported_tasks": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
+        "supported_tasks": _supported_core_worker_job_types(),
         "battery": _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot()),
         "network": _safe_telemetry("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}),
         "health": {
@@ -1042,7 +1065,7 @@ def _system_status() -> dict[str, Any]:
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "supervisor": _safe_telemetry("supervisor", _runtime_supervisor_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "supported_tasks": list(SUPPORTED_DIRECT_TASKS),
-        "supported_core_worker_jobs": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
+        "supported_core_worker_jobs": _supported_core_worker_job_types(),
         "pid": os.getpid(),
         "uptime_seconds": round(time.time() - START_TIME, 3),
         "platform": platform.platform(),
@@ -1075,7 +1098,7 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "profile_label": _core_worker_profile_label(profile),
         "roles": _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))[:16],
         "capabilities": _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))[:24],
-        "supported_tasks": list(SUPPORTED_CORE_WORKER_JOB_TYPES),
+        "supported_tasks": _supported_core_worker_job_types(),
         "vps_configured": _heartbeat_configured(),
         "jobs_configured": _core_worker_jobs_configured(),
         "vps_url": str(os.getenv("CORE_WORKER_VPS_URL") or os.getenv("CORE_WORKER_BASE_URL") or "").strip(),
@@ -1291,7 +1314,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload.setdefault("summary", "status direto coletado")
             elif task in {"diagnostic_basic", "worker_self_check"}:
                 payload = _execute_core_worker_job({"type": "worker_self_check", "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
-            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
+            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "apk_build_debug", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
                 payload = _execute_core_worker_job({"type": task, "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
             elif task == "sha256":
                 payload = self._task_sha256(body)
@@ -2077,6 +2100,196 @@ def _run_service_action(service: str, action: str) -> dict[str, Any]:
 
 
 
+
+
+def _safe_extract_zip_file(zip_path: Path, target_dir: Path, *, max_members: int = 6000) -> int:
+    target_root = target_dir.resolve()
+    count = 0
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.infolist():
+            if count >= max_members:
+                raise ValueError("source zip com arquivos demais")
+            name = str(member.filename or "").replace("\\", "/")
+            if not name or name.startswith("/") or ".." in name.split("/"):
+                raise ValueError(f"caminho inseguro no zip: {name[:80]}")
+            destination = (target_root / name).resolve()
+            if destination != target_root and not str(destination).startswith(str(target_root) + os.sep):
+                raise ValueError(f"caminho fora da pasta do build: {name[:80]}")
+            if member.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as src, destination.open("wb") as dst:
+                shutil.copyfileobj(src, dst, length=128 * 1024)
+            count += 1
+    return count
+
+
+def _read_android_version(project_dir: Path) -> tuple[str, int]:
+    build_gradle = project_dir / "app" / "build.gradle"
+    text = build_gradle.read_text(encoding="utf-8", errors="ignore") if build_gradle.exists() else ""
+    name_match = re.search(r"versionName\s+[\"']([^\"']+)[\"']", text)
+    code_match = re.search(r"versionCode\s+(\d+)", text)
+    version_name = name_match.group(1) if name_match else "0.0.0"
+    version_code = int(code_match.group(1)) if code_match else 0
+    return version_name, version_code
+
+
+def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str, version_code: int, sha256: str, publish_url: str, changelog: list[str] | None = None) -> dict[str, Any]:
+    base_url, token, worker_id = _core_worker_auth_parts()
+    if not token or not worker_id:
+        return {"ok": False, "error": "worker não pareado; não posso publicar APK"}
+    publish_url = str(publish_url or "").strip() or f"{base_url}/core-worker/app/publish"
+    boundary = "----CoreWorkerApkBoundary" + hashlib.sha256(f"{time.time()}:{os.getpid()}".encode()).hexdigest()[:24]
+
+    def field(name: str, value: Any) -> bytes:
+        return (
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+            f"{value}\r\n"
+        ).encode("utf-8")
+
+    apk_bytes = apk_path.read_bytes()
+    parts = [
+        field("worker_id", worker_id),
+        field("filename", filename),
+        field("versionName", version_name),
+        field("versionCode", int(version_code or 0)),
+        field("sha256", sha256),
+        field("requiredAgentVersion", PHONE_WORKER_VERSION),
+        field("changelog", json.dumps(changelog or ["APK compilado por worker builder"], ensure_ascii=False)),
+        (
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"apk\"; filename=\"{filename}\"\r\n"
+            f"Content-Type: application/vnd.android.package-archive\r\n\r\n"
+        ).encode("utf-8"),
+        apk_bytes,
+        b"\r\n",
+        f"--{boundary}--\r\n".encode("utf-8"),
+    ]
+    body = b"".join(parts)
+    req = urllib.request.Request(
+        publish_url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=max(5.0, _env_float("PHONE_WORKER_APK_PUBLISH_TIMEOUT_SECONDS", 60.0))) as resp:
+            raw = resp.read(256 * 1024)
+            data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+            return data if isinstance(data, dict) else {"ok": False, "error": "resposta inválida da VPS"}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read(64 * 1024).decode("utf-8", errors="replace")
+        return {"ok": False, "status": int(exc.code), "error": _short_text(raw or exc, limit=240)}
+
+
+def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
+    roles, capabilities = _current_core_worker_roles_and_capabilities()
+    if "apk-builder" not in set(roles + capabilities):
+        raise PermissionError("este worker não tem função apk-builder")
+    if not _env_bool("PHONE_WORKER_APK_BUILD_ENABLED", True):
+        raise PermissionError("build de APK desativado neste worker")
+
+    source_url = str(payload.get("source_zip_url") or os.getenv("PHONE_WORKER_APK_BUILD_SOURCE_URL") or "").strip()
+    if not source_url:
+        raise ValueError("source_zip_url ausente; publique source-core-worker-app.zip na VPS")
+    expected_source_sha = str(payload.get("source_sha256") or "").strip().lower()
+    project_subdir = str(payload.get("project_subdir") or "android/core-worker-app").strip().strip("/")
+    if not project_subdir or project_subdir.startswith("/") or ".." in project_subdir.split("/"):
+        raise ValueError("project_subdir inválido")
+
+    build_root = Path(os.getenv("PHONE_WORKER_APK_BUILD_DIR") or (Path.home() / "core-worker-apk-builds")).expanduser()
+    work_dir = build_root / f"build-{int(time.time())}-{os.getpid()}"
+    source_zip = work_dir / "source.zip"
+    timeout_seconds = max(60, _env_int("PHONE_WORKER_APK_BUILD_TIMEOUT_SECONDS", 3600))
+    max_source_bytes = max(1024 * 1024, _env_int("PHONE_WORKER_APK_BUILD_SOURCE_MAX_BYTES", 220 * 1024 * 1024))
+    keep_workdir = _env_bool("PHONE_WORKER_APK_BUILD_KEEP_WORKDIR", False)
+    started = time.time()
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        download = _download_url_to_file(source_url, source_zip, timeout=60.0, max_bytes=max_source_bytes)
+        if not download.get("ok"):
+            return {"ok": False, "summary": "falha baixando fonte do APK", "download": download}
+        if expected_source_sha and expected_source_sha != str(download.get("sha256") or "").lower():
+            return {"ok": False, "summary": "sha256 do source zip divergente", "expected": expected_source_sha, "actual": download.get("sha256")}
+        source_dir = work_dir / "src"
+        members = _safe_extract_zip_file(source_zip, source_dir)
+        project_dir = (source_dir / project_subdir).resolve()
+        if not project_dir.is_dir():
+            # Compatibilidade: zip pode ter a pasta android/core-worker-app como raiz direta.
+            alt = source_dir / "core-worker-app"
+            if alt.is_dir():
+                project_dir = alt.resolve()
+            else:
+                raise FileNotFoundError(f"projeto Android não encontrado: {project_subdir}")
+        version_name, version_code = _read_android_version(project_dir)
+        version_name = str(payload.get("versionName") or payload.get("version_name") or version_name)
+        version_code = int(payload.get("versionCode") or payload.get("version_code") or version_code or 0)
+        gradlew = project_dir / "gradlew"
+        if gradlew.exists():
+            gradlew.chmod(0o755)
+            cmd = [str(gradlew), "assembleDebug", "--no-daemon", "--max-workers=1"]
+        else:
+            if not shutil.which("gradle"):
+                raise FileNotFoundError("gradle não encontrado no worker builder")
+            cmd = ["gradle", "assembleDebug", "--no-daemon", "--max-workers=1"]
+        env = os.environ.copy()
+        if not env.get("ANDROID_HOME"):
+            default_sdk = Path.home() / "android-sdk"
+            if default_sdk.exists():
+                env["ANDROID_HOME"] = str(default_sdk)
+                env.setdefault("ANDROID_SDK_ROOT", str(default_sdk))
+                env["PATH"] = f"{default_sdk}/cmdline-tools/latest/bin:{default_sdk}/platform-tools:" + env.get("PATH", "")
+        proc = subprocess.run(cmd, cwd=str(project_dir), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds)
+        stdout = _sanitize_log_text(proc.stdout or "", limit=18000)
+        stderr = _sanitize_log_text(proc.stderr or "", limit=18000)
+        if proc.returncode != 0:
+            return {"ok": False, "summary": "build do APK falhou", "returncode": proc.returncode, "stdout_tail": stdout[-9000:], "stderr_tail": stderr[-9000:], "work_dir": str(work_dir)}
+        apk_candidates = sorted((project_dir / "app" / "build" / "outputs" / "apk" / "debug").glob("*.apk"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if not apk_candidates:
+            return {"ok": False, "summary": "build terminou mas APK não foi encontrado", "work_dir": str(work_dir)}
+        apk_path = apk_candidates[0]
+        raw = apk_path.read_bytes()
+        apk_sha = hashlib.sha256(raw).hexdigest()
+        filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or f"CoreWorker-v{version_name}-debug.apk")).strip("-._")
+        if not filename.lower().endswith(".apk"):
+            filename += ".apk"
+        result: dict[str, Any] = {
+            "ok": True,
+            "summary": f"APK {version_name} compilado pelo worker",
+            "versionName": version_name,
+            "versionCode": version_code,
+            "apk": {"filename": filename, "bytes": len(raw), "sha256": apk_sha},
+            "source": {"url": source_url, "bytes": download.get("bytes"), "sha256": download.get("sha256"), "files": members},
+            "duration_seconds": round(time.time() - started, 3),
+        }
+        if bool(payload.get("publish", True)):
+            publish_url = str(payload.get("publish_url") or "").strip()
+            base_url, _token, _worker_id = _core_worker_auth_parts()
+            publish = _upload_core_worker_apk(
+                apk_path,
+                filename=filename,
+                version_name=version_name,
+                version_code=version_code,
+                sha256=apk_sha,
+                publish_url=publish_url or f"{base_url}/core-worker/app/publish",
+                changelog=list(payload.get("changelog") or ["APK compilado por worker builder"]),
+            )
+            result["publish"] = publish
+            if not bool(publish.get("ok", False)):
+                result["ok"] = False
+                result["summary"] = "APK compilado, mas publicação na VPS falhou"
+        return result
+    finally:
+        if not keep_workdir:
+            with contextlib.suppress(Exception):
+                shutil.rmtree(work_dir)
+
 _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker.py": ("worker", "phone_worker.py", 0o755),
     "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
@@ -2287,6 +2500,9 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
         elif kind == "worker_update":
             result = _apply_worker_update(payload)
             result.setdefault("summary", "arquivos do phone-worker atualizados")
+        elif kind == "apk_build_debug":
+            result = _apply_apk_build_debug(payload)
+            result.setdefault("summary", "APK compilado/publicado pelo worker")
         elif kind == "boot_status":
             result = _termux_boot_status_snapshot()
             result.setdefault("summary", "status do boot automático coletado")

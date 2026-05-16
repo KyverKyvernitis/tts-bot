@@ -10,9 +10,9 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
-## v0.4.2 — atualização simples pelo próprio APK
+## v0.4.3 — atualização simples pelo próprio APK
 
-A versão `0.4.2` corrige a direção do update: o painel `workers` não tenta mais baixar/instalar APK nos celulares. A VPS só publica/sinaliza que existe uma versão nova, e o APK cuida da experiência humana:
+A versão `0.4.3` corrige a direção do update: o painel `workers` não tenta mais baixar/instalar APK nos celulares. A VPS só publica/sinaliza que existe uma versão nova, e o APK cuida da experiência humana:
 
 - o APK consulta `/core-worker/app/latest.json`;
 - se houver versão nova, mostra um aviso no topo com botão **Atualizar**;
@@ -174,8 +174,8 @@ Depois de buildar o APK na VPS:
 ```bash
 cd /home/ubuntu/bot/android/core-worker-app
 mkdir -p releases
-cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.2-debug.apk
-sha256sum releases/CoreWorker-v0.4.2-debug.apk
+cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.3-debug.apk
+sha256sum releases/CoreWorker-v0.4.3-debug.apk
 ```
 
 Crie o manifesto:
@@ -183,9 +183,9 @@ Crie o manifesto:
 ```bash
 cat > releases/latest.json <<'JSON'
 {
-  "versionName": "0.4.2",
+  "versionName": "0.4.3",
   "versionCode": 7,
-  "apkUrl": "/core-worker/app/CoreWorker-v0.4.2-debug.apk",
+  "apkUrl": "/core-worker/app/CoreWorker-v0.4.3-debug.apk",
   "sha256": "COLE_AQUI_O_SHA256",
   "requiredAgentVersion": "1.6.2",
   "changelog": [
@@ -241,3 +241,23 @@ Fases esperadas:
 4. Futuro grande: rede privada embutida/própria estilo VPN, provavelmente WireGuard/userspace ou equivalente.
 
 Mesmo no futuro, a VPS/Discord deve continuar como cérebro/orquestrador e segredos devem continuar fora do GitHub.
+
+
+## APK compilado por worker builder
+
+Para evitar travar a VPS Oracle de 1 GB RAM, o painel `workers` pode enviar o job **Buildar APK** para um celular com perfil/função `builder` (`apk-builder`).
+
+O fluxo é:
+
+```text
+VPS empacota android/core-worker-app em source-core-worker-app.zip
+worker builder baixa o source
+worker compila o APK
+worker envia APK + sha256 para a VPS
+VPS atualiza latest.json
+Core Worker APK mostra Atualizar no topo quando houver versão nova
+```
+
+A VPS continua só como orquestradora/publicadora. O build pesado fica no worker.
+
+No Android comum, a instalação ainda exige confirmação do usuário.
