@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.6.3"
+PHONE_WORKER_VERSION = "1.6.4"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -2125,6 +2125,63 @@ def _safe_extract_zip_file(zip_path: Path, target_dir: Path, *, max_members: int
     return count
 
 
+
+def _is_termux_runtime() -> bool:
+    prefix = os.getenv("PREFIX") or ""
+    return "com.termux" in prefix or Path("/data/data/com.termux/files/usr").exists()
+
+
+def _prepare_termux_android_build(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
+    """Ajustes seguros para build Android dentro do Termux.
+
+    O Android Gradle Plugin tenta baixar um aapt2 Linux comum que não roda no
+    Android/Termux. Quando existir aapt2 do Termux, forçamos o override global.
+    Também permitimos fallback para SDK 34, que é o caminho que funcionou no
+    builder do usuário.
+    """
+    info: dict[str, Any] = {"termux": _is_termux_runtime()}
+    if not info["termux"] or not _env_bool("PHONE_WORKER_APK_BUILD_TERMUX_TWEAKS", True):
+        return info
+
+    default_sdk = Path.home() / "android-sdk"
+    if not env.get("ANDROID_HOME") and default_sdk.exists():
+        env["ANDROID_HOME"] = str(default_sdk)
+        env.setdefault("ANDROID_SDK_ROOT", str(default_sdk))
+        env["PATH"] = f"{default_sdk}/cmdline-tools/latest/bin:{default_sdk}/platform-tools:" + env.get("PATH", "")
+        info["android_home"] = str(default_sdk)
+
+    sdk_fallback = str(os.getenv("PHONE_WORKER_APK_BUILD_TERMUX_SDK") or "34").strip()
+    build_gradle = project_dir / "app" / "build.gradle"
+    if sdk_fallback and build_gradle.exists():
+        text = build_gradle.read_text(encoding="utf-8", errors="ignore")
+        changed = re.sub(r"(compileSdk\s*=?\s*)\d+", rf"\g<1>{sdk_fallback}", text)
+        changed = re.sub(r"(targetSdk\s*=?\s*)\d+", rf"\g<1>{sdk_fallback}", changed)
+        if changed != text:
+            build_gradle.write_text(changed, encoding="utf-8")
+            info["sdk_fallback"] = sdk_fallback
+
+    aapt2_path = shutil.which("aapt2")
+    if aapt2_path:
+        gradle_dir = Path.home() / ".gradle"
+        gradle_dir.mkdir(parents=True, exist_ok=True)
+        props = gradle_dir / "gradle.properties"
+        line = f"android.aapt2FromMavenOverride={aapt2_path}"
+        lines = props.read_text(encoding="utf-8", errors="ignore").splitlines() if props.exists() else []
+        replaced = False
+        new_lines = []
+        for existing in lines:
+            if existing.startswith("android.aapt2FromMavenOverride="):
+                new_lines.append(line)
+                replaced = True
+            else:
+                new_lines.append(existing)
+        if not replaced:
+            new_lines.append(line)
+        props.write_text("\n".join(new_lines).strip() + "\n", encoding="utf-8")
+        info["aapt2_override"] = aapt2_path
+    return info
+
+
 def _read_android_version(project_dir: Path) -> tuple[str, int]:
     build_gradle = project_dir / "app" / "build.gradle"
     text = build_gradle.read_text(encoding="utf-8", errors="ignore") if build_gradle.exists() else ""
@@ -2227,6 +2284,8 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 project_dir = alt.resolve()
             else:
                 raise FileNotFoundError(f"projeto Android não encontrado: {project_subdir}")
+        env = os.environ.copy()
+        builder_environment = _prepare_termux_android_build(project_dir, env)
         version_name, version_code = _read_android_version(project_dir)
         version_name = str(payload.get("versionName") or payload.get("version_name") or version_name)
         version_code = int(payload.get("versionCode") or payload.get("version_code") or version_code or 0)
@@ -2238,7 +2297,6 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             if not shutil.which("gradle"):
                 raise FileNotFoundError("gradle não encontrado no worker builder")
             cmd = ["gradle", "assembleDebug", "--no-daemon", "--max-workers=1"]
-        env = os.environ.copy()
         if not env.get("ANDROID_HOME"):
             default_sdk = Path.home() / "android-sdk"
             if default_sdk.exists():
@@ -2266,6 +2324,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             "versionCode": version_code,
             "apk": {"filename": filename, "bytes": len(raw), "sha256": apk_sha},
             "source": {"url": source_url, "bytes": download.get("bytes"), "sha256": download.get("sha256"), "files": members},
+            "builder_environment": builder_environment,
             "duration_seconds": round(time.time() - started, 3),
         }
         if bool(payload.get("publish", True)):

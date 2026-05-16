@@ -38,7 +38,7 @@ X-Phone-Worker-Token: <PHONE_WORKER_TOKEN>
 
 ## Ponte local com o APK Core Worker
 
-O APK v0.3.1 usa apenas rotas locais, sempre em `127.0.0.1`, para não transformar o app em painel avançado:
+O APK usa apenas rotas locais, sempre em `127.0.0.1`, para não transformar o app em painel avançado:
 
 ```txt
 GET  http://127.0.0.1:8766/local/status
@@ -58,7 +58,7 @@ Essas rotas:
 
 Quando o perfil é atualizado, o worker salva `CORE_WORKER_PROFILE`, `CORE_WORKER_ROLES` e `CORE_WORKER_CAPABILITIES` no `~/.phone-worker.env` e tenta mandar um heartbeat para a VPS se o registry já estiver configurado.
 
-Na versão `1.6.0`, o APK também pode pedir pareamento local por `POST /local/pair`. Essa rota recebe `vps_url`, `code`, `name` e `profile`, chama o pareamento real da VPS a partir do próprio Termux worker e salva `CORE_WORKER_ID`/`CORE_WORKER_TOKEN` apenas no `~/.phone-worker.env`. O token não volta para o APK. Assim o APK não cria um registro `apk-*` duplicado no registry.
+Desde a versão `1.6.0`, o APK também pode pedir pareamento local por `POST /local/pair`. Essa rota recebe `vps_url`, `code`, `name` e `profile`, chama o pareamento real da VPS a partir do próprio Termux worker e salva `CORE_WORKER_ID`/`CORE_WORKER_TOKEN` apenas no `~/.phone-worker.env`. O token não volta para o APK. Assim o APK não cria um registro `apk-*` duplicado no registry.
 
 `POST /local/heartbeat` apenas pede para o Termux worker enviar um heartbeat imediato para a VPS. O APK não envia heartbeat próprio.
 
@@ -337,3 +337,10 @@ PHONE_WORKER_APK_BUILD_ENABLED=true
 PHONE_WORKER_APK_BUILD_TIMEOUT_SECONDS=3600
 PHONE_WORKER_APK_BUILD_DIR=/data/data/com.termux/files/home/core-worker-apk-builds
 ```
+
+
+## Builder de APK
+
+Na versão `1.6.4`, o worker pode continuar usando o perfil `builder`/`apk-builder` para compilar o Core Worker fora da VPS. O worker compila e envia o APK para a VPS, mas a VPS deve re-assinar/publicar o APK com uma chave fixa local. A chave privada não deve ficar no Termux nem no GitHub.
+
+O builder em Termux tende a funcionar melhor com Android SDK 34 e `aapt2` do próprio Termux. Se o build falhar com `aapt2` ou `android.jar`, prepare o ambiente com SDK 34 e mantenha `android.aapt2FromMavenOverride` apontando para `/data/data/com.termux/files/usr/bin/aapt2`.

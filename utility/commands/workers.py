@@ -1835,7 +1835,7 @@ class WorkersCommandMixin:
             "versionName": version_name,
             "versionCode": version_code,
             "filename": f"CoreWorker-v{version_name}-debug.apk",
-            "changelog": ["APK compilado por worker builder", "VPS apenas publicou o resultado"],
+            "changelog": ["APK compilado por worker builder", "VPS assinou e publicou o resultado", "URL da VPS fixa no APK"],
         })
         return payload
 

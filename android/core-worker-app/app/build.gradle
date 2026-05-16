@@ -4,14 +4,14 @@ plugins {
 
 android {
     namespace "dev.core.worker"
-    compileSdk 35
+    compileSdk 34
 
     defaultConfig {
         applicationId "dev.core.worker"
         minSdk 26
-        targetSdk 35
-        versionCode 8
-        versionName "0.4.3"
+        targetSdk 34
+        versionCode 9
+        versionName "0.4.4"
     }
 
     buildFeatures {

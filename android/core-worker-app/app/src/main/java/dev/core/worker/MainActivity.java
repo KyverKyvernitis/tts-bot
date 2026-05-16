@@ -56,7 +56,9 @@ import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.4.3";
+    private static final String APP_VERSION = "0.4.4";
+    private static final String DEFAULT_VPS_URL = "http://100.103.240.118:10000";
+    private static final String DEFAULT_VPS_LABEL = "VPS principal · 100.103.240.118:10000";
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
     private static final String LOCAL_AGENT_PROFILE_URL = "http://127.0.0.1:8766/local/profile";
     private static final String LOCAL_AGENT_PAIR_URL = "http://127.0.0.1:8766/local/pair";
@@ -74,6 +76,7 @@ public class MainActivity extends Activity {
 
     private SharedPreferences prefs;
     private EditText serverUrlInput;
+    private TextView serverInfoText;
     private EditText pairCodeInput;
     private EditText deviceNameInput;
     private RadioGroup profileGroup;
@@ -191,11 +194,16 @@ public class MainActivity extends Activity {
 
         LinearLayout connectCard = cardWithTopMargin(root);
         connectCard.addView(sectionTitle("2. Conectar à VPS"));
-        connectCard.addView(smallText("Gere um código no painel workers do Discord. O APK entrega o código ao worker local do Termux, então não cria celular duplicado no registry."));
+        connectCard.addView(smallText("Gere um código no painel workers do Discord. O APK usa sempre a VPS atual do projeto e entrega o código ao worker local do Termux, então não cria celular duplicado no registry."));
 
-        serverUrlInput = input("URL da VPS", "http://100.x.x.x:10000");
-        connectCard.addView(label("URL da VPS"));
-        connectCard.addView(serverUrlInput);
+        serverUrlInput = input("", DEFAULT_VPS_URL);
+        serverUrlInput.setVisibility(View.GONE);
+        connectCard.addView(label("Servidor"));
+        serverInfoText = smallText("Servidor atual: " + DEFAULT_VPS_LABEL);
+        serverInfoText.setTextColor(TEXT);
+        serverInfoText.setBackgroundColor(CARD_SOFT);
+        serverInfoText.setPadding(dp(10), dp(10), dp(10), dp(10));
+        connectCard.addView(serverInfoText);
 
         pairCodeInput = input("Código CORE-XXXX", "CORE-XXXXXXXX");
         pairCodeInput.setAllCaps(true);
@@ -371,7 +379,7 @@ public class MainActivity extends Activity {
     }
 
     private void loadInputs() {
-        serverUrlInput.setText(prefs.getString("server_url", ""));
+        serverUrlInput.setText(DEFAULT_VPS_URL);
         pairCodeInput.setText("");
         deviceNameInput.setText(prefs.getString("device_name", defaultDeviceName()));
         String profile = prefs.getString("profile", "midia");
@@ -389,7 +397,7 @@ public class MainActivity extends Activity {
     private void testServer() {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
-            refreshLocalStatus("Informe a URL da VPS antes de testar.");
+            refreshLocalStatus("Servidor da VPS não configurado no APK.");
             return;
         }
         runBusy("Testando conexão com a VPS...", () -> {
@@ -414,8 +422,8 @@ public class MainActivity extends Activity {
         String code = pairCodeInput.getText().toString().trim();
         String name = deviceNameInput.getText().toString().trim();
         String profile = selectedProfile();
-        if (serverUrl.isEmpty() || code.isEmpty() || name.isEmpty()) {
-            refreshLocalStatus("Preencha URL da VPS, código CORE e nome do celular.");
+        if (code.isEmpty() || name.isEmpty()) {
+            refreshLocalStatus("Preencha o código CORE e o nome do celular.");
             return;
         }
         saveLocalFields(profile);
@@ -517,7 +525,7 @@ public class MainActivity extends Activity {
     private void autoCheckForUpdate() {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
-            updateUpdateUi("Versão instalada: " + APP_VERSION + "\nAtualização: informe a URL da VPS para verificar.", false, false);
+            updateUpdateUi("Versão instalada: " + APP_VERSION + "\nAtualização: VPS padrão não configurada no APK.", false, false);
             return;
         }
         new Thread(() -> {
@@ -532,7 +540,7 @@ public class MainActivity extends Activity {
     private void checkForUpdate() {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
-            refreshLocalStatus("Informe a URL da VPS antes de procurar atualização.");
+            refreshLocalStatus("Servidor da VPS não configurado no APK.");
             return;
         }
         runBusy("Procurando atualização na VPS...", () -> checkForUpdateInternal(serverUrl, true));
@@ -591,7 +599,7 @@ public class MainActivity extends Activity {
     private void downloadAndInstallUpdate() {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
-            refreshLocalStatus("Informe a URL da VPS antes de atualizar.");
+            refreshLocalStatus("Servidor da VPS não configurado no APK.");
             return;
         }
         runBusy("Baixando atualização...", () -> {
@@ -803,7 +811,7 @@ public class MainActivity extends Activity {
 
     private void saveLocalFields(String profile) {
         prefs.edit()
-                .putString("server_url", normalizedServerUrl())
+                .putString("server_url", DEFAULT_VPS_URL)
                 .putString("device_name", deviceNameInput.getText().toString().trim())
                 .putString("profile", profile)
                 .apply();
@@ -1086,7 +1094,7 @@ public class MainActivity extends Activity {
 
     private boolean hasPairing() {
         boolean pairedViaLocal = prefs.getBoolean("paired_via_local_agent", false);
-        String serverUrl = prefs.getString("server_url", "");
+        String serverUrl = prefs.getString("server_url", DEFAULT_VPS_URL);
         String workerId = prefs.getString("worker_id", "");
         return pairedViaLocal && serverUrl != null && !serverUrl.isEmpty() && workerId != null && !workerId.isEmpty();
     }
@@ -1171,7 +1179,7 @@ public class MainActivity extends Activity {
         }
         String workerId = localAgentWorkerId != null && !localAgentWorkerId.trim().isEmpty() ? localAgentWorkerId : prefs.getString("worker_id", "");
         boolean paired = hasPairing();
-        String server = prefs.getString("server_url", normalizedServerUrl());
+        String server = normalizedServerUrl();
         String profile = prefs.getString("profile", selectedProfileSafe());
         StringBuilder builder = new StringBuilder();
         builder.append("Resumo\n");
@@ -1183,7 +1191,7 @@ public class MainActivity extends Activity {
         builder.append("Este celular\n");
         builder.append("Conectado: ").append(paired ? "sim" : "não").append('\n');
         builder.append("Perfil: ").append(profileLabel(profile)).append('\n');
-        builder.append("VPS: ").append(server == null || server.isEmpty() ? "não definida" : server).append('\n');
+        builder.append("VPS: ").append(serverDisplayLabel()).append('\n');
         if (workerId != null && !workerId.trim().isEmpty()) {
             builder.append("Worker ID: ").append(workerId).append('\n');
         }
@@ -1255,7 +1263,7 @@ public class MainActivity extends Activity {
     }
 
     private String prepareChecklistText() {
-        String server = prefs == null ? "" : prefs.getString("server_url", "");
+        String server = normalizedServerUrl();
         StringBuilder builder = new StringBuilder();
         builder.append(checkLine("Termux", isPackageInstalled("com.termux") ? "instalado" : "precisa instalar")).append('\n');
         builder.append(checkLine("Termux:API", isPackageInstalled("com.termux.api") ? "instalado" : "precisa instalar")).append('\n');
@@ -1284,12 +1292,11 @@ public class MainActivity extends Activity {
     }
 
     private String normalizedServerUrl() {
-        String raw = serverUrlInput == null ? prefs.getString("server_url", "") : serverUrlInput.getText().toString();
-        raw = raw == null ? "" : raw.trim();
-        while (raw.endsWith("/")) {
-            raw = raw.substring(0, raw.length() - 1);
-        }
-        return raw;
+        return DEFAULT_VPS_URL;
+    }
+
+    private String serverDisplayLabel() {
+        return DEFAULT_VPS_LABEL;
     }
 
     private String selectedProfile() {

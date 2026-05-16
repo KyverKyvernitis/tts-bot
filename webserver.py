@@ -8,6 +8,11 @@ import contextlib
 import threading
 import time
 import uuid
+import shutil
+import subprocess
+import tempfile
+import zipfile
+from pathlib import Path
 
 app = Flask(__name__)
 
@@ -57,6 +62,143 @@ def _json_field(value: str, fallback):
         return parsed
     except Exception:
         return fallback
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "y", "on", "sim"}
+
+
+def _expand_path(value: str | None) -> str:
+    return os.path.abspath(os.path.expanduser(str(value or "")))
+
+
+def _find_android_build_tool(tool: str) -> str | None:
+    explicit = os.getenv(f"CORE_WORKER_APK_{tool.upper()}")
+    if explicit and os.path.isfile(_expand_path(explicit)):
+        return _expand_path(explicit)
+    found = shutil.which(tool)
+    if found:
+        return found
+    roots = []
+    for env_name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        root = os.getenv(env_name)
+        if root:
+            roots.append(_expand_path(root))
+    roots.extend([
+        _expand_path("~/android-sdk"),
+        _expand_path("~/Android/Sdk"),
+        "/opt/android-sdk",
+        "/usr/lib/android-sdk",
+    ])
+    candidates: list[str] = []
+    for root in dict.fromkeys(roots):
+        build_tools = os.path.join(root, "build-tools")
+        if not os.path.isdir(build_tools):
+            continue
+        for version in sorted(os.listdir(build_tools), reverse=True):
+            candidates.append(os.path.join(build_tools, version, tool))
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _strip_apk_signatures(source: str, target: str) -> None:
+    """Recria o APK removendo assinaturas antigas.
+
+    Isso evita publicar APK assinado com a chave debug do worker. A regravação do
+    ZIP também remove blocos de assinatura v2/v3, e depois a VPS assina com uma
+    chave fixa local.
+    """
+    with zipfile.ZipFile(source, "r") as zin, zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            name = str(info.filename or "")
+            upper = name.upper()
+            if upper.startswith("META-INF/") and (
+                upper.endswith(".RSA") or upper.endswith(".DSA") or upper.endswith(".EC") or upper.endswith(".SF") or upper == "META-INF/MANIFEST.MF"
+            ):
+                continue
+            data = zin.read(info.filename)
+            info.date_time = info.date_time or (1980, 1, 1, 0, 0, 0)
+            zout.writestr(info, data)
+
+
+def _fixed_apk_signing_config() -> dict[str, str] | None:
+    mode = str(os.getenv("CORE_WORKER_APK_SIGNING_MODE") or "debug").strip().lower()
+    if mode in {"off", "none", "disabled", "false", "0"} or _env_bool("CORE_WORKER_APK_SIGNING_DISABLED", False):
+        return None
+    if mode == "debug":
+        keystore = _expand_path(os.getenv("CORE_WORKER_APK_KEYSTORE") or "~/.android/debug.keystore")
+        return {
+            "mode": "debug",
+            "keystore": keystore,
+            "alias": os.getenv("CORE_WORKER_APK_KEY_ALIAS") or "androiddebugkey",
+            "storepass": os.getenv("CORE_WORKER_APK_KEYSTORE_PASSWORD") or "android",
+            "keypass": os.getenv("CORE_WORKER_APK_KEY_PASSWORD") or os.getenv("CORE_WORKER_APK_KEYSTORE_PASSWORD") or "android",
+        }
+    keystore = _expand_path(os.getenv("CORE_WORKER_APK_KEYSTORE") or "")
+    return {
+        "mode": mode or "keystore",
+        "keystore": keystore,
+        "alias": os.getenv("CORE_WORKER_APK_KEY_ALIAS") or "",
+        "storepass": os.getenv("CORE_WORKER_APK_KEYSTORE_PASSWORD") or "",
+        "keypass": os.getenv("CORE_WORKER_APK_KEY_PASSWORD") or os.getenv("CORE_WORKER_APK_KEYSTORE_PASSWORD") or "",
+    }
+
+
+def _sign_core_worker_apk_with_vps_key(uploaded_apk: str, final_apk: str) -> dict[str, object]:
+    cfg = _fixed_apk_signing_config()
+    if cfg is None:
+        shutil.copyfile(uploaded_apk, final_apk)
+        return {"signedByVps": False, "signingMode": "disabled"}
+    apksigner = _find_android_build_tool("apksigner")
+    if not apksigner:
+        raise RuntimeError("apksigner não encontrado na VPS; configure ANDROID_HOME ou CORE_WORKER_APK_APKSIGNER")
+    zipalign = _find_android_build_tool("zipalign")
+    keystore = str(cfg.get("keystore") or "")
+    alias = str(cfg.get("alias") or "")
+    storepass = str(cfg.get("storepass") or "")
+    keypass = str(cfg.get("keypass") or "")
+    if not keystore or not os.path.isfile(keystore):
+        raise RuntimeError("keystore fixa ausente na VPS; configure CORE_WORKER_APK_KEYSTORE ou preserve ~/.android/debug.keystore")
+    if not alias or not storepass:
+        raise RuntimeError("configuração de assinatura incompleta na VPS")
+
+    base_dir = os.path.dirname(final_apk) or os.getcwd()
+    with tempfile.TemporaryDirectory(prefix="core-worker-sign-", dir=base_dir) as tmpdir:
+        stripped = os.path.join(tmpdir, "stripped.apk")
+        aligned = os.path.join(tmpdir, "aligned.apk")
+        _strip_apk_signatures(uploaded_apk, stripped)
+        sign_input = stripped
+        if zipalign:
+            proc = subprocess.run([zipalign, "-f", "-p", "4", stripped, aligned], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+            if proc.returncode != 0:
+                raise RuntimeError("zipalign falhou: " + (proc.stderr or proc.stdout or "sem saída")[-400:])
+            sign_input = aligned
+        cmd = [
+            apksigner,
+            "sign",
+            "--ks", keystore,
+            "--ks-key-alias", alias,
+            "--ks-pass", f"pass:{storepass}",
+            "--key-pass", f"pass:{keypass}",
+            "--out", final_apk,
+            sign_input,
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
+        if proc.returncode != 0:
+            raise RuntimeError("apksigner falhou: " + (proc.stderr or proc.stdout or "sem saída")[-500:])
+        verify = subprocess.run([apksigner, "verify", "--verbose", final_apk], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        if verify.returncode != 0:
+            raise RuntimeError("verificação da assinatura falhou: " + (verify.stderr or verify.stdout or "sem saída")[-500:])
+    return {
+        "signedByVps": True,
+        "signingMode": str(cfg.get("mode") or "keystore"),
+        "zipalign": bool(zipalign),
+    }
 
 def set_health_provider(provider):
     global _health_provider
@@ -147,32 +289,51 @@ def core_worker_app_publish():
     target = os.path.abspath(os.path.join(base, filename))
     if target != base and not target.startswith(base + os.sep):
         return jsonify({"ok": False, "error": "nome de arquivo inválido"}), 400
-    tmp = target + ".tmp"
+    tmp = target + ".upload.tmp"
     expected_sha = str(form.get("sha256") or "").strip().lower()
     digest = hashlib.sha256()
-    total = 0
+    upload_total = 0
     max_bytes = int(os.getenv("CORE_WORKER_APK_UPLOAD_MAX_BYTES", str(220 * 1024 * 1024)))
+    signing_info: dict[str, object] = {"signedByVps": False, "signingMode": "not-run"}
     try:
         with open(tmp, "wb") as fh:
             while True:
                 chunk = upload.stream.read(128 * 1024)
                 if not chunk:
                     break
-                total += len(chunk)
-                if total > max_bytes:
+                upload_total += len(chunk)
+                if upload_total > max_bytes:
                     raise ValueError("APK grande demais")
                 digest.update(chunk)
                 fh.write(chunk)
-        actual_sha = digest.hexdigest()
-        if expected_sha and expected_sha != actual_sha:
+        upload_sha = digest.hexdigest()
+        if expected_sha and expected_sha != upload_sha:
             with contextlib.suppress(Exception):
                 os.remove(tmp)
-            return jsonify({"ok": False, "error": "sha256 divergente", "expected": expected_sha, "actual": actual_sha}), 400
-        os.replace(tmp, target)
+            return jsonify({"ok": False, "error": "sha256 divergente", "expected": expected_sha, "actual": upload_sha}), 400
+        try:
+            signing_info = _sign_core_worker_apk_with_vps_key(tmp, target)
+        except Exception as sign_exc:
+            with contextlib.suppress(Exception):
+                os.remove(tmp)
+            with contextlib.suppress(Exception):
+                os.remove(target)
+            return jsonify({
+                "ok": False,
+                "error": "falha assinando APK na VPS",
+                "detail": str(sign_exc)[:500],
+                "hint": "configure CORE_WORKER_APK_KEYSTORE/APKSIGNER ou preserve a chave fixa da VPS",
+            }), 500
+        with contextlib.suppress(Exception):
+            os.remove(tmp)
     except Exception as exc:
         with contextlib.suppress(Exception):
             os.remove(tmp)
         return jsonify({"ok": False, "error": f"falha salvando APK: {type(exc).__name__}"}), 500
+
+    final_raw = open(target, "rb").read()
+    actual_sha = hashlib.sha256(final_raw).hexdigest()
+    total = len(final_raw)
 
     changelog = _json_field(form.get("changelog") or "", ["APK compilado por worker builder"])
     if not isinstance(changelog, list):
@@ -184,18 +345,22 @@ def core_worker_app_publish():
         "versionCode": version_code,
         "apkUrl": f"/core-worker/app/{filename}",
         "sha256": actual_sha,
+        "uploadedSha256": upload_sha,
         "requiredAgentVersion": required_agent,
+        "signedByVps": bool(signing_info.get("signedByVps")),
+        "signingMode": str(signing_info.get("signingMode") or "unknown"),
         "changelog": [str(item)[:180] for item in changelog[:8]],
         "publishedByWorker": str(worker.get("name") or worker.get("worker_id") or "worker builder")[:80],
         "publishedAt": int(time.time()),
         "bytes": total,
+        "uploadedBytes": upload_total,
     }
     manifest_path = os.path.join(base, "latest.json")
     tmp_manifest = manifest_path + ".tmp"
     with open(tmp_manifest, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2)
     os.replace(tmp_manifest, manifest_path)
-    return jsonify({"ok": True, "filename": filename, "bytes": total, "sha256": actual_sha, "latest": manifest}), 200
+    return jsonify({"ok": True, "filename": filename, "bytes": total, "sha256": actual_sha, "signedByVps": bool(signing_info.get("signedByVps")), "latest": manifest}), 200
 
 
 @app.get("/core-worker/app/latest.json")

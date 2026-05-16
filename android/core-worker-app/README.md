@@ -10,11 +10,13 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
-## v0.4.3 — atualização simples pelo próprio APK
+## v0.4.4 — VPS fixa e assinatura pela VPS
 
-A versão `0.4.3` corrige a direção do update: o painel `workers` não tenta mais baixar/instalar APK nos celulares. A VPS só publica/sinaliza que existe uma versão nova, e o APK cuida da experiência humana:
+A versão `0.4.4` corrige dois pontos importantes: a URL da VPS não aparece mais como campo editável na tela normal, e APKs compilados por worker builder devem ser assinados/publicados pela VPS com uma chave fixa local para evitar conflito de pacote no Android.
 
-- o APK consulta `/core-worker/app/latest.json`;
+A VPS só publica/sinaliza que existe uma versão nova, e o APK cuida da experiência humana:
+
+- o APK consulta sempre a VPS principal configurada no app (`http://100.103.240.118:10000`) e seu `/core-worker/app/latest.json`;
 - se houver versão nova, mostra um aviso no topo com botão **Atualizar**;
 - quando possível, envia uma notificação local de atualização;
 - ao tocar em **Atualizar**, o APK baixa o arquivo indicado no manifesto, valida SHA-256 quando informado e abre o instalador do Android;
@@ -42,7 +44,7 @@ O APK pode:
 
 - detectar se Termux, Termux:API, Termux:Boot e Tailscale estão instalados;
 - detectar o worker local em `http://127.0.0.1:8766/local/status`;
-- testar conexão com a VPS pela rede privada atual;
+- testar conexão com a VPS principal pela rede privada atual, sem o usuário digitar IP/porta;
 - parear este celular usando o código `CORE-XXXX` gerado no painel `workers`;
 - passar o pareamento para o phone-worker real via `POST /local/pair`;
 - editar o **perfil deste próprio celular** por `POST /local/profile`;
@@ -130,10 +132,11 @@ O APK altera apenas o perfil do celular onde ele está instalado.
    - conecte no Tailscale.
 4. No Discord, abra o painel `workers`.
 5. Vá em **Adicionar celular → Gerar código**.
-6. No APK, preencha:
-   - URL da VPS, exemplo: `http://100.x.x.x:10000`;
+6. No APK, preencha apenas:
    - código `CORE-XXXX`;
    - nome do celular.
+
+   A URL da VPS é fixa no app e não aparece como escolha normal para o usuário.
 7. Toque em **Testar conexão**.
 8. Toque em **Conectar este celular à VPS**.
 9. Escolha o perfil e toque em **Aplicar perfil**.
@@ -174,8 +177,8 @@ Depois de buildar o APK na VPS:
 ```bash
 cd /home/ubuntu/bot/android/core-worker-app
 mkdir -p releases
-cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.3-debug.apk
-sha256sum releases/CoreWorker-v0.4.3-debug.apk
+cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.4-debug.apk
+sha256sum releases/CoreWorker-v0.4.4-debug.apk
 ```
 
 Crie o manifesto:
@@ -183,11 +186,11 @@ Crie o manifesto:
 ```bash
 cat > releases/latest.json <<'JSON'
 {
-  "versionName": "0.4.3",
-  "versionCode": 7,
-  "apkUrl": "/core-worker/app/CoreWorker-v0.4.3-debug.apk",
+  "versionName": "0.4.4",
+  "versionCode": 9,
+  "apkUrl": "/core-worker/app/CoreWorker-v0.4.4-debug.apk",
   "sha256": "COLE_AQUI_O_SHA256",
-  "requiredAgentVersion": "1.6.2",
+  "requiredAgentVersion": "1.6.4",
   "changelog": [
     "Botão Atualizar no topo apenas quando houver versão nova",
     "Notificação local quando a VPS publica atualização",
@@ -254,10 +257,38 @@ VPS empacota android/core-worker-app em source-core-worker-app.zip
 worker builder baixa o source
 worker compila o APK
 worker envia APK + sha256 para a VPS
-VPS atualiza latest.json
+VPS re-assina o APK com chave fixa local
+VPS atualiza latest.json com o SHA-256 do APK assinado
 Core Worker APK mostra Atualizar no topo quando houver versão nova
 ```
 
 A VPS continua só como orquestradora/publicadora. O build pesado fica no worker.
 
 No Android comum, a instalação ainda exige confirmação do usuário.
+
+
+## Assinatura fixa ao publicar APK de worker builder
+
+Quando um worker builder compila o APK, ele pode assinar com a chave debug do próprio Termux. Isso causa conflito no Android se o APK instalado foi assinado por outra chave. Por isso o endpoint `POST /core-worker/app/publish` agora deve re-assinar o APK na VPS antes de publicar.
+
+Configuração recomendada na VPS:
+
+```env
+CORE_WORKER_APK_SIGNING_MODE=debug
+CORE_WORKER_APK_KEYSTORE=/home/ubuntu/.android/debug.keystore
+CORE_WORKER_APK_KEY_ALIAS=androiddebugkey
+CORE_WORKER_APK_KEYSTORE_PASSWORD=android
+CORE_WORKER_APK_KEY_PASSWORD=android
+```
+
+Para produção privada futura, troque por uma keystore release local da VPS:
+
+```env
+CORE_WORKER_APK_SIGNING_MODE=release
+CORE_WORKER_APK_KEYSTORE=/home/ubuntu/secrets/core-worker-release.jks
+CORE_WORKER_APK_KEY_ALIAS=core-worker
+CORE_WORKER_APK_KEYSTORE_PASSWORD=...
+CORE_WORKER_APK_KEY_PASSWORD=...
+```
+
+Nunca envie keystore ou senhas para GitHub. O APK publicado no `latest.json` deve ser o APK já assinado pela VPS, não o APK assinado pelo worker.
