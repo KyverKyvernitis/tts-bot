@@ -38,10 +38,6 @@ CORE_WORKER_JOB_TYPES = {
     "text_stats",
     "maintenance_plan",
     "worker_update",
-    "apk_update_check",
-    "apk_update_download",
-    "apk_update_install_prompt",
-    "apk_update",
     "boot_status",
     "boot_repair",
 }

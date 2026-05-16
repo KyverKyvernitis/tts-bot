@@ -1,7 +1,12 @@
 package dev.core.worker;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
@@ -51,12 +56,11 @@ import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.4.1";
+    private static final String APP_VERSION = "0.4.2";
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
     private static final String LOCAL_AGENT_PROFILE_URL = "http://127.0.0.1:8766/local/profile";
     private static final String LOCAL_AGENT_PAIR_URL = "http://127.0.0.1:8766/local/pair";
     private static final String LOCAL_AGENT_HEARTBEAT_URL = "http://127.0.0.1:8766/local/heartbeat";
-    private static final String LOCAL_AGENT_APP_UPDATE_URL = "http://127.0.0.1:8766/local/app/update";
     private static final String PREFS = "core_worker_private";
 
     private static final int BG = Color.rgb(8, 12, 25);
@@ -74,6 +78,8 @@ public class MainActivity extends Activity {
     private EditText deviceNameInput;
     private RadioGroup profileGroup;
     private TextView statusText;
+    private LinearLayout updateBanner;
+    private TextView updateBannerText;
     private TextView profileHintText;
     private TextView localAgentText;
     private TextView systemChecklistText;
@@ -100,6 +106,7 @@ public class MainActivity extends Activity {
     private volatile String latestApkUrl = "";
     private volatile String latestApkSha256 = "";
     private volatile String latestChangelog = "";
+    private volatile boolean latestUpdateAvailable = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -109,6 +116,7 @@ public class MainActivity extends Activity {
         loadInputs();
         refreshLocalStatus("Pronto. Primeiro prepare este celular, depois gere um código no Discord e conecte à VPS.");
         checkLocalAgent(false);
+        autoCheckForUpdate();
     }
 
     private void buildUi() {
@@ -138,6 +146,22 @@ public class MainActivity extends Activity {
         subtitle.setTextSize(14);
         subtitle.setPadding(0, dp(8), 0, dp(14));
         root.addView(subtitle);
+
+        updateBanner = card();
+        updateBanner.setVisibility(View.GONE);
+        updateBanner.setBackgroundColor(Color.rgb(44, 58, 93));
+        updateBannerText = smallText("Atualização disponível.");
+        updateBannerText.setTextColor(TEXT);
+        updateBanner.addView(updateBannerText);
+        updateInstallButton = button("Atualizar");
+        updateInstallButton.setOnClickListener(v -> downloadAndInstallUpdate());
+        updateBanner.addView(updateInstallButton);
+        LinearLayout.LayoutParams updateBannerParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        updateBannerParams.setMargins(0, 0, 0, dp(14));
+        root.addView(updateBanner, updateBannerParams);
 
         LinearLayout prepareCard = card();
         root.addView(prepareCard);
@@ -218,20 +242,16 @@ public class MainActivity extends Activity {
 
         LinearLayout updateCard = cardWithTopMargin(root);
         updateCard.addView(sectionTitle("4. Sistema do app"));
-        updateCard.addView(smallText("Atualizações vêm da VPS. Quando o worker local está online, ele baixa o APK e abre o instalador; no Android comum você ainda confirma a atualização na tela do sistema."));
+        updateCard.addView(smallText("Atualizações vêm da VPS. Quando existir versão nova, o Core Worker mostra um aviso no topo e uma notificação. Toque em Atualizar para baixar e abrir a instalação."));
         updateText = smallText("Versão instalada: " + APP_VERSION + "\nAtualização: ainda não verificada.");
         updateText.setTextColor(TEXT);
         updateText.setBackgroundColor(CARD_SOFT);
         updateText.setPadding(dp(10), dp(10), dp(10), dp(10));
         updateCard.addView(updateText);
 
-        updateCheckButton = button("Procurar atualização pelo worker");
+        updateCheckButton = button("Procurar atualização na VPS");
         updateCheckButton.setOnClickListener(v -> checkForUpdate());
         updateCard.addView(updateCheckButton);
-
-        updateInstallButton = button("Baixar e instalar pelo worker");
-        updateInstallButton.setOnClickListener(v -> downloadAndInstallUpdate());
-        updateCard.addView(updateInstallButton);
 
         heartbeatButton = button("Atualizar status no painel");
         heartbeatButton.setOnClickListener(v -> sendHeartbeat());
@@ -493,97 +513,96 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void autoCheckForUpdate() {
+        String serverUrl = normalizedServerUrl();
+        if (serverUrl.isEmpty()) {
+            updateUpdateUi("Versão instalada: " + APP_VERSION + "\nAtualização: informe a URL da VPS para verificar.", false, false);
+            return;
+        }
+        new Thread(() -> {
+            try {
+                checkForUpdateInternal(serverUrl, false);
+            } catch (Exception ignored) {
+                updateUpdateUi("Versão instalada: " + APP_VERSION + "\nAtualização: ainda não verificada.", false, false);
+            }
+        }).start();
+    }
+
     private void checkForUpdate() {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
-            refreshLocalStatus("Informe a URL da VPS para procurar atualização.");
+            refreshLocalStatus("Informe a URL da VPS antes de procurar atualização.");
             return;
         }
-        saveLocalFields(selectedProfileSafe());
-        runBusy("Procurando atualização pelo worker local...", () -> {
-            boolean usedWorker = updateLocalAgentStatus(false);
-            if (usedWorker) {
-                JSONObject payload = updatePayload("check", serverUrl);
-                HttpResult local = request("POST", LOCAL_AGENT_APP_UPDATE_URL, payload, null);
-                if (local.ok()) {
-                    JSONObject body = new JSONObject(local.body);
-                    applyWorkerUpdateManifest(body, serverUrl);
-                    updateLatestUi(workerUpdateText(body, "worker local"));
-                    show("Worker local consultou a atualização na VPS.");
-                    return;
-                }
-            }
+        runBusy("Procurando atualização na VPS...", () -> checkForUpdateInternal(serverUrl, true));
+    }
 
-            HttpResult result = request("GET", serverUrl + "/core-worker/app/latest.json", null, null);
-            if (!result.ok()) {
-                updateLatestUi("Atualização não publicada na VPS.\nConfigure /core-worker/app/latest.json depois de buildar o APK.\nHTTP " + result.status + " · " + compactResultBody(result.body));
-                show("A VPS respondeu, mas ainda não publicou atualização do APK.");
-                return;
+    private void checkForUpdateInternal(String serverUrl, boolean userVisible) throws Exception {
+        HttpResult result = request("GET", serverUrl + "/core-worker/app/latest.json", null, null);
+        if (!result.ok()) {
+            latestUpdateAvailable = false;
+            latestVersionName = "";
+            latestVersionCode = -1;
+            updateUpdateUi("Versão instalada: " + APP_VERSION + "\nAtualização: não publicada na VPS ou indisponível.", false, false);
+            if (userVisible) {
+                show("Não encontrei atualização publicada na VPS.\nHTTP " + result.status + " · " + compactResultBody(result.body));
             }
-            JSONObject body = new JSONObject(result.body);
-            latestVersionName = body.optString("versionName", body.optString("version", ""));
-            latestVersionCode = body.optInt("versionCode", -1);
-            latestApkSha256 = body.optString("sha256", "");
-            latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("apkUrl", body.optString("url", "")));
-            latestChangelog = changelogText(body.optJSONArray("changelog"));
-            String requiredAgent = body.optString("requiredAgentVersion", body.optString("minAgentVersion", ""));
-            boolean available = latestVersionCode > BuildConfig.VERSION_CODE;
-            if (latestVersionCode < 0 && !latestVersionName.isEmpty() && !APP_VERSION.equals(latestVersionName)) {
-                available = true;
-            }
-            StringBuilder text = new StringBuilder();
-            text.append("Versão instalada: ").append(APP_VERSION).append(" (").append(BuildConfig.VERSION_CODE).append(").\n");
-            text.append("Versão na VPS: ").append(emptyFallback(latestVersionName, "sem nome"));
-            if (latestVersionCode >= 0) text.append(" (").append(latestVersionCode).append(")");
-            text.append(".\n");
-            text.append(available ? "Atualização disponível." : "Este APK parece atualizado.");
-            if (!requiredAgent.isEmpty()) {
-                text.append("\nWorker local exigido: ").append(requiredAgent).append(".");
-            }
-            if (!latestChangelog.isEmpty()) {
-                text.append("\n\nMudanças:\n").append(latestChangelog);
-            }
-            updateLatestUi(text.toString());
-            show(available ? "Atualização encontrada na VPS." : "Nenhuma atualização nova encontrada.");
-        });
+            return;
+        }
+        JSONObject body = new JSONObject(result.body);
+        latestVersionName = body.optString("versionName", body.optString("version", ""));
+        latestVersionCode = body.optInt("versionCode", -1);
+        latestApkSha256 = body.optString("sha256", "");
+        latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("apkUrl", body.optString("url", "")));
+        latestChangelog = changelogText(body.optJSONArray("changelog"));
+        String requiredAgent = body.optString("requiredAgentVersion", body.optString("minAgentVersion", ""));
+        boolean available = isLatestUpdateAvailable();
+        latestUpdateAvailable = available;
+
+        StringBuilder text = new StringBuilder();
+        text.append("Versão instalada: ").append(APP_VERSION).append(" (").append(BuildConfig.VERSION_CODE).append(").\n");
+        text.append("Versão na VPS: ").append(emptyFallback(latestVersionName, "sem nome"));
+        if (latestVersionCode >= 0) text.append(" (").append(latestVersionCode).append(")");
+        text.append(".\n");
+        text.append(available ? "Atualização disponível. Use o botão Atualizar no topo." : "Este APK está em dia.");
+        if (!requiredAgent.isEmpty()) {
+            text.append("\nWorker local sugerido: ").append(requiredAgent).append(".");
+        }
+        if (!latestChangelog.isEmpty()) {
+            text.append("\n\nMudanças:\n").append(latestChangelog);
+        }
+        updateUpdateUi(text.toString(), available, true);
+        if (available) {
+            notifyUpdateAvailable();
+        }
+        if (userVisible) {
+            show(available ? "Atualização encontrada. Toque em Atualizar no topo do app." : "Nenhuma atualização nova encontrada.");
+        }
+    }
+
+    private boolean isLatestUpdateAvailable() {
+        if (latestVersionCode > BuildConfig.VERSION_CODE) {
+            return true;
+        }
+        return latestVersionCode < 0 && latestVersionName != null && !latestVersionName.isEmpty() && !APP_VERSION.equals(latestVersionName);
     }
 
     private void downloadAndInstallUpdate() {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
-            refreshLocalStatus("Informe a URL da VPS antes de baixar atualização.");
+            refreshLocalStatus("Informe a URL da VPS antes de atualizar.");
             return;
         }
-        runBusy("Pedindo atualização ao worker local...", () -> {
-            boolean usedWorker = updateLocalAgentStatus(false);
-            if (usedWorker) {
-                JSONObject payload = updatePayload("update", serverUrl);
-                HttpResult local = request("POST", LOCAL_AGENT_APP_UPDATE_URL, payload, null);
-                if (local.ok()) {
-                    JSONObject body = new JSONObject(local.body);
-                    applyWorkerUpdateManifest(body, serverUrl);
-                    updateLatestUi(workerUpdateText(body, "worker local"));
-                    String path = body.optString("apk_path", "");
-                    show("O worker baixou o APK e tentou abrir o instalador.\nConfirme a atualização na tela do Android." + (path.isEmpty() ? "" : "\nArquivo: " + path));
-                    return;
-                }
-                updateLatestUi("Worker local não conseguiu atualizar pelo Termux.\nTentando fallback pelo próprio APK...\n" + compactResultBody(local.body));
+        runBusy("Baixando atualização...", () -> {
+            if (latestApkUrl == null || latestApkUrl.trim().isEmpty() || !latestUpdateAvailable) {
+                checkForUpdateInternal(serverUrl, false);
             }
-
-            if (latestApkUrl == null || latestApkUrl.trim().isEmpty()) {
-                HttpResult manifest = request("GET", serverUrl + "/core-worker/app/latest.json", null, null);
-                if (!manifest.ok()) {
-                    show("Não encontrei atualização publicada na VPS.\nHTTP " + manifest.status + " · " + compactResultBody(manifest.body));
-                    return;
-                }
-                JSONObject body = new JSONObject(manifest.body);
-                latestVersionName = body.optString("versionName", body.optString("version", ""));
-                latestVersionCode = body.optInt("versionCode", -1);
-                latestApkSha256 = body.optString("sha256", "");
-                latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("apkUrl", body.optString("url", "")));
+            if (!latestUpdateAvailable) {
+                show("Este APK já está em dia.");
+                return;
             }
             if (latestApkUrl == null || latestApkUrl.trim().isEmpty()) {
-                show("O manifesto de atualização não tem apkUrl.");
+                show("A VPS avisou atualização, mas o manifesto não tem apkUrl.");
                 return;
             }
             File filesBase = getExternalFilesDir(null);
@@ -592,10 +611,10 @@ public class MainActivity extends Activity {
             }
             File updateDir = new File(filesBase, "updates");
             if (!updateDir.exists() && !updateDir.mkdirs()) {
-                show("Não consegui criar pasta local de atualização.");
+                show("Não consegui criar a pasta local de atualização.");
                 return;
             }
-            File apkFile = new File(updateDir, "CoreWorker-update.apk");
+            File apkFile = new File(updateDir, safeLocalApkName());
             downloadFile(latestApkUrl, apkFile);
             if (latestApkSha256 != null && !latestApkSha256.trim().isEmpty()) {
                 String actual = sha256Of(apkFile);
@@ -605,58 +624,75 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            updateLatestUi("Atualização baixada pelo APK. O Android vai abrir a tela de instalação para você confirmar.\nArquivo: " + apkFile.getName());
+            updateUpdateUi("Atualização baixada. Confirme a instalação na tela do Android.\nArquivo: " + apkFile.getName(), true, true);
             openApkInstaller(apkFile);
         });
     }
 
-    private JSONObject updatePayload(String action, String serverUrl) throws Exception {
-        JSONObject payload = new JSONObject();
-        payload.put("action", action);
-        payload.put("mode", action);
-        payload.put("vps_url", serverUrl);
-        payload.put("server_url", serverUrl);
-        payload.put("current_version", APP_VERSION);
-        payload.put("current_version_code", BuildConfig.VERSION_CODE);
-        payload.put("source", "core-worker-apk-companion");
-        payload.put("apk_version", APP_VERSION);
-        return payload;
+    private String safeLocalApkName() {
+        String clean = (latestVersionName == null || latestVersionName.trim().isEmpty()) ? "update" : latestVersionName.trim();
+        clean = clean.replaceAll("[^A-Za-z0-9._-]+", "-");
+        return "CoreWorker-" + clean + ".apk";
     }
 
-    private void applyWorkerUpdateManifest(JSONObject body, String serverUrl) {
-        latestVersionName = body.optString("version_name", body.optString("versionName", latestVersionName));
-        latestVersionCode = body.optInt("version_code", body.optInt("versionCode", latestVersionCode));
-        latestApkSha256 = body.optString("sha256", latestApkSha256);
-        latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("apk_url", body.optString("apkUrl", latestApkUrl)));
-        JSONArray changes = body.optJSONArray("changelog");
-        latestChangelog = changelogText(changes);
+    private void updateUpdateUi(String value, boolean available, boolean refreshSummary) {
+        latestUpdateAvailable = available;
+        runOnUiThread(() -> {
+            if (updateText != null) {
+                updateText.setText(value);
+            }
+            if (updateBanner != null) {
+                updateBanner.setVisibility(available ? View.VISIBLE : View.GONE);
+            }
+            if (updateBannerText != null) {
+                String version = emptyFallback(latestVersionName, "nova versão");
+                updateBannerText.setText("Atualização disponível: " + version + "\nToque em Atualizar para baixar e abrir a instalação.");
+            }
+            if (refreshSummary) {
+                refreshLocalStatus(null);
+            }
+        });
     }
 
-    private String workerUpdateText(JSONObject body, String source) {
-        String versionName = body.optString("version_name", body.optString("versionName", latestVersionName));
-        int versionCode = body.optInt("version_code", body.optInt("versionCode", latestVersionCode));
-        boolean downloaded = body.optBoolean("downloaded", body.optString("apk_path", "").length() > 0);
-        String summary = body.optString("summary", "Atualização verificada.");
-        String path = body.optString("apk_path", body.optString("downloaded_path", ""));
-        StringBuilder text = new StringBuilder();
-        text.append("Versão instalada: ").append(APP_VERSION).append(" (").append(BuildConfig.VERSION_CODE).append(").\n");
-        text.append("Fonte: ").append(source).append(".\n");
-        text.append("Versão na VPS: ").append(emptyFallback(versionName, "sem nome"));
-        if (versionCode >= 0) text.append(" (").append(versionCode).append(")");
-        text.append(".\n");
-        if (versionCode > BuildConfig.VERSION_CODE || (!versionName.isEmpty() && !APP_VERSION.equals(versionName))) {
-            text.append("Atualização disponível.");
-        } else {
-            text.append("Este APK parece atualizado.");
+    private void notifyUpdateAvailable() {
+        try {
+            String version = emptyFallback(latestVersionName, "nova versão");
+            String already = prefs.getString("last_update_notification", "");
+            if (version.equals(already)) {
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4103);
+                return;
+            }
+            NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (manager == null) {
+                return;
+            }
+            String channelId = "core_worker_updates";
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel channel = new NotificationChannel(channelId, "Atualizações do Core Worker", NotificationManager.IMPORTANCE_DEFAULT);
+                manager.createNotificationChannel(channel);
+            }
+            Intent open = new Intent(this, MainActivity.class);
+            open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= 23) {
+                flags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent pending = PendingIntent.getActivity(this, 4102, open, flags);
+            Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+                    ? new Notification.Builder(this, channelId)
+                    : new Notification.Builder(this);
+            builder.setSmallIcon(android.R.drawable.stat_sys_download_done)
+                    .setContentTitle("Atualização do Core Worker")
+                    .setContentText("Versão " + version + " disponível")
+                    .setContentIntent(pending)
+                    .setAutoCancel(true);
+            manager.notify(4102, builder.build());
+            prefs.edit().putString("last_update_notification", version).apply();
+        } catch (Exception ignored) {
         }
-        text.append("\n").append(summary);
-        if (downloaded) {
-            text.append("\nAPK baixado pelo worker.");
-        }
-        if (!path.isEmpty()) {
-            text.append("\nArquivo: ").append(path);
-        }
-        return text.toString();
     }
 
     private void downloadFile(String url, File target) throws Exception {
@@ -689,7 +725,7 @@ public class MainActivity extends Activity {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
                     Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()));
                     startActivity(settings);
-                    refreshLocalStatus("Autorize o Core Worker a instalar apps desconhecidos. Depois volte aqui e toque novamente em Baixar e instalar atualização.");
+                    refreshLocalStatus("Autorize o Core Worker a instalar apps desconhecidos. Depois volte aqui e toque novamente em Atualizar.");
                     return;
                 }
                 Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".files", apkFile);
@@ -1177,11 +1213,11 @@ public class MainActivity extends Activity {
     }
 
     private String updateChecklistLabel() {
-        if (latestVersionCode > BuildConfig.VERSION_CODE) {
+        if (latestUpdateAvailable) {
             return "nova versão disponível";
         }
         if (latestVersionCode >= 0) {
-            return "verificada";
+            return "em dia";
         }
         return "não verificada";
     }

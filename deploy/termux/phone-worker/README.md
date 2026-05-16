@@ -163,7 +163,7 @@ python phone_worker.py --heartbeat-once
 python phone_worker.py --jobs-once
 ```
 
-O heartbeat envia status, bateria real via Termux:API quando disponível, ping TCP até a VPS, rede, ffmpeg/ffprobe, disco, saúde básica e um resumo do Tailscale quando a CLI existir. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `worker_self_check`, `worker_logs`, `network_probe`, `tailscale_status`, `service_status`, `service_start`, `service_stop`, `service_restart`, `ffmpeg_check`, `ffprobe_check`, `worker_update`, `apk_update_check`, `apk_update_download`, `apk_update_install_prompt`, `apk_update`, `boot_status`, `boot_repair`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
+O heartbeat envia status, bateria real via Termux:API quando disponível, ping TCP até a VPS, rede, ffmpeg/ffprobe, disco, saúde básica e um resumo do Tailscale quando a CLI existir. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `worker_self_check`, `worker_logs`, `network_probe`, `tailscale_status`, `service_status`, `service_start`, `service_stop`, `service_restart`, `ffmpeg_check`, `ffprobe_check`, `worker_update`, `boot_status`, `boot_repair`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
 
 
 ## Supervisor local e anti-duplicação
@@ -250,35 +250,20 @@ PHONE_WORKER_UPDATE_MAX_TOTAL_BYTES=1048576
 ```
 
 
-## Atualização do APK Core Worker pelo worker
+## Atualização do APK Core Worker
 
-A partir da versão `1.6.1`, o phone-worker consegue ajudar a atualizar o APK privado **Core Worker** sem criar worker duplicado. O fluxo é:
+A atualização do APK ficou simples e centrada no app:
 
 ```text
 VPS publica /core-worker/app/latest.json
-worker consulta o manifesto
-worker baixa o APK para Downloads/CoreWorker
-worker valida SHA-256 quando informado
-worker abre o instalador do Android
-usuário confirma a instalação
+APK consulta a VPS quando abre ou quando o usuário pede verificação
+APK mostra notificação local se existir versão nova
+APK mostra o botão Atualizar no topo apenas quando houver update
+usuário toca em Atualizar
+APK baixa, valida SHA-256 quando informado e abre o instalador do Android
 ```
 
-Rotas locais usadas pelo APK:
-
-```text
-POST http://127.0.0.1:8766/local/app/update
-```
-
-A rota aceita ações seguras como `check`, `download`, `install_prompt` e `update`. Ela só aceita localhost, não executa shell livre e não expõe tokens.
-
-Jobs aceitos pelo painel/VPS:
-
-- `apk_update_check`: consulta a versão publicada;
-- `apk_update_download`: baixa e valida o APK;
-- `apk_update_install_prompt`: abre o instalador para um APK já baixado;
-- `apk_update`: baixa, valida e tenta abrir o instalador em uma ação só.
-
-No Android comum, o worker não instala silenciosamente; ele apenas abre a tela de instalação para o usuário confirmar. Isso é intencional e mais seguro para APK privado fora da Play Store.
+O phone-worker não baixa nem instala o APK pelo painel `workers`. O painel continua focado em controlar/monitorar workers; o app cuida da própria atualização. No Android comum, a instalação ainda precisa da confirmação do usuário.
 
 ## Onboarding rápido de novo celular
 

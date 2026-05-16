@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.6.1"
+PHONE_WORKER_VERSION = "1.6.2"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -65,10 +65,6 @@ SUPPORTED_DIRECT_TASKS = (
     "worker_logs",
     "worker_self_check",
     "worker_update",
-    "apk_update_check",
-    "apk_update_download",
-    "apk_update_install_prompt",
-    "apk_update",
     "boot_status",
     "boot_repair",
     "zip",
@@ -93,10 +89,6 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "worker_logs",
     "worker_self_check",
     "worker_update",
-    "apk_update_check",
-    "apk_update_download",
-    "apk_update_install_prompt",
-    "apk_update",
     "boot_status",
     "boot_repair",
     "zip_validate",
@@ -1072,8 +1064,6 @@ def _system_status() -> dict[str, Any]:
 def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
     profile = _current_core_worker_profile()
     status = _safe_telemetry("system", _system_status, {"ok": False})
-    update_state = _apk_update_read_state()
-    update_manifest = update_state.get("manifest") if isinstance(update_state.get("manifest"), dict) else {}
     return {
         "ok": True,
         "local_only": True,
@@ -1098,14 +1088,6 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "ffprobe": bool(status.get("ffprobe")),
         "boot_ok": ((status.get("boot") or {}).get("ok") if isinstance(status.get("boot"), dict) else None),
         "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
-        "apk_update": {
-            "version_name": update_manifest.get("version_name") or update_manifest.get("versionName") or "",
-            "version_code": update_manifest.get("version_code") or update_manifest.get("versionCode") or None,
-            "downloaded": bool(update_state.get("apk_path") and Path(str(update_state.get("apk_path"))).exists()),
-            "apk_path": str(update_state.get("apk_path") or ""),
-            "last_check_at": update_state.get("last_check_at"),
-            "last_download_at": update_state.get("last_download_at"),
-        },
         "note": "Rota local para o APK Core Worker; não executa shell e não expõe token.",
     }
 
@@ -1276,21 +1258,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")
             return
-        if path == "/local/app/update":
-            if not self._require_local_client():
-                return
-            body = self._read_json()
-            if body is None:
-                return
-            try:
-                action = str(body.get("action") or body.get("mode") or "check")
-                result = _run_apk_update_action(action, body)
-                host, port = self._bind_host_port()
-                result["local_status"] = _safe_dict(_local_agent_status_payload(host=host, port=port), max_items=24)
-                _json_response(self, HTTPStatus.OK if result.get("ok", True) else HTTPStatus.BAD_REQUEST, result)
-            except Exception as exc:
-                _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")
-            return
         if path == "/local/profile":
             if not self._require_local_client():
                 return
@@ -1324,7 +1291,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload.setdefault("summary", "status direto coletado")
             elif task in {"diagnostic_basic", "worker_self_check"}:
                 payload = _execute_core_worker_job({"type": "worker_self_check", "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
-            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "apk_update_check", "apk_update_download", "apk_update_install_prompt", "apk_update", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
+            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
                 payload = _execute_core_worker_job({"type": task, "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
             elif task == "sha256":
                 payload = self._task_sha256(body)
@@ -2132,251 +2099,6 @@ def _safe_update_target_path(target: str) -> tuple[Path, int]:
     return path, mode
 
 
-def _apk_update_state_path() -> Path:
-    return _phone_worker_dir() / ".core-worker-apk-update.json"
-
-
-def _apk_update_download_dir() -> Path:
-    candidates = [
-        Path.home() / "storage" / "downloads" / "CoreWorker",
-        Path("/sdcard/Download/CoreWorker"),
-        _phone_worker_dir() / "apk-updates",
-    ]
-    for candidate in candidates:
-        try:
-            parent = candidate.parent
-            if parent.exists() or candidate == candidates[-1]:
-                candidate.mkdir(parents=True, exist_ok=True)
-                probe = candidate / ".write-test"
-                probe.write_text("ok", encoding="utf-8")
-                probe.unlink(missing_ok=True)
-                return candidate
-        except Exception:
-            continue
-    fallback = _phone_worker_dir() / "apk-updates"
-    fallback.mkdir(parents=True, exist_ok=True)
-    return fallback
-
-
-def _apk_update_read_state() -> dict[str, Any]:
-    path = _apk_update_state_path()
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="ignore") or "{}")
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _apk_update_write_state(data: dict[str, Any]) -> None:
-    path = _apk_update_state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    safe = _safe_dict(data, max_items=48, max_string=8192)
-    path.write_text(json.dumps(safe, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-
-
-def _apk_update_base_url(payload: dict[str, Any]) -> str:
-    raw = str(
-        payload.get("vps_url")
-        or payload.get("server_url")
-        or payload.get("base_url")
-        or os.getenv("CORE_WORKER_VPS_URL")
-        or os.getenv("CORE_WORKER_BASE_URL")
-        or ""
-    ).strip().rstrip("/")
-    return raw
-
-
-def _resolve_url_against_base(base_url: str, raw_url: str) -> str:
-    raw = str(raw_url or "").strip()
-    if raw.startswith("http://") or raw.startswith("https://"):
-        return raw
-    if not base_url:
-        return raw
-    parsed = urllib.parse.urlparse(base_url)
-    root = f"{parsed.scheme or 'http'}://{parsed.netloc}"
-    if not raw.startswith("/"):
-        raw = "/" + raw
-    return root + raw
-
-
-def _safe_apk_filename(value: Any, *, default: str = "CoreWorker-update.apk") -> str:
-    text = str(value or default).strip().replace("\\", "/").split("/")[-1]
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip(".-_")
-    if not text.lower().endswith(".apk"):
-        text += ".apk"
-    return text[:96] or default
-
-
-def _apk_update_manifest(payload: dict[str, Any]) -> dict[str, Any]:
-    base_url = _apk_update_base_url(payload)
-    manifest_url = str(payload.get("manifest_url") or "").strip()
-    if not manifest_url:
-        if not base_url:
-            raise ValueError("URL da VPS não configurada para atualizar o APK")
-        manifest_url = f"{base_url}/core-worker/app/latest.json"
-    else:
-        manifest_url = _resolve_url_against_base(base_url, manifest_url)
-    status, data = _get_json_url(manifest_url, timeout=max(2.0, _env_float("PHONE_WORKER_APK_UPDATE_TIMEOUT", 12.0)))
-    if not (200 <= status < 300) or not data:
-        raise RuntimeError(f"manifesto HTTP {status}: {_short_text((data or {}).get('error') or data, limit=160)}")
-    if data.get("ok") is False and not (data.get("apkUrl") or data.get("url")):
-        raise RuntimeError(_short_text(data.get("error") or "manifesto de APK indisponível", limit=160))
-    apk_url = _resolve_url_against_base(base_url, str(data.get("apkUrl") or data.get("url") or ""))
-    if not apk_url:
-        raise ValueError("manifesto sem apkUrl")
-    version_name = str(data.get("versionName") or data.get("version") or "").strip()
-    version_code = int(data.get("versionCode") or -1) if str(data.get("versionCode") or "").strip() else -1
-    filename = _safe_apk_filename(data.get("fileName") or urllib.parse.urlparse(apk_url).path or "CoreWorker-update.apk")
-    return {
-        "ok": True,
-        "manifest_url": manifest_url,
-        "base_url": base_url,
-        "apk_url": apk_url,
-        "filename": filename,
-        "version_name": version_name,
-        "version_code": version_code,
-        "sha256": str(data.get("sha256") or "").strip().lower(),
-        "required_agent_version": str(data.get("requiredAgentVersion") or data.get("minAgentVersion") or "").strip(),
-        "changelog": data.get("changelog") if isinstance(data.get("changelog"), list) else [],
-        "raw": _safe_dict(data, max_items=32, max_string=4096),
-    }
-
-
-def _apk_update_check(payload: dict[str, Any]) -> dict[str, Any]:
-    manifest = _apk_update_manifest(payload)
-    state = _apk_update_read_state()
-    downloaded_path = str(state.get("apk_path") or "")
-    downloaded = bool(downloaded_path and Path(downloaded_path).exists())
-    result = {
-        "ok": True,
-        "summary": f"APK na VPS: {manifest.get('version_name') or 'versão sem nome'}",
-        "available": True,
-        "version_name": manifest.get("version_name"),
-        "version_code": manifest.get("version_code"),
-        "apk_url": manifest.get("apk_url"),
-        "sha256": manifest.get("sha256"),
-        "required_agent_version": manifest.get("required_agent_version"),
-        "downloaded": downloaded,
-        "downloaded_path": downloaded_path if downloaded else "",
-        "install_needs_user_confirmation": True,
-        "note": "O worker pode baixar o APK e abrir o instalador; o Android ainda pede confirmação.",
-    }
-    _apk_update_write_state({**state, "last_check_at": time.time(), "manifest": manifest, "last_result": result})
-    return result
-
-
-def _apk_update_download(payload: dict[str, Any]) -> dict[str, Any]:
-    manifest = _apk_update_manifest(payload)
-    target = _apk_update_download_dir() / _safe_apk_filename(manifest.get("filename"), default="CoreWorker-update.apk")
-    max_bytes = max(5 * 1024 * 1024, _env_int("PHONE_WORKER_APK_UPDATE_MAX_BYTES", 180 * 1024 * 1024))
-    downloaded = _download_url_to_file(str(manifest["apk_url"]), target, max_bytes=max_bytes)
-    if not downloaded.get("ok"):
-        downloaded.setdefault("summary", "falha ao baixar APK")
-        return downloaded
-    expected = str(manifest.get("sha256") or "").strip().lower()
-    actual = str(downloaded.get("sha256") or "").strip().lower()
-    if expected and expected != actual:
-        with contextlib.suppress(Exception):
-            target.unlink()
-        return {
-            "ok": False,
-            "summary": "APK baixado, mas hash divergente",
-            "expected_sha256": expected,
-            "actual_sha256": actual,
-        }
-    state = {
-        "last_download_at": time.time(),
-        "manifest": manifest,
-        "apk_path": str(target),
-        "apk_sha256": actual,
-        "apk_bytes": int(downloaded.get("bytes") or 0),
-    }
-    _apk_update_write_state(state)
-    return {
-        "ok": True,
-        "summary": f"APK {manifest.get('version_name') or ''} baixado; instalação aguarda confirmação no celular".strip(),
-        "downloaded": True,
-        "apk_path": str(target),
-        "bytes": int(downloaded.get("bytes") or 0),
-        "sha256": actual,
-        "version_name": manifest.get("version_name"),
-        "version_code": manifest.get("version_code"),
-        "install_needs_user_confirmation": True,
-    }
-
-
-def _apk_update_install_prompt(payload: dict[str, Any]) -> dict[str, Any]:
-    state = _apk_update_read_state()
-    raw_path = str(payload.get("apk_path") or state.get("apk_path") or "").strip()
-    if not raw_path:
-        raise ValueError("nenhum APK baixado para instalar")
-    apk_path = Path(raw_path).expanduser()
-    if not apk_path.exists() or not apk_path.is_file():
-        raise FileNotFoundError(f"APK não encontrado: {apk_path}")
-    commands: list[list[str]] = []
-    if shutil.which("termux-open"):
-        commands.append(["termux-open", str(apk_path)])
-    commands.append([
-        "am", "start",
-        "-a", "android.intent.action.VIEW",
-        "-d", "file://" + str(apk_path),
-        "-t", "application/vnd.android.package-archive",
-    ])
-    last_error = ""
-    for cmd in commands:
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
-            if proc.returncode == 0:
-                state["last_install_prompt_at"] = time.time()
-                state["last_install_prompt_cmd"] = cmd[0]
-                _apk_update_write_state(state)
-                return {
-                    "ok": True,
-                    "summary": "instalador do Android aberto; confirme a atualização no celular",
-                    "apk_path": str(apk_path),
-                    "command": cmd[0],
-                    "install_needs_user_confirmation": True,
-                }
-            last_error = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
-        except Exception as exc:
-            last_error = f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
-    return {
-        "ok": False,
-        "summary": "APK baixado, mas não consegui abrir o instalador automaticamente",
-        "apk_path": str(apk_path),
-        "error": _short_text(last_error, limit=220),
-        "hint": "Abra o arquivo APK manualmente na pasta Downloads/CoreWorker do Android.",
-    }
-
-
-def _apk_update(payload: dict[str, Any]) -> dict[str, Any]:
-    download = _apk_update_download(payload)
-    if not download.get("ok"):
-        return download
-    if bool(payload.get("download_only", False)):
-        return download
-    prompt = _apk_update_install_prompt({**payload, "apk_path": download.get("apk_path")})
-    prompt.setdefault("download", download)
-    if prompt.get("ok"):
-        prompt["summary"] = "APK baixado pelo worker; instalador aberto no celular"
-    return prompt
-
-
-def _run_apk_update_action(action: str, payload: dict[str, Any]) -> dict[str, Any]:
-    normalized = str(action or "").strip().lower().replace("-", "_")
-    if normalized in {"", "check", "status"}:
-        return _apk_update_check(payload)
-    if normalized in {"download", "baixar"}:
-        return _apk_update_download(payload)
-    if normalized in {"install", "install_prompt", "prompt", "abrir_instalador"}:
-        return _apk_update_install_prompt(payload)
-    if normalized in {"update", "download_install", "download_install_prompt", "auto"}:
-        return _apk_update(payload)
-    raise ValueError("ação de atualização de APK não permitida")
-
-
 def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
     if not _env_bool("PHONE_WORKER_SELF_UPDATE_ENABLED", True):
         raise PermissionError("self-update do phone-worker desativado por configuração")
@@ -2565,18 +2287,6 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
         elif kind == "worker_update":
             result = _apply_worker_update(payload)
             result.setdefault("summary", "arquivos do phone-worker atualizados")
-        elif kind == "apk_update_check":
-            result = _apk_update_check(payload)
-            result.setdefault("summary", "verificação de update do APK concluída")
-        elif kind == "apk_update_download":
-            result = _apk_update_download(payload)
-            result.setdefault("summary", "APK baixado pelo worker")
-        elif kind == "apk_update_install_prompt":
-            result = _apk_update_install_prompt(payload)
-            result.setdefault("summary", "instalador do APK aberto no celular")
-        elif kind == "apk_update":
-            result = _apk_update(payload)
-            result.setdefault("summary", "update do APK solicitado ao worker")
         elif kind == "boot_status":
             result = _termux_boot_status_snapshot()
             result.setdefault("summary", "status do boot automático coletado")
@@ -2656,8 +2366,9 @@ def _poll_core_worker_job_once(*, host: str, port: int, max_body_bytes: int, max
     print(f"[core-worker-jobs] executando {job_id} ({kind})", flush=True)
     try:
         result = _execute_core_worker_job(job, max_body_bytes=max_body_bytes, max_output_bytes=max_output_bytes, job_timeout=job_timeout)
-        ok = _send_core_worker_job_result(job_id=job_id, status="succeeded", result=result, timeout=timeout)
-        if ok:
+        result_ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
+        ok = _send_core_worker_job_result(job_id=job_id, status="succeeded" if result_ok else "failed", result=result, error="" if result_ok else str(result.get("summary") or "ação falhou"), timeout=timeout)
+        if ok and result_ok:
             _launch_deferred_phone_worker_action(result)
     except Exception as exc:
         _send_core_worker_job_result(job_id=job_id, status="failed", result={}, error=f"{type(exc).__name__}: {exc}", timeout=timeout)

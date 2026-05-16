@@ -10,39 +10,31 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
-## v0.4.1 — atualização do APK pelo worker local
+## v0.4.2 — atualização simples pelo próprio APK
 
-A versão `0.4.1` mantém a interface do `0.4.0` e adiciona atualização do APK passando pelo worker local:
+A versão `0.4.2` corrige a direção do update: o painel `workers` não tenta mais baixar/instalar APK nos celulares. A VPS só publica/sinaliza que existe uma versão nova, e o APK cuida da experiência humana:
 
-- tela principal reorganizada em passos humanos:
-  - **Preparar este celular**;
-  - **Conectar à VPS**;
-  - **Perfil deste celular**;
-  - **Sistema do app**;
-- checklist de preparação com Termux, Termux:API, Termux:Boot, rede privada/Tailscale e worker local;
-- textos menos técnicos na tela principal;
-- botões renomeados:
-  - `Verificar este celular`;
-  - `Testar conexão`;
-  - `Conectar este celular à VPS`;
-  - `Aplicar perfil`;
-  - `Atualizar status no painel`;
-- o APK continua pareando via Termux worker local:
+- o APK consulta `/core-worker/app/latest.json`;
+- se houver versão nova, mostra um aviso no topo com botão **Atualizar**;
+- quando possível, envia uma notificação local de atualização;
+- ao tocar em **Atualizar**, o APK baixa o arquivo indicado no manifesto, valida SHA-256 quando informado e abre o instalador do Android;
+- se não houver update, o topo fica limpo e não mostra botão extra.
+
+A interface principal continua em passos:
+
+- **Preparar este celular**;
+- **Conectar à VPS**;
+- **Perfil deste celular**;
+- **Sistema do app**.
+
+O pareamento continua correto:
 
 ```text
 APK -> /local/pair -> Termux phone-worker -> /core-worker/pair na VPS
 APK -> /local/heartbeat -> Termux phone-worker -> /core-worker/heartbeat na VPS
 ```
 
-- o APK não cria worker próprio, não salva token de worker e não envia heartbeat direto;
-- o APK ganhou atualização semi-automática via VPS e worker local:
-  - o APK pede ao Termux worker local para consultar `/core-worker/app/latest.json`;
-  - o worker baixa o APK para a pasta de downloads do Android;
-  - valida SHA-256 quando informado;
-  - abre a tela de instalação do Android para confirmação;
-  - se o worker local estiver offline, o APK ainda tenta o fallback antigo baixando por conta própria.
-
-No Android comum, a instalação ainda precisa de confirmação do usuário. Atualização silenciosa só deve ser considerada no futuro com cenário controlado, como device owner/profile owner ou distribuição gerenciada.
+O APK não cria worker próprio, não salva token de worker e não envia heartbeat direto. No Android comum, a instalação ainda precisa de confirmação do usuário.
 
 ## Escopo correto do APK agora
 
@@ -55,8 +47,9 @@ O APK pode:
 - passar o pareamento para o phone-worker real via `POST /local/pair`;
 - editar o **perfil deste próprio celular** por `POST /local/profile`;
 - pedir heartbeat/status básico ao worker local por `POST /local/heartbeat`;
-- procurar atualização privada do APK na VPS pelo worker local;
-- pedir para o worker baixar atualização e abrir o instalador do Android;
+- procurar atualização privada do APK na VPS;
+- mostrar o botão **Atualizar** no topo apenas quando houver update;
+- baixar o APK e abrir o instalador do Android pelo próprio app;
 - abrir Termux/Tailscale quando o Android permitir.
 
 O APK não deve virar, por enquanto:
@@ -113,7 +106,6 @@ GET  http://127.0.0.1:8766/local/status
 POST http://127.0.0.1:8766/local/profile
 POST http://127.0.0.1:8766/local/pair
 POST http://127.0.0.1:8766/local/heartbeat
-POST http://127.0.0.1:8766/local/app/update
 ```
 
 Essas rotas devem aceitar apenas localhost. Elas não expõem shell livre, token global, fila completa, controle pesado ou ações perigosas.
@@ -157,7 +149,7 @@ O APK procura atualização aqui:
 GET /core-worker/app/latest.json
 ```
 
-E baixa o APK pelo `apkUrl` indicado no manifesto.
+E baixa o APK pelo `apkUrl` indicado no manifesto quando o usuário toca em **Atualizar** no topo do app.
 
 ### Endpoint na VPS
 
@@ -182,8 +174,8 @@ Depois de buildar o APK na VPS:
 ```bash
 cd /home/ubuntu/bot/android/core-worker-app
 mkdir -p releases
-cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.1-debug.apk
-sha256sum releases/CoreWorker-v0.4.1-debug.apk
+cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.2-debug.apk
+sha256sum releases/CoreWorker-v0.4.2-debug.apk
 ```
 
 Crie o manifesto:
@@ -191,21 +183,21 @@ Crie o manifesto:
 ```bash
 cat > releases/latest.json <<'JSON'
 {
-  "versionName": "0.4.1",
-  "versionCode": 6,
-  "apkUrl": "/core-worker/app/CoreWorker-v0.4.1-debug.apk",
+  "versionName": "0.4.2",
+  "versionCode": 7,
+  "apkUrl": "/core-worker/app/CoreWorker-v0.4.2-debug.apk",
   "sha256": "COLE_AQUI_O_SHA256",
-  "requiredAgentVersion": "1.6.1",
+  "requiredAgentVersion": "1.6.2",
   "changelog": [
-    "Interface de onboarding mais simples",
-    "Checklist de Termux, plugins e rede privada",
-    "Atualização privada do APK pelo worker local"
+    "Botão Atualizar no topo apenas quando houver versão nova",
+    "Notificação local quando a VPS publica atualização",
+    "Atualização do APK feita pelo próprio app"
   ]
 }
 JSON
 ```
 
-Reinicie o bot/webserver se necessário. No APK, toque em **Procurar atualização pelo worker**. Pelo painel `workers`, em **Manutenção**, também é possível pedir **Atualizar APK** para um celular ou **Atualizar APKs online** para todos os workers compatíveis.
+Reinicie o bot/webserver se necessário. O APK consulta a VPS, mostra uma notificação local quando houver versão nova e exibe o botão **Atualizar** no topo apenas nesse caso. O painel `workers` não precisa controlar atualização do APK.
 
 ## Build por terminal na VPS
 
