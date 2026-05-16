@@ -37,6 +37,8 @@ CLEANUP_CHANGED=0
 PHONE_LAVALINK_WATCH_CHANGED=0
 PHONE_WORKER_WATCH_CHANGED=0
 PHONE_WORKER_SYNC_REQUIRED=0
+CORE_WORKER_APK_CHANGED=0
+CORE_WORKER_AUTOMATION_REQUIRED=0
 
 BOT_HEALTHCHECK_STATUS="não verificado"
 CALLKEEPER_STATUS="não alterado"
@@ -45,6 +47,9 @@ CLEANUP_STATUS="não alterada"
 PHONE_LAVALINK_WATCH_STATUS="não alterado"
 PHONE_WORKER_WATCH_STATUS="não alterado"
 PHONE_WORKER_SYNC_STATUS="sem mudanças"
+CORE_WORKER_AGENT_UPDATE_STATUS="sem mudanças"
+CORE_WORKER_APK_BUILD_STATUS="sem mudanças"
+CORE_WORKER_NOTIFY_STATUS="sem mudanças"
 FRONT_STATUS="não alterado"
 BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
@@ -426,6 +431,9 @@ cleanup_known_generated_update_artifacts() {
   rm -rf "$REPO_DIR/android/core-worker-app/app/build" 2>/dev/null || true
   rm -rf "$REPO_DIR/android/core-worker-app/.gradle" 2>/dev/null || true
   rm -f "$REPO_DIR/android/core-worker-app/app/build.gradle.bak"* 2>/dev/null || true
+  # Não removemos android/core-worker-app/releases aqui: é onde latest.json/APKs
+  # privados ficam publicados para os celulares. O auto updater já ignora essa
+  # pasta ao criar commits e alterações não rastreadas não bloqueiam git pull.
 }
 
 local_changes_fingerprint() {
@@ -697,7 +705,12 @@ deploy_phone_worker_sync() {
     return 0
   fi
 
-  STAGE="sincronização do phone-worker no celular"
+  if ! env_truthy PHONE_WORKER_LEGACY_SSH_SYNC_ENABLED; then
+    PHONE_WORKER_SYNC_STATUS="agendado para automação por jobs após restart"
+    return 0
+  fi
+
+  STAGE="sincronização legada do phone-worker por SSH"
 
   if [[ ! -x "$REPO_DIR/scripts/sync-phone-worker.sh" ]]; then
     PHONE_WORKER_SYNC_STATUS="não executado: scripts/sync-phone-worker.sh ausente"
@@ -714,7 +727,69 @@ deploy_phone_worker_sync() {
     PHONE_WORKER_SYNC_STATUS="executado; sem status legível"
   fi
 
-  logger -t "$LOG_TAG" "Phone-worker sync: $PHONE_WORKER_SYNC_STATUS"
+  logger -t "$LOG_TAG" "Phone-worker sync legado: $PHONE_WORKER_SYNC_STATUS"
+  return 0
+}
+
+run_core_worker_post_update_automation() {
+  if (( CORE_WORKER_AUTOMATION_REQUIRED == 0 )); then
+    CORE_WORKER_AGENT_UPDATE_STATUS="sem mudanças"
+    CORE_WORKER_APK_BUILD_STATUS="sem mudanças"
+    CORE_WORKER_NOTIFY_STATUS="sem mudanças"
+    return 0
+  fi
+
+  STAGE="automação pós-update dos Core Workers"
+  local py="$REPO_DIR/.venv/bin/python"
+  [[ -x "$py" ]] || py="$(command -v python3 || true)"
+  if [[ -z "$py" || ! -f "$REPO_DIR/scripts/core-worker-automation.py" ]]; then
+    CORE_WORKER_AGENT_UPDATE_STATUS="não executado: core-worker-automation ausente"
+    CORE_WORKER_APK_BUILD_STATUS="não executado"
+    CORE_WORKER_NOTIFY_STATUS="não executado"
+    return 0
+  fi
+
+  local output
+  output="$(sudo -u ubuntu -H env CORE_WORKER_CHANGED_FILES="$CHANGED_FILES_RAW" "$py" "$REPO_DIR/scripts/core-worker-automation.py" after-update 2>&1 || true)"
+  logger -t "$LOG_TAG" "Core Worker automation: $output"
+
+  local parsed
+  parsed="$(CORE_WORKER_AUTOMATION_RAW="$output" python3 - <<'PYJSON' 2>/dev/null || true
+import json, os
+raw = os.environ.get('CORE_WORKER_AUTOMATION_RAW') or '{}'
+line = next((ln for ln in reversed(raw.splitlines()) if ln.strip().startswith('{')), '{}')
+try:
+    data = json.loads(line)
+except Exception:
+    data = {}
+agent = data.get('agent_update') or {}
+apk = data.get('apk_build') or {}
+def brief_agent(obj):
+    if not obj:
+        return 'sem mudanças'
+    queued = len(obj.get('queued') or [])
+    skipped = len(obj.get('skipped') or [])
+    errors = len(obj.get('errors') or [])
+    version = obj.get('target_version') or '?'
+    return f'agent {version}: {queued} job(s), {skipped} skip, {errors} erro(s)'
+def brief_apk(obj):
+    if not obj:
+        return 'sem mudanças'
+    if obj.get('ok'):
+        job = obj.get('job') or {}
+        return f"APK {obj.get('versionName') or '?'}: build job {job.get('job_id') or 'criado'}"
+    return f"APK {obj.get('versionName') or '?'}: pendente ({obj.get('message') or obj.get('error') or 'sem builder'})"
+print(brief_agent(agent))
+print(brief_apk(apk))
+print('apps verão banner/notify quando latest.json novo for publicado' if apk else 'sem notificação nova')
+PYJSON
+)"
+  CORE_WORKER_AGENT_UPDATE_STATUS="$(printf '%s\n' "$parsed" | sed -n '1p')"
+  CORE_WORKER_APK_BUILD_STATUS="$(printf '%s\n' "$parsed" | sed -n '2p')"
+  CORE_WORKER_NOTIFY_STATUS="$(printf '%s\n' "$parsed" | sed -n '3p')"
+  [[ -n "${CORE_WORKER_AGENT_UPDATE_STATUS//[[:space:]]/}" ]] || CORE_WORKER_AGENT_UPDATE_STATUS="executado; sem resumo"
+  [[ -n "${CORE_WORKER_APK_BUILD_STATUS//[[:space:]]/}" ]] || CORE_WORKER_APK_BUILD_STATUS="executado; sem resumo"
+  [[ -n "${CORE_WORKER_NOTIFY_STATUS//[[:space:]]/}" ]] || CORE_WORKER_NOTIFY_STATUS="executado"
   return 0
 }
 
@@ -1057,6 +1132,11 @@ if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/phone-worker-watch\.
 fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/termux/phone-worker/'; then
   PHONE_WORKER_SYNC_REQUIRED=1
+  CORE_WORKER_AUTOMATION_REQUIRED=1
+fi
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^android/core-worker-app/'; then
+  CORE_WORKER_APK_CHANGED=1
+  CORE_WORKER_AUTOMATION_REQUIRED=1
 fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callkeeper_runtime/|deploy/systemd/callkeeper\.service|config\.py|db\.py|requirements\.txt)$'; then
   CALLKEEPER_CHANGED=1
@@ -1083,6 +1163,7 @@ deploy_bot
 deploy_callkeeper
 deploy_frontend
 deploy_backend
+run_core_worker_post_update_automation
 
 DURATION="$(human_duration "$SECONDS")"
 ROLLBACK_STATUS="não foi necessário"
@@ -1121,6 +1202,9 @@ Limpeza de áudio: $CLEANUP_STATUS
 Watcher Lavalink celular: $PHONE_LAVALINK_WATCH_STATUS
 Phone worker: $PHONE_WORKER_WATCH_STATUS
 Phone-worker sync: $PHONE_WORKER_SYNC_STATUS
+Core Worker agent auto-update: $CORE_WORKER_AGENT_UPDATE_STATUS
+Core Worker APK build: $CORE_WORKER_APK_BUILD_STATUS
+Notificação APK: $CORE_WORKER_NOTIFY_STATUS
 Análise phone-worker: $PHONE_WORKER_UPDATE_ANALYSIS
 CallKeeper: $CALLKEEPER_STATUS
 Frontend: $FRONT_STATUS

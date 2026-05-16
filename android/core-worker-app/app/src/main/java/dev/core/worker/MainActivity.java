@@ -21,6 +21,7 @@ import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
@@ -56,7 +57,7 @@ import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.4.5";
+    private static final String APP_VERSION = "0.4.6";
     private static final String DEFAULT_VPS_URL = "http://100.103.240.118:10000";
     private static final String DEFAULT_VPS_LABEL = "VPS principal · 100.103.240.118:10000";
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -87,6 +88,13 @@ public class MainActivity extends Activity {
     private TextView localAgentText;
     private TextView systemChecklistText;
     private TextView updateText;
+    private LinearLayout permissionGateCard;
+    private LinearLayout mainContent;
+    private TextView permissionStatusText;
+    private Button notificationPermissionButton;
+    private Button installPermissionButton;
+    private Button batteryPermissionButton;
+    private Button refreshPermissionsButton;
     private Button prepareButton;
     private Button termuxButton;
     private Button tailscaleButton;
@@ -117,9 +125,23 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         buildUi();
         loadInputs();
+        updatePermissionGate();
         refreshLocalStatus("Pronto. Primeiro prepare este celular, depois gere um código no Discord e conecte à VPS.");
         checkLocalAgent(false);
         autoCheckForUpdate();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        updatePermissionGate();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        updatePermissionGate();
+        refreshLocalStatus(requestCode == 4103 ? "Permissão de notificação atualizada. Verifique as demais permissões necessárias." : null);
     }
 
     private void buildUi() {
@@ -150,6 +172,15 @@ public class MainActivity extends Activity {
         subtitle.setPadding(0, dp(8), 0, dp(14));
         root.addView(subtitle);
 
+        buildPermissionGate(root);
+
+        mainContent = new LinearLayout(this);
+        mainContent.setOrientation(LinearLayout.VERTICAL);
+        root.addView(mainContent, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
         updateBanner = card();
         updateBanner.setVisibility(View.GONE);
         updateBanner.setBackgroundColor(Color.rgb(44, 58, 93));
@@ -164,10 +195,10 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
         updateBannerParams.setMargins(0, 0, 0, dp(14));
-        root.addView(updateBanner, updateBannerParams);
+        mainContent.addView(updateBanner, updateBannerParams);
 
         LinearLayout prepareCard = card();
-        root.addView(prepareCard);
+        mainContent.addView(prepareCard);
         prepareCard.addView(sectionTitle("1. Preparar este celular"));
         prepareCard.addView(smallText("Checklist simples do que hoje ainda depende de apps externos. O objetivo final é reduzir estes passos até virar um app único."));
         systemChecklistText = smallText(prepareChecklistText());
@@ -192,7 +223,7 @@ public class MainActivity extends Activity {
         tailscaleButton.setOnClickListener(v -> openTailscale());
         prepareCard.addView(tailscaleButton);
 
-        LinearLayout connectCard = cardWithTopMargin(root);
+        LinearLayout connectCard = cardWithTopMargin(mainContent);
         connectCard.addView(sectionTitle("2. Conectar à VPS"));
         connectCard.addView(smallText("Gere um código no painel workers do Discord. O APK usa sempre a VPS atual do projeto e entrega o código ao worker local do Termux, então não cria celular duplicado no registry."));
 
@@ -222,7 +253,7 @@ public class MainActivity extends Activity {
         pairButton.setOnClickListener(v -> pairWorker());
         connectCard.addView(pairButton);
 
-        LinearLayout profileCard = cardWithTopMargin(root);
+        LinearLayout profileCard = cardWithTopMargin(mainContent);
         profileCard.addView(sectionTitle("3. Perfil deste celular"));
         profileCard.addView(smallText("Escolha o que este celular oferece. Isso altera só este aparelho; o controle de workers continua no Discord."));
 
@@ -249,7 +280,7 @@ public class MainActivity extends Activity {
         saveProfileButton.setOnClickListener(v -> updateOwnProfile());
         profileCard.addView(saveProfileButton);
 
-        LinearLayout updateCard = cardWithTopMargin(root);
+        LinearLayout updateCard = cardWithTopMargin(mainContent);
         updateCard.addView(sectionTitle("4. Sistema do app"));
         updateCard.addView(smallText("Atualizações vêm da VPS. Quando existir versão nova, o Core Worker mostra um aviso no topo e uma notificação. Toque em Atualizar para baixar e abrir a instalação."));
         updateText = smallText("Versão instalada: " + APP_VERSION + "\nAtualização: ainda não verificada.");
@@ -284,9 +315,155 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
         statusParams.setMargins(0, dp(14), 0, 0);
-        root.addView(statusText, statusParams);
+        mainContent.addView(statusText, statusParams);
 
         setContentView(scroll);
+    }
+
+    private void buildPermissionGate(LinearLayout root) {
+        permissionGateCard = card();
+        permissionGateCard.setBackgroundColor(CARD_SOFT);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, 0, 0, dp(14));
+        root.addView(permissionGateCard, params);
+
+        permissionGateCard.addView(sectionTitle("Permissões do Core Worker"));
+        TextView intro = smallText("Antes de liberar a tela principal, permita o necessário para o app avisar updates, abrir a instalação do APK e sobreviver melhor em segundo plano.");
+        intro.setTextColor(TEXT);
+        permissionGateCard.addView(intro);
+
+        permissionStatusText = smallText("");
+        permissionStatusText.setTextColor(TEXT);
+        permissionStatusText.setBackgroundColor(CARD);
+        permissionStatusText.setPadding(dp(10), dp(10), dp(10), dp(10));
+        permissionGateCard.addView(permissionStatusText);
+
+        notificationPermissionButton = button("Permitir notificações");
+        notificationPermissionButton.setOnClickListener(v -> requestNotificationPermission());
+        permissionGateCard.addView(notificationPermissionButton);
+
+        installPermissionButton = button("Permitir instalar atualizações");
+        installPermissionButton.setOnClickListener(v -> openInstallPermissionSettings());
+        permissionGateCard.addView(installPermissionButton);
+
+        batteryPermissionButton = button("Permitir rodar em segundo plano");
+        batteryPermissionButton.setOnClickListener(v -> openBatteryOptimizationSettings());
+        permissionGateCard.addView(batteryPermissionButton);
+
+        refreshPermissionsButton = button("Verificar permissões");
+        refreshPermissionsButton.setOnClickListener(v -> updatePermissionGate());
+        permissionGateCard.addView(refreshPermissionsButton);
+    }
+
+    private boolean hasNotificationPermission() {
+        return Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean hasInstallPermission() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.O || getPackageManager().canRequestPackageInstalls();
+    }
+
+    private boolean hasBatteryPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return true;
+        }
+        try {
+            PowerManager manager = (PowerManager) getSystemService(POWER_SERVICE);
+            return manager == null || manager.isIgnoringBatteryOptimizations(getPackageName());
+        } catch (Exception ignored) {
+            return true;
+        }
+    }
+
+    private boolean hasRequiredAppPermissions() {
+        return hasNotificationPermission() && hasInstallPermission() && hasBatteryPermission();
+    }
+
+    private void updatePermissionGate() {
+        runOnUiThread(() -> {
+            boolean notificationOk = hasNotificationPermission();
+            boolean installOk = hasInstallPermission();
+            boolean batteryOk = hasBatteryPermission();
+            boolean allOk = notificationOk && installOk && batteryOk;
+
+            if (permissionStatusText != null) {
+                StringBuilder builder = new StringBuilder();
+                builder.append(permissionLine("Notificações", notificationOk, "para avisar quando a VPS publicar APK novo")).append('\n');
+                builder.append(permissionLine("Instalar atualização/APK", installOk, "para abrir o instalador baixado da VPS")).append('\n');
+                builder.append(permissionLine("Segundo plano/bateria", batteryOk, "para reduzir chance do Android matar o app")).append("\n\n");
+                builder.append("Dependências atuais\n");
+                builder.append(checkLine("Termux", isPackageInstalled("com.termux") ? "instalado" : "ainda necessário instalar")).append('\n');
+                builder.append(checkLine("Termux:API", isPackageInstalled("com.termux.api") ? "instalado" : "ainda necessário instalar")).append('\n');
+                builder.append(checkLine("Termux:Boot", isPackageInstalled("com.termux.boot") ? "instalado" : "recomendado")).append('\n');
+                builder.append(checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? "Tailscale instalado" : "Tailscale externo ainda necessário"));
+                permissionStatusText.setText(builder.toString());
+            }
+
+            if (permissionGateCard != null) {
+                permissionGateCard.setVisibility(allOk ? View.GONE : View.VISIBLE);
+            }
+            if (mainContent != null) {
+                mainContent.setVisibility(allOk ? View.VISIBLE : View.GONE);
+            }
+            if (notificationPermissionButton != null) {
+                notificationPermissionButton.setVisibility(notificationOk ? View.GONE : View.VISIBLE);
+            }
+            if (installPermissionButton != null) {
+                installPermissionButton.setVisibility(installOk ? View.GONE : View.VISIBLE);
+            }
+            if (batteryPermissionButton != null) {
+                batteryPermissionButton.setVisibility(batteryOk ? View.GONE : View.VISIBLE);
+            }
+        });
+    }
+
+    private String permissionLine(String label, boolean ok, String reason) {
+        return (ok ? "✅ " : "⚠️ ") + label + ": " + (ok ? "ok" : "pendente") + " · " + reason;
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 && !hasNotificationPermission()) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4103);
+        } else {
+            updatePermissionGate();
+        }
+    }
+
+    private void openInstallPermissionSettings() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Intent intent = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()));
+                startActivity(intent);
+            } else {
+                updatePermissionGate();
+            }
+        } catch (Exception exc) {
+            try {
+                startActivity(new Intent(Settings.ACTION_SECURITY_SETTINGS));
+            } catch (Exception ignored) {
+                refreshLocalStatus("Não consegui abrir a tela de instalação de APK. Abra as configurações do Android e permita instalações pelo Core Worker.");
+            }
+        }
+    }
+
+    private void openBatteryOptimizationSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            updatePermissionGate();
+            return;
+        }
+        try {
+            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+        } catch (Exception exc) {
+            try {
+                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (Exception ignored) {
+                refreshLocalStatus("Não consegui abrir a tela de bateria. Desative otimização de bateria manualmente para o Core Worker.");
+            }
+        }
     }
 
     private LinearLayout cardWithTopMargin(LinearLayout root) {
@@ -565,6 +742,7 @@ public class MainActivity extends Activity {
         latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("apkUrl", body.optString("url", "")));
         latestChangelog = changelogText(body.optJSONArray("changelog"));
         String requiredAgent = body.optString("requiredAgentVersion", body.optString("minAgentVersion", ""));
+        boolean notificationRequested = body.optBoolean("notificationRequested", body.optBoolean("notifyUsers", false));
         boolean available = isLatestUpdateAvailable();
         latestUpdateAvailable = available;
 
@@ -581,7 +759,7 @@ public class MainActivity extends Activity {
             text.append("\n\nMudanças:\n").append(latestChangelog);
         }
         updateUpdateUi(text.toString(), available, true);
-        if (available) {
+        if (available && notificationRequested) {
             notifyUpdateAvailable();
         }
         if (userVisible) {

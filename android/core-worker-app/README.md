@@ -10,6 +10,18 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
+## v0.4.6 — permissões obrigatórias e aviso automático de update
+
+A versão `0.4.6` adiciona a tela inicial de permissões do Core Worker. A tela principal só é liberada quando o app tiver o necessário para funcionar como companion privado:
+
+- notificações para avisar quando a VPS publicar um APK novo;
+- permissão de instalar atualizações/APKs baixados da VPS;
+- permissão/ajuste de bateria para reduzir a chance do Android matar o app em segundo plano.
+
+Quando a VPS publicar `latest.json` com `notifyUsers`/`notificationRequested`, o app mostra o banner **Atualizar** no topo e tenta disparar uma notificação local. A URL da VPS continua fixa/read-only e não existe campo normal para escolher IP ou porta.
+
+O objetivo continua o mesmo: hoje o app guia Termux/Termux:API/Tailscale; no futuro, essas dependências serão reduzidas ou embutidas aos poucos.
+
 ## v0.4.5 — updater robusto e worker builder sem sujeira local
 
 A versão `0.4.5` mantém a URL da VPS fixa na tela normal, reforça o banner único de atualização no topo e documenta que builds feitos por worker devem ser publicados/assinados pela VPS sem deixar artefatos locais no repositório.

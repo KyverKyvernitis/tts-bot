@@ -4,6 +4,15 @@ Worker opcional para usar o celular como ajudante da VPS em tarefas que não sã
 
 Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e usa fallback local.
 
+## v1.6.6 — auto-update por jobs da VPS
+
+A versão `1.6.6` foi preparada para o fluxo automático pós-update da VPS:
+
+- quando o updater detectar mudanças em `deploy/termux/phone-worker/`, ele agenda jobs `worker_update` para agents online compatíveis depois que o bot reiniciar e passar no healthcheck;
+- o worker valida os arquivos recebidos, confere SHA-256, aplica apenas alvos permitidos e reinicia de forma adiada/segura;
+- quando o updater detectar mudanças no APK, a VPS agenda um job `apk_build_debug` para workers com perfil/capability `apk-builder`;
+- builds de APK rodam em diretório temporário no celular builder e publicam o resultado na VPS, sem sujar o repositório principal.
+
 ## O que ele expõe
 
 - `GET /health` e `GET /status`: saúde do worker.

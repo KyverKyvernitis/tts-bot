@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.6.5"
+PHONE_WORKER_VERSION = "1.6.6"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -2219,6 +2219,8 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
         field("versionCode", int(version_code or 0)),
         field("sha256", sha256),
         field("requiredAgentVersion", PHONE_WORKER_VERSION),
+        field("notifyUsers", "true"),
+        field("notificationRequested", "true"),
         field("changelog", json.dumps(changelog or ["APK compilado por worker builder"], ensure_ascii=False)),
         (
             f"--{boundary}\r\n"

@@ -18,6 +18,7 @@ DEFAULT_MAX_WORKERS = 24
 DEFAULT_JOB_TTL_SECONDS = 900
 DEFAULT_JOB_LEASE_SECONDS = 120
 DEFAULT_JOB_HISTORY_LIMIT = 80
+DEFAULT_JOB_PAYLOAD_MAX_STRING = 2 * 1024 * 1024
 
 CORE_WORKER_JOB_TYPES = {
     "ping",
@@ -573,7 +574,7 @@ class CoreWorkersRegistry:
         record = {
             "job_id": job_id,
             "type": kind,
-            "payload": _safe_dict(payload or {}, max_items=64, max_string=131072),
+            "payload": _safe_dict(payload or {}, max_items=96, max_string=_env_int("CORE_WORKER_JOB_PAYLOAD_MAX_STRING", DEFAULT_JOB_PAYLOAD_MAX_STRING)),
             "status": "queued",
             "created_at": ts,
             "updated_at": ts,
@@ -751,7 +752,7 @@ class CoreWorkersRegistry:
             "job": {
                 "job_id": str(selected.get("job_id") or ""),
                 "type": str(selected.get("type") or ""),
-                "payload": _safe_dict(selected.get("payload"), max_items=64, max_string=131072),
+                "payload": _safe_dict(selected.get("payload"), max_items=96, max_string=_env_int("CORE_WORKER_JOB_PAYLOAD_MAX_STRING", DEFAULT_JOB_PAYLOAD_MAX_STRING)),
                 "lease_until": selected.get("lease_until"),
                 "attempts": int(selected.get("attempts") or 0),
             },
