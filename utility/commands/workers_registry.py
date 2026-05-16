@@ -175,6 +175,17 @@ def normalize_job_types(value: object, *, default: list[str] | None = None, limi
     return tasks
 
 
+def _merge_unique(base: list[str], extra: list[str], *, limit: int) -> list[str]:
+    result: list[str] = []
+    for item in list(base or []) + list(extra or []):
+        clean = str(item or "").strip()
+        if clean and clean not in result:
+            result.append(clean)
+        if len(result) >= limit:
+            break
+    return result
+
+
 def _job_type_set(value: object) -> set[str]:
     return set(normalize_job_types(value, limit=96))
 
@@ -257,6 +268,9 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
     age = max(0.0, ts - last_seen) if last_seen else None
     enabled = bool(record.get("enabled", True))
     online = enabled and age is not None and age <= offline_after
+    roles = _merge_unique(normalize_roles(record.get("roles"), limit=16), normalize_roles(record.get("manual_roles"), limit=16), limit=16)
+    capabilities = _merge_unique(normalize_roles(record.get("capabilities"), limit=24), normalize_roles(record.get("manual_capabilities"), limit=24), limit=24)
+    supported_tasks = _merge_unique(normalize_job_types(record.get("supported_tasks"), limit=64), normalize_job_types(record.get("manual_supported_tasks"), limit=64), limit=64)
     public = {
         "worker_id": str(record.get("worker_id") or ""),
         "name": _short_text(record.get("name"), limit=64, default="Core Worker"),
@@ -265,9 +279,9 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "last_seen_age_seconds": round(age, 3) if age is not None else None,
         "registered_at": record.get("registered_at"),
         "last_heartbeat_at": record.get("last_heartbeat_at"),
-        "roles": normalize_roles(record.get("roles"), limit=16),
-        "capabilities": normalize_roles(record.get("capabilities"), limit=24),
-        "supported_tasks": normalize_job_types(record.get("supported_tasks"), limit=64),
+        "roles": roles,
+        "capabilities": capabilities,
+        "supported_tasks": supported_tasks,
         "version": _short_text(record.get("version"), limit=48),
         "source": _short_text(record.get("source"), limit=32, default="apk"),
         "endpoint": _short_text(record.get("endpoint"), limit=160),
@@ -666,15 +680,15 @@ class CoreWorkersRegistry:
         target = str(job.get("target_worker_id") or "").strip()
         if target and target != worker_id:
             return False
-        roles = set(normalize_roles(worker.get("roles"), limit=32))
-        capabilities = set(normalize_roles(worker.get("capabilities"), limit=48)) | roles
+        roles = set(normalize_roles(worker.get("roles"), limit=32)) | set(normalize_roles(worker.get("manual_roles"), limit=32))
+        capabilities = (set(normalize_roles(worker.get("capabilities"), limit=48)) | set(normalize_roles(worker.get("manual_capabilities"), limit=48)) | roles)
         required_roles = set(normalize_roles(job.get("required_roles"), limit=16))
         required_capabilities = set(normalize_roles(job.get("required_capabilities"), limit=16))
         if required_roles and not required_roles.issubset(roles | capabilities):
             return False
         if required_capabilities and not required_capabilities.issubset(capabilities):
             return False
-        supported_tasks = _job_type_set(worker.get("supported_tasks"))
+        supported_tasks = _job_type_set(worker.get("supported_tasks")) | _job_type_set(worker.get("manual_supported_tasks"))
         job_type = _normalize_job_type(job.get("type"))
         if supported_tasks and job_type and job_type not in supported_tasks:
             return False
@@ -884,12 +898,13 @@ class CoreWorkersRegistry:
             public = _compact_worker_public(worker, now=ts)
         return {"ok": True, "worker": public}
 
-    def update_worker_roles(self, worker_id: str, roles: object, capabilities: object | None = None) -> dict[str, Any]:
+    def update_worker_roles(self, worker_id: str, roles: object, capabilities: object | None = None, supported_tasks: object | None = None) -> dict[str, Any]:
         safe_worker_id = _safe_worker_id(worker_id)
         new_roles = normalize_roles(roles, limit=16)
         if not new_roles:
             raise CoreWorkerRegistryError("roles ausentes", status=400)
         new_capabilities = normalize_roles(capabilities if capabilities is not None else new_roles, default=new_roles, limit=24)
+        manual_tasks = normalize_job_types(supported_tasks, limit=64) if supported_tasks is not None else []
         ts = _now()
         with self._lock:
             data = self._load_unlocked()
@@ -897,8 +912,17 @@ class CoreWorkersRegistry:
             worker = workers.get(safe_worker_id)
             if not isinstance(worker, dict):
                 raise CoreWorkerRegistryError("worker não encontrado", status=404)
-            worker["roles"] = new_roles
-            worker["capabilities"] = new_capabilities
+            # Mantemos override manual separado porque o heartbeat do agent pode
+            # reenviar o perfil local antigo. O painel deve continuar refletindo
+            # a escolha feita no Discord até o usuário/app trocar de perfil.
+            worker["manual_roles"] = new_roles
+            worker["manual_capabilities"] = new_capabilities
+            if manual_tasks:
+                worker["manual_supported_tasks"] = manual_tasks
+            worker["roles"] = _merge_unique(normalize_roles(worker.get("roles"), limit=16), new_roles, limit=16)
+            worker["capabilities"] = _merge_unique(normalize_roles(worker.get("capabilities"), limit=24), new_capabilities, limit=24)
+            if manual_tasks:
+                worker["supported_tasks"] = _merge_unique(normalize_job_types(worker.get("supported_tasks"), limit=64), manual_tasks, limit=64)
             worker["updated_at"] = ts
             workers[safe_worker_id] = worker
             data["workers"] = workers

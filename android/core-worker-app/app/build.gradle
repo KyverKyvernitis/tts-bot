@@ -2,6 +2,14 @@ plugins {
     id "com.android.application"
 }
 
+// Valores privados do APK final. Não coloque IP real no código-fonte público.
+// Para build privado, exporte CORE_WORKER_VPS_URL/CORE_WORKER_VPS_LABEL ou passe -P.
+def coreWorkerEsc = { String value ->
+    (value ?: "").replace("\\", "\\\\").replace("\"", "\\\"")
+}
+def coreWorkerVpsUrl = (project.findProperty("CORE_WORKER_VPS_URL") ?: System.getenv("CORE_WORKER_VPS_URL") ?: "").toString().trim()
+def coreWorkerVpsLabel = (project.findProperty("CORE_WORKER_VPS_LABEL") ?: System.getenv("CORE_WORKER_VPS_LABEL") ?: (coreWorkerVpsUrl ? "VPS privada configurada no build" : "VPS não configurada no build")).toString().trim()
+
 android {
     namespace "dev.core.worker"
     compileSdk 34
@@ -10,8 +18,11 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 12
-        versionName "0.4.7"
+        versionCode 13
+        versionName "0.4.8"
+
+        buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
+        buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
     }
 
     buildFeatures {
@@ -22,4 +33,3 @@ android {
 dependencies {
     implementation "androidx.core:core:1.13.1"
 }
-

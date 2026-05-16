@@ -57,9 +57,9 @@ import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.4.7";
-    private static final String DEFAULT_VPS_URL = "http://100.103.240.118:10000";
-    private static final String DEFAULT_VPS_LABEL = "VPS principal · 100.103.240.118:10000";
+    private static final String APP_VERSION = "0.4.8";
+    private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
+    private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
     private static final String LOCAL_AGENT_PROFILE_URL = "http://127.0.0.1:8766/local/profile";
     private static final String LOCAL_AGENT_PAIR_URL = "http://127.0.0.1:8766/local/pair";
@@ -230,7 +230,7 @@ public class MainActivity extends Activity {
         serverUrlInput = input("", DEFAULT_VPS_URL);
         serverUrlInput.setVisibility(View.GONE);
         connectCard.addView(label("Servidor"));
-        serverInfoText = smallText("Servidor atual: " + DEFAULT_VPS_LABEL);
+        serverInfoText = smallText("Servidor atual: " + serverDisplayLabel());
         serverInfoText.setTextColor(TEXT);
         serverInfoText.setBackgroundColor(CARD_SOFT);
         serverInfoText.setPadding(dp(10), dp(10), dp(10), dp(10));
@@ -597,6 +597,10 @@ public class MainActivity extends Activity {
 
     private void pairWorker() {
         String serverUrl = normalizedServerUrl();
+        if (serverUrl.isEmpty()) {
+            refreshLocalStatus("VPS não configurada neste APK. Compile o APK privado com CORE_WORKER_VPS_URL.");
+            return;
+        }
         String code = pairCodeInput.getText().toString().trim();
         String name = deviceNameInput.getText().toString().trim();
         String profile = selectedProfile();
@@ -990,7 +994,7 @@ public class MainActivity extends Activity {
 
     private void saveLocalFields(String profile) {
         prefs.edit()
-                .putString("server_url", DEFAULT_VPS_URL)
+                .putString("server_url", normalizedServerUrl())
                 .putString("device_name", deviceNameInput.getText().toString().trim())
                 .putString("profile", profile)
                 .apply();
@@ -1471,11 +1475,13 @@ public class MainActivity extends Activity {
     }
 
     private String normalizedServerUrl() {
-        return DEFAULT_VPS_URL;
+        return emptyFallback(DEFAULT_VPS_URL, "").trim().replaceAll("/+$", "");
     }
 
     private String serverDisplayLabel() {
-        return DEFAULT_VPS_LABEL;
+        String label = emptyFallback(DEFAULT_VPS_LABEL, "VPS não configurada no build");
+        String url = normalizedServerUrl();
+        return url.isEmpty() ? "VPS não configurada no build" : label;
     }
 
     private String selectedProfile() {

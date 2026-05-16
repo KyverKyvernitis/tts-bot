@@ -4,6 +4,12 @@ Worker opcional para usar o celular como ajudante da VPS em tarefas que não sã
 
 Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e usa fallback local.
 
+## v1.6.8 — funções selecionáveis e matriz de jobs
+
+A versão `1.6.8` alinha o agent ao painel `workers`: `builder` também pode receber manutenção segura, `turbo` declara assistência máxima e os jobs auxiliares (`maintenance_plan`, `vps_assist_probe`, `hash_batch`, `endpoint_probe`, `log_digest`, `zip_audit`, `media_probe`, `audio_convert`) ficam oficialmente na matriz do worker quando as capacidades correspondentes estão ativas.
+
+O painel Discord agora deve editar funções por seletores, não por lista digitada manualmente.
+
 ## v1.6.6 — auto-update por jobs da VPS
 
 A versão `1.6.6` foi preparada para o fluxo automático pós-update da VPS:
@@ -172,7 +178,7 @@ python phone_worker.py --heartbeat-once
 python phone_worker.py --jobs-once
 ```
 
-O heartbeat envia status, bateria real via Termux:API quando disponível, ping TCP até a VPS, rede, ffmpeg/ffprobe, disco, saúde básica e um resumo do Tailscale quando a CLI existir. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `worker_self_check`, `worker_logs`, `network_probe`, `tailscale_status`, `service_status`, `service_start`, `service_stop`, `service_restart`, `ffmpeg_check`, `ffprobe_check`, `worker_update`, `boot_status`, `boot_repair`, `zip_validate`, `log_summary`, `text_stats`, `maintenance_plan`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
+O heartbeat envia status, bateria real via Termux:API quando disponível, ping TCP até a VPS, rede, ffmpeg/ffprobe, disco, saúde básica e um resumo do Tailscale quando a CLI existir. Com jobs habilitados, o worker consulta a VPS por polling e executa somente jobs whitelisted (`ping`, `status`, `diagnostic_basic`, `worker_self_check`, `worker_logs`, `network_probe`, `tailscale_status`, `service_status`, `service_start`, `service_stop`, `service_restart`, `ffmpeg_check`, `ffprobe_check`, `worker_update`, `boot_status`, `boot_repair`, `zip_validate`, `zip_audit`, `log_summary`, `log_digest`, `text_stats`, `maintenance_plan`, `vps_assist_probe`, `hash_batch`, `endpoint_probe`, `media_probe`, `audio_convert`, `apk_build_debug`). Não existe execução de shell livre pelo registry. O token fica só no `~/.phone-worker.env`; o registry da VPS guarda apenas hash.
 
 
 ## Supervisor local e anti-duplicação
@@ -298,6 +304,8 @@ Perfis aceitos pelo `pair-phone-worker.sh` e pelo bootstrap:
 - `leve`: `phone-worker, diagnostics, log-summary`
 - `midia`: `phone-worker, diagnostics, log-summary, zip-validate, ffmpeg, ffprobe, tts-convert`
 - `completo`: `phone-worker, diagnostics, log-summary, maintenance-plan, zip-validate, ffmpeg, ffprobe, tts-convert`
+- `builder`: `phone-worker, diagnostics, log-summary, maintenance-plan, apk-builder, zip-validate, vps-assist, cache-worker`
+- `turbo`: mídia + manutenção + APK builder + assistência máxima para acelerar a VPS
 - `bedrock`: reservado para o futuro worker Bedrock (`bedrock`, `bedrock-logs`, `bedrock-backup`), não assume Java.
 
 Também é possível passar uma lista customizada no lugar do perfil:
@@ -356,7 +364,7 @@ O builder em Termux tende a funcionar melhor com Android SDK 34 e `aapt2` do pr�
 
 ## Worker Assist / aceleração da VPS
 
-A partir do phone-worker 1.6.7, o celular pode ajudar a VPS de forma oportunista, sem virar dependência obrigatória do bot.
+A partir do phone-worker 1.6.7/1.6.8, o celular pode ajudar a VPS de forma oportunista, sem virar dependência obrigatória do bot.
 
 Novas capacidades seguras:
 
@@ -376,6 +384,8 @@ Novos jobs permitidos:
 - `audio_convert`
 - `log_digest`
 - `zip_audit`
+- `maintenance_plan`
+- `apk_build_debug` quando o worker tem `apk-builder`
 
 A VPS continua sendo o cérebro. Se nenhum worker estiver online, a VPS deve usar fallback local. Não existe shell livre nem execução arbitrária; apenas jobs whitelist.
 

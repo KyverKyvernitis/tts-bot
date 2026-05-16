@@ -37,7 +37,7 @@ _PING_CACHE: dict[str, Any] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.6.7"
+PHONE_WORKER_VERSION = "1.6.8"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -128,8 +128,8 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "builder": {
         "label": "Builder",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "worker-logs", "network-probe", "tailscale-status"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "apk-builder", "zip-validate", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "apk-builder", "zip-validate", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "worker-logs", "network-probe", "tailscale-status", "boot-repair", "service-control"],
     },
     "turbo": {
         "label": "Turbo",
@@ -254,6 +254,12 @@ def _supported_core_worker_job_types() -> list[str]:
     # Funções de assistência só aparecem quando o perfil permite ajudar a VPS.
     if "vps-assist" not in caps:
         allowed = [item for item in allowed if item not in {"vps_assist_probe", "hash_batch", "endpoint_probe", "log_digest", "zip_audit"}]
+    if "maintenance-plan" not in caps and "cache-worker" not in caps:
+        allowed = [item for item in allowed if item != "maintenance_plan"]
+    if "service-control" not in caps:
+        allowed = [item for item in allowed if item not in {"service_status", "service_start", "service_stop", "service_restart"}]
+    if "boot-repair" not in caps:
+        allowed = [item for item in allowed if item not in {"boot_status", "boot_repair"}]
     if "ffprobe" not in caps and "media-probe" not in caps:
         allowed = [item for item in allowed if item != "media_probe"]
     if "ffmpeg" not in caps and "audio-convert" not in caps and "tts-convert" not in caps:
@@ -2374,7 +2380,15 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             else:
                 raise FileNotFoundError(f"projeto Android não encontrado: {project_subdir}")
         env = os.environ.copy()
+        base_url, _token, _worker_id = _core_worker_auth_parts()
+        injected_vps_url = str(payload.get("coreWorkerVpsUrl") or payload.get("core_worker_vps_url") or payload.get("vps_url") or base_url or "").strip().rstrip("/")
+        injected_vps_label = str(payload.get("coreWorkerVpsLabel") or payload.get("core_worker_vps_label") or ("VPS privada configurada" if injected_vps_url else "VPS não configurada no build")).strip()
+        if injected_vps_url:
+            env["CORE_WORKER_VPS_URL"] = injected_vps_url
+            env["CORE_WORKER_VPS_LABEL"] = injected_vps_label
         builder_environment = _prepare_termux_android_build(project_dir, env)
+        if injected_vps_url:
+            builder_environment["injected_vps_url"] = True
         version_name, version_code = _read_android_version(project_dir)
         version_name = str(payload.get("versionName") or payload.get("version_name") or version_name)
         version_code = int(payload.get("versionCode") or payload.get("version_code") or version_code or 0)
@@ -2587,6 +2601,8 @@ def _assist_readiness_snapshot(payload: dict[str, Any] | None = None) -> dict[st
         reasons.append("VPS instável vista do worker")
     caps = set(capabilities) | set(roles)
     recommended: list[str] = ["log_summary", "zip_validate", "hash_batch", "endpoint_probe"]
+    if "maintenance-plan" in caps or "cache-worker" in caps:
+        recommended.append("maintenance_plan")
     if "ffprobe" in caps:
         recommended.append("media_probe")
     if "ffmpeg" in caps or "tts-convert" in caps:

@@ -40,7 +40,8 @@ WORKER_ROLE_PROFILES: dict[str, tuple[str, ...]] = {
     "leve": ("phone-worker", "diagnostics", "log-summary"),
     "midia": ("phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
     "completo": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
-    "builder": ("phone-worker", "diagnostics", "log-summary", "apk-builder", "zip-validate"),
+    "builder": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "apk-builder", "vps-assist", "cache-worker"),
+    "turbo": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "apk-builder", "vps-assist", "cache-worker"),
     # Futuro: usar só quando o worker realmente tiver servidor Bedrock configurado.
     "bedrock": ("phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"),
 }
@@ -58,15 +59,47 @@ WORKER_ROLE_LABELS: dict[str, str] = {
     "bedrock-logs": "Logs Bedrock",
     "bedrock-backup": "Backup Bedrock",
     "apk-builder": "Compilar APK",
+    "vps-assist": "Ajudar VPS",
+    "cache-worker": "Cache auxiliar",
+    "hash-worker": "Hashes",
+    "endpoint-probe": "Teste de endpoint",
+    "media-probe": "Análise de mídia",
+    "audio-convert": "Converter áudio",
+    "worker-logs": "Logs do worker",
+    "network-probe": "Teste de rede",
+    "tailscale-status": "Status Tailscale",
+    "service-control": "Controle de serviços",
+    "boot-repair": "Reparo de boot",
 }
 
 WORKER_ROLE_PROFILE_DESCRIPTIONS: dict[str, str] = {
     "leve": "diagnósticos e logs",
     "midia": "logs, ZIP, FFmpeg/FFprobe e TTS",
     "completo": "mídia + plano de manutenção",
-    "builder": "compilar APK fora da VPS",
+    "builder": "APK + manutenção segura",
+    "turbo": "ajuda máxima para acelerar a VPS",
     "bedrock": "Minecraft Bedrock futuro",
 }
+
+WORKER_EDITABLE_FEATURES: tuple[dict[str, Any], ...] = (
+    {"value": "phone-worker", "label": "Base", "description": "Obrigatório para qualquer celular", "emoji": "📱", "roles": ("phone-worker",), "capabilities": ("phone-worker",), "tasks": ("ping", "status")},
+    {"value": "diagnostics", "label": "Diagnóstico", "description": "Saúde e checks básicos", "emoji": "🩺", "roles": ("diagnostics",), "capabilities": ("diagnostics",), "tasks": ("diagnostic_basic", "worker_self_check")},
+    {"value": "log-summary", "label": "Logs", "description": "Resumo e leitura de logs", "emoji": "🧾", "roles": ("log-summary",), "capabilities": ("log-summary", "worker-logs"), "tasks": ("log_summary", "log_digest", "worker_logs", "text_stats")},
+    {"value": "maintenance-plan", "label": "Manutenção", "description": "Plano seguro de limpeza/cache", "emoji": "🧹", "roles": ("maintenance-plan",), "capabilities": ("maintenance-plan", "cache-worker"), "tasks": ("maintenance_plan",)},
+    {"value": "zip-validate", "label": "ZIP / patch", "description": "Validar e auditar ZIP", "emoji": "🧪", "roles": ("zip-validate",), "capabilities": ("zip-validate",), "tasks": ("zip_validate", "zip_audit")},
+    {"value": "apk-builder", "label": "APK builder", "description": "Compilar APK fora da VPS", "emoji": "🏗️", "roles": ("apk-builder",), "capabilities": ("apk-builder",), "tasks": ("apk_build_debug",)},
+    {"value": "vps-assist", "label": "Ajudar VPS", "description": "Offload seguro quando disponível", "emoji": "🧠", "roles": ("vps-assist",), "capabilities": ("vps-assist", "hash-worker", "endpoint-probe"), "tasks": ("vps_assist_probe", "hash_batch", "endpoint_probe")},
+    {"value": "ffmpeg", "label": "FFmpeg", "description": "Conversão de áudio curta", "emoji": "🎚️", "roles": ("ffmpeg",), "capabilities": ("ffmpeg", "audio-convert"), "tasks": ("ffmpeg_check", "audio_convert")},
+    {"value": "ffprobe", "label": "FFprobe", "description": "Analisar mídia", "emoji": "🔎", "roles": ("ffprobe",), "capabilities": ("ffprobe", "media-probe"), "tasks": ("ffprobe_check", "media_probe")},
+    {"value": "tts-convert", "label": "TTS/cache", "description": "Preparar áudio para TTS", "emoji": "🔊", "roles": ("tts-convert",), "capabilities": ("tts-convert", "audio-convert"), "tasks": ("audio_convert",)},
+    {"value": "network-probe", "label": "Rede", "description": "Teste de rede/endpoint", "emoji": "📡", "roles": (), "capabilities": ("network-probe", "endpoint-probe"), "tasks": ("network_probe", "endpoint_probe")},
+    {"value": "tailscale-status", "label": "Tailscale", "description": "Status da rede privada", "emoji": "🌐", "roles": (), "capabilities": ("tailscale-status",), "tasks": ("tailscale_status",)},
+    {"value": "service-control", "label": "Serviços", "description": "Start/stop/restart permitidos", "emoji": "🧰", "roles": (), "capabilities": ("service-control",), "tasks": ("service_status", "service_start", "service_stop", "service_restart")},
+    {"value": "boot-repair", "label": "Boot", "description": "Termux:Boot / auto-start", "emoji": "🚀", "roles": (), "capabilities": ("boot-repair",), "tasks": ("boot_status", "boot_repair")},
+    {"value": "bedrock", "label": "Bedrock", "description": "Minecraft Bedrock futuro", "emoji": "🧱", "roles": ("bedrock", "bedrock-logs", "bedrock-backup"), "capabilities": ("bedrock", "bedrock-logs", "bedrock-backup"), "tasks": ()},
+)
+
+_FEATURE_BY_VALUE: dict[str, dict[str, Any]] = {str(item["value"]): item for item in WORKER_EDITABLE_FEATURES}
 LEGACY_WORKER_ID = "__legacy_phone_worker__"
 AUTO_WORKER_ID = "__auto_core_worker__"
 
@@ -237,6 +270,10 @@ def _normalize_worker_profile(value: object, *, default: str = "midia") -> str:
         "builder": "builder",
         "build": "builder",
         "apk-builder": "builder",
+        "turbo": "turbo",
+        "max": "turbo",
+        "rapido": "turbo",
+        "rápido": "turbo",
         "bedrock": "bedrock",
     }
     clean = aliases.get(clean, clean)
@@ -244,6 +281,73 @@ def _normalize_worker_profile(value: object, *, default: str = "midia") -> str:
         return default if default in WORKER_ROLE_PROFILES else "midia"
     return clean
 
+
+
+def _unique_ordered(items: list[str] | tuple[str, ...] | set[str]) -> list[str]:
+    result: list[str] = []
+    for item in items:
+        clean = str(item or "").strip().lower().replace("_", "-")
+        clean = re.sub(r"[^a-z0-9_.:-]+", "-", clean).strip("-._:")
+        if clean and clean not in result:
+            result.append(clean[:40])
+    return result
+
+
+def _profile_feature_values(profile: str) -> set[str]:
+    values: set[str] = {"phone-worker"}
+    roles = set(WORKER_ROLE_PROFILES.get(profile, WORKER_ROLE_PROFILES.get("midia", ())))
+    for value, feature in _FEATURE_BY_VALUE.items():
+        feature_roles = set(str(x) for x in feature.get("roles") or ())
+        feature_caps = set(str(x) for x in feature.get("capabilities") or ())
+        if value == "phone-worker" or value in roles or roles.intersection(feature_roles | feature_caps):
+            values.add(value)
+    if profile == "builder":
+        values.update({"apk-builder", "maintenance-plan", "zip-validate", "vps-assist", "log-summary", "diagnostics"})
+    elif profile == "turbo":
+        values.update(str(item["value"]) for item in WORKER_EDITABLE_FEATURES if str(item.get("value")) != "bedrock")
+    return values
+
+
+def _feature_values_from_worker(worker: dict[str, Any]) -> set[str]:
+    raw_roles = [str(x) for x in (worker.get("roles") or []) if x]
+    raw_caps = [str(x) for x in (worker.get("capabilities") or []) if x]
+    all_tokens = set(_unique_ordered(raw_roles + raw_caps))
+    values: set[str] = {"phone-worker"}
+    for value, feature in _FEATURE_BY_VALUE.items():
+        tokens = {value}
+        tokens.update(str(x) for x in feature.get("roles") or ())
+        tokens.update(str(x) for x in feature.get("capabilities") or ())
+        normalized = set(_unique_ordered(list(tokens)))
+        if all_tokens.intersection(normalized):
+            values.add(value)
+    return values
+
+
+def _roles_caps_tasks_for_features(values: set[str], *, profile: str = "manter") -> tuple[list[str], list[str], list[str]]:
+    selected = set(values or set())
+    selected.add("phone-worker")
+    roles: list[str] = []
+    caps: list[str] = []
+    tasks: list[str] = []
+    # Começa pelo perfil quando ele é explícito, depois aplica as marcações.
+    if profile in WORKER_ROLE_PROFILES:
+        roles.extend(WORKER_ROLE_PROFILES.get(profile, ()))
+    for value in selected:
+        feature = _FEATURE_BY_VALUE.get(value)
+        if not feature:
+            continue
+        roles.extend(str(x) for x in feature.get("roles") or ())
+        caps.extend(str(x) for x in feature.get("capabilities") or ())
+        tasks.extend(str(x) for x in feature.get("tasks") or ())
+    caps.extend(roles)
+    roles = _unique_ordered(roles)[:16]
+    caps = _unique_ordered(caps)[:24]
+    tasks_normalized: list[str] = []
+    for item in tasks:
+        clean = _task_name(item)
+        if clean and clean not in tasks_normalized:
+            tasks_normalized.append(clean[:48])
+    return roles, caps, tasks_normalized[:64]
 
 def _host_label(host: str) -> str:
     host = str(host or "").strip()
@@ -728,6 +832,160 @@ class WorkerSnapshot:
             return discord.Color.orange()
         return discord.Color.dark_grey()
 
+
+
+class WorkerRolesEditorView(discord.ui.LayoutView):
+    def __init__(self, parent: "WorkersPanelView", *, worker: dict[str, Any]):
+        super().__init__(timeout=180.0)
+        self.parent = parent
+        self.cog = parent.cog
+        self.owner_id = parent.owner_id
+        self.worker_id = str(worker.get("worker_id") or "")
+        self.worker_name = _shorten(worker.get("name") or self.worker_id or "Core Worker", limit=48)
+        self.profile = "manter"
+        self.selected_features: set[str] = _feature_values_from_worker(worker)
+        if not self.selected_features:
+            self.selected_features = _profile_feature_values("midia")
+        self._rebuild()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(getattr(interaction.user, "id", 0) or 0) == self.owner_id:
+            return True
+        if interaction.response.is_done():
+            await interaction.followup.send("Só quem abriu o painel pode editar este worker.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Só quem abriu o painel pode editar este worker.", ephemeral=True)
+        return False
+
+    def _clear_items(self) -> None:
+        for item in list(self.children):
+            self.remove_item(item)
+
+    def _new_select(self, **kwargs: Any):
+        select_cls = getattr(discord.ui, "StringSelect", None) or getattr(discord.ui, "Select")
+        return select_cls(**kwargs)
+
+    def _profile_options(self) -> list[discord.SelectOption]:
+        return [
+            discord.SelectOption(label="Manter seleção atual", value="manter", description="Não troca o perfil base sozinho", emoji="📌", default=self.profile == "manter"),
+            discord.SelectOption(label="Leve", value="leve", description="Reserva, diagnóstico e logs", emoji="🍃", default=self.profile == "leve"),
+            discord.SelectOption(label="Mídia", value="midia", description="FFmpeg, FFprobe, TTS e ZIP", emoji="🎧", default=self.profile == "midia"),
+            discord.SelectOption(label="Completo", value="completo", description="Mídia + manutenção", emoji="🧰", default=self.profile == "completo"),
+            discord.SelectOption(label="Builder", value="builder", description="APK + ZIP + manutenção segura", emoji="🏗️", default=self.profile == "builder"),
+            discord.SelectOption(label="Turbo", value="turbo", description="Ajuda máxima para acelerar a VPS", emoji="⚡", default=self.profile == "turbo"),
+            discord.SelectOption(label="Bedrock", value="bedrock", description="Minecraft Bedrock futuro", emoji="🧱", default=self.profile == "bedrock"),
+        ]
+
+    def _feature_options(self) -> list[discord.SelectOption]:
+        options: list[discord.SelectOption] = []
+        selected = set(self.selected_features)
+        for feature in WORKER_EDITABLE_FEATURES:
+            value = str(feature.get("value") or "")
+            if not value:
+                continue
+            options.append(discord.SelectOption(
+                label=str(feature.get("label") or value)[:100],
+                value=value[:100],
+                description=_shorten(feature.get("description") or "", limit=100),
+                emoji=str(feature.get("emoji") or "🧩"),
+                default=value in selected,
+            ))
+        return options[:25]
+
+    def _preview_text(self) -> str:
+        roles, caps, tasks = _roles_caps_tasks_for_features(self.selected_features, profile=(self.profile if self.profile != "manter" else ""))
+        role_preview = ", ".join(_role_label(role) for role in roles[:10]) or "Base do worker"
+        task_preview = ", ".join(f"`{task}`" for task in tasks[:12]) or "`ping`/`status`"
+        if len(tasks) > 12:
+            task_preview += f" +{len(tasks) - 12}"
+        return (
+            f"## 🧩 Editar funções do celular\n"
+            f"**Worker:** {_shorten(self.worker_name, limit=64)}\n"
+            "Escolha por opções. Nada de digitar lista de funções na mão.\n\n"
+            f"**Perfil base:** `{self.profile}`\n"
+            f"**Funções finais:** {role_preview}\n"
+            f"**Jobs que serão declarados:** {task_preview}\n"
+            "-# Isso salva um override manual no registry. O agent ainda deve estar atualizado para executar os jobs."
+        )
+
+    def _rebuild(self, *, done: str = "") -> None:
+        self._clear_items()
+        if done:
+            self.add_item(discord.ui.Container(discord.ui.TextDisplay(done[:1900]), accent_color=discord.Color.green()))
+            return
+        profile_select = self._new_select(
+            placeholder="Perfil base",
+            min_values=1,
+            max_values=1,
+            options=self._profile_options(),
+        )
+        profile_select.callback = self._select_profile
+        feature_options = self._feature_options()
+        features_select = self._new_select(
+            placeholder="Funções deste celular",
+            min_values=1,
+            max_values=min(25, len(feature_options)),
+            options=feature_options,
+        )
+        features_select.callback = self._select_features
+        apply_button = discord.ui.Button(label="Aplicar funções", emoji="✅", style=discord.ButtonStyle.primary)
+        apply_button.callback = self._apply
+        cancel_button = discord.ui.Button(label="Fechar", emoji="✖️", style=discord.ButtonStyle.secondary)
+        cancel_button.callback = self._cancel
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(self._preview_text()),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(profile_select),
+            discord.ui.ActionRow(features_select),
+            discord.ui.ActionRow(apply_button, cancel_button),
+            accent_color=discord.Color.blurple(),
+        ))
+
+    async def _select_profile(self, interaction: discord.Interaction) -> None:
+        values = list(getattr(getattr(interaction, "data", None), "get", lambda _k, _d=None: _d)("values", []) or [])
+        if not values:
+            with contextlib.suppress(Exception):
+                values = list(getattr(interaction, "values", []) or [])
+        profile = _normalize_worker_profile(str((values or ["manter"])[0] or "manter"), default="midia")
+        if str((values or [""])[0]) == "manter":
+            profile = "manter"
+        self.profile = profile
+        if profile != "manter":
+            self.selected_features = _profile_feature_values(profile)
+        self._rebuild()
+        await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _select_features(self, interaction: discord.Interaction) -> None:
+        values = list(getattr(getattr(interaction, "data", None), "get", lambda _k, _d=None: _d)("values", []) or [])
+        if not values:
+            with contextlib.suppress(Exception):
+                values = list(getattr(interaction, "values", []) or [])
+        self.selected_features = {str(value) for value in values if str(value) in _FEATURE_BY_VALUE}
+        self.selected_features.add("phone-worker")
+        self._rebuild()
+        await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _apply(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=False)
+        roles, caps, tasks = _roles_caps_tasks_for_features(self.selected_features, profile=(self.profile if self.profile != "manter" else ""))
+        try:
+            await self.cog._update_core_worker_roles(self.worker_id, ", ".join(roles), ", ".join(caps), ", ".join(tasks))
+            self.parent.snapshot = await self.cog._collect_workers_snapshot(action_note=f"funções atualizadas por seleção · {_shorten(self.worker_name, limit=32)}")
+            self.parent._ensure_selected_worker()
+            self.parent._rebuild_layout()
+            if self.parent.message is not None:
+                await self.parent.message.edit(view=self.parent, allowed_mentions=discord.AllowedMentions.none())
+            text = "✅ Funções atualizadas.\n\n" + _role_text(roles, limit=16) + "\n\nJobs: " + ", ".join(f"`{task}`" for task in tasks[:20])
+            self._rebuild(done=text[:1900])
+            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as exc:
+            text = f"Não consegui atualizar as funções: {_compact_failure(exc)}"
+            self._rebuild(done=text)
+            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _cancel(self, interaction: discord.Interaction) -> None:
+        self._rebuild(done="Edição fechada. Nada foi alterado.")
+        await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
 
 class WorkersPanelView(discord.ui.LayoutView):
     def __init__(
@@ -1570,81 +1828,11 @@ class WorkersPanelView(discord.ui.LayoutView):
         if not worker:
             await interaction.response.send_message("Selecione um celular registrado para editar funções.", ephemeral=True)
             return
-        view = self
-        worker_id = str(worker.get("worker_id") or "")
-        current_roles_list = [str(role) for role in (worker.get("roles") or []) if role]
-        current_caps_list = [str(role) for role in (worker.get("capabilities") or worker.get("roles") or []) if role]
-        current_roles = ", ".join(current_roles_list)
-        current_caps = ", ".join(current_caps_list)
-
-        class WorkerRolesModal(discord.ui.Modal, title="Editar funções do celular"):
-            profile = discord.ui.TextInput(
-                label="Perfil base",
-                placeholder="manter, leve, midia, completo, builder ou bedrock",
-                default="manter",
-                min_length=4,
-                max_length=16,
-                required=True,
-            )
-            add_roles = discord.ui.TextInput(
-                label="Adicionar funções extras",
-                placeholder="Ex.: ffmpeg, tts-convert, zip-validate; vazio = nenhuma extra",
-                default="",
-                min_length=0,
-                max_length=260,
-                required=False,
-            )
-            remove_roles = discord.ui.TextInput(
-                label="Remover funções",
-                placeholder="Ex.: maintenance-plan; vazio = não remove nada",
-                default="",
-                min_length=0,
-                max_length=260,
-                required=False,
-            )
-            capabilities = discord.ui.TextInput(
-                label="Capacidades avançadas opcional",
-                placeholder="Vazio = igual às funções finais",
-                default=current_caps[:400] if current_caps and current_caps != current_roles else "",
-                min_length=0,
-                max_length=400,
-                required=False,
-            )
-
-            async def on_submit(self, modal_interaction: discord.Interaction) -> None:
-                await modal_interaction.response.defer(thinking=False)
-                try:
-                    raw_profile = str(self.profile.value or "manter").strip().lower().replace("í", "i")
-                    if raw_profile in {"manter", "atual", "current", "mesmo"}:
-                        roles = list(current_roles_list)
-                        profile_label = "mantido"
-                    else:
-                        profile_key = _normalize_worker_profile(raw_profile, default="midia")
-                        roles = list(WORKER_ROLE_PROFILES.get(profile_key, WORKER_ROLE_PROFILES["midia"]))
-                        profile_label = profile_key
-                    for role in _split_role_list(self.add_roles.value):
-                        if role not in roles:
-                            roles.append(role)
-                    for role in _split_role_list(self.remove_roles.value):
-                        roles = [item for item in roles if item != role]
-                    if "phone-worker" not in roles:
-                        roles.insert(0, "phone-worker")
-                    roles = roles[:16]
-                    caps = _split_role_list(self.capabilities.value, limit=24) or list(roles)
-                    await view.cog._update_core_worker_roles(worker_id, ", ".join(roles), ", ".join(caps))
-                    view.snapshot = await view.cog._collect_workers_snapshot(action_note=f"funções atualizadas · perfil {profile_label}")
-                    message = "Funções do celular atualizadas.\n" + _role_text(roles, limit=16)
-                except Exception as exc:
-                    view.snapshot = await view.cog._collect_workers_snapshot(action_note=f"falha editando funções: {_compact_failure(exc)}")
-                    message = f"Não consegui atualizar as funções: {_compact_failure(exc)}"
-                view._ensure_selected_worker()
-                view._rebuild_layout()
-                if view.message is not None:
-                    await view.message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
-                with contextlib.suppress(Exception):
-                    await modal_interaction.followup.send(message[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-
-        await interaction.response.send_modal(WorkerRolesModal())
+        await interaction.response.send_message(
+            view=WorkerRolesEditorView(self, worker=worker),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     async def _set_selected_worker_enabled(self, interaction: discord.Interaction, *, enabled: bool):
         worker = self._selected_worker()
@@ -1935,7 +2123,9 @@ class WorkersCommandMixin:
             "versionName": version_name,
             "versionCode": version_code,
             "filename": f"CoreWorker-v{version_name}-debug.apk",
-            "changelog": ["APK compilado por worker builder", "VPS assinou e publicou o resultado", "URL da VPS fixa no APK"],
+            "coreWorkerVpsUrl": _public_base_url(),
+            "coreWorkerVpsLabel": f"VPS privada · {_host_label(_public_base_url().replace('http://', '').replace('https://', '').split(':')[0])}:" + str(os.getenv("CORE_WORKER_PUBLIC_PORT") or os.getenv("PORT") or "10000"),
+            "changelog": ["APK compilado por worker builder", "VPS assinou e publicou o resultado", "URL da VPS injetada no build privado"],
         })
         return payload
 
@@ -1952,7 +2142,11 @@ class WorkersCommandMixin:
         task = _task_name(job_type)
         is_apk_build = task == "apk_build_debug"
         assist_tasks = {"vps_assist_probe", "hash_batch", "endpoint_probe", "media_probe", "audio_convert", "log_digest", "zip_audit", "maintenance_plan"}
-        required_caps = ["apk-builder"] if is_apk_build else (["vps-assist"] if task in assist_tasks else ["phone-worker"])
+        # Não use uma capacidade genérica como trava para todos os assist jobs.
+        # O registry já valida supported_tasks/target. Isso evita oferecer uma ação
+        # compatível no painel e falhar depois só porque o worker não tinha
+        # `vps-assist` escrito nas capabilities antigas.
+        required_caps = ["apk-builder"] if is_apk_build else []
         ttl = 7200 if is_apk_build else (1200 if task in assist_tasks or task in {"log_summary", "maintenance_plan", "zip_validate"} else 900)
         lease = 7200 if is_apk_build else (240 if task in assist_tasks or task in {"log_summary", "maintenance_plan", "zip_validate"} else 120)
         return await asyncio.to_thread(
@@ -2002,9 +2196,9 @@ class WorkersCommandMixin:
         registry = get_core_workers_registry()
         return await asyncio.to_thread(registry.rename_worker, worker_id, name)
 
-    async def _update_core_worker_roles(self, worker_id: str, roles: str, capabilities: str = "") -> dict[str, Any]:
+    async def _update_core_worker_roles(self, worker_id: str, roles: str, capabilities: str = "", supported_tasks: str = "") -> dict[str, Any]:
         registry = get_core_workers_registry()
-        return await asyncio.to_thread(registry.update_worker_roles, worker_id, roles, capabilities or None)
+        return await asyncio.to_thread(registry.update_worker_roles, worker_id, roles, capabilities or None, supported_tasks or None)
 
     async def _set_core_worker_enabled(self, worker_id: str, *, enabled: bool) -> dict[str, Any]:
         registry = get_core_workers_registry()

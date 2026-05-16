@@ -177,3 +177,5 @@ android/**/captures/
 android/**/*.jks
 android/**/*.keystore
 android/**/keystore.properties
+android/core-worker-app/private.properties
+android/core-worker-app/vps.properties

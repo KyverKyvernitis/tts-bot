@@ -10,6 +10,21 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
+## v0.4.8 — URL privada injetada no build
+
+A versão `0.4.8` remove IP/porta reais do código versionado. O APK final privado continua usando a VPS atual do projeto, mas a URL agora entra no build por `CORE_WORKER_VPS_URL`/`CORE_WORKER_VPS_LABEL`, variáveis locais ou propriedades Gradle que não devem ir para o GitHub.
+
+Exemplo de build privado:
+
+```bash
+cd /home/ubuntu/bot/android/core-worker-app
+CORE_WORKER_VPS_URL="http://IP_PRIVADO_DA_VPS:10000" \
+CORE_WORKER_VPS_LABEL="VPS privada configurada" \
+gradle assembleDebug --no-daemon --max-workers=1
+```
+
+Se a URL não for injetada, o app mostra **VPS não configurada no build** e bloqueia pareamento/update em vez de expor IP real no repositório.
+
 ## v0.4.6 — permissões obrigatórias e aviso automático de update
 
 A versão `0.4.6` adiciona a tela inicial de permissões do Core Worker. A tela principal só é liberada quando o app tiver o necessário para funcionar como companion privado:
@@ -28,7 +43,7 @@ A versão `0.4.5` mantém a URL da VPS fixa na tela normal, reforça o banner ú
 
 A VPS só publica/sinaliza que existe uma versão nova, e o APK cuida da experiência humana:
 
-- o APK consulta sempre a VPS principal configurada no app (`http://100.103.240.118:10000`) e seu `/core-worker/app/latest.json`;
+- o APK consulta sempre a VPS privada injetada no build e seu `/core-worker/app/latest.json`;
 - se houver versão nova, mostra um aviso no topo com botão **Atualizar**;
 - quando possível, envia uma notificação local de atualização;
 - ao tocar em **Atualizar**, o APK baixa o arquivo indicado no manifesto, valida SHA-256 quando informado e abre o instalador do Android;
@@ -56,7 +71,7 @@ O APK pode:
 
 - detectar se Termux, Termux:API, Termux:Boot e Tailscale estão instalados;
 - detectar o worker local em `http://127.0.0.1:8766/local/status`;
-- testar conexão com a VPS principal pela rede privada atual, sem o usuário digitar IP/porta;
+- testar conexão com a VPS privada configurada no build, sem o usuário digitar IP/porta;
 - parear este celular usando o código `CORE-XXXX` gerado no painel `workers`;
 - passar o pareamento para o phone-worker real via `POST /local/pair`;
 - editar o **perfil deste próprio celular** por `POST /local/profile`;
