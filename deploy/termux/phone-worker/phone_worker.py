@@ -42,7 +42,7 @@ _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.7.7"
+PHONE_WORKER_VERSION = "1.7.8"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -1079,6 +1079,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "loadavg": status.get("loadavg"),
             "scripts": status.get("scripts"),
             "boot": status.get("boot"),
+            "shell_autostart": status.get("shell_autostart"),
             "auto_boot_repair": status.get("auto_boot_repair"),
             "supervisor": status.get("supervisor"),
             "sshd": status.get("sshd"),
@@ -1265,6 +1266,7 @@ def _system_status() -> dict[str, Any]:
         "core_worker_network": _core_worker_network_runtime_snapshot(),
         "scripts": _script_inventory(),
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
+        "shell_autostart": _safe_telemetry("shell autostart", _termux_shell_autostart_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "auto_boot_repair": auto_boot_repair,
         "supervisor": _safe_telemetry("supervisor", _runtime_supervisor_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "sshd": _safe_telemetry("sshd", _sshd_snapshot, {"ok": False, "source": "telemetry_failed"}),
@@ -1317,6 +1319,8 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
         "sshd_ok": ((status.get("sshd") or {}).get("ok") if isinstance(status.get("sshd"), dict) else None),
         "sshd_summary": ((status.get("sshd") or {}).get("summary") if isinstance(status.get("sshd"), dict) else None),
+        "shell_autostart_ok": ((status.get("shell_autostart") or {}).get("ok") if isinstance(status.get("shell_autostart"), dict) else None),
+        "shell_autostart_summary": ((status.get("shell_autostart") or {}).get("summary") if isinstance(status.get("shell_autostart"), dict) else None),
         "note": "Rota local para o APK Core Worker; não executa shell e não expõe token.",
     }
 
@@ -2234,6 +2238,91 @@ def _termux_boot_script_content() -> str:
     ])
 
 
+
+
+def _termux_shell_autostart_block() -> str:
+    """Bloco gerenciado para iniciar o watchdog quando o Termux é aberto."""
+    return "\n".join([
+        '# >>> core-worker-autostart >>>',
+        '# Bloco gerenciado pelo Core Worker. Não coloque segredos aqui.',
+        'if [ -z "${CORE_WORKER_SHELL_AUTOSTART_DONE:-}" ]; then',
+        '  export CORE_WORKER_SHELL_AUTOSTART_DONE=1',
+        '  if [ -f "$HOME/phone-worker/watch-phone-worker.sh" ]; then',
+        '    (',
+        '      termux-wake-lock >/dev/null 2>&1 || true',
+        '      cd "$HOME/phone-worker" >/dev/null 2>&1 || exit 0',
+        '      nohup /data/data/com.termux/files/usr/bin/bash "$HOME/phone-worker/watch-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.shell.log" 2>&1 &',
+        '    ) >/dev/null 2>&1 &',
+        '  fi',
+        'fi',
+        '# <<< core-worker-autostart <<<',
+        ''
+    ])
+
+
+def _update_managed_shell_block(path: Path, block: str) -> bool:
+    start = '# >>> core-worker-autostart >>>'
+    end = '# <<< core-worker-autostart <<<'
+    path = path.expanduser()
+    try:
+        text = path.read_text(encoding='utf-8', errors='ignore') if path.exists() else ''
+    except Exception:
+        text = ''
+    pattern = re.compile(re.escape(start) + r'.*?' + re.escape(end) + r'\n?', re.DOTALL)
+    clean = pattern.sub('', text).rstrip()
+    new_text = (clean + '\n\n' if clean else '') + block
+    if text == new_text:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_text, encoding='utf-8')
+    return True
+
+
+def _termux_shell_autostart_status_snapshot() -> dict[str, Any]:
+    files = [Path.home() / '.bashrc', Path.home() / '.profile']
+    items: list[dict[str, Any]] = []
+    ok_any = False
+    for path in files:
+        exists = path.exists()
+        has_block = False
+        has_watchdog = False
+        try:
+            text = path.read_text(encoding='utf-8', errors='ignore') if exists else ''
+            has_block = '# >>> core-worker-autostart >>>' in text and '# <<< core-worker-autostart <<<' in text
+            has_watchdog = 'watch-phone-worker.sh' in text
+        except Exception:
+            pass
+        ok = bool(exists and has_block and has_watchdog)
+        ok_any = ok_any or ok
+        items.append({'path': str(path), 'exists': exists, 'content_ok': ok, 'has_block': has_block, 'has_watchdog': has_watchdog})
+    return {
+        'ok': bool(ok_any),
+        'source': 'termux-shell',
+        'files': items,
+        'summary': 'shell abre watchdog ao abrir Termux' if ok_any else 'shell não dispara watchdog ao abrir Termux',
+    }
+
+
+def _repair_termux_shell_autostart() -> dict[str, Any]:
+    block = _termux_shell_autostart_block()
+    changed: list[str] = []
+    errors: list[str] = []
+    for path in (Path.home() / '.bashrc', Path.home() / '.profile'):
+        try:
+            if _update_managed_shell_block(path, block):
+                changed.append(str(path))
+        except Exception as exc:
+            errors.append(f'{path}: {type(exc).__name__}: {_short_text(exc, limit=100)}')
+    status = _termux_shell_autostart_status_snapshot()
+    status['changed_files'] = changed
+    status['changed'] = bool(changed)
+    if errors:
+        status['errors'] = errors[:4]
+        status['ok'] = False
+        status['summary'] = 'falha reparando autostart de shell do Termux'
+    return status
+
+
 def _termux_boot_package_status() -> dict[str, Any]:
     # Best-effort: Android 16 pode negar listagem completa de pacotes para o app,
     # então falha aqui não deve marcar o boot como quebrado.
@@ -2304,11 +2393,13 @@ def _repair_termux_boot_script() -> dict[str, Any]:
             changed = path.read_text(encoding="utf-8", errors="ignore") != content
     path.write_text(content, encoding="utf-8")
     os.chmod(path, 0o755)
+    shell_status = _repair_termux_shell_autostart()
     status = _termux_boot_status_snapshot()
     status.update({
-        "ok": bool(status.get("ok")),
-        "changed": bool(changed),
-        "summary": "boot automático reparado" if status.get("ok") else "boot automático criado, verifique Termux:Boot",
+        "ok": bool(status.get("ok")) and bool(shell_status.get("ok", True)),
+        "changed": bool(changed or shell_status.get("changed")),
+        "shell_autostart": shell_status,
+        "summary": "boot/shell automático reparado" if status.get("ok") else "boot automático criado, verifique Termux:Boot",
     })
     return status
 
@@ -2405,10 +2496,12 @@ def _script_inventory() -> dict[str, Any]:
             "preferred": str(_best_script(name)),
         }
     installs = _duplicate_installations_snapshot()
+    shell_autostart = _termux_shell_autostart_status_snapshot()
     return {
         "complete": complete,
         "mirrored": mirrored,
         "scripts": scripts,
+        "shell_autostart": shell_autostart,
         "installations": installs,
         # Só marcamos como problema quando a duplicata parece ativa/referenciada.
         # Diretórios antigos inativos continuam visíveis no diagnóstico sem poluir o card.
@@ -2426,6 +2519,9 @@ def _local_boot_needs_repair() -> tuple[bool, str]:
     installs = scripts.get("installations") if isinstance(scripts.get("installations"), dict) else {}
     if installs.get("has_active_duplicates"):
         reasons.append("duplicata ativa aponta para instalação antiga")
+    shell_autostart = _termux_shell_autostart_status_snapshot()
+    if not shell_autostart.get("ok"):
+        reasons.append("Termux aberto não dispara watchdog")
     return bool(reasons), "; ".join(reasons)
 
 
@@ -2434,10 +2530,22 @@ def _auto_repair_local_boot_if_needed() -> dict[str, Any]:
         return {"enabled": False}
     try:
         needed, reason = _local_boot_needs_repair()
-        if not needed:
-            return {"enabled": True, "changed": False, "reason": "ok"}
-        repaired = _repair_termux_boot_script()
-        return {"enabled": True, "changed": True, "reason": reason, "boot": repaired}
+        shell_status = _termux_shell_autostart_status_snapshot()
+        shell_needed = not bool(shell_status.get("ok"))
+        if not needed and not shell_needed:
+            return {"enabled": True, "changed": False, "reason": "ok", "shell_autostart": shell_status}
+        repaired = _repair_termux_boot_script() if needed else _termux_boot_status_snapshot()
+        shell_repaired = _repair_termux_shell_autostart() if shell_needed else shell_status
+        reasons = [reason] if reason else []
+        if shell_needed:
+            reasons.append("shell do Termux não iniciava watchdog ao abrir app")
+        return {
+            "enabled": True,
+            "changed": bool(needed or shell_needed),
+            "reason": "; ".join(reasons) or "reparo aplicado",
+            "boot": repaired,
+            "shell_autostart": shell_repaired,
+        }
     except Exception as exc:
         return {"enabled": True, "changed": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"}
 
@@ -2955,6 +3063,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
     target_version = _short_text(payload.get("version"), limit=48, default="desconhecida")
     applied_version = _read_phone_worker_version_from_path(_phone_worker_dir() / "phone_worker.py") or target_version
     boot_status = _repair_termux_boot_script() if any(item.get("target") in {"start-phone-worker.sh", "watch-phone-worker.sh", "bootstrap-phone-worker.sh", "install.sh"} for item in updated) else _termux_boot_status_snapshot()
+    shell_status = _repair_termux_shell_autostart()
     update_status = {
         "ok": True,
         "updated_at": time.time(),
@@ -2964,6 +3073,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
         "restart_requested": bool(payload.get("restart", True)),
         "files": [item.get("target") for item in updated],
         "boot_ok": bool(boot_status.get("ok")),
+        "shell_autostart_ok": bool(shell_status.get("ok")),
     }
     with contextlib.suppress(Exception):
         _write_json_file_atomic(_phone_worker_update_status_file(), update_status)
@@ -2977,6 +3087,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
         "applied_file_version": applied_version,
         "target_version": target_version,
         "boot": {"ok": bool(boot_status.get("ok")), "mode": boot_status.get("mode"), "summary": boot_status.get("summary")},
+        "shell_autostart": {"ok": bool(shell_status.get("ok")), "summary": shell_status.get("summary"), "changed": bool(shell_status.get("changed"))},
         "update_status_file": str(_phone_worker_update_status_file()),
     }
     if _env_bool("PHONE_WORKER_UPDATE_RESTART", bool(payload.get("restart", True))):
@@ -3167,12 +3278,14 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
             result.setdefault("summary", "APK compilado/publicado pelo worker")
         elif kind == "boot_status":
             result = _termux_boot_status_snapshot()
-            result.setdefault("summary", "status do boot automático coletado")
+            result["shell_autostart"] = _termux_shell_autostart_status_snapshot()
+            result.setdefault("summary", "status do boot/shell automático coletado")
         elif kind == "boot_repair":
             result = _repair_termux_boot_script()
+            result["shell_autostart"] = _repair_termux_shell_autostart()
             result["scripts"] = _script_inventory()
             result["supervisor"] = _runtime_supervisor_snapshot()
-            result.setdefault("summary", "boot automático reparado")
+            result.setdefault("summary", "boot/shell automático reparado")
         elif kind in {"service_status", "service_start", "service_stop", "service_restart"}:
             service = payload.get("service") or "phone-worker"
             action = kind.removeprefix("service_")

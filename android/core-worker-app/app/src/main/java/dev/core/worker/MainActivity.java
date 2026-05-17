@@ -58,7 +58,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.4";
+    private static final String APP_VERSION = "0.5.5";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -669,7 +669,7 @@ public class MainActivity extends Activity {
             boolean localSynced = syncProfileToLocalAgent(profile);
             String prefix = localSynced
                     ? "Perfil aplicado no worker local: " + profileLabel(profile)
-                    : "Perfil salvo no APK. Worker local offline; abra o Termux e inicie o worker.";
+                    : "Perfil salvo no APK. Worker local offline; abra o Termux para o autostart tentar levantar o watchdog.";
             if (hasPairing()) {
                 sendHeartbeatInternal(true, prefix);
             } else {
@@ -740,14 +740,14 @@ public class MainActivity extends Activity {
     }
 
     private void checkForUpdateInternal(String serverUrl, boolean userVisible) throws Exception {
-        HttpResult result = request("GET", serverUrl + "/core-worker/app/latest.json", null, null);
+        HttpResult result = fetchLatestManifest(serverUrl);
         if (!result.ok()) {
             latestUpdateAvailable = false;
             latestVersionName = "";
             latestVersionCode = -1;
-            updateUpdateUi("Versão instalada: " + APP_VERSION + "\nAtualização: não publicada na VPS ou indisponível.", false, false);
+            updateUpdateUi("Versão instalada: " + APP_VERSION + "\nAtualização: manifesto latest.json indisponível na VPS.", false, false);
             if (userVisible) {
-                show("Não encontrei atualização publicada na VPS.\nHTTP " + result.status + " · " + compactResultBody(result.body));
+                show("Não encontrei manifesto de atualização na VPS.\nHTTP " + result.status + " · " + compactResultBody(result.body));
             }
             return;
         }
@@ -789,6 +789,20 @@ public class MainActivity extends Activity {
         if (userVisible) {
             show(available ? "Atualização encontrada. Toque em Atualizar no topo do app." : "Nenhuma atualização nova encontrada.");
         }
+    }
+
+    private HttpResult fetchLatestManifest(String serverUrl) throws Exception {
+        String[] paths = new String[] {
+                "/core-worker/app/latest.json",
+                "/core-worker/latest.json"
+        };
+        HttpResult first = null;
+        for (String path : paths) {
+            HttpResult result = request("GET", serverUrl + path, null, null);
+            if (first == null) first = result;
+            if (result.ok()) return result;
+        }
+        return first == null ? new HttpResult(0, "") : first;
     }
 
     private boolean isLatestUpdateAvailable() {
@@ -1447,7 +1461,7 @@ public class MainActivity extends Activity {
             }
             startActivity(launch);
         } catch (Exception exc) {
-            refreshLocalStatus("Não consegui abrir o Termux automaticamente. Abra o Termux manualmente e rode: ~/phone-worker/start-phone-worker.sh");
+            refreshLocalStatus("Não consegui abrir o Termux automaticamente. Abra o Termux; o autostart do Core Worker deve iniciar o watchdog local.");
         }
     }
 

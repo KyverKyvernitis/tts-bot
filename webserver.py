@@ -576,6 +576,8 @@ def core_worker_app_notification():
 
 
 @app.get("/core-worker/app/latest.json")
+@app.get("/core-worker/latest.json")
+@app.get("/core-worker/latest")
 def core_worker_app_latest():
     """Manifesto privado de atualização do Core Worker APK.
 

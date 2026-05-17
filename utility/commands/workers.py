@@ -646,12 +646,18 @@ def _wake_channel_text(worker: dict[str, Any]) -> str:
     status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
     sshd = status.get("sshd") if isinstance(status.get("sshd"), dict) else {}
     supervisor = status.get("supervisor") if isinstance(status.get("supervisor"), dict) else {}
+    shell_autostart = status.get("shell_autostart") if isinstance(status.get("shell_autostart"), dict) else {}
     pieces: list[str] = []
     if supervisor:
         if supervisor.get("watchdog_ok") is True:
             pieces.append("watchdog ok")
         elif supervisor.get("watchdog_ok") is False:
             pieces.append("watchdog off")
+    if shell_autostart:
+        if shell_autostart.get("ok") is True:
+            pieces.append("shell auto ok")
+        elif shell_autostart.get("ok") is False:
+            pieces.append("shell auto off")
     if sshd:
         if sshd.get("ok"):
             port = str(sshd.get("port") or "8022")
@@ -662,7 +668,7 @@ def _wake_channel_text(worker: dict[str, Any]) -> str:
             pieces.append("SSHD parado")
         elif sshd.get("listening") is False:
             pieces.append("SSHD sem porta")
-    return " · ".join(pieces[:3])
+    return " · ".join(pieces[:4])
 
 
 def _boot_health_label(worker: dict[str, Any]) -> str:
@@ -1257,6 +1263,7 @@ def _worker_detail_text(worker: dict[str, Any] | None) -> str:
         f"**Rede:** {_network_text(worker)}",
         f"**Scripts:** {_script_health_label(worker)}",
         f"**Boot automático:** {_boot_health_label(worker)}",
+        f"**Canal wake:** {_wake_channel_text(worker) or 'não reportado'}",
         f"**Runtime:** {_runtime_health_label(worker)}",
         "",
         "### Funções",

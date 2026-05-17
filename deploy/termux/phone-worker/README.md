@@ -4,6 +4,12 @@ Worker opcional para usar o celular como ajudante da VPS em tarefas que não sã
 
 Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e usa fallback local.
 
+## v1.7.8 — autostart ao abrir Termux e sshd auto-heal
+
+A versão `1.7.8` alinha o agent ao Patch 47. Além do Termux:Boot, o update/boot_repair agora instala um bloco gerenciado em `~/.bashrc` e `~/.profile` para disparar o watchdog silenciosamente quando o Termux é aberto. Isso corrige o caso em que o usuário abre o Termux e cai só na tela inicial sem `watch-phone-worker.sh`, `phone_worker.py` ou `sshd` rodando.
+
+O watchdog também tenta iniciar `sshd` automaticamente quando o binário existe e a porta configurada não está ouvindo. O heartbeat passa a reportar `shell_autostart` para o painel/APK diferenciar: VPN ok, Termux aberto, mas canal local parado.
+
 ## v1.7.7 — diagnóstico de wake e canal SSH/HTTP real
 
 A versão `1.7.7` alinha o agent ao Patch 46. O heartbeat agora informa melhor o canal de wake: watchdog local, `sshd`, porta configurada e resumo do SSH no Termux. A VPS passa a diferenciar `porta worker fechada`, `SSHD parado`, `sem rota`, `timeout`, `token errado` e `SSH/auth falhou`, em vez de mostrar apenas “SSH falhou”.

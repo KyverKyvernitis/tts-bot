@@ -23,9 +23,37 @@ LOCK_DIR="${PHONE_WORKER_LOCK_DIR:-$WORKER_DIR/.phone-worker-start.lock}"
 STATUS_FILE="${PHONE_WORKER_STATUS_FILE:-$WORKER_DIR/phone-worker.status}"
 MAX_LOG_BYTES="${PHONE_WORKER_LOG_MAX_BYTES:-1048576}"
 KILL_DUPLICATES="${PHONE_WORKER_START_KILL_DUPLICATES:-true}"
+SSHD_AUTO_START="${PHONE_WORKER_SSHD_AUTO_START:-true}"
+SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
 
 log() {
   printf '[phone-worker-start] %s\n' "$*"
+}
+
+truthy() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"')"
+  value="${value//\'/}"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "y" || "$value" == "on" || "$value" == "sim" ]]
+}
+
+sshd_listening() {
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -lnt 2>/dev/null | grep -Eq "[:.]${SSHD_PORT}[[:space:]]|:${SSHD_PORT}$"
+}
+
+ensure_sshd_running() {
+  truthy "$SSHD_AUTO_START" || return 0
+  command -v sshd >/dev/null 2>&1 || return 0
+  if sshd_listening; then
+    return 0
+  fi
+  if command -v pgrep >/dev/null 2>&1 && pgrep -f 'sshd' >/dev/null 2>&1; then
+    log "sshd rodando, mas porta ${SSHD_PORT} não apareceu; mantendo processo existente"
+    return 0
+  fi
+  log "sshd parado; tentando iniciar porta ${SSHD_PORT}"
+  sshd -p "$SSHD_PORT" >/dev/null 2>&1 || sshd >/dev/null 2>&1 || true
 }
 
 now_iso() {
@@ -50,6 +78,7 @@ fi
 trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
 termux-wake-lock 2>/dev/null || true
+ensure_sshd_running
 
 health_ok() {
   if [[ -n "$TOKEN" ]]; then

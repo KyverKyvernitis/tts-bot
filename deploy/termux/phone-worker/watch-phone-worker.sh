@@ -23,6 +23,8 @@ WATCH_PID_FILE="${PHONE_WORKER_WATCH_PID_FILE:-$WORKER_DIR/phone-worker-watch.pi
 WATCH_LOCK_DIR="${PHONE_WORKER_WATCH_LOCK_DIR:-$WORKER_DIR/.phone-worker-watch.lock}"
 STATUS_FILE="${PHONE_WORKER_STATUS_FILE:-$WORKER_DIR/phone-worker.status}"
 MAX_LOG_BYTES="${PHONE_WORKER_LOG_MAX_BYTES:-1048576}"
+SSHD_AUTO_START="${PHONE_WORKER_SSHD_AUTO_START:-true}"
+SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
 
 if [[ ! -x "$START_SCRIPT" && -x "$HOME/start-phone-worker.sh" ]]; then
   START_SCRIPT="$HOME/start-phone-worker.sh"
@@ -55,6 +57,32 @@ rotate_watch_log_if_needed() {
   fi
 }
 
+truthy() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"')"
+  value="${value//\'/}"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "y" || "$value" == "on" || "$value" == "sim" ]]
+}
+
+sshd_listening() {
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -lnt 2>/dev/null | grep -Eq "[:.]${SSHD_PORT}[[:space:]]|:${SSHD_PORT}$"
+}
+
+ensure_sshd_running() {
+  truthy "$SSHD_AUTO_START" || return 0
+  command -v sshd >/dev/null 2>&1 || return 0
+  if sshd_listening; then
+    return 0
+  fi
+  if command -v pgrep >/dev/null 2>&1 && pgrep -f 'sshd' >/dev/null 2>&1; then
+    log "sshd rodando, mas porta ${SSHD_PORT} não apareceu; mantendo processo existente"
+    return 0
+  fi
+  log "sshd parado; tentando iniciar porta ${SSHD_PORT}"
+  sshd -p "$SSHD_PORT" >/dev/null 2>&1 || sshd >/dev/null 2>&1 || true
+}
+
 # Impede múltiplos watchdogs competindo entre si. Lock velho é removido se o PID
 # gravado nele não existir mais.
 if ! mkdir "$WATCH_LOCK_DIR" 2>/dev/null; then
@@ -79,6 +107,7 @@ failures=0
 while true; do
   rotate_watch_log_if_needed
   termux-wake-lock 2>/dev/null || true
+  ensure_sshd_running
   if [[ -x "$START_SCRIPT" ]]; then
     if "$START_SCRIPT" >> "$WATCH_LOG" 2>&1; then
       failures=0

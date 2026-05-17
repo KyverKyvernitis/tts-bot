@@ -4,6 +4,40 @@
 #   bash bootstrap-phone-worker.sh CORE-XXXX http://100.x.x.x:10000 "Xiaomi Worker 2" midia
 set -Eeuo pipefail
 
+
+install_core_worker_shell_autostart() {
+  local block file tmp
+  block='# >>> core-worker-autostart >>>
+# Bloco gerenciado pelo Core Worker. Não coloque segredos aqui.
+if [ -z "${CORE_WORKER_SHELL_AUTOSTART_DONE:-}" ]; then
+  export CORE_WORKER_SHELL_AUTOSTART_DONE=1
+  if [ -f "$HOME/phone-worker/watch-phone-worker.sh" ]; then
+    (
+      termux-wake-lock >/dev/null 2>&1 || true
+      cd "$HOME/phone-worker" >/dev/null 2>&1 || exit 0
+      nohup /data/data/com.termux/files/usr/bin/bash "$HOME/phone-worker/watch-phone-worker.sh" >> "$HOME/phone-worker/phone-worker-watch.shell.log" 2>&1 &
+    ) >/dev/null 2>&1 &
+  fi
+fi
+# <<< core-worker-autostart <<<
+'
+  for file in "$HOME/.bashrc" "$HOME/.profile"; do
+    mkdir -p "$(dirname "$file")"
+    tmp="$file.core-worker.tmp"
+    if [ -f "$file" ]; then
+      sed '/# >>> core-worker-autostart >>>/,/# <<< core-worker-autostart <<</d' "$file" > "$tmp" 2>/dev/null || cp "$file" "$tmp"
+    else
+      : > "$tmp"
+    fi
+    if [ -s "$tmp" ]; then
+      printf '\n%s\n' "$block" >> "$tmp"
+    else
+      printf '%s\n' "$block" > "$tmp"
+    fi
+    mv "$tmp" "$file"
+  done
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 CODE="${1:-}"
@@ -70,6 +104,7 @@ chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/install.sh" 2>/dev/null || t
 
 log "criando/reparando inicialização automática do Termux:Boot"
 install_core_worker_boot || true
+install_core_worker_shell_autostart || true
 
 if [[ ! -f "$HOME/.phone-worker.env" && -f "$WORKER_DIR/phone-worker.env.example" ]]; then
   cp "$WORKER_DIR/phone-worker.env.example" "$HOME/.phone-worker.env"
