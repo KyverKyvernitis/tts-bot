@@ -182,3 +182,4 @@ android/core-worker-app/vps.properties
 secrets/
 firebase-service-account.json
 *service-account*.json
+android/core-worker-app/app/google-services.json
