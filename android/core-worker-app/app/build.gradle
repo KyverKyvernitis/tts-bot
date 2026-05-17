@@ -11,6 +11,31 @@ def coreWorkerEsc = { String value ->
 def coreWorkerVpsUrl = (project.findProperty("CORE_WORKER_VPS_URL") ?: System.getenv("CORE_WORKER_VPS_URL") ?: "").toString().trim()
 def coreWorkerVpsLabel = (project.findProperty("CORE_WORKER_VPS_LABEL") ?: System.getenv("CORE_WORKER_VPS_LABEL") ?: (coreWorkerVpsUrl ? "VPS privada configurada no build" : "VPS não configurada no build")).toString().trim()
 
+
+
+def coreWorkerExpectedPackage = "dev.core.worker"
+tasks.register("verifyCoreWorkerGoogleServices") {
+    description = "Valida o google-services.json local antes do build do Core Worker."
+    doLast {
+        def file = file("${projectDir}/google-services.json")
+        if (!file.exists()) {
+            throw new GradleException("google-services.json ausente em ${file}. Coloque o arquivo local do Firebase em android/core-worker-app/app/google-services.json antes de buildar o APK privado.")
+        }
+        def parsed = new groovy.json.JsonSlurper().parse(file)
+        def clients = parsed?.client ?: []
+        def match = clients.find { it?.client_info?.android_client_info?.package_name == coreWorkerExpectedPackage }
+        if (match == null) {
+            throw new GradleException("google-services.json não contém client Android para package_name=${coreWorkerExpectedPackage}. Baixe novamente no Firebase usando exatamente esse applicationId.")
+        }
+        def projectId = parsed?.project_info?.project_id
+        def appId = match?.client_info?.mobilesdk_app_id
+        def apiKey = match?.api_key?.find { it?.current_key }?.current_key
+        if (!projectId || !appId || !apiKey) {
+            throw new GradleException("google-services.json está incompleto: precisa conter project_id, mobilesdk_app_id e api_key para o client Android.")
+        }
+    }
+}
+
 android {
     namespace "dev.core.worker"
     compileSdk 34
@@ -19,21 +44,29 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 26
-        versionName "0.5.11"
+        versionCode 27
+        versionName "0.5.12"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
-        buildConfigField "boolean", "CORE_WORKER_FCM_ENABLED", "false"
+        buildConfigField "boolean", "CORE_WORKER_FCM_ENABLED", "true"
     }
 
     buildFeatures {
         buildConfig true
     }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
 }
 
 dependencies {
     implementation "androidx.core:core:1.13.1"
-    implementation platform("com.google.firebase:firebase-bom:33.7.0")
+    implementation platform("com.google.firebase:firebase-bom:34.13.0")
     implementation "com.google.firebase:firebase-messaging"
 }
+
+// FCM só deve ser buildado quando o arquivo local do Firebase estiver válido.
+tasks.named("preBuild").configure { dependsOn("verifyCoreWorkerGoogleServices") }

@@ -24,12 +24,6 @@
         android:theme="@style/Theme.CoreWorker"
         android:usesCleartextTraffic="true">
 
-        <!-- Patch 51c: disable Firebase auto-init provider until FCM is re-enabled safely. -->
-        <provider
-            android:name="com.google.firebase.provider.FirebaseInitProvider"
-            android:authorities="${applicationId}.firebaseinitprovider"
-            tools:node="remove" />
-
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"
@@ -42,9 +36,13 @@
 
 
 
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="core_worker_updates" />
+
         <service
             android:name=".CoreWorkerFirebaseMessagingService"
-            android:enabled="false"
+            android:enabled="true"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />

@@ -30,7 +30,7 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
     private static final String PREFS = "core_worker_private";
     private static final String CHANNEL_ID = "core_worker_updates";
     private static final int NOTIFICATION_ID = 4102;
-    private static final boolean FCM_SERVICE_ENABLED = false;
+    private static final boolean FCM_SERVICE_ENABLED = BuildConfig.CORE_WORKER_FCM_ENABLED;
 
     @Override
     public void onNewToken(String token) {
@@ -40,13 +40,17 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         }
         if (!FCM_SERVICE_ENABLED) {
             try {
-                prefs().edit().putString("fcm_state", "desativado por segurança").apply();
+                prefs().edit().putString("fcm_state", "desativado no build").apply();
             } catch (Throwable ignored) {
             }
             return;
         }
         try {
-            prefs().edit().putString("fcm_token", token == null ? "" : token).apply();
+            prefs().edit()
+                    .putString("fcm_token", token == null ? "" : token)
+                    .putString("fcm_state", token == null || token.trim().isEmpty() ? "token vazio" : "ativo")
+                    .remove("fcm_disabled_until")
+                    .apply();
             registerToken(token, "on_new_token");
         } catch (Throwable ignored) {
         }
@@ -63,7 +67,11 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         }
         try {
             handleMessageReceived(message);
-        } catch (Throwable ignored) {
+        } catch (Throwable exc) {
+            try {
+                prefs().edit().putString("fcm_state", "erro no serviço: " + exc.getClass().getSimpleName()).apply();
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -94,6 +102,10 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         report(notificationId, "fcm_received", false, versionName, versionCode, "push FCM recebido: " + (type.isEmpty() ? "data" : type));
         boolean shown = showUpdateNotification(notificationId, title, body);
         report(notificationId, shown ? "fcm_displayed" : "fcm_permission_missing", shown, versionName, versionCode, shown ? "notificação exibida por FCM" : "push recebido, mas Android não permitiu notificação visível");
+        try {
+            CoreWorkerUpdateJobService.schedule(this, "fcm_message");
+        } catch (Throwable ignored) {
+        }
         if (shown) {
             try {
                 prefs().edit().putString("last_update_notification", notificationId).apply();

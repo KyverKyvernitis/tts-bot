@@ -25,6 +25,8 @@ import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.text.InputType;
@@ -40,6 +42,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.core.content.FileProvider;
+
+import com.google.firebase.FirebaseApp;
+import com.google.firebase.messaging.FirebaseMessaging;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -63,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.11";
+    private static final String APP_VERSION = "0.5.12";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -71,10 +76,11 @@ public class MainActivity extends Activity {
     private static final String LOCAL_AGENT_PAIR_URL = "http://127.0.0.1:8766/local/pair";
     private static final String LOCAL_AGENT_HEARTBEAT_URL = "http://127.0.0.1:8766/local/heartbeat";
     private static final String PREFS = "core_worker_private";
-    // Kill switch: keep Firebase/FCM disabled in the APK process until the Android crash cause is confirmed by logcat.
-    // The VPS/backend FCM path remains prepared, but app startup must never depend on Firebase.
-    private static final boolean FCM_ENABLED_IN_APK = false;
-    private static final long FCM_DISABLED_MS = 24L * 60L * 60L * 1000L;
+    // Patch 52: FCM volta em modo seguro e em camadas.
+    // A tela principal nunca depende do Firebase; token/push ficam em fluxo isolado e tolerante a falhas.
+    private static final boolean FCM_ENABLED_IN_APK = BuildConfig.CORE_WORKER_FCM_ENABLED;
+    private static final long FCM_DISABLED_MS = 30L * 60L * 1000L;
+    private static final long FCM_STARTUP_DELAY_MS = 1500L;
 
     private static final int BG = Color.rgb(8, 12, 25);
     private static final int CARD = Color.rgb(19, 26, 45);
@@ -90,6 +96,7 @@ public class MainActivity extends Activity {
     private static final int WARN = Color.rgb(255, 206, 115);
 
     private SharedPreferences prefs;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private LinearLayout connectCard;
     private TextView connectTitleText;
     private TextView connectHintText;
@@ -150,7 +157,7 @@ public class MainActivity extends Activity {
     private volatile String latestNotificationId = "";
     private volatile boolean latestUpdateAvailable = false;
     private volatile boolean updateDownloadBusy = false;
-    private volatile String fcmState = "desativado por segurança";
+    private volatile String fcmState = "não verificado";
     private volatile String fcmTokenPreview = "";
     private volatile long fcmDisabledUntil = 0L;
 
@@ -158,16 +165,17 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        migrateFcmSafetyStateForPatch52();
         buildUi();
         loadInputs();
         safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_create"));
-        safeStartupTask(() -> registerFcmTokenAsync("activity_create"));
         safeStartupTask(() -> reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")"));
         safeStartupTask(this::updatePermissionGate);
         refreshLocalStatus("Pronto. O app verifica automaticamente se este celular já está pareado.");
         safeStartupTask(() -> checkLocalAgent(false));
         safeStartupTask(this::autoVerifySavedPairing);
         safeStartupTask(this::autoCheckForUpdate);
+        scheduleFcmTokenRegistration("activity_create");
     }
 
     @Override
@@ -175,9 +183,9 @@ public class MainActivity extends Activity {
         super.onResume();
         safeStartupTask(this::updatePermissionGate);
         safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_resume"));
-        safeStartupTask(() -> registerFcmTokenAsync("activity_resume"));
         safeStartupTask(this::autoVerifySavedPairing);
         safeStartupTask(this::autoCheckForUpdate);
+        scheduleFcmTokenRegistration("activity_resume");
     }
 
     @Override
@@ -187,7 +195,7 @@ public class MainActivity extends Activity {
         refreshLocalStatus(requestCode == 4103 ? "Permissão de notificação atualizada. Verifique as demais permissões necessárias." : null);
         if (requestCode == 4103) {
             safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "notification_permission_result"));
-            safeStartupTask(() -> registerFcmTokenAsync("notification_permission_result"));
+            scheduleFcmTokenRegistration("notification_permission_result");
             safeStartupTask(this::autoCheckForUpdate);
         }
     }
@@ -362,7 +370,7 @@ public class MainActivity extends Activity {
 
         LinearLayout updateCard = cardWithTopMargin(mainContent);
         updateCard.addView(sectionTitle("4. Atualizações"));
-        updateCard.addView(smallText("O app verifica a VPS por checagem local. O push FCM fica temporariamente desligado neste build para evitar crash enquanto coletamos logcat."));
+        updateCard.addView(smallText("O app verifica a VPS por checagem local e também registra push FCM em modo seguro. Se Firebase ou Google Play Services falhar, o app continua usando o fallback local."));
         updateText = smallText("Instalado: " + APP_VERSION + "\nAtualizações: ainda não verificadas.");
         updateText.setTextColor(TEXT);
         updateText.setBackgroundColor(CARD_SOFT);
@@ -1205,50 +1213,200 @@ public class MainActivity extends Activity {
         return state;
     }
 
-    private void registerFcmTokenAsync(String reason) {
-        if (!FCM_ENABLED_IN_APK || prefs.getBoolean("fcm_kill_switch", true)) {
-            disableFcmTemporarily("desativado por segurança");
-            return;
+    private void migrateFcmSafetyStateForPatch52() {
+        try {
+            int migrated = prefs.getInt("fcm_patch52_migration_code", 0);
+            if (migrated < BuildConfig.VERSION_CODE) {
+                prefs.edit()
+                        .putInt("fcm_patch52_migration_code", BuildConfig.VERSION_CODE)
+                        .putBoolean("fcm_kill_switch", false)
+                        .remove("fcm_disabled_until")
+                        .putString("fcm_state", "não verificado")
+                        .apply();
+                fcmState = "não verificado";
+                fcmDisabledUntil = 0L;
+                fcmTokenPreview = tokenPreview(prefs.getString("fcm_token", ""));
+            } else {
+                fcmState = prefs.getString("fcm_state", "não verificado");
+                fcmDisabledUntil = prefs.getLong("fcm_disabled_until", 0L);
+                fcmTokenPreview = tokenPreview(prefs.getString("fcm_token", ""));
+            }
+        } catch (Throwable ignored) {
+            fcmState = "não verificado";
+            fcmDisabledUntil = 0L;
         }
-        // FCM remains behind a hard kill switch in this build.
-        // Re-enable only after capturing the AndroidRuntime crash with logcat.
-        disableFcmTemporarily("desativado por segurança");
     }
 
-    private void disableFcmTemporarily(String label) {
-        fcmState = label == null || label.trim().isEmpty() ? "desativado por segurança" : label.trim();
-        fcmDisabledUntil = System.currentTimeMillis() + FCM_DISABLED_MS;
+    private void scheduleFcmTokenRegistration(String reason) {
         try {
-            prefs.edit()
-                    .putBoolean("fcm_kill_switch", true)
-                    .putString("fcm_state", fcmState)
-                    .putLong("fcm_disabled_until", fcmDisabledUntil)
-                    .apply();
+            mainHandler.postDelayed(() -> safeStartupTask(() -> registerFcmTokenAsync(reason)), FCM_STARTUP_DELAY_MS);
         } catch (Throwable ignored) {
         }
-        refreshLocalStatus(null);
+    }
+
+    private void registerFcmTokenAsync(String reason) {
+        if (!FCM_ENABLED_IN_APK) {
+            markFcmState("desativado no build", "CORE_WORKER_FCM_ENABLED=false", false);
+            return;
+        }
+        long disabledUntil = prefs.getLong("fcm_disabled_until", 0L);
+        if (disabledUntil > System.currentTimeMillis()) {
+            fcmDisabledUntil = disabledUntil;
+            markFcmState("pausado temporariamente", "aguardando próxima tentativa segura", false);
+            return;
+        }
+        String serverUrl = normalizedServerUrl();
+        if (serverUrl == null || serverUrl.trim().isEmpty()) {
+            markFcmState("aguardando VPS do build", "CORE_WORKER_VPS_URL vazio", false);
+            return;
+        }
+        markFcmState("verificando", "preparando Firebase Messaging", false);
+        try {
+            if (!ensureFirebaseReady()) {
+                return;
+            }
+            try {
+                FirebaseMessaging.getInstance().setAutoInitEnabled(true);
+            } catch (Throwable ignored) {
+            }
+            FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
+                try {
+                    if (task == null || !task.isSuccessful()) {
+                        Throwable err = task == null ? null : task.getException();
+                        markFcmError("token indisponível", err, true);
+                        reportAppState("fcm_token_failed", err == null ? "Firebase não retornou token" : shortThrowable(err));
+                        return;
+                    }
+                    String token = task.getResult();
+                    if (token == null || token.trim().isEmpty()) {
+                        markFcmState("token vazio", "Firebase retornou token vazio", true);
+                        reportAppState("fcm_token_failed", "Firebase retornou token vazio");
+                        return;
+                    }
+                    prefs.edit()
+                            .putString("fcm_token", token.trim())
+                            .putBoolean("fcm_kill_switch", false)
+                            .remove("fcm_disabled_until")
+                            .putString("fcm_state", "ativo")
+                            .apply();
+                    fcmTokenPreview = tokenPreview(token);
+                    fcmDisabledUntil = 0L;
+                    fcmState = "ativo";
+                    runOnUiThread(() -> refreshLocalStatus(null));
+                    reportFcmToken(serverUrl, token, reason);
+                } catch (Throwable err) {
+                    markFcmError("falha registrando token", err, true);
+                }
+            });
+        } catch (Throwable err) {
+            markFcmError("falha inicializando FCM", err, true);
+        }
+    }
+
+    private boolean ensureFirebaseReady() {
+        try {
+            FirebaseApp app;
+            try {
+                app = FirebaseApp.getInstance();
+            } catch (Throwable missing) {
+                app = FirebaseApp.initializeApp(getApplicationContext());
+            }
+            if (app == null) {
+                markFcmState("Firebase não inicializado", "google-services não gerou opções válidas", true);
+                return false;
+            }
+            return true;
+        } catch (Throwable err) {
+            markFcmError("Firebase indisponível", err, true);
+            return false;
+        }
+    }
+
+    private void markFcmState(String state, String detail, boolean temporaryPause) {
+        String cleanState = emptyFallback(state, "não verificado");
+        fcmState = cleanState;
+        if (temporaryPause) {
+            fcmDisabledUntil = System.currentTimeMillis() + FCM_DISABLED_MS;
+        } else if (!"pausado temporariamente".equals(cleanState)) {
+            fcmDisabledUntil = 0L;
+        }
+        try {
+            SharedPreferences.Editor editor = prefs.edit()
+                    .putString("fcm_state", cleanState)
+                    .putString("fcm_last_detail", detail == null ? "" : detail);
+            if (temporaryPause) {
+                editor.putLong("fcm_disabled_until", fcmDisabledUntil);
+            } else if (!"pausado temporariamente".equals(cleanState)) {
+                editor.remove("fcm_disabled_until");
+            }
+            editor.apply();
+        } catch (Throwable ignored) {
+        }
+        runOnUiThread(() -> refreshLocalStatus(null));
+    }
+
+    private void markFcmError(String state, Throwable err, boolean temporaryPause) {
+        String detail = err == null ? "sem detalhe" : shortThrowable(err);
+        markFcmState(state + " · " + detail, detail, temporaryPause);
+    }
+
+    private String shortThrowable(Throwable err) {
+        if (err == null) return "erro desconhecido";
+        String msg = String.valueOf(err.getMessage() == null ? "" : err.getMessage()).trim();
+        String text = err.getClass().getSimpleName() + (msg.isEmpty() ? "" : ": " + msg);
+        return text.length() > 160 ? text.substring(0, 160) : text;
+    }
+
+    private String tokenPreview(String token) {
+        String clean = token == null ? "" : token.trim();
+        if (clean.length() <= 12) return clean;
+        return clean.substring(0, 6) + "…" + clean.substring(clean.length() - 4);
     }
 
     private void reportFcmToken(String serverUrl, String token, String reason) {
-        fcmState = "desativado por segurança";
-        refreshLocalStatus(null);
+        if (serverUrl == null || serverUrl.trim().isEmpty() || token == null || token.trim().isEmpty()) {
+            return;
+        }
+        new Thread(() -> {
+            try {
+                JSONObject payload = statusSnapshot();
+                payload.put("fcmToken", token.trim());
+                payload.put("state", "registered");
+                payload.put("reason", reason == null ? "activity" : reason);
+                payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
+                HttpResult result = request("POST", serverUrl + "/core-worker/app/fcm-token", payload, null);
+                if (result.ok()) {
+                    markFcmState("ativo", "token registrado na VPS", false);
+                    reportAppState("fcm_token_registered", "token FCM registrado na VPS");
+                } else {
+                    markFcmState("token local · VPS não confirmou", "HTTP " + result.status + " em /fcm-token", false);
+                }
+            } catch (Throwable err) {
+                markFcmState("token local · falha ao registrar", shortThrowable(err), false);
+            }
+        }, "core-worker-fcm-token").start();
     }
 
     private String fcmStatusLabel() {
-        if (!FCM_ENABLED_IN_APK || prefs.getBoolean("fcm_kill_switch", true)) {
-            return "desativado por segurança · fallback local ativo";
+        if (!FCM_ENABLED_IN_APK) {
+            return "desativado no build · fallback local ativo";
+        }
+        long disabledUntil = prefs.getLong("fcm_disabled_until", 0L);
+        if (disabledUntil > System.currentTimeMillis()) {
+            long minutes = Math.max(1L, (disabledUntil - System.currentTimeMillis()) / 60000L);
+            return "pausado por segurança · nova tentativa em ~" + minutes + " min · fallback local ativo";
         }
         String state = fcmState == null ? "" : fcmState.trim();
         if (state.isEmpty()) {
-            state = "não verificado";
+            state = prefs.getString("fcm_state", "não verificado");
         }
         if ("ativo".equalsIgnoreCase(state)) {
-            return fcmTokenPreview == null || fcmTokenPreview.trim().isEmpty() ? "ativo" : "ativo · token " + fcmTokenPreview;
+            return fcmTokenPreview == null || fcmTokenPreview.trim().isEmpty() ? "ativo · fallback local ativo" : "ativo · token " + fcmTokenPreview + " · fallback local ativo";
         }
         if (Build.VERSION.SDK_INT >= 33 && !hasNotificationPermission()) {
-            return state + " · sem permissão visível";
+            return state + " · sem permissão visível · fallback local ativo";
         }
-        return state;
+        return state + " · fallback local ativo";
     }
 
     private void reportAppState(String state, String detail) {

@@ -1,10 +1,23 @@
 # Core Worker APK privado
 
-## v0.5.11 — FCM kill switch / estabilidade do APK
+## v0.5.12 — FCM seguro em camadas
 
-A versão `0.5.11` complementa o Patch 51c. Como o crash persistiu mesmo após corrigir o erro 500 da VPS, este build coloca o FCM do APK atrás de um kill switch rígido: o Firebase não é inicializado automaticamente, o serviço FCM fica desativado no Manifest e o app volta a depender da checagem local (`JobScheduler`) enquanto o logcat Android não for coletado.
+A versão `0.5.12` complementa o Patch 52. O FCM volta a ser ativado, mas seguindo um fluxo mais seguro:
 
-Objetivo desta versão: o app precisa abrir sempre. Firebase, Google Play Services ou configuração local quebrada não podem derrubar a tela principal. O painel ainda pode manter os dados/backend preparados para FCM, mas o APK exibirá `Push: desativado por segurança · fallback local ativo`.
+- o build valida o `app/google-services.json` local antes de gerar APK;
+- o `google-services` Gradle plugin volta a processar a configuração do Firebase;
+- o app abre primeiro e só depois tenta registrar o token FCM;
+- se Firebase, Google Play Services, permissão de notificação ou VPS falhar, a tela principal continua funcionando;
+- o botão **Verificar agora** não depende de FCM;
+- o `FirebaseMessagingService` fica mínimo: recebe data push, mostra notificação quando permitido, agenda checagem local e reporta best-effort;
+- `JobScheduler` continua como fallback local.
+
+Arquivos Firebase continuam locais no ambiente de build/VPS e fora do Git:
+
+```text
+/home/ubuntu/secrets/firebase-service-account.json
+android/core-worker-app/app/google-services.json
+```
 
 
 Este diretório contém o APK privado **Core Worker**.
