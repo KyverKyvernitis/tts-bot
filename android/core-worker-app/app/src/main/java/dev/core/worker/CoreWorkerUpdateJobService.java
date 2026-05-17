@@ -54,7 +54,7 @@ public class CoreWorkerUpdateJobService extends JobService {
                     .setExtras(extras)
                     .build();
             scheduler.schedule(job);
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
         }
     }
 
@@ -133,7 +133,7 @@ public class CoreWorkerUpdateJobService extends JobService {
             manager.notify(NOTIFICATION_ID, builder.build());
             prefs().edit().putString("last_update_notification", notificationId).apply();
             report(serverUrl, notificationId, "background_displayed", true, versionName, versionCode, "notificação criada por checagem periódica com app fechado");
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
         }
     }
 
@@ -163,7 +163,7 @@ public class CoreWorkerUpdateJobService extends JobService {
             payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
             payload.put("detail", detail == null ? "" : detail);
             request("POST", serverUrl + "/core-worker/app/notification", payload);
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
         }
     }
 

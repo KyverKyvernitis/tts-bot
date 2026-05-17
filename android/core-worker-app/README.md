@@ -10,6 +10,18 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
+## v0.5.10 — hotfix FCM/notification crash guard
+
+A versão `0.5.10` complementa o Patch 51b. Ela corrige o crash loop observado na `0.5.9` quando o APK reportava eventos de notificação/FCM e a VPS respondia erro 500.
+
+Correções principais:
+
+- `webserver.py` passa a gravar `data/core_worker_app_notifications.json` com tmp único e lock, evitando corrida entre vários reports simultâneos do APK;
+- `/core-worker/app/notification` não derruba mais a VPS por falha de escrita local;
+- o APK protege inicialização, registro de token FCM, checagem de update e reports com crash guard;
+- se Firebase/Google Play Services/backend falhar, o app mostra estado de push indisponível/temporário e continua abrindo;
+- `JobScheduler` continua como fallback local.
+
 ## v0.5.9 — FCM push real + fallback local
 
 A versão `0.5.9` complementa o Patch 51. O APK passa a registrar o token FCM da instalação na VPS e a VPS pode enviar push real quando publicar uma nova versão do APK. O push é enviado por FCM HTTP v1 usando a service account local da VPS, mantida fora do Git.

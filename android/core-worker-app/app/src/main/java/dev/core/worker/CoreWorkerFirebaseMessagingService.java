@@ -34,13 +34,23 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
     @Override
     public void onNewToken(String token) {
         super.onNewToken(token);
-        prefs().edit().putString("fcm_token", token == null ? "" : token).apply();
-        registerToken(token, "on_new_token");
+        try {
+            prefs().edit().putString("fcm_token", token == null ? "" : token).apply();
+            registerToken(token, "on_new_token");
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
     public void onMessageReceived(RemoteMessage message) {
         super.onMessageReceived(message);
+        try {
+            handleMessageReceived(message);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void handleMessageReceived(RemoteMessage message) {
         Map<String, String> data = message == null ? null : message.getData();
         String type = data == null ? "" : str(data.get("type"));
         String notificationId = data == null ? "" : str(data.get("notificationId"));
@@ -50,13 +60,16 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         String body = versionName.isEmpty()
                 ? "Nova versão disponível para instalar."
                 : "Versão " + versionName + " disponível para instalar.";
-        if (message != null && message.getNotification() != null) {
-            if (message.getNotification().getTitle() != null && !message.getNotification().getTitle().trim().isEmpty()) {
-                title = message.getNotification().getTitle().trim();
+        try {
+            if (message != null && message.getNotification() != null) {
+                if (message.getNotification().getTitle() != null && !message.getNotification().getTitle().trim().isEmpty()) {
+                    title = message.getNotification().getTitle().trim();
+                }
+                if (message.getNotification().getBody() != null && !message.getNotification().getBody().trim().isEmpty()) {
+                    body = message.getNotification().getBody().trim();
+                }
             }
-            if (message.getNotification().getBody() != null && !message.getNotification().getBody().trim().isEmpty()) {
-                body = message.getNotification().getBody().trim();
-            }
+        } catch (Throwable ignored) {
         }
         if (notificationId.isEmpty()) {
             notificationId = "fcm-" + (versionCode > 0 ? versionCode : BuildConfig.VERSION_CODE) + "-" + str(versionName);
@@ -65,7 +78,10 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         boolean shown = showUpdateNotification(notificationId, title, body);
         report(notificationId, shown ? "fcm_displayed" : "fcm_permission_missing", shown, versionName, versionCode, shown ? "notificação exibida por FCM" : "push recebido, mas Android não permitiu notificação visível");
         if (shown) {
-            prefs().edit().putString("last_update_notification", notificationId).apply();
+            try {
+                prefs().edit().putString("last_update_notification", notificationId).apply();
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -101,7 +117,7 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
                     .setAutoCancel(true);
             manager.notify(NOTIFICATION_ID, builder.build());
             return true;
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             return false;
         }
     }
@@ -119,7 +135,7 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
                 payload.put("reason", reason == null ? "service" : reason);
                 payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
                 request("POST", serverUrl + "/core-worker/app/fcm-token", payload);
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
             }
         }).start();
     }
@@ -140,12 +156,12 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
                 payload.put("detail", detail == null ? "" : detail);
                 payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
                 request("POST", serverUrl + "/core-worker/app/notification", payload);
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
             }
         }).start();
     }
 
-    private JSONObject basePayload() throws Exception {
+    private JSONObject basePayload() throws Throwable {
         JSONObject payload = new JSONObject();
         payload.put("platform", "android");
         payload.put("source", "core-worker-apk");
@@ -179,7 +195,7 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         return url.replaceAll("/+$", "");
     }
 
-    private HttpResult request(String method, String url, JSONObject payload) throws Exception {
+    private HttpResult request(String method, String url, JSONObject payload) throws Throwable {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setRequestMethod(method);
         conn.setConnectTimeout(7000);
@@ -200,7 +216,7 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         return new HttpResult(status, body == null ? "" : body);
     }
 
-    private String readAll(InputStream input) throws Exception {
+    private String readAll(InputStream input) throws Throwable {
         if (input == null) {
             return "";
         }
@@ -224,7 +240,7 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
     private static int intValue(Object value, int fallback) {
         try {
             return Integer.parseInt(str(value));
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             return fallback;
         }
     }

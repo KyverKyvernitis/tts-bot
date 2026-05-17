@@ -20,6 +20,8 @@ app = Flask(__name__)
 
 _health_provider = None
 _tts_audio_lock = threading.RLock()
+_core_worker_notification_lock = threading.RLock()
+_core_worker_fcm_tokens_lock = threading.RLock()
 _tts_audio_files: dict[str, tuple[str, float]] = {}
 
 
@@ -98,6 +100,30 @@ def _safe_short_text(value, limit: int = 160) -> str:
     return text[:limit].rstrip() if len(text) > limit else text
 
 
+def _atomic_write_json(path: str, data: dict, *, mode: int = 0o600) -> None:
+    """Grava JSON de forma atômica e segura, com tmp único por chamada.
+
+    O Patch 51 usava sempre o mesmo ``.tmp``. Quando o APK reportava vários
+    eventos ao mesmo tempo, uma requisição podia renomear o tmp da outra e o
+    endpoint /core-worker/app/notification caía com FileNotFoundError.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            fh.flush()
+            with contextlib.suppress(Exception):
+                os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        with contextlib.suppress(Exception):
+            os.chmod(path, mode)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+
+
 def _core_worker_notification_log_path() -> str:
     return os.path.join(_repo_data_dir(), "core_worker_app_notifications.json")
 
@@ -126,27 +152,24 @@ def _append_core_worker_notification_event(event: dict) -> dict:
         "installId": _safe_short_text(event.get("installId"), 80),
         "permission": _safe_short_text(event.get("permission"), 40),
         "detail": _safe_short_text(event.get("detail"), 180),
-        "remoteAddr": _safe_short_text(request.remote_addr or "", 64),
+        "remoteAddr": _safe_short_text(getattr(request, "remote_addr", "") or "", 64),
     }
-    try:
-        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    events = data.get("events") if isinstance(data.get("events"), list) else []
-    events.append(clean)
-    events = events[-120:]
-    latest_by_id = data.get("latestById") if isinstance(data.get("latestById"), dict) else {}
-    nid = clean.get("notificationId") or "unknown"
-    latest_by_id[nid] = clean
-    data = {"ok": True, "updatedAt": now, "events": events, "latestById": latest_by_id}
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
-    os.replace(tmp, path)
+    with _core_worker_notification_lock:
+        try:
+            data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        events = data.get("events") if isinstance(data.get("events"), list) else []
+        events.append(clean)
+        events = events[-120:]
+        latest_by_id = data.get("latestById") if isinstance(data.get("latestById"), dict) else {}
+        nid = clean.get("notificationId") or "unknown"
+        latest_by_id[nid] = clean
+        data = {"ok": True, "updatedAt": now, "events": events, "latestById": latest_by_id}
+        _atomic_write_json(path, data, mode=0o600)
     return clean
-
 
 def _latest_core_worker_notification_summary(notification_id: str) -> dict:
     path = _core_worker_notification_log_path()
@@ -194,14 +217,8 @@ def _load_core_worker_fcm_tokens() -> dict:
 
 def _save_core_worker_fcm_tokens(data: dict) -> None:
     path = _core_worker_fcm_tokens_path()
-    tmp = path + ".tmp"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
-    os.replace(tmp, path)
-    with contextlib.suppress(Exception):
-        os.chmod(path, 0o600)
-
+    with _core_worker_fcm_tokens_lock:
+        _atomic_write_json(path, data, mode=0o600)
 
 def _register_core_worker_fcm_token(payload: dict) -> dict:
     token = str(payload.get("fcmToken") or payload.get("fcm_token") or payload.get("token") or "").strip()
@@ -209,10 +226,11 @@ def _register_core_worker_fcm_token(payload: dict) -> dict:
         raise ValueError("fcmToken ausente ou curto demais")
     now = int(time.time())
     token_hash = _fcm_token_hash(token)
-    data = _load_core_worker_fcm_tokens()
-    tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
-    record = tokens.get(token_hash) if isinstance(tokens.get(token_hash), dict) else {}
-    record.update({
+    with _core_worker_fcm_tokens_lock:
+        data = _load_core_worker_fcm_tokens()
+        tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
+        record = tokens.get(token_hash) if isinstance(tokens.get(token_hash), dict) else {}
+        record.update({
         "token": token,
         "tokenHash": token_hash,
         "workerId": _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80),
@@ -228,12 +246,12 @@ def _register_core_worker_fcm_token(payload: dict) -> dict:
         "lastSeenAt": now,
         "active": True,
     })
-    record.setdefault("registeredAt", now)
-    tokens[token_hash] = record
-    data["tokens"] = tokens
-    data["updatedAt"] = now
-    _save_core_worker_fcm_tokens(data)
-    return {k: v for k, v in record.items() if k != "token"}
+        record.setdefault("registeredAt", now)
+        tokens[token_hash] = record
+        data["tokens"] = tokens
+        data["updatedAt"] = now
+        _atomic_write_json(_core_worker_fcm_tokens_path(), data, mode=0o600)
+        return {k: v for k, v in record.items() if k != "token"}
 
 
 def _active_core_worker_fcm_records(*, max_age_days: int = 45) -> list[dict]:
@@ -380,9 +398,10 @@ def _send_core_worker_apk_update_pushes(manifest: dict, *, reason: str = "apk_pu
             "permission": _safe_short_text(current.get("permission"), 40),
             "detail": "push FCM enviado pela VPS" if ok else detail,
         }
-        with app.test_request_context(headers={"X-Internal-Core-Worker": "fcm"}):
-            # _append_core_worker_notification_event usa request.remote_addr; contexto interno evita depender de uma requisição real.
-            _append_core_worker_notification_event(event)
+        with contextlib.suppress(Exception):
+            with app.test_request_context(headers={"X-Internal-Core-Worker": "fcm"}):
+                # _append_core_worker_notification_event usa request.remote_addr; contexto interno evita depender de uma requisição real.
+                _append_core_worker_notification_event(event)
         sent += 1 if ok else 0
         failed += 0 if ok else 1
     store["tokens"] = tokens
@@ -399,15 +418,16 @@ def _kick_core_worker_fcm_push(manifest: dict, *, reason: str = "apk_published")
         try:
             _send_core_worker_apk_update_pushes(manifest, reason=reason)
         except Exception as exc:
-            with app.test_request_context(headers={"X-Internal-Core-Worker": "fcm"}):
-                _append_core_worker_notification_event({
-                    "notificationId": manifest.get("notificationId") or "fcm",
-                    "state": "fcm_failed",
-                    "delivered": False,
-                    "versionName": manifest.get("versionName"),
-                    "versionCode": manifest.get("versionCode") or 0,
-                    "detail": f"falha geral enviando FCM: {type(exc).__name__}: {str(exc)[:180]}",
-                })
+            with contextlib.suppress(Exception):
+                with app.test_request_context(headers={"X-Internal-Core-Worker": "fcm"}):
+                    _append_core_worker_notification_event({
+                        "notificationId": manifest.get("notificationId") or "fcm",
+                        "state": "fcm_failed",
+                        "delivered": False,
+                        "versionName": manifest.get("versionName"),
+                        "versionCode": manifest.get("versionCode") or 0,
+                        "detail": f"falha geral enviando FCM: {type(exc).__name__}: {str(exc)[:180]}",
+                    })
     try:
         threading.Thread(target=runner, name="core-worker-fcm-push", daemon=True).start()
     except Exception:
@@ -818,8 +838,11 @@ def core_worker_app_fcm_token():
         payload = {}
     try:
         record = _register_core_worker_fcm_token(payload)
-    except Exception as exc:
+    except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)[:180]}), 400
+    except Exception as exc:
+        app.logger.warning("core-worker FCM token ignored: %s", exc)
+        return jsonify({"ok": False, "accepted": True, "error": _safe_short_text(f"{type(exc).__name__}: {exc}", 180)}), 200
     return jsonify({"ok": True, "push": record}), 200
 
 
@@ -842,7 +865,11 @@ def core_worker_app_notification():
     state = _safe_short_text(payload.get("state") or payload.get("event"), 48)
     if not state:
         return jsonify({"ok": False, "error": "state ausente"}), 400
-    event = _append_core_worker_notification_event(payload)
+    try:
+        event = _append_core_worker_notification_event(payload)
+    except Exception as exc:
+        app.logger.warning("core-worker app notification ignored: %s", exc)
+        return jsonify({"ok": False, "accepted": True, "error": _safe_short_text(f"{type(exc).__name__}: {exc}", 180)}), 200
     return jsonify({"ok": True, "event": event}), 200
 
 

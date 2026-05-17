@@ -65,7 +65,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.9";
+    private static final String APP_VERSION = "0.5.10";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -150,6 +150,7 @@ public class MainActivity extends Activity {
     private volatile boolean updateDownloadBusy = false;
     private volatile String fcmState = "não verificado";
     private volatile String fcmTokenPreview = "";
+    private volatile long fcmDisabledUntil = 0L;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -157,35 +158,46 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         buildUi();
         loadInputs();
-        CoreWorkerUpdateJobService.schedule(this, "activity_create");
-        registerFcmTokenAsync("activity_create");
-        reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")");
-        updatePermissionGate();
+        safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_create"));
+        safeStartupTask(() -> registerFcmTokenAsync("activity_create"));
+        safeStartupTask(() -> reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")"));
+        safeStartupTask(this::updatePermissionGate);
         refreshLocalStatus("Pronto. O app verifica automaticamente se este celular já está pareado.");
-        checkLocalAgent(false);
-        autoVerifySavedPairing();
-        autoCheckForUpdate();
+        safeStartupTask(() -> checkLocalAgent(false));
+        safeStartupTask(this::autoVerifySavedPairing);
+        safeStartupTask(this::autoCheckForUpdate);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        updatePermissionGate();
-        CoreWorkerUpdateJobService.schedule(this, "activity_resume");
-        registerFcmTokenAsync("activity_resume");
-        autoVerifySavedPairing();
-        autoCheckForUpdate();
+        safeStartupTask(this::updatePermissionGate);
+        safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_resume"));
+        safeStartupTask(() -> registerFcmTokenAsync("activity_resume"));
+        safeStartupTask(this::autoVerifySavedPairing);
+        safeStartupTask(this::autoCheckForUpdate);
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        updatePermissionGate();
+        safeStartupTask(this::updatePermissionGate);
         refreshLocalStatus(requestCode == 4103 ? "Permissão de notificação atualizada. Verifique as demais permissões necessárias." : null);
         if (requestCode == 4103) {
-            CoreWorkerUpdateJobService.schedule(this, "notification_permission_result");
-            registerFcmTokenAsync("notification_permission_result");
-            autoCheckForUpdate();
+            safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "notification_permission_result"));
+            safeStartupTask(() -> registerFcmTokenAsync("notification_permission_result"));
+            safeStartupTask(this::autoCheckForUpdate);
+        }
+    }
+
+    private interface SafeStartupRunnable {
+        void run() throws Exception;
+    }
+
+    private void safeStartupTask(SafeStartupRunnable runnable) {
+        try {
+            runnable.run();
+        } catch (Throwable ignored) {
         }
     }
 
@@ -348,7 +360,7 @@ public class MainActivity extends Activity {
 
         LinearLayout updateCard = cardWithTopMargin(mainContent);
         updateCard.addView(sectionTitle("4. Atualizações"));
-        updateCard.addView(smallText("O app verifica a VPS de tempos em tempos. Com o app fechado, o Android pode atrasar a checagem local porque não existe push/FCM."));
+        updateCard.addView(smallText("O app tenta receber push FCM real. Se o Firebase ou o Android bloquearem, a checagem local continua como reserva."));
         updateText = smallText("Instalado: " + APP_VERSION + "\nAtualizações: ainda não verificadas.");
         updateText.setTextColor(TEXT);
         updateText.setBackgroundColor(CARD_SOFT);
@@ -462,7 +474,7 @@ public class MainActivity extends Activity {
         try {
             PowerManager manager = (PowerManager) getSystemService(POWER_SERVICE);
             return manager == null || manager.isIgnoringBatteryOptimizations(getPackageName());
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             return true;
         }
     }
@@ -524,10 +536,10 @@ public class MainActivity extends Activity {
             } else {
                 updatePermissionGate();
             }
-        } catch (Exception exc) {
+        } catch (Throwable exc) {
             try {
                 startActivity(new Intent(Settings.ACTION_SECURITY_SETTINGS));
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
                 refreshLocalStatus("Não consegui abrir a tela de instalação de APK. Abra as configurações do Android e permita instalações pelo Core Worker.");
             }
         }
@@ -541,10 +553,10 @@ public class MainActivity extends Activity {
         try {
             Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName()));
             startActivity(intent);
-        } catch (Exception exc) {
+        } catch (Throwable exc) {
             try {
                 startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
                 refreshLocalStatus("Não consegui abrir a tela de bateria. Desative otimização de bateria manualmente para o Core Worker.");
             }
         }
@@ -890,7 +902,7 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 checkForUpdateInternal(serverUrl, false);
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
                 updateUpdateUi("Instalado: " + APP_VERSION + "\nAtualizações: ainda não verificadas.", false, false);
             }
         }).start();
@@ -1058,7 +1070,7 @@ public class MainActivity extends Activity {
                 updateUpdateUi("Atualização baixada e verificada. Vou abrir o instalador do Android.\nArquivo: " + apkFile.getName() + "\nSe aparecer bloqueio, permita instalar apps desconhecidos para o Core Worker.", true, true);
                 setUpdateActionState("APK baixado e validado. Abrindo instalador do Android...", "Abrindo...", true, true);
                 openApkInstaller(apkFile);
-            } catch (Exception exc) {
+            } catch (Throwable exc) {
                 String detail = exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage());
                 reportUpdateNotification(serverUrl, "download_failed", false, detail);
                 show("Falha ao atualizar: " + detail);
@@ -1162,7 +1174,7 @@ public class MainActivity extends Activity {
             manager.notify(4102, builder.build());
             prefs.edit().putString("last_update_notification", notificationKey).apply();
             return "displayed";
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             return "failed";
         }
     }
@@ -1197,23 +1209,38 @@ public class MainActivity extends Activity {
             fcmState = "VPS não configurada";
             return;
         }
+        long now = System.currentTimeMillis();
+        if (fcmDisabledUntil > now) {
+            fcmState = "push em espera";
+            refreshLocalStatus(null);
+            return;
+        }
         try {
             fcmState = "registrando";
             FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
-                if (!task.isSuccessful() || task.getResult() == null || task.getResult().trim().isEmpty()) {
-                    fcmState = "indisponível";
-                    refreshLocalStatus(null);
-                    return;
+                try {
+                    if (!task.isSuccessful() || task.getResult() == null || task.getResult().trim().isEmpty()) {
+                        fcmState = "indisponível";
+                        refreshLocalStatus(null);
+                        return;
+                    }
+                    String token = task.getResult().trim();
+                    fcmTokenPreview = token.length() <= 10 ? token : token.substring(0, 6) + "…" + token.substring(token.length() - 4);
+                    prefs.edit().putString("fcm_token", token).apply();
+                    new Thread(() -> reportFcmToken(serverUrl, token, reason)).start();
+                } catch (Throwable exc) {
+                    disableFcmTemporarily("falha lendo token");
                 }
-                String token = task.getResult().trim();
-                fcmTokenPreview = token.length() <= 10 ? token : token.substring(0, 6) + "…" + token.substring(token.length() - 4);
-                prefs.edit().putString("fcm_token", token).apply();
-                new Thread(() -> reportFcmToken(serverUrl, token, reason)).start();
             });
-        } catch (Exception exc) {
-            fcmState = "Firebase indisponível";
-            refreshLocalStatus(null);
+        } catch (Throwable exc) {
+            disableFcmTemporarily("Firebase indisponível");
         }
+    }
+
+    private void disableFcmTemporarily(String label) {
+        fcmState = label == null || label.trim().isEmpty() ? "Firebase indisponível" : label.trim();
+        fcmDisabledUntil = System.currentTimeMillis() + 5L * 60L * 1000L;
+        refreshLocalStatus(null);
     }
 
     private void reportFcmToken(String serverUrl, String token, String reason) {
@@ -1232,7 +1259,7 @@ public class MainActivity extends Activity {
             payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
             HttpResult result = request("POST", serverUrl + "/core-worker/app/fcm-token", payload, null);
             fcmState = result.ok() ? "ativo" : "falha HTTP " + result.status;
-        } catch (Exception exc) {
+        } catch (Throwable exc) {
             fcmState = "falha ao registrar";
         }
         refreshLocalStatus(null);
@@ -1266,7 +1293,7 @@ public class MainActivity extends Activity {
                 payload.put("detail", detail == null ? "" : detail);
                 payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
                 request("POST", serverUrl + "/core-worker/app/notification", payload, null);
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
             }
         }).start();
     }
@@ -1295,7 +1322,7 @@ public class MainActivity extends Activity {
             if (result.ok() && !transientEvent) {
                 prefs.edit().putBoolean(prefKey, true).apply();
             }
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
         }
     }
 
@@ -1345,7 +1372,7 @@ public class MainActivity extends Activity {
         long total = -1;
         try {
             total = conn.getContentLengthLong();
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             total = -1;
         }
         InputStream input = conn.getInputStream();
@@ -1393,7 +1420,7 @@ public class MainActivity extends Activity {
                     setUpdateActionState("APK baixado e validado, mas o Android bloqueou instalação por fonte desconhecida.\nAutorize o Core Worker e toque em Atualizar novamente.", "Abrir instalador", true, false);
                     refreshLocalStatus("Autorize o Core Worker a instalar apps desconhecidos. Depois volte aqui e toque novamente em Atualizar. O APK já foi baixado e validado localmente.");
                     return;
-                } catch (Exception ignored) {
+                } catch (Throwable ignored) {
                     // Continua para tentar abrir o instalador local.
                 }
             }
@@ -1401,7 +1428,7 @@ public class MainActivity extends Activity {
             Uri uri;
             try {
                 uri = FileProvider.getUriForFile(this, getPackageName() + ".files", apkFile);
-            } catch (Exception exc) {
+            } catch (Throwable exc) {
                 reportUpdateNotification(serverUrl, "install_intent_failed", false, "FileProvider falhou: " + exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage()));
                 setUpdateActionState("APK baixado, mas o FileProvider falhou ao preparar o instalador.\n" + exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage()), "Tentar novamente", true, false);
                 refreshLocalStatus("Atualização baixada, mas não consegui preparar o arquivo para instalação: " + exc.getClass().getSimpleName());
@@ -1420,7 +1447,7 @@ public class MainActivity extends Activity {
                 setUpdateActionState("Instalador do Android aberto. Conclua a instalação da atualização.", "Instalador aberto", true, false);
                 refreshLocalStatus("APK baixado e validado. Abri o instalador do Android usando o arquivo local, sem mandar para site intermediário.");
                 return;
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
                 // Tenta fallback ACTION_VIEW abaixo.
             }
 
@@ -1434,7 +1461,7 @@ public class MainActivity extends Activity {
                 setUpdateActionState("Instalador do Android aberto. Conclua a instalação da atualização.", "Instalador aberto", true, false);
                 refreshLocalStatus("APK baixado e validado. Abri o instalador do Android usando ACTION_VIEW.");
                 return;
-            } catch (Exception viewExc) {
+            } catch (Throwable viewExc) {
                 reportUpdateNotification(serverUrl, "install_intent_failed", false, viewExc.getClass().getSimpleName() + ": " + String.valueOf(viewExc.getMessage()));
                 if (latestApkUrl != null && !latestApkUrl.trim().isEmpty()) {
                     try {
@@ -1445,7 +1472,7 @@ public class MainActivity extends Activity {
                         setUpdateActionState("Não consegui abrir o instalador local, então abri a URL direta do arquivo APK como fallback.", "URL direta aberta", true, false);
                         refreshLocalStatus("Fallback usado: abri a URL direta do APK, não uma página intermediária.");
                         return;
-                    } catch (Exception urlExc) {
+                    } catch (Throwable urlExc) {
                         reportUpdateNotification(serverUrl, "install_intent_failed", false, "fallback URL falhou: " + urlExc.getClass().getSimpleName() + ": " + String.valueOf(urlExc.getMessage()));
                     }
                 }
@@ -1479,7 +1506,7 @@ public class MainActivity extends Activity {
                 raw = "/" + raw;
             }
             return root + raw;
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             return raw;
         }
     }
@@ -1639,11 +1666,11 @@ public class MainActivity extends Activity {
             } finally {
                 try {
                     socket.close();
-                } catch (Exception ignored) {
+                } catch (Throwable ignored) {
                 }
             }
             return (System.nanoTime() - start) / 1_000_000.0;
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             return -1;
         }
     }
@@ -1652,7 +1679,7 @@ public class MainActivity extends Activity {
         try {
             String host = new URL(serverUrl).getHost();
             return host != null && host.startsWith("100.");
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             return false;
         }
     }
@@ -1727,7 +1754,7 @@ public class MainActivity extends Activity {
                 showLocalAgentText();
             }
             return true;
-        } catch (Exception exc) {
+        } catch (Throwable exc) {
             localAgentOnline = false;
             localAgentVersion = "";
             localAgentProfile = "";
@@ -1762,7 +1789,7 @@ public class MainActivity extends Activity {
             updatePairingUi();
             updateSystemChecklistText();
             return true;
-        } catch (Exception exc) {
+        } catch (Throwable exc) {
             localAgentOnline = false;
             localAgentVersion = "";
             localAgentProfile = "";
@@ -1851,7 +1878,7 @@ public class MainActivity extends Activity {
                     reportAppState(ok ? "local_agent_unpaired" : "local_agent_offline", ok ? localAgentMessage : "worker local offline/inacessível pelo APK");
                     show(null);
                 }
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
                 show(null);
             }
         }).start();
@@ -1864,7 +1891,7 @@ public class MainActivity extends Activity {
                 throw new ActivityNotFoundException("Termux não encontrado");
             }
             startActivity(launch);
-        } catch (Exception exc) {
+        } catch (Throwable exc) {
             refreshLocalStatus("Não consegui abrir o Termux automaticamente. Abra o Termux; o autostart do Core Worker deve iniciar o watchdog local.");
         }
     }
@@ -1876,7 +1903,7 @@ public class MainActivity extends Activity {
                 throw new ActivityNotFoundException("Tailscale não encontrado");
             }
             startActivity(launch);
-        } catch (Exception exc) {
+        } catch (Throwable exc) {
             refreshLocalStatus("Não consegui abrir o Tailscale automaticamente. Abra o app Tailscale manualmente e conecte na mesma tailnet da VPS.");
         }
     }
@@ -1907,7 +1934,7 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 runnable.run();
-            } catch (Exception exc) {
+            } catch (Throwable exc) {
                 show("Erro: " + exc.getClass().getSimpleName() + " · " + String.valueOf(exc.getMessage()));
             } finally {
                 runOnUiThread(() -> setButtonsEnabled(true));
@@ -2023,7 +2050,7 @@ public class MainActivity extends Activity {
                 return "rede ok · confirme Tailscale";
             }
             return "rede ok";
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             return "desconhecida";
         }
     }
@@ -2062,7 +2089,7 @@ public class MainActivity extends Activity {
                 getPackageManager().getPackageInfo(packageName, 0);
             }
             return true;
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             return false;
         }
     }
@@ -2093,7 +2120,7 @@ public class MainActivity extends Activity {
     private String selectedProfileSafe() {
         try {
             return selectedProfile();
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
             return prefs.getString("profile", "midia");
         }
     }
@@ -2196,7 +2223,7 @@ public class MainActivity extends Activity {
             if (json.optBoolean("ok", false)) {
                 return "ok";
             }
-        } catch (Exception ignored) {
+        } catch (Throwable ignored) {
         }
         String compact = body.replace('\n', ' ').replace('\r', ' ').trim();
         if (compact.length() > 180) {
