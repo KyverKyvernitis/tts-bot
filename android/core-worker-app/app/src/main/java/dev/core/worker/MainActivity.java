@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.13";
+    private static final String APP_VERSION = "0.5.14";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -82,16 +82,16 @@ public class MainActivity extends Activity {
     private static final long FCM_DISABLED_MS = 30L * 60L * 1000L;
     private static final long FCM_STARTUP_DELAY_MS = 1500L;
 
-    private static final int BG = Color.rgb(7, 11, 23);
-    private static final int CARD = Color.rgb(18, 25, 44);
-    private static final int CARD_SOFT = Color.rgb(27, 36, 62);
-    private static final int CARD_HIGHLIGHT = Color.rgb(32, 44, 76);
+    private static final int BG = Color.rgb(5, 9, 20);
+    private static final int CARD = Color.rgb(16, 24, 43);
+    private static final int CARD_SOFT = Color.rgb(26, 37, 68);
+    private static final int CARD_HIGHLIGHT = Color.rgb(32, 48, 86);
     private static final int TEXT = Color.rgb(248, 250, 255);
-    private static final int MUTED = Color.rgb(186, 195, 218);
-    private static final int ACCENT = Color.rgb(122, 179, 255);
-    private static final int BUTTON_BG = Color.rgb(132, 190, 255);
+    private static final int MUTED = Color.rgb(177, 188, 214);
+    private static final int ACCENT = Color.rgb(116, 190, 255);
+    private static final int BUTTON_BG = Color.rgb(120, 184, 255);
     private static final int BUTTON_TEXT = Color.rgb(4, 10, 24);
-    private static final int BUTTON_DISABLED_BG = Color.rgb(55, 64, 88);
+    private static final int BUTTON_DISABLED_BG = Color.rgb(48, 58, 82);
     private static final int BUTTON_DISABLED_TEXT = Color.rgb(164, 173, 199);
     private static final int OK = Color.rgb(110, 225, 145);
     private static final int WARN = Color.rgb(255, 205, 113);
@@ -220,7 +220,7 @@ public class MainActivity extends Activity {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18), dp(18), dp(18), dp(28));
+        root.setPadding(dp(16), dp(18), dp(16), dp(24));
         scroll.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT,
                 ScrollView.LayoutParams.WRAP_CONTENT
@@ -229,16 +229,16 @@ public class MainActivity extends Activity {
         TextView title = new TextView(this);
         title.setText("Core Worker");
         title.setTextColor(TEXT);
-        title.setTextSize(29);
+        title.setTextSize(31);
         title.setGravity(Gravity.START);
         title.setTypeface(null, 1);
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Deixe este celular pronto para ajudar a VPS do bot. A tela principal mostra só o essencial.");
+        subtitle.setText("Seu celular está ajudando a VPS do bot.");
         subtitle.setTextColor(MUTED);
-        subtitle.setTextSize(13);
-        subtitle.setPadding(0, dp(6), 0, dp(10));
+        subtitle.setTextSize(14);
+        subtitle.setPadding(0, dp(5), 0, dp(12));
         root.addView(subtitle);
 
         buildPermissionGate(root);
@@ -269,15 +269,15 @@ public class MainActivity extends Activity {
         LinearLayout prepareCard = card();
         mainContent.addView(prepareCard);
         prepareCard.addView(sectionTitle("Status"));
-        prepareCard.addView(smallText("Resumo rápido deste aparelho."));
+        prepareCard.addView(smallText("Visão rápida do aparelho."));
 
         localAgentText = smallText("Este celular ainda não foi verificado.");
         localAgentText.setTextColor(TEXT);
         localAgentText.setBackground(cardBackground(CARD_SOFT));
-        localAgentText.setPadding(dp(10), dp(10), dp(10), dp(10));
+        localAgentText.setPadding(dp(12), dp(10), dp(12), dp(10));
         prepareCard.addView(localAgentText);
 
-        prepareButton = button("Verificar agora");
+        prepareButton = primaryButton("Verificar agora");
         prepareButton.setOnClickListener(v -> checkLocalAgent(true));
         prepareCard.addView(prepareButton);
 
@@ -293,7 +293,7 @@ public class MainActivity extends Activity {
         pairingStatusText.setPadding(dp(10), dp(10), dp(10), dp(10));
         connectCard.addView(pairingStatusText);
 
-        rePairButton = button("Trocar/refazer pareamento");
+        rePairButton = secondaryButton("Trocar pareamento");
         rePairButton.setOnClickListener(v -> showPairingForm(true, "Modo de pareamento aberto. Gere um código novo no Discord se quiser trocar o vínculo deste celular."));
         connectCard.addView(rePairButton);
 
@@ -319,17 +319,17 @@ public class MainActivity extends Activity {
         pairingForm.addView(label("Nome deste celular"));
         pairingForm.addView(deviceNameInput);
 
-        testButton = button("Testar conexão com a VPS");
+        testButton = secondaryButton("Testar conexão");
         testButton.setOnClickListener(v -> testServer());
         pairingForm.addView(testButton);
 
-        pairButton = button("Conectar este celular");
+        pairButton = primaryButton("Conectar este celular");
         pairButton.setOnClickListener(v -> pairWorker());
         pairingForm.addView(pairButton);
 
         LinearLayout profileCard = cardWithTopMargin(mainContent);
         profileCard.addView(sectionTitle("Perfil"));
-        profileCard.addView(smallText("Escolha quanto este celular pode ajudar quando estiver disponível."));
+        profileCard.addView(smallText("Quanto este celular pode ajudar quando estiver livre."));
 
         profileSummaryText = smallText("");
         profileSummaryText.setTextColor(TEXT);
@@ -337,7 +337,7 @@ public class MainActivity extends Activity {
         profileSummaryText.setPadding(dp(10), dp(10), dp(10), dp(10));
         profileCard.addView(profileSummaryText);
 
-        profileToggleButton = button("Alterar perfil");
+        profileToggleButton = secondaryButton("Alterar perfil");
         profileToggleButton.setOnClickListener(v -> toggleProfileDetails());
         profileCard.addView(profileToggleButton);
 
@@ -349,12 +349,12 @@ public class MainActivity extends Activity {
         profileGroup = new RadioGroup(this);
         profileGroup.setOrientation(RadioGroup.VERTICAL);
         profileGroup.setPadding(0, dp(6), 0, dp(6));
-        addProfileRadio("leve", "Leve · economia e diagnóstico");
+        addProfileRadio("leve", "Leve · economia de bateria");
         addProfileRadio("midia", "Normal · recomendado");
         addProfileRadio("completo", "Completo · tarefas extras");
-        addProfileRadio("builder", "Builder · compilar APK no celular");
+        addProfileRadio("builder", "Builder · compilar APK");
         addProfileRadio("turbo", "Turbo · máximo desempenho");
-        addProfileRadio("bedrock", "Bedrock · reservado para futuro");
+        addProfileRadio("bedrock", "Bedrock · reservado");
         profileGroup.setOnCheckedChangeListener((group, checkedId) -> {
             String profile = selectedProfile();
             updateProfileSelectionHint(profile);
@@ -365,28 +365,28 @@ public class MainActivity extends Activity {
         profileHintText = smallText("");
         profileDetailsContent.addView(profileHintText);
 
-        saveProfileButton = button("Aplicar perfil");
+        saveProfileButton = primaryButton("Aplicar perfil");
         saveProfileButton.setOnClickListener(v -> updateOwnProfile());
         profileDetailsContent.addView(saveProfileButton);
 
         LinearLayout updateCard = cardWithTopMargin(mainContent);
         updateCard.addView(sectionTitle("Atualizações"));
-        updateCard.addView(smallText("Push FCM e checagem local mantêm o APK em dia."));
-        updateText = smallText("Instalado: " + APP_VERSION + "\nAtualizações: ainda não verificadas.");
+        updateCard.addView(smallText("APK e avisos de atualização."));
+        updateText = smallText("APK " + APP_VERSION + " · ainda não verificado.");
         updateText.setTextColor(TEXT);
         updateText.setBackground(cardBackground(CARD_SOFT));
         updateText.setPadding(dp(10), dp(10), dp(10), dp(10));
         updateCard.addView(updateText);
 
-        updateCheckButton = button("Verificar atualização agora");
+        updateCheckButton = secondaryButton("Verificar atualização");
         updateCheckButton.setOnClickListener(v -> checkForUpdate());
         updateCard.addView(updateCheckButton);
 
 
         LinearLayout technicalCard = cardWithTopMargin(mainContent);
         technicalCard.addView(sectionTitle("Detalhes técnicos"));
-        technicalCard.addView(smallText("Termux, rede, jobs, SSHD, versões e logs ficam recolhidos aqui."));
-        technicalToggleButton = button("Mostrar detalhes técnicos");
+        technicalCard.addView(smallText("Logs, rede e opções avançadas."));
+        technicalToggleButton = secondaryButton("Abrir detalhes técnicos");
         technicalToggleButton.setOnClickListener(v -> toggleTechnicalDetails());
         technicalCard.addView(technicalToggleButton);
 
@@ -401,19 +401,19 @@ public class MainActivity extends Activity {
         systemChecklistText.setPadding(dp(10), dp(10), dp(10), dp(10));
         technicalDetailsContent.addView(systemChecklistText);
 
-        termuxButton = button("Abrir Termux");
+        termuxButton = secondaryButton("Abrir Termux");
         termuxButton.setOnClickListener(v -> openTermux());
         technicalDetailsContent.addView(termuxButton);
 
-        tailscaleButton = button("Abrir Tailscale");
+        tailscaleButton = secondaryButton("Abrir Tailscale");
         tailscaleButton.setOnClickListener(v -> openTailscale());
         technicalDetailsContent.addView(tailscaleButton);
 
-        heartbeatButton = button("Sincronizar com painel workers");
+        heartbeatButton = secondaryButton("Sincronizar painel workers");
         heartbeatButton.setOnClickListener(v -> sendHeartbeat());
         technicalDetailsContent.addView(heartbeatButton);
 
-        clearButton = button("Esquecer conexão local");
+        clearButton = dangerButton("Esquecer conexão local");
         clearButton.setBackground(makeButtonBackground(Color.rgb(91, 50, 57), BUTTON_DISABLED_BG));
         clearButton.setTextColor(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled}, new int[]{}}, new int[]{BUTTON_DISABLED_TEXT, TEXT}));
         clearButton.setOnClickListener(v -> confirmClearPairing());
@@ -421,7 +421,7 @@ public class MainActivity extends Activity {
 
         statusText = new TextView(this);
         statusText.setTextColor(TEXT);
-        statusText.setTextSize(14);
+        statusText.setTextSize(13);
         statusText.setPadding(dp(14), dp(14), dp(14), dp(14));
         statusText.setBackground(cardBackground(CARD));
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
@@ -444,8 +444,8 @@ public class MainActivity extends Activity {
         params.setMargins(0, 0, 0, dp(14));
         root.addView(permissionGateCard, params);
 
-        permissionGateCard.addView(sectionTitle("Permissões do Core Worker"));
-        TextView intro = smallText("Permita o básico para receber aviso de APK novo, abrir o instalador e reduzir a chance do Android pausar o app em segundo plano.");
+        permissionGateCard.addView(sectionTitle("Permissões necessárias"));
+        TextView intro = smallText("Permita notificações, instalação de APK e uso em segundo plano.");
         intro.setTextColor(TEXT);
         permissionGateCard.addView(intro);
 
@@ -581,7 +581,7 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        params.setMargins(0, dp(10), 0, 0);
+        params.setMargins(0, dp(8), 0, 0);
         root.addView(card, params);
         return card;
     }
@@ -589,14 +589,14 @@ public class MainActivity extends Activity {
     private LinearLayout card() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(14), dp(13), dp(14), dp(13));
+        card.setPadding(dp(13), dp(12), dp(13), dp(12));
         card.setBackground(cardBackground(CARD));
         return card;
     }
 
     private GradientDrawable cardBackground(int color) {
         GradientDrawable drawable = rounded(color);
-        drawable.setStroke(dp(1), Color.rgb(31, 40, 64));
+        drawable.setStroke(dp(1), Color.rgb(34, 45, 72));
         return drawable;
     }
 
@@ -606,7 +606,7 @@ public class MainActivity extends Activity {
         title.setTextColor(TEXT);
         title.setTextSize(18);
         title.setTypeface(null, 1);
-        title.setPadding(0, 0, 0, dp(4));
+        title.setPadding(0, 0, 0, dp(3));
         return title;
     }
 
@@ -615,7 +615,7 @@ public class MainActivity extends Activity {
         text.setText(value);
         text.setTextColor(MUTED);
         text.setTextSize(12);
-        text.setPadding(0, dp(1), 0, dp(5));
+        text.setPadding(0, dp(1), 0, dp(4));
         return text;
     }
 
@@ -624,7 +624,7 @@ public class MainActivity extends Activity {
         label.setText(value);
         label.setTextColor(MUTED);
         label.setTextSize(13);
-        label.setPadding(0, dp(10), 0, dp(4));
+        label.setPadding(0, dp(8), 0, dp(3));
         return label;
     }
 
@@ -638,20 +638,39 @@ public class MainActivity extends Activity {
         edit.setTextSize(15);
         edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         edit.setSelectAllOnFocus(false);
-        edit.setPadding(dp(10), dp(8), dp(10), dp(8));
+        edit.setPadding(dp(10), dp(7), dp(10), dp(7));
         return edit;
     }
 
     private Button button(String text) {
+        return styledButton(text, BUTTON_BG, BUTTON_TEXT, dp(40));
+    }
+
+    private Button primaryButton(String text) {
+        return styledButton(text, BUTTON_BG, BUTTON_TEXT, dp(40));
+    }
+
+    private Button secondaryButton(String text) {
+        return styledButton(text, Color.rgb(35, 49, 82), TEXT, dp(36));
+    }
+
+    private Button dangerButton(String text) {
+        return styledButton(text, Color.rgb(91, 50, 57), TEXT, dp(36));
+    }
+
+    private Button styledButton(String text, int enabledColor, int textColor, int minHeight) {
         Button button = new Button(this);
         button.setText(text);
         button.setAllCaps(false);
-        button.setTextColor(buttonTextColors());
+        button.setTextColor(new ColorStateList(
+                new int[][]{new int[]{-android.R.attr.state_enabled}, new int[]{}},
+                new int[]{BUTTON_DISABLED_TEXT, textColor}
+        ));
         button.setTextSize(14);
         button.setTypeface(null, Typeface.BOLD);
-        button.setMinHeight(dp(40));
-        button.setPadding(dp(12), dp(7), dp(12), dp(7));
-        button.setBackground(makeButtonBackground(BUTTON_BG, BUTTON_DISABLED_BG));
+        button.setMinHeight(minHeight);
+        button.setPadding(dp(12), dp(6), dp(12), dp(6));
+        button.setBackground(makeButtonBackground(enabledColor, BUTTON_DISABLED_BG));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -682,7 +701,7 @@ public class MainActivity extends Activity {
     private GradientDrawable rounded(int color) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(color);
-        drawable.setCornerRadius(dp(14));
+        drawable.setCornerRadius(dp(16));
         return drawable;
     }
 
@@ -716,7 +735,7 @@ public class MainActivity extends Activity {
             technicalDetailsContent.setVisibility(technicalExpanded ? View.VISIBLE : View.GONE);
         }
         if (technicalToggleButton != null) {
-            technicalToggleButton.setText(technicalExpanded ? "Ocultar detalhes técnicos" : "Mostrar detalhes técnicos");
+            technicalToggleButton.setText(technicalExpanded ? "Fechar detalhes" : "Abrir detalhes técnicos");
         }
         refreshLocalStatus(null);
     }
@@ -727,7 +746,7 @@ public class MainActivity extends Activity {
             profileDetailsContent.setVisibility(profileExpanded ? View.VISIBLE : View.GONE);
         }
         if (profileToggleButton != null) {
-            profileToggleButton.setText(profileExpanded ? "Ocultar perfis" : "Alterar perfil");
+            profileToggleButton.setText(profileExpanded ? "Fechar opções" : "Alterar perfil");
         }
         updateProfileHint(appliedProfile());
     }
@@ -752,14 +771,14 @@ public class MainActivity extends Activity {
             }
             if (connectHintText != null) {
                 connectHintText.setText(paired
-                        ? "Vinculado à VPS principal. Nenhum código é necessário agora."
-                        : "Use o código gerado no painel workers do Discord.");
+                        ? "Vínculo ativo. Nenhum código necessário."
+                        : "Use o código do painel workers.");
             }
             if (pairingStatusText != null) {
                 String profile = appliedProfile();
                 pairingStatusText.setText(paired
-                        ? "VPS principal conectada\nPerfil sincronizado: " + profileLabel(profile)
-                        : "Ainda não conectado. Gere um código no Discord e conecte este celular.");
+                        ? "VPS principal conectada · perfil " + profileLabel(profile)
+                        : "Ainda não conectado. Gere um código no Discord.");
             }
             if (rePairButton != null) {
                 rePairButton.setVisibility(paired ? View.VISIBLE : View.GONE);
@@ -847,7 +866,7 @@ public class MainActivity extends Activity {
             updatePairingUi();
             registerFcmTokenAsync("pair_success");
             vpsState = "ok";
-            show("Celular conectado com sucesso.\nPerfil: " + profileLabel(profile) + "\nRegistro usado: " + emptyFallback(workerId, "worker local") + "\n\nO APK não criou worker separado; quem envia heartbeat e executa jobs é o Termux worker.");
+            show("Celular conectado.\nPerfil: " + profileLabel(profile) + "\nWorker: " + emptyFallback(workerId, "local"));
         });
     }
 
@@ -883,7 +902,7 @@ public class MainActivity extends Activity {
 
     private void sendHeartbeatInternal(boolean showResult, String successPrefix) throws Exception {
         if (!updateLocalAgentStatus(true)) {
-            show("Worker local offline. Abra o Termux e inicie o phone-worker.\n\nO APK não envia heartbeat próprio para não criar registro duplicado.");
+            show("Worker local offline. Abra o Termux para sincronizar.");
             return;
         }
         HttpResult result = request("POST", LOCAL_AGENT_HEARTBEAT_URL, new JSONObject(), null);
@@ -902,21 +921,21 @@ public class MainActivity extends Activity {
             message += synced ? "\nVPS recebeu heartbeat do Termux worker." : "\nWorker local respondeu, mas ainda não confirmou heartbeat na VPS.";
             show(message);
         } else {
-            show("Worker local pareado. O Termux worker envia heartbeat e executa jobs.\nAgora confira o painel workers no Discord.");
+            show("Worker local sincronizado. Confira o painel workers no Discord.");
         }
     }
 
     private void autoCheckForUpdate() {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
-            updateUpdateUi("Instalado: " + APP_VERSION + "\nAtualizações: VPS padrão não configurada no APK.", false, false);
+            updateUpdateUi("APK " + APP_VERSION + " · VPS não configurada.", false, false);
             return;
         }
         new Thread(() -> {
             try {
                 checkForUpdateInternal(serverUrl, false);
             } catch (Throwable ignored) {
-                updateUpdateUi("Instalado: " + APP_VERSION + "\nAtualizações: ainda não verificadas.", false, false);
+                updateUpdateUi("APK " + APP_VERSION + " · ainda não verificado.", false, false);
             }
         }).start();
     }
@@ -936,7 +955,7 @@ public class MainActivity extends Activity {
             latestUpdateAvailable = false;
             latestVersionName = "";
             latestVersionCode = -1;
-            updateUpdateUi("Instalado: " + APP_VERSION + "\nAtualizações: a VPS não publicou manifesto de APK.", false, false);
+            updateUpdateUi("APK " + APP_VERSION + " · manifesto indisponível.", false, false);
             if (userVisible) {
                 show("Não encontrei manifesto de atualização na VPS.\nHTTP " + result.status + " · " + compactResultBody(result.body));
             }
@@ -958,11 +977,10 @@ public class MainActivity extends Activity {
         latestUpdateAvailable = available;
 
         StringBuilder text = new StringBuilder();
-        text.append("Instalado: ").append(APP_VERSION).append(" (").append(BuildConfig.VERSION_CODE).append(").\n");
-        text.append("Na VPS: ").append(emptyFallback(latestVersionName, "sem nome"));
+        text.append("APK ").append(APP_VERSION).append(" → VPS ").append(emptyFallback(latestVersionName, "sem nome"));
         if (latestVersionCode >= 0) text.append(" (").append(latestVersionCode).append(")");
-        text.append(".\n");
-        text.append(available ? "Atualização pronta para instalar." : "Atualizações em dia.");
+        text.append("\n");
+        text.append(available ? "Atualização pronta para instalar." : "Tudo em dia.");
         if (!requiredAgent.isEmpty() && technicalExpanded) {
             text.append("\nWorker recomendado: ").append(requiredAgent).append(".");
         }
@@ -1132,7 +1150,7 @@ public class MainActivity extends Activity {
             }
             applyUpdateButtonState(showBanner && latestUpdateAvailable, buttonText, busy);
             if (updateText != null && message != null && !message.trim().isEmpty()) {
-                updateText.setText("Instalado: " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ").\n" + message);
+                updateText.setText("APK " + APP_VERSION + " · " + message);
             }
         });
     }
@@ -1878,9 +1896,9 @@ public class MainActivity extends Activity {
             updateSystemChecklistText();
             if (userVisible) {
                 if (ok) {
-                    show("Este celular está pronto.\nWorker local: online\nVersão: " + emptyFallback(localAgentVersion, "desconhecida") + "\nPerfil: " + emptyFallback(localAgentProfile, "não informado"));
+                    show("Tudo pronto.\nWorker online · perfil " + profileLabel(appliedProfile()));
                 } else {
-                    show("Worker local offline. Abra o Termux e inicie o phone-worker.");
+                    show("Worker local offline. Abra o Termux para acordar este celular.");
                 }
             }
         });
@@ -1987,12 +2005,12 @@ public class MainActivity extends Activity {
     private String localAgentLine() {
         String profile = appliedProfile();
         if (!localAgentOnline) {
-            return "⚠️ Worker local offline\nAbra o Termux para acordar este celular.";
+            return "⚠️ Aguardando worker local\nAbra o Termux para acordar este celular.";
         }
         if (hasPairing()) {
-            return "✅ Pronto para trabalhar\nPerfil: " + profileLabel(profile) + " · Push: " + fcmCompactLabel();
+            return "✅ Pronto para trabalhar\n" + profileLabel(profile) + " · Push " + fcmCompactLabel() + " · APK " + updateChecklistLabel();
         }
-        return "⚠️ Worker local detectado\nConecte este celular à VPS principal.";
+        return "⚠️ Worker detectado\nConecte este celular à VPS principal.";
     }
 
 
@@ -2358,21 +2376,21 @@ public class MainActivity extends Activity {
     private String profileDescription(String profile) {
         String normalized = normalizeProfile(profile);
         if ("leve".equals(normalized)) {
-            return "Economia de bateria, logs e diagnósticos básicos.";
+            return "Economia de bateria para uso leve.";
         }
         if ("completo".equals(normalized)) {
-            return "Ajuda em mídia, arquivos, cache e manutenção segura.";
+            return "Tarefas extras sem exigir modo máximo.";
         }
         if ("builder".equals(normalized)) {
-            return "Compila o APK privado no celular para aliviar a VPS.";
+            return "Compila APK no celular quando solicitado.";
         }
         if ("turbo".equals(normalized)) {
-            return "Máximo desempenho para acelerar tarefas auxiliares.";
+            return "Máximo desempenho para ajudar a VPS.";
         }
         if ("bedrock".equals(normalized)) {
-            return "Reservado para Minecraft Bedrock no futuro.";
+            return "Reservado para funções futuras.";
         }
-        return "Recomendado para uso diário e tarefas normais.";
+        return "Recomendado para tarefas normais.";
     }
 
     private void updateProfileHint(String profile) {

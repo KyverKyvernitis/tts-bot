@@ -1,8 +1,17 @@
 # Core Worker APK privado
 
-## v0.5.13 — perfil único e tela mais compacta
+## v0.5.14 — polimento visual e tela principal mais leve
 
-A versão `0.5.13` complementa o Patch 53.
+A versão `0.5.14` complementa o Patch 54.
+
+Principais ajustes desta versão:
+
+- tela inicial com textos mais curtos e visual mais limpo;
+- somente a ação principal continua em botão azul forte; ações secundárias ficaram mais discretas;
+- perfil, conexão, atualizações e detalhes técnicos ocupam menos espaço;
+- detalhes técnicos continuam recolhidos por padrão;
+- não muda a arquitetura FCM: push real continua em modo seguro com fallback local.
+
 
 Correções principais:
 
