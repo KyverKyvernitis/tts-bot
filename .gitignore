@@ -183,3 +183,7 @@ secrets/
 firebase-service-account.json
 *service-account*.json
 android/core-worker-app/app/google-services.json
+data/core_worker_app_fcm_tokens.json
+data/core_worker_app_fcm_tokens.json.tmp
+data/core_worker_app_notifications.json
+data/core_worker_app_notifications.json.tmp

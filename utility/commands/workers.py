@@ -853,7 +853,7 @@ def _core_worker_notification_status_text() -> str:
     record = latest_by_id.get(notification_id) if notification_id else None
     if isinstance(record, dict):
         state = str(record.get("state") or "recebida")
-        delivered = bool(record.get("delivered")) or state in {"displayed", "background_displayed", "duplicate", "background_duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "app_opened"}
+        delivered = bool(record.get("delivered")) or state in {"displayed", "background_displayed", "fcm_received", "fcm_displayed", "duplicate", "background_duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "app_opened"}
         app_version = str(record.get("appVersion") or "").strip()
         try:
             app_code = int(record.get("appVersionCode") or 0)
@@ -866,6 +866,8 @@ def _core_worker_notification_status_text() -> str:
             labels = {
                 "displayed": "instalação pendente",
                 "background_displayed": "instalação pendente",
+                "fcm_received": "push recebido · instalação pendente",
+                "fcm_displayed": "push exibido · instalação pendente",
                 "duplicate": "instalação pendente",
                 "background_duplicate": "instalação pendente",
                 "download_started": "download iniciado",
@@ -875,6 +877,10 @@ def _core_worker_notification_status_text() -> str:
             return f"APK: {labels.get(state, 'instalação pendente')} ({version})"
         if state in {"permission_missing", "background_permission_missing"}:
             return "APK: sem permissão de notificação"
+        if state == "fcm_sent":
+            return f"APK: push enviado ({version})"
+        if state == "fcm_failed":
+            return "APK: push falhou"
         if state == "manifest_seen":
             return f"APK: aviso visto ({version})"
         if state == "install_permission_missing":
@@ -889,6 +895,65 @@ def _core_worker_notification_status_text() -> str:
         except Exception:
             pass
     return f"APK: aguardando app ver versão {version}"
+
+def _core_worker_fcm_status_summary(worker_id: str = "") -> dict[str, Any]:
+    path = _repo_root() / "data" / "core_worker_app_fcm_tokens.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        data = {}
+    tokens = data.get("tokens") if isinstance(data, dict) and isinstance(data.get("tokens"), dict) else {}
+    now = time.time()
+    records: list[dict[str, Any]] = []
+    for record in tokens.values():
+        if not isinstance(record, dict) or not record.get("active"):
+            continue
+        if worker_id and str(record.get("workerId") or "") != str(worker_id):
+            continue
+        try:
+            seen = float(record.get("lastSeenAt") or record.get("registeredAt") or 0)
+        except Exception:
+            seen = 0.0
+        if seen and now - seen > 120 * 86400:
+            continue
+        records.append(record)
+    last = None
+    for record in records:
+        if last is None or float(record.get("lastSeenAt") or 0) > float(last.get("lastSeenAt") or 0):
+            last = record
+    if not records:
+        return {"active": 0}
+    return {
+        "active": len(records),
+        "lastSeenAt": (last or {}).get("lastSeenAt"),
+        "lastPushAt": (last or {}).get("lastPushAt"),
+        "lastPushStatus": str((last or {}).get("lastPushStatus") or ""),
+        "lastError": str((last or {}).get("lastError") or ""),
+        "lastAppVersion": str((last or {}).get("appVersion") or ""),
+        "permission": str((last or {}).get("permission") or ""),
+    }
+
+
+def _core_worker_push_status_text(worker_id: str = "") -> str:
+    summary = _core_worker_fcm_status_summary(worker_id)
+    active = int(summary.get("active") or 0)
+    if active <= 0:
+        return "Push: aguardando APK registrar FCM"
+    permission = str(summary.get("permission") or "").lower()
+    suffix = ""
+    last_push = summary.get("lastPushAt")
+    if last_push:
+        suffix = f" · último push {_format_age(max(0, time.time() - float(last_push)))}"
+    status = str(summary.get("lastPushStatus") or "")
+    if status == "failed":
+        err = _shorten(_redact(summary.get("lastError") or "falha"), limit=70)
+        return f"Push: ativo, mas último envio falhou · {err}"
+    if permission == "missing":
+        return f"Push: token ativo · sem permissão visível{suffix}"
+    if status == "sent":
+        return f"Push: ativo · enviado{suffix}"
+    return f"Push: ativo ({active}){suffix}"
+
 
 def _automation_status_text() -> str:
     """Resumo curto e humano do pipeline agent/APK para o painel."""
@@ -941,7 +1006,10 @@ def _automation_status_text() -> str:
     notif = _core_worker_notification_status_text()
     if notif:
         parts.append(notif)
-    return " · ".join(parts[:4]) if parts else "tudo em dia"
+    push = _core_worker_push_status_text()
+    if push and "aguardando APK" not in push:
+        parts.append(push)
+    return " · ".join(parts[:5]) if parts else "tudo em dia"
 
 def _worker_wake_tokens(worker: dict[str, Any]) -> set[str]:
     tokens: set[str] = set()
@@ -1324,6 +1392,7 @@ def _worker_detail_text(worker: dict[str, Any] | None) -> str:
         f"## 📱 {name}",
         f"**Estado:** {online} · visto {seen}",
         f"**Versão:** `{version}`",
+        f"**Push:** {_core_worker_push_status_text(worker_id)}",
         f"**Bateria:** {_battery_text(worker)}",
         f"**Rede:** {_network_text(worker)}",
         f"**Scripts:** {_script_health_label(worker)}",
@@ -2000,7 +2069,9 @@ class WorkersPanelView(discord.ui.LayoutView):
             stale_note = _worker_stale_note(worker)
             if stale_note:
                 lines.append(f"-# {stale_note}")
-            lines.append(f"-# {ready} · visto {seen} · worker `{version}` · {_battery_text(worker)} · {_simple_network_text(worker)}")
+            push = _core_worker_push_status_text(str(worker.get("worker_id") or ""))
+            push_label = push.replace("Push: ", "push ") if push else "push ?"
+            lines.append(f"-# {ready} · visto {seen} · worker `{version}` · {_battery_text(worker)} · {_simple_network_text(worker)} · {push_label}")
             queue_text = _queue_status_text(worker)
             if queue_text:
                 lines.append(f"-# Fila: {queue_text}")

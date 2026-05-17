@@ -41,6 +41,8 @@ import android.widget.Toast;
 
 import androidx.core.content.FileProvider;
 
+import com.google.firebase.messaging.FirebaseMessaging;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -63,7 +65,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.8";
+    private static final String APP_VERSION = "0.5.9";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -146,6 +148,8 @@ public class MainActivity extends Activity {
     private volatile String latestNotificationId = "";
     private volatile boolean latestUpdateAvailable = false;
     private volatile boolean updateDownloadBusy = false;
+    private volatile String fcmState = "não verificado";
+    private volatile String fcmTokenPreview = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -154,6 +158,7 @@ public class MainActivity extends Activity {
         buildUi();
         loadInputs();
         CoreWorkerUpdateJobService.schedule(this, "activity_create");
+        registerFcmTokenAsync("activity_create");
         reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")");
         updatePermissionGate();
         refreshLocalStatus("Pronto. O app verifica automaticamente se este celular já está pareado.");
@@ -167,6 +172,7 @@ public class MainActivity extends Activity {
         super.onResume();
         updatePermissionGate();
         CoreWorkerUpdateJobService.schedule(this, "activity_resume");
+        registerFcmTokenAsync("activity_resume");
         autoVerifySavedPairing();
         autoCheckForUpdate();
     }
@@ -178,6 +184,7 @@ public class MainActivity extends Activity {
         refreshLocalStatus(requestCode == 4103 ? "Permissão de notificação atualizada. Verifique as demais permissões necessárias." : null);
         if (requestCode == 4103) {
             CoreWorkerUpdateJobService.schedule(this, "notification_permission_result");
+            registerFcmTokenAsync("notification_permission_result");
             autoCheckForUpdate();
         }
     }
@@ -815,6 +822,7 @@ public class MainActivity extends Activity {
             applyLocalAgentStatus(body);
             showLocalAgentText();
             updatePairingUi();
+            registerFcmTokenAsync("pair_success");
             vpsState = "ok";
             show("Celular conectado com sucesso.\nPerfil: " + profileLabel(profile) + "\nRegistro usado: " + emptyFallback(workerId, "worker local") + "\n\nO APK não criou worker separado; quem envia heartbeat e executa jobs é o Termux worker.");
         });
@@ -1162,6 +1170,9 @@ public class MainActivity extends Activity {
     private String notificationDetail(String state) {
         if ("displayed".equals(state)) return "notificação local exibida pelo APK";
         if ("background_displayed".equals(state)) return "notificação local exibida por checagem com app fechado";
+        if ("fcm_received".equals(state)) return "push FCM recebido pelo APK";
+        if ("fcm_displayed".equals(state)) return "notificação exibida por push FCM";
+        if ("fcm_permission_missing".equals(state)) return "push FCM recebido sem permissão para notificação visível";
         if ("background_duplicate".equals(state)) return "checagem com app fechado viu notificação já registrada";
         if ("background_permission_missing".equals(state)) return "checagem em segundo plano sem permissão de notificação";
         if ("background_failed".equals(state)) return "falha criando notificação em segundo plano";
@@ -1177,6 +1188,67 @@ public class MainActivity extends Activity {
         if ("install_intent_failed".equals(state)) return "falha abrindo instalador Android";
         if ("download_failed".equals(state)) return "falha no download direto";
         if ("failed".equals(state)) return "falha criando notificação local";
+        return state;
+    }
+
+    private void registerFcmTokenAsync(String reason) {
+        String serverUrl = normalizedServerUrl();
+        if (serverUrl == null || serverUrl.trim().isEmpty()) {
+            fcmState = "VPS não configurada";
+            return;
+        }
+        try {
+            fcmState = "registrando";
+            FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
+                if (!task.isSuccessful() || task.getResult() == null || task.getResult().trim().isEmpty()) {
+                    fcmState = "indisponível";
+                    refreshLocalStatus(null);
+                    return;
+                }
+                String token = task.getResult().trim();
+                fcmTokenPreview = token.length() <= 10 ? token : token.substring(0, 6) + "…" + token.substring(token.length() - 4);
+                prefs.edit().putString("fcm_token", token).apply();
+                new Thread(() -> reportFcmToken(serverUrl, token, reason)).start();
+            });
+        } catch (Exception exc) {
+            fcmState = "Firebase indisponível";
+            refreshLocalStatus(null);
+        }
+    }
+
+    private void reportFcmToken(String serverUrl, String token, String reason) {
+        try {
+            JSONObject payload = statusSnapshot();
+            payload.put("fcmToken", token == null ? "" : token.trim());
+            payload.put("state", "registered");
+            payload.put("reason", reason == null ? "app" : reason);
+            payload.put("platform", "android");
+            payload.put("source", "core-worker-apk");
+            payload.put("appVersion", APP_VERSION);
+            payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+            payload.put("workerId", emptyFallback(localAgentWorkerId, prefs.getString("worker_id", "")));
+            payload.put("installId", installId());
+            payload.put("deviceName", prefs.getString("device_name", ""));
+            payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
+            HttpResult result = request("POST", serverUrl + "/core-worker/app/fcm-token", payload, null);
+            fcmState = result.ok() ? "ativo" : "falha HTTP " + result.status;
+        } catch (Exception exc) {
+            fcmState = "falha ao registrar";
+        }
+        refreshLocalStatus(null);
+    }
+
+    private String fcmStatusLabel() {
+        String state = fcmState == null ? "" : fcmState.trim();
+        if (state.isEmpty()) {
+            state = "não verificado";
+        }
+        if ("ativo".equalsIgnoreCase(state)) {
+            return fcmTokenPreview == null || fcmTokenPreview.trim().isEmpty() ? "ativo" : "ativo · token " + fcmTokenPreview;
+        }
+        if (Build.VERSION.SDK_INT >= 33 && !hasNotificationPermission()) {
+            return state + " · sem permissão visível";
+        }
         return state;
     }
 
@@ -1228,7 +1300,10 @@ public class MainActivity extends Activity {
     }
 
     private boolean isTransientUpdateEvent(String state) {
-        return "download_tap".equals(state)
+        return "fcm_received".equals(state)
+                || "fcm_displayed".equals(state)
+                || "fcm_permission_missing".equals(state)
+                || "download_tap".equals(state)
                 || "download_started".equals(state)
                 || "download_verified".equals(state)
                 || "download_failed".equals(state)
@@ -1478,6 +1553,8 @@ public class MainActivity extends Activity {
         status.put("termux_api_installed", isPackageInstalled("com.termux.api"));
         status.put("termux_boot_installed", isPackageInstalled("com.termux.boot"));
         status.put("tailscale_installed", isPackageInstalled("com.tailscale.ipn"));
+        status.put("fcm_state", fcmState);
+        status.put("fcm_token_preview", fcmTokenPreview);
         if (localAgentOnline) {
             status.put("local_agent_version", localAgentVersion);
             status.put("local_agent_profile", localAgentProfile);
@@ -1758,6 +1835,7 @@ public class MainActivity extends Activity {
                 .putString("worker_id", localAgentWorkerId)
                 .putBoolean("paired_via_local_agent", true)
                 .apply();
+        registerFcmTokenAsync("local_agent_pair_detected");
         return true;
     }
 
@@ -1893,6 +1971,7 @@ public class MainActivity extends Activity {
                 builder.append(checkLine("Worker ID", workerId)).append('\n');
             }
             builder.append(checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")")).append('\n');
+            builder.append(checkLine("Push", fcmStatusLabel())).append('\n');
         }
         if (extra != null && !extra.trim().isEmpty()) {
             builder.append("\n").append(extra);
@@ -1969,7 +2048,8 @@ public class MainActivity extends Activity {
         builder.append(checkLine("Jobs locais", localAgentJobsConfigured ? "ok" : "pendentes")).append('\n');
         builder.append(checkLine("SSHD", emptyFallback(localAgentSshdSummary, "não informado"))).append('\n');
         builder.append(checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")")).append('\n');
-        builder.append(checkLine("Checagem com app fechado", "JobScheduler periódico; não é push instantâneo")).append('\n');
+            builder.append(checkLine("Push", fcmStatusLabel())).append('\n');
+        builder.append(checkLine("App fechado", "FCM push real + JobScheduler fallback")).append('\n');
         builder.append(checkLine("Próximo futuro", "worker e VPN embutidos no APK"));
         return builder.toString();
     }

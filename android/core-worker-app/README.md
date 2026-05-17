@@ -10,6 +10,39 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
+## v0.5.9 — FCM push real + fallback local
+
+A versão `0.5.9` complementa o Patch 51. O APK passa a registrar o token FCM da instalação na VPS e a VPS pode enviar push real quando publicar uma nova versão do APK. O push é enviado por FCM HTTP v1 usando a service account local da VPS, mantida fora do Git.
+
+Arquivos locais necessários para build/envio:
+
+```text
+/home/ubuntu/secrets/firebase-service-account.json
+  -> credencial privada da VPS para enviar FCM
+  -> nunca vai para GitHub
+
+android/core-worker-app/app/google-services.json
+  -> config Android do Firebase usada pelo Gradle
+  -> fica local no ambiente de build
+  -> ignorado pelo Git neste projeto
+```
+
+Fluxo novo:
+
+```text
+APK abre ou recebe novo token FCM
+  -> POST /core-worker/app/fcm-token
+  -> VPS salva token em data/core_worker_app_fcm_tokens.json com chmod 600
+
+Worker builder publica APK novo
+  -> webserver.py atualiza releases/latest.json
+  -> VPS envia mensagem FCM data-only de alta prioridade
+  -> CoreWorkerFirebaseMessagingService recebe mesmo com app fechado, quando o Android permitir
+  -> APK mostra notificação e reporta fcm_received/fcm_displayed
+```
+
+O `JobScheduler` periódico continua como fallback. FCM reduz o atraso, mas Android ainda pode bloquear entrega se o app for forçado a parar, se Google Play Services estiver indisponível ou se a permissão de notificação estiver negada.
+
 ## v0.5.8 — modo usuário comum + painel workers limpo
 
 A versão `0.5.8` complementa o Patch 50. A tela principal do APK fica mais parecida com um app normal: estado do celular, conexão com a VPS principal, perfil resumido e atualização. Perfil detalhado, Termux, rede privada, jobs, SSHD, portas e botões de sincronização ficam recolhidos em áreas técnicas ou em ações explícitas.
@@ -54,7 +87,14 @@ Exemplo de build privado:
 cd /home/ubuntu/bot/android/core-worker-app
 CORE_WORKER_VPS_URL="http://IP_PRIVADO_DA_VPS:10000" \
 CORE_WORKER_VPS_LABEL="VPS privada configurada" \
-gradle assembleDebug --no-daemon --max-workers=1
+./gradlew assembleDebug --no-daemon --max-workers=1
+# ou gradle assembleDebug --no-daemon --max-workers=1 se a VPS não tiver wrapper
+```
+
+Antes de buildar com Firebase, garanta que o arquivo local exista:
+
+```bash
+ls -l app/google-services.json
 ```
 
 Se a URL não for injetada, o app mostra **VPS não configurada no build** e bloqueia pareamento/update em vez de expor IP real no repositório.
@@ -266,7 +306,8 @@ Em uma VPS fraca, use swap de 4 GB e compile com baixa prioridade. Evite parar o
 
 ```bash
 cd /home/ubuntu/bot/android/core-worker-app
-nice -n 19 ionice -c3 gradle assembleDebug --no-daemon --max-workers=1
+nice -n 19 ionice -c3 ./gradlew assembleDebug --no-daemon --max-workers=1
+# ou gradle assembleDebug --no-daemon --max-workers=1 se a VPS não tiver wrapper
 ```
 
 O APK debug ficará em:

@@ -12,6 +12,8 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 app = Flask(__name__)
@@ -110,7 +112,7 @@ def _append_core_worker_notification_event(event: dict) -> dict:
     path = _core_worker_notification_log_path()
     now = int(time.time())
     state = _safe_short_text(event.get("state") or event.get("event"), 48)
-    delivered = bool(event.get("delivered", False)) or state in {"displayed", "background_displayed", "duplicate", "background_duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "local_agent_seen", "local_agent_unpaired", "app_opened"}
+    delivered = bool(event.get("delivered", False)) or state in {"displayed", "background_displayed", "fcm_received", "fcm_displayed", "duplicate", "background_duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "local_agent_seen", "local_agent_unpaired", "app_opened"}
     clean = {
         "receivedAt": now,
         "notificationId": _safe_short_text(event.get("notificationId"), 96),
@@ -156,7 +158,7 @@ def _latest_core_worker_notification_summary(notification_id: str) -> dict:
     record = latest.get(str(notification_id or "")) if isinstance(latest, dict) else None
     if isinstance(record, dict):
         state = str(record.get("state") or "")
-        delivered = bool(record.get("delivered", False)) or state in {"displayed", "background_displayed", "duplicate", "background_duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "local_agent_seen", "local_agent_unpaired", "app_opened"}
+        delivered = bool(record.get("delivered", False)) or state in {"displayed", "background_displayed", "fcm_received", "fcm_displayed", "duplicate", "background_duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "local_agent_seen", "local_agent_unpaired", "app_opened"}
         return {
             "lastState": record.get("state"),
             "lastDelivered": delivered,
@@ -166,6 +168,250 @@ def _latest_core_worker_notification_summary(notification_id: str) -> dict:
             "lastDetail": record.get("detail"),
         }
     return {"lastState": "pending", "lastDelivered": False}
+
+
+def _core_worker_fcm_tokens_path() -> str:
+    return os.path.join(_repo_data_dir(), "core_worker_app_fcm_tokens.json")
+
+
+def _fcm_token_hash(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _load_core_worker_fcm_tokens() -> dict:
+    path = _core_worker_fcm_tokens_path()
+    try:
+        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
+    data["tokens"] = tokens
+    data.setdefault("ok", True)
+    return data
+
+
+def _save_core_worker_fcm_tokens(data: dict) -> None:
+    path = _core_worker_fcm_tokens_path()
+    tmp = path + ".tmp"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+    with contextlib.suppress(Exception):
+        os.chmod(path, 0o600)
+
+
+def _register_core_worker_fcm_token(payload: dict) -> dict:
+    token = str(payload.get("fcmToken") or payload.get("fcm_token") or payload.get("token") or "").strip()
+    if len(token) < 20:
+        raise ValueError("fcmToken ausente ou curto demais")
+    now = int(time.time())
+    token_hash = _fcm_token_hash(token)
+    data = _load_core_worker_fcm_tokens()
+    tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
+    record = tokens.get(token_hash) if isinstance(tokens.get(token_hash), dict) else {}
+    record.update({
+        "token": token,
+        "tokenHash": token_hash,
+        "workerId": _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80),
+        "installId": _safe_short_text(payload.get("installId") or payload.get("install_id"), 80),
+        "deviceName": _safe_short_text(payload.get("deviceName") or payload.get("device_name"), 80),
+        "platform": _safe_short_text(payload.get("platform") or "android", 32),
+        "source": _safe_short_text(payload.get("source") or "core-worker-apk", 48),
+        "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48),
+        "appVersionCode": int(payload.get("appVersionCode") or payload.get("app_version_code") or 0),
+        "permission": _safe_short_text(payload.get("permission"), 40),
+        "lastReason": _safe_short_text(payload.get("reason"), 64),
+        "lastRemoteAddr": _safe_short_text(request.remote_addr or "", 64),
+        "lastSeenAt": now,
+        "active": True,
+    })
+    record.setdefault("registeredAt", now)
+    tokens[token_hash] = record
+    data["tokens"] = tokens
+    data["updatedAt"] = now
+    _save_core_worker_fcm_tokens(data)
+    return {k: v for k, v in record.items() if k != "token"}
+
+
+def _active_core_worker_fcm_records(*, max_age_days: int = 45) -> list[dict]:
+    data = _load_core_worker_fcm_tokens()
+    tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
+    cutoff = int(time.time()) - max(1, int(max_age_days)) * 86400
+    records: list[dict] = []
+    for record in tokens.values():
+        if not isinstance(record, dict) or not record.get("active"):
+            continue
+        token = str(record.get("token") or "").strip()
+        if len(token) < 20:
+            continue
+        try:
+            seen = int(record.get("lastSeenAt") or record.get("registeredAt") or 0)
+        except Exception:
+            seen = 0
+        if seen and seen < cutoff:
+            continue
+        records.append(record)
+    return records
+
+
+def _core_worker_fcm_public_summary(worker_id: str = "") -> dict:
+    worker_id = str(worker_id or "").strip()
+    records = _active_core_worker_fcm_records(max_age_days=120)
+    if worker_id:
+        records = [r for r in records if str(r.get("workerId") or "") == worker_id]
+    last = None
+    for record in records:
+        if last is None or int(record.get("lastSeenAt") or 0) > int(last.get("lastSeenAt") or 0):
+            last = record
+    return {
+        "active": len(records),
+        "lastSeenAt": int((last or {}).get("lastSeenAt") or 0),
+        "lastPushAt": int((last or {}).get("lastPushAt") or 0),
+        "lastPushStatus": _safe_short_text((last or {}).get("lastPushStatus"), 40),
+        "lastError": _safe_short_text((last or {}).get("lastError"), 120),
+        "lastAppVersion": _safe_short_text((last or {}).get("appVersion"), 48),
+        "permission": _safe_short_text((last or {}).get("permission"), 40),
+    }
+
+
+def _firebase_service_account_path() -> str:
+    return _expand_path(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "/home/ubuntu/secrets/firebase-service-account.json")
+
+
+def _firebase_access_token_and_project() -> tuple[str, str]:
+    path = _firebase_service_account_path()
+    if not os.path.isfile(path):
+        raise RuntimeError(f"service account Firebase ausente em {path}")
+    try:
+        from google.oauth2 import service_account
+        from google.auth.transport.requests import Request as GoogleAuthRequest
+    except Exception as exc:
+        raise RuntimeError(f"dependência google-auth indisponível: {type(exc).__name__}") from exc
+    scopes = ["https://www.googleapis.com/auth/firebase.messaging"]
+    credentials = service_account.Credentials.from_service_account_file(path, scopes=scopes)
+    credentials.refresh(GoogleAuthRequest())
+    project_id = getattr(credentials, "project_id", "") or ""
+    if not project_id:
+        with open(path, "r", encoding="utf-8") as fh:
+            project_id = str((json.load(fh) or {}).get("project_id") or "")
+    if not project_id:
+        raise RuntimeError("project_id ausente na service account Firebase")
+    return str(credentials.token or ""), project_id
+
+
+def _fcm_send_v1(token: str, data_payload: dict) -> tuple[bool, str]:
+    access_token, project_id = _firebase_access_token_and_project()
+    url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
+    clean_data = {str(k): str(v) for k, v in (data_payload or {}).items() if v is not None}
+    body = json.dumps({
+        "message": {
+            "token": token,
+            "android": {"priority": "HIGH"},
+            "data": clean_data,
+        }
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            response_body = resp.read(8192).decode("utf-8", errors="replace")
+            return True, response_body[:500]
+    except urllib.error.HTTPError as exc:
+        response_body = exc.read(8192).decode("utf-8", errors="replace") if exc.fp else ""
+        return False, f"HTTP {exc.code}: {response_body[:500]}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {str(exc)[:300]}"
+
+
+def _send_core_worker_apk_update_pushes(manifest: dict, *, reason: str = "apk_published") -> dict:
+    if not isinstance(manifest, dict):
+        return {"ok": False, "error": "manifest inválido"}
+    notification_id = _safe_short_text(manifest.get("notificationId") or _notification_event_id(version_name=str(manifest.get("versionName") or ""), version_code=int(manifest.get("versionCode") or 0), sha256=str(manifest.get("sha256") or "")), 96)
+    version_name = _safe_short_text(manifest.get("versionName"), 48)
+    version_code = int(manifest.get("versionCode") or 0)
+    data_payload = {
+        "type": "apk_update_available",
+        "source": "core-worker-vps",
+        "reason": reason,
+        "notificationId": notification_id,
+        "versionName": version_name,
+        "versionCode": str(version_code),
+        "apkUrl": str(manifest.get("apkUrl") or ""),
+        "downloadUrl": str(manifest.get("downloadUrl") or manifest.get("directApkUrl") or ""),
+        "sha256": str(manifest.get("sha256") or ""),
+    }
+    records = _active_core_worker_fcm_records()
+    sent = 0
+    failed = 0
+    now = int(time.time())
+    store = _load_core_worker_fcm_tokens()
+    tokens = store.get("tokens") if isinstance(store.get("tokens"), dict) else {}
+    for record in records:
+        token = str(record.get("token") or "").strip()
+        token_hash = str(record.get("tokenHash") or _fcm_token_hash(token))
+        ok, detail = _fcm_send_v1(token, data_payload)
+        current = tokens.get(token_hash) if isinstance(tokens.get(token_hash), dict) else record
+        current["lastPushAt"] = now
+        current["lastPushStatus"] = "sent" if ok else "failed"
+        current["lastNotificationId"] = notification_id
+        current["lastError"] = "" if ok else _safe_short_text(detail, 180)
+        tokens[token_hash] = current
+        event = {
+            "notificationId": notification_id,
+            "state": "fcm_sent" if ok else "fcm_failed",
+            "delivered": False,
+            "versionName": version_name,
+            "versionCode": version_code,
+            "appVersion": _safe_short_text(current.get("appVersion"), 48),
+            "appVersionCode": int(current.get("appVersionCode") or 0),
+            "workerId": _safe_short_text(current.get("workerId"), 80),
+            "installId": _safe_short_text(current.get("installId"), 80),
+            "permission": _safe_short_text(current.get("permission"), 40),
+            "detail": "push FCM enviado pela VPS" if ok else detail,
+        }
+        with app.test_request_context(headers={"X-Internal-Core-Worker": "fcm"}):
+            # _append_core_worker_notification_event usa request.remote_addr; contexto interno evita depender de uma requisição real.
+            _append_core_worker_notification_event(event)
+        sent += 1 if ok else 0
+        failed += 0 if ok else 1
+    store["tokens"] = tokens
+    store["updatedAt"] = now
+    store["lastBroadcast"] = {"notificationId": notification_id, "sent": sent, "failed": failed, "reason": reason, "at": now}
+    _save_core_worker_fcm_tokens(store)
+    return {"ok": failed == 0, "tokens": len(records), "sent": sent, "failed": failed, "notificationId": notification_id}
+
+
+def _kick_core_worker_fcm_push(manifest: dict, *, reason: str = "apk_published") -> None:
+    if not isinstance(manifest, dict) or not manifest.get("notificationRequested"):
+        return
+    def runner() -> None:
+        try:
+            _send_core_worker_apk_update_pushes(manifest, reason=reason)
+        except Exception as exc:
+            with app.test_request_context(headers={"X-Internal-Core-Worker": "fcm"}):
+                _append_core_worker_notification_event({
+                    "notificationId": manifest.get("notificationId") or "fcm",
+                    "state": "fcm_failed",
+                    "delivered": False,
+                    "versionName": manifest.get("versionName"),
+                    "versionCode": manifest.get("versionCode") or 0,
+                    "detail": f"falha geral enviando FCM: {type(exc).__name__}: {str(exc)[:180]}",
+                })
+    try:
+        threading.Thread(target=runner, name="core-worker-fcm-push", daemon=True).start()
+    except Exception:
+        pass
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -554,16 +800,41 @@ def core_worker_app_publish():
     with open(tmp_manifest, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2)
     os.replace(tmp_manifest, manifest_path)
+    _kick_core_worker_fcm_push(manifest, reason="apk_published")
     _kick_core_worker_pending_automation(str(worker.get("worker_id") or ""))
     return jsonify({"ok": True, "filename": filename, "bytes": total, "sha256": actual_sha, "signedByVps": bool(signing_info.get("signedByVps")), "validation": validation, "latest": manifest}), 200
+
+
+
+@app.post("/core-worker/app/fcm-token")
+def core_worker_app_fcm_token():
+    """Registra token FCM do APK privado.
+
+    O token é segredo operacional do dispositivo e fica só em data/ local com
+    permissão 600. O painel mostra apenas resumo como Push: ativo.
+    """
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    try:
+        record = _register_core_worker_fcm_token(payload)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:180]}), 400
+    return jsonify({"ok": True, "push": record}), 200
+
+
+@app.get("/core-worker/app/fcm-summary")
+def core_worker_app_fcm_summary():
+    worker_id = str(request.args.get("worker_id") or "").strip()
+    return jsonify({"ok": True, "summary": _core_worker_fcm_public_summary(worker_id)}), 200
 
 
 @app.post("/core-worker/app/notification")
 def core_worker_app_notification():
     """Recebe confirmação best-effort do APK privado sobre notificação local.
 
-    O app ainda é privado e fica atrás da rede da VPS/Tailscale. Não recebe
-    tokens aqui; o endpoint só armazena telemetria curta, sem segredos.
+    O app ainda é privado e fica atrás da rede da VPS/Tailscale. Este endpoint
+    armazena apenas telemetria curta; tokens FCM entram em /fcm-token.
     """
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
@@ -604,6 +875,7 @@ def core_worker_app_latest():
             nid = str(data.get("notificationId") or "")
             if nid:
                 data["notificationStatus"] = _latest_core_worker_notification_summary(nid)
+            data["pushStatus"] = _core_worker_fcm_public_summary()
             return jsonify(data), 200
     except Exception:
         pass
