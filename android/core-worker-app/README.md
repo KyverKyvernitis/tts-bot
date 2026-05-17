@@ -10,6 +10,20 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
+## v0.5.7 — UX limpa + checagem local com app fechado
+
+A versão `0.5.7` complementa o Patch 49. A tela principal foi simplificada para usuário comum: o app mostra se o celular está pronto, se está conectado à VPS principal e se existe atualização. Termux, Termux:API, Termux:Boot, Tailscale, SSHD, jobs, portas, versões e outras informações de diagnóstico ficam recolhidos em **Detalhes técnicos**.
+
+Quando o worker local já está pareado, a etapa **Conectar à VPS** vira **Conectado à VPS principal** e o campo de código fica escondido. O formulário só volta a aparecer ao tocar em **Trocar/refazer pareamento**.
+
+A checagem de atualização com app fechado usa `JobScheduler` periódico do Android. Isso é uma notificação local/best-effort, não push instantâneo: sem FCM, sem serviço foreground permanente e sem o usuário abrir o app pelo menos uma vez, o Android pode atrasar a execução. Quando o job roda, ele consulta `/core-worker/app/latest.json`, compara `versionCode`, evita notificação duplicada e reporta estados como `background_displayed`, `background_duplicate` ou `background_permission_missing` para a VPS.
+
+O painel `workers` também diferencia:
+
+- notificação entregue/exibida, mas APK ainda antigo: **atualização pendente de instalação**;
+- instalador aberto, mas app ainda antigo: **instalação pendente**;
+- app aberto já na versão publicada: **app atualizado**.
+
 ## v0.5.6 — botão Atualizar com feedback real
 
 A versão `0.5.6` complementa o Patch 48. O botão **Atualizar** não deve mais falhar em silêncio: ao tocar, o app mostra status no banner superior, registra o clique para a VPS, mostra progresso do download direto do APK, valida SHA-256 quando o `latest.json` informar hash e tenta abrir o instalador Android usando o arquivo local. Se o instalador local falhar, o fallback abre a URL direta do arquivo `.apk`, não uma página intermediária. Eventos de clique, download, validação e abertura do instalador não são deduplicados, para que cada tentativa apareça no diagnóstico da VPS.
@@ -57,12 +71,13 @@ A VPS só publica/sinaliza que existe uma versão nova, e o APK cuida da experi�
 - ao tocar em **Atualizar**, o APK baixa o arquivo indicado no manifesto, valida SHA-256 quando informado e abre o instalador do Android;
 - se não houver update, o topo fica limpo e não mostra botão extra.
 
-A interface principal continua em passos:
+A interface principal fica em blocos mais naturais:
 
-- **Preparar este celular**;
-- **Conectar à VPS**;
+- **Este celular**;
+- **Conectar à VPS** ou **Conectado à VPS principal**;
 - **Perfil deste celular**;
-- **Sistema do app**.
+- **Atualizações**;
+- **Detalhes técnicos** recolhidos.
 
 O pareamento continua correto:
 
@@ -159,12 +174,8 @@ O APK altera apenas o perfil do celular onde ele está instalado.
 ## Fluxo de uso
 
 1. Abra o app **Core Worker**.
-2. Em **Preparar este celular**, toque em **Verificar este celular**.
-3. Se faltar algo:
-   - abra/instale Termux;
-   - instale Termux:API;
-   - instale Termux:Boot para boot automático;
-   - conecte no Tailscale.
+2. Em **Este celular**, toque em **Atualizar status deste celular**.
+3. Se faltar algo, abra **Detalhes técnicos** para ver Termux, Termux:API, Termux:Boot e Tailscale.
 4. No Discord, abra o painel `workers`.
 5. Vá em **Adicionar celular → Gerar código**.
 6. No APK, preencha apenas:
@@ -187,7 +198,7 @@ O APK procura atualização aqui:
 GET /core-worker/app/latest.json
 ```
 
-E baixa o APK pelo `apkUrl` indicado no manifesto quando o usuário toca em **Atualizar** no topo do app.
+E baixa o APK pelo `apkUrl` indicado no manifesto quando o usuário toca em **Atualizar** no topo do app. Com o app fechado, o job local periódico também consulta esse manifesto quando o Android permitir.
 
 ### Endpoint na VPS
 

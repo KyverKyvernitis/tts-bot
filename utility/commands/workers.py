@@ -284,6 +284,26 @@ def _version_tuple(value: object) -> tuple[int, ...]:
     return tuple(int(part) for part in parts[:4]) if parts else (0,)
 
 
+
+
+def _active_workers_need_agent_version(workers: list[dict[str, Any]], target_version: object) -> bool:
+    target = str(target_version or "").strip()
+    if not target:
+        return False
+    for worker in workers or []:
+        if not isinstance(worker, dict) or not worker.get("online") or worker.get("enabled") is False:
+            continue
+        tokens = set(str(item).replace("-", "_") for item in (worker.get("supported_tasks") or []))
+        caps = {str(item) for item in (worker.get("capabilities") or [])} | {str(item) for item in (worker.get("roles") or [])}
+        if "phone-worker" not in caps:
+            continue
+        if tokens and "worker_update" not in tokens:
+            continue
+        current = str(worker.get("version") or "")
+        if not current or _version_tuple(current) < _version_tuple(target):
+            return True
+    return False
+
 def _agent_version_label(current: object) -> str:
     version = _shorten(current or "sem versão", limit=24)
     expected = _expected_phone_worker_version()
@@ -811,26 +831,36 @@ def _core_worker_notification_status_text() -> str:
     record = latest_by_id.get(notification_id) if notification_id else None
     if isinstance(record, dict):
         state = str(record.get("state") or "recebida")
-        delivered = bool(record.get("delivered")) or state in {"displayed", "duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened"}
-        if delivered:
+        delivered = bool(record.get("delivered")) or state in {"displayed", "background_displayed", "duplicate", "background_duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "app_opened"}
+        app_version = str(record.get("appVersion") or "").strip()
+        try:
+            app_code = int(record.get("appVersionCode") or 0)
+        except Exception:
+            app_code = 0
+        installed_latest = bool(latest_code and app_code >= latest_code)
+        if installed_latest or state == "app_opened" and app_version == version:
+            label = "app atualizado"
+        elif delivered:
             labels = {
-                "duplicate": "já exibida",
+                "displayed": "pendente de instalação",
+                "background_displayed": "pendente de instalação",
+                "duplicate": "pendente de instalação",
+                "background_duplicate": "pendente de instalação",
                 "download_started": "download iniciado",
-                "download_verified": "APK baixado",
-                "install_intent_opened": "instalador aberto",
+                "download_verified": "APK baixado · instalação pendente",
+                "install_intent_opened": "instalador aberto · instalação pendente",
             }
-            label = labels.get(state, "entregue")
-        elif state == "permission_missing":
-            label = "sem permissão"
+            label = labels.get(state, "pendente de instalação")
+        elif state in {"permission_missing", "background_permission_missing"}:
+            label = "sem permissão de notificação"
         elif state == "manifest_seen":
             label = "app viu manifesto"
         elif state == "install_permission_missing":
             label = "sem permissão de instalar"
-        elif state in {"download_failed", "install_intent_failed"}:
+        elif state in {"download_failed", "install_intent_failed", "background_failed"}:
             label = "falha no update"
         else:
             label = state
-        app_version = str(record.get("appVersion") or "").strip()
         suffix = f" · app {app_version}" if app_version else ""
         return f"notif APK {version}: {label}{suffix}"
     if published_at:
@@ -851,11 +881,19 @@ def _automation_status_text() -> str:
         pending = json.loads(pending_path.read_text(encoding="utf-8")) if pending_path.exists() else {}
     except Exception:
         pending = {}
+    snapshot_workers: list[dict[str, Any]] = []
+    try:
+        snap = get_core_workers_registry().snapshot()
+        snapshot_workers = [w for w in (snap.get("workers") or []) if isinstance(w, dict)] if isinstance(snap, dict) else []
+    except Exception:
+        snapshot_workers = []
     if isinstance(pending, dict):
         agent = pending.get("agent_update") if isinstance(pending.get("agent_update"), dict) else {}
         apk = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
         if agent:
-            parts.append(f"agent {agent.get('target_version') or '?'} pendente")
+            target = agent.get('target_version') or _expected_phone_worker_version() or '?'
+            if _active_workers_need_agent_version(snapshot_workers, target):
+                parts.append(f"agent {target} pendente")
         if apk:
             parts.append(f"APK {apk.get('versionName') or '?'} pendente")
     if not parts:
@@ -868,7 +906,12 @@ def _automation_status_text() -> str:
             agent = root_status.get("agent_update") if isinstance(root_status.get("agent_update"), dict) else {}
             apk = root_status.get("apk_build") if isinstance(root_status.get("apk_build"), dict) else {}
             if agent:
-                parts.append(f"agent: {len(agent.get('queued') or [])} job(s)")
+                queued = agent.get("queued") or []
+                target = agent.get("target_version") or _expected_phone_worker_version() or "?"
+                if queued:
+                    parts.append(f"agent {target}: {len(queued)} job(s)")
+                elif agent.get("pending") and _active_workers_need_agent_version(snapshot_workers, target):
+                    parts.append(f"agent {target} pendente")
             if apk:
                 msg = "publicado" if apk.get("already_published") else ("job criado" if apk.get("job") else "pendente")
                 parts.append(f"APK {apk.get('versionName') or '?'}: {msg}")

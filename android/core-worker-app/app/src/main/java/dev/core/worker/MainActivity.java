@@ -7,6 +7,7 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.res.ColorStateList;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
@@ -14,6 +15,9 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -59,7 +63,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.6";
+    private static final String APP_VERSION = "0.5.7";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -74,10 +78,20 @@ public class MainActivity extends Activity {
     private static final int TEXT = Color.rgb(247, 248, 252);
     private static final int MUTED = Color.rgb(183, 190, 212);
     private static final int ACCENT = Color.rgb(110, 168, 254);
+    private static final int BUTTON_BG = Color.rgb(135, 190, 255);
+    private static final int BUTTON_TEXT = Color.rgb(4, 11, 24);
+    private static final int BUTTON_DISABLED_BG = Color.rgb(54, 62, 84);
+    private static final int BUTTON_DISABLED_TEXT = Color.rgb(161, 170, 196);
     private static final int OK = Color.rgb(118, 227, 151);
     private static final int WARN = Color.rgb(255, 206, 115);
 
     private SharedPreferences prefs;
+    private LinearLayout connectCard;
+    private TextView connectTitleText;
+    private TextView connectHintText;
+    private TextView pairingStatusText;
+    private LinearLayout pairingForm;
+    private Button rePairButton;
     private EditText serverUrlInput;
     private TextView serverInfoText;
     private EditText pairCodeInput;
@@ -107,6 +121,9 @@ public class MainActivity extends Activity {
     private Button updateCheckButton;
     private Button updateInstallButton;
     private Button clearButton;
+    private LinearLayout technicalDetailsContent;
+    private Button technicalToggleButton;
+    private boolean technicalExpanded = false;
 
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";
@@ -132,8 +149,10 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         buildUi();
         loadInputs();
+        CoreWorkerUpdateJobService.schedule(this, "activity_create");
+        reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")");
         updatePermissionGate();
-        refreshLocalStatus("Pronto. O APK verifica automaticamente se este celular já está pareado pelo worker local.");
+        refreshLocalStatus("Pronto. O app verifica automaticamente se este celular já está pareado.");
         checkLocalAgent(false);
         autoVerifySavedPairing();
         autoCheckForUpdate();
@@ -143,6 +162,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         updatePermissionGate();
+        CoreWorkerUpdateJobService.schedule(this, "activity_resume");
         autoVerifySavedPairing();
         autoCheckForUpdate();
     }
@@ -153,6 +173,7 @@ public class MainActivity extends Activity {
         updatePermissionGate();
         refreshLocalStatus(requestCode == 4103 ? "Permissão de notificação atualizada. Verifique as demais permissões necessárias." : null);
         if (requestCode == 4103) {
+            CoreWorkerUpdateJobService.schedule(this, "notification_permission_result");
             autoCheckForUpdate();
         }
     }
@@ -179,7 +200,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Instalou, preparou, pareou: este celular vira worker auxiliar da VPS. Por enquanto o app guia Termux, Termux:API e Tailscale; no futuro eles vão ser substituídos/embutidos aos poucos.");
+        subtitle.setText("Este app deixa o celular pronto para ajudar a VPS do bot. Quando tudo estiver certo, a tela principal mostra só o essencial; detalhes técnicos ficam recolhidos.");
         subtitle.setTextColor(MUTED);
         subtitle.setTextSize(14);
         subtitle.setPadding(0, dp(8), 0, dp(14));
@@ -212,59 +233,64 @@ public class MainActivity extends Activity {
 
         LinearLayout prepareCard = card();
         mainContent.addView(prepareCard);
-        prepareCard.addView(sectionTitle("1. Preparar este celular"));
-        prepareCard.addView(smallText("Checklist simples do que hoje ainda depende de apps externos. O objetivo final é reduzir estes passos até virar um app único."));
-        systemChecklistText = smallText(prepareChecklistText());
-        systemChecklistText.setTextColor(TEXT);
-        systemChecklistText.setBackgroundColor(CARD_SOFT);
-        systemChecklistText.setPadding(dp(10), dp(10), dp(10), dp(10));
-        prepareCard.addView(systemChecklistText);
+        prepareCard.addView(sectionTitle("1. Este celular"));
+        prepareCard.addView(smallText("Resumo simples do estado atual. Se o worker local já estiver pareado, você não precisa gerar outro código."));
 
-        localAgentText = smallText("Worker local: ainda não verificado.");
+        localAgentText = smallText("Este celular ainda não foi verificado.");
         localAgentText.setTextColor(TEXT);
+        localAgentText.setBackgroundColor(CARD_SOFT);
+        localAgentText.setPadding(dp(10), dp(10), dp(10), dp(10));
         prepareCard.addView(localAgentText);
 
-        prepareButton = button("Verificar este celular");
+        prepareButton = button("Atualizar status deste celular");
         prepareButton.setOnClickListener(v -> checkLocalAgent(true));
         prepareCard.addView(prepareButton);
 
-        termuxButton = button("Abrir Termux");
-        termuxButton.setOnClickListener(v -> openTermux());
-        prepareCard.addView(termuxButton);
+        connectCard = cardWithTopMargin(mainContent);
+        connectTitleText = sectionTitle("2. Conectar à VPS");
+        connectCard.addView(connectTitleText);
+        connectHintText = smallText("Use o código gerado no painel workers do Discord. A VPS privada vem fixa no build; o app não mostra nem salva IP sensível no GitHub.");
+        connectCard.addView(connectHintText);
 
-        tailscaleButton = button("Abrir Tailscale");
-        tailscaleButton.setOnClickListener(v -> openTailscale());
-        prepareCard.addView(tailscaleButton);
+        pairingStatusText = smallText("");
+        pairingStatusText.setTextColor(TEXT);
+        pairingStatusText.setBackgroundColor(CARD_SOFT);
+        pairingStatusText.setPadding(dp(10), dp(10), dp(10), dp(10));
+        connectCard.addView(pairingStatusText);
 
-        LinearLayout connectCard = cardWithTopMargin(mainContent);
-        connectCard.addView(sectionTitle("2. Conectar à VPS"));
-        connectCard.addView(smallText("Gere um código no painel workers do Discord. O APK usa sempre a VPS atual do projeto e entrega o código ao worker local do Termux, então não cria celular duplicado no registry."));
+        rePairButton = button("Trocar/refazer pareamento");
+        rePairButton.setOnClickListener(v -> showPairingForm(true, "Modo de pareamento aberto. Gere um código novo no Discord se quiser trocar o vínculo deste celular."));
+        connectCard.addView(rePairButton);
+
+        pairingForm = new LinearLayout(this);
+        pairingForm.setOrientation(LinearLayout.VERTICAL);
+        connectCard.addView(pairingForm);
 
         serverUrlInput = input("", DEFAULT_VPS_URL);
         serverUrlInput.setVisibility(View.GONE);
-        connectCard.addView(label("Servidor"));
-        serverInfoText = smallText("Servidor atual: " + serverDisplayLabel());
+        pairingForm.addView(label("VPS do projeto"));
+        serverInfoText = smallText("VPS atual: " + serverDisplayLabel());
         serverInfoText.setTextColor(TEXT);
         serverInfoText.setBackgroundColor(CARD_SOFT);
         serverInfoText.setPadding(dp(10), dp(10), dp(10), dp(10));
-        connectCard.addView(serverInfoText);
+        pairingForm.addView(serverInfoText);
 
         pairCodeInput = input("Código CORE-XXXX", "CORE-XXXXXXXX");
         pairCodeInput.setAllCaps(true);
-        connectCard.addView(label("Código de pareamento"));
-        connectCard.addView(pairCodeInput);
+        pairingForm.addView(label("Código de pareamento"));
+        pairingForm.addView(pairCodeInput);
 
         deviceNameInput = input("Nome do celular", defaultDeviceName());
-        connectCard.addView(label("Nome deste celular"));
-        connectCard.addView(deviceNameInput);
+        pairingForm.addView(label("Nome deste celular"));
+        pairingForm.addView(deviceNameInput);
 
-        testButton = button("Testar conexão");
+        testButton = button("Testar conexão com a VPS");
         testButton.setOnClickListener(v -> testServer());
-        connectCard.addView(testButton);
+        pairingForm.addView(testButton);
 
-        pairButton = button("Conectar este celular à VPS");
+        pairButton = button("Conectar este celular");
         pairButton.setOnClickListener(v -> pairWorker());
-        connectCard.addView(pairButton);
+        pairingForm.addView(pairButton);
 
         LinearLayout profileCard = cardWithTopMargin(mainContent);
         profileCard.addView(sectionTitle("3. Perfil deste celular"));
@@ -295,19 +321,19 @@ public class MainActivity extends Activity {
         profileCard.addView(saveProfileButton);
 
         LinearLayout updateCard = cardWithTopMargin(mainContent);
-        updateCard.addView(sectionTitle("4. Sistema do app"));
-        updateCard.addView(smallText("Atualizações vêm da VPS. Quando existir versão nova, o Core Worker mostra um aviso no topo e uma notificação. Toque em Atualizar para baixar e abrir a instalação."));
+        updateCard.addView(sectionTitle("4. Atualizações"));
+        updateCard.addView(smallText("A VPS avisa quando publicar APK novo. Com o app fechado, o Android permite apenas checagens locais periódicas; por isso a notificação pode não ser instantânea sem push/FCM."));
         updateText = smallText("Versão instalada: " + APP_VERSION + "\nAtualização: ainda não verificada.");
         updateText.setTextColor(TEXT);
         updateText.setBackgroundColor(CARD_SOFT);
         updateText.setPadding(dp(10), dp(10), dp(10), dp(10));
         updateCard.addView(updateText);
 
-        updateCheckButton = button("Procurar atualização na VPS");
+        updateCheckButton = button("Procurar atualização agora");
         updateCheckButton.setOnClickListener(v -> checkForUpdate());
         updateCard.addView(updateCheckButton);
 
-        heartbeatButton = button("Atualizar status no painel");
+        heartbeatButton = button("Atualizar painel workers");
         heartbeatButton.setOnClickListener(v -> sendHeartbeat());
         updateCard.addView(heartbeatButton);
 
@@ -315,9 +341,31 @@ public class MainActivity extends Activity {
         clearButton.setOnClickListener(v -> confirmClearPairing());
         updateCard.addView(clearButton);
 
-        TextView finalGoal = smallText("Meta final: reduzir Termux, plugins e rede privada externa até que criar worker novo seja quase só instalar o Core Worker, permitir o necessário e parear com a VPS.");
-        finalGoal.setTextColor(WARN);
-        updateCard.addView(finalGoal);
+        LinearLayout technicalCard = cardWithTopMargin(mainContent);
+        technicalCard.addView(sectionTitle("Detalhes técnicos"));
+        technicalCard.addView(smallText("Termux, rede privada, jobs, SSHD, versões e portas ficam aqui para não poluir a tela principal."));
+        technicalToggleButton = button("Mostrar detalhes técnicos");
+        technicalToggleButton.setOnClickListener(v -> toggleTechnicalDetails());
+        technicalCard.addView(technicalToggleButton);
+
+        technicalDetailsContent = new LinearLayout(this);
+        technicalDetailsContent.setOrientation(LinearLayout.VERTICAL);
+        technicalDetailsContent.setVisibility(View.GONE);
+        technicalCard.addView(technicalDetailsContent);
+
+        systemChecklistText = smallText(prepareChecklistText());
+        systemChecklistText.setTextColor(TEXT);
+        systemChecklistText.setBackgroundColor(CARD_SOFT);
+        systemChecklistText.setPadding(dp(10), dp(10), dp(10), dp(10));
+        technicalDetailsContent.addView(systemChecklistText);
+
+        termuxButton = button("Abrir Termux");
+        termuxButton.setOnClickListener(v -> openTermux());
+        technicalDetailsContent.addView(termuxButton);
+
+        tailscaleButton = button("Abrir Tailscale");
+        tailscaleButton.setOnClickListener(v -> openTailscale());
+        technicalDetailsContent.addView(tailscaleButton);
 
         statusText = new TextView(this);
         statusText.setTextColor(TEXT);
@@ -345,7 +393,7 @@ public class MainActivity extends Activity {
         root.addView(permissionGateCard, params);
 
         permissionGateCard.addView(sectionTitle("Permissões do Core Worker"));
-        TextView intro = smallText("Antes de liberar a tela principal, permita o necessário para o app avisar updates, abrir a instalação do APK e sobreviver melhor em segundo plano.");
+        TextView intro = smallText("Permita o básico para receber aviso de APK novo, abrir o instalador e reduzir a chance do Android pausar o app em segundo plano.");
         intro.setTextColor(TEXT);
         permissionGateCard.addView(intro);
 
@@ -405,14 +453,9 @@ public class MainActivity extends Activity {
 
             if (permissionStatusText != null) {
                 StringBuilder builder = new StringBuilder();
-                builder.append(permissionLine("Notificações", notificationOk, "para avisar quando a VPS publicar APK novo")).append('\n');
-                builder.append(permissionLine("Instalar atualização/APK", installOk, "para abrir o instalador baixado da VPS")).append('\n');
-                builder.append(permissionLine("Segundo plano/bateria", batteryOk, "para reduzir chance do Android matar o app")).append("\n\n");
-                builder.append("Dependências atuais\n");
-                builder.append(checkLine("Termux", isPackageInstalled("com.termux") ? "instalado" : "ainda necessário instalar")).append('\n');
-                builder.append(checkLine("Termux:API", isPackageInstalled("com.termux.api") ? "instalado" : "ainda necessário instalar")).append('\n');
-                builder.append(checkLine("Termux:Boot", isPackageInstalled("com.termux.boot") ? "instalado" : "recomendado")).append('\n');
-                builder.append(checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? "Tailscale instalado" : "Tailscale externo ainda necessário"));
+                builder.append(permissionLine("Notificações", notificationOk, "avisar APK novo publicado pela VPS")).append('\n');
+                builder.append(permissionLine("Instalar atualizações", installOk, "abrir o APK baixado da VPS")).append('\n');
+                builder.append(permissionLine("Segundo plano/bateria", batteryOk, "manter checagens locais mais confiáveis"));
                 permissionStatusText.setText(builder.toString());
             }
 
@@ -545,8 +588,12 @@ public class MainActivity extends Activity {
         Button button = new Button(this);
         button.setText(text);
         button.setAllCaps(false);
-        button.setTextColor(Color.WHITE);
+        button.setTextColor(buttonTextColors());
         button.setTextSize(14);
+        button.setTypeface(null, Typeface.BOLD);
+        button.setMinHeight(dp(44));
+        button.setPadding(dp(12), dp(8), dp(12), dp(8));
+        button.setBackground(makeButtonBackground(BUTTON_BG, BUTTON_DISABLED_BG));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -554,6 +601,31 @@ public class MainActivity extends Activity {
         params.setMargins(0, dp(8), 0, 0);
         button.setLayoutParams(params);
         return button;
+    }
+
+    private ColorStateList buttonTextColors() {
+        return new ColorStateList(
+                new int[][]{
+                        new int[]{-android.R.attr.state_enabled},
+                        new int[]{}
+                },
+                new int[]{BUTTON_DISABLED_TEXT, BUTTON_TEXT}
+        );
+    }
+
+    private StateListDrawable makeButtonBackground(int enabledColor, int disabledColor) {
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{-android.R.attr.state_enabled}, rounded(disabledColor));
+        states.addState(new int[]{android.R.attr.state_pressed}, rounded(Color.rgb(166, 211, 255)));
+        states.addState(new int[]{}, rounded(enabledColor));
+        return states;
+    }
+
+    private GradientDrawable rounded(int color) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(12));
+        return drawable;
     }
 
     private void addProfileRadio(String tag, String text) {
@@ -583,6 +655,58 @@ public class MainActivity extends Activity {
         }
         updateProfileHint(profile);
         updateSystemChecklistText();
+        updatePairingUi();
+    }
+
+    private void toggleTechnicalDetails() {
+        technicalExpanded = !technicalExpanded;
+        if (technicalDetailsContent != null) {
+            technicalDetailsContent.setVisibility(technicalExpanded ? View.VISIBLE : View.GONE);
+        }
+        if (technicalToggleButton != null) {
+            technicalToggleButton.setText(technicalExpanded ? "Ocultar detalhes técnicos" : "Mostrar detalhes técnicos");
+        }
+        refreshLocalStatus(null);
+    }
+
+    private void showPairingForm(boolean show, String message) {
+        if (pairingForm != null) {
+            pairingForm.setVisibility(show ? View.VISIBLE : View.GONE);
+        }
+        if (rePairButton != null) {
+            rePairButton.setVisibility(show ? View.GONE : View.VISIBLE);
+        }
+        if (message != null && !message.trim().isEmpty()) {
+            refreshLocalStatus(message);
+        }
+    }
+
+    private void updatePairingUi() {
+        runOnUiThread(() -> {
+            boolean paired = hasPairing();
+            if (connectTitleText != null) {
+                connectTitleText.setText(paired ? "2. Conectado à VPS principal" : "2. Conectar à VPS");
+            }
+            if (connectHintText != null) {
+                connectHintText.setText(paired
+                        ? "Este celular já está vinculado ao worker local. O campo de código só aparece se você quiser trocar/refazer o pareamento."
+                        : "Use o código gerado no painel workers do Discord. A VPS privada vem fixa no build; o app não mostra nem salva IP sensível no GitHub.");
+            }
+            if (pairingStatusText != null) {
+                String profile = prefs.getString("profile", selectedProfileSafe());
+                pairingStatusText.setText(paired
+                        ? "Conectado à VPS principal.\n"
+                                + "Este celular está pronto para trabalhar quando o worker local estiver online.\n"
+                                + "Perfil: " + profileLabel(profile)
+                        : "Ainda não conectado. Gere um código no Discord e conecte este celular.");
+            }
+            if (rePairButton != null) {
+                rePairButton.setVisibility(paired ? View.VISIBLE : View.GONE);
+            }
+            if (pairingForm != null) {
+                pairingForm.setVisibility(paired ? View.GONE : View.VISIBLE);
+            }
+        });
     }
 
     private void testServer() {
@@ -659,6 +783,7 @@ public class MainActivity extends Activity {
                     .apply();
             applyLocalAgentStatus(body);
             showLocalAgentText();
+            updatePairingUi();
             vpsState = "ok";
             show("Celular conectado com sucesso.\nPerfil: " + profileLabel(profile) + "\nRegistro usado: " + emptyFallback(workerId, "worker local") + "\n\nO APK não criou worker separado; quem envia heartbeat e executa jobs é o Termux worker.");
         });
@@ -783,6 +908,9 @@ public class MainActivity extends Activity {
         updateUpdateUi(text.toString(), available, true);
         if (notificationRequested) {
             reportUpdateNotification(serverUrl, "manifest_seen", false, available ? "manifesto lido; atualização disponível" : "manifesto lido; app em dia");
+            if (!available) {
+                reportUpdateNotification(serverUrl, "app_opened", true, "APK instalado já está na versão publicada");
+            }
         }
         if (available && notificationRequested) {
             String notifyState = notifyUpdateAvailable();
@@ -951,8 +1079,8 @@ public class MainActivity extends Activity {
         }
         updateInstallButton.setText(emptyFallback(text, available ? "Atualizar agora" : "Atualizar"));
         updateInstallButton.setEnabled(available && !busy);
-        updateInstallButton.setTextColor(Color.WHITE);
-        updateInstallButton.setBackgroundColor(available && !busy ? ACCENT : Color.rgb(120, 126, 140));
+        updateInstallButton.setTextColor(buttonTextColors());
+        updateInstallButton.setBackground(makeButtonBackground(available ? BUTTON_BG : Color.rgb(96, 110, 138), BUTTON_DISABLED_BG));
     }
 
 
@@ -1002,6 +1130,10 @@ public class MainActivity extends Activity {
 
     private String notificationDetail(String state) {
         if ("displayed".equals(state)) return "notificação local exibida pelo APK";
+        if ("background_displayed".equals(state)) return "notificação local exibida por checagem com app fechado";
+        if ("background_duplicate".equals(state)) return "checagem com app fechado viu notificação já registrada";
+        if ("background_permission_missing".equals(state)) return "checagem em segundo plano sem permissão de notificação";
+        if ("background_failed".equals(state)) return "falha criando notificação em segundo plano";
         if ("duplicate".equals(state)) return "notificação já exibida/confirmada para essa versão";
         if ("permission_missing".equals(state)) return "permissão POST_NOTIFICATIONS ausente";
         if ("manager_unavailable".equals(state)) return "NotificationManager indisponível";
@@ -1495,6 +1627,7 @@ public class MainActivity extends Activity {
             localAgentVpsConfigured = false;
             localAgentJobsConfigured = false;
             localAgentMessage = "offline";
+            updatePairingUi();
             if (updateText) {
                 showLocalAgentText();
             }
@@ -1518,6 +1651,7 @@ public class MainActivity extends Activity {
             JSONObject body = new JSONObject(result.body);
             applyLocalAgentStatus(body);
             showLocalAgentText();
+            updatePairingUi();
             updateSystemChecklistText();
             return true;
         } catch (Exception exc) {
@@ -1525,6 +1659,7 @@ public class MainActivity extends Activity {
             localAgentVersion = "";
             localAgentProfile = "";
             localAgentMessage = "offline ao aplicar perfil";
+            updatePairingUi();
             showLocalAgentText();
             updateSystemChecklistText();
             return false;
@@ -1556,17 +1691,20 @@ public class MainActivity extends Activity {
                 localAgentText.setText(localAgentLine());
             }
             updateSystemChecklistText();
+            updatePairingUi();
             refreshLocalStatus(null);
         });
     }
 
     private String localAgentLine() {
         if (!localAgentOnline) {
-            return "Worker local: offline. Abra o Termux e inicie o phone-worker.";
+            return "Este celular ainda não está pronto. Abra o Termux para iniciar o worker local.";
         }
-        String version = emptyFallback(localAgentVersion, "versão ?");
-        String profile = emptyFallback(localAgentProfile, "perfil ?");
-        return "Worker local: online · " + version + " · " + profile + " · " + localAgentMessage;
+        String profile = emptyFallback(localAgentProfile, "perfil não informado");
+        if (hasPairing()) {
+            return "Este celular está conectado e pronto para trabalhar.\nPerfil: " + profile;
+        }
+        return "Worker local detectado. Falta conectar este celular à VPS principal.";
     }
 
     private boolean hasPairing() {
@@ -1646,6 +1784,7 @@ public class MainActivity extends Activity {
                             .remove("worker_id")
                             .apply();
                     loadInputs();
+                    updatePairingUi();
                     refreshLocalStatus("Conexão local removida.");
                 })
                 .setNegativeButton("Cancelar", null)
@@ -1696,32 +1835,40 @@ public class MainActivity extends Activity {
         String server = normalizedServerUrl();
         String profile = prefs.getString("profile", selectedProfileSafe());
         StringBuilder builder = new StringBuilder();
-        builder.append("Resumo\n");
-        builder.append(checkLine("Rede privada", networkChecklistLabel(server))).append('\n');
-        builder.append(checkLine("VPS", vpsChecklistLabel(server))).append('\n');
-        builder.append(checkLine("Worker local", localAgentOnline ? "ok" : localAgentMessage)).append('\n');
-        builder.append(checkLine("Pareamento", paired ? (localAgentVpsConfigured ? "ok · validado automaticamente" : "ok") : "pendente")).append('\n');
-        builder.append(checkLine("Atualizações", updateChecklistLabel())).append("\n\n");
-        builder.append("Este celular\n");
-        builder.append("Conectado: ").append(paired ? "sim" : "não").append('\n');
-        builder.append("Perfil: ").append(profileLabel(profile)).append('\n');
-        builder.append("VPS: ").append(serverDisplayLabel()).append('\n');
-        if (workerId != null && !workerId.trim().isEmpty()) {
-            builder.append("Worker ID: ").append(workerId).append('\n');
+        if (paired && localAgentOnline) {
+            builder.append("Este celular está conectado e pronto para trabalhar.");
+        } else if (paired) {
+            builder.append("Este celular está conectado, mas o worker local não respondeu agora.");
+        } else if (localAgentOnline) {
+            builder.append("Worker local detectado. Falta conectar à VPS principal.");
+        } else {
+            builder.append("Abra o Termux para iniciar o worker local e deixar este celular pronto.");
         }
-        if (prefs.getBoolean("paired_via_local_agent", false)) {
-            builder.append("Modo: APK conectado ao Termux worker local\n");
+        builder.append("\n\nResumo\n");
+        builder.append(checkLine("VPS", paired ? "conectada" : vpsChecklistLabel(server))).append('\n');
+        builder.append(checkLine("Worker local", localAgentOnline ? "online" : "offline")).append('\n');
+        builder.append(checkLine("Perfil", profileLabel(profile))).append('\n');
+        builder.append(checkLine("Atualizações", updateChecklistLabel())).append('\n');
+        if (technicalExpanded) {
+            builder.append("\nTécnico\n");
+            builder.append(checkLine("Rede privada", networkChecklistLabel(server))).append('\n');
+            builder.append(checkLine("VPS label", serverDisplayLabel())).append('\n');
+            builder.append(checkLine("Agent local", localAgentOnline ? emptyFallback(localAgentVersion, "online") : "offline")).append('\n');
+            builder.append(checkLine("SSHD", emptyFallback(localAgentSshdSummary, "não informado"))).append('\n');
+            if (workerId != null && !workerId.trim().isEmpty()) {
+                builder.append(checkLine("Worker ID", workerId)).append('\n');
+            }
+            builder.append(checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")")).append('\n');
         }
-        builder.append("APK: ").append(APP_VERSION).append(" (").append(BuildConfig.VERSION_CODE).append(")\n");
-        builder.append("Agent local: ").append(localAgentOnline ? emptyFallback(localAgentVersion, "online") : "offline").append("\n\n");
         if (extra != null && !extra.trim().isEmpty()) {
-            builder.append(extra);
+            builder.append("\n").append(extra);
         }
         statusText.setText(builder.toString());
         if (localAgentText != null) {
             localAgentText.setText(localAgentLine());
         }
         updateSystemChecklistText();
+        updatePairingUi();
     }
 
     private String checkLine(String label, String value) {
@@ -1784,6 +1931,11 @@ public class MainActivity extends Activity {
         builder.append(checkLine("Termux:Boot", isPackageInstalled("com.termux.boot") ? "instalado" : "recomendado para boot automático")).append('\n');
         builder.append(checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "Tailscale externo ainda necessário")).append('\n');
         builder.append(checkLine("Worker local", localAgentOnline ? "online" : "offline")).append('\n');
+        builder.append(checkLine("VPS local", localAgentVpsConfigured ? "configurada" : "pendente")).append('\n');
+        builder.append(checkLine("Jobs locais", localAgentJobsConfigured ? "ok" : "pendentes")).append('\n');
+        builder.append(checkLine("SSHD", emptyFallback(localAgentSshdSummary, "não informado"))).append('\n');
+        builder.append(checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")")).append('\n');
+        builder.append(checkLine("Checagem com app fechado", "JobScheduler periódico; não é push instantâneo")).append('\n');
         builder.append(checkLine("Próximo futuro", "worker e VPN embutidos no APK"));
         return builder.toString();
     }

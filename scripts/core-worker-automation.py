@@ -283,9 +283,19 @@ def _manifest_source_sha() -> str:
 
 
 def _workers_need_agent_version(snapshot: dict[str, Any], target_version: str) -> bool:
+    """Retorna True só para workers ativos/online abaixo da versão alvo.
+
+    Workers antigos offline não devem manter o painel preso em "agent pendente".
+    Quando um celular voltar online, o heartbeat/process-pending roda de novo e
+    cria o update se a versão real ainda estiver antiga.
+    """
+    if not str(target_version or "").strip():
+        return False
     workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
     for worker in workers:
-        if not isinstance(worker, dict):
+        if not isinstance(worker, dict) or not worker.get("online") or worker.get("enabled") is False:
+            continue
+        if not _worker_supports(worker, "worker_update", "phone-worker"):
             continue
         current = str(worker.get("version") or "")
         if not current or _version_tuple(current) < _version_tuple(target_version):
@@ -460,14 +470,15 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
             queued.append(f"{name}:{job.get('job_id') or 'job'}")
         except Exception as exc:
             errors.append(f"{name}: {type(exc).__name__}: {_short(exc, 120)}")
-    # Se todos os workers conhecidos já estão na versão alvo, limpar a pendência
-    # para o painel não ficar mostrando update eterno. Se houver offline, erro ou
-    # incompatível, mantemos para tentar de novo quando o worker aparecer.
-    if not only_worker_id and not queued and not errors and workers and skipped and all(": já em " in item for item in skipped):
+    # Se nenhum worker ativo precisa da versão alvo, limpar a pendência para o
+    # painel não ficar preso em "agent X pendente" por causa de registros offline
+    # ou duplicatas antigas. Se algum voltar online desatualizado, process-pending
+    # recria o job automaticamente no heartbeat/poll.
+    if not queued and not errors and not _workers_need_agent_version(_load_registry_snapshot(), target_version):
         pending = _load_pending()
         pending.pop("agent_update", None)
         _save_pending(pending)
-        return {"ok": True, "target_version": target_version, "queued": [], "skipped": skipped[:16], "errors": [], "pending": False, "message": "todos os agents conhecidos já estão atualizados"}
+        return {"ok": True, "target_version": target_version, "queued": [], "skipped": skipped[:16], "errors": [], "pending": False, "message": "todos os agents ativos já estão atualizados"}
     return {"ok": True, "target_version": target_version, "queued": queued, "skipped": skipped[:16], "errors": errors[:10], "pending": True}
 
 def queue_apk_build() -> dict[str, Any]:

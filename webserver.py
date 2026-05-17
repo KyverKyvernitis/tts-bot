@@ -110,7 +110,7 @@ def _append_core_worker_notification_event(event: dict) -> dict:
     path = _core_worker_notification_log_path()
     now = int(time.time())
     state = _safe_short_text(event.get("state") or event.get("event"), 48)
-    delivered = bool(event.get("delivered", False)) or state in {"displayed", "duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "local_agent_seen", "local_agent_unpaired", "app_opened"}
+    delivered = bool(event.get("delivered", False)) or state in {"displayed", "background_displayed", "duplicate", "background_duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "local_agent_seen", "local_agent_unpaired", "app_opened"}
     clean = {
         "receivedAt": now,
         "notificationId": _safe_short_text(event.get("notificationId"), 96),
@@ -156,7 +156,7 @@ def _latest_core_worker_notification_summary(notification_id: str) -> dict:
     record = latest.get(str(notification_id or "")) if isinstance(latest, dict) else None
     if isinstance(record, dict):
         state = str(record.get("state") or "")
-        delivered = bool(record.get("delivered", False)) or state in {"displayed", "duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "local_agent_seen", "local_agent_unpaired", "app_opened"}
+        delivered = bool(record.get("delivered", False)) or state in {"displayed", "background_displayed", "duplicate", "background_duplicate", "already_displayed", "download_started", "download_verified", "install_intent_opened", "local_agent_seen", "local_agent_unpaired", "app_opened"}
         return {
             "lastState": record.get("state"),
             "lastDelivered": delivered,
