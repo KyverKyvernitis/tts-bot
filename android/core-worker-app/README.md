@@ -10,9 +10,9 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
-## v0.5.5 — fallback de latest.json e status local mais honesto
+## v0.5.6 — botão Atualizar com feedback real
 
-A versão `0.5.5` complementa o Patch 47. O APK tenta consultar tanto `/core-worker/app/latest.json` quanto `/core-worker/latest.json`, então builds antigos/novos da VPS não quebram o botão **Atualizar** por diferença de rota. As mensagens do app também deixam de mandar o usuário rodar comando manual; quando o worker local está offline, o app orienta abrir o Termux para o autostart gerenciado acionar o watchdog.
+A versão `0.5.6` complementa o Patch 48. O botão **Atualizar** não deve mais falhar em silêncio: ao tocar, o app mostra status no banner superior, registra o clique para a VPS, mostra progresso do download direto do APK, valida SHA-256 quando o `latest.json` informar hash e tenta abrir o instalador Android usando o arquivo local. Se o instalador local falhar, o fallback abre a URL direta do arquivo `.apk`, não uma página intermediária. Eventos de clique, download, validação e abertura do instalador não são deduplicados, para que cada tentativa apareça no diagnóstico da VPS.
 
 ## v0.5.4 — estado local do agent e telemetria de pareamento
 

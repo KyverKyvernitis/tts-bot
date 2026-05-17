@@ -33,6 +33,7 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.core.content.FileProvider;
 
@@ -58,7 +59,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.5";
+    private static final String APP_VERSION = "0.5.6";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -123,6 +124,7 @@ public class MainActivity extends Activity {
     private volatile String latestChangelog = "";
     private volatile String latestNotificationId = "";
     private volatile boolean latestUpdateAvailable = false;
+    private volatile boolean updateDownloadBusy = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -816,53 +818,91 @@ public class MainActivity extends Activity {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
             refreshLocalStatus("Servidor da VPS não configurado no APK.");
+            toast("VPS não configurada no APK.");
             return;
         }
-        runBusy("Baixando atualização direto da VPS...", () -> {
+        if (updateDownloadBusy) {
+            refreshLocalStatus("Download da atualização já está em andamento. Aguarde o status no aviso superior.");
+            toast("Download já está em andamento.");
+            return;
+        }
+
+        updateDownloadBusy = true;
+        setButtonsEnabled(false);
+        setUpdateActionState("Preparando atualização...\nVou buscar o latest.json, baixar o APK direto da VPS e abrir o instalador.", "Baixando...", true, true);
+        refreshLocalStatus("Preparando download da atualização do Core Worker...");
+        toast("Preparando download da atualização...");
+
+        new Thread(() -> {
             try {
+                reportUpdateNotification(serverUrl, "download_tap", true, "usuário tocou em Atualizar no APK");
+                setUpdateActionState("Lendo manifesto latest.json da VPS...", "Baixando...", true, true);
                 if (latestApkUrl == null || latestApkUrl.trim().isEmpty() || !latestUpdateAvailable) {
                     checkForUpdateInternal(serverUrl, false);
                 }
                 if (!latestUpdateAvailable) {
                     show("Este APK já está em dia.");
+                    setUpdateActionState("Este APK já está em dia.", "Atualizar", false, false);
                     return;
                 }
                 if (latestApkUrl == null || latestApkUrl.trim().isEmpty()) {
-                    show("A VPS avisou atualização, mas o manifesto não tem URL direta do APK.");
-                    reportUpdateNotification(serverUrl, "download_failed", false, "manifesto sem downloadUrl/apkUrl");
+                    String detail = "A VPS avisou atualização, mas o manifesto não trouxe downloadUrl/directApkUrl/apkUrl.";
+                    show(detail);
+                    setUpdateActionState("Falha: manifesto sem URL direta do APK.\nToque em Procurar atualização na VPS e tente novamente.", "Tentar novamente", true, false);
+                    reportUpdateNotification(serverUrl, "download_failed", false, "manifesto sem downloadUrl/directApkUrl/apkUrl");
                     return;
                 }
-                reportUpdateNotification(serverUrl, "download_started", true, "usuário tocou em Atualizar; download direto iniciado pelo APK");
+
+                String version = emptyFallback(latestVersionName, "nova versão");
+                setUpdateActionState("Baixando Core Worker " + version + " direto da VPS...\nSe falhar, o erro aparecerá aqui.", "Baixando...", true, true);
+                reportUpdateNotification(serverUrl, "download_started", true, "download direto iniciado pelo APK");
                 File filesBase = getExternalFilesDir(null);
                 if (filesBase == null) {
                     filesBase = getCacheDir();
                 }
                 File updateDir = new File(filesBase, "updates");
                 if (!updateDir.exists() && !updateDir.mkdirs()) {
-                    show("Não consegui criar a pasta local de atualização.");
+                    String detail = "Não consegui criar a pasta local de atualização.";
+                    show(detail);
+                    setUpdateActionState("Falha: não consegui criar pasta local para baixar o APK.", "Tentar novamente", true, false);
                     reportUpdateNotification(serverUrl, "download_failed", false, "falha criando pasta local de atualização");
                     return;
                 }
                 File apkFile = new File(updateDir, safeLocalApkName());
-                downloadFile(latestApkUrl, apkFile);
+                downloadFile(latestApkUrl, apkFile, (done, total) -> {
+                    String progress = total > 0
+                            ? "Baixando " + version + "... " + Math.max(0, Math.min(100, (int) ((done * 100L) / total))) + "% · " + formatBytes(done) + " / " + formatBytes(total)
+                            : "Baixando " + version + "... " + formatBytes(done);
+                    setUpdateActionState(progress, "Baixando...", true, true);
+                });
+                setUpdateActionState("Download concluído. Validando APK...", "Validando...", true, true);
                 if (latestApkSha256 != null && !latestApkSha256.trim().isEmpty()) {
                     String actual = sha256Of(apkFile);
                     if (!actual.equalsIgnoreCase(latestApkSha256.trim())) {
                         apkFile.delete();
-                        show("Atualização baixada, mas o hash não confere. Instalação bloqueada por segurança.");
+                        String detail = "Atualização baixada, mas o hash não confere. Instalação bloqueada por segurança.";
+                        show(detail);
+                        setUpdateActionState("Falha: hash SHA-256 diferente do latest.json.\nInstalação bloqueada por segurança.", "Tentar novamente", true, false);
                         reportUpdateNotification(serverUrl, "download_failed", false, "sha256 divergente no APK baixado");
                         return;
                     }
                 }
                 reportUpdateNotification(serverUrl, "download_verified", true, "APK baixado direto e sha256 validado");
                 updateUpdateUi("Atualização baixada e verificada. Vou abrir o instalador do Android.\nArquivo: " + apkFile.getName() + "\nSe aparecer bloqueio, permita instalar apps desconhecidos para o Core Worker.", true, true);
+                setUpdateActionState("APK baixado e validado. Abrindo instalador do Android...", "Abrindo...", true, true);
                 openApkInstaller(apkFile);
             } catch (Exception exc) {
-                reportUpdateNotification(serverUrl, "download_failed", false, exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage()));
-                throw exc;
+                String detail = exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage());
+                reportUpdateNotification(serverUrl, "download_failed", false, detail);
+                show("Falha ao atualizar: " + detail);
+                setUpdateActionState("Falha ao baixar/abrir atualização.\n" + detail + "\nToque em Atualizar para tentar novamente.", "Tentar novamente", true, false);
+            } finally {
+                updateDownloadBusy = false;
+                runOnUiThread(() -> setButtonsEnabled(true));
             }
-        });
+        }).start();
     }
+
 
     private String safeLocalApkName() {
         String clean = (latestVersionName == null || latestVersionName.trim().isEmpty()) ? "update" : latestVersionName.trim();
@@ -881,13 +921,40 @@ public class MainActivity extends Activity {
             }
             if (updateBannerText != null) {
                 String version = emptyFallback(latestVersionName, "nova versão");
-                updateBannerText.setText("Atualização disponível: " + version + "\nToque em Atualizar para baixar e abrir a instalação.");
+                updateBannerText.setText("Atualização disponível: " + version + "\nToque em Atualizar para baixar direto da VPS e abrir a instalação.");
             }
+            applyUpdateButtonState(available, updateDownloadBusy ? "Baixando..." : "Atualizar agora", updateDownloadBusy);
             if (refreshSummary) {
                 refreshLocalStatus(null);
             }
         });
     }
+
+    private void setUpdateActionState(String message, String buttonText, boolean showBanner, boolean busy) {
+        runOnUiThread(() -> {
+            if (updateBanner != null) {
+                updateBanner.setVisibility(showBanner ? View.VISIBLE : View.GONE);
+            }
+            if (updateBannerText != null && message != null && !message.trim().isEmpty()) {
+                updateBannerText.setText(message);
+            }
+            applyUpdateButtonState(showBanner && latestUpdateAvailable, buttonText, busy);
+            if (updateText != null && message != null && !message.trim().isEmpty()) {
+                updateText.setText("Versão instalada: " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ").\n" + message);
+            }
+        });
+    }
+
+    private void applyUpdateButtonState(boolean available, String text, boolean busy) {
+        if (updateInstallButton == null) {
+            return;
+        }
+        updateInstallButton.setText(emptyFallback(text, available ? "Atualizar agora" : "Atualizar"));
+        updateInstallButton.setEnabled(available && !busy);
+        updateInstallButton.setTextColor(Color.WHITE);
+        updateInstallButton.setBackgroundColor(available && !busy ? ACCENT : Color.rgb(120, 126, 140));
+    }
+
 
     private String notifyUpdateAvailable() {
         try {
@@ -938,10 +1005,12 @@ public class MainActivity extends Activity {
         if ("duplicate".equals(state)) return "notificação já exibida/confirmada para essa versão";
         if ("permission_missing".equals(state)) return "permissão POST_NOTIFICATIONS ausente";
         if ("manager_unavailable".equals(state)) return "NotificationManager indisponível";
+        if ("download_tap".equals(state)) return "usuário tocou no botão Atualizar";
         if ("download_started".equals(state)) return "download direto iniciado pelo APK";
         if ("download_verified".equals(state)) return "APK baixado e validado localmente";
         if ("install_permission_missing".equals(state)) return "permissão de instalação ausente";
         if ("install_intent_opened".equals(state)) return "instalador Android aberto";
+        if ("install_direct_url_opened".equals(state)) return "URL direta do APK aberta como fallback";
         if ("install_intent_failed".equals(state)) return "falha abrindo instalador Android";
         if ("download_failed".equals(state)) return "falha no download direto";
         if ("failed".equals(state)) return "falha criando notificação local";
@@ -971,7 +1040,8 @@ public class MainActivity extends Activity {
         try {
             String id = emptyFallback(latestNotificationId, "apk-" + latestVersionCode + "-" + latestVersionName);
             String prefKey = "notification_reported_" + sanitizePrefKey(id) + "_" + sanitizePrefKey(state);
-            if (prefs.getBoolean(prefKey, false)) {
+            boolean transientEvent = isTransientUpdateEvent(state);
+            if (!transientEvent && prefs.getBoolean(prefKey, false)) {
                 return;
             }
             JSONObject payload = new JSONObject();
@@ -987,11 +1057,22 @@ public class MainActivity extends Activity {
             payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
             payload.put("detail", detail);
             HttpResult result = request("POST", serverUrl + "/core-worker/app/notification", payload, null);
-            if (result.ok()) {
+            if (result.ok() && !transientEvent) {
                 prefs.edit().putBoolean(prefKey, true).apply();
             }
         } catch (Exception ignored) {
         }
+    }
+
+    private boolean isTransientUpdateEvent(String state) {
+        return "download_tap".equals(state)
+                || "download_started".equals(state)
+                || "download_verified".equals(state)
+                || "download_failed".equals(state)
+                || "install_permission_missing".equals(state)
+                || "install_intent_opened".equals(state)
+                || "install_direct_url_opened".equals(state)
+                || "install_intent_failed".equals(state);
     }
 
     private String sanitizePrefKey(String value) {
@@ -1007,10 +1088,15 @@ public class MainActivity extends Activity {
         return id;
     }
 
-    private void downloadFile(String url, File target) throws Exception {
+    private interface DownloadProgress {
+        void onProgress(long done, long total);
+    }
+
+    private void downloadFile(String url, File target, DownloadProgress progress) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(9000);
-        conn.setReadTimeout(25000);
+        conn.setReadTimeout(30000);
+        conn.setInstanceFollowRedirects(true);
         conn.setRequestProperty("Accept", "application/vnd.android.package-archive,*/*");
         int status = conn.getResponseCode();
         if (status < 200 || status >= 300) {
@@ -1018,18 +1104,45 @@ public class MainActivity extends Activity {
             conn.disconnect();
             throw new Exception("HTTP " + status + " · " + compactResultBody(body));
         }
+        long total = -1;
+        try {
+            total = conn.getContentLengthLong();
+        } catch (Exception ignored) {
+            total = -1;
+        }
         InputStream input = conn.getInputStream();
         FileOutputStream output = new FileOutputStream(target);
-        byte[] buffer = new byte[16 * 1024];
+        byte[] buffer = new byte[32 * 1024];
         int read;
+        long done = 0;
+        long lastUi = 0;
         while ((read = input.read(buffer)) >= 0) {
             output.write(buffer, 0, read);
+            done += read;
+            long now = System.currentTimeMillis();
+            if (progress != null && (now - lastUi > 700 || (total > 0 && done >= total))) {
+                lastUi = now;
+                progress.onProgress(done, total);
+            }
         }
         output.flush();
         output.close();
         input.close();
         conn.disconnect();
+        if (progress != null) {
+            progress.onProgress(done, total);
+        }
     }
+
+    private String formatBytes(long value) {
+        if (value < 0) return "?";
+        if (value < 1024) return value + " B";
+        double kb = value / 1024.0;
+        if (kb < 1024) return String.format(Locale.ROOT, "%.1f KB", kb);
+        double mb = kb / 1024.0;
+        return String.format(Locale.ROOT, "%.1f MB", mb);
+    }
+
 
     private void openApkInstaller(File apkFile) {
         runOnUiThread(() -> {
@@ -1039,6 +1152,7 @@ public class MainActivity extends Activity {
                     Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()));
                     startActivity(settings);
                     reportUpdateNotification(serverUrl, "install_permission_missing", false, "Android bloqueou instalação por fonte desconhecida");
+                    setUpdateActionState("APK baixado e validado, mas o Android bloqueou instalação por fonte desconhecida.\nAutorize o Core Worker e toque em Atualizar novamente.", "Abrir instalador", true, false);
                     refreshLocalStatus("Autorize o Core Worker a instalar apps desconhecidos. Depois volte aqui e toque novamente em Atualizar. O APK já foi baixado e validado localmente.");
                     return;
                 } catch (Exception ignored) {
@@ -1046,21 +1160,63 @@ public class MainActivity extends Activity {
                 }
             }
 
+            Uri uri;
             try {
-                Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".files", apkFile);
-                Intent install = new Intent(Intent.ACTION_VIEW);
-                install.setDataAndType(uri, "application/vnd.android.package-archive");
+                uri = FileProvider.getUriForFile(this, getPackageName() + ".files", apkFile);
+            } catch (Exception exc) {
+                reportUpdateNotification(serverUrl, "install_intent_failed", false, "FileProvider falhou: " + exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage()));
+                setUpdateActionState("APK baixado, mas o FileProvider falhou ao preparar o instalador.\n" + exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage()), "Tentar novamente", true, false);
+                refreshLocalStatus("Atualização baixada, mas não consegui preparar o arquivo para instalação: " + exc.getClass().getSimpleName());
+                return;
+            }
+
+            try {
+                Intent install = new Intent(Intent.ACTION_INSTALL_PACKAGE);
+                install.setData(uri);
+                install.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true);
+                install.putExtra(Intent.EXTRA_RETURN_RESULT, false);
                 install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(install);
-                reportUpdateNotification(serverUrl, "install_intent_opened", true, "instalador Android aberto pelo APK usando arquivo local validado");
+                reportUpdateNotification(serverUrl, "install_intent_opened", true, "instalador Android aberto com ACTION_INSTALL_PACKAGE");
+                setUpdateActionState("Instalador do Android aberto. Conclua a instalação da atualização.", "Instalador aberto", true, false);
                 refreshLocalStatus("APK baixado e validado. Abri o instalador do Android usando o arquivo local, sem mandar para site intermediário.");
-            } catch (Exception exc) {
-                reportUpdateNotification(serverUrl, "install_intent_failed", false, exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage()));
-                refreshLocalStatus("Atualização baixada, mas não consegui abrir o instalador local: " + exc.getClass().getSimpleName() + ". Verifique a permissão de instalar apps desconhecidos para o Core Worker.");
+                return;
+            } catch (Exception ignored) {
+                // Tenta fallback ACTION_VIEW abaixo.
+            }
+
+            try {
+                Intent view = new Intent(Intent.ACTION_VIEW);
+                view.setDataAndType(uri, "application/vnd.android.package-archive");
+                view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(view);
+                reportUpdateNotification(serverUrl, "install_intent_opened", true, "instalador Android aberto com ACTION_VIEW");
+                setUpdateActionState("Instalador do Android aberto. Conclua a instalação da atualização.", "Instalador aberto", true, false);
+                refreshLocalStatus("APK baixado e validado. Abri o instalador do Android usando ACTION_VIEW.");
+                return;
+            } catch (Exception viewExc) {
+                reportUpdateNotification(serverUrl, "install_intent_failed", false, viewExc.getClass().getSimpleName() + ": " + String.valueOf(viewExc.getMessage()));
+                if (latestApkUrl != null && !latestApkUrl.trim().isEmpty()) {
+                    try {
+                        Intent direct = new Intent(Intent.ACTION_VIEW, Uri.parse(latestApkUrl));
+                        direct.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(direct);
+                        reportUpdateNotification(serverUrl, "install_direct_url_opened", true, "fallback abriu URL direta do arquivo APK");
+                        setUpdateActionState("Não consegui abrir o instalador local, então abri a URL direta do arquivo APK como fallback.", "URL direta aberta", true, false);
+                        refreshLocalStatus("Fallback usado: abri a URL direta do APK, não uma página intermediária.");
+                        return;
+                    } catch (Exception urlExc) {
+                        reportUpdateNotification(serverUrl, "install_intent_failed", false, "fallback URL falhou: " + urlExc.getClass().getSimpleName() + ": " + String.valueOf(urlExc.getMessage()));
+                    }
+                }
+                setUpdateActionState("Atualização baixada, mas não consegui abrir o instalador.\n" + viewExc.getClass().getSimpleName() + ": " + String.valueOf(viewExc.getMessage()), "Tentar novamente", true, false);
+                refreshLocalStatus("Atualização baixada, mas não consegui abrir o instalador local: " + viewExc.getClass().getSimpleName() + ". Verifique a permissão de instalar apps desconhecidos para o Core Worker.");
             }
         });
     }
+
 
     private void updateLatestUi(String value) {
         runOnUiThread(() -> {
@@ -1514,6 +1670,10 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> refreshLocalStatus(message));
     }
 
+    private void toast(String message) {
+        runOnUiThread(() -> Toast.makeText(this, message, Toast.LENGTH_SHORT).show());
+    }
+
     private void setButtonsEnabled(boolean enabled) {
         if (prepareButton != null) prepareButton.setEnabled(enabled);
         if (termuxButton != null) termuxButton.setEnabled(enabled);
@@ -1523,7 +1683,7 @@ public class MainActivity extends Activity {
         if (saveProfileButton != null) saveProfileButton.setEnabled(enabled);
         if (heartbeatButton != null) heartbeatButton.setEnabled(enabled);
         if (updateCheckButton != null) updateCheckButton.setEnabled(enabled);
-        if (updateInstallButton != null) updateInstallButton.setEnabled(enabled);
+        if (updateInstallButton != null) applyUpdateButtonState(latestUpdateAvailable, updateDownloadBusy ? "Baixando..." : "Atualizar agora", updateDownloadBusy);
         if (clearButton != null) clearButton.setEnabled(enabled);
     }
 
