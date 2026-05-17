@@ -106,11 +106,11 @@ WORKER_ROLE_LABELS: dict[str, str] = {
 }
 
 WORKER_ROLE_PROFILE_DESCRIPTIONS: dict[str, str] = {
-    "leve": "diagnósticos e logs",
-    "midia": "logs, ZIP, FFmpeg/FFprobe e TTS",
-    "completo": "mídia + plano de manutenção",
-    "builder": "APK + manutenção segura",
-    "turbo": "ajuda máxima para acelerar a VPS",
+    "leve": "economia, diagnósticos e logs",
+    "midia": "perfil normal recomendado",
+    "completo": "tarefas extras e manutenção segura",
+    "builder": "compilar APK no phone worker",
+    "turbo": "máximo desempenho para acelerar a VPS",
     "bedrock": "Minecraft Bedrock futuro",
 }
 
@@ -382,6 +382,23 @@ def _unique_ordered(items: list[str] | tuple[str, ...] | set[str]) -> list[str]:
         if clean and clean not in result:
             result.append(clean[:40])
     return result
+
+
+def _worker_profile_label(worker: dict[str, Any] | None) -> str:
+    if not isinstance(worker, dict):
+        return "Normal"
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    raw = worker.get("profile") or status.get("profile") or worker.get("profile_label") or status.get("profile_label") or "midia"
+    profile = _normalize_worker_profile(raw)
+    labels = {
+        "leve": "Leve",
+        "midia": "Normal",
+        "completo": "Completo",
+        "builder": "Builder",
+        "turbo": "Turbo",
+        "bedrock": "Bedrock",
+    }
+    return labels.get(profile, "Normal")
 
 
 def _profile_feature_values(profile: str) -> set[str]:
@@ -1392,6 +1409,7 @@ def _worker_detail_text(worker: dict[str, Any] | None) -> str:
         f"## 📱 {name}",
         f"**Estado:** {online} · visto {seen}",
         f"**Versão:** `{version}`",
+        f"**Perfil:** {_worker_profile_label(worker)}",
         f"**Push:** {_core_worker_push_status_text(worker_id)}",
         f"**Bateria:** {_battery_text(worker)}",
         f"**Rede:** {_network_text(worker)}",
@@ -1516,7 +1534,7 @@ class WorkerRolesEditorView(discord.ui.LayoutView):
         return [
             discord.SelectOption(label="Manter seleção atual", value="manter", description="Não troca o perfil base sozinho", emoji="📌", default=self.profile == "manter"),
             discord.SelectOption(label="Leve", value="leve", description="Reserva, diagnóstico e logs", emoji="🍃", default=self.profile == "leve"),
-            discord.SelectOption(label="Mídia", value="midia", description="FFmpeg, FFprobe, TTS e ZIP", emoji="🎧", default=self.profile == "midia"),
+            discord.SelectOption(label="Normal", value="midia", description="Perfil recomendado", emoji="🎧", default=self.profile == "midia"),
             discord.SelectOption(label="Completo", value="completo", description="Mídia + manutenção", emoji="🧰", default=self.profile == "completo"),
             discord.SelectOption(label="Builder", value="builder", description="APK + ZIP + manutenção segura", emoji="🏗️", default=self.profile == "builder"),
             discord.SelectOption(label="Turbo", value="turbo", description="Ajuda máxima para acelerar a VPS", emoji="⚡", default=self.profile == "turbo"),
@@ -2071,7 +2089,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 lines.append(f"-# {stale_note}")
             push = _core_worker_push_status_text(str(worker.get("worker_id") or ""))
             push_label = push.replace("Push: ", "push ") if push else "push ?"
-            lines.append(f"-# {ready} · visto {seen} · worker `{version}` · {_battery_text(worker)} · {_simple_network_text(worker)} · {push_label}")
+            lines.append(f"-# {ready} · visto {seen} · worker `{version}` · perfil {_worker_profile_label(worker)} · {_battery_text(worker)} · {_simple_network_text(worker)} · {push_label}")
             queue_text = _queue_status_text(worker)
             if queue_text:
                 lines.append(f"-# Fila: {queue_text}")
@@ -2335,7 +2353,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             "3. Copie o comando pronto e cole no Termux do celular novo.\n"
             "4. Quando terminar, toque **Atualizar**.\n\n"
             f"VPS detectada: `{base_url}`\n"
-            "Perfis: `leve` (logs), `midia` (TTS/FFmpeg), `completo` (manutenção), `builder` (compila APK), `bedrock` (Minecraft Bedrock futuro)."
+            "Perfis: `leve` (economia), `midia`/Normal (recomendado), `completo` (tarefas extras), `builder` (compila APK no phone worker), `turbo` (máximo desempenho), `bedrock` (futuro)."
         )
         await interaction.response.send_message(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 

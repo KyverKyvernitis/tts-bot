@@ -1,5 +1,26 @@
 # Core Worker APK privado
 
+## v0.5.13 — perfil único e tela mais compacta
+
+A versão `0.5.13` complementa o Patch 53.
+
+Correções principais:
+
+- o perfil do app agora usa uma fonte única de verdade e normaliza `profile`/`profile_label`, evitando aparecer `Normal`/`Mídia` em um bloco e `Turbo` em outro;
+- escolher um perfil não finge que aplicou: o app só atualiza o perfil persistido quando o usuário toca em **Aplicar perfil**;
+- depois de aplicar, a lista de perfis fecha e todos os blocos usam o mesmo perfil;
+- a tela principal ficou mais compacta, sem numeração e com textos mais curtos;
+- detalhes de Termux, rede, SSHD, jobs, FCM e versões continuam recolhidos em **Detalhes técnicos**;
+- ações perigosas, como esquecer conexão local, ficam visualmente separadas;
+- a VPS continua só orquestrando/publicando; build Android pesado deve ser feito pelo phone worker com função `apk-builder`/`turbo`.
+
+Arquivos locais necessários continuam fora do Git:
+
+```text
+/home/ubuntu/secrets/firebase-service-account.json
+android/core-worker-app/app/google-services.json
+```
+
 ## v0.5.12 — FCM seguro em camadas
 
 A versão `0.5.12` complementa o Patch 52. O FCM volta a ser ativado, mas seguindo um fluxo mais seguro:
@@ -12,7 +33,7 @@ A versão `0.5.12` complementa o Patch 52. O FCM volta a ser ativado, mas seguin
 - o `FirebaseMessagingService` fica mínimo: recebe data push, mostra notificação quando permitido, agenda checagem local e reporta best-effort;
 - `JobScheduler` continua como fallback local.
 
-Arquivos Firebase continuam locais no ambiente de build/VPS e fora do Git:
+Arquivos Firebase continuam locais no ambiente de build/phone worker e fora do Git:
 
 ```text
 /home/ubuntu/secrets/firebase-service-account.json
@@ -113,23 +134,24 @@ A versão `0.5.4` complementa o Patch 46: ao abrir/voltar para o app, o APK veri
 
 A versão `0.5.3` mantém IP/porta reais fora do código versionado e melhora a comunicação APK ⇄ VPS ⇄ phone-worker. Ao abrir, o app verifica automaticamente se o Termux worker local já está pareado e salva esse estado sem exigir novo código. O app passa a consumir `downloadUrl`/`directApkUrl`, reportar `download_started`, `download_verified` e abertura do instalador para a VPS, e o botão Atualizar baixa o APK direto da VPS e abre o instalador local, sem mandar para página intermediária.
 
-Exemplo de build privado:
+Build privado do APK:
 
-```bash
-cd /home/ubuntu/bot/android/core-worker-app
-CORE_WORKER_VPS_URL="http://IP_PRIVADO_DA_VPS:10000" \
-CORE_WORKER_VPS_LABEL="VPS privada configurada" \
-./gradlew assembleDebug --no-daemon --max-workers=1
-# ou gradle assembleDebug --no-daemon --max-workers=1 se a VPS não tiver wrapper
+```text
+A VPS Oracle de 1 GB RAM não deve compilar o APK.
+Ela só orquestra, valida arquivos leves, enfileira o job e publica o resultado.
+O build pesado deve rodar automaticamente em um phone worker com perfil `builder` ou `turbo`.
 ```
 
-Antes de buildar com Firebase, garanta que o arquivo local exista:
+Antes de acionar o build pelo worker, valide apenas os arquivos locais leves na VPS:
 
 ```bash
-ls -l app/google-services.json
+cd /home/ubuntu/bot
+python3 -m json.tool android/core-worker-app/app/google-services.json >/dev/null && echo "google-services.json OK"
+grep -n '"package_name"' android/core-worker-app/app/google-services.json
+ls -l /home/ubuntu/secrets/firebase-service-account.json
 ```
 
-Se a URL não for injetada, o app mostra **VPS não configurada no build** e bloqueia pareamento/update em vez de expor IP real no repositório.
+Se a URL não for injetada pelo fluxo privado de build, o app mostra **VPS não configurada no build** e bloqueia pareamento/update em vez de expor IP real no repositório.
 
 ## v0.4.6 — permissões obrigatórias e aviso automático de update
 
@@ -302,55 +324,34 @@ considerando que o bot rode a partir de `/home/ubuntu/bot`.
 
 ### Publicar uma versão nova
 
-Depois de buildar o APK na VPS:
-
-```bash
-cd /home/ubuntu/bot/android/core-worker-app
-mkdir -p releases
-cp app/build/outputs/apk/debug/app-debug.apk releases/CoreWorker-v0.4.5-debug.apk
-sha256sum releases/CoreWorker-v0.4.5-debug.apk
-```
-
-Crie o manifesto:
-
-```bash
-cat > releases/latest.json <<'JSON'
-{
-  "versionName": "0.4.5",
-  "versionCode": 9,
-  "apkUrl": "/core-worker/app/CoreWorker-v0.4.5-debug.apk",
-  "sha256": "COLE_AQUI_O_SHA256",
-  "requiredAgentVersion": "1.6.5",
-  "changelog": [
-    "Botão Atualizar no topo apenas quando houver versão nova",
-    "Notificação local quando a VPS publica atualização",
-    "Atualização do APK feita pelo próprio app"
-  ]
-}
-JSON
-```
-
-Reinicie o bot/webserver se necessário. O APK consulta a VPS, mostra uma notificação local quando houver versão nova e exibe o botão **Atualizar** no topo apenas nesse caso. O painel `workers` não precisa controlar atualização do APK.
-
-## Build por terminal na VPS
-
-Em uma VPS fraca, use swap de 4 GB e compile com baixa prioridade. Evite parar o bot se o callkeeper/monitor for religá-lo durante a build:
-
-```bash
-cd /home/ubuntu/bot/android/core-worker-app
-nice -n 19 ionice -c3 ./gradlew assembleDebug --no-daemon --max-workers=1
-# ou gradle assembleDebug --no-daemon --max-workers=1 se a VPS não tiver wrapper
-```
-
-O APK debug ficará em:
+O caminho normal é:
 
 ```text
-app/build/outputs/apk/debug/app-debug.apk
+VPS detecta mudança / usuário aciona build
+  -> painel workers enfileira job apk_build_debug
+  -> phone worker builder baixa a base
+  -> phone worker compila o APK
+  -> worker envia o APK para POST /core-worker/app/publish
+  -> VPS assina/publica e atualiza latest.json
 ```
 
-## Build pelo Android Studio
+A VPS não deve executar `gradle`, `assembleDebug` ou Android build localmente. Em Oracle 1 GB RAM, ela deve ficar como cérebro/orquestradora.
 
-1. Abra `android/core-worker-app` no Android Studio.
+Para checar o estado sem compilar:
+
+```bash
+cd /home/ubuntu/bot
+python3 -m json.tool android/core-worker-app/app/google-services.json >/dev/null && echo "google-services.json OK"
+python3 scripts/core-worker-automation.py status
+```
+
+## Build pelo phone worker
+
+Use o painel `workers` ou a automação do Core Worker para enfileirar o job **Buildar APK**. O worker precisa declarar `apk-builder`, normalmente via perfil `Builder` ou `Turbo`.
+
+## Build local fora da VPS, se necessário
+
+1. Abra `android/core-worker-app` no Android Studio em uma máquina/celular capaz de compilar.
 2. Aguarde o Gradle sincronizar.
 3. Selecione **Build > Build APK(s)**.
 4. Instale o APK apenas nos seus celulares.

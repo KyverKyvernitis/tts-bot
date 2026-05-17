@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.12";
+    private static final String APP_VERSION = "0.5.13";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -82,18 +82,20 @@ public class MainActivity extends Activity {
     private static final long FCM_DISABLED_MS = 30L * 60L * 1000L;
     private static final long FCM_STARTUP_DELAY_MS = 1500L;
 
-    private static final int BG = Color.rgb(8, 12, 25);
-    private static final int CARD = Color.rgb(19, 26, 45);
-    private static final int CARD_SOFT = Color.rgb(25, 34, 58);
-    private static final int TEXT = Color.rgb(247, 248, 252);
-    private static final int MUTED = Color.rgb(183, 190, 212);
-    private static final int ACCENT = Color.rgb(110, 168, 254);
-    private static final int BUTTON_BG = Color.rgb(135, 190, 255);
-    private static final int BUTTON_TEXT = Color.rgb(4, 11, 24);
-    private static final int BUTTON_DISABLED_BG = Color.rgb(54, 62, 84);
-    private static final int BUTTON_DISABLED_TEXT = Color.rgb(161, 170, 196);
-    private static final int OK = Color.rgb(118, 227, 151);
-    private static final int WARN = Color.rgb(255, 206, 115);
+    private static final int BG = Color.rgb(7, 11, 23);
+    private static final int CARD = Color.rgb(18, 25, 44);
+    private static final int CARD_SOFT = Color.rgb(27, 36, 62);
+    private static final int CARD_HIGHLIGHT = Color.rgb(32, 44, 76);
+    private static final int TEXT = Color.rgb(248, 250, 255);
+    private static final int MUTED = Color.rgb(186, 195, 218);
+    private static final int ACCENT = Color.rgb(122, 179, 255);
+    private static final int BUTTON_BG = Color.rgb(132, 190, 255);
+    private static final int BUTTON_TEXT = Color.rgb(4, 10, 24);
+    private static final int BUTTON_DISABLED_BG = Color.rgb(55, 64, 88);
+    private static final int BUTTON_DISABLED_TEXT = Color.rgb(164, 173, 199);
+    private static final int OK = Color.rgb(110, 225, 145);
+    private static final int WARN = Color.rgb(255, 205, 113);
+    private static final int DANGER = Color.rgb(255, 123, 123);
 
     private SharedPreferences prefs;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -233,10 +235,10 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Este app deixa o celular pronto para ajudar a VPS do bot. A tela principal mostra o essencial; o resto fica em detalhes técnicos.");
+        subtitle.setText("Deixe este celular pronto para ajudar a VPS do bot. A tela principal mostra só o essencial.");
         subtitle.setTextColor(MUTED);
-        subtitle.setTextSize(14);
-        subtitle.setPadding(0, dp(8), 0, dp(14));
+        subtitle.setTextSize(13);
+        subtitle.setPadding(0, dp(6), 0, dp(10));
         root.addView(subtitle);
 
         buildPermissionGate(root);
@@ -250,7 +252,7 @@ public class MainActivity extends Activity {
 
         updateBanner = card();
         updateBanner.setVisibility(View.GONE);
-        updateBanner.setBackgroundColor(Color.rgb(44, 58, 93));
+        updateBanner.setBackground(cardBackground(Color.rgb(38, 55, 93)));
         updateBannerText = smallText("Atualização disponível.");
         updateBannerText.setTextColor(TEXT);
         updateBanner.addView(updateBannerText);
@@ -266,12 +268,12 @@ public class MainActivity extends Activity {
 
         LinearLayout prepareCard = card();
         mainContent.addView(prepareCard);
-        prepareCard.addView(sectionTitle("1. Estado deste celular"));
-        prepareCard.addView(smallText("Resumo rápido. Quando aparecer pronto, você não precisa mexer em Termux, rede ou código."));
+        prepareCard.addView(sectionTitle("Status"));
+        prepareCard.addView(smallText("Resumo rápido deste aparelho."));
 
         localAgentText = smallText("Este celular ainda não foi verificado.");
         localAgentText.setTextColor(TEXT);
-        localAgentText.setBackgroundColor(CARD_SOFT);
+        localAgentText.setBackground(cardBackground(CARD_SOFT));
         localAgentText.setPadding(dp(10), dp(10), dp(10), dp(10));
         prepareCard.addView(localAgentText);
 
@@ -280,14 +282,14 @@ public class MainActivity extends Activity {
         prepareCard.addView(prepareButton);
 
         connectCard = cardWithTopMargin(mainContent);
-        connectTitleText = sectionTitle("2. Conectar à VPS");
+        connectTitleText = sectionTitle("Conexão");
         connectCard.addView(connectTitleText);
-        connectHintText = smallText("Use o código gerado no painel workers do Discord. Depois de conectado, este bloco vira apenas um resumo.");
+        connectHintText = smallText("Pareie uma vez. Depois o app lembra a VPS principal.");
         connectCard.addView(connectHintText);
 
         pairingStatusText = smallText("");
         pairingStatusText.setTextColor(TEXT);
-        pairingStatusText.setBackgroundColor(CARD_SOFT);
+        pairingStatusText.setBackground(cardBackground(CARD_SOFT));
         pairingStatusText.setPadding(dp(10), dp(10), dp(10), dp(10));
         connectCard.addView(pairingStatusText);
 
@@ -304,7 +306,7 @@ public class MainActivity extends Activity {
         pairingForm.addView(label("VPS do projeto"));
         serverInfoText = smallText("VPS atual: " + serverDisplayLabel());
         serverInfoText.setTextColor(TEXT);
-        serverInfoText.setBackgroundColor(CARD_SOFT);
+        serverInfoText.setBackground(cardBackground(CARD_SOFT));
         serverInfoText.setPadding(dp(10), dp(10), dp(10), dp(10));
         pairingForm.addView(serverInfoText);
 
@@ -326,12 +328,12 @@ public class MainActivity extends Activity {
         pairingForm.addView(pairButton);
 
         LinearLayout profileCard = cardWithTopMargin(mainContent);
-        profileCard.addView(sectionTitle("3. Perfil de trabalho"));
-        profileCard.addView(smallText("O perfil define como este celular ajuda a VPS. Normalmente não precisa alterar."));
+        profileCard.addView(sectionTitle("Perfil"));
+        profileCard.addView(smallText("Escolha quanto este celular pode ajudar quando estiver disponível."));
 
         profileSummaryText = smallText("");
         profileSummaryText.setTextColor(TEXT);
-        profileSummaryText.setBackgroundColor(CARD_SOFT);
+        profileSummaryText.setBackground(cardBackground(CARD_SOFT));
         profileSummaryText.setPadding(dp(10), dp(10), dp(10), dp(10));
         profileCard.addView(profileSummaryText);
 
@@ -347,17 +349,16 @@ public class MainActivity extends Activity {
         profileGroup = new RadioGroup(this);
         profileGroup.setOrientation(RadioGroup.VERTICAL);
         profileGroup.setPadding(0, dp(6), 0, dp(6));
-        addProfileRadio("leve", "Leve · reserva e diagnósticos");
-        addProfileRadio("midia", "Mídia · recomendado para tarefas normais");
-        addProfileRadio("completo", "Completo · mídia + manutenção");
-        addProfileRadio("builder", "Builder · compilar APK fora da VPS");
-        addProfileRadio("turbo", "Turbo · ajuda máxima para acelerar a VPS");
-        addProfileRadio("bedrock", "Bedrock · Minecraft Bedrock futuro");
+        addProfileRadio("leve", "Leve · economia e diagnóstico");
+        addProfileRadio("midia", "Normal · recomendado");
+        addProfileRadio("completo", "Completo · tarefas extras");
+        addProfileRadio("builder", "Builder · compilar APK no celular");
+        addProfileRadio("turbo", "Turbo · máximo desempenho");
+        addProfileRadio("bedrock", "Bedrock · reservado para futuro");
         profileGroup.setOnCheckedChangeListener((group, checkedId) -> {
             String profile = selectedProfile();
-            prefs.edit().putString("profile", profile).apply();
-            updateProfileHint(profile);
-            refreshLocalStatus("Perfil escolhido: " + profileLabel(profile) + ". Toque em Aplicar perfil para enviar ao worker local.");
+            updateProfileSelectionHint(profile);
+            refreshLocalStatus("Perfil selecionado: " + profileLabel(profile) + ". Toque em Aplicar para sincronizar.");
         });
         profileDetailsContent.addView(profileGroup);
 
@@ -369,11 +370,11 @@ public class MainActivity extends Activity {
         profileDetailsContent.addView(saveProfileButton);
 
         LinearLayout updateCard = cardWithTopMargin(mainContent);
-        updateCard.addView(sectionTitle("4. Atualizações"));
-        updateCard.addView(smallText("O app verifica a VPS por checagem local e também registra push FCM em modo seguro. Se Firebase ou Google Play Services falhar, o app continua usando o fallback local."));
+        updateCard.addView(sectionTitle("Atualizações"));
+        updateCard.addView(smallText("Push FCM e checagem local mantêm o APK em dia."));
         updateText = smallText("Instalado: " + APP_VERSION + "\nAtualizações: ainda não verificadas.");
         updateText.setTextColor(TEXT);
-        updateText.setBackgroundColor(CARD_SOFT);
+        updateText.setBackground(cardBackground(CARD_SOFT));
         updateText.setPadding(dp(10), dp(10), dp(10), dp(10));
         updateCard.addView(updateText);
 
@@ -384,7 +385,7 @@ public class MainActivity extends Activity {
 
         LinearLayout technicalCard = cardWithTopMargin(mainContent);
         technicalCard.addView(sectionTitle("Detalhes técnicos"));
-        technicalCard.addView(smallText("Termux, rede privada, jobs, SSHD, versões e portas ficam aqui para não poluir a tela principal."));
+        technicalCard.addView(smallText("Termux, rede, jobs, SSHD, versões e logs ficam recolhidos aqui."));
         technicalToggleButton = button("Mostrar detalhes técnicos");
         technicalToggleButton.setOnClickListener(v -> toggleTechnicalDetails());
         technicalCard.addView(technicalToggleButton);
@@ -396,7 +397,7 @@ public class MainActivity extends Activity {
 
         systemChecklistText = smallText(prepareChecklistText());
         systemChecklistText.setTextColor(TEXT);
-        systemChecklistText.setBackgroundColor(CARD_SOFT);
+        systemChecklistText.setBackground(cardBackground(CARD_SOFT));
         systemChecklistText.setPadding(dp(10), dp(10), dp(10), dp(10));
         technicalDetailsContent.addView(systemChecklistText);
 
@@ -413,6 +414,8 @@ public class MainActivity extends Activity {
         technicalDetailsContent.addView(heartbeatButton);
 
         clearButton = button("Esquecer conexão local");
+        clearButton.setBackground(makeButtonBackground(Color.rgb(91, 50, 57), BUTTON_DISABLED_BG));
+        clearButton.setTextColor(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled}, new int[]{}}, new int[]{BUTTON_DISABLED_TEXT, TEXT}));
         clearButton.setOnClickListener(v -> confirmClearPairing());
         technicalDetailsContent.addView(clearButton);
 
@@ -420,12 +423,12 @@ public class MainActivity extends Activity {
         statusText.setTextColor(TEXT);
         statusText.setTextSize(14);
         statusText.setPadding(dp(14), dp(14), dp(14), dp(14));
-        statusText.setBackgroundColor(CARD);
+        statusText.setBackground(cardBackground(CARD));
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        statusParams.setMargins(0, dp(14), 0, 0);
+        statusParams.setMargins(0, dp(10), 0, 0);
         mainContent.addView(statusText, statusParams);
 
         setContentView(scroll);
@@ -433,7 +436,7 @@ public class MainActivity extends Activity {
 
     private void buildPermissionGate(LinearLayout root) {
         permissionGateCard = card();
-        permissionGateCard.setBackgroundColor(CARD_SOFT);
+        permissionGateCard.setBackground(cardBackground(CARD_SOFT));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -448,7 +451,7 @@ public class MainActivity extends Activity {
 
         permissionStatusText = smallText("");
         permissionStatusText.setTextColor(TEXT);
-        permissionStatusText.setBackgroundColor(CARD);
+        permissionStatusText.setBackground(cardBackground(CARD));
         permissionStatusText.setPadding(dp(10), dp(10), dp(10), dp(10));
         permissionGateCard.addView(permissionStatusText);
 
@@ -578,7 +581,7 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        params.setMargins(0, dp(14), 0, 0);
+        params.setMargins(0, dp(10), 0, 0);
         root.addView(card, params);
         return card;
     }
@@ -586,18 +589,24 @@ public class MainActivity extends Activity {
     private LinearLayout card() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(14), dp(14), dp(14), dp(14));
-        card.setBackgroundColor(CARD);
+        card.setPadding(dp(14), dp(13), dp(14), dp(13));
+        card.setBackground(cardBackground(CARD));
         return card;
+    }
+
+    private GradientDrawable cardBackground(int color) {
+        GradientDrawable drawable = rounded(color);
+        drawable.setStroke(dp(1), Color.rgb(31, 40, 64));
+        return drawable;
     }
 
     private TextView sectionTitle(String value) {
         TextView title = new TextView(this);
         title.setText(value);
         title.setTextColor(TEXT);
-        title.setTextSize(17);
+        title.setTextSize(18);
         title.setTypeface(null, 1);
-        title.setPadding(0, 0, 0, dp(6));
+        title.setPadding(0, 0, 0, dp(4));
         return title;
     }
 
@@ -605,8 +614,8 @@ public class MainActivity extends Activity {
         TextView text = new TextView(this);
         text.setText(value);
         text.setTextColor(MUTED);
-        text.setTextSize(13);
-        text.setPadding(0, dp(2), 0, dp(6));
+        text.setTextSize(12);
+        text.setPadding(0, dp(1), 0, dp(5));
         return text;
     }
 
@@ -640,14 +649,14 @@ public class MainActivity extends Activity {
         button.setTextColor(buttonTextColors());
         button.setTextSize(14);
         button.setTypeface(null, Typeface.BOLD);
-        button.setMinHeight(dp(44));
-        button.setPadding(dp(12), dp(8), dp(12), dp(8));
+        button.setMinHeight(dp(40));
+        button.setPadding(dp(12), dp(7), dp(12), dp(7));
         button.setBackground(makeButtonBackground(BUTTON_BG, BUTTON_DISABLED_BG));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        params.setMargins(0, dp(8), 0, 0);
+        params.setMargins(0, dp(7), 0, 0);
         button.setLayoutParams(params);
         return button;
     }
@@ -673,7 +682,7 @@ public class MainActivity extends Activity {
     private GradientDrawable rounded(int color) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(color);
-        drawable.setCornerRadius(dp(12));
+        drawable.setCornerRadius(dp(14));
         return drawable;
     }
 
@@ -694,14 +703,8 @@ public class MainActivity extends Activity {
         serverUrlInput.setText(DEFAULT_VPS_URL);
         pairCodeInput.setText("");
         deviceNameInput.setText(prefs.getString("device_name", defaultDeviceName()));
-        String profile = prefs.getString("profile", "midia");
-        for (int i = 0; i < profileGroup.getChildCount(); i++) {
-            View child = profileGroup.getChildAt(i);
-            if (child instanceof RadioButton && profile.equals(String.valueOf(child.getTag()))) {
-                ((RadioButton) child).setChecked(true);
-                break;
-            }
-        }
+        String profile = normalizeProfile(prefs.getString("profile", "midia"));
+        updateProfileRadioSelection(profile);
         updateProfileHint(profile);
         updateSystemChecklistText();
         updatePairingUi();
@@ -726,7 +729,7 @@ public class MainActivity extends Activity {
         if (profileToggleButton != null) {
             profileToggleButton.setText(profileExpanded ? "Ocultar perfis" : "Alterar perfil");
         }
-        updateProfileHint(prefs.getString("profile", selectedProfileSafe()));
+        updateProfileHint(appliedProfile());
     }
 
     private void showPairingForm(boolean show, String message) {
@@ -745,19 +748,17 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             boolean paired = hasPairing();
             if (connectTitleText != null) {
-                connectTitleText.setText(paired ? "2. Conectado à VPS principal" : "2. Conectar à VPS");
+                connectTitleText.setText("Conexão");
             }
             if (connectHintText != null) {
                 connectHintText.setText(paired
-                        ? "Este celular já está vinculado ao worker local. O campo de código fica escondido até você pedir para trocar."
-                        : "Use o código gerado no painel workers do Discord. A VPS privada vem fixa no build e não aparece no código do GitHub.");
+                        ? "Vinculado à VPS principal. Nenhum código é necessário agora."
+                        : "Use o código gerado no painel workers do Discord.");
             }
             if (pairingStatusText != null) {
-                String profile = prefs.getString("profile", selectedProfileSafe());
+                String profile = appliedProfile();
                 pairingStatusText.setText(paired
-                        ? "Conectado à VPS principal.\n"
-                                + "Este celular está pronto quando o worker local estiver online.\n"
-                                + "Perfil: " + profileLabel(profile)
+                        ? "VPS principal conectada\nPerfil sincronizado: " + profileLabel(profile)
                         : "Ainda não conectado. Gere um código no Discord e conecte este celular.");
             }
             if (rePairButton != null) {
@@ -853,11 +854,13 @@ public class MainActivity extends Activity {
     private void updateOwnProfile() {
         String profile = selectedProfile();
         saveLocalFields(profile);
-        runBusy("Aplicando perfil deste celular...", () -> {
+        updateProfileHint(profile);
+        collapseProfileDetails();
+        runBusy("Aplicando perfil...", () -> {
             boolean localSynced = syncProfileToLocalAgent(profile);
             String prefix = localSynced
-                    ? "Perfil aplicado no worker local: " + profileLabel(profile)
-                    : "Perfil salvo no APK. Worker local offline; abra o Termux para o autostart tentar levantar o watchdog.";
+                    ? "Perfil aplicado: " + profileLabel(profile)
+                    : "Perfil salvo no APK. Worker local offline; abra o Termux para sincronizar.";
             if (hasPairing()) {
                 sendHeartbeatInternal(true, prefix);
             } else {
@@ -867,7 +870,7 @@ public class MainActivity extends Activity {
     }
 
     private void sendHeartbeat() {
-        saveLocalFields(selectedProfile());
+        saveLocalFields(appliedProfile());
         runBusy("Atualizando status no painel...", () -> {
             updateLocalAgentStatus(false);
             sendHeartbeatInternal(true);
@@ -1387,6 +1390,14 @@ public class MainActivity extends Activity {
         }, "core-worker-fcm-token").start();
     }
 
+    private String fcmCompactLabel() {
+        String state = fcmStatusLabel().toLowerCase(Locale.ROOT);
+        if (state.startsWith("ativo")) return "ativo";
+        if (state.contains("desativado")) return "desativado";
+        if (state.contains("indispon")) return "indisponível";
+        return "fallback local";
+    }
+
     private String fcmStatusLabel() {
         if (!FCM_ENABLED_IN_APK) {
             return "desativado no build · fallback local ativo";
@@ -1674,12 +1685,15 @@ public class MainActivity extends Activity {
     }
 
     private void saveLocalFields(String profile) {
+        String normalized = normalizeProfile(profile);
         prefs.edit()
                 .putString("server_url", normalizedServerUrl())
                 .putString("device_name", deviceNameInput.getText().toString().trim())
-                .putString("profile", profile)
+                .putString("profile", normalized)
                 .apply();
+        localAgentProfile = normalized;
         updateSystemChecklistText();
+        updatePairingUi();
     }
 
     private void putProfilePayload(JSONObject payload, String profile) throws Exception {
@@ -1934,7 +1948,16 @@ public class MainActivity extends Activity {
     private void applyLocalAgentStatus(JSONObject body) {
         localAgentOnline = body.optBoolean("ok", true);
         localAgentVersion = body.optString("version", "");
-        localAgentProfile = body.optString("profile_label", body.optString("profile", ""));
+        String reportedProfile = normalizeProfileOrEmpty(body.optString("profile", ""));
+        if (reportedProfile.isEmpty()) {
+            reportedProfile = normalizeProfileOrEmpty(body.optString("profile_label", ""));
+        }
+        localAgentProfile = reportedProfile;
+        if (!reportedProfile.isEmpty()) {
+            prefs.edit().putString("profile", reportedProfile).apply();
+            updateProfileRadioSelection(reportedProfile);
+            updateProfileHint(reportedProfile);
+        }
         localAgentWorkerId = body.optString("worker_id", localAgentWorkerId);
         localAgentVpsConfigured = body.optBoolean("vps_configured", false);
         localAgentJobsConfigured = body.optBoolean("jobs_configured", false);
@@ -1962,14 +1985,14 @@ public class MainActivity extends Activity {
     }
 
     private String localAgentLine() {
+        String profile = appliedProfile();
         if (!localAgentOnline) {
-            return "Este celular ainda não está pronto. Abra o Termux para acordar o worker local.";
+            return "⚠️ Worker local offline\nAbra o Termux para acordar este celular.";
         }
-        String profile = emptyFallback(localAgentProfile, prefs.getString("profile", "midia"));
         if (hasPairing()) {
-            return "Este celular está conectado e pronto para trabalhar.\nPerfil atual: " + profileLabel(profile);
+            return "✅ Pronto para trabalhar\nPerfil: " + profileLabel(profile) + " · Push: " + fcmCompactLabel();
         }
-        return "Worker local detectado. Falta conectar este celular à VPS principal.";
+        return "⚠️ Worker local detectado\nConecte este celular à VPS principal.";
     }
 
 
@@ -2099,41 +2122,24 @@ public class MainActivity extends Activity {
         if (statusText == null) {
             return;
         }
-        String workerId = localAgentWorkerId != null && !localAgentWorkerId.trim().isEmpty() ? localAgentWorkerId : prefs.getString("worker_id", "");
-        boolean paired = hasPairing();
-        String server = normalizedServerUrl();
-        String profile = prefs.getString("profile", selectedProfileSafe());
-        StringBuilder builder = new StringBuilder();
-        if (paired && localAgentOnline) {
-            builder.append("Este celular está conectado e pronto para trabalhar.");
-        } else if (paired) {
-            builder.append("Este celular está conectado, mas o worker local não respondeu agora.");
-        } else if (localAgentOnline) {
-            builder.append("Worker local detectado. Falta conectar à VPS principal.");
-        } else {
-            builder.append("Abra o Termux para iniciar o worker local e deixar este celular pronto.");
-        }
-        builder.append("\n\nStatus rápido\n");
-        builder.append(checkLine("VPS", paired ? "conectada" : vpsChecklistLabel(server))).append('\n');
-        builder.append(checkLine("Worker", localAgentOnline ? "online" : "offline")).append('\n');
-        builder.append(checkLine("Perfil", profileLabel(profile))).append('\n');
-        builder.append(checkLine("Atualizações", updateChecklistLabel())).append('\n');
-        if (technicalExpanded) {
-            builder.append("\nTécnico\n");
-            builder.append(checkLine("Rede privada", networkChecklistLabel(server))).append('\n');
-            builder.append(checkLine("VPS label", serverDisplayLabel())).append('\n');
-            builder.append(checkLine("Agent local", localAgentOnline ? emptyFallback(localAgentVersion, "online") : "offline")).append('\n');
-            builder.append(checkLine("SSHD", emptyFallback(localAgentSshdSummary, "não informado"))).append('\n');
-            if (workerId != null && !workerId.trim().isEmpty()) {
-                builder.append(checkLine("Worker ID", workerId)).append('\n');
+        boolean hasExtra = extra != null && !extra.trim().isEmpty();
+        if (hasExtra) {
+            StringBuilder builder = new StringBuilder();
+            builder.append(extra.trim());
+            if (technicalExpanded) {
+                builder.append("\n\nResumo técnico rápido\n");
+                builder.append(checkLine("VPS", hasPairing() ? "conectada" : vpsChecklistLabel(normalizedServerUrl()))).append('\n');
+                builder.append(checkLine("Worker", localAgentOnline ? "online" : "offline")).append('\n');
+                builder.append(checkLine("Perfil", profileLabel(appliedProfile()))).append('\n');
+                builder.append(checkLine("Atualizações", updateChecklistLabel())).append('\n');
+                builder.append(checkLine("Push", fcmStatusLabel()));
             }
-            builder.append(checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")")).append('\n');
-            builder.append(checkLine("Push", fcmStatusLabel())).append('\n');
+            statusText.setText(builder.toString());
+            statusText.setVisibility(View.VISIBLE);
+        } else {
+            statusText.setText("");
+            statusText.setVisibility(View.GONE);
         }
-        if (extra != null && !extra.trim().isEmpty()) {
-            builder.append("\n").append(extra);
-        }
-        statusText.setText(builder.toString());
         if (localAgentText != null) {
             localAgentText.setText(localAgentLine());
         }
@@ -2196,18 +2202,23 @@ public class MainActivity extends Activity {
     private String prepareChecklistText() {
         String server = normalizedServerUrl();
         StringBuilder builder = new StringBuilder();
+        builder.append("App\n");
+        builder.append(checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")")).append('\n');
+        builder.append(checkLine("Push", fcmStatusLabel())).append('\n');
+        builder.append(checkLine("Fallback", "JobScheduler local ativo")).append("\n\n");
+
+        builder.append("Worker\n");
+        builder.append(checkLine("Status", localAgentOnline ? "online" : "offline")).append('\n');
+        builder.append(checkLine("Perfil", profileLabel(appliedProfile()))).append('\n');
+        builder.append(checkLine("Jobs locais", localAgentJobsConfigured ? "ok" : "pendentes")).append('\n');
+        builder.append(checkLine("SSHD", emptyFallback(localAgentSshdSummary, "não informado"))).append("\n\n");
+
+        builder.append("Rede e Termux\n");
+        builder.append(checkLine("VPS local", localAgentVpsConfigured ? "configurada" : "pendente")).append('\n');
+        builder.append(checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "Tailscale externo ainda necessário")).append('\n');
         builder.append(checkLine("Termux", isPackageInstalled("com.termux") ? "instalado" : "precisa instalar")).append('\n');
         builder.append(checkLine("Termux:API", isPackageInstalled("com.termux.api") ? "instalado" : "precisa instalar")).append('\n');
-        builder.append(checkLine("Termux:Boot", isPackageInstalled("com.termux.boot") ? "instalado" : "recomendado para boot automático")).append('\n');
-        builder.append(checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "Tailscale externo ainda necessário")).append('\n');
-        builder.append(checkLine("Worker", localAgentOnline ? "online" : "offline")).append('\n');
-        builder.append(checkLine("VPS local", localAgentVpsConfigured ? "configurada" : "pendente")).append('\n');
-        builder.append(checkLine("Jobs locais", localAgentJobsConfigured ? "ok" : "pendentes")).append('\n');
-        builder.append(checkLine("SSHD", emptyFallback(localAgentSshdSummary, "não informado"))).append('\n');
-        builder.append(checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")")).append('\n');
-            builder.append(checkLine("Push", fcmStatusLabel())).append('\n');
-        builder.append(checkLine("App fechado", "FCM push real + JobScheduler fallback")).append('\n');
-        builder.append(checkLine("Próximo futuro", "worker e VPN embutidos no APK"));
+        builder.append(checkLine("Termux:Boot", isPackageInstalled("com.termux.boot") ? "instalado" : "recomendado"));
         return builder.toString();
     }
 
@@ -2242,17 +2253,60 @@ public class MainActivity extends Activity {
         int id = profileGroup.getCheckedRadioButtonId();
         View selected = id == -1 ? null : findViewById(id);
         if (selected != null && selected.getTag() != null) {
-            return String.valueOf(selected.getTag());
+            return normalizeProfile(String.valueOf(selected.getTag()));
         }
-        return "midia";
+        return appliedProfile();
     }
 
     private String selectedProfileSafe() {
         try {
             return selectedProfile();
         } catch (Throwable ignored) {
-            return prefs.getString("profile", "midia");
+            return appliedProfile();
         }
+    }
+
+    private String appliedProfile() {
+        String fromAgent = normalizeProfileOrEmpty(localAgentProfile);
+        if (!fromAgent.isEmpty()) {
+            return fromAgent;
+        }
+        return normalizeProfile(prefs.getString("profile", "midia"));
+    }
+
+    private String normalizeProfile(String profile) {
+        String normalized = normalizeProfileOrEmpty(profile);
+        return normalized.isEmpty() ? "midia" : normalized;
+    }
+
+    private String normalizeProfileOrEmpty(String profile) {
+        String value = profile == null ? "" : profile.trim().toLowerCase(Locale.ROOT);
+        value = value.replace('í', 'i').replace('í', 'i').replace('á', 'a').replace('é', 'e').replace('ó', 'o').replace('ú', 'u');
+        value = value.replaceAll("[^a-z0-9_-]+", "-").replaceAll("^-+|-+$", "");
+        if ("normal".equals(value) || "media".equals(value) || "midia".equals(value)) return "midia";
+        if ("leve".equals(value)) return "leve";
+        if ("completo".equals(value)) return "completo";
+        if ("builder".equals(value) || "build".equals(value) || "apk-builder".equals(value)) return "builder";
+        if ("turbo".equals(value)) return "turbo";
+        if ("bedrock".equals(value)) return "bedrock";
+        return "";
+    }
+
+    private void updateProfileRadioSelection(String profile) {
+        if (profileGroup == null) return;
+        String normalized = normalizeProfile(profile);
+        runOnUiThread(() -> {
+            for (int i = 0; i < profileGroup.getChildCount(); i++) {
+                View child = profileGroup.getChildAt(i);
+                if (child instanceof RadioButton && normalized.equals(String.valueOf(child.getTag()))) {
+                    int id = child.getId();
+                    if (profileGroup.getCheckedRadioButtonId() != id) {
+                        profileGroup.check(id);
+                    }
+                    break;
+                }
+            }
+        });
     }
 
     private String defaultDeviceName() {
@@ -2292,41 +2346,63 @@ public class MainActivity extends Activity {
     }
 
     private String profileLabel(String profile) {
-        if ("leve".equals(profile)) return "Leve";
-        if ("completo".equals(profile)) return "Completo";
-        if ("builder".equals(profile)) return "Builder";
-        if ("turbo".equals(profile)) return "Turbo";
-        if ("bedrock".equals(profile)) return "Bedrock";
-        return "Mídia";
+        String normalized = normalizeProfile(profile);
+        if ("leve".equals(normalized)) return "Leve";
+        if ("completo".equals(normalized)) return "Completo";
+        if ("builder".equals(normalized)) return "Builder";
+        if ("turbo".equals(normalized)) return "Turbo";
+        if ("bedrock".equals(normalized)) return "Bedrock";
+        return "Normal";
     }
 
     private String profileDescription(String profile) {
-        if ("leve".equals(profile)) {
-            return "Reserva e diagnósticos leves.";
+        String normalized = normalizeProfile(profile);
+        if ("leve".equals(normalized)) {
+            return "Economia de bateria, logs e diagnósticos básicos.";
         }
-        if ("completo".equals(profile)) {
-            return "Ajuda forte para mídia, arquivos e manutenção segura.";
+        if ("completo".equals(normalized)) {
+            return "Ajuda em mídia, arquivos, cache e manutenção segura.";
         }
-        if ("builder".equals(profile)) {
-            return "Usa este celular para compilar APK privado e aliviar a VPS.";
+        if ("builder".equals(normalized)) {
+            return "Compila o APK privado no celular para aliviar a VPS.";
         }
-        if ("turbo".equals(profile)) {
-            return "Modo mais forte para acelerar tarefas auxiliares quando este celular estiver disponível.";
+        if ("turbo".equals(normalized)) {
+            return "Máximo desempenho para acelerar tarefas auxiliares.";
         }
-        if ("bedrock".equals(profile)) {
+        if ("bedrock".equals(normalized)) {
             return "Reservado para Minecraft Bedrock no futuro.";
         }
-        return "Recomendado para uso normal: mídia, arquivos e cache.";
+        return "Recomendado para uso diário e tarefas normais.";
     }
 
     private void updateProfileHint(String profile) {
-        String summary = "Perfil atual: " + profileLabel(profile) + "\n" + profileDescription(profile);
-        if (profileSummaryText != null) {
-            profileSummaryText.setText(summary);
-        }
-        if (profileHintText != null) {
-            profileHintText.setText(profileDescription(profile));
-        }
+        String normalized = normalizeProfile(profile);
+        String summary = profileLabel(normalized) + "\n" + profileDescription(normalized);
+        runOnUiThread(() -> {
+            if (profileSummaryText != null) {
+                profileSummaryText.setText(summary);
+            }
+            if (profileHintText != null) {
+                profileHintText.setText(profileDescription(normalized));
+            }
+        });
+    }
+
+    private void updateProfileSelectionHint(String profile) {
+        String normalized = normalizeProfile(profile);
+        runOnUiThread(() -> {
+            if (profileHintText != null) {
+                profileHintText.setText("Selecionado: " + profileLabel(normalized) + "\n" + profileDescription(normalized));
+            }
+        });
+    }
+
+    private void collapseProfileDetails() {
+        runOnUiThread(() -> {
+            profileExpanded = false;
+            if (profileDetailsContent != null) profileDetailsContent.setVisibility(View.GONE);
+            if (profileToggleButton != null) profileToggleButton.setText("Alterar perfil");
+        });
     }
 
 

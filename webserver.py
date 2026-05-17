@@ -29,7 +29,7 @@ def _core_worker_apk_dir() -> str:
     """Diretório local usado para publicar atualizações privadas do Core Worker APK.
 
     O caminho pode ser definido por CORE_WORKER_APK_DIR. Por padrão fica dentro do
-    repositório para facilitar publicar o APK buildado pela própria VPS.
+    repositório para publicar o APK recebido do phone worker builder.
     """
     base = os.getenv("CORE_WORKER_APK_DIR")
     if not base:
