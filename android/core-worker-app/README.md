@@ -1,5 +1,12 @@
 # Core Worker APK privado
 
+## v0.5.11 — FCM kill switch / estabilidade do APK
+
+A versão `0.5.11` complementa o Patch 51c. Como o crash persistiu mesmo após corrigir o erro 500 da VPS, este build coloca o FCM do APK atrás de um kill switch rígido: o Firebase não é inicializado automaticamente, o serviço FCM fica desativado no Manifest e o app volta a depender da checagem local (`JobScheduler`) enquanto o logcat Android não for coletado.
+
+Objetivo desta versão: o app precisa abrir sempre. Firebase, Google Play Services ou configuração local quebrada não podem derrubar a tela principal. O painel ainda pode manter os dados/backend preparados para FCM, mas o APK exibirá `Push: desativado por segurança · fallback local ativo`.
+
+
 Este diretório contém o APK privado **Core Worker**.
 
 O APK está evoluindo para o objetivo final:

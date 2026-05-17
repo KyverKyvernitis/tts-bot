@@ -30,10 +30,21 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
     private static final String PREFS = "core_worker_private";
     private static final String CHANNEL_ID = "core_worker_updates";
     private static final int NOTIFICATION_ID = 4102;
+    private static final boolean FCM_SERVICE_ENABLED = false;
 
     @Override
     public void onNewToken(String token) {
-        super.onNewToken(token);
+        try {
+            super.onNewToken(token);
+        } catch (Throwable ignored) {
+        }
+        if (!FCM_SERVICE_ENABLED) {
+            try {
+                prefs().edit().putString("fcm_state", "desativado por segurança").apply();
+            } catch (Throwable ignored) {
+            }
+            return;
+        }
         try {
             prefs().edit().putString("fcm_token", token == null ? "" : token).apply();
             registerToken(token, "on_new_token");
@@ -43,7 +54,13 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
 
     @Override
     public void onMessageReceived(RemoteMessage message) {
-        super.onMessageReceived(message);
+        try {
+            super.onMessageReceived(message);
+        } catch (Throwable ignored) {
+        }
+        if (!FCM_SERVICE_ENABLED) {
+            return;
+        }
         try {
             handleMessageReceived(message);
         } catch (Throwable ignored) {

@@ -60,14 +60,22 @@ public class CoreWorkerUpdateJobService extends JobService {
 
     @Override
     public boolean onStartJob(JobParameters params) {
-        new Thread(() -> {
-            try {
-                runUpdateCheck(params);
-            } finally {
-                jobFinished(params, false);
-            }
-        }).start();
-        return true;
+        try {
+            new Thread(() -> {
+                try {
+                    runUpdateCheck(params);
+                } catch (Throwable ignored) {
+                } finally {
+                    try {
+                        jobFinished(params, false);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }).start();
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     @Override

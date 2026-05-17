@@ -7,7 +7,10 @@ import android.content.Intent;
 public class CoreWorkerBootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
-        String action = intent == null ? "receiver" : String.valueOf(intent.getAction());
-        CoreWorkerUpdateJobService.schedule(context, action);
+        try {
+            String action = intent == null ? "receiver" : String.valueOf(intent.getAction());
+            CoreWorkerUpdateJobService.schedule(context, action);
+        } catch (Throwable ignored) {
+        }
     }
 }
