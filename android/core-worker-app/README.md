@@ -10,6 +10,10 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
+## v0.5.4 — estado local do agent e telemetria de pareamento
+
+A versão `0.5.4` complementa o Patch 46: ao abrir/voltar para o app, o APK verifica o worker local e reporta à VPS se encontrou o agent já pareado, se ele está offline ou se ainda não está vinculado. A tela também mostra o resumo do canal SSH/SSHD informado pelo agent local, ajudando a entender por que o botão remoto de wake pode falhar mesmo com Termux/Tailscale abertos.
+
 ## v0.5.3 — pareamento automático, notificação e download direto
 
 A versão `0.5.3` mantém IP/porta reais fora do código versionado e melhora a comunicação APK ⇄ VPS ⇄ phone-worker. Ao abrir, o app verifica automaticamente se o Termux worker local já está pareado e salva esse estado sem exigir novo código. O app passa a consumir `downloadUrl`/`directApkUrl`, reportar `download_started`, `download_verified` e abertura do instalador para a VPS, e o botão Atualizar baixa o APK direto da VPS e abre o instalador local, sem mandar para página intermediária.

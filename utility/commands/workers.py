@@ -642,6 +642,29 @@ def _runtime_health_label(worker: dict[str, Any]) -> str:
     return "runtime ok"
 
 
+def _wake_channel_text(worker: dict[str, Any]) -> str:
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    sshd = status.get("sshd") if isinstance(status.get("sshd"), dict) else {}
+    supervisor = status.get("supervisor") if isinstance(status.get("supervisor"), dict) else {}
+    pieces: list[str] = []
+    if supervisor:
+        if supervisor.get("watchdog_ok") is True:
+            pieces.append("watchdog ok")
+        elif supervisor.get("watchdog_ok") is False:
+            pieces.append("watchdog off")
+    if sshd:
+        if sshd.get("ok"):
+            port = str(sshd.get("port") or "8022")
+            pieces.append(f"SSHD ok:{port}")
+        elif sshd.get("installed") is False:
+            pieces.append("SSHD ausente")
+        elif sshd.get("running") is False:
+            pieces.append("SSHD parado")
+        elif sshd.get("listening") is False:
+            pieces.append("SSHD sem porta")
+    return " · ".join(pieces[:3])
+
+
 def _boot_health_label(worker: dict[str, Any]) -> str:
     status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
     health = worker.get("health") if isinstance(worker.get("health"), dict) else {}
@@ -914,10 +937,30 @@ def _watch_output_note(output: object) -> str:
         return "SSH do celular não configurado; aguardando watchdog local"
     if "ssh não encontrado" in lowered or "ssh nao encontrado" in lowered:
         return "SSH não encontrado na VPS"
+    if "probe ssh:" in lowered and "connection-refused" in lowered:
+        return "porta SSH fechada/sshd parado no celular"
+    if "probe ssh:" in lowered and "timeout" in lowered:
+        return "SSH/Tailscale não respondeu dentro do timeout"
+    if "probe ssh:" in lowered and "no-route" in lowered:
+        return "sem rota da VPS até o celular"
+    if "health: http 401" in lowered or "health: http 403" in lowered:
+        return "phone-worker respondeu, mas token/config da VPS não bate"
+    if "probe worker-http:" in lowered and "connection-refused" in lowered:
+        return "porta do phone-worker fechada no celular"
+    if "probe worker-http:" in lowered and "timeout" in lowered:
+        return "porta do phone-worker não respondeu"
     if "não consegui acionar" in lowered or "nao consegui acionar" in lowered:
+        if "auth-failed" in lowered:
+            return "SSH respondeu, mas autenticação/chave falhou"
+        if "connection-refused" in lowered:
+            return "SSH recusado; sshd provavelmente parado"
+        if "no-route" in lowered:
+            return "sem rota da VPS até o celular"
+        if "timeout" in lowered:
+            return "SSH/Tailscale sem resposta"
         return "SSH falhou ou celular não respondeu"
     if "celular respondeu ao ssh" in lowered:
-        return "SSH respondeu, mas o agent ainda não confirmou heartbeat"
+        return "SSH respondeu, mas o agent ainda não confirmou heartbeat/token/porta"
     if "worker voltou" in lowered:
         return "script informou worker voltou"
     if "worker online" in lowered:
@@ -1883,9 +1926,17 @@ class WorkersPanelView(discord.ui.LayoutView):
             stale_note = _worker_stale_note(worker)
             if stale_note:
                 lines.append(f"-# {stale_note}")
-                lines.append(f"-# último estado: v `{version}` · {_battery_text(worker)} · {_network_text(worker)}")
+                line = f"-# último estado: v `{version}` · {_battery_text(worker)} · {_network_text(worker)}"
+                wake_channel = _wake_channel_text(worker)
+                if wake_channel:
+                    line += f" · {wake_channel}"
+                lines.append(line)
             else:
-                lines.append(f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)} · {_boot_health_label(worker)} · {_runtime_health_label(worker)}")
+                line = f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)} · {_boot_health_label(worker)} · {_runtime_health_label(worker)}"
+                wake_channel = _wake_channel_text(worker)
+                if wake_channel:
+                    line += f" · {wake_channel}"
+                lines.append(line)
             scripts = worker.get("status", {}).get("scripts") if isinstance(worker.get("status"), dict) else {}
             if isinstance(scripts, dict):
                 installs = scripts.get("installations") if isinstance(scripts.get("installations"), dict) else {}

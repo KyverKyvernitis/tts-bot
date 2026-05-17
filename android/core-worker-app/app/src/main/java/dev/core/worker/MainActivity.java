@@ -58,7 +58,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.3";
+    private static final String APP_VERSION = "0.5.4";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -112,6 +112,7 @@ public class MainActivity extends Activity {
     private volatile String localAgentProfile = "";
     private volatile String localAgentWorkerId = "";
     private volatile String localAgentMessage = "ainda não verificado";
+    private volatile String localAgentSshdSummary = "";
     private volatile boolean localAgentVpsConfigured = false;
     private volatile boolean localAgentJobsConfigured = false;
     private volatile String vpsState = "não testada";
@@ -933,6 +934,25 @@ public class MainActivity extends Activity {
         return state;
     }
 
+    private void reportAppState(String state, String detail) {
+        String serverUrl = normalizedServerUrl();
+        if (serverUrl == null || serverUrl.trim().isEmpty()) return;
+        new Thread(() -> {
+            try {
+                JSONObject payload = statusSnapshot();
+                payload.put("notificationId", "app-state-" + APP_VERSION);
+                payload.put("state", state);
+                payload.put("delivered", true);
+                payload.put("versionName", latestVersionName == null ? "" : latestVersionName);
+                payload.put("versionCode", latestVersionCode);
+                payload.put("detail", detail == null ? "" : detail);
+                payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
+                request("POST", serverUrl + "/core-worker/app/notification", payload, null);
+            } catch (Exception ignored) {
+            }
+        }).start();
+    }
+
     private void reportUpdateNotification(String serverUrl, String state, boolean delivered, String detail) {
         try {
             String id = emptyFallback(latestNotificationId, "apk-" + latestVersionCode + "-" + latestVersionName);
@@ -1128,6 +1148,7 @@ public class MainActivity extends Activity {
         if (localAgentOnline) {
             status.put("local_agent_version", localAgentVersion);
             status.put("local_agent_profile", localAgentProfile);
+            status.put("local_agent_sshd", localAgentSshdSummary);
         }
         return status;
     }
@@ -1347,11 +1368,13 @@ public class MainActivity extends Activity {
         localAgentWorkerId = body.optString("worker_id", localAgentWorkerId);
         localAgentVpsConfigured = body.optBoolean("vps_configured", false);
         localAgentJobsConfigured = body.optBoolean("jobs_configured", false);
+        localAgentSshdSummary = body.optString("sshd_summary", "");
         if (localAgentOnline) {
             String jobs = localAgentJobsConfigured ? "jobs ok" : "jobs pendentes";
             String vps = localAgentVpsConfigured ? "VPS ok" : "VPS pendente";
             String paired = autoPairFromLocalAgent() ? "pareado" : "pareamento local pendente";
-            localAgentMessage = "online · " + vps + " · " + jobs + " · " + paired;
+            String sshd = localAgentSshdSummary == null || localAgentSshdSummary.trim().isEmpty() ? "wake ?" : localAgentSshdSummary.trim();
+            localAgentMessage = "online · " + vps + " · " + jobs + " · " + paired + " · " + sshd;
         } else {
             localAgentMessage = "offline";
         }
@@ -1404,8 +1427,10 @@ public class MainActivity extends Activity {
                 boolean ok = updateLocalAgentStatus(false);
                 if (ok && autoPairFromLocalAgent()) {
                     vpsState = localAgentVpsConfigured ? "ok" : "pendente";
+                    reportAppState("local_agent_seen", "APK detectou worker local já pareado: " + localAgentMessage);
                     show("Pareamento existente detectado automaticamente pelo worker local. Nenhum novo código é necessário.");
                 } else {
+                    reportAppState(ok ? "local_agent_unpaired" : "local_agent_offline", ok ? localAgentMessage : "worker local offline/inacessível pelo APK");
                     show(null);
                 }
             } catch (Exception ignored) {

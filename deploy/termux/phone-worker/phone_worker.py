@@ -42,7 +42,7 @@ _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.7.6"
+PHONE_WORKER_VERSION = "1.7.7"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -1064,6 +1064,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "scripts_ok": ((status.get("scripts") or {}).get("complete") if isinstance(status.get("scripts"), dict) else None),
             "boot_ok": ((status.get("boot") or {}).get("ok") if isinstance(status.get("boot"), dict) else None),
             "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
+            "sshd_ok": ((status.get("sshd") or {}).get("ok") if isinstance(status.get("sshd"), dict) else None),
         },
         "status": {
             "core_worker_jobs": _core_job_runtime_snapshot(),
@@ -1080,6 +1081,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "boot": status.get("boot"),
             "auto_boot_repair": status.get("auto_boot_repair"),
             "supervisor": status.get("supervisor"),
+            "sshd": status.get("sshd"),
         },
     }
 
@@ -1265,6 +1267,7 @@ def _system_status() -> dict[str, Any]:
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "auto_boot_repair": auto_boot_repair,
         "supervisor": _safe_telemetry("supervisor", _runtime_supervisor_snapshot, {"ok": False, "source": "telemetry_failed"}),
+        "sshd": _safe_telemetry("sshd", _sshd_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "supported_tasks": list(SUPPORTED_DIRECT_TASKS),
         "supported_core_worker_jobs": _supported_core_worker_job_types(),
         "pid": os.getpid(),
@@ -1312,6 +1315,8 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "ffprobe": bool(status.get("ffprobe")),
         "boot_ok": ((status.get("boot") or {}).get("ok") if isinstance(status.get("boot"), dict) else None),
         "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
+        "sshd_ok": ((status.get("sshd") or {}).get("ok") if isinstance(status.get("sshd"), dict) else None),
+        "sshd_summary": ((status.get("sshd") or {}).get("summary") if isinstance(status.get("sshd"), dict) else None),
         "note": "Rota local para o APK Core Worker; não executa shell e não expõe token.",
     }
 
@@ -2152,6 +2157,59 @@ def _runtime_supervisor_snapshot() -> dict[str, Any]:
         and (result.get("duplicates") in {0, None})
         and watch_alive
     )
+    return result
+
+
+def _sshd_snapshot() -> dict[str, Any]:
+    """Diagnóstico local do canal SSH do Termux usado pela VPS para wake.
+
+    Não inicia/paralisa SSH automaticamente aqui; apenas informa se o caminho
+    que a VPS tenta usar parece existir. Isso ajuda o painel a diferenciar
+    "Tailscale ativo" de "SSHD/porta indisponível".
+    """
+    configured_port = str(os.getenv("PHONE_WORKER_SSH_PORT") or os.getenv("PHONE_LAVALINK_SSH_PORT") or "8022").strip() or "8022"
+    result: dict[str, Any] = {
+        "ok": False,
+        "source": "termux-sshd",
+        "installed": bool(shutil.which("sshd")),
+        "port": configured_port,
+        "running": False,
+        "processes": 0,
+        "listening": False,
+        "listening_ports": [],
+    }
+    try:
+        count = _pgrep_count("sshd")
+        result["processes"] = count
+        result["running"] = count > 0
+    except Exception as exc:
+        result["process_error"] = _short_text(exc, limit=100)
+    output = ""
+    if shutil.which("ss"):
+        _code, stdout, stderr = _run_text_command(["ss", "-lnt"], timeout=2.0, max_bytes=16384)
+        output = stdout or stderr or ""
+    elif shutil.which("netstat"):
+        _code, stdout, stderr = _run_text_command(["netstat", "-lnt"], timeout=2.0, max_bytes=16384)
+        output = stdout or stderr or ""
+    ports: list[str] = []
+    if output:
+        for line in output.splitlines():
+            if "LISTEN" not in line.upper() and not re.search(r"[:.]\d+\s", line):
+                continue
+            for match in re.findall(r"(?::|\.)(\d{2,5})(?:\s|$)", line):
+                if match not in ports:
+                    ports.append(match)
+        result["listening_ports"] = ports[:16]
+        result["listening"] = configured_port in ports or "22" in ports
+    if not result["installed"]:
+        result["summary"] = "sshd não instalado no Termux"
+    elif result["listening"]:
+        result["summary"] = f"sshd ouvindo porta {configured_port}"
+    elif result["running"]:
+        result["summary"] = "sshd rodando, mas porta configurada não apareceu ouvindo"
+    else:
+        result["summary"] = "sshd parado; wake via SSH não funciona"
+    result["ok"] = bool(result.get("installed") and (result.get("running") or result.get("listening")))
     return result
 
 
@@ -3085,6 +3143,7 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
                     "phone-worker": _safe_telemetry("service phone-worker", lambda: _service_status("phone-worker"), {"ok": False}),
                     "phone-worker-watch": _safe_telemetry("service phone-worker-watch", lambda: _service_status("phone-worker-watch"), {"ok": False}),
                     "tailscale": _safe_telemetry("service tailscale", lambda: _service_status("tailscale"), {"ok": False}),
+                    "sshd": _safe_telemetry("sshd", _sshd_snapshot, {"ok": False}),
                 },
                 "ffmpeg": _command_version("ffmpeg"),
                 "ffprobe": _command_version("ffprobe"),

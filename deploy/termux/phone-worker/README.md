@@ -4,6 +4,12 @@ Worker opcional para usar o celular como ajudante da VPS em tarefas que não sã
 
 Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e usa fallback local.
 
+## v1.7.7 — diagnóstico de wake e canal SSH/HTTP real
+
+A versão `1.7.7` alinha o agent ao Patch 46. O heartbeat agora informa melhor o canal de wake: watchdog local, `sshd`, porta configurada e resumo do SSH no Termux. A VPS passa a diferenciar `porta worker fechada`, `SSHD parado`, `sem rota`, `timeout`, `token errado` e `SSH/auth falhou`, em vez de mostrar apenas “SSH falhou”.
+
+O botão **Acordar phone-worker** usa o watchdog oficial quando consegue entrar por SSH e registra probes HTTP/SSH redigidos no painel. Se o Android matar Termux/SSHD, o painel deve explicar que o canal remoto está indisponível e que o watchdog/local/APK precisam manter o worker vivo.
+
 ## v1.7.6 — comunicação confiável e auto-update garantido
 
 A versão `1.7.6` alinha o agent ao Patch 45. O worker continua usando watchdog local, mas a VPS agora também reavalia mismatch de versão em cada heartbeat/poll e agenda `worker_update` mesmo se a pendência antiga tiver sumido. O agent mantém resultado pendente em disco e reenvia quando a rota/VPN voltar, evitando jobs invisíveis.
