@@ -1,5 +1,26 @@
 # Core Worker APK privado
 
+## v0.5.15 — preparação do runtime interno
+
+A versão `0.5.15` complementa o Patch 55. Ela começa a reduzir a dependência futura do Termux sem remover nem quebrar o fluxo atual.
+
+O comportamento desta versão é intencionalmente conservador:
+
+- o **Termux phone-worker continua sendo o worker oficial** e executa todos os jobs reais;
+- o APK cria e mantém um espaço privado `core-runtime/` apenas em modo preview;
+- a telemetria passa a informar `runtime_mode=termux` e o estado do runtime interno;
+- o painel `workers` mostra se o celular está em **Termux atual** ou em runtime interno futuro;
+- nenhuma função pesada foi migrada ainda;
+- build Android pesado continua sendo responsabilidade do phone worker builder, não da VPS Oracle.
+
+Objetivo da etapa:
+
+```text
+Termux atual funcionando -> APK prepara runtime interno -> migrar primeiro health ping pequeno -> só depois migrar jobs reais
+```
+
+O runtime interno ainda **não substitui** Termux, Termux:API, Termux:Boot ou Tailscale. Ele apenas prepara a estrutura para que isso aconteça em patches futuros, com fallback seguro.
+
 ## v0.5.14 — polimento visual e tela principal mais leve
 
 A versão `0.5.14` complementa o Patch 54.

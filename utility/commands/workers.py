@@ -401,6 +401,27 @@ def _worker_profile_label(worker: dict[str, Any] | None) -> str:
     return labels.get(profile, "Normal")
 
 
+
+def _worker_runtime_label(worker: dict[str, Any] | None) -> str:
+    if not isinstance(worker, dict):
+        return "desconhecido"
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    runtime = status.get("runtime") if isinstance(status.get("runtime"), dict) else worker.get("runtime") if isinstance(worker.get("runtime"), dict) else {}
+    raw = str(worker.get("runtime_mode") or status.get("runtime_mode") or runtime.get("mode") or "").strip().lower()
+    source = str(worker.get("source") or "").strip().lower()
+    internal = str(runtime.get("internal_runtime") or status.get("internal_runtime_state") or worker.get("internal_runtime_state") or "").strip().lower()
+    if not raw and "termux" in source:
+        raw = "termux"
+    if raw in {"termux", "termux-phone-worker"}:
+        if internal and internal not in {"", "none", "unknown"}:
+            return "Termux atual · interno em preparação"
+        return "Termux atual"
+    if raw in {"internal", "core-runtime", "internal-runtime"}:
+        return "Runtime interno"
+    if raw in {"internal_preview", "preview"}:
+        return "Runtime interno preview"
+    return raw or "desconhecido"
+
 def _profile_feature_values(profile: str) -> set[str]:
     values: set[str] = {"phone-worker"}
     roles = set(WORKER_ROLE_PROFILES.get(profile, WORKER_ROLE_PROFILES.get("midia", ())))
@@ -1410,6 +1431,7 @@ def _worker_detail_text(worker: dict[str, Any] | None) -> str:
         f"**Estado:** {online} · visto {seen}",
         f"**Versão:** `{version}`",
         f"**Perfil:** {_worker_profile_label(worker)}",
+        f"**Modo:** {_worker_runtime_label(worker)}",
         f"**Push:** {_core_worker_push_status_text(worker_id)}",
         f"**Bateria:** {_battery_text(worker)}",
         f"**Rede:** {_network_text(worker)}",
@@ -2089,7 +2111,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 lines.append(f"-# {stale_note}")
             push = _core_worker_push_status_text(str(worker.get("worker_id") or ""))
             push_label = push.replace("Push: ", "push ") if push else "push ?"
-            lines.append(f"-# {ready} · visto {seen} · worker `{version}` · perfil {_worker_profile_label(worker)} · {_battery_text(worker)} · {_simple_network_text(worker)} · {push_label}")
+            lines.append(f"-# {ready} · visto {seen} · `{version}` · {_worker_runtime_label(worker)} · perfil {_worker_profile_label(worker)} · {_battery_text(worker)} · {_simple_network_text(worker)} · {push_label}")
             queue_text = _queue_status_text(worker)
             if queue_text:
                 lines.append(f"-# Fila: {queue_text}")
@@ -2099,7 +2121,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             version = _shorten((snapshot.status or {}).get("version") or "sem versão", limit=24)
             lines.append(f"🟢 **{_shorten(snapshot.name or 'phone-worker direto', limit=36)}** · `direto`")
             status = snapshot.status if isinstance(snapshot.status, dict) else {}
-            lines.append(f"-# direto · v `{version}` · {_script_health_label({'status': status})}")
+            lines.append(f"-# direto · v `{version}` · Termux atual · {_script_health_label({'status': status})}")
             lines.append("-# Detalhes técnicos ficam no botão/ação **Detalhes do celular**.")
         elif workers:
             lines.append("Selecione um worker.")

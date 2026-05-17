@@ -42,7 +42,9 @@ _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.7.8"
+PHONE_WORKER_VERSION = "1.7.9"
+CORE_WORKER_RUNTIME_MODE = "termux"
+CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
@@ -1044,6 +1046,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "worker_id": worker_id,
         "name": _short_text(name, limit=64, default="Core Phone Worker"),
         "source": "termux-phone-worker",
+        "runtime_mode": CORE_WORKER_RUNTIME_MODE,
         "version": PHONE_WORKER_VERSION,
         "profile": profile,
         "profile_label": _core_worker_profile_label(profile),
@@ -1065,10 +1068,20 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "boot_ok": ((status.get("boot") or {}).get("ok") if isinstance(status.get("boot"), dict) else None),
             "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
             "sshd_ok": ((status.get("sshd") or {}).get("ok") if isinstance(status.get("sshd"), dict) else None),
+            "runtime_mode": CORE_WORKER_RUNTIME_MODE,
+            "internal_runtime_state": CORE_WORKER_INTERNAL_RUNTIME_STATE,
         },
         "status": {
             "core_worker_jobs": _core_job_runtime_snapshot(),
             "core_worker_network": _core_worker_network_runtime_snapshot(),
+            "runtime_mode": CORE_WORKER_RUNTIME_MODE,
+            "runtime": {
+                "mode": CORE_WORKER_RUNTIME_MODE,
+                "current_worker": "termux-phone-worker",
+                "internal_runtime": CORE_WORKER_INTERNAL_RUNTIME_STATE,
+                "migration_stage": "termux-current",
+                "summary": "Termux executa jobs reais; APK prepara runtime interno gradualmente.",
+            },
             "profile": profile,
             "profile_label": _core_worker_profile_label(profile),
             "http_host": host,
@@ -1256,6 +1269,13 @@ def _system_status() -> dict[str, Any]:
     return {
         "ok": True,
         "worker": "phone-worker",
+        "runtime_mode": CORE_WORKER_RUNTIME_MODE,
+        "runtime": {
+            "mode": CORE_WORKER_RUNTIME_MODE,
+            "current_worker": "termux-phone-worker",
+            "internal_runtime": CORE_WORKER_INTERNAL_RUNTIME_STATE,
+            "migration_stage": "termux-current",
+        },
         "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
         "name": _default_worker_name(),
         "version": PHONE_WORKER_VERSION,
@@ -1297,6 +1317,13 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "ok": True,
         "local_only": True,
         "worker": "phone-worker",
+        "runtime_mode": CORE_WORKER_RUNTIME_MODE,
+        "runtime": {
+            "mode": CORE_WORKER_RUNTIME_MODE,
+            "current_worker": "termux-phone-worker",
+            "internal_runtime": CORE_WORKER_INTERNAL_RUNTIME_STATE,
+            "migration_stage": "termux-current",
+        },
         "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
         "name": _default_worker_name(),
         "version": PHONE_WORKER_VERSION,
@@ -1321,7 +1348,7 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "sshd_summary": ((status.get("sshd") or {}).get("summary") if isinstance(status.get("sshd"), dict) else None),
         "shell_autostart_ok": ((status.get("shell_autostart") or {}).get("ok") if isinstance(status.get("shell_autostart"), dict) else None),
         "shell_autostart_summary": ((status.get("shell_autostart") or {}).get("summary") if isinstance(status.get("shell_autostart"), dict) else None),
-        "note": "Rota local para o APK Core Worker; não executa shell e não expõe token.",
+        "note": "Rota local para o APK Core Worker; Termux segue como runtime oficial nesta etapa e não expõe token.",
     }
 
 

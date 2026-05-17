@@ -288,6 +288,12 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
     roles = _merge_unique(normalize_roles(record.get("roles"), limit=16), normalize_roles(record.get("manual_roles"), limit=16), limit=16)
     capabilities = _merge_unique(normalize_roles(record.get("capabilities"), limit=24), normalize_roles(record.get("manual_capabilities"), limit=24), limit=24)
     supported_tasks = _merge_unique(normalize_job_types(record.get("supported_tasks"), limit=64), normalize_job_types(record.get("manual_supported_tasks"), limit=64), limit=64)
+    status = record.get("status") if isinstance(record.get("status"), Mapping) else {}
+    runtime = status.get("runtime") if isinstance(status.get("runtime"), Mapping) else {}
+    runtime_mode = _short_text(record.get("runtime_mode") or status.get("runtime_mode") or runtime.get("mode") or "", limit=32)
+    if not runtime_mode:
+        source_hint = str(record.get("source") or "").lower()
+        runtime_mode = "termux" if "termux" in source_hint else "unknown"
     public = {
         "worker_id": str(record.get("worker_id") or ""),
         "name": _short_text(record.get("name"), limit=64, default="Core Worker"),
@@ -301,6 +307,8 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "supported_tasks": supported_tasks,
         "version": _short_text(record.get("version"), limit=48),
         "source": _short_text(record.get("source"), limit=32, default="apk"),
+        "runtime_mode": runtime_mode,
+        "runtime": _safe_dict(runtime, max_items=16),
         "endpoint": _short_text(record.get("endpoint"), limit=160),
         "battery": _safe_dict(record.get("battery"), max_items=16),
         "network": _safe_dict(record.get("network"), max_items=16),
