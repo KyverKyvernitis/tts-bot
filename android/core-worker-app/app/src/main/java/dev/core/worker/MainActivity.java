@@ -63,7 +63,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.7";
+    private static final String APP_VERSION = "0.5.8";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -124,6 +124,10 @@ public class MainActivity extends Activity {
     private LinearLayout technicalDetailsContent;
     private Button technicalToggleButton;
     private boolean technicalExpanded = false;
+    private TextView profileSummaryText;
+    private LinearLayout profileDetailsContent;
+    private Button profileToggleButton;
+    private boolean profileExpanded = false;
 
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";
@@ -200,7 +204,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Este app deixa o celular pronto para ajudar a VPS do bot. Quando tudo estiver certo, a tela principal mostra só o essencial; detalhes técnicos ficam recolhidos.");
+        subtitle.setText("Este app deixa o celular pronto para ajudar a VPS do bot. A tela principal mostra o essencial; o resto fica em detalhes técnicos.");
         subtitle.setTextColor(MUTED);
         subtitle.setTextSize(14);
         subtitle.setPadding(0, dp(8), 0, dp(14));
@@ -233,8 +237,8 @@ public class MainActivity extends Activity {
 
         LinearLayout prepareCard = card();
         mainContent.addView(prepareCard);
-        prepareCard.addView(sectionTitle("1. Este celular"));
-        prepareCard.addView(smallText("Resumo simples do estado atual. Se o worker local já estiver pareado, você não precisa gerar outro código."));
+        prepareCard.addView(sectionTitle("1. Estado deste celular"));
+        prepareCard.addView(smallText("Resumo rápido. Quando aparecer pronto, você não precisa mexer em Termux, rede ou código."));
 
         localAgentText = smallText("Este celular ainda não foi verificado.");
         localAgentText.setTextColor(TEXT);
@@ -242,14 +246,14 @@ public class MainActivity extends Activity {
         localAgentText.setPadding(dp(10), dp(10), dp(10), dp(10));
         prepareCard.addView(localAgentText);
 
-        prepareButton = button("Atualizar status deste celular");
+        prepareButton = button("Verificar agora");
         prepareButton.setOnClickListener(v -> checkLocalAgent(true));
         prepareCard.addView(prepareButton);
 
         connectCard = cardWithTopMargin(mainContent);
         connectTitleText = sectionTitle("2. Conectar à VPS");
         connectCard.addView(connectTitleText);
-        connectHintText = smallText("Use o código gerado no painel workers do Discord. A VPS privada vem fixa no build; o app não mostra nem salva IP sensível no GitHub.");
+        connectHintText = smallText("Use o código gerado no painel workers do Discord. Depois de conectado, este bloco vira apenas um resumo.");
         connectCard.addView(connectHintText);
 
         pairingStatusText = smallText("");
@@ -293,14 +297,29 @@ public class MainActivity extends Activity {
         pairingForm.addView(pairButton);
 
         LinearLayout profileCard = cardWithTopMargin(mainContent);
-        profileCard.addView(sectionTitle("3. Perfil deste celular"));
-        profileCard.addView(smallText("Escolha o que este celular oferece. Isso altera só este aparelho; o controle de workers continua no Discord."));
+        profileCard.addView(sectionTitle("3. Perfil de trabalho"));
+        profileCard.addView(smallText("O perfil define como este celular ajuda a VPS. Normalmente não precisa alterar."));
+
+        profileSummaryText = smallText("");
+        profileSummaryText.setTextColor(TEXT);
+        profileSummaryText.setBackgroundColor(CARD_SOFT);
+        profileSummaryText.setPadding(dp(10), dp(10), dp(10), dp(10));
+        profileCard.addView(profileSummaryText);
+
+        profileToggleButton = button("Alterar perfil");
+        profileToggleButton.setOnClickListener(v -> toggleProfileDetails());
+        profileCard.addView(profileToggleButton);
+
+        profileDetailsContent = new LinearLayout(this);
+        profileDetailsContent.setOrientation(LinearLayout.VERTICAL);
+        profileDetailsContent.setVisibility(View.GONE);
+        profileCard.addView(profileDetailsContent);
 
         profileGroup = new RadioGroup(this);
         profileGroup.setOrientation(RadioGroup.VERTICAL);
         profileGroup.setPadding(0, dp(6), 0, dp(6));
-        addProfileRadio("leve", "Leve · reserva, diagnóstico e logs");
-        addProfileRadio("midia", "Mídia · recomendado para FFmpeg/TTS/ZIP");
+        addProfileRadio("leve", "Leve · reserva e diagnósticos");
+        addProfileRadio("midia", "Mídia · recomendado para tarefas normais");
         addProfileRadio("completo", "Completo · mídia + manutenção");
         addProfileRadio("builder", "Builder · compilar APK fora da VPS");
         addProfileRadio("turbo", "Turbo · ajuda máxima para acelerar a VPS");
@@ -311,35 +330,28 @@ public class MainActivity extends Activity {
             updateProfileHint(profile);
             refreshLocalStatus("Perfil escolhido: " + profileLabel(profile) + ". Toque em Aplicar perfil para enviar ao worker local.");
         });
-        profileCard.addView(profileGroup);
+        profileDetailsContent.addView(profileGroup);
 
         profileHintText = smallText("");
-        profileCard.addView(profileHintText);
+        profileDetailsContent.addView(profileHintText);
 
         saveProfileButton = button("Aplicar perfil");
         saveProfileButton.setOnClickListener(v -> updateOwnProfile());
-        profileCard.addView(saveProfileButton);
+        profileDetailsContent.addView(saveProfileButton);
 
         LinearLayout updateCard = cardWithTopMargin(mainContent);
         updateCard.addView(sectionTitle("4. Atualizações"));
-        updateCard.addView(smallText("A VPS avisa quando publicar APK novo. Com o app fechado, o Android permite apenas checagens locais periódicas; por isso a notificação pode não ser instantânea sem push/FCM."));
-        updateText = smallText("Versão instalada: " + APP_VERSION + "\nAtualização: ainda não verificada.");
+        updateCard.addView(smallText("O app verifica a VPS de tempos em tempos. Com o app fechado, o Android pode atrasar a checagem local porque não existe push/FCM."));
+        updateText = smallText("Instalado: " + APP_VERSION + "\nAtualizações: ainda não verificadas.");
         updateText.setTextColor(TEXT);
         updateText.setBackgroundColor(CARD_SOFT);
         updateText.setPadding(dp(10), dp(10), dp(10), dp(10));
         updateCard.addView(updateText);
 
-        updateCheckButton = button("Procurar atualização agora");
+        updateCheckButton = button("Verificar atualização agora");
         updateCheckButton.setOnClickListener(v -> checkForUpdate());
         updateCard.addView(updateCheckButton);
 
-        heartbeatButton = button("Atualizar painel workers");
-        heartbeatButton.setOnClickListener(v -> sendHeartbeat());
-        updateCard.addView(heartbeatButton);
-
-        clearButton = button("Esquecer conexão local");
-        clearButton.setOnClickListener(v -> confirmClearPairing());
-        updateCard.addView(clearButton);
 
         LinearLayout technicalCard = cardWithTopMargin(mainContent);
         technicalCard.addView(sectionTitle("Detalhes técnicos"));
@@ -366,6 +378,14 @@ public class MainActivity extends Activity {
         tailscaleButton = button("Abrir Tailscale");
         tailscaleButton.setOnClickListener(v -> openTailscale());
         technicalDetailsContent.addView(tailscaleButton);
+
+        heartbeatButton = button("Sincronizar com painel workers");
+        heartbeatButton.setOnClickListener(v -> sendHeartbeat());
+        technicalDetailsContent.addView(heartbeatButton);
+
+        clearButton = button("Esquecer conexão local");
+        clearButton.setOnClickListener(v -> confirmClearPairing());
+        technicalDetailsContent.addView(clearButton);
 
         statusText = new TextView(this);
         statusText.setTextColor(TEXT);
@@ -669,6 +689,17 @@ public class MainActivity extends Activity {
         refreshLocalStatus(null);
     }
 
+    private void toggleProfileDetails() {
+        profileExpanded = !profileExpanded;
+        if (profileDetailsContent != null) {
+            profileDetailsContent.setVisibility(profileExpanded ? View.VISIBLE : View.GONE);
+        }
+        if (profileToggleButton != null) {
+            profileToggleButton.setText(profileExpanded ? "Ocultar perfis" : "Alterar perfil");
+        }
+        updateProfileHint(prefs.getString("profile", selectedProfileSafe()));
+    }
+
     private void showPairingForm(boolean show, String message) {
         if (pairingForm != null) {
             pairingForm.setVisibility(show ? View.VISIBLE : View.GONE);
@@ -689,14 +720,14 @@ public class MainActivity extends Activity {
             }
             if (connectHintText != null) {
                 connectHintText.setText(paired
-                        ? "Este celular já está vinculado ao worker local. O campo de código só aparece se você quiser trocar/refazer o pareamento."
-                        : "Use o código gerado no painel workers do Discord. A VPS privada vem fixa no build; o app não mostra nem salva IP sensível no GitHub.");
+                        ? "Este celular já está vinculado ao worker local. O campo de código fica escondido até você pedir para trocar."
+                        : "Use o código gerado no painel workers do Discord. A VPS privada vem fixa no build e não aparece no código do GitHub.");
             }
             if (pairingStatusText != null) {
                 String profile = prefs.getString("profile", selectedProfileSafe());
                 pairingStatusText.setText(paired
                         ? "Conectado à VPS principal.\n"
-                                + "Este celular está pronto para trabalhar quando o worker local estiver online.\n"
+                                + "Este celular está pronto quando o worker local estiver online.\n"
                                 + "Perfil: " + profileLabel(profile)
                         : "Ainda não conectado. Gere um código no Discord e conecte este celular.");
             }
@@ -845,14 +876,14 @@ public class MainActivity extends Activity {
     private void autoCheckForUpdate() {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
-            updateUpdateUi("Versão instalada: " + APP_VERSION + "\nAtualização: VPS padrão não configurada no APK.", false, false);
+            updateUpdateUi("Instalado: " + APP_VERSION + "\nAtualizações: VPS padrão não configurada no APK.", false, false);
             return;
         }
         new Thread(() -> {
             try {
                 checkForUpdateInternal(serverUrl, false);
             } catch (Exception ignored) {
-                updateUpdateUi("Versão instalada: " + APP_VERSION + "\nAtualização: ainda não verificada.", false, false);
+                updateUpdateUi("Instalado: " + APP_VERSION + "\nAtualizações: ainda não verificadas.", false, false);
             }
         }).start();
     }
@@ -872,7 +903,7 @@ public class MainActivity extends Activity {
             latestUpdateAvailable = false;
             latestVersionName = "";
             latestVersionCode = -1;
-            updateUpdateUi("Versão instalada: " + APP_VERSION + "\nAtualização: manifesto latest.json indisponível na VPS.", false, false);
+            updateUpdateUi("Instalado: " + APP_VERSION + "\nAtualizações: a VPS não publicou manifesto de APK.", false, false);
             if (userVisible) {
                 show("Não encontrei manifesto de atualização na VPS.\nHTTP " + result.status + " · " + compactResultBody(result.body));
             }
@@ -894,15 +925,15 @@ public class MainActivity extends Activity {
         latestUpdateAvailable = available;
 
         StringBuilder text = new StringBuilder();
-        text.append("Versão instalada: ").append(APP_VERSION).append(" (").append(BuildConfig.VERSION_CODE).append(").\n");
-        text.append("Versão na VPS: ").append(emptyFallback(latestVersionName, "sem nome"));
+        text.append("Instalado: ").append(APP_VERSION).append(" (").append(BuildConfig.VERSION_CODE).append(").\n");
+        text.append("Na VPS: ").append(emptyFallback(latestVersionName, "sem nome"));
         if (latestVersionCode >= 0) text.append(" (").append(latestVersionCode).append(")");
         text.append(".\n");
-        text.append(available ? "Atualização disponível. Use o botão Atualizar no topo." : "Este APK está em dia.");
-        if (!requiredAgent.isEmpty()) {
-            text.append("\nWorker local sugerido: ").append(requiredAgent).append(".");
+        text.append(available ? "Atualização pronta para instalar." : "Atualizações em dia.");
+        if (!requiredAgent.isEmpty() && technicalExpanded) {
+            text.append("\nWorker recomendado: ").append(requiredAgent).append(".");
         }
-        if (!latestChangelog.isEmpty()) {
+        if (!latestChangelog.isEmpty() && technicalExpanded) {
             text.append("\n\nMudanças:\n").append(latestChangelog);
         }
         updateUpdateUi(text.toString(), available, true);
@@ -1049,7 +1080,7 @@ public class MainActivity extends Activity {
             }
             if (updateBannerText != null) {
                 String version = emptyFallback(latestVersionName, "nova versão");
-                updateBannerText.setText("Atualização disponível: " + version + "\nToque em Atualizar para baixar direto da VPS e abrir a instalação.");
+                updateBannerText.setText("Atualização disponível: " + version + "\nBaixe direto da VPS e conclua pelo instalador do Android.");
             }
             applyUpdateButtonState(available, updateDownloadBusy ? "Baixando..." : "Atualizar agora", updateDownloadBusy);
             if (refreshSummary) {
@@ -1068,7 +1099,7 @@ public class MainActivity extends Activity {
             }
             applyUpdateButtonState(showBanner && latestUpdateAvailable, buttonText, busy);
             if (updateText != null && message != null && !message.trim().isEmpty()) {
-                updateText.setText("Versão instalada: " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ").\n" + message);
+                updateText.setText("Instalado: " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ").\n" + message);
             }
         });
     }
@@ -1698,14 +1729,15 @@ public class MainActivity extends Activity {
 
     private String localAgentLine() {
         if (!localAgentOnline) {
-            return "Este celular ainda não está pronto. Abra o Termux para iniciar o worker local.";
+            return "Este celular ainda não está pronto. Abra o Termux para acordar o worker local.";
         }
-        String profile = emptyFallback(localAgentProfile, "perfil não informado");
+        String profile = emptyFallback(localAgentProfile, prefs.getString("profile", "midia"));
         if (hasPairing()) {
-            return "Este celular está conectado e pronto para trabalhar.\nPerfil: " + profile;
+            return "Este celular está conectado e pronto para trabalhar.\nPerfil atual: " + profileLabel(profile);
         }
         return "Worker local detectado. Falta conectar este celular à VPS principal.";
     }
+
 
     private boolean hasPairing() {
         boolean pairedViaLocal = prefs.getBoolean("paired_via_local_agent", false);
@@ -1820,6 +1852,8 @@ public class MainActivity extends Activity {
         if (testButton != null) testButton.setEnabled(enabled);
         if (pairButton != null) pairButton.setEnabled(enabled);
         if (saveProfileButton != null) saveProfileButton.setEnabled(enabled);
+        if (profileToggleButton != null) profileToggleButton.setEnabled(enabled);
+        if (technicalToggleButton != null) technicalToggleButton.setEnabled(enabled);
         if (heartbeatButton != null) heartbeatButton.setEnabled(enabled);
         if (updateCheckButton != null) updateCheckButton.setEnabled(enabled);
         if (updateInstallButton != null) applyUpdateButtonState(latestUpdateAvailable, updateDownloadBusy ? "Baixando..." : "Atualizar agora", updateDownloadBusy);
@@ -1844,9 +1878,9 @@ public class MainActivity extends Activity {
         } else {
             builder.append("Abra o Termux para iniciar o worker local e deixar este celular pronto.");
         }
-        builder.append("\n\nResumo\n");
+        builder.append("\n\nStatus rápido\n");
         builder.append(checkLine("VPS", paired ? "conectada" : vpsChecklistLabel(server))).append('\n');
-        builder.append(checkLine("Worker local", localAgentOnline ? "online" : "offline")).append('\n');
+        builder.append(checkLine("Worker", localAgentOnline ? "online" : "offline")).append('\n');
         builder.append(checkLine("Perfil", profileLabel(profile))).append('\n');
         builder.append(checkLine("Atualizações", updateChecklistLabel())).append('\n');
         if (technicalExpanded) {
@@ -1930,7 +1964,7 @@ public class MainActivity extends Activity {
         builder.append(checkLine("Termux:API", isPackageInstalled("com.termux.api") ? "instalado" : "precisa instalar")).append('\n');
         builder.append(checkLine("Termux:Boot", isPackageInstalled("com.termux.boot") ? "instalado" : "recomendado para boot automático")).append('\n');
         builder.append(checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "Tailscale externo ainda necessário")).append('\n');
-        builder.append(checkLine("Worker local", localAgentOnline ? "online" : "offline")).append('\n');
+        builder.append(checkLine("Worker", localAgentOnline ? "online" : "offline")).append('\n');
         builder.append(checkLine("VPS local", localAgentVpsConfigured ? "configurada" : "pendente")).append('\n');
         builder.append(checkLine("Jobs locais", localAgentJobsConfigured ? "ok" : "pendentes")).append('\n');
         builder.append(checkLine("SSHD", emptyFallback(localAgentSshdSummary, "não informado"))).append('\n');
@@ -2031,28 +2065,33 @@ public class MainActivity extends Activity {
 
     private String profileDescription(String profile) {
         if ("leve".equals(profile)) {
-            return "Reserva e tarefas leves: diagnósticos e resumo de logs.";
+            return "Reserva e diagnósticos leves.";
         }
         if ("completo".equals(profile)) {
-            return "Principal forte: mídia, ZIP, TTS, FFmpeg e manutenção.";
+            return "Ajuda forte para mídia, arquivos e manutenção segura.";
         }
         if ("builder".equals(profile)) {
-            return "Compila APK do Core Worker em um celular builder para aliviar a VPS. Use só em aparelho forte.";
+            return "Usa este celular para compilar APK privado e aliviar a VPS.";
         }
         if ("turbo".equals(profile)) {
-            return "Modo mais forte: logs, ZIP, FFmpeg, cache, APK builder e tarefas auxiliares para deixar a VPS mais rápida quando este celular estiver disponível.";
+            return "Modo mais forte para acelerar tarefas auxiliares quando este celular estiver disponível.";
         }
         if ("bedrock".equals(profile)) {
-            return "Preparado para Minecraft Bedrock no futuro. Não assume Java.";
+            return "Reservado para Minecraft Bedrock no futuro.";
         }
-        return "Recomendado agora: logs, ZIP, FFmpeg, FFprobe e TTS/cache.";
+        return "Recomendado para uso normal: mídia, arquivos e cache.";
     }
 
     private void updateProfileHint(String profile) {
+        String summary = "Perfil atual: " + profileLabel(profile) + "\n" + profileDescription(profile);
+        if (profileSummaryText != null) {
+            profileSummaryText.setText(summary);
+        }
         if (profileHintText != null) {
             profileHintText.setText(profileDescription(profile));
         }
     }
+
 
     private JSONArray jsonArray(String[] values) {
         JSONArray array = new JSONArray();

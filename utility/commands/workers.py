@@ -579,6 +579,28 @@ def _network_text(worker: dict[str, Any]) -> str:
 
 
 
+
+def _simple_network_text(worker: dict[str, Any]) -> str:
+    network = worker.get("network") if isinstance(worker.get("network"), dict) else {}
+    if not network:
+        return "rede não informada"
+    parts: list[str] = []
+    kind = str(network.get("type") or network.get("kind") or network.get("transport") or "").strip().lower()
+    if kind and kind not in {"unknown", "connected"}:
+        parts.append(_shorten(kind, limit=14))
+    elif kind == "connected":
+        parts.append("rede ok")
+    tailscale = network.get("tailscale")
+    tailscale_state = str(network.get("tailscale_state") or "").strip().lower()
+    if tailscale is True or tailscale_state in {"app/vpn", "vpn", "app", "running"}:
+        parts.append("rede privada ok")
+    elif tailscale is False and network.get("tailscale_cli"):
+        parts.append("rede privada off")
+    ping_label = _ping_text(network)
+    if ping_label:
+        parts.append(ping_label)
+    return " · ".join(parts[:3]) if parts else "rede ok"
+
 def _worker_ping_numeric(worker: dict[str, Any]) -> float | None:
     network = worker.get("network") if isinstance(worker.get("network"), dict) else {}
     for key in ("vps_ping_ms", "ping_ms", "latency_ms", "vps_latency_ms"):
@@ -811,16 +833,16 @@ def _core_worker_notification_status_text() -> str:
     except Exception:
         latest = {}
     if not isinstance(latest, dict) or not latest:
-        return f"APK {expected_name or '?'}: aguardando publicação" if expected_name else ""
-    version = str(latest.get("versionName") or "?")
+        return f"APK: aguardando publicação ({expected_name or '?'})" if expected_name else ""
+    version = str(latest.get("versionName") or expected_name or "?")
     try:
         latest_code = int(latest.get("versionCode") or 0)
     except Exception:
         latest_code = 0
     if expected_code and latest_code and latest_code < expected_code:
-        return f"APK {expected_name or expected_code}: latest antigo ({version}) · build pendente"
+        return f"APK: build pendente ({expected_name or expected_code}; VPS ainda em {version})"
     if not latest.get("notificationRequested"):
-        return ""
+        return "APK: publicado"
     notification_id = str(latest.get("notificationId") or "").strip()
     published_at = latest.get("publishedAt")
     try:
@@ -838,41 +860,38 @@ def _core_worker_notification_status_text() -> str:
         except Exception:
             app_code = 0
         installed_latest = bool(latest_code and app_code >= latest_code)
-        if installed_latest or state == "app_opened" and app_version == version:
-            label = "app atualizado"
-        elif delivered:
+        if installed_latest or (state == "app_opened" and app_version == version):
+            return f"APK: instalado {app_version or version}"
+        if delivered:
             labels = {
-                "displayed": "pendente de instalação",
-                "background_displayed": "pendente de instalação",
-                "duplicate": "pendente de instalação",
-                "background_duplicate": "pendente de instalação",
+                "displayed": "instalação pendente",
+                "background_displayed": "instalação pendente",
+                "duplicate": "instalação pendente",
+                "background_duplicate": "instalação pendente",
                 "download_started": "download iniciado",
-                "download_verified": "APK baixado · instalação pendente",
+                "download_verified": "baixado · instalação pendente",
                 "install_intent_opened": "instalador aberto · instalação pendente",
             }
-            label = labels.get(state, "pendente de instalação")
-        elif state in {"permission_missing", "background_permission_missing"}:
-            label = "sem permissão de notificação"
-        elif state == "manifest_seen":
-            label = "app viu manifesto"
-        elif state == "install_permission_missing":
-            label = "sem permissão de instalar"
-        elif state in {"download_failed", "install_intent_failed", "background_failed"}:
-            label = "falha no update"
-        else:
-            label = state
-        suffix = f" · app {app_version}" if app_version else ""
-        return f"notif APK {version}: {label}{suffix}"
+            return f"APK: {labels.get(state, 'instalação pendente')} ({version})"
+        if state in {"permission_missing", "background_permission_missing"}:
+            return "APK: sem permissão de notificação"
+        if state == "manifest_seen":
+            return f"APK: aviso visto ({version})"
+        if state == "install_permission_missing":
+            return "APK: sem permissão de instalar"
+        if state in {"download_failed", "install_intent_failed", "background_failed"}:
+            return "APK: falha no update"
+        return f"APK: {state}"
     if published_at:
         try:
             age = _format_age(max(0, time.time() - float(published_at)))
-            return f"notif APK {version}: pendente {age}"
+            return f"APK: aguardando app ver versão {version} · {age}"
         except Exception:
             pass
-    return f"notif APK {version}: pendente"
+    return f"APK: aguardando app ver versão {version}"
 
 def _automation_status_text() -> str:
-    """Resumo curto do pipeline automático agent/APK para mostrar no painel."""
+    """Resumo curto e humano do pipeline agent/APK para o painel."""
     root = _repo_root()
     pending_path = root / "data" / "core_worker_automation_pending.json"
     status_path = root / "data" / "core_worker_automation_status.json"
@@ -893,9 +912,9 @@ def _automation_status_text() -> str:
         if agent:
             target = agent.get('target_version') or _expected_phone_worker_version() or '?'
             if _active_workers_need_agent_version(snapshot_workers, target):
-                parts.append(f"agent {target} pendente")
+                parts.append(f"Worker: atualização pendente ({target})")
         if apk:
-            parts.append(f"APK {apk.get('versionName') or '?'} pendente")
+            parts.append(f"APK: build pendente ({apk.get('versionName') or '?'})")
     if not parts:
         try:
             status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
@@ -909,17 +928,20 @@ def _automation_status_text() -> str:
                 queued = agent.get("queued") or []
                 target = agent.get("target_version") or _expected_phone_worker_version() or "?"
                 if queued:
-                    parts.append(f"agent {target}: {len(queued)} job(s)")
+                    parts.append(f"Worker: {len(queued)} atualização(ões) na fila")
                 elif agent.get("pending") and _active_workers_need_agent_version(snapshot_workers, target):
-                    parts.append(f"agent {target} pendente")
+                    parts.append(f"Worker: atualização pendente ({target})")
             if apk:
-                msg = "publicado" if apk.get("already_published") else ("job criado" if apk.get("job") else "pendente")
-                parts.append(f"APK {apk.get('versionName') or '?'}: {msg}")
+                if apk.get("already_published"):
+                    parts.append(f"APK: publicado {apk.get('versionName') or '?'}")
+                elif apk.get("job"):
+                    parts.append(f"APK: build em andamento ({apk.get('versionName') or '?'})")
+                else:
+                    parts.append(f"APK: build pendente ({apk.get('versionName') or '?'})")
     notif = _core_worker_notification_status_text()
     if notif:
         parts.append(notif)
-    return " · ".join(parts[:4])
-
+    return " · ".join(parts[:4]) if parts else "tudo em dia"
 
 def _worker_wake_tokens(worker: dict[str, Any]) -> set[str]:
     tokens: set[str] = set()
@@ -1853,22 +1875,23 @@ class WorkersPanelView(discord.ui.LayoutView):
         registered = int((summary or {}).get('registered') or 0)
         online = int((summary or {}).get('online') or 0)
         pairings = int((summary or {}).get('pairings_active') or 0)
-        registry_label = "nenhum worker pareado" if registered <= 0 else f"`{registered}` reg · `{online}` online"
+        workers_label = "nenhum celular pareado" if registered <= 0 else f"{online}/{registered} online"
         if pairings:
-            registry_label += f" · `{pairings}` pair"
-        jobs_label = f"`{queued}` pend · `{running}` rod"
-        if queued and not online and not self._has_legacy_worker():
-            jobs_label += " · sem worker"
-        automation_label = _automation_status_text()
-        automation_line = f"\n**Automação:** {_shorten(automation_label, limit=120)}" if automation_label else ""
+            workers_label += f" · {pairings} código(s) ativo(s)"
+        queue_label = "sem tarefas na fila"
+        if queued or running:
+            queue_label = f"{queued} pendente(s) · {running} rodando"
+            if queued and not online and not self._has_legacy_worker():
+                queue_label += " · sem celular online"
+        automation_label = _shorten(_automation_status_text(), limit=140)
         header = discord.ui.TextDisplay(
             "# 📱 Core Workers\n"
-            f"-# privado · `workers` / `worker` / `w` · guild `{WORKERS_COMMAND_GUILD_ID}`\n"
             f"**Estado:** {snapshot.state_label}\n"
-            f"**Registry:** {registry_label}\n"
-            f"**Jobs:** {jobs_label}"
-            f"{automation_line}"
+            f"**Celulares:** {workers_label}\n"
+            f"**Atualizações:** {automation_label}\n"
+            f"-# Fila: {queue_label}. Use detalhes técnicos só quando precisar depurar."
         )
+
 
         worker_options = self._worker_select_options()
         worker_select = None
@@ -1896,8 +1919,9 @@ class WorkersPanelView(discord.ui.LayoutView):
             action_options = self._action_select_options()
             action_disabled = bool(action_options and str(action_options[0].value) == "_unsupported")
             action_label = next((str(item.get("label")) for item in WORKER_ACTION_CATEGORIES if str(item.get("value")) == self.selected_action_category), "Ações")
+            action_placeholder = f"{action_label}: escolha uma ação" if not action_disabled else "Sem ações nessa categoria"
             action_select = self._new_select(
-                placeholder=f"Ação de {action_label.lower()}" if not action_disabled else "Sem ações nessa categoria",
+                placeholder=action_placeholder,
                 min_values=1,
                 max_values=1,
                 options=action_options,
@@ -1964,49 +1988,30 @@ class WorkersPanelView(discord.ui.LayoutView):
                     role_s = str(role)
                     if role_s and role_s not in roles_union:
                         roles_union.append(role_s)
-            lines.append(f"Roles: {_role_text(roles_union, limit=6)}")
+            if roles_union:
+                lines.append(f"-# {len(roles_union)} função(ões) técnicas disponíveis nos celulares online")
         elif worker:
             icon = "🟢" if worker.get("online") else "🔴"
             name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=36)
-            worker_id = _shorten(worker.get("worker_id"), limit=24)
             seen = _format_age(worker.get("last_seen_age_seconds"))
-            roles = _role_text([str(r) for r in (worker.get("roles") or [])], limit=5)
             version = _agent_version_label(worker.get("version"))
-            lines.append(f"{icon} **{name}** · `{worker_id}`")
+            ready = "pronto" if worker.get("online") and not _worker_stale_note(worker) else ("sem resposta recente" if worker.get("online") else "offline")
+            lines.append(f"{icon} **{name}**")
             stale_note = _worker_stale_note(worker)
             if stale_note:
                 lines.append(f"-# {stale_note}")
-                line = f"-# último estado: v `{version}` · {_battery_text(worker)} · {_network_text(worker)}"
-                wake_channel = _wake_channel_text(worker)
-                if wake_channel:
-                    line += f" · {wake_channel}"
-                lines.append(line)
-            else:
-                line = f"-# visto {seen} · v `{version}` · {_battery_text(worker)} · {_network_text(worker)} · {_script_health_label(worker)} · {_boot_health_label(worker)} · {_runtime_health_label(worker)}"
-                wake_channel = _wake_channel_text(worker)
-                if wake_channel:
-                    line += f" · {wake_channel}"
-                lines.append(line)
-            scripts = worker.get("status", {}).get("scripts") if isinstance(worker.get("status"), dict) else {}
-            if isinstance(scripts, dict):
-                installs = scripts.get("installations") if isinstance(scripts.get("installations"), dict) else {}
-                active_dups = installs.get("active_duplicates") if isinstance(installs.get("active_duplicates"), list) else []
-                dups = installs.get("duplicates") if isinstance(installs.get("duplicates"), list) else []
-                if active_dups:
-                    lines.append(f"-# ⚠️ duplicata ativa no Termux: `{_shorten(active_dups[0], limit=70)}` · boot_repair/worker_update alinham a oficial.")
-                elif dups:
-                    lines.append(f"-# ℹ️ duplicata inativa detectada: `{_shorten(dups[0], limit=72)}` · oficial: `~/phone-worker`.")
-            lines.append(f"Roles: {roles}")
+            lines.append(f"-# {ready} · visto {seen} · worker `{version}` · {_battery_text(worker)} · {_simple_network_text(worker)}")
             queue_text = _queue_status_text(worker)
             if queue_text:
                 lines.append(f"-# Fila: {queue_text}")
+            lines.append("-# Detalhes técnicos ficam no botão/ação **Detalhes do celular**.")
         elif self._selected_is_legacy():
             roles = _role_text(snapshot.roles, limit=6)
             version = _shorten((snapshot.status or {}).get("version") or "sem versão", limit=24)
             lines.append(f"🟢 **{_shorten(snapshot.name or 'phone-worker direto', limit=36)}** · `direto`")
             status = snapshot.status if isinstance(snapshot.status, dict) else {}
-            lines.append(f"-# endpoint local/Tailscale · v `{version}` · {_script_health_label({'status': status})} · {_boot_health_label({'status': status})}")
-            lines.append(f"Roles: {roles}")
+            lines.append(f"-# direto · v `{version}` · {_script_health_label({'status': status})}")
+            lines.append("-# Detalhes técnicos ficam no botão/ação **Detalhes do celular**.")
         elif workers:
             lines.append("Selecione um worker.")
         elif snapshot.configured:

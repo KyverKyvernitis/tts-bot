@@ -10,6 +10,18 @@ instalou o APK -> preparou o celular -> pareou -> virou worker da VPS
 
 Hoje ele ainda é um **companion de onboarding**: guia Termux, Termux:API, Termux:Boot e Tailscale, fala com o phone-worker local em `127.0.0.1` e conecta o worker real à VPS. O controle pesado continua no Discord/VPS pelo painel `workers`.
 
+## v0.5.8 — modo usuário comum + painel workers limpo
+
+A versão `0.5.8` complementa o Patch 50. A tela principal do APK fica mais parecida com um app normal: estado do celular, conexão com a VPS principal, perfil resumido e atualização. Perfil detalhado, Termux, rede privada, jobs, SSHD, portas e botões de sincronização ficam recolhidos em áreas técnicas ou em ações explícitas.
+
+O painel `workers` do Discord também passa a priorizar leitura humana: mostra quantos celulares estão online, se há atualização pendente e o resumo do worker selecionado. Registry, roles, PID, SSHD, portas, duplicatas do Termux e caminhos locais deixam de aparecer no card principal e ficam para **Detalhes do celular**/diagnóstico.
+
+Estados de update agora usam linguagem mais clara:
+
+- `APK: instalado X` quando o app aberto realmente reportar a versão publicada;
+- `APK: instalação pendente` quando a notificação/download chegou, mas o Android ainda não concluiu a instalação;
+- `Worker: atualização pendente` apenas se algum worker online estiver abaixo da versão esperada.
+
 ## v0.5.7 — UX limpa + checagem local com app fechado
 
 A versão `0.5.7` complementa o Patch 49. A tela principal foi simplificada para usuário comum: o app mostra se o celular está pronto, se está conectado à VPS principal e se existe atualização. Termux, Termux:API, Termux:Boot, Tailscale, SSHD, jobs, portas, versões e outras informações de diagnóstico ficam recolhidos em **Detalhes técnicos**.
@@ -174,7 +186,7 @@ O APK altera apenas o perfil do celular onde ele está instalado.
 ## Fluxo de uso
 
 1. Abra o app **Core Worker**.
-2. Em **Este celular**, toque em **Atualizar status deste celular**.
+2. Em **Estado deste celular**, toque em **Verificar agora**.
 3. Se faltar algo, abra **Detalhes técnicos** para ver Termux, Termux:API, Termux:Boot e Tailscale.
 4. No Discord, abra o painel `workers`.
 5. Vá em **Adicionar celular → Gerar código**.
@@ -185,7 +197,7 @@ O APK altera apenas o perfil do celular onde ele está instalado.
    A URL da VPS é fixa no app e não aparece como escolha normal para o usuário.
 7. Toque em **Testar conexão**.
 8. Toque em **Conectar este celular à VPS**.
-9. Escolha o perfil e toque em **Aplicar perfil**.
+9. Se precisar, toque em **Alterar perfil**, escolha o perfil e toque em **Aplicar perfil**.
 10. No Discord, toque em **Atualizar**.
 
 > Use HTTP apenas dentro da rede privada Tailscale/rede privada equivalente. Se a VPS ficar exposta publicamente, use HTTPS antes de parear.
