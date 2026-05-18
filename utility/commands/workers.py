@@ -498,9 +498,14 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_linux_runtime_probe",
     "apk_linux_rootfs_probe",
     "apk_linux_box64_probe",
+    "apk_linux_provisioner_probe",
+    "apk_linux_prepare_directories",
+    "apk_linux_generate_setup_plan",
     "apk_minecraft_bedrock_probe",
     "apk_minecraft_bedrock_status",
     "apk_minecraft_bedrock_requirements",
+    "apk_minecraft_bedrock_install_plan",
+    "apk_minecraft_bedrock_properties_template",
 }
 CORE_WORKER_APP_JOB_LABELS = {
     "apk_ping": "ping interno",
@@ -539,9 +544,14 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_linux_runtime_probe": "Core Linux runtime",
     "apk_linux_rootfs_probe": "Linux rootfs",
     "apk_linux_box64_probe": "Box64",
+    "apk_linux_provisioner_probe": "Linux provisioner",
+    "apk_linux_prepare_directories": "preparar diretórios Linux",
+    "apk_linux_generate_setup_plan": "plano setup Linux",
     "apk_minecraft_bedrock_probe": "Bedrock diagnóstico",
     "apk_minecraft_bedrock_status": "Bedrock status",
     "apk_minecraft_bedrock_requirements": "Bedrock requisitos",
+    "apk_minecraft_bedrock_install_plan": "Bedrock plano instalação",
+    "apk_minecraft_bedrock_properties_template": "Bedrock template propriedades",
 }
 
 
@@ -2407,7 +2417,12 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Linux runtime", "value": "_apk_linux_runtime_probe", "description": "Base Linux interna", "emoji": "🐧", "panel_action": "apk_linux_runtime_probe", "category": "apk", "apk_job_type": "apk_linux_runtime_probe"},
                 {"label": "Linux rootfs", "value": "_apk_linux_rootfs_probe", "description": "Rootfs experimental", "emoji": "📦", "panel_action": "apk_linux_rootfs_probe", "category": "apk", "apk_job_type": "apk_linux_rootfs_probe"},
                 {"label": "Box64", "value": "_apk_linux_box64_probe", "description": "Camada x86_64 futura", "emoji": "🧱", "panel_action": "apk_linux_box64_probe", "category": "apk", "apk_job_type": "apk_linux_box64_probe"},
+                {"label": "Linux preparar", "value": "_apk_linux_prepare_directories", "description": "Diretórios e planos", "emoji": "🗂️", "panel_action": "apk_linux_prepare_directories", "category": "apk", "apk_job_type": "apk_linux_prepare_directories"},
+                {"label": "Linux plano", "value": "_apk_linux_generate_setup_plan", "description": "Setup sem download", "emoji": "🧭", "panel_action": "apk_linux_generate_setup_plan", "category": "apk", "apk_job_type": "apk_linux_generate_setup_plan"},
+                {"label": "Provisioner", "value": "_apk_linux_provisioner_probe", "description": "Plano rootfs/Box64", "emoji": "🐧", "panel_action": "apk_linux_provisioner_probe", "category": "apk", "apk_job_type": "apk_linux_provisioner_probe"},
                 {"label": "Bedrock reqs", "value": "_apk_minecraft_bedrock_requirements", "description": "RAM/storage/Ubuntu", "emoji": "⛏️", "panel_action": "apk_minecraft_bedrock_requirements", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_requirements"},
+                {"label": "Bedrock plano", "value": "_apk_minecraft_bedrock_install_plan", "description": "Instalação assistida", "emoji": "🧾", "panel_action": "apk_minecraft_bedrock_install_plan", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_install_plan"},
+                {"label": "Bedrock props", "value": "_apk_minecraft_bedrock_properties_template", "description": "Template server.properties", "emoji": "⚙️", "panel_action": "apk_minecraft_bedrock_properties_template", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_properties_template"},
                 {"label": "Bedrock status", "value": "_apk_minecraft_bedrock_status", "description": "Arquivos do servidor", "emoji": "🟫", "panel_action": "apk_minecraft_bedrock_status", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_status"},
                 {"label": "Renomear celular", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename", "category": "organize"},
                 {"label": "Editar funções", "value": "_edit_roles", "description": "Perfil + extras/remoções", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
