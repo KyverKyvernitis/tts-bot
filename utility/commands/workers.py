@@ -439,6 +439,37 @@ def _core_worker_app_runtime_record(worker_id: str) -> dict[str, Any] | None:
     return record if isinstance(record, dict) else None
 
 
+def _core_worker_app_jobs_text(worker_id: str) -> str:
+    worker_id = str(worker_id or "").strip()
+    path = _repo_root() / "data" / "core_worker_app_jobs.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        return "jobs leves: aguardando"
+    record = None
+    for item in reversed(data.get("results") or []):
+        if not isinstance(item, dict):
+            continue
+        if worker_id and str(item.get("workerId") or "") == worker_id:
+            record = item
+            break
+    pending = len(data.get("pending") or []) if isinstance(data.get("pending"), list) else 0
+    if not isinstance(record, dict):
+        return f"jobs leves: {pending} pend" if pending else "jobs leves: aguardando"
+    age = max(0.0, time.time() - float(record.get("receivedAt") or 0))
+    typ = _shorten(record.get("type") or "job", limit=32)
+    status = "ok" if record.get("ok") else "falhou"
+    msg = _shorten(record.get("message") or record.get("error") or "", limit=60)
+    pieces = [f"jobs leves: {typ} {status}", f"visto {_format_age(age)}"]
+    if pending:
+        pieces.append(f"{pending} pend")
+    if msg:
+        pieces.append(msg)
+    return " · ".join(pieces)
+
+
 def _core_worker_app_runtime_text(worker_id: str) -> str:
     worker_id = str(worker_id or "").strip()
     if not worker_id:
@@ -484,7 +515,7 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
     except Exception:
         pass
     prefix = "online" if online else "visto " + _format_age(age)
-    pieces = [prefix, app_version, f"perfil {profile}", f"push {fcm_state}", battery, network, f"APK {update_state}", f"jobs: {jobs_runtime}"]
+    pieces = [prefix, app_version, f"perfil {profile}", f"push {fcm_state}", battery, network, f"APK {update_state}", f"jobs: {jobs_runtime}", _core_worker_app_jobs_text(worker_id)]
     last_error = _shorten(record.get("lastAppError"), limit=80)
     if last_error:
         pieces.append(f"último erro: {last_error}")

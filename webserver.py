@@ -23,6 +23,7 @@ _tts_audio_lock = threading.RLock()
 _core_worker_notification_lock = threading.RLock()
 _core_worker_fcm_tokens_lock = threading.RLock()
 _core_worker_app_heartbeat_lock = threading.RLock()
+_core_worker_app_jobs_lock = threading.RLock()
 _tts_audio_files: dict[str, tuple[str, float]] = {}
 
 
@@ -405,7 +406,137 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         "updateAvailable": bool(record.get("updateAvailable")),
         "lastAppError": _safe_short_text(record.get("lastAppError"), 160),
         "ready": bool(record.get("ready")),
+        "lightJobs": _core_worker_app_jobs_public_summary(worker_id=worker_id, install_id=install_id),
     }
+
+
+def _core_worker_app_jobs_path() -> str:
+    return os.path.join(_repo_data_dir(), "core_worker_app_jobs.json")
+
+
+def _core_worker_app_jobs_key(payload: dict) -> str:
+    install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
+    worker_id = _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80)
+    return install_id or worker_id or "unknown"
+
+
+def _core_worker_app_jobs_fetch(payload: dict) -> dict:
+    now = int(time.time())
+    if not isinstance(payload, dict):
+        payload = {}
+    key = _core_worker_app_jobs_key(payload)
+    install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
+    worker_id = _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80)
+    supported = payload.get("supportedJobs") if isinstance(payload.get("supportedJobs"), list) else []
+    supported_set = {str(item) for item in supported if str(item or "").strip()}
+    if not supported_set:
+        supported_set = {"apk_ping", "apk_status_refresh", "apk_report_logs"}
+    path = _core_worker_app_jobs_path()
+    with _core_worker_app_jobs_lock:
+        try:
+            data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        pending = data.get("pending") if isinstance(data.get("pending"), list) else []
+        results = data.get("results") if isinstance(data.get("results"), list) else []
+        last_fetch = data.get("lastFetchByInstallId") if isinstance(data.get("lastFetchByInstallId"), dict) else {}
+        auto_ping = data.get("lastAutoPingByInstallId") if isinstance(data.get("lastAutoPingByInstallId"), dict) else {}
+        deliver = []
+        remaining = []
+        for job in pending:
+            if not isinstance(job, dict):
+                continue
+            target_install = str(job.get("installId") or job.get("install_id") or "").strip()
+            target_worker = str(job.get("workerId") or job.get("worker_id") or "").strip()
+            job_type = _safe_short_text(job.get("type"), 48)
+            if job_type not in supported_set:
+                remaining.append(job)
+                continue
+            matches = (target_install and target_install == install_id) or (target_worker and target_worker == worker_id) or (not target_install and not target_worker)
+            if matches and len(deliver) < 3:
+                out = dict(job)
+                out["id"] = _safe_short_text(out.get("id") or f"job-{uuid.uuid4().hex[:12]}", 64)
+                out["type"] = job_type
+                out["issuedAt"] = int(out.get("issuedAt") or now)
+                deliver.append(out)
+            else:
+                remaining.append(job)
+        auto_interval = int(os.getenv("CORE_WORKER_APP_AUTO_PING_INTERVAL_SECONDS", "900") or "900")
+        try:
+            last_auto = int(auto_ping.get(key) or 0)
+        except Exception:
+            last_auto = 0
+        if not deliver and auto_interval > 0 and now - last_auto >= auto_interval and "apk_ping" in supported_set:
+            deliver.append({"id": f"auto-apk-ping-{key[:16]}-{now}", "type": "apk_ping", "reason": "auto-health-check", "issuedAt": now, "title": "Verificação leve do APK"})
+            auto_ping[key] = now
+        last_fetch[key] = {"at": now, "installId": install_id, "workerId": worker_id, "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48), "jobsReturned": len(deliver)}
+        data["pending"] = remaining[-80:]
+        data["results"] = results[-160:]
+        data["lastFetchByInstallId"] = last_fetch
+        data["lastAutoPingByInstallId"] = auto_ping
+        data["updatedAt"] = now
+        data["ok"] = True
+        _atomic_write_json(path, data, mode=0o600)
+    public_jobs = []
+    for job in deliver:
+        public_jobs.append({"id": _safe_short_text(job.get("id"), 64), "type": _safe_short_text(job.get("type"), 48), "reason": _safe_short_text(job.get("reason"), 80), "issuedAt": int(job.get("issuedAt") or now), "title": _safe_short_text(job.get("title"), 80)})
+    return {"ok": True, "jobs": public_jobs, "count": len(public_jobs), "jobsRuntime": "apk-light"}
+
+
+def _core_worker_app_jobs_result(payload: dict) -> dict:
+    now = int(time.time())
+    if not isinstance(payload, dict):
+        payload = {}
+    job_id = _safe_short_text(payload.get("jobId") or payload.get("job_id"), 64)
+    job_type = _safe_short_text(payload.get("type"), 48)
+    if not job_id:
+        raise ValueError("jobId ausente")
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    record = {"receivedAt": now, "jobId": job_id, "type": job_type, "installId": _safe_short_text(payload.get("installId") or payload.get("install_id"), 80), "workerId": _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80), "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48), "appVersionCode": int(payload.get("appVersionCode") or payload.get("app_version_code") or 0), "ok": bool(result.get("ok")), "message": _safe_short_text(result.get("message"), 160), "error": _safe_short_text(result.get("error"), 160), "result": result}
+    path = _core_worker_app_jobs_path()
+    with _core_worker_app_jobs_lock:
+        try:
+            data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        results = data.get("results") if isinstance(data.get("results"), list) else []
+        latest = data.get("latestResultByInstallId") if isinstance(data.get("latestResultByInstallId"), dict) else {}
+        key = record["installId"] or record["workerId"] or "unknown"
+        results.append(record)
+        data["results"] = results[-240:]
+        latest[key] = record
+        data["latestResultByInstallId"] = latest
+        data["updatedAt"] = now
+        data["ok"] = True
+        _atomic_write_json(path, data, mode=0o600)
+    return record
+
+
+def _core_worker_app_jobs_public_summary(worker_id: str = "", install_id: str = "") -> dict:
+    path = _core_worker_app_jobs_path()
+    try:
+        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    latest = data.get("latestResultByInstallId") if isinstance(data.get("latestResultByInstallId"), dict) else {}
+    record = None
+    if install_id:
+        record = latest.get(install_id)
+    if not isinstance(record, dict) and isinstance(data.get("results"), list):
+        for item in reversed(data.get("results") or []):
+            if not isinstance(item, dict):
+                continue
+            if worker_id and str(item.get("workerId") or "") == worker_id:
+                record = item
+                break
+    pending = data.get("pending") if isinstance(data.get("pending"), list) else []
+    return {"pending": len(pending), "lastResultAt": int((record or {}).get("receivedAt") or 0), "lastType": _safe_short_text((record or {}).get("type"), 48), "lastOk": bool((record or {}).get("ok")) if isinstance(record, dict) else False, "lastMessage": _safe_short_text((record or {}).get("message") or (record or {}).get("error"), 120)}
 
 
 def _firebase_service_account_path() -> str:
@@ -1003,6 +1134,38 @@ def core_worker_app_runtime_summary():
     worker_id = str(request.args.get("worker_id") or "").strip()
     install_id = str(request.args.get("install_id") or "").strip()
     return jsonify({"ok": True, "summary": _core_worker_app_runtime_public_summary(worker_id, install_id)}), 200
+
+
+@app.post("/core-worker/app/jobs/fetch")
+def core_worker_app_jobs_fetch():
+    """Entrega jobs leves para o runtime interno do APK.
+
+    Apenas jobs sem shell/comando são aceitos pelo APK nesta etapa. Jobs reais
+    continuam no Termux. Este endpoint é best-effort e não concede execução arbitrária.
+    """
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    try:
+        return jsonify(_core_worker_app_jobs_fetch(payload)), 200
+    except Exception as exc:
+        app.logger.warning("core-worker app light jobs fetch ignored: %s", exc)
+        return jsonify({"ok": False, "jobs": [], "error": _safe_short_text(f"{type(exc).__name__}: {exc}", 180)}), 200
+
+
+@app.post("/core-worker/app/jobs/result")
+def core_worker_app_jobs_result():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    try:
+        record = _core_worker_app_jobs_result(payload)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)[:180]}), 400
+    except Exception as exc:
+        app.logger.warning("core-worker app light job result ignored: %s", exc)
+        return jsonify({"ok": False, "accepted": True, "error": _safe_short_text(f"{type(exc).__name__}: {exc}", 180)}), 200
+    return jsonify({"ok": True, "result": record}), 200
 
 
 @app.post("/core-worker/app/notification")

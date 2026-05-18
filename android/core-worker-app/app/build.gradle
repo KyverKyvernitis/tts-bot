@@ -57,8 +57,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 33
-        versionName "0.5.18"
+        versionCode 34
+        versionName "0.5.19"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""

@@ -527,3 +527,13 @@ A VPS não depende desse perfil para funcionar. Se o celular estiver offline, o 
 - Jobs reais, build APK, diagnósticos e tarefas pesadas continuam no Termux/phone-worker por enquanto.
 - A VPS continua sem build Android local: ela só orquestra, injeta arquivos locais no payload temporário e publica o APK recebido do phone worker.
 - `google-services.json`, service account e keystore continuam fora do GitHub e fora dos ZIPs públicos.
+
+## Patch 60 — detalhes técnicos e jobs leves do APK
+
+- O APK passa para `0.5.19` / `versionCode 34`.
+- A tela de **Detalhes técnicos** foi reorganizada em blocos menores: App, Aparelho, Runtime, Termux worker e dependências atuais.
+- O token FCM não é mais exibido na UI; o app mostra apenas `token registrado`.
+- O runtime interno começa a consultar jobs leves em `/core-worker/app/jobs/fetch` e reportar resultado em `/core-worker/app/jobs/result`.
+- Jobs leves suportados nesta etapa: `apk_ping`, `apk_status_refresh` e `apk_report_logs`.
+- Esses jobs não executam shell, não mexem no Termux, não compilam APK e não recebem comandos arbitrários.
+- Jobs reais e tarefas pesadas continuam no Termux/phone-worker por enquanto.

@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.18";
+    private static final String APP_VERSION = "0.5.19";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -116,6 +116,11 @@ public class MainActivity extends Activity {
     private TextView profileHintText;
     private TextView localAgentText;
     private TextView systemChecklistText;
+    private TextView technicalAppText;
+    private TextView technicalDeviceText;
+    private TextView technicalRuntimeText;
+    private TextView technicalTermuxText;
+    private TextView technicalDependenciesText;
     private TextView updateText;
     private LinearLayout permissionGateCard;
     private LinearLayout mainContent;
@@ -171,6 +176,9 @@ public class MainActivity extends Activity {
     private volatile long fcmDisabledUntil = 0L;
     private volatile String appStatusLastError = "";
     private volatile long appStatusLastSentAt = 0L;
+    private volatile String internalLightJobsState = "aguardando primeira verificação";
+    private volatile long internalLightJobsLastCheckAt = 0L;
+    private volatile int internalLightJobsLastCount = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -184,6 +192,7 @@ public class MainActivity extends Activity {
         safeStartupTask(() -> reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")"));
         safeStartupTask(() -> reportAppState("runtime_internal_ready", "runtime interno preparado em modo híbrido; heartbeat/status direto ativo"));
         safeStartupTask(() -> sendInternalRuntimeHeartbeat(false, "app_opened"));
+        safeStartupTask(() -> fetchAndRunLightJobs(false, "app_opened"));
         safeStartupTask(this::updatePermissionGate);
         refreshLocalStatus("Pronto. O app verifica automaticamente se este celular já está pareado.");
         safeStartupTask(() -> checkLocalAgent(false));
@@ -200,6 +209,7 @@ public class MainActivity extends Activity {
         safeStartupTask(this::autoVerifySavedPairing);
         safeStartupTask(this::autoCheckForUpdate);
         safeStartupTask(() -> sendInternalRuntimeHeartbeat(false, "activity_resume"));
+        safeStartupTask(() -> fetchAndRunLightJobs(false, "activity_resume"));
         scheduleFcmTokenRegistration("activity_resume");
     }
 
@@ -398,7 +408,7 @@ public class MainActivity extends Activity {
 
         LinearLayout technicalCard = cardWithTopMargin(mainContent);
         technicalCard.addView(sectionTitle("Detalhes técnicos"));
-        technicalCard.addView(smallText("Status completo, rede, bateria, logs e opções avançadas."));
+        technicalCard.addView(smallText("Status avançado, runtime, rede e dependências ficam recolhidos aqui."));
         technicalToggleButton = secondaryButton("Abrir detalhes técnicos");
         technicalToggleButton.setOnClickListener(v -> toggleTechnicalDetails());
         technicalCard.addView(technicalToggleButton);
@@ -408,10 +418,14 @@ public class MainActivity extends Activity {
         technicalDetailsContent.setVisibility(View.GONE);
         technicalCard.addView(technicalDetailsContent);
 
+        technicalAppText = technicalInfoBlock(technicalDetailsContent, "App");
+        technicalDeviceText = technicalInfoBlock(technicalDetailsContent, "Aparelho");
+        technicalRuntimeText = technicalInfoBlock(technicalDetailsContent, "Runtime");
+        technicalTermuxText = technicalInfoBlock(technicalDetailsContent, "Termux worker");
+        technicalDependenciesText = technicalInfoBlock(technicalDetailsContent, "Ainda depende de");
+
         systemChecklistText = smallText(prepareChecklistText());
-        systemChecklistText.setTextColor(TEXT);
-        systemChecklistText.setBackground(cardBackground(CARD_SOFT));
-        systemChecklistText.setPadding(dp(10), dp(10), dp(10), dp(10));
+        systemChecklistText.setVisibility(View.GONE);
         technicalDetailsContent.addView(systemChecklistText);
 
         termuxButton = secondaryButton("Abrir Termux");
@@ -629,6 +643,23 @@ public class MainActivity extends Activity {
         text.setTextColor(MUTED);
         text.setTextSize(12);
         text.setPadding(0, dp(1), 0, dp(4));
+        return text;
+    }
+
+    private TextView technicalInfoBlock(LinearLayout parent, String title) {
+        TextView text = new TextView(this);
+        text.setText(title);
+        text.setTextColor(TEXT);
+        text.setTextSize(13);
+        text.setLineSpacing(dp(1), 1.02f);
+        text.setPadding(dp(12), dp(10), dp(12), dp(10));
+        text.setBackground(cardBackground(CARD_SOFT));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, dp(8), 0, 0);
+        parent.addView(text, params);
         return text;
     }
 
@@ -1459,9 +1490,12 @@ public class MainActivity extends Activity {
         runtime.put("internal_runtime_last_error", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
         runtime.put("internal_runtime_path", internalRuntimePath == null ? "" : internalRuntimePath);
         runtime.put("termux_required_now", true);
-        runtime.put("jobs_runtime", "termux");
-        runtime.put("migration_stage", "apk-heartbeat-no-jobs");
-        runtime.put("summary", "APK já envia heartbeat direto para a VPS; Termux continua responsável por jobs reais.");
+        runtime.put("jobs_runtime", "termux+apk-light");
+        runtime.put("migration_stage", "apk-light-jobs");
+        runtime.put("light_jobs_state", internalLightJobsState == null ? "" : internalLightJobsState);
+        runtime.put("light_jobs_last_check_at", internalLightJobsLastCheckAt);
+        runtime.put("light_jobs_last_count", internalLightJobsLastCount);
+        runtime.put("summary", "APK já envia heartbeat/status direto e pode executar jobs leves sem shell; Termux continua responsável por jobs reais.");
         return runtime;
     }
 
@@ -1497,7 +1531,7 @@ public class MainActivity extends Activity {
             payload.put("profileLabel", profileLabel(appliedProfile()));
             payload.put("localAgentOnline", localAgentOnline);
             payload.put("termuxWorkerOnline", localAgentOnline);
-            payload.put("jobsRuntime", "termux");
+            payload.put("jobsRuntime", "termux+apk-light");
             safePutPayload(payload, "battery", batterySnapshot());
             safePutPayload(payload, "network", networkSnapshot(serverUrl));
             safePutPayload(payload, "update", updateSnapshot());
@@ -1541,6 +1575,108 @@ public class MainActivity extends Activity {
         }
         updateSystemChecklistText();
         showLocalAgentText();
+    }
+
+    private void fetchAndRunLightJobs(boolean showResult, String reason) {
+        String serverUrl = normalizedServerUrl();
+        if (serverUrl.isEmpty()) {
+            internalLightJobsState = "VPS não configurada";
+            updateSystemChecklistText();
+            return;
+        }
+        new Thread(() -> {
+            try {
+                JSONObject payload = statusSnapshot();
+                payload.put("installId", installId());
+                payload.put("workerId", emptyFallback(localAgentWorkerId, prefs.getString("worker_id", "")));
+                payload.put("reason", reason == null ? "background" : reason);
+                payload.put("supportedJobs", new JSONArray().put("apk_ping").put("apk_status_refresh").put("apk_report_logs"));
+                HttpResult response = request("POST", serverUrl + "/core-worker/app/jobs/fetch", payload, null);
+                internalLightJobsLastCheckAt = System.currentTimeMillis();
+                if (!response.ok()) {
+                    internalLightJobsState = "falha HTTP " + response.status;
+                    internalRuntimeLastError = compactResultBody(response.body);
+                    updateSystemChecklistText();
+                    return;
+                }
+                JSONObject body = new JSONObject(response.body);
+                JSONArray jobs = body.optJSONArray("jobs");
+                int count = jobs == null ? 0 : jobs.length();
+                internalLightJobsLastCount = count;
+                if (count <= 0) {
+                    internalLightJobsState = "sem jobs pendentes";
+                    updateSystemChecklistText();
+                    if (showResult) show("Runtime interno verificado. Nenhum job leve pendente.");
+                    return;
+                }
+                int okCount = 0;
+                for (int i = 0; i < count; i++) {
+                    JSONObject job = jobs.optJSONObject(i);
+                    if (job == null) continue;
+                    JSONObject result = executeLightJob(job);
+                    if (result.optBoolean("ok", false)) okCount++;
+                    postLightJobResult(serverUrl, job, result);
+                }
+                internalLightJobsState = "executados " + okCount + "/" + count;
+                updateSystemChecklistText();
+                if (showResult) show("Jobs leves do APK executados: " + okCount + "/" + count);
+            } catch (Throwable exc) {
+                internalLightJobsState = "falha · " + shortThrowable(exc);
+                internalRuntimeLastError = shortThrowable(exc);
+                appStatusLastError = internalRuntimeLastError;
+                updateSystemChecklistText();
+            }
+        }, "core-worker-apk-light-jobs").start();
+    }
+
+    private JSONObject executeLightJob(JSONObject job) throws Exception {
+        String type = job == null ? "" : job.optString("type", "");
+        JSONObject result = new JSONObject();
+        result.put("ok", true);
+        result.put("type", type);
+        result.put("executedBy", "core-worker-apk-internal-runtime");
+        result.put("appVersion", APP_VERSION);
+        result.put("appVersionCode", BuildConfig.VERSION_CODE);
+        result.put("installId", installId());
+        result.put("workerId", emptyFallback(localAgentWorkerId, prefs.getString("worker_id", "")));
+        if ("apk_ping".equals(type)) {
+            result.put("message", "pong");
+            result.put("runtime", runtimeStatusLabel());
+            return result;
+        }
+        if ("apk_status_refresh".equals(type)) {
+            safePutPayload(result, "status", statusSnapshot());
+            result.put("message", "status atualizado pelo APK");
+            return result;
+        }
+        if ("apk_report_logs".equals(type)) {
+            JSONObject logs = new JSONObject();
+            logs.put("lastAppError", appStatusLastError == null ? "" : appStatusLastError);
+            logs.put("internalRuntimeLastError", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
+            logs.put("fcmState", fcmStatusLabel());
+            logs.put("lightJobs", internalLightJobsState == null ? "" : internalLightJobsState);
+            safePutPayload(result, "logs", logs);
+            result.put("message", "logs leves reportados pelo APK");
+            return result;
+        }
+        result.put("ok", false);
+        result.put("error", "job leve não suportado pelo APK: " + type);
+        return result;
+    }
+
+    private void postLightJobResult(String serverUrl, JSONObject job, JSONObject result) {
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("jobId", job == null ? "" : job.optString("id", ""));
+            payload.put("type", job == null ? "" : job.optString("type", ""));
+            payload.put("installId", installId());
+            payload.put("workerId", emptyFallback(localAgentWorkerId, prefs.getString("worker_id", "")));
+            payload.put("appVersion", APP_VERSION);
+            payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+            safePutPayload(payload, "result", result);
+            request("POST", serverUrl + "/core-worker/app/jobs/result", payload, null);
+        } catch (Throwable ignored) {
+        }
     }
 
     private void reportFcmToken(String serverUrl, String token, String reason) {
@@ -1589,7 +1725,7 @@ public class MainActivity extends Activity {
             state = prefs.getString("fcm_state", "não verificado");
         }
         if ("ativo".equalsIgnoreCase(state)) {
-            return fcmTokenPreview == null || fcmTokenPreview.trim().isEmpty() ? "ativo · fallback local ativo" : "ativo · token " + fcmTokenPreview + " · fallback local ativo";
+            return fcmTokenPreview == null || fcmTokenPreview.trim().isEmpty() ? "ativo · fallback local ativo" : "ativo · token registrado · fallback local ativo";
         }
         if (Build.VERSION.SDK_INT >= 33 && !hasNotificationPermission()) {
             return state + " · sem permissão visível · fallback local ativo";
@@ -1950,6 +2086,9 @@ public class MainActivity extends Activity {
         status.put("internal_runtime_online", internalRuntimeOnline);
         status.put("internal_runtime_heartbeat_state", internalRuntimeHeartbeatState == null ? "" : internalRuntimeHeartbeatState);
         status.put("internal_runtime_last_error", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
+        status.put("internal_light_jobs_state", internalLightJobsState == null ? "" : internalLightJobsState);
+        status.put("internal_light_jobs_last_check_at", internalLightJobsLastCheckAt);
+        status.put("internal_light_jobs_last_count", internalLightJobsLastCount);
         status.put("runtime", runtimeSnapshot());
         safePutPayload(status, "battery", batterySnapshot());
         safePutPayload(status, "network", networkSnapshot(normalizedServerUrl()));
@@ -2105,6 +2244,7 @@ public class MainActivity extends Activity {
         runBusy(userVisible ? "Verificando este celular..." : "Verificando este celular...", () -> {
             boolean ok = updateLocalAgentStatus(true);
             sendInternalRuntimeHeartbeat(false, userVisible ? "manual_check" : "background_check");
+            fetchAndRunLightJobs(false, userVisible ? "manual_check" : "background_check");
             updateSystemChecklistText();
             if (userVisible) {
                 if (ok) {
@@ -2482,54 +2622,80 @@ public class MainActivity extends Activity {
 
     private void updateSystemChecklistText() {
         runOnUiThread(() -> {
+            String[] blocks = prepareChecklistBlocks();
+            if (technicalAppText != null) technicalAppText.setText(blocks[0]);
+            if (technicalDeviceText != null) technicalDeviceText.setText(blocks[1]);
+            if (technicalRuntimeText != null) technicalRuntimeText.setText(blocks[2]);
+            if (technicalTermuxText != null) technicalTermuxText.setText(blocks[3]);
+            if (technicalDependenciesText != null) technicalDependenciesText.setText(blocks[4]);
             if (systemChecklistText != null) {
                 systemChecklistText.setText(prepareChecklistText());
             }
         });
     }
 
-    private String prepareChecklistText() {
+    private String[] prepareChecklistBlocks() {
         String server = normalizedServerUrl();
-        StringBuilder builder = new StringBuilder();
-        JSONObject battery = null;
-        JSONObject network = null;
-        try { battery = batterySnapshot(); } catch (Throwable ignored) {}
-        try { network = networkSnapshot(server); } catch (Throwable ignored) {}
+        try { batterySnapshot(); } catch (Throwable ignored) {}
+        try { networkSnapshot(server); } catch (Throwable ignored) {}
 
-        builder.append("App interno\n");
-        builder.append(checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")")).append('\n');
-        builder.append(checkLine("Push", fcmStatusLabel())).append('\n');
-        builder.append(checkLine("Perfil", profileLabel(appliedProfile()))).append('\n');
-        builder.append(checkLine("Atualizações", updateChecklistLabel())).append("\n\n");
+        String appBlock = "App\n"
+                + checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")") + "\n"
+                + checkLine("Push", fcmStatusLabel()) + "\n"
+                + checkLine("Perfil", profileLabel(appliedProfile())) + "\n"
+                + checkLine("Atualizações", updateChecklistLabel());
 
-        builder.append("Aparelho\n");
-        builder.append(checkLine("Bateria", battery == null ? "desconhecida" : quickBatteryLabel())).append('\n');
-        builder.append(checkLine("Rede", network == null ? "desconhecida" : quickNetworkLabel())).append('\n');
-        builder.append(checkLine("Dispositivo", Build.MANUFACTURER + " " + Build.MODEL)).append("\n\n");
+        String battery = quickBatteryLabel();
+        String tempNote = "";
+        try {
+            JSONObject snap = batterySnapshot();
+            double temp = snap.optDouble("temperature_c", -1);
+            if (temp >= 42) tempNote = " · atenção";
+        } catch (Throwable ignored) {}
+        String deviceBlock = "Aparelho\n"
+                + checkLine("Bateria", battery + tempNote) + "\n"
+                + checkLine("Rede", quickNetworkLabel()) + "\n"
+                + checkLine("Dispositivo", Build.MANUFACTURER + " " + Build.MODEL);
 
-        builder.append("Runtime\n");
-        builder.append(checkLine("Modo", runtimeStatusLabel())).append('\n');
-        builder.append(checkLine("Heartbeat APK", internalRuntimeOnline ? "online direto na VPS" : emptyFallback(internalRuntimeHeartbeatState, "pendente"))).append('\n');
+        String ageLabel = "pendente";
         if (internalRuntimeLastHeartbeatAt > 0L) {
             long age = Math.max(0L, (System.currentTimeMillis() - internalRuntimeLastHeartbeatAt) / 1000L);
-            builder.append(checkLine("Último heartbeat", age < 60 ? "agora" : (age / 60L) + " min atrás")).append('\n');
+            ageLabel = age < 60 ? "agora" : (age / 60L) + " min atrás";
         }
-        if (internalRuntimeLastError != null && !internalRuntimeLastError.trim().isEmpty()) {
-            builder.append(checkLine("Último erro APK", internalRuntimeLastError)).append('\n');
+        String runtimeBlock = "Runtime\n"
+                + checkLine("Modo", runtimeStatusLabel()) + "\n"
+                + checkLine("Heartbeat APK", internalRuntimeOnline ? "online direto na VPS" : emptyFallback(internalRuntimeHeartbeatState, "pendente")) + "\n"
+                + checkLine("Último heartbeat", ageLabel) + "\n"
+                + checkLine("Jobs leves", emptyFallback(internalLightJobsState, "aguardando")) + "\n"
+                + checkLine("Jobs reais", "Termux por enquanto")
+                + ((internalRuntimeLastError != null && !internalRuntimeLastError.trim().isEmpty()) ? "\n" + checkLine("Último erro APK", internalRuntimeLastError) : "");
+
+        String sshd = emptyFallback(localAgentSshdSummary, "não informado");
+        if (sshd.toLowerCase(Locale.ROOT).contains("porta configurada não apareceu")) {
+            sshd = "ativo · porta não detectada";
         }
-        builder.append(checkLine("Jobs reais", "Termux por enquanto")).append("\n\n");
+        String termuxBlock = "Termux worker\n"
+                + checkLine("Status", localAgentOnline ? "online" : "offline") + "\n"
+                + checkLine("Jobs locais", localAgentJobsConfigured ? "ok" : "pendentes") + "\n"
+                + checkLine("SSHD", sshd);
 
-        builder.append("Termux worker\n");
-        builder.append(checkLine("Status", localAgentOnline ? "online" : "offline")).append('\n');
-        builder.append(checkLine("Jobs locais", localAgentJobsConfigured ? "ok" : "pendentes")).append('\n');
-        builder.append(checkLine("SSHD", emptyFallback(localAgentSshdSummary, "não informado"))).append("\n\n");
+        String depsBlock = "Ainda depende de\n"
+                + checkLine("Termux", isPackageInstalled("com.termux") ? "jobs reais" : "precisa instalar para jobs reais") + "\n"
+                + checkLine("Termux:API", isPackageInstalled("com.termux.api") ? "status do aparelho" : "status limitado") + "\n"
+                + checkLine("Termux:Boot", isPackageInstalled("com.termux.boot") ? "inicialização auxiliar" : "recomendado") + "\n"
+                + checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "Tailscale externo ainda necessário") + "\n"
+                + checkLine("VPS local", localAgentVpsConfigured ? "configurada" : "pendente");
 
-        builder.append("Dependências atuais\n");
-        builder.append(checkLine("VPS local", localAgentVpsConfigured ? "configurada" : "pendente")).append('\n');
-        builder.append(checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "Tailscale externo ainda necessário")).append('\n');
-        builder.append(checkLine("Termux", isPackageInstalled("com.termux") ? "instalado" : "precisa instalar")).append('\n');
-        builder.append(checkLine("Termux:API", isPackageInstalled("com.termux.api") ? "instalado" : "precisa instalar")).append('\n');
-        builder.append(checkLine("Termux:Boot", isPackageInstalled("com.termux.boot") ? "instalado" : "recomendado"));
+        return new String[]{appBlock, deviceBlock, runtimeBlock, termuxBlock, depsBlock};
+    }
+
+    private String prepareChecklistText() {
+        StringBuilder builder = new StringBuilder();
+        String[] blocks = prepareChecklistBlocks();
+        for (int i = 0; i < blocks.length; i++) {
+            if (i > 0) builder.append("\n\n");
+            builder.append(blocks[i]);
+        }
         return builder.toString();
     }
 
