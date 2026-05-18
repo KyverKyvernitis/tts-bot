@@ -73,7 +73,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.27";
+    private static final String APP_VERSION = "0.5.28";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -1804,6 +1804,19 @@ public class MainActivity extends Activity {
         return runEmbeddedPythonJob("log_summarizer", extra);
     }
 
+    private JSONObject pythonNetworkDiagnosticSnapshot(String serverUrl) throws Exception {
+        JSONObject extra = new JSONObject();
+        safePutPayload(extra, "network", networkSnapshot(serverUrl));
+        extra.put("serverUrlConfigured", serverUrl != null && !serverUrl.trim().isEmpty());
+        return runEmbeddedPythonJob("network_diagnostic", extra);
+    }
+
+    private JSONObject pythonRuntimeFilesCheckSnapshot() throws Exception {
+        JSONObject extra = new JSONObject();
+        safePutPayload(extra, "storage", storageSnapshot());
+        return runEmbeddedPythonJob("runtime_files_check", extra);
+    }
+
     private JSONObject buildPythonJobContext(JSONObject extra) throws Exception {
         JSONObject ctx = new JSONObject();
         ctx.put("appVersion", APP_VERSION);
@@ -1899,7 +1912,9 @@ public class MainActivity extends Activity {
                 || "runtime_info".equals(script)
                 || "status_bundle".equals(script)
                 || "storage_check".equals(script)
-                || "log_summarizer".equals(script);
+                || "log_summarizer".equals(script)
+                || "network_diagnostic".equals(script)
+                || "runtime_files_check".equals(script);
     }
 
 
@@ -2121,6 +2136,8 @@ public class MainActivity extends Activity {
                 if (count <= 0) {
                     internalLightJobsState = "fila vazia";
                     internalLightJobsLastSummary = "fila vazia";
+                    internalLightJobsRunningCount = 0;
+                    internalLightJobsQueueSummary = internalLightJobsPendingCount > 0 ? (internalLightJobsPendingCount + " pendentes") : "fila vazia";
                     clearTransientApkNetworkError();
                     updateSystemChecklistText();
                     if (showResult) show("Runtime interno verificado. Nenhum job interno pendente.");
@@ -2159,6 +2176,9 @@ public class MainActivity extends Activity {
                     recordInternalJobHistory(jobType, result.optBoolean("ok", false), result.optString("message", result.optString("error", "")));
                 }
                 internalLightJobsState = "executados " + okCount + "/" + count;
+                internalLightJobsRunningCount = 0;
+                internalLightJobsPendingCount = Math.max(0, internalLightJobsPendingCount);
+                internalLightJobsQueueSummary = internalLightJobsPendingCount > 0 ? (internalLightJobsPendingCount + " pendentes") : "fila vazia";
                 internalLightJobsLastSummary = summarizeLightJobs(jobs, okCount, count);
                 if (okCount > 0) {
                     clearTransientApkNetworkError();
@@ -2217,7 +2237,9 @@ public class MainActivity extends Activity {
                 .put("apk_python_runtime_info")
                 .put("apk_python_status_bundle")
                 .put("apk_python_storage_check")
-                .put("apk_python_log_summary");
+                .put("apk_python_log_summary")
+                .put("apk_python_network_diagnostic")
+                .put("apk_python_runtime_files_check");
     }
 
     private String summarizeLightJobs(JSONArray jobs, int okCount, int count) {
@@ -2372,9 +2394,11 @@ public class MainActivity extends Activity {
             logs.put("queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
             safePutPayload(logs, "history", internalJobHistoryJson());
             safePutPayload(logs, "status", statusSnapshot());
-            result.put("reportKind", "app-internal-logs");
+            JSONObject python = pythonLogSummarySnapshot();
+            safePutPayload(logs, "pythonLogSummary", python);
+            result.put("reportKind", "app-internal-logs-python-first");
             safePutPayload(result, "logs", logs);
-            result.put("message", "logs do APK enviados para a VPS");
+            result.put("message", python.optBoolean("ok", false) ? "logs do APK resumidos pelo Python interno" : "logs do APK enviados; resumo Python indisponível");
             return result;
         }
         if ("apk_diagnostic".equals(type)) {
@@ -2434,15 +2458,17 @@ public class MainActivity extends Activity {
         }
         if ("apk_network_diagnostic".equals(type)) {
             JSONObject network = networkDiagnosticSnapshot(serverUrl);
+            JSONObject python = pythonNetworkDiagnosticSnapshot(serverUrl);
             safePutPayload(result, "network", network);
-            boolean ok = network.optBoolean("ok", false);
-            internalDiagnosticsSummary = ok ? "rede ok · " + quickNetworkLabel() : "rede com atenção";
+            safePutPayload(result, "python", python);
+            boolean ok = network.optBoolean("ok", false) && python.optBoolean("ok", false);
+            internalDiagnosticsSummary = ok ? "rede ok · Python interno" : "rede com atenção";
             internalDiagnosticsLastAt = System.currentTimeMillis();
             if (!ok) {
                 result.put("ok", false);
-                result.put("error", network.optString("error", "rede indisponível"));
+                result.put("error", network.optString("error", python.optString("error", "rede indisponível")));
             }
-            result.put("message", ok ? "diagnóstico de rede concluído pelo APK" : "diagnóstico de rede encontrou problema");
+            result.put("message", ok ? "diagnóstico de rede concluído pelo Python interno" : "diagnóstico de rede encontrou problema");
             return result;
         }
         if ("apk_push_diagnostic".equals(type)) {
@@ -2475,11 +2501,13 @@ public class MainActivity extends Activity {
         }
         if ("apk_storage_diagnostic".equals(type)) {
             JSONObject storage = storageSnapshot();
+            JSONObject python = pythonStorageCheckSnapshot();
             safePutPayload(result, "storage", storage);
-            internalStorageSummary = storageSummary(storage);
+            safePutPayload(result, "python", python);
+            internalStorageSummary = python.optBoolean("ok", false) ? python.optString("summary", storageSummary(storage)) : storageSummary(storage);
             internalDiagnosticsSummary = "armazenamento " + internalStorageSummary;
             internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "diagnóstico de armazenamento interno concluído");
+            result.put("message", python.optBoolean("ok", false) ? "armazenamento verificado pelo Python interno" : "diagnóstico de armazenamento interno concluído");
             return result;
         }
         if ("apk_worker_bridge_status".equals(type)) {
@@ -2493,10 +2521,12 @@ public class MainActivity extends Activity {
         }
         if ("apk_collect_status_bundle".equals(type) || "apk_force_status_bundle".equals(type)) {
             JSONObject bundle = collectStatusBundle(serverUrl);
+            JSONObject python = pythonStatusBundleSnapshot(serverUrl);
             safePutPayload(result, "bundle", bundle);
-            internalDiagnosticsSummary = "pacote de status enviado";
+            safePutPayload(result, "python", python);
+            internalDiagnosticsSummary = python.optBoolean("ok", false) ? "pacote de status Python enviado" : "pacote de status enviado";
             internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "pacote completo de status do APK enviado para a VPS");
+            result.put("message", python.optBoolean("ok", false) ? "pacote completo gerado com Python interno" : "pacote completo de status do APK enviado para a VPS");
             return result;
         }
         if ("apk_test_notification".equals(type)) {
@@ -2639,6 +2669,30 @@ public class MainActivity extends Activity {
                 result.put("error", python.optString("error", "resumo Python falhou"));
             }
             result.put("message", python.optBoolean("ok", false) ? "histórico resumido pelo Python interno" : "resumo Python de logs falhou");
+            return result;
+        }
+        if ("apk_python_network_diagnostic".equals(type)) {
+            JSONObject python = pythonNetworkDiagnosticSnapshot(serverUrl);
+            safePutPayload(result, "python", python);
+            internalDiagnosticsSummary = python.optString("summary", "diagnóstico Python de rede enviado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!python.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", python.optString("error", "diagnóstico Python de rede falhou"));
+            }
+            result.put("message", python.optBoolean("ok", false) ? "rede diagnosticada pelo Python interno" : "diagnóstico Python de rede falhou");
+            return result;
+        }
+        if ("apk_python_runtime_files_check".equals(type)) {
+            JSONObject python = pythonRuntimeFilesCheckSnapshot();
+            safePutPayload(result, "python", python);
+            internalDiagnosticsSummary = python.optString("summary", "arquivos runtime verificados pelo Python");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!python.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", python.optString("error", "verificação Python de arquivos falhou"));
+            }
+            result.put("message", python.optBoolean("ok", false) ? "arquivos do runtime verificados pelo Python interno" : "verificação Python de arquivos falhou");
             return result;
         }
         if ("apk_download_small".equals(type)) {
@@ -4137,7 +4191,7 @@ public class MainActivity extends Activity {
                 + checkLine("Jobs internos", emptyFallback(internalLightJobsState, "aguardando")) + "\n"
                 + checkLine("Cobertura", emptyFallback(internalLightJobsCatalogSummary, "catálogo aguardando")) + "\n"
                 + checkLine("Fila", emptyFallback(internalLightJobsQueueSummary, "aguardando")) + "\n"
-                + checkLine("Jobs reais", nativeWorkerOnline ? "APK nativo" : "APK interno · fallback Termux") + "\n"
+                + checkLine("Jobs reais", nativePythonAvailable ? "APK Python interno" : (nativeWorkerOnline ? "APK nativo" : "APK interno · fallback legado")) + "\n"
                 + checkLine("Shell", emptyFallback(nativeShellSummary, "controlado aguardando")) + "\n"
                 + checkLine("Python", emptyFallback(nativePythonSummary, "aguardando health check"));
 
@@ -4159,9 +4213,9 @@ public class MainActivity extends Activity {
         if (sshd.toLowerCase(Locale.ROOT).contains("porta configurada não apareceu")) {
             sshd = "ativo · porta não detectada";
         }
-        String termuxBlock = "Fallback Termux\n"
-                + checkLine("Status", localAgentOnline ? "online como fallback" : "offline") + "\n"
-                + checkLine("Jobs avançados", localAgentJobsConfigured ? "fallback disponível" : "não dependente para runtime básico") + "\n"
+        String termuxBlock = "Fallback legado Termux\n"
+                + checkLine("Status", localAgentOnline ? "online, mas não principal" : "offline") + "\n"
+                + checkLine("Jobs avançados", localAgentJobsConfigured ? "fallback disponível" : "não exigido para runtime APK") + "\n"
                 + checkLine("SSHD", sshd);
 
         String depsBlock = "Migração sem Termux\n"
@@ -4171,7 +4225,7 @@ public class MainActivity extends Activity {
                 + checkLine("Jobs Python", nativePythonAvailable ? "APK + Python interno" : "aguardando health check") + "\n"
                 + checkLine("Shell", emptyFallback(nativeShellSummary, "controlado aguardando")) + "\n"
                 + checkLine("Python", emptyFallback(nativePythonSummary, "runtime embutido aguardando")) + "\n"
-                + checkLine("Termux", localAgentOnline ? "fallback temporário online" : "não exigido para status/boot/jobs internos") + "\n"
+                + checkLine("Termux", localAgentOnline ? "fallback legado online" : "não exigido para status/boot/jobs Python") + "\n"
                 + checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "VPN externa ainda é etapa futura") + "\n"
                 + checkLine("VPS", hasPairing() ? "conexão direta salva" : "pareamento pendente");
 

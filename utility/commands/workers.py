@@ -492,6 +492,8 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_python_status_bundle",
     "apk_python_storage_check",
     "apk_python_log_summary",
+    "apk_python_network_diagnostic",
+    "apk_python_runtime_files_check",
 }
 CORE_WORKER_APP_JOB_LABELS = {
     "apk_ping": "ping interno",
@@ -525,6 +527,8 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_python_status_bundle": "Python status bundle",
     "apk_python_storage_check": "Python storage check",
     "apk_python_log_summary": "Python resumo de logs",
+    "apk_python_network_diagnostic": "Python diagnóstico de rede",
+    "apk_python_runtime_files_check": "Python arquivos runtime",
 }
 
 
@@ -727,6 +731,32 @@ def _core_worker_app_jobs_text(worker_id: str) -> str:
     return " · ".join([label] + extra)
 
 
+def _core_worker_app_queue_text_for_runtime(worker_id: str, record: dict[str, Any]) -> str:
+    summary = _core_worker_app_jobs_summary_for_worker(worker_id)
+    try:
+        running = int(summary.get("running") or 0) if isinstance(summary, dict) else 0
+    except Exception:
+        running = 0
+    try:
+        pending = int(summary.get("pending") or 0) if isinstance(summary, dict) else 0
+    except Exception:
+        pending = 0
+    if running or pending:
+        parts: list[str] = []
+        if running:
+            parts.append(f"{running} rodando")
+        if pending:
+            parts.append(f"{pending} pendentes")
+        return " · ".join(parts)
+    raw = _shorten(record.get("internalJobsQueue") or "", limit=40) if isinstance(record, dict) else ""
+    # Patch 68 podia manter no heartbeat um texto transitório como "6 rodando · 0 pendentes"
+    # mesmo depois de a VPS já ter recebido todos os resultados. Quando o resumo oficial
+    # por instalação diz 0/0, tratamos a fila como vazia.
+    if raw and "rodando" in raw.lower():
+        return "fila vazia"
+    return raw or "fila vazia"
+
+
 def _core_worker_app_runtime_detail_text(worker_id: str) -> str:
     record = _core_worker_app_runtime_record(str(worker_id or ""))
     if not isinstance(record, dict):
@@ -756,8 +786,8 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
     profile = _shorten(record.get("profile") or "perfil ?", limit=24)
     fcm_state = _shorten(record.get("fcmState") or "push ?", limit=32)
     update_state = _shorten(record.get("updateState") or "atualização ?", limit=32)
-    jobs_runtime = _shorten(record.get("jobsRuntime") or "termux", limit=24)
-    internal_queue = _shorten(record.get("internalJobsQueue") or "", limit=40)
+    jobs_runtime = _shorten(record.get("jobsRuntime") or "apk-python", limit=28)
+    internal_queue = _core_worker_app_queue_text_for_runtime(worker_id, record)
     battery_parts: list[str] = []
     try:
         percent = int(record.get("batteryPercent") or -1)
@@ -795,7 +825,7 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
         pieces.append(storage)
     if bridge:
         pieces.append(bridge)
-    if internal_queue:
+    if internal_queue and internal_queue != "fila vazia":
         pieces.append(f"fila {internal_queue}")
     pieces.append(_core_worker_app_jobs_text(worker_id))
     return " · ".join(str(x) for x in pieces if x)
@@ -2351,6 +2381,8 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Python status", "value": "_apk_python_status_bundle", "description": "Bundle gerado pelo Python", "emoji": "📦", "panel_action": "apk_python_status_bundle", "category": "apk", "apk_job_type": "apk_python_status_bundle"},
                 {"label": "Python storage", "value": "_apk_python_storage_check", "description": "Armazenamento via Python", "emoji": "💾", "panel_action": "apk_python_storage_check", "category": "apk", "apk_job_type": "apk_python_storage_check"},
                 {"label": "Python logs", "value": "_apk_python_log_summary", "description": "Resumo local de jobs", "emoji": "🧾", "panel_action": "apk_python_log_summary", "category": "apk", "apk_job_type": "apk_python_log_summary"},
+                {"label": "Python rede", "value": "_apk_python_network_diagnostic", "description": "Diagnóstico de rede Python", "emoji": "🌐", "panel_action": "apk_python_network_diagnostic", "category": "apk", "apk_job_type": "apk_python_network_diagnostic"},
+                {"label": "Python arquivos", "value": "_apk_python_runtime_files_check", "description": "Runtime/sandbox internos", "emoji": "📁", "panel_action": "apk_python_runtime_files_check", "category": "apk", "apk_job_type": "apk_python_runtime_files_check"},
                 {"label": "Renomear celular", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename", "category": "organize"},
                 {"label": "Editar funções", "value": "_edit_roles", "description": "Perfil + extras/remoções", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
             ])
