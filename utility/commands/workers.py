@@ -175,6 +175,9 @@ _SECRET_PATTERNS = (
     re.compile(r"(CORE_WORKER_TOKEN\s*=\s*)[^\s]+", re.IGNORECASE),
     re.compile(r"(X-Phone-Worker-Token:\s*)[^\s]+", re.IGNORECASE),
     re.compile(r"(X-Core-Worker-Token:\s*)[^\s]+", re.IGNORECASE),
+    re.compile(r"(\"(?:apkSigningKeystoreB64|apkSigningStorePassword|apkSigningKeyPassword)\"\s*:\s*\")[^\"]+", re.IGNORECASE),
+    re.compile(r"(apkSigning(?:KeystoreB64|StorePassword|KeyPassword)\s*[:=]\s*)[^,}\s]+", re.IGNORECASE),
+    re.compile(r"(CORE_WORKER_SIGNING_(?:STORE_PASSWORD|KEY_PASSWORD)\s*[:=]\s*)[^,}\s]+", re.IGNORECASE),
 )
 
 
@@ -2987,6 +2990,69 @@ class WorkersCommandMixin:
             "googleServicesSource": "local-vps-payload",
         }
 
+
+    def _load_apk_signing_payload_for_worker_build(self) -> dict[str, Any]:
+        """Carrega a keystore compatível para o payload autenticado do job.
+
+        Não entra no Git, no ZIP público nem no painel. O phone worker usa essa
+        chave só no workspace temporário para permitir update sem desinstalar.
+        """
+        root = _repo_root()
+        candidates: list[Path] = []
+        for raw in (
+            os.getenv("CORE_WORKER_APK_COMPAT_KEYSTORE"),
+            os.getenv("CORE_WORKER_APK_UPLOAD_KEYSTORE"),
+            os.getenv("CORE_WORKER_APK_SIGNING_KEYSTORE"),
+            os.getenv("CORE_WORKER_APK_KEYSTORE"),
+        ):
+            if raw:
+                candidates.append(Path(str(raw)).expanduser())
+        candidates.extend([
+            Path("/home/ubuntu/secrets/core-worker-upload.keystore"),
+            Path.home() / ".android" / "debug.keystore",
+            root / "secrets" / "core-worker-upload.keystore",
+        ])
+        path = next((item for item in candidates if item.is_file()), None)
+        if path is None:
+            raise FileNotFoundError(
+                "keystore compatível não encontrada. Copie a chave antiga para "
+                "/home/ubuntu/secrets/core-worker-upload.keystore."
+            )
+        raw = path.read_bytes()
+        if len(raw) > 1024 * 1024:
+            raise ValueError("keystore compatível grande demais")
+        alias = (
+            os.getenv("CORE_WORKER_APK_COMPAT_KEY_ALIAS")
+            or os.getenv("CORE_WORKER_APK_UPLOAD_KEY_ALIAS")
+            or os.getenv("CORE_WORKER_APK_KEY_ALIAS")
+            or "androiddebugkey"
+        ).strip()
+        storepass = (
+            os.getenv("CORE_WORKER_APK_COMPAT_KEYSTORE_PASSWORD")
+            or os.getenv("CORE_WORKER_APK_UPLOAD_KEYSTORE_PASSWORD")
+            or os.getenv("CORE_WORKER_APK_KEYSTORE_PASSWORD")
+            or "android"
+        ).strip()
+        keypass = (
+            os.getenv("CORE_WORKER_APK_COMPAT_KEY_PASSWORD")
+            or os.getenv("CORE_WORKER_APK_UPLOAD_KEY_PASSWORD")
+            or os.getenv("CORE_WORKER_APK_KEY_PASSWORD")
+            or storepass
+            or "android"
+        ).strip()
+        if not alias or not storepass:
+            raise ValueError("alias/senha da keystore compatível ausentes")
+        sha = hashlib.sha256(raw).hexdigest()
+        return {
+            "apkSigningMode": "compat-vps-debug-keystore",
+            "apkSigningKeystoreB64": base64.b64encode(raw).decode("ascii"),
+            "apkSigningKeystoreSha256": sha,
+            "apkSigningKeyAlias": alias,
+            "apkSigningStorePassword": storepass,
+            "apkSigningKeyPassword": keypass,
+            "apkSigningSource": "local-vps-secret",
+        }
+
     def _prepare_core_worker_source_zip_sync(self) -> dict[str, Any]:
         root = _repo_root()
         project = root / "android" / "core-worker-app"
@@ -3035,12 +3101,14 @@ class WorkersCommandMixin:
         source = await asyncio.to_thread(self._prepare_core_worker_source_zip_sync)
         version_name, version_code = self._read_core_worker_app_version()
         firebase_config = self._load_google_services_payload_for_apk_build()
+        signing_config = self._load_apk_signing_payload_for_worker_build()
         payload.update({
             "source_zip_url": source["url"],
             "source_sha256": source["sha256"],
             "source_bytes": source["bytes"],
             "firebase_config_delivery": source.get("firebase_config_delivery") or "job_payload",
             **firebase_config,
+            **signing_config,
             "project_subdir": "android/core-worker-app",
             "publish": True,
             "versionName": version_name,
@@ -3048,7 +3116,7 @@ class WorkersCommandMixin:
             "filename": f"CoreWorker-v{version_name}-debug.apk",
             "coreWorkerVpsUrl": _public_base_url(),
             "coreWorkerVpsLabel": f"VPS privada · {_host_label(_public_base_url().replace('http://', '').replace('https://', '').split(':')[0])}:" + str(os.getenv("CORE_WORKER_PUBLIC_PORT") or os.getenv("PORT") or "10000"),
-            "changelog": ["APK compilado por worker builder", "Phone worker compilou e assinou o APK; VPS só publicou o resultado", "URL da VPS injetada no build privado"],
+            "changelog": ["APK compilado por worker builder", "Phone worker assinou com a chave compatível; VPS só publicou o resultado", "URL da VPS injetada no build privado"],
         })
         return payload
 

@@ -507,12 +507,15 @@ def _fixed_apk_signing_config() -> dict[str, str] | None:
     if raw_mode is None or not str(raw_mode).strip():
         return None
     mode = str(raw_mode).strip().lower()
-    if mode in {"off", "none", "disabled", "false", "0", "worker", "uploaded", "phone-worker"}:
+    if mode in {"off", "none", "disabled", "false", "0", "worker", "uploaded", "phone-worker", "debug", "release"}:
+        # Patch 57: mesmo se sobrou CORE_WORKER_APK_SIGNING_MODE=debug no .env,
+        # a VPS não deve tentar assinar. O phone worker assina com a keystore
+        # compatível recebida pelo payload temporário.
         return None
-    if mode == "debug":
+    if mode == "vps-debug":
         keystore = _expand_path(os.getenv("CORE_WORKER_APK_KEYSTORE") or "~/.android/debug.keystore")
         return {
-            "mode": "debug",
+            "mode": "vps-debug",
             "keystore": keystore,
             "alias": os.getenv("CORE_WORKER_APK_KEY_ALIAS") or "androiddebugkey",
             "storepass": os.getenv("CORE_WORKER_APK_KEYSTORE_PASSWORD") or "android",
@@ -815,7 +818,8 @@ def core_worker_app_publish():
         "notificationStatus": notification_summary,
         "sourceSha256": source_sha,
         "signedByVps": bool(signing_info.get("signedByVps")),
-        "signingMode": str(signing_info.get("signingMode") or "unknown"),
+        "signingMode": _safe_short_text(form.get("apkSigningMode") or signing_info.get("signingMode") or "phone-worker-signed", 96),
+        "signingKeystoreSha256": _safe_short_text(form.get("apkSigningKeystoreSha256") or "", 64),
         "changelog": [str(item)[:180] for item in changelog[:8]],
         "publishedByWorker": str(worker.get("name") or worker.get("worker_id") or "worker builder")[:80],
         "publishedAt": int(time.time()),
@@ -831,7 +835,7 @@ def core_worker_app_publish():
     os.replace(tmp_manifest, manifest_path)
     _kick_core_worker_fcm_push(manifest, reason="apk_published")
     _kick_core_worker_pending_automation(str(worker.get("worker_id") or ""))
-    return jsonify({"ok": True, "filename": filename, "bytes": total, "sha256": actual_sha, "signedByVps": bool(signing_info.get("signedByVps")), "validation": validation, "latest": manifest}), 200
+    return jsonify({"ok": True, "filename": filename, "bytes": total, "sha256": actual_sha, "signedByVps": bool(signing_info.get("signedByVps")), "signingMode": manifest.get("signingMode"), "validation": validation, "latest": manifest}), 200
 
 
 

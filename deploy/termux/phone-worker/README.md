@@ -1,5 +1,17 @@
 # Phone Worker
 
+## v1.8.1 — assinatura compatível do APK
+
+A versão `1.8.1` alinha o agent ao Patch 57. O phone worker continua compilando o APK, mas agora recebe uma keystore compatível pelo payload autenticado do job e assina o APK no workspace temporário. Isso evita o erro do Android de conflito com pacote existente ao atualizar por cima.
+
+Regras de segurança:
+
+- a keystore não vem no ZIP público;
+- a keystore não vai para GitHub;
+- a keystore é apagada junto com o workspace temporário depois do build;
+- o phone worker não recebe a service account do Firebase;
+- se a keystore não vier no payload, o build falha em vez de gerar APK com assinatura incompatível.
+
 Worker opcional para usar o celular como ajudante da VPS em tarefas que não são críticas.
 
 Ele **não substitui a VPS**. Se o celular cair, a VPS continua funcionando e usa fallback local.

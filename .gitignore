@@ -187,3 +187,9 @@ data/core_worker_app_fcm_tokens.json
 data/core_worker_app_fcm_tokens.json.tmp
 data/core_worker_app_notifications.json
 data/core_worker_app_notifications.json.tmp
+data/core_worker_automation_pending.json
+data/core_worker_automation_status.json
+data/core_worker_automation_state.json
+data/core_worker_automation_pending.json.tmp
+data/core_worker_automation_status.json.tmp
+data/core_worker_automation_state.json.tmp

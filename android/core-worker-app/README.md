@@ -1,5 +1,28 @@
 # Core Worker APK privado
 
+# Patch 57 — assinatura compatível pelo phone worker
+
+O Patch 57 corrige o conflito de pacote do Android ao atualizar por cima:
+
+- o APK continua sendo buildado no phone worker, não na VPS Oracle;
+- a VPS não usa `gradle`, Android SDK nem `apksigner`;
+- a keystore antiga compatível fica local em `/home/ubuntu/secrets/core-worker-upload.keystore`;
+- a VPS envia essa keystore somente pelo payload autenticado do job para o phone worker;
+- o phone worker grava a keystore apenas no workspace temporário de build;
+- o APK gerado sai assinado com a mesma chave da versão já instalada;
+- a keystore não entra no GitHub, ZIP público, logs ou painel;
+- se a keystore faltar, o job falha com mensagem clara e não publica APK incompatível.
+
+Arquivos locais esperados:
+
+```text
+/home/ubuntu/secrets/core-worker-upload.keystore
+android/core-worker-app/app/google-services.json
+/home/ubuntu/secrets/firebase-service-account.json
+```
+
+A service account do Firebase continua somente na VPS e nunca vai para o phone worker.
+
 ## Patch 56 — APK builder sem segredos públicos e sem assinatura na VPS
 
 O Patch 56 corrige o fluxo de build automático com Firebase:

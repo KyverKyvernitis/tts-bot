@@ -274,6 +274,68 @@ def _load_google_services_payload_for_apk_build() -> dict[str, Any]:
     }
 
 
+def _load_apk_signing_payload_for_worker_build() -> dict[str, Any]:
+    """Carrega a keystore compatível sem colocá-la no Git/ZIP público.
+
+    A VPS envia a keystore somente pelo payload autenticado do job para o phone
+    worker assinar o APK com a mesma chave da versão instalada. Isso evita o
+    erro do Android de conflito de pacote por assinatura diferente.
+    """
+    candidates: list[Path] = []
+    for raw_path in (
+        os.getenv("CORE_WORKER_APK_COMPAT_KEYSTORE"),
+        os.getenv("CORE_WORKER_APK_UPLOAD_KEYSTORE"),
+        os.getenv("CORE_WORKER_APK_SIGNING_KEYSTORE"),
+        os.getenv("CORE_WORKER_APK_KEYSTORE"),
+    ):
+        if raw_path:
+            candidates.append(Path(str(raw_path)).expanduser())
+    candidates.extend([
+        Path("/home/ubuntu/secrets/core-worker-upload.keystore"),
+        Path.home() / ".android" / "debug.keystore",
+    ])
+    path = next((item for item in candidates if item.is_file()), None)
+    if path is None:
+        raise FileNotFoundError(
+            "keystore compatível do Core Worker não encontrada. Preserve/copie a chave antiga para "
+            "/home/ubuntu/secrets/core-worker-upload.keystore."
+        )
+    raw = path.read_bytes()
+    if len(raw) > 1024 * 1024:
+        raise ValueError("keystore compatível grande demais")
+    alias = (
+        os.getenv("CORE_WORKER_APK_COMPAT_KEY_ALIAS")
+        or os.getenv("CORE_WORKER_APK_UPLOAD_KEY_ALIAS")
+        or os.getenv("CORE_WORKER_APK_KEY_ALIAS")
+        or "androiddebugkey"
+    ).strip()
+    storepass = (
+        os.getenv("CORE_WORKER_APK_COMPAT_KEYSTORE_PASSWORD")
+        or os.getenv("CORE_WORKER_APK_UPLOAD_KEYSTORE_PASSWORD")
+        or os.getenv("CORE_WORKER_APK_KEYSTORE_PASSWORD")
+        or "android"
+    ).strip()
+    keypass = (
+        os.getenv("CORE_WORKER_APK_COMPAT_KEY_PASSWORD")
+        or os.getenv("CORE_WORKER_APK_UPLOAD_KEY_PASSWORD")
+        or os.getenv("CORE_WORKER_APK_KEY_PASSWORD")
+        or storepass
+        or "android"
+    ).strip()
+    if not alias or not storepass:
+        raise ValueError("alias/senha da keystore compatível ausentes")
+    sha = hashlib.sha256(raw).hexdigest()
+    return {
+        "apkSigningMode": "compat-vps-debug-keystore",
+        "apkSigningKeystoreB64": base64.b64encode(raw).decode("ascii"),
+        "apkSigningKeystoreSha256": sha,
+        "apkSigningKeyAlias": alias,
+        "apkSigningStorePassword": storepass,
+        "apkSigningKeyPassword": keypass,
+        "apkSigningSource": "local-vps-secret",
+    }
+
+
 def _prepare_apk_source_zip() -> dict[str, Any]:
     project = ROOT / "android" / "core-worker-app"
     if not project.is_dir():
@@ -599,8 +661,14 @@ def queue_apk_build() -> dict[str, Any]:
     notification_id = f"apk-{version_code}-{source_fingerprint[:12]}"
     try:
         firebase_config = _load_google_services_payload_for_apk_build()
+        signing_config = _load_apk_signing_payload_for_worker_build()
     except Exception as exc:
         pending = _load_pending()
+        message = "arquivo local necessário ausente/inválido; build do APK não foi enfileirado"
+        if "google-services" in str(exc).lower():
+            message = "google-services.json local ausente/inválido; build do APK não foi enfileirado"
+        elif "keystore" in str(exc).lower() or "assinatura" in str(exc).lower():
+            message = "keystore compatível ausente/inválida; build do APK não foi enfileirado"
         pending["apk_build"] = {
             "ok": False,
             "pending": False,
@@ -609,7 +677,7 @@ def queue_apk_build() -> dict[str, Any]:
             "source": source,
             "error": f"{type(exc).__name__}: {_short(exc, 200)}",
             "updated_at": time.time(),
-            "message": "google-services.json local ausente/inválido; build do APK não foi enfileirado",
+            "message": message,
         }
         _save_pending(pending)
         return pending["apk_build"]
@@ -620,6 +688,7 @@ def queue_apk_build() -> dict[str, Any]:
         "source_bytes": source["bytes"],
         "firebase_config_delivery": source.get("firebase_config_delivery") or "job_payload",
         **firebase_config,
+        **signing_config,
         "project_subdir": "android/core-worker-app",
         "publish": True,
         "versionName": version_name,
@@ -632,7 +701,7 @@ def queue_apk_build() -> dict[str, Any]:
         "coreWorkerVpsLabel": os.getenv("CORE_WORKER_VPS_LABEL") or "VPS principal",
         "changelog": [
             "APK compilado automaticamente por worker builder",
-            "Phone worker compila e assina; VPS só publica o resultado",
+            "Phone worker assina com chave compatível; VPS só publica o resultado",
             "O app mostra Atualizar no topo quando estiver disponível",
         ],
     }
@@ -641,7 +710,9 @@ def queue_apk_build() -> dict[str, Any]:
         "type": "apk_build_debug",
         "versionName": version_name,
         "versionCode": version_code,
-        "payload": payload,
+        "payload_redacted": True,
+        "firebase_config_delivery": "job_payload",
+        "apk_signing_delivery": "job_payload",
         "source": source,
         "created_at": float((pending.get("apk_build") or {}).get("created_at") or time.time()) if isinstance(pending.get("apk_build"), dict) else time.time(),
         "updated_at": time.time(),

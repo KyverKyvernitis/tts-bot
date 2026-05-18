@@ -42,7 +42,7 @@ _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.8.0"
+PHONE_WORKER_VERSION = "1.8.1"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2877,6 +2877,69 @@ def _install_google_services_from_payload(project_dir: Path, payload: dict[str, 
     }
 
 
+def _install_apk_signing_from_payload(project_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """Instala keystore compatível recebida pelo payload autenticado do job.
+
+    A keystore não vem no ZIP público e não fica no Git. Ela é gravada somente
+    no workspace temporário do build para que o APK novo tenha a mesma assinatura
+    da versão já instalada e possa atualizar sem desinstalar.
+    """
+    raw_b64 = str(payload.get("apkSigningKeystoreB64") or payload.get("apk_signing_keystore_b64") or "").strip()
+    expected_sha = str(payload.get("apkSigningKeystoreSha256") or payload.get("apk_signing_keystore_sha256") or "").strip().lower()
+    alias = str(payload.get("apkSigningKeyAlias") or payload.get("apk_signing_key_alias") or "androiddebugkey").strip() or "androiddebugkey"
+    storepass = str(payload.get("apkSigningStorePassword") or payload.get("apk_signing_store_password") or "").strip()
+    keypass = str(payload.get("apkSigningKeyPassword") or payload.get("apk_signing_key_password") or storepass).strip()
+
+    if not raw_b64:
+        raise FileNotFoundError(
+            "keystore de assinatura compatível ausente no payload. A VPS deve enviar apkSigningKeystoreB64; "
+            "não use a chave debug aleatória do phone worker para atualizar o Core Worker instalado."
+        )
+    if not storepass or not alias:
+        raise ValueError("configuração de assinatura compatível incompleta no payload")
+
+    try:
+        raw = base64.b64decode(raw_b64.encode("ascii"), validate=True)
+    except Exception as exc:
+        raise ValueError(f"payload da keystore inválido: {type(exc).__name__}: {_short_text(exc, limit=100)}") from exc
+    if len(raw) > 1024 * 1024:
+        raise ValueError("keystore de assinatura grande demais")
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    if expected_sha and expected_sha != actual_sha:
+        raise ValueError("sha256 da keystore de assinatura divergente no payload")
+
+    app_dir = project_dir / "app"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    key_path = app_dir / "core-worker-upload.keystore"
+    props_path = app_dir / "core-worker-signing.properties"
+
+    key_path.write_bytes(raw)
+    with contextlib.suppress(Exception):
+        key_path.chmod(0o600)
+
+    # Não registrar senhas em logs/resultados. Este arquivo fica só no workspace temporário.
+    props_path.write_text(
+        "\n".join([
+            "CORE_WORKER_SIGNING_KEYSTORE=core-worker-upload.keystore",
+            f"CORE_WORKER_SIGNING_KEY_ALIAS={alias}",
+            f"CORE_WORKER_SIGNING_STORE_PASSWORD={storepass}",
+            f"CORE_WORKER_SIGNING_KEY_PASSWORD={keypass or storepass}",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    with contextlib.suppress(Exception):
+        props_path.chmod(0o600)
+
+    return {
+        "ok": True,
+        "mode": str(payload.get("apkSigningMode") or payload.get("apk_signing_mode") or "compat-vps-debug-keystore")[:80],
+        "alias": alias,
+        "keystore_sha256": actual_sha,
+        "source": str(payload.get("apkSigningSource") or payload.get("apk_signing_source") or "job_payload")[:80],
+    }
+
+
 def _read_android_version(project_dir: Path) -> tuple[str, int]:
     build_gradle = project_dir / "app" / "build.gradle"
     text = build_gradle.read_text(encoding="utf-8", errors="ignore") if build_gradle.exists() else ""
@@ -2887,7 +2950,7 @@ def _read_android_version(project_dir: Path) -> tuple[str, int]:
     return version_name, version_code
 
 
-def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str, version_code: int, sha256: str, publish_url: str, changelog: list[str] | None = None, source_sha256: str = "", source_fingerprint: str = "", notification_id: str = "") -> dict[str, Any]:
+def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str, version_code: int, sha256: str, publish_url: str, changelog: list[str] | None = None, source_sha256: str = "", source_fingerprint: str = "", notification_id: str = "", apk_signing_mode: str = "", apk_signing_keystore_sha256: str = "") -> dict[str, Any]:
     base_url, token, worker_id = _core_worker_auth_parts()
     if not token or not worker_id:
         return {"ok": False, "error": "worker não pareado; não posso publicar APK"}
@@ -2914,6 +2977,8 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
         field("sourceSha256", source_sha256),
         field("sourceFingerprint", source_fingerprint or source_sha256),
         field("notificationId", notification_id),
+        field("apkSigningMode", apk_signing_mode),
+        field("apkSigningKeystoreSha256", apk_signing_keystore_sha256[:64]),
         field("changelog", json.dumps(changelog or ["APK compilado por worker builder"], ensure_ascii=False)),
         (
             f"--{boundary}\r\n"
@@ -2990,7 +3055,9 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             else:
                 raise FileNotFoundError(f"projeto Android não encontrado: {project_subdir}")
         google_services = _install_google_services_from_payload(project_dir, payload)
+        apk_signing = _install_apk_signing_from_payload(project_dir, payload)
         env = os.environ.copy()
+        env["CORE_WORKER_REQUIRE_COMPAT_SIGNING"] = "true"
         base_url, _token, _worker_id = _core_worker_auth_parts()
         injected_vps_url = str(payload.get("coreWorkerVpsUrl") or payload.get("core_worker_vps_url") or payload.get("vps_url") or base_url or "").strip().rstrip("/")
         injected_vps_label = str(payload.get("coreWorkerVpsLabel") or payload.get("core_worker_vps_label") or ("VPS privada configurada" if injected_vps_url else "VPS não configurada no build")).strip()
@@ -3004,6 +3071,13 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             "project_id": google_services.get("project_id"),
             "source": google_services.get("source"),
             "sha256": str(google_services.get("sha256") or "")[:12],
+        }
+        builder_environment["apk_signing"] = {
+            "ok": bool(apk_signing.get("ok")),
+            "mode": apk_signing.get("mode"),
+            "alias": apk_signing.get("alias"),
+            "source": apk_signing.get("source"),
+            "keystore_sha256": str(apk_signing.get("keystore_sha256") or "")[:12],
         }
         if injected_vps_url:
             builder_environment["injected_vps_url"] = True
@@ -3045,7 +3119,14 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             "versionName": version_name,
             "versionCode": version_code,
             "notificationId": notification_id,
-            "apk": {"filename": filename, "bytes": len(raw), "sha256": apk_sha, "signed": True, "signed_by": "gradle-debug-phone-worker"},
+            "apk": {
+                "filename": filename,
+                "bytes": len(raw),
+                "sha256": apk_sha,
+                "signed": True,
+                "signed_by": str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
+                "signing_keystore_sha256": str(apk_signing.get("keystore_sha256") or "")[:12],
+            },
             "source": {"url": source_url, "bytes": download.get("bytes"), "sha256": download.get("sha256"), "files": members},
             "builder_environment": builder_environment,
             "duration_seconds": round(time.time() - started, 3),
@@ -3064,6 +3145,8 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 source_sha256=str(download.get("sha256") or expected_source_sha or ""),
                 source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or download.get("sha256") or expected_source_sha or ""),
                 notification_id=notification_id,
+                apk_signing_mode=str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
+                apk_signing_keystore_sha256=str(apk_signing.get("keystore_sha256") or ""),
             )
             result["publish"] = publish
             if not bool(publish.get("ok", False)):

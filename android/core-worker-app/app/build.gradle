@@ -11,7 +11,20 @@ def coreWorkerEsc = { String value ->
 def coreWorkerVpsUrl = (project.findProperty("CORE_WORKER_VPS_URL") ?: System.getenv("CORE_WORKER_VPS_URL") ?: "").toString().trim()
 def coreWorkerVpsLabel = (project.findProperty("CORE_WORKER_VPS_LABEL") ?: System.getenv("CORE_WORKER_VPS_LABEL") ?: (coreWorkerVpsUrl ? "VPS privada configurada no build" : "VPS não configurada no build")).toString().trim()
 
-
+def coreWorkerSigningProps = new Properties()
+def coreWorkerSigningFile = file("${projectDir}/core-worker-signing.properties")
+if (coreWorkerSigningFile.exists()) {
+    coreWorkerSigningFile.withInputStream { coreWorkerSigningProps.load(it) }
+}
+def coreWorkerSigningStoreFile = (coreWorkerSigningProps.getProperty("CORE_WORKER_SIGNING_KEYSTORE") ?: "").toString().trim()
+def coreWorkerSigningStorePassword = (coreWorkerSigningProps.getProperty("CORE_WORKER_SIGNING_STORE_PASSWORD") ?: "").toString()
+def coreWorkerSigningKeyAlias = (coreWorkerSigningProps.getProperty("CORE_WORKER_SIGNING_KEY_ALIAS") ?: "").toString().trim()
+def coreWorkerSigningKeyPassword = (coreWorkerSigningProps.getProperty("CORE_WORKER_SIGNING_KEY_PASSWORD") ?: coreWorkerSigningStorePassword).toString()
+def coreWorkerSigningEnabled = coreWorkerSigningStoreFile &&
+        coreWorkerSigningStorePassword &&
+        coreWorkerSigningKeyAlias &&
+        file("${projectDir}/${coreWorkerSigningStoreFile}").exists()
+def coreWorkerRequireCompatSigning = ((project.findProperty("CORE_WORKER_REQUIRE_COMPAT_SIGNING") ?: System.getenv("CORE_WORKER_REQUIRE_COMPAT_SIGNING") ?: "false").toString().toLowerCase() in ["1", "true", "yes", "on", "sim"])
 
 def coreWorkerExpectedPackage = "dev.core.worker"
 tasks.register("verifyCoreWorkerGoogleServices") {
@@ -44,12 +57,31 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 30
-        versionName "0.5.15"
+        versionCode 31
+        versionName "0.5.16"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
         buildConfigField "boolean", "CORE_WORKER_FCM_ENABLED", "true"
+    }
+
+    signingConfigs {
+        coreWorkerCompat {
+            if (coreWorkerSigningEnabled) {
+                storeFile file(coreWorkerSigningStoreFile)
+                storePassword coreWorkerSigningStorePassword
+                keyAlias coreWorkerSigningKeyAlias
+                keyPassword coreWorkerSigningKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            if (coreWorkerSigningEnabled) {
+                signingConfig signingConfigs.coreWorkerCompat
+            }
+        }
     }
 
     buildFeatures {
@@ -68,5 +100,17 @@ dependencies {
     implementation "com.google.firebase:firebase-messaging"
 }
 
-// FCM só deve ser buildado quando o arquivo local do Firebase estiver válido.
-tasks.named("preBuild").configure { dependsOn("verifyCoreWorkerGoogleServices") }
+tasks.register("verifyCoreWorkerCompatSigning") {
+    description = "Valida a keystore fixa usada pelo phone worker para permitir atualização sem desinstalar."
+    doLast {
+        if (coreWorkerRequireCompatSigning && !coreWorkerSigningEnabled) {
+            throw new GradleException("assinatura compatível ausente. O phone worker deve receber core-worker-signing.properties e a keystore temporária pelo payload autenticado do job.")
+        }
+    }
+}
+
+// FCM e assinatura compatível só devem ser usados quando os arquivos locais temporários estiverem válidos.
+tasks.named("preBuild").configure {
+    dependsOn("verifyCoreWorkerGoogleServices")
+    dependsOn("verifyCoreWorkerCompatSigning")
+}
