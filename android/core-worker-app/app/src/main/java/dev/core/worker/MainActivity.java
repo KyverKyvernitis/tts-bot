@@ -157,7 +157,7 @@ public class MainActivity extends Activity {
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";
     private volatile String localAgentProfile = "";
-    private volatile String runtimeMode = "apk-native-python-linux-assisted-runtime";
+    private volatile String runtimeMode = "apk-native-python-linux-bedrock-installer";
     private volatile String internalRuntimeState = "não preparado";
     private volatile String internalRuntimePath = "";
     private volatile boolean internalRuntimeOnline = false;
@@ -220,6 +220,9 @@ public class MainActivity extends Activity {
     private volatile boolean foregroundRuntimeActive = false;
     private volatile long foregroundRuntimeLastTickAt = 0L;
     private volatile String linuxInstallStrategySummary = "estratégia Linux aguardando confirmação";
+    private volatile String bedrockInstallerSummary = "instalador Bedrock aguardando";
+    private volatile String bedrockInstallerState = "aguardando";
+    private volatile String bedrockInstallerNextAction = "validar requisitos";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -496,13 +499,29 @@ public class MainActivity extends Activity {
         foregroundStopButton.setOnClickListener(v -> stopForegroundRuntimeFromUi());
         technicalDetailsContent.addView(foregroundStopButton);
 
+        Button bedrockValidateButton = secondaryButton("Validar Bedrock");
+        bedrockValidateButton.setOnClickListener(v -> bedrockWizardFromUi("validate_device", "Validação Bedrock solicitada."));
+        technicalDetailsContent.addView(bedrockValidateButton);
+
+        Button bedrockInstallerButton = secondaryButton("Instalador Bedrock");
+        bedrockInstallerButton.setOnClickListener(v -> bedrockWizardFromUi("prepare_environment", "Instalador Bedrock atualizado."));
+        technicalDetailsContent.addView(bedrockInstallerButton);
+
         Button bedrockPrepareButton = secondaryButton("Preparar Bedrock");
         bedrockPrepareButton.setOnClickListener(v -> prepareBedrockManagerFromUi());
         technicalDetailsContent.addView(bedrockPrepareButton);
 
+        Button bedrockManifestButton = secondaryButton("Manifesto Bedrock");
+        bedrockManifestButton.setOnClickListener(v -> bedrockWizardFromUi("download_manifest", "Manifesto Bedrock preparado."));
+        technicalDetailsContent.addView(bedrockManifestButton);
+
         Button bedrockStatusButton = secondaryButton("Status Bedrock");
         bedrockStatusButton.setOnClickListener(v -> refreshBedrockManagerFromUi());
         technicalDetailsContent.addView(bedrockStatusButton);
+
+        Button bedrockPreflightButton = secondaryButton("Preflight Bedrock");
+        bedrockPreflightButton.setOnClickListener(v -> bedrockWizardFromUi("final_preflight", "Preflight Bedrock atualizado."));
+        technicalDetailsContent.addView(bedrockPreflightButton);
 
         Button bedrockEulaButton = dangerButton("Confirmar EULA Bedrock");
         bedrockEulaButton.setOnClickListener(v -> confirmBedrockEulaFromUi());
@@ -1690,6 +1709,40 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    private void bedrockWizardFromUi(String focus, String fallbackMessage) {
+        runBusy("Atualizando instalador assistido Bedrock...", () -> {
+            JSONObject out = bedrockInstallerWizardSnapshot(focus == null ? "status" : focus);
+            reportAppState("bedrock_installer_" + (focus == null ? "status" : focus), out.optString("summary", fallbackMessage == null ? "Instalador Bedrock atualizado" : fallbackMessage));
+            show(out.optString("summary", fallbackMessage == null ? "Instalador Bedrock atualizado." : fallbackMessage));
+        });
+    }
+
+    private JSONObject bedrockInstallerWizardSnapshot(String focus) throws Exception {
+        prepareCoreLinuxRuntimeState();
+        JSONObject extra = new JSONObject();
+        extra.put("focus", focus == null ? "status" : focus);
+        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
+        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
+        extra.put("foregroundRuntimeActive", foregroundRuntimeActive);
+        extra.put("officialLinux", "Ubuntu Linux 22.04 LTS ou superior");
+        extra.put("officialRamGb", 4);
+        JSONObject py = runEmbeddedPythonJob("bedrock_installer_wizard", extra);
+        bedrockInstallerSummary = py.optString("summary", bedrockInstallerSummary);
+        bedrockInstallerState = py.optString("state", bedrockInstallerState);
+        bedrockInstallerNextAction = py.optString("nextAction", bedrockInstallerNextAction);
+        JSONObject bedrock = py.optJSONObject("bedrock");
+        if (bedrock != null) {
+            if (bedrock.optBoolean("serverInstalled", false)) {
+                bedrockSummary = "Bedrock instalado · aguardando runner";
+            } else if (bedrock.optBoolean("eulaAccepted", false)) {
+                bedrockSummary = "Bedrock EULA aceita · servidor não instalado";
+            }
+        }
+        bedrockLastCheckAt = System.currentTimeMillis();
+        updateSystemChecklistText();
+        return py;
+    }
+
     private JSONObject bedrockManagerSnapshot(String focus, boolean acceptEula) throws Exception {
         prepareCoreLinuxRuntimeState();
         JSONObject extra = new JSONObject();
@@ -2001,7 +2054,7 @@ public class MainActivity extends Activity {
             status.put("apk_native_worker", true);
             status.put("termux_required_now", false);
             status.put("termux_role", "fallback-legado");
-            status.put("migration_stage", "apk-native-runtime-python-linux-provisioner");
+            status.put("migration_stage", "apk-native-runtime-python-linux-bedrock-installer");
             status.put("native_shell", "allowlist-probe");
             status.put("python_runtime", nativePythonAvailable ? "embedded-ok" : "embedded-pending");
             safePutPayload(payload, "status", status);
@@ -2327,6 +2380,7 @@ public class MainActivity extends Activity {
                 || "bedrock_probe".equals(script)
                 || "bedrock_install_plan".equals(script)
                 || "linux_assisted_install".equals(script)
+                || "bedrock_installer_wizard".equals(script)
                 || "bedrock_manager".equals(script);
     }
 
@@ -2343,18 +2397,18 @@ public class MainActivity extends Activity {
             File state = new File(runtimeDir, "runtime-state.json");
             JSONObject meta = new JSONObject();
             meta.put("ok", true);
-            meta.put("mode", "apk-native-python-linux-assisted-runtime");
+            meta.put("mode", "apk-native-python-linux-bedrock-installer");
             meta.put("active", true);
             meta.put("internal_runtime", "apk-native-runtime");
             meta.put("apk_version", APP_VERSION);
             meta.put("version_code", BuildConfig.VERSION_CODE);
             meta.put("created_by", "core-worker-apk");
             meta.put("summary", "Runtime interno ativo para status, boot, jobs seguros, Python, shell controlado, Foreground Service e Core Linux Runtime Manager. Termux fica só como fallback legado.");
-            meta.put("migration_stage", "apk-native-linux-assisted-install-phase");
+            meta.put("migration_stage", "apk-native-bedrock-installer-phase");
             writeTextFile(state, meta.toString());
             internalRuntimeState = "preparado · heartbeat ativo";
             internalRuntimePath = runtimeDir.getAbsolutePath();
-            runtimeMode = "apk-native-python-linux-assisted-runtime";
+            runtimeMode = "apk-native-python-linux-bedrock-installer";
         } catch (Throwable exc) {
             internalRuntimeState = "falha ao preparar · " + exc.getClass().getSimpleName();
             internalRuntimeOnline = false;
@@ -2377,7 +2431,7 @@ public class MainActivity extends Activity {
 
     private JSONObject runtimeSnapshot() throws Exception {
         JSONObject runtime = new JSONObject();
-        runtime.put("mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-assisted-runtime" : runtimeMode.trim());
+        runtime.put("mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-bedrock-installer" : runtimeMode.trim());
         runtime.put("current_worker", nativeWorkerOnline ? "apk-native-worker" : (localAgentOnline ? "termux-fallback" : "apk-internal-heartbeat"));
         runtime.put("internal_runtime", "apk-native-runtime");
         runtime.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
@@ -2390,11 +2444,14 @@ public class MainActivity extends Activity {
         runtime.put("foreground_runtime_summary", foregroundRuntimeSummary == null ? "" : foregroundRuntimeSummary);
         runtime.put("foreground_runtime_last_tick_at", foregroundRuntimeLastTickAt);
         runtime.put("linux_install_strategy_summary", linuxInstallStrategySummary == null ? "" : linuxInstallStrategySummary);
+        runtime.put("bedrock_installer_summary", bedrockInstallerSummary == null ? "" : bedrockInstallerSummary);
+        runtime.put("bedrock_installer_state", bedrockInstallerState == null ? "" : bedrockInstallerState);
+        runtime.put("bedrock_installer_next_action", bedrockInstallerNextAction == null ? "" : bedrockInstallerNextAction);
         runtime.put("termux_required_now", false);
         runtime.put("termux_fallback_available", localAgentOnline);
         runtime.put("advanced_jobs_require_termux", false);
-        runtime.put("jobs_runtime", "apk-native-python-linux-assisted-runtime");
-        runtime.put("migration_stage", "apk-native-linux-assisted-install-phase");
+        runtime.put("jobs_runtime", "apk-native-python-linux-bedrock-installer");
+        runtime.put("migration_stage", "apk-native-bedrock-installer-phase");
         runtime.put("light_jobs_state", internalLightJobsState == null ? "" : internalLightJobsState);
         runtime.put("light_jobs_last_check_at", internalLightJobsLastCheckAt);
         runtime.put("light_jobs_last_count", internalLightJobsLastCount);
@@ -2453,7 +2510,7 @@ public class MainActivity extends Activity {
             payload.put("state", "internal_heartbeat");
             payload.put("reason", reason == null ? "manual" : reason);
             payload.put("source", "core-worker-apk-internal-runtime");
-            payload.put("runtime_mode", "apk-native-python-linux-assisted-runtime");
+            payload.put("runtime_mode", "apk-native-python-linux-bedrock-installer");
             payload.put("internal_runtime", "apk-native-runtime");
             payload.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
             payload.put("internal_runtime_path", internalRuntimePath == null ? "" : internalRuntimePath);
@@ -2467,7 +2524,7 @@ public class MainActivity extends Activity {
             payload.put("localAgentOnline", localAgentOnline);
             payload.put("termuxWorkerOnline", localAgentOnline);
             payload.put("nativeWorkerOnline", nativeWorkerOnline);
-            payload.put("jobsRuntime", "apk-native-python-linux-assisted-runtime");
+            payload.put("jobsRuntime", "apk-native-python-linux-bedrock-installer");
             safePutPayload(payload, "battery", batterySnapshot());
             safePutPayload(payload, "network", networkSnapshot(serverUrl));
             safePutPayload(payload, "update", updateSnapshot());
@@ -2686,7 +2743,13 @@ public class MainActivity extends Activity {
                 .put("apk_minecraft_bedrock_eula_status")
                 .put("apk_minecraft_bedrock_start_plan")
                 .put("apk_minecraft_bedrock_stop_plan")
-                .put("apk_minecraft_bedrock_logs_status");
+                .put("apk_minecraft_bedrock_logs_status")
+                .put("apk_minecraft_bedrock_installer_status")
+                .put("apk_minecraft_bedrock_validate_device")
+                .put("apk_minecraft_bedrock_choose_strategy_plan")
+                .put("apk_minecraft_bedrock_prepare_environment_plan")
+                .put("apk_minecraft_bedrock_download_manifest")
+                .put("apk_minecraft_bedrock_final_preflight");
     }
 
     private String summarizeLightJobs(JSONArray jobs, int okCount, int count) {
@@ -3277,6 +3340,29 @@ public class MainActivity extends Activity {
             result.put("message", manager.optString("summary", "Bedrock Manager atualizado sem baixar/iniciar servidor"));
             return result;
         }
+        if ("apk_minecraft_bedrock_installer_status".equals(type)
+                || "apk_minecraft_bedrock_validate_device".equals(type)
+                || "apk_minecraft_bedrock_choose_strategy_plan".equals(type)
+                || "apk_minecraft_bedrock_prepare_environment_plan".equals(type)
+                || "apk_minecraft_bedrock_download_manifest".equals(type)
+                || "apk_minecraft_bedrock_final_preflight".equals(type)) {
+            String focus = "status";
+            if ("apk_minecraft_bedrock_validate_device".equals(type)) focus = "validate_device";
+            if ("apk_minecraft_bedrock_choose_strategy_plan".equals(type)) focus = "choose_strategy";
+            if ("apk_minecraft_bedrock_prepare_environment_plan".equals(type)) focus = "prepare_environment";
+            if ("apk_minecraft_bedrock_download_manifest".equals(type)) focus = "download_manifest";
+            if ("apk_minecraft_bedrock_final_preflight".equals(type)) focus = "final_preflight";
+            JSONObject wizard = bedrockInstallerWizardSnapshot(focus);
+            safePutPayload(result, "bedrockInstaller", wizard);
+            internalDiagnosticsSummary = wizard.optString("summary", "instalador Bedrock atualizado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!wizard.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", wizard.optString("error", wizard.optString("summary", "instalador Bedrock bloqueado")));
+            }
+            result.put("message", wizard.optString("summary", "instalador Bedrock atualizado sem baixar/iniciar servidor"));
+            return result;
+        }
         if ("apk_download_small".equals(type)) {
             JSONObject download = downloadSmallJobPayload(serverUrl, jobPayload);
             safePutPayload(result, "download", download);
@@ -3414,7 +3500,7 @@ public class MainActivity extends Activity {
 
     private JSONObject workerBridgeStatusSnapshot() throws Exception {
         JSONObject bridge = new JSONObject();
-        bridge.put("mode", "apk-native-python-linux-assisted-runtime");
+        bridge.put("mode", "apk-native-python-linux-bedrock-installer");
         bridge.put("apk_internal_online", internalRuntimeOnline);
         bridge.put("apk_native_worker_online", nativeWorkerOnline);
         bridge.put("termux_worker_online", localAgentOnline);
@@ -4096,11 +4182,11 @@ public class MainActivity extends Activity {
         }
         profileStatus.put("profile", profile);
         profileStatus.put("profile_label", profileLabel(profile));
-        profileStatus.put("apk_scope", "native-runtime-python-linux-provisioner");
-        profileStatus.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-assisted-runtime" : runtimeMode);
+        profileStatus.put("apk_scope", "native-runtime-python-linux-bedrock-installer");
+        profileStatus.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-bedrock-installer" : runtimeMode);
         profileStatus.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
         profileStatus.put("runtime", runtimeSnapshot());
-        payload.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-assisted-runtime" : runtimeMode);
+        payload.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-bedrock-installer" : runtimeMode);
         payload.put("status", profileStatus);
     }
 
@@ -4175,13 +4261,16 @@ public class MainActivity extends Activity {
         status.put("foreground_runtime_summary", foregroundRuntimeSummary == null ? "" : foregroundRuntimeSummary);
         status.put("foreground_runtime_last_tick_at", foregroundRuntimeLastTickAt);
         status.put("linux_install_strategy_summary", linuxInstallStrategySummary == null ? "" : linuxInstallStrategySummary);
+        status.put("bedrock_installer_summary", bedrockInstallerSummary == null ? "" : bedrockInstallerSummary);
+        status.put("bedrock_installer_state", bedrockInstallerState == null ? "" : bedrockInstallerState);
+        status.put("bedrock_installer_next_action", bedrockInstallerNextAction == null ? "" : bedrockInstallerNextAction);
         status.put("termux_installed", isPackageInstalled("com.termux"));
         status.put("termux_api_installed", isPackageInstalled("com.termux.api"));
         status.put("termux_boot_installed", isPackageInstalled("com.termux.boot"));
         status.put("tailscale_installed", isPackageInstalled("com.tailscale.ipn"));
         status.put("fcm_state", fcmState);
         status.put("fcm_token_preview", fcmTokenPreview);
-        status.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-assisted-runtime" : runtimeMode);
+        status.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-bedrock-installer" : runtimeMode);
         status.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
         status.put("internal_runtime_online", internalRuntimeOnline);
         status.put("internal_runtime_heartbeat_state", internalRuntimeHeartbeatState == null ? "" : internalRuntimeHeartbeatState);
@@ -4814,6 +4903,8 @@ public class MainActivity extends Activity {
         String bedrockBlock = "Servidor Minecraft Bedrock\n"
                 + checkLine("Estado", emptyFallback(bedrockSummary, "não instalado")) + "\n"
                 + checkLine("Manager", emptyFallback(bedrockState, "aguardando diagnóstico")) + "\n"
+                + checkLine("Instalador", emptyFallback(bedrockInstallerSummary, "aguardando validação")) + "\n"
+                + checkLine("Próxima ação", emptyFallback(bedrockInstallerNextAction, "validar requisitos")) + "\n"
                 + checkLine("Pronto", bedrockReady ? "sim · aguardando runner" : "não · ambiente/servidor pendente") + "\n"
                 + checkLine("Propriedades", "server.properties preparado pelo APK") + "\n"
                 + checkLine("EULA", bedrockSummary != null && bedrockSummary.toLowerCase(Locale.ROOT).contains("eula") ? "verificar no status" : "não aceita automaticamente") + "\n"
@@ -4837,6 +4928,7 @@ public class MainActivity extends Activity {
                 + checkLine("Shell", emptyFallback(nativeShellSummary, "controlado aguardando")) + "\n"
                 + checkLine("Linux runtime", emptyFallback(coreLinuxSummary, "base preparada")) + "\n"
                 + checkLine("Instalação Linux", emptyFallback(linuxInstallStrategySummary, "aguardando plano")) + "\n"
+                + checkLine("Instalador Bedrock", emptyFallback(bedrockInstallerSummary, "aguardando validação")) + "\n"
                 + checkLine("Bedrock", emptyFallback(bedrockSummary, "diagnóstico pendente")) + "\n"
                 + checkLine("Termux", localAgentOnline ? "fallback legado online" : "fallback legado opcional") + "\n"
                 + checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "VPN externa ainda é etapa futura") + "\n"

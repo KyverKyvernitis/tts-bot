@@ -517,6 +517,12 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_minecraft_bedrock_start_plan",
     "apk_minecraft_bedrock_stop_plan",
     "apk_minecraft_bedrock_logs_status",
+    "apk_minecraft_bedrock_installer_status",
+    "apk_minecraft_bedrock_validate_device",
+    "apk_minecraft_bedrock_choose_strategy_plan",
+    "apk_minecraft_bedrock_prepare_environment_plan",
+    "apk_minecraft_bedrock_download_manifest",
+    "apk_minecraft_bedrock_final_preflight",
 }
 CORE_WORKER_APP_JOB_LABELS = {
     "apk_ping": "ping interno",
@@ -574,6 +580,12 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_minecraft_bedrock_start_plan": "Bedrock plano start",
     "apk_minecraft_bedrock_stop_plan": "Bedrock plano stop",
     "apk_minecraft_bedrock_logs_status": "Bedrock logs status",
+    "apk_minecraft_bedrock_installer_status": "Bedrock instalador status",
+    "apk_minecraft_bedrock_validate_device": "Bedrock validar aparelho",
+    "apk_minecraft_bedrock_choose_strategy_plan": "Bedrock escolher estratégia",
+    "apk_minecraft_bedrock_prepare_environment_plan": "Bedrock preparar ambiente",
+    "apk_minecraft_bedrock_download_manifest": "Bedrock manifesto downloads",
+    "apk_minecraft_bedrock_final_preflight": "Bedrock preflight final",
 }
 
 
@@ -817,6 +829,11 @@ def _core_worker_app_runtime_detail_text(worker_id: str) -> str:
 
 
 def _core_worker_app_runtime_text(worker_id: str) -> str:
+    """Resumo curto para o card principal do Discord.
+
+    O painel é snapshot manual; detalhes completos ficam no app e na ação
+    "Detalhes do celular". Aqui evitamos despejar estado técnico/truncado.
+    """
     worker_id = str(worker_id or "").strip()
     if not worker_id:
         return "aguardando vínculo"
@@ -829,60 +846,51 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
         seen = 0.0
     age = max(0.0, time.time() - seen) if seen else None
     online = age is not None and age <= 180
-    app_version = _shorten(record.get("appVersion") or "APK", limit=20)
-    profile = _shorten(record.get("profile") or "perfil ?", limit=24)
-    fcm_state = _shorten(record.get("fcmState") or "push ?", limit=32)
-    update_state = _shorten(record.get("updateState") or "atualização ?", limit=32)
-    jobs_runtime = _shorten(record.get("jobsRuntime") or "apk-python", limit=28)
-    internal_queue = _core_worker_app_queue_text_for_runtime(worker_id, record)
-    battery_parts: list[str] = []
-    try:
-        percent = int(record.get("batteryPercent") or -1)
-        if percent >= 0:
-            battery_parts.append(f"{percent}%")
-    except Exception:
-        pass
-    try:
-        temp = float(record.get("batteryTemperatureC") or -1)
-        if temp >= 0:
-            battery_parts.append(f"{round(temp)}°C")
-    except Exception:
-        pass
-    if record.get("batteryCharging"):
-        battery_parts.append("carregando")
-    battery = " · ".join(battery_parts) if battery_parts else "bateria ?"
-    network_type = _shorten(record.get("networkType") or "rede", limit=16)
-    network = network_type
-    if record.get("networkVpn") and "vpn" not in network.lower():
-        network += "+VPN"
-    try:
-        ping = int(record.get("vpsPingMs") or -1)
-        if ping >= 0:
-            network += f" · {ping}ms"
-    except Exception:
-        pass
-    diagnostics = _shorten(record.get("diagnosticsSummary") or "", limit=42)
-    storage = _shorten(record.get("storageSummary") or "", limit=34)
-    bridge = _shorten(record.get("bridgeSummary") or "", limit=34)
-    linux = _shorten(record.get("coreLinuxSummary") or "", limit=34)
-    bedrock = _shorten(record.get("bedrockSummary") or "", limit=34)
-    prefix = "online" if online else "visto " + _format_age(age)
-    pieces = [prefix, app_version, f"perfil {profile}", f"push {fcm_state}", battery, network, f"APK {update_state}", f"jobs: {jobs_runtime}"]
-    if diagnostics:
-        pieces.append(f"diag {diagnostics}")
-    if storage:
-        pieces.append(storage)
-    if bridge:
-        pieces.append(bridge)
-    if linux:
-        pieces.append(linux)
-    if bedrock:
-        pieces.append(bedrock)
-    if internal_queue and internal_queue != "fila vazia":
-        pieces.append(f"fila {internal_queue}")
-    pieces.append(_core_worker_app_jobs_text(worker_id))
-    return " · ".join(str(x) for x in pieces if x)
+    app_version = _shorten(record.get("appVersion") or "APK", limit=16)
+    status = "online" if online else "visto " + _format_age(age)
+    parts = [status, app_version]
 
+    # Estados principais, em português natural.
+    python_ok = False
+    jobs_runtime = str(record.get("jobsRuntime") or record.get("runtimeMode") or "").lower()
+    if "python" in jobs_runtime or "chaquopy" in str(record.get("diagnosticsSummary") or "").lower():
+        python_ok = True
+    parts.append("Python ok" if python_ok else "Python preparando")
+
+    fg = str(record.get("foregroundRuntimeSummary") or "").strip().lower()
+    fg_active = bool(record.get("foregroundRuntimeActive"))
+    if fg_active or "ativo" in fg:
+        parts.append("runtime persistente ativo")
+    elif fg:
+        parts.append("runtime persistente parado")
+
+    linux_state = str(record.get("coreLinuxState") or "").lower()
+    linux_summary = str(record.get("coreLinuxSummary") or "").lower()
+    if record.get("coreLinuxPrepared") or "pronto" in linux_summary or "plan" in linux_state:
+        parts.append("Linux pronto")
+    elif linux_summary:
+        parts.append("Linux preparando")
+
+    bedrock_summary = str(record.get("bedrockSummary") or "")
+    bedrock_installer = str(record.get("bedrockInstallerSummary") or "")
+    bedrock_joined = (bedrock_summary + " " + bedrock_installer).lower()
+    if record.get("bedrockReady") or "pronto para iniciar" in bedrock_joined:
+        parts.append("Bedrock pronto")
+    elif "servidor não instalado" in bedrock_joined or "não instalado" in bedrock_joined:
+        parts.append("Bedrock não instalado")
+    elif "instalador" in bedrock_joined or "bedrock" in bedrock_joined:
+        parts.append("Bedrock assistido")
+
+    q = _core_worker_app_queue_text_for_runtime(worker_id, record)
+    if q and q != "fila vazia":
+        parts.append(f"fila {q}")
+    jobs_text = _core_worker_app_jobs_text(worker_id)
+    if jobs_text and "aguardando" not in jobs_text:
+        # Compacta "jobs internos: 19/19 ok · 47 manuais" para caber melhor.
+        jobs_text = jobs_text.replace("jobs internos: ", "jobs ")
+        parts.append(jobs_text)
+
+    return " · ".join(str(x) for x in parts if x)
 
 def _profile_feature_values(profile: str) -> set[str]:
     values: set[str] = {"phone-worker"}
@@ -2451,6 +2459,11 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Bedrock start", "value": "_apk_minecraft_bedrock_start_plan", "description": "Plano de início seguro", "emoji": "▶️", "panel_action": "apk_minecraft_bedrock_start_plan", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_start_plan"},
                 {"label": "Bedrock stop", "value": "_apk_minecraft_bedrock_stop_plan", "description": "Plano de parada segura", "emoji": "⏹️", "panel_action": "apk_minecraft_bedrock_stop_plan", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_stop_plan"},
                 {"label": "Bedrock logs", "value": "_apk_minecraft_bedrock_logs_status", "description": "Estado dos logs", "emoji": "📄", "panel_action": "apk_minecraft_bedrock_logs_status", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_logs_status"},
+                {"label": "Bedrock validar", "value": "_apk_minecraft_bedrock_validate_device", "description": "RAM/storage antes de instalar", "emoji": "✅", "panel_action": "apk_minecraft_bedrock_validate_device", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_validate_device"},
+                {"label": "Bedrock instalador", "value": "_apk_minecraft_bedrock_installer_status", "description": "Etapas assistidas", "emoji": "🧭", "panel_action": "apk_minecraft_bedrock_installer_status", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_installer_status"},
+                {"label": "Bedrock ambiente", "value": "_apk_minecraft_bedrock_prepare_environment_plan", "description": "Prepara plano seguro", "emoji": "🗂️", "panel_action": "apk_minecraft_bedrock_prepare_environment_plan", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_prepare_environment_plan"},
+                {"label": "Bedrock manifesto", "value": "_apk_minecraft_bedrock_download_manifest", "description": "Downloads sem baixar", "emoji": "📜", "panel_action": "apk_minecraft_bedrock_download_manifest", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_download_manifest"},
+                {"label": "Bedrock preflight", "value": "_apk_minecraft_bedrock_final_preflight", "description": "Últimos bloqueios", "emoji": "🛫", "panel_action": "apk_minecraft_bedrock_final_preflight", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_final_preflight"},
                 {"label": "Runtime persist.", "value": "_apk_runtime_foreground_probe", "description": "Serviço com notificação", "emoji": "🟢", "panel_action": "apk_runtime_foreground_probe", "category": "apk", "apk_job_type": "apk_runtime_foreground_probe"},
                 {"label": "Ativar persist.", "value": "_apk_runtime_foreground_start", "description": "Inicia foreground runtime", "emoji": "▶️", "panel_action": "apk_runtime_foreground_start", "category": "apk", "apk_job_type": "apk_runtime_foreground_start"},
                 {"label": "Parar persist.", "value": "_apk_runtime_foreground_stop", "description": "Para foreground runtime", "emoji": "⏹️", "panel_action": "apk_runtime_foreground_stop", "category": "apk", "apk_job_type": "apk_runtime_foreground_stop"},

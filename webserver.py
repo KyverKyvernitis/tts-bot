@@ -493,12 +493,17 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         "diagnosticsSummary": _safe_short_text(runtime.get("diagnostics_summary") or status.get("diagnostics_summary"), 160),
         "storageSummary": _safe_short_text(runtime.get("storage_summary") or (storage.get("summary") if isinstance(storage, dict) else ""), 120),
         "bridgeSummary": _safe_short_text(runtime.get("bridge_summary"), 120),
+        "foregroundRuntimeActive": bool(runtime.get("foreground_runtime_active") or status.get("foreground_runtime_active")),
+        "foregroundRuntimeSummary": _safe_short_text(runtime.get("foreground_runtime_summary") or status.get("foreground_runtime_summary"), 120),
         "coreLinuxSummary": _safe_short_text(runtime.get("core_linux_summary") or status.get("core_linux_summary"), 160),
         "coreLinuxState": _safe_short_text(runtime.get("core_linux_state") or status.get("core_linux_state"), 80),
         "coreLinuxPrepared": bool(runtime.get("core_linux_prepared") or status.get("core_linux_prepared")),
         "bedrockSummary": _safe_short_text(runtime.get("bedrock_summary") or status.get("bedrock_summary"), 160),
         "bedrockState": _safe_short_text(runtime.get("bedrock_state") or status.get("bedrock_state"), 80),
         "bedrockReady": bool(runtime.get("bedrock_ready") or status.get("bedrock_ready")),
+        "bedrockInstallerSummary": _safe_short_text(runtime.get("bedrock_installer_summary") or status.get("bedrock_installer_summary"), 160),
+        "bedrockInstallerState": _safe_short_text(runtime.get("bedrock_installer_state") or status.get("bedrock_installer_state"), 80),
+        "bedrockInstallerNextAction": _safe_short_text(runtime.get("bedrock_installer_next_action") or status.get("bedrock_installer_next_action"), 120),
         "notificationPermission": _safe_short_text((permissions.get("notifications") if isinstance(permissions, dict) else ""), 32),
         "battery": battery if isinstance(battery, dict) else {},
         "network": network if isinstance(network, dict) else {},
@@ -675,6 +680,12 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_minecraft_bedrock_start_plan",
     "apk_minecraft_bedrock_stop_plan",
     "apk_minecraft_bedrock_logs_status",
+    "apk_minecraft_bedrock_installer_status",
+    "apk_minecraft_bedrock_validate_device",
+    "apk_minecraft_bedrock_choose_strategy_plan",
+    "apk_minecraft_bedrock_prepare_environment_plan",
+    "apk_minecraft_bedrock_download_manifest",
+    "apk_minecraft_bedrock_final_preflight",
 }
 
 CORE_WORKER_APP_SAFE_JOB_TYPES = (
@@ -745,6 +756,12 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_minecraft_bedrock_start_plan": "Bedrock plano start",
     "apk_minecraft_bedrock_stop_plan": "Bedrock plano stop",
     "apk_minecraft_bedrock_logs_status": "Bedrock logs status",
+    "apk_minecraft_bedrock_installer_status": "Bedrock instalador status",
+    "apk_minecraft_bedrock_validate_device": "Bedrock validar aparelho",
+    "apk_minecraft_bedrock_choose_strategy_plan": "Bedrock escolher estratégia",
+    "apk_minecraft_bedrock_prepare_environment_plan": "Bedrock preparar ambiente",
+    "apk_minecraft_bedrock_download_manifest": "Bedrock manifesto downloads",
+    "apk_minecraft_bedrock_final_preflight": "Bedrock preflight final",
 }
 
 def _core_worker_app_normalize_job_type(job_type: object) -> str:
@@ -795,7 +812,7 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         profile = _safe_short_text(payload.get("profile"), 40).lower()
         if profile in {"leve", "midia", "media", "normal", "completo", "builder", "turbo", "bedrock"}:
             clean["profile"] = profile
-    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state", "apk_native_worker_status", "apk_native_boot_status", "apk_local_shell_probe", "apk_python_runtime_probe", "apk_python_health_check", "apk_python_runtime_info", "apk_python_status_bundle", "apk_python_storage_check", "apk_python_log_summary", "apk_python_network_diagnostic", "apk_python_runtime_files_check", "apk_linux_runtime_probe", "apk_linux_rootfs_probe", "apk_linux_box64_probe", "apk_linux_provisioner_probe", "apk_linux_prepare_directories", "apk_linux_generate_setup_plan", "apk_minecraft_bedrock_probe", "apk_minecraft_bedrock_status", "apk_minecraft_bedrock_requirements", "apk_minecraft_bedrock_install_plan", "apk_minecraft_bedrock_properties_template", "apk_runtime_foreground_probe", "apk_runtime_foreground_start", "apk_runtime_foreground_stop", "apk_linux_strategy_plan", "apk_linux_manifest_plan", "apk_minecraft_bedrock_assisted_install_plan", "apk_minecraft_bedrock_prepare_files", "apk_minecraft_bedrock_eula_status", "apk_minecraft_bedrock_start_plan", "apk_minecraft_bedrock_stop_plan", "apk_minecraft_bedrock_logs_status"}:
+    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state", "apk_native_worker_status", "apk_native_boot_status", "apk_local_shell_probe", "apk_python_runtime_probe", "apk_python_health_check", "apk_python_runtime_info", "apk_python_status_bundle", "apk_python_storage_check", "apk_python_log_summary", "apk_python_network_diagnostic", "apk_python_runtime_files_check", "apk_linux_runtime_probe", "apk_linux_rootfs_probe", "apk_linux_box64_probe", "apk_linux_provisioner_probe", "apk_linux_prepare_directories", "apk_linux_generate_setup_plan", "apk_minecraft_bedrock_probe", "apk_minecraft_bedrock_status", "apk_minecraft_bedrock_requirements", "apk_minecraft_bedrock_install_plan", "apk_minecraft_bedrock_properties_template", "apk_runtime_foreground_probe", "apk_runtime_foreground_start", "apk_runtime_foreground_stop", "apk_linux_strategy_plan", "apk_linux_manifest_plan", "apk_minecraft_bedrock_assisted_install_plan", "apk_minecraft_bedrock_prepare_files", "apk_minecraft_bedrock_eula_status", "apk_minecraft_bedrock_start_plan", "apk_minecraft_bedrock_stop_plan", "apk_minecraft_bedrock_logs_status", "apk_minecraft_bedrock_installer_status", "apk_minecraft_bedrock_validate_device", "apk_minecraft_bedrock_choose_strategy_plan", "apk_minecraft_bedrock_prepare_environment_plan", "apk_minecraft_bedrock_download_manifest", "apk_minecraft_bedrock_final_preflight"}:
         detail = _safe_short_text(payload.get("detail") or payload.get("reason"), 80)
         if detail:
             clean["detail"] = detail
