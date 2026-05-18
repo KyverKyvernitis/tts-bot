@@ -78,7 +78,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.35";
+    private static final String APP_VERSION = "0.5.36";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -161,6 +161,7 @@ public class MainActivity extends Activity {
     private Button heartbeatButton;
     private Button updateCheckButton;
     private Button updateInstallButton;
+    private Button updateCleanupButton;
     private Button clearButton;
     private LinearLayout technicalDetailsContent;
     private Button technicalToggleButton;
@@ -250,6 +251,7 @@ public class MainActivity extends Activity {
         migrateFcmSafetyStateForPatch52();
         buildUi();
         loadInputs();
+        safeStartupTask(() -> cleanupUpdateArtifacts(false, "app_start"));
         safeStartupTask(this::prepareInternalRuntimePreview);
         safeStartupTask(this::prepareNativeRuntimeState);
         safeStartupTask(this::prepareCoreLinuxRuntimeState);
@@ -275,6 +277,7 @@ public class MainActivity extends Activity {
         safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_resume"));
         safeStartupTask(this::autoVerifySavedPairing);
         safeStartupTask(this::autoCheckForUpdate);
+        safeStartupTask(() -> cleanupUpdateArtifacts(false, "activity_resume"));
         safeStartupTask(() -> sendInternalRuntimeHeartbeat(false, "activity_resume"));
         safeStartupTask(() -> sendNativeWorkerHeartbeat(false, "activity_resume"));
         safeStartupTask(this::readBedrockServiceState);
@@ -533,6 +536,10 @@ public class MainActivity extends Activity {
         updateCheckButton = secondaryButton("Verificar atualização");
         updateCheckButton.setOnClickListener(v -> checkForUpdate());
         updateCard.addView(updateCheckButton);
+
+        updateCleanupButton = secondaryButton("Limpeza segura de updates");
+        updateCleanupButton.setOnClickListener(v -> runManualUpdateCleanup());
+        updateCard.addView(updateCleanupButton);
 
         LinearLayout technicalCard = cardWithTopMargin(mainContent);
         technicalCard.addView(sectionTitle("Detalhes técnicos"));
@@ -1501,11 +1508,7 @@ public class MainActivity extends Activity {
                 String version = emptyFallback(latestVersionName, "nova versão");
                 setUpdateActionState("Baixando Core Worker " + version + " direto da VPS...\nSe falhar, o erro aparecerá aqui.", "Baixando...", true, true);
                 reportUpdateNotification(serverUrl, "download_started", true, "download direto iniciado pelo APK");
-                File filesBase = getExternalFilesDir(null);
-                if (filesBase == null) {
-                    filesBase = getCacheDir();
-                }
-                File updateDir = new File(filesBase, "updates");
+                File updateDir = primaryUpdateDir();
                 if (!updateDir.exists() && !updateDir.mkdirs()) {
                     String detail = "Não consegui criar a pasta local de atualização.";
                     show(detail);
@@ -1513,28 +1516,52 @@ public class MainActivity extends Activity {
                     reportUpdateNotification(serverUrl, "download_failed", false, "falha criando pasta local de atualização");
                     return;
                 }
-                File apkFile = new File(updateDir, safeLocalApkName());
-                downloadFile(latestApkUrl, apkFile, (done, total) -> {
-                    String progress = total > 0
-                            ? "Baixando " + version + "... " + Math.max(0, Math.min(100, (int) ((done * 100L) / total))) + "% · " + formatBytes(done) + " / " + formatBytes(total)
-                            : "Baixando " + version + "... " + formatBytes(done);
-                    setUpdateActionState(progress, "Baixando...", true, true);
-                });
-                setUpdateActionState("Download concluído. Validando APK...", "Validando...", true, true);
-                if (latestApkSha256 != null && !latestApkSha256.trim().isEmpty()) {
+                String apkName = safeLocalApkName();
+                cleanupUpdateArtifactsKeeping(apkName, "pre_download");
+                File apkFile = new File(updateDir, apkName);
+                boolean reusedExisting = false;
+                if (apkFile.exists() && latestApkSha256 != null && latestApkSha256.trim().matches("(?i)[a-f0-9]{64}")) {
+                    setUpdateActionState("APK já baixado. Validando arquivo local antes de reutilizar...", "Validando...", true, true);
                     String actual = sha256Of(apkFile);
-                    if (!actual.equalsIgnoreCase(latestApkSha256.trim())) {
+                    if (actual.equalsIgnoreCase(latestApkSha256.trim())) {
+                        reusedExisting = true;
+                    } else {
                         apkFile.delete();
-                        String detail = "Atualização baixada, mas o hash não confere. Instalação bloqueada por segurança.";
-                        show(detail);
-                        setUpdateActionState("Falha: hash SHA-256 diferente do latest.json.\nInstalação bloqueada por segurança.", "Tentar novamente", true, false);
-                        reportUpdateNotification(serverUrl, "download_failed", false, "sha256 divergente no APK baixado");
-                        return;
                     }
                 }
-                reportUpdateNotification(serverUrl, "download_verified", true, "APK baixado direto e sha256 validado");
-                updateUpdateUi("Atualização baixada e verificada. Vou abrir o instalador do Android.\nArquivo: " + apkFile.getName() + "\nSe aparecer bloqueio, permita instalar apps desconhecidos para o Core Worker.", true, true);
-                setUpdateActionState("APK baixado e validado. Abrindo instalador do Android...", "Abrindo...", true, true);
+                if (!reusedExisting) {
+                    File partFile = new File(updateDir, apkName + ".download");
+                    if (partFile.exists()) partFile.delete();
+                    downloadFile(latestApkUrl, partFile, (done, total) -> {
+                        String progress = total > 0
+                                ? "Baixando " + version + "... " + Math.max(0, Math.min(100, (int) ((done * 100L) / total))) + "% · " + formatBytes(done) + " / " + formatBytes(total)
+                                : "Baixando " + version + "... " + formatBytes(done);
+                        setUpdateActionState(progress, "Baixando...", true, true);
+                    });
+                    setUpdateActionState("Download concluído. Validando APK...", "Validando...", true, true);
+                    if (latestApkSha256 != null && !latestApkSha256.trim().isEmpty()) {
+                        String actual = sha256Of(partFile);
+                        if (!actual.equalsIgnoreCase(latestApkSha256.trim())) {
+                            partFile.delete();
+                            String detail = "Atualização baixada, mas o hash não confere. Instalação bloqueada por segurança.";
+                            show(detail);
+                            setUpdateActionState("Falha: hash SHA-256 diferente do latest.json.\nInstalação bloqueada por segurança.", "Tentar novamente", true, false);
+                            reportUpdateNotification(serverUrl, "download_failed", false, "sha256 divergente no APK baixado");
+                            return;
+                        }
+                    }
+                    if (apkFile.exists() && !apkFile.delete()) {
+                        throw new Exception("não consegui substituir APK local antigo");
+                    }
+                    if (!partFile.renameTo(apkFile)) {
+                        partFile.delete();
+                        throw new Exception("não consegui finalizar arquivo local de atualização");
+                    }
+                }
+                rememberPendingUpdateArtifact(apkFile);
+                reportUpdateNotification(serverUrl, "download_verified", true, reusedExisting ? "APK local validado e reutilizado" : "APK baixado direto e sha256 validado");
+                updateUpdateUi("Atualização pronta e verificada. Vou abrir o instalador do Android.\nArquivo: " + apkFile.getName() + "\nDepois de instalar, o APK novo limpará este instalador automaticamente.", true, true);
+                setUpdateActionState("APK pronto e validado. Abrindo instalador do Android...", "Abrindo...", true, true);
                 openApkInstaller(apkFile);
             } catch (Throwable exc) {
                 String detail = exc.getClass().getSimpleName() + ": " + String.valueOf(exc.getMessage());
@@ -1553,6 +1580,199 @@ public class MainActivity extends Activity {
         String clean = (latestVersionName == null || latestVersionName.trim().isEmpty()) ? "update" : latestVersionName.trim();
         clean = clean.replaceAll("[^A-Za-z0-9._-]+", "-");
         return "CoreWorker-" + clean + ".apk";
+    }
+
+    private File primaryUpdateDir() {
+        File filesBase = getExternalFilesDir(null);
+        if (filesBase == null) {
+            filesBase = getCacheDir();
+        }
+        return new File(filesBase, "updates");
+    }
+
+    private File[] updateArtifactDirs() {
+        return new File[] {
+                primaryUpdateDir(),
+                new File(getCacheDir(), "updates"),
+                new File(getFilesDir(), "updates")
+        };
+    }
+
+    private void rememberPendingUpdateArtifact(File apkFile) {
+        try {
+            prefs.edit()
+                    .putInt("pending_update_version_code", latestVersionCode)
+                    .putString("pending_update_version_name", latestVersionName == null ? "" : latestVersionName)
+                    .putString("pending_update_apk_name", apkFile == null ? "" : apkFile.getName())
+                    .putString("pending_update_sha256", latestApkSha256 == null ? "" : latestApkSha256)
+                    .putLong("pending_update_saved_at", System.currentTimeMillis())
+                    .apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private JSONObject cleanupUpdateArtifacts(boolean manual, String reason) {
+        try {
+            int pendingCode = prefs.getInt("pending_update_version_code", -1);
+            String pendingName = prefs.getString("pending_update_apk_name", "");
+            boolean keepPendingInstaller = pendingCode > BuildConfig.VERSION_CODE && pendingName != null && !pendingName.trim().isEmpty();
+            long bytes = 0L;
+            int files = 0;
+            for (File dir : updateArtifactDirs()) {
+                CleanupCount count = cleanupUpdateDir(dir, keepPendingInstaller ? pendingName.trim() : "");
+                bytes += count.bytes;
+                files += count.files;
+            }
+            if (!keepPendingInstaller) {
+                prefs.edit()
+                        .remove("pending_update_version_code")
+                        .remove("pending_update_version_name")
+                        .remove("pending_update_apk_name")
+                        .remove("pending_update_sha256")
+                        .remove("pending_update_saved_at")
+                        .apply();
+            }
+            prefs.edit()
+                    .putLong("update_cleanup_last_at", System.currentTimeMillis())
+                    .putLong("update_cleanup_last_bytes", bytes)
+                    .putInt("update_cleanup_last_files", files)
+                    .putString("update_cleanup_last_reason", reason == null ? "" : reason)
+                    .apply();
+            internalStorageSummary = bytes > 0 ? "updates limpos " + humanBytes(bytes) : "updates sem lixo";
+            if (manual) {
+                show(bytes > 0
+                        ? "Limpeza segura concluída. Liberei " + humanBytes(bytes) + " de instaladores/staging antigos."
+                        : "Limpeza segura concluída. Não havia instaladores antigos para apagar.");
+            }
+            return new JSONObject()
+                    .put("ok", true)
+                    .put("bytesCleared", bytes)
+                    .put("filesCleared", files)
+                    .put("keptPendingInstaller", keepPendingInstaller)
+                    .put("summary", bytes > 0 ? "updates limpos " + humanBytes(bytes) : "updates sem lixo");
+        } catch (Throwable exc) {
+            try {
+                return new JSONObject()
+                        .put("ok", false)
+                        .put("error", shortThrowable(exc))
+                        .put("summary", "limpeza de updates falhou");
+            } catch (Throwable ignored) {
+                return new JSONObject();
+            }
+        }
+    }
+
+    private long cleanupUpdateArtifactsKeeping(String keepName, String reason) {
+        long bytes = 0L;
+        int files = 0;
+        try {
+            for (File dir : updateArtifactDirs()) {
+                CleanupCount count = cleanupUpdateDir(dir, keepName == null ? "" : keepName.trim());
+                bytes += count.bytes;
+                files += count.files;
+            }
+            prefs.edit()
+                    .putLong("update_cleanup_last_at", System.currentTimeMillis())
+                    .putLong("update_cleanup_last_bytes", bytes)
+                    .putInt("update_cleanup_last_files", files)
+                    .putString("update_cleanup_last_reason", reason == null ? "" : reason)
+                    .apply();
+        } catch (Throwable ignored) {
+        }
+        return bytes;
+    }
+
+    private CleanupCount cleanupUpdateDir(File dir, String keepName) {
+        CleanupCount count = new CleanupCount();
+        if (dir == null || !dir.exists()) return count;
+        File[] children = dir.listFiles();
+        if (children == null) return count;
+        String keep = keepName == null ? "" : keepName.trim();
+        for (File child : children) {
+            if (child == null) continue;
+            String name = child.getName();
+            if (!keep.isEmpty() && keep.equals(name)) {
+                continue;
+            }
+            CleanupCount childCount = deleteUpdateArtifact(child);
+            count.bytes += childCount.bytes;
+            count.files += childCount.files;
+        }
+        try {
+            File[] remaining = dir.listFiles();
+            if (remaining != null && remaining.length == 0) dir.delete();
+        } catch (Throwable ignored) {
+        }
+        return count;
+    }
+
+    private CleanupCount deleteUpdateArtifact(File file) {
+        CleanupCount count = new CleanupCount();
+        if (file == null || !file.exists()) return count;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    CleanupCount childCount = deleteUpdateArtifact(child);
+                    count.bytes += childCount.bytes;
+                    count.files += childCount.files;
+                }
+            }
+        }
+        try {
+            count.bytes += Math.max(0L, file.length());
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (file.delete()) count.files += 1;
+        } catch (Throwable ignored) {
+        }
+        return count;
+    }
+
+    private JSONObject updateArtifactsSnapshot() throws Exception {
+        JSONObject updates = new JSONObject();
+        long bytes = 0L;
+        int files = 0;
+        JSONArray dirs = new JSONArray();
+        for (File dir : updateArtifactDirs()) {
+            if (dir == null) continue;
+            long dirBytes = directorySize(dir);
+            int dirFiles = directoryFileCount(dir);
+            bytes += dirBytes;
+            files += dirFiles;
+            dirs.put(new JSONObject()
+                    .put("name", dir.getName())
+                    .put("exists", dir.exists())
+                    .put("bytes", dirBytes)
+                    .put("files", dirFiles));
+        }
+        updates.put("bytes", bytes);
+        updates.put("files", files);
+        updates.put("pendingVersionCode", prefs.getInt("pending_update_version_code", -1));
+        updates.put("pendingVersionName", prefs.getString("pending_update_version_name", ""));
+        updates.put("pendingApkName", prefs.getString("pending_update_apk_name", ""));
+        updates.put("lastCleanupAt", prefs.getLong("update_cleanup_last_at", 0L));
+        updates.put("lastCleanupBytes", prefs.getLong("update_cleanup_last_bytes", 0L));
+        updates.put("lastCleanupFiles", prefs.getInt("update_cleanup_last_files", 0));
+        updates.put("lastCleanupReason", prefs.getString("update_cleanup_last_reason", ""));
+        updates.put("dirs", dirs);
+        updates.put("summary", bytes > 0 ? "updates " + humanBytes(bytes) : "updates limpos");
+        return updates;
+    }
+
+    private void runManualUpdateCleanup() {
+        runBusy("Limpando instaladores antigos com segurança...", () -> {
+            JSONObject cleanup = cleanupUpdateArtifacts(true, "manual_button");
+            safePutPayload(cleanup, "storage", storageSnapshot());
+            reportAppState("update_storage_cleanup", cleanup.optString("summary", "limpeza segura de updates"));
+            updateUpdateUi("APK " + APP_VERSION + " · " + cleanup.optString("summary", "limpeza segura concluída"), latestUpdateAvailable, true);
+        });
+    }
+
+    private static final class CleanupCount {
+        long bytes = 0L;
+        int files = 0;
     }
 
     private void updateUpdateUi(String value, boolean available, boolean refreshSummary) {
@@ -3229,6 +3449,7 @@ public class MainActivity extends Activity {
                 .put("apk_repair_local_state")
                 .put("apk_reset_job_history")
                 .put("apk_trim_cache")
+                .put("apk_update_storage_cleanup")
                 .put("apk_sync_profile_now")
                 .put("apk_verify_update_state")
                 .put("apk_native_worker_status")
@@ -3607,6 +3828,17 @@ public class MainActivity extends Activity {
             result.put("message", "cache interno do APK limpo");
             return result;
         }
+        if ("apk_update_storage_cleanup".equals(type)) {
+            JSONObject cleanup = cleanupUpdateArtifacts(false, "job_update_storage_cleanup");
+            safePutPayload(result, "cleanup", cleanup);
+            safePutPayload(result, "storage", storageSnapshot());
+            result.put("ok", cleanup.optBoolean("ok", true));
+            if (!cleanup.optBoolean("ok", true)) {
+                result.put("error", cleanup.optString("error", "limpeza de updates falhou"));
+            }
+            result.put("message", cleanup.optString("summary", "limpeza segura de updates concluída"));
+            return result;
+        }
         if ("apk_sync_profile".equals(type) || "apk_sync_profile_now".equals(type)) {
             String requested = normalizeProfile(jobPayload.optString("profile", appliedProfile()));
             boolean localSynced = syncProfileToLocalAgent(requested);
@@ -3951,14 +4183,18 @@ public class MainActivity extends Activity {
         File cache = getCacheDir();
         File runtime = internalRuntimePath == null || internalRuntimePath.trim().isEmpty() ? new File(files, "core-runtime") : new File(internalRuntimePath);
         File jobCache = new File(cache, "core-worker-jobs");
+        JSONObject updates = updateArtifactsSnapshot();
         storage.put("files_bytes", directorySize(files));
         storage.put("cache_bytes", directorySize(cache));
         storage.put("runtime_bytes", directorySize(runtime));
         storage.put("job_cache_bytes", directorySize(jobCache));
         storage.put("job_cache_files", directoryFileCount(jobCache));
+        storage.put("update_artifacts_bytes", updates.optLong("bytes", 0L));
+        storage.put("update_artifacts_files", updates.optInt("files", 0));
+        safePutPayload(storage, "update_artifacts", updates);
         storage.put("files_dir", files == null ? "" : files.getName());
         storage.put("cache_dir", cache == null ? "" : cache.getName());
-        storage.put("scope", "app-specific-internal");
+        storage.put("scope", "app-specific-internal-and-external-app-specific");
         storage.put("summary", storageSummary(storage));
         return storage;
     }
@@ -3967,6 +4203,10 @@ public class MainActivity extends Activity {
         try {
             long cacheBytes = storage.optLong("cache_bytes", 0L);
             long jobBytes = storage.optLong("job_cache_bytes", 0L);
+            long updateBytes = storage.optLong("update_artifacts_bytes", 0L);
+            if (updateBytes > 0L) {
+                return "cache " + humanBytes(cacheBytes) + " · updates " + humanBytes(updateBytes);
+            }
             return "cache " + humanBytes(cacheBytes) + " · jobs " + humanBytes(jobBytes);
         } catch (Throwable ignored) {
             return "cache interno ok";
@@ -4767,6 +5007,7 @@ public class MainActivity extends Activity {
         update.put("available", latestUpdateAvailable);
         update.put("state", updateChecklistLabel());
         update.put("download_busy", updateDownloadBusy);
+        safePutPayload(update, "artifacts", updateArtifactsSnapshot());
         return update;
     }
 
@@ -5304,6 +5545,7 @@ public class MainActivity extends Activity {
         if (technicalToggleButton != null) technicalToggleButton.setEnabled(enabled);
         if (heartbeatButton != null) heartbeatButton.setEnabled(enabled);
         if (updateCheckButton != null) updateCheckButton.setEnabled(enabled);
+        if (updateCleanupButton != null) updateCleanupButton.setEnabled(enabled && !updateDownloadBusy);
         if (updateInstallButton != null) applyUpdateButtonState(latestUpdateAvailable, updateDownloadBusy ? "Baixando..." : "Atualizar agora", updateDownloadBusy);
         if (clearButton != null) clearButton.setEnabled(enabled);
     }

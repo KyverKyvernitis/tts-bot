@@ -446,6 +446,8 @@ CORE_WORKER_APP_JOB_ALIASES = {
     "apk_report_logs": "apk_upload_app_logs",
     "apk_status_refresh": "apk_sync_runtime_state",
     "apk_trim_runtime_cache": "apk_trim_cache",
+    "apk_cleanup_update_storage": "apk_update_storage_cleanup",
+    "apk_clear_update_downloads": "apk_update_storage_cleanup",
     "apk_refresh_status": "apk_refresh_runtime",
 }
 CORE_WORKER_APP_AUTO_JOB_TYPES = {
@@ -482,6 +484,7 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_repair_local_state",
     "apk_reset_job_history",
     "apk_trim_cache",
+    "apk_update_storage_cleanup",
     "apk_sync_profile_now",
     "apk_verify_update_state",
     "apk_native_worker_status",
@@ -549,6 +552,7 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_repair_local_state": "reparar estado local",
     "apk_reset_job_history": "limpar histórico",
     "apk_trim_cache": "limpar cache",
+    "apk_update_storage_cleanup": "limpar updates",
     "apk_sync_profile_now": "sincronizar perfil agora",
     "apk_verify_update_state": "verificar atualização",
     "apk_native_worker_status": "worker nativo",
@@ -2443,6 +2447,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Reparar estado local", "value": "_apk_repair_local_state", "description": "Limpa erro transitório", "emoji": "🛠️", "panel_action": "apk_repair_local_state", "category": "apk", "apk_job_type": "apk_repair_local_state"},
                 {"label": "Limpar histórico", "value": "_apk_reset_job_history", "description": "Histórico local de jobs", "emoji": "🧾", "panel_action": "apk_reset_job_history", "category": "apk", "apk_job_type": "apk_reset_job_history"},
                 {"label": "Limpar cache APK", "value": "_apk_trim_cache", "description": "Cache interno pequeno", "emoji": "🧹", "panel_action": "apk_trim_cache", "category": "apk", "apk_job_type": "apk_trim_cache"},
+                {"label": "Limpar updates APK", "value": "_apk_update_storage_cleanup", "description": "Instaladores/staging antigos", "emoji": "🗑️", "panel_action": "apk_update_storage_cleanup", "category": "apk", "apk_job_type": "apk_update_storage_cleanup"},
                 {"label": "Sincronizar perfil", "value": "_apk_sync_profile_now", "description": "Perfil APK/Termux", "emoji": "👤", "panel_action": "apk_sync_profile_now", "category": "apk", "apk_job_type": "apk_sync_profile_now"},
                 {"label": "Verificar update", "value": "_apk_verify_update_state", "description": "Manifesto/latest.json", "emoji": "⬆️", "panel_action": "apk_verify_update_state", "category": "apk", "apk_job_type": "apk_verify_update_state"},
                 {"label": "Worker nativo", "value": "_apk_native_worker_status", "description": "Heartbeat direto do APK", "emoji": "📡", "panel_action": "apk_native_worker_status", "category": "apk", "apk_job_type": "apk_native_worker_status"},
