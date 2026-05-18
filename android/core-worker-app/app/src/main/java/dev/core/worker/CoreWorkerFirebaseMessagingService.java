@@ -103,7 +103,11 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         boolean shown = showUpdateNotification(notificationId, title, body);
         report(notificationId, shown ? "fcm_displayed" : "fcm_permission_missing", shown, versionName, versionCode, shown ? "notificação exibida por FCM" : "push recebido, mas Android não permitiu notificação visível");
         try {
-            CoreWorkerUpdateJobService.schedule(this, "fcm_message");
+            prefs().edit()
+                    .putLong("internal_jobs_wake_requested_at", System.currentTimeMillis())
+                    .putString("internal_jobs_wake_reason", type != null && type.toLowerCase().contains("job") ? "fcm_jobs_available" : "fcm_message")
+                    .apply();
+            CoreWorkerUpdateJobService.schedule(this, type != null && type.toLowerCase().contains("job") ? "fcm_jobs_available" : "fcm_message");
         } catch (Throwable ignored) {
         }
         if (shown) {

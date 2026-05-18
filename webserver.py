@@ -377,6 +377,9 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         "internalRuntimeState": _safe_short_text(payload.get("internal_runtime_state") or runtime.get("internal_runtime_state"), 120),
         "termuxWorkerOnline": bool(payload.get("termuxWorkerOnline") or payload.get("localAgentOnline") or status.get("local_agent_online")),
         "jobsRuntime": _safe_short_text(payload.get("jobsRuntime") or runtime.get("jobs_runtime") or "termux", 40),
+        "internalJobsQueue": _safe_short_text(runtime.get("internal_jobs_queue") or status.get("internal_jobs_queue"), 120),
+        "internalJobsRunning": int(runtime.get("internal_jobs_running") or status.get("internal_jobs_running") or 0),
+        "internalJobsPending": int(runtime.get("internal_jobs_pending") or status.get("internal_jobs_pending") or 0),
         "fcmState": _safe_short_text(status.get("fcm_state") or payload.get("fcm_state"), 80),
         "batteryPercent": int(battery.get("percent") or battery.get("percentage") or -1) if isinstance(battery, dict) else -1,
         "batteryTemperatureC": float(battery.get("temperature_c") or -1) if isinstance(battery, dict) else -1,
@@ -454,6 +457,9 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         "updateAvailable": bool(record.get("updateAvailable")),
         "lastAppError": _safe_short_text(record.get("lastAppError"), 160),
         "ready": bool(record.get("ready")),
+        "internalJobsQueue": _safe_short_text(record.get("internalJobsQueue"), 120),
+        "internalJobsRunning": int(record.get("internalJobsRunning") or 0),
+        "internalJobsPending": int(record.get("internalJobsPending") or 0),
         "lightJobs": _core_worker_app_jobs_public_summary(worker_id=worker_id, install_id=install_id),
     }
 
@@ -476,10 +482,20 @@ CORE_WORKER_APP_SAFE_JOB_TYPES = {
     "apk_check_update",
     "apk_test_vps_connection",
     "apk_upload_report",
+    "apk_upload_app_logs",
     "apk_clear_app_cache",
+    "apk_cache_cleanup",
     "apk_sync_profile",
+    "apk_sync_runtime_state",
     "apk_download_small",
+    "apk_verify_file",
+    "apk_job_history",
 }
+
+CORE_WORKER_APP_JOB_MAX_DELIVER = 4
+CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS = 45
+CORE_WORKER_APP_JOB_DEFAULT_MAX_RETRIES = 1
+CORE_WORKER_APP_JOB_RESULT_LIMIT = 300
 
 
 def _core_worker_app_safe_job_payload(job: dict) -> dict:
@@ -496,11 +512,63 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         except Exception:
             max_bytes = 262144
         clean["maxBytes"] = max(1024, min(max_bytes, 262144))
+        expected_sha = _safe_short_text(payload.get("sha256") or payload.get("expectedSha256"), 80).lower()
+        if re.fullmatch(r"[a-f0-9]{64}", expected_sha):
+            clean["sha256"] = expected_sha
+    elif job_type == "apk_verify_file":
+        filename = _safe_short_text(payload.get("file") or payload.get("cacheFile") or payload.get("name"), 80)
+        if filename and not filename.startswith("/") and ".." not in filename.replace("\\", "/").split("/"):
+            clean["file"] = filename
+        expected_sha = _safe_short_text(payload.get("sha256") or payload.get("expectedSha256"), 80).lower()
+        if re.fullmatch(r"[a-f0-9]{64}", expected_sha):
+            clean["sha256"] = expected_sha
     elif job_type == "apk_sync_profile":
         profile = _safe_short_text(payload.get("profile"), 40).lower()
         if profile in {"leve", "midia", "media", "normal", "completo", "builder", "turbo", "bedrock"}:
             clean["profile"] = profile
+    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_clear_app_cache"}:
+        detail = _safe_short_text(payload.get("detail") or payload.get("reason"), 80)
+        if detail:
+            clean["detail"] = detail
     return clean
+
+
+def _core_worker_app_job_timeout(job: dict) -> int:
+    try:
+        raw = int(job.get("timeoutSec") or job.get("timeout_seconds") or CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS)
+    except Exception:
+        raw = CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS
+    return max(10, min(raw, 180))
+
+
+def _core_worker_app_job_max_retries(job: dict) -> int:
+    try:
+        raw = int(job.get("maxRetries") or job.get("max_retries") or CORE_WORKER_APP_JOB_DEFAULT_MAX_RETRIES)
+    except Exception:
+        raw = CORE_WORKER_APP_JOB_DEFAULT_MAX_RETRIES
+    return max(0, min(raw, 3))
+
+
+def _core_worker_app_job_matches(job: dict, install_id: str, worker_id: str) -> bool:
+    target_install = str(job.get("installId") or job.get("install_id") or "").strip()
+    target_worker = str(job.get("workerId") or job.get("worker_id") or "").strip()
+    return (target_install and target_install == install_id) or (target_worker and target_worker == worker_id) or (not target_install and not target_worker)
+
+
+def _core_worker_app_make_timeout_record(job: dict, now: int) -> dict:
+    return {
+        "receivedAt": now,
+        "jobId": _safe_short_text(job.get("id"), 64),
+        "type": _safe_short_text(job.get("type"), 48),
+        "installId": _safe_short_text(job.get("installId") or job.get("install_id"), 80),
+        "workerId": _safe_short_text(job.get("workerId") or job.get("worker_id"), 80),
+        "appVersion": "",
+        "appVersionCode": 0,
+        "ok": False,
+        "message": "job interno expirou antes do APK reportar resultado",
+        "error": "timeout",
+        "result": {"ok": False, "error": "timeout", "attempt": int(job.get("attempt") or 0)},
+    }
 
 
 def _core_worker_app_public_job(job: dict, now: int) -> dict:
@@ -514,6 +582,8 @@ def _core_worker_app_public_job(job: dict, now: int) -> dict:
     payload = _core_worker_app_safe_job_payload(job)
     if payload:
         out["payload"] = payload
+    out["timeoutSec"] = _core_worker_app_job_timeout(job)
+    out["attempt"] = int(job.get("attempt") or 0)
     return out
 
 def _core_worker_app_jobs_fetch(payload: dict) -> dict:
@@ -537,34 +607,73 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
             data = {}
         pending = data.get("pending") if isinstance(data.get("pending"), list) else []
         results = data.get("results") if isinstance(data.get("results"), list) else []
+        running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
+        history = data.get("historyByInstallId") if isinstance(data.get("historyByInstallId"), dict) else {}
+        stats = data.get("statsByInstallId") if isinstance(data.get("statsByInstallId"), dict) else {}
         last_fetch = data.get("lastFetchByInstallId") if isinstance(data.get("lastFetchByInstallId"), dict) else {}
         auto_ping = data.get("lastAutoPingByInstallId") if isinstance(data.get("lastAutoPingByInstallId"), dict) else {}
-        deliver = []
-        remaining = []
+
+        # Recoloca jobs expirados na fila, com retry limitado. Se estourar, registra timeout claro.
+        refreshed_running: dict = {}
+        for job_id, job in list(running.items()):
+            if not isinstance(job, dict):
+                continue
+            deadline = int(job.get("deadlineAt") or 0)
+            if deadline and deadline < now:
+                attempts = int(job.get("attempt") or 0)
+                if attempts <= _core_worker_app_job_max_retries(job):
+                    job["status"] = "pending"
+                    job["requeuedAt"] = now
+                    pending.append(job)
+                else:
+                    results.append(_core_worker_app_make_timeout_record(job, now))
+                continue
+            refreshed_running[str(job_id)] = job
+        running = refreshed_running
+
+        deliver: list[dict] = []
+        remaining: list[dict] = []
+        delivered_keys: set[str] = set()
         for job in pending:
             if not isinstance(job, dict):
                 continue
-            target_install = str(job.get("installId") or job.get("install_id") or "").strip()
-            target_worker = str(job.get("workerId") or job.get("worker_id") or "").strip()
             job_type = _safe_short_text(job.get("type"), 48)
             if job_type not in CORE_WORKER_APP_SAFE_JOB_TYPES or job_type not in supported_set:
                 remaining.append(job)
                 continue
-            matches = (target_install and target_install == install_id) or (target_worker and target_worker == worker_id) or (not target_install and not target_worker)
-            if matches and len(deliver) < 3:
-                out = dict(job)
-                out["id"] = _safe_short_text(out.get("id") or f"job-{uuid.uuid4().hex[:12]}", 64)
-                out["type"] = job_type
-                out["issuedAt"] = int(out.get("issuedAt") or now)
-                deliver.append(out)
-            else:
+            if not _core_worker_app_job_matches(job, install_id, worker_id):
                 remaining.append(job)
+                continue
+            job_id = _safe_short_text(job.get("id") or f"job-{uuid.uuid4().hex[:12]}", 64)
+            if job_id in running or job_id in delivered_keys:
+                remaining.append(job)
+                continue
+            if len(deliver) >= CORE_WORKER_APP_JOB_MAX_DELIVER:
+                remaining.append(job)
+                continue
+            out = dict(job)
+            out["id"] = job_id
+            out["type"] = job_type
+            out["issuedAt"] = int(out.get("issuedAt") or now)
+            out["status"] = "running"
+            out["claimedAt"] = now
+            out["deadlineAt"] = now + _core_worker_app_job_timeout(out)
+            out["attempt"] = int(out.get("attempt") or 0) + 1
+            if install_id and not out.get("installId"):
+                out["installId"] = install_id
+            if worker_id and not out.get("workerId"):
+                out["workerId"] = worker_id
+            running[job_id] = out
+            deliver.append(out)
+            delivered_keys.add(job_id)
+
         auto_interval = int(os.getenv("CORE_WORKER_APP_AUTO_PING_INTERVAL_SECONDS", "900") or "900")
         auto_diag_interval = int(os.getenv("CORE_WORKER_APP_AUTO_DIAGNOSTIC_INTERVAL_SECONDS", "1800") or "1800")
         auto_update_interval = int(os.getenv("CORE_WORKER_APP_AUTO_UPDATE_CHECK_INTERVAL_SECONDS", "2700") or "2700")
+        auto_report_interval = int(os.getenv("CORE_WORKER_APP_AUTO_REPORT_INTERVAL_SECONDS", "3600") or "3600")
 
         def _maybe_auto_job(kind: str, interval: int, title: str, reason: str) -> None:
-            if deliver or interval <= 0 or kind not in supported_set:
+            if len(deliver) >= CORE_WORKER_APP_JOB_MAX_DELIVER or interval <= 0 or kind not in supported_set:
                 return
             auto_key = f"{key}:{kind}"
             try:
@@ -572,22 +681,36 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
             except Exception:
                 last = 0
             if now - last >= interval:
-                deliver.append({"id": f"auto-{kind.replace('_', '-')}-{key[:16]}-{now}", "type": kind, "reason": reason, "issuedAt": now, "title": title})
+                job_id = f"auto-{kind.replace('_', '-')}-{key[:16]}-{now}"
+                job = {"id": job_id, "type": kind, "reason": reason, "issuedAt": now, "title": title, "status": "running", "claimedAt": now, "deadlineAt": now + CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS, "attempt": 1, "installId": install_id, "workerId": worker_id}
+                running[job_id] = job
+                deliver.append(job)
                 auto_ping[auto_key] = now
 
         _maybe_auto_job("apk_ping", auto_interval, "Verificação leve do APK", "auto-health-check")
         _maybe_auto_job("apk_diagnostic", auto_diag_interval, "Diagnóstico interno seguro", "auto-diagnostic")
         _maybe_auto_job("apk_check_update", auto_update_interval, "Checar atualização pelo APK", "auto-update-check")
-        last_fetch[key] = {"at": now, "installId": install_id, "workerId": worker_id, "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48), "jobsReturned": len(deliver)}
-        data["pending"] = remaining[-80:]
-        data["results"] = results[-160:]
+        _maybe_auto_job("apk_upload_app_logs", auto_report_interval, "Enviar relatório interno do APK", "auto-app-report")
+
+        queue_stats = stats.get(key) if isinstance(stats.get(key), dict) else {}
+        queue_stats["lastFetchAt"] = now
+        queue_stats["jobsReturned"] = len(deliver)
+        queue_stats["pending"] = len(remaining)
+        queue_stats["running"] = len(running)
+        stats[key] = queue_stats
+        last_fetch[key] = {"at": now, "installId": install_id, "workerId": worker_id, "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48), "jobsReturned": len(deliver), "pending": len(remaining), "running": len(running)}
+        data["pending"] = remaining[-120:]
+        data["runningByJobId"] = running
+        data["results"] = results[-CORE_WORKER_APP_JOB_RESULT_LIMIT:]
+        data["historyByInstallId"] = history
+        data["statsByInstallId"] = stats
         data["lastFetchByInstallId"] = last_fetch
         data["lastAutoPingByInstallId"] = auto_ping
         data["updatedAt"] = now
         data["ok"] = True
         _atomic_write_json(path, data, mode=0o600)
     public_jobs = [_core_worker_app_public_job(job, now) for job in deliver]
-    return {"ok": True, "jobs": public_jobs, "count": len(public_jobs), "jobsRuntime": "apk-safe-internal", "supported": sorted(CORE_WORKER_APP_SAFE_JOB_TYPES)}
+    return {"ok": True, "jobs": public_jobs, "count": len(public_jobs), "jobsRuntime": "apk-safe-internal-queue", "queue": {"pending": len(remaining), "running": len(running)}, "supported": sorted(CORE_WORKER_APP_SAFE_JOB_TYPES)}
 
 
 def _core_worker_app_jobs_result(payload: dict) -> dict:
@@ -610,11 +733,31 @@ def _core_worker_app_jobs_result(payload: dict) -> dict:
             data = {}
         results = data.get("results") if isinstance(data.get("results"), list) else []
         latest = data.get("latestResultByInstallId") if isinstance(data.get("latestResultByInstallId"), dict) else {}
+        running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
+        history = data.get("historyByInstallId") if isinstance(data.get("historyByInstallId"), dict) else {}
+        stats = data.get("statsByInstallId") if isinstance(data.get("statsByInstallId"), dict) else {}
         key = record["installId"] or record["workerId"] or "unknown"
+        running.pop(job_id, None)
         results.append(record)
-        data["results"] = results[-240:]
+        hist = history.get(key) if isinstance(history.get(key), list) else []
+        hist.append({"at": now, "jobId": job_id, "type": job_type, "ok": bool(record.get("ok")), "message": _safe_short_text(record.get("message") or record.get("error"), 120)})
+        history[key] = hist[-24:]
+        queue_stats = stats.get(key) if isinstance(stats.get(key), dict) else {}
+        queue_stats["lastResultAt"] = now
+        queue_stats["lastType"] = job_type
+        queue_stats["lastOk"] = bool(record.get("ok"))
+        queue_stats["lastMessage"] = _safe_short_text(record.get("message") or record.get("error"), 120)
+        if bool(record.get("ok")):
+            queue_stats["okCount"] = int(queue_stats.get("okCount") or 0) + 1
+        else:
+            queue_stats["failCount"] = int(queue_stats.get("failCount") or 0) + 1
+        stats[key] = queue_stats
+        data["results"] = results[-CORE_WORKER_APP_JOB_RESULT_LIMIT:]
         latest[key] = record
         data["latestResultByInstallId"] = latest
+        data["runningByJobId"] = running
+        data["historyByInstallId"] = history
+        data["statsByInstallId"] = stats
         data["updatedAt"] = now
         data["ok"] = True
         _atomic_write_json(path, data, mode=0o600)
@@ -630,6 +773,8 @@ def _core_worker_app_jobs_public_summary(worker_id: str = "", install_id: str = 
     if not isinstance(data, dict):
         data = {}
     latest = data.get("latestResultByInstallId") if isinstance(data.get("latestResultByInstallId"), dict) else {}
+    stats = data.get("statsByInstallId") if isinstance(data.get("statsByInstallId"), dict) else {}
+    history = data.get("historyByInstallId") if isinstance(data.get("historyByInstallId"), dict) else {}
     record = None
     if install_id:
         record = latest.get(install_id)
@@ -641,7 +786,13 @@ def _core_worker_app_jobs_public_summary(worker_id: str = "", install_id: str = 
                 record = item
                 break
     pending = data.get("pending") if isinstance(data.get("pending"), list) else []
-    return {"pending": len(pending), "lastResultAt": int((record or {}).get("receivedAt") or 0), "lastType": _safe_short_text((record or {}).get("type"), 48), "lastOk": bool((record or {}).get("ok")) if isinstance(record, dict) else False, "lastMessage": _safe_short_text((record or {}).get("message") or (record or {}).get("error"), 120)}
+    running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
+    pending_count = len(pending)
+    running_count = len(running)
+    key = install_id or worker_id or "unknown"
+    stat = stats.get(key) if isinstance(stats.get(key), dict) else {}
+    hist = history.get(key) if isinstance(history.get(key), list) else []
+    return {"pending": pending_count, "running": running_count, "lastResultAt": int((record or {}).get("receivedAt") or 0), "lastType": _safe_short_text((record or {}).get("type"), 48), "lastOk": bool((record or {}).get("ok")) if isinstance(record, dict) else False, "lastMessage": _safe_short_text((record or {}).get("message") or (record or {}).get("error"), 120), "okCount": int((stat or {}).get("okCount") or 0), "failCount": int((stat or {}).get("failCount") or 0), "history": hist[-5:]}
 
 
 def _firebase_service_account_path() -> str:

@@ -565,3 +565,20 @@ A VPS não depende desse perfil para funcionar. Se o celular estiver offline, o 
 - Jobs reais continuam no Termux/phone-worker.
 - O APK não executa comandos arbitrários recebidos da VPS.
 - A VPS continua só orquestrando; build Android pesado segue no phone worker.
+
+## Patch 63 — runtime interno avançado do APK
+
+- O APK passa para `0.5.22` / `versionCode 37`.
+- O runtime interno ganhou fila de jobs mais robusta, com estado `pending`, `running`, `ok`, `failed` e `timeout` salvo na VPS.
+- A VPS agora rastreia jobs em execução, reentrega jobs expirados com retry limitado e registra timeout em vez de perder jobs silenciosamente.
+- O APK mantém histórico local curto dos últimos jobs internos e faz deduplicação defensiva para não executar o mesmo job duas vezes.
+- Novos jobs internos seguros:
+  - `apk_upload_app_logs`;
+  - `apk_sync_runtime_state`;
+  - `apk_cache_cleanup`;
+  - `apk_verify_file`;
+  - `apk_job_history`.
+- `apk_download_small` continua restrito à própria VPS e ao cache interno do app, com limite de tamanho e validação opcional de SHA-256.
+- Transferências continuam usando armazenamento específico do app (`getCacheDir()`/diretório interno do APK), sem acessar Termux, armazenamento geral ou pastas externas.
+- FCM continua mínimo: ele marca solicitação de acordar/sincronizar e agenda a checagem local; trabalho real continua fora de `onMessageReceived`.
+- Ainda não há shell, Python interno, build Android pelo APK ou acesso a arquivos do Termux. Jobs reais continuam no phone-worker/Termux.

@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.21";
+    private static final String APP_VERSION = "0.5.22";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -180,6 +180,9 @@ public class MainActivity extends Activity {
     private volatile long internalLightJobsLastCheckAt = 0L;
     private volatile int internalLightJobsLastCount = 0;
     private volatile String internalLightJobsLastSummary = "nenhum job executado ainda";
+    private volatile int internalLightJobsRunningCount = 0;
+    private volatile int internalLightJobsPendingCount = 0;
+    private volatile String internalLightJobsQueueSummary = "fila aguardando";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -1497,6 +1500,9 @@ public class MainActivity extends Activity {
         runtime.put("light_jobs_last_check_at", internalLightJobsLastCheckAt);
         runtime.put("light_jobs_last_count", internalLightJobsLastCount);
         runtime.put("light_jobs_last_summary", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
+        runtime.put("internal_jobs_queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
+        runtime.put("internal_jobs_running", internalLightJobsRunningCount);
+        runtime.put("internal_jobs_pending", internalLightJobsPendingCount);
         runtime.put("summary", "APK já envia heartbeat/status direto e executa jobs internos seguros sem shell; Termux continua responsável por jobs reais.");
         return runtime;
     }
@@ -1610,21 +1616,55 @@ public class MainActivity extends Activity {
                 JSONArray jobs = body.optJSONArray("jobs");
                 int count = jobs == null ? 0 : jobs.length();
                 internalLightJobsLastCount = count;
+                JSONObject queue = body.optJSONObject("queue");
+                if (queue != null) {
+                    internalLightJobsPendingCount = queue.optInt("pending", 0);
+                    internalLightJobsRunningCount = queue.optInt("running", 0);
+                    internalLightJobsQueueSummary = internalLightJobsRunningCount + " rodando · " + internalLightJobsPendingCount + " pendentes";
+                } else {
+                    internalLightJobsPendingCount = 0;
+                    internalLightJobsRunningCount = 0;
+                    internalLightJobsQueueSummary = "fila sincronizada";
+                }
                 if (count <= 0) {
-                    internalLightJobsState = "sem jobs pendentes";
+                    internalLightJobsState = "fila vazia";
                     internalLightJobsLastSummary = "fila vazia";
                     clearTransientApkNetworkError();
                     updateSystemChecklistText();
-                    if (showResult) show("Runtime interno verificado. Nenhum job leve pendente.");
+                    if (showResult) show("Runtime interno verificado. Nenhum job interno pendente.");
                     return;
                 }
                 int okCount = 0;
                 for (int i = 0; i < count; i++) {
                     JSONObject job = jobs.optJSONObject(i);
                     if (job == null) continue;
-                    JSONObject result = executeLightJob(job);
+                    JSONObject result;
+                    long startedAt = System.currentTimeMillis();
+                    String jobId = job.optString("id", "");
+                    String jobType = job.optString("type", "job");
+                    try {
+                        if (wasJobRecentlyCompleted(jobId)) {
+                            result = new JSONObject();
+                            result.put("ok", true);
+                            result.put("type", jobType);
+                            result.put("deduplicated", true);
+                            result.put("message", "job interno duplicado ignorado pelo APK");
+                        } else {
+                            result = executeLightJob(job);
+                        }
+                    } catch (Throwable jobError) {
+                        result = new JSONObject();
+                        result.put("ok", false);
+                        result.put("type", jobType);
+                        result.put("error", shortThrowable(jobError));
+                        result.put("message", "job interno falhou no APK");
+                    }
+                    result.put("durationMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+                    result.put("attempt", job.optInt("attempt", 1));
                     if (result.optBoolean("ok", false)) okCount++;
                     postLightJobResult(serverUrl, job, result);
+                    rememberCompletedJob(jobId);
+                    recordInternalJobHistory(jobType, result.optBoolean("ok", false), result.optString("message", result.optString("error", "")));
                 }
                 internalLightJobsState = "executados " + okCount + "/" + count;
                 internalLightJobsLastSummary = summarizeLightJobs(jobs, okCount, count);
@@ -1632,7 +1672,7 @@ public class MainActivity extends Activity {
                     clearTransientApkNetworkError();
                 }
                 updateSystemChecklistText();
-                if (showResult) show("Jobs leves do APK executados: " + okCount + "/" + count);
+                if (showResult) show("Jobs internos do APK executados: " + okCount + "/" + count);
             } catch (Throwable exc) {
                 internalLightJobsState = "falha · " + shortThrowable(exc);
                 internalLightJobsLastSummary = "falha: " + shortThrowable(exc);
@@ -1652,9 +1692,14 @@ public class MainActivity extends Activity {
                 .put("apk_check_update")
                 .put("apk_test_vps_connection")
                 .put("apk_upload_report")
+                .put("apk_upload_app_logs")
                 .put("apk_clear_app_cache")
+                .put("apk_cache_cleanup")
                 .put("apk_sync_profile")
-                .put("apk_download_small");
+                .put("apk_sync_runtime_state")
+                .put("apk_download_small")
+                .put("apk_verify_file")
+                .put("apk_job_history");
     }
 
     private String summarizeLightJobs(JSONArray jobs, int okCount, int count) {
@@ -1673,6 +1718,79 @@ public class MainActivity extends Activity {
             return builder.toString();
         } catch (Throwable ignored) {
             return "jobs internos · " + okCount + "/" + count + " ok";
+        }
+    }
+
+    private boolean wasJobRecentlyCompleted(String jobId) {
+        if (jobId == null || jobId.trim().isEmpty()) return false;
+        try {
+            JSONArray recent = new JSONArray(prefs.getString("internal_completed_job_ids", "[]"));
+            for (int i = 0; i < recent.length(); i++) {
+                if (jobId.equals(recent.optString(i, ""))) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private void rememberCompletedJob(String jobId) {
+        if (jobId == null || jobId.trim().isEmpty()) return;
+        try {
+            JSONArray old = new JSONArray(prefs.getString("internal_completed_job_ids", "[]"));
+            JSONArray next = new JSONArray();
+            next.put(jobId);
+            for (int i = 0; i < old.length() && next.length() < 32; i++) {
+                String value = old.optString(i, "");
+                if (!value.isEmpty() && !jobId.equals(value)) next.put(value);
+            }
+            prefs.edit().putString("internal_completed_job_ids", next.toString()).apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void recordInternalJobHistory(String type, boolean ok, String message) {
+        try {
+            JSONArray old = new JSONArray(prefs.getString("internal_job_history", "[]"));
+            JSONArray next = new JSONArray();
+            JSONObject item = new JSONObject();
+            item.put("at", System.currentTimeMillis());
+            item.put("type", type == null ? "job" : type);
+            item.put("ok", ok);
+            item.put("message", message == null ? "" : message);
+            next.put(item);
+            for (int i = 0; i < old.length() && next.length() < 12; i++) {
+                JSONObject existing = old.optJSONObject(i);
+                if (existing != null) next.put(existing);
+            }
+            prefs.edit().putString("internal_job_history", next.toString()).apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private JSONArray internalJobHistoryJson() {
+        try {
+            return new JSONArray(prefs.getString("internal_job_history", "[]"));
+        } catch (Throwable ignored) {
+            return new JSONArray();
+        }
+    }
+
+    private String internalJobHistoryText() {
+        try {
+            JSONArray history = internalJobHistoryJson();
+            if (history.length() == 0) return "sem histórico local";
+            StringBuilder builder = new StringBuilder();
+            int limit = Math.min(4, history.length());
+            for (int i = 0; i < limit; i++) {
+                JSONObject item = history.optJSONObject(i);
+                if (item == null) continue;
+                if (builder.length() > 0) builder.append("; ");
+                builder.append(item.optString("type", "job"));
+                builder.append(item.optBoolean("ok", false) ? " ok" : " falhou");
+            }
+            return builder.length() == 0 ? "sem histórico local" : builder.toString();
+        } catch (Throwable ignored) {
+            return "histórico indisponível";
         }
     }
 
@@ -1696,7 +1814,7 @@ public class MainActivity extends Activity {
         result.put("ok", true);
         result.put("type", type);
         result.put("executedBy", "core-worker-apk-internal-runtime");
-        result.put("safety", "whitelisted-no-shell");
+        result.put("safety", "fila interna allowlist · sem shell · sem Termux");
         result.put("appVersion", APP_VERSION);
         result.put("appVersionCode", BuildConfig.VERSION_CODE);
         result.put("installId", installId());
@@ -1718,8 +1836,24 @@ public class MainActivity extends Activity {
             logs.put("fcmState", fcmStatusLabel());
             logs.put("lightJobs", internalLightJobsState == null ? "" : internalLightJobsState);
             logs.put("lastLightJob", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
+            logs.put("queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
+            logs.put("historyText", internalJobHistoryText());
+            safePutPayload(logs, "history", internalJobHistoryJson());
             safePutPayload(result, "logs", logs);
-            result.put("message", "logs leves reportados pelo APK");
+            result.put("message", "logs internos reportados pelo APK");
+            return result;
+        }
+        if ("apk_upload_app_logs".equals(type)) {
+            JSONObject logs = new JSONObject();
+            logs.put("lastAppError", appStatusLastError == null ? "" : appStatusLastError);
+            logs.put("internalRuntimeLastError", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
+            logs.put("fcmState", fcmStatusLabel());
+            logs.put("queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
+            safePutPayload(logs, "history", internalJobHistoryJson());
+            safePutPayload(logs, "status", statusSnapshot());
+            result.put("reportKind", "app-internal-logs");
+            safePutPayload(result, "logs", logs);
+            result.put("message", "logs do APK enviados para a VPS");
             return result;
         }
         if ("apk_diagnostic".equals(type)) {
@@ -1756,7 +1890,20 @@ public class MainActivity extends Activity {
             result.put("message", "relatório interno enviado pelo APK");
             return result;
         }
-        if ("apk_clear_app_cache".equals(type)) {
+        if ("apk_sync_runtime_state".equals(type)) {
+            safePutPayload(result, "runtime", runtimeSnapshot());
+            safePutPayload(result, "status", statusSnapshot());
+            result.put("queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
+            result.put("message", "estado do runtime interno sincronizado");
+            return result;
+        }
+        if ("apk_job_history".equals(type)) {
+            safePutPayload(result, "history", internalJobHistoryJson());
+            result.put("historyText", internalJobHistoryText());
+            result.put("message", "histórico local de jobs internos enviado");
+            return result;
+        }
+        if ("apk_clear_app_cache".equals(type) || "apk_cache_cleanup".equals(type)) {
             long bytes = clearInternalJobCache();
             result.put("bytesCleared", bytes);
             result.put("message", "cache interno do APK limpo");
@@ -1782,8 +1929,18 @@ public class MainActivity extends Activity {
             result.put("message", download.optBoolean("ok", false) ? "download pequeno concluído pelo APK" : "download pequeno falhou");
             return result;
         }
+        if ("apk_verify_file".equals(type)) {
+            JSONObject verify = verifyCachedJobFile(jobPayload);
+            safePutPayload(result, "verify", verify);
+            if (!verify.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", verify.optString("error", "verificação de arquivo falhou"));
+            }
+            result.put("message", verify.optBoolean("ok", false) ? "arquivo interno verificado" : "verificação de arquivo falhou");
+            return result;
+        }
         result.put("ok", false);
-        result.put("error", "job interno não suportado pelo APK: " + type);
+        result.put("error", "job interno não permitido pelo APK: " + type);
         return result;
     }
 
@@ -1793,6 +1950,8 @@ public class MainActivity extends Activity {
         diagnostic.put("runtimeLabel", runtimeStatusLabel());
         diagnostic.put("lightJobs", internalLightJobsState == null ? "" : internalLightJobsState);
         diagnostic.put("lastLightJob", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
+        diagnostic.put("queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
+        safePutPayload(diagnostic, "jobHistory", internalJobHistoryJson());
         diagnostic.put("termuxWorkerOnline", localAgentOnline);
         diagnostic.put("localAgentVersion", localAgentVersion == null ? "" : localAgentVersion);
         safePutPayload(diagnostic, "battery", batterySnapshot());
@@ -1924,8 +2083,59 @@ public class MainActivity extends Activity {
         conn.disconnect();
         output.put("ok", true);
         output.put("bytes", total);
-        output.put("sha256", bytesToHex(digest.digest()));
+        String sha = bytesToHex(digest.digest());
+        output.put("sha256", sha);
         output.put("cacheFile", target.getName());
+        String expectedSha = jobPayload == null ? "" : jobPayload.optString("sha256", jobPayload.optString("expectedSha256", ""));
+        if (expectedSha != null && expectedSha.trim().matches("(?i)[a-f0-9]{64}")) {
+            boolean match = expectedSha.trim().equalsIgnoreCase(sha);
+            output.put("sha256Match", match);
+            if (!match) {
+                output.put("ok", false);
+                output.put("error", "sha256 diferente do esperado");
+            }
+        }
+        return output;
+    }
+
+    private JSONObject verifyCachedJobFile(JSONObject jobPayload) throws Exception {
+        JSONObject output = new JSONObject();
+        String name = jobPayload == null ? "" : jobPayload.optString("file", jobPayload.optString("cacheFile", jobPayload.optString("name", "")));
+        if (name == null || name.trim().isEmpty() || name.contains("/") || name.contains("\\") || name.contains("..")) {
+            output.put("ok", false);
+            output.put("error", "arquivo inválido");
+            return output;
+        }
+        File target = new File(new File(getCacheDir(), "core-worker-jobs"), name.trim());
+        if (!target.exists() || !target.isFile()) {
+            output.put("ok", false);
+            output.put("error", "arquivo não encontrado no cache interno");
+            return output;
+        }
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        InputStream input = new FileInputStream(target);
+        byte[] buffer = new byte[8192];
+        int read;
+        long total = 0L;
+        while ((read = input.read(buffer)) != -1) {
+            total += read;
+            digest.update(buffer, 0, read);
+        }
+        input.close();
+        String sha = bytesToHex(digest.digest());
+        output.put("ok", true);
+        output.put("file", target.getName());
+        output.put("bytes", total);
+        output.put("sha256", sha);
+        String expectedSha = jobPayload == null ? "" : jobPayload.optString("sha256", jobPayload.optString("expectedSha256", ""));
+        if (expectedSha != null && expectedSha.trim().matches("(?i)[a-f0-9]{64}")) {
+            boolean match = expectedSha.trim().equalsIgnoreCase(sha);
+            output.put("sha256Match", match);
+            if (!match) {
+                output.put("ok", false);
+                output.put("error", "sha256 diferente do esperado");
+            }
+        }
         return output;
     }
 
@@ -2383,6 +2593,15 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void safePutPayload(JSONObject target, String key, JSONArray value) {
+        try {
+            if (target != null && key != null && value != null) {
+                target.put(key, value);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private JSONObject updateSnapshot() throws Exception {
         JSONObject update = new JSONObject();
         update.put("installed_version", APP_VERSION);
@@ -2431,6 +2650,10 @@ public class MainActivity extends Activity {
         status.put("internal_light_jobs_last_check_at", internalLightJobsLastCheckAt);
         status.put("internal_light_jobs_last_count", internalLightJobsLastCount);
         status.put("internal_light_jobs_last_summary", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
+        status.put("internal_jobs_queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
+        status.put("internal_jobs_running", internalLightJobsRunningCount);
+        status.put("internal_jobs_pending", internalLightJobsPendingCount);
+        safePutPayload(status, "internal_jobs_history", internalJobHistoryJson());
         status.put("runtime", runtimeSnapshot());
         safePutPayload(status, "battery", batterySnapshot());
         safePutPayload(status, "network", networkSnapshot(normalizedServerUrl()));
@@ -3008,7 +3231,9 @@ public class MainActivity extends Activity {
                 + checkLine("Heartbeat APK", internalRuntimeOnline ? "online direto na VPS" : emptyFallback(internalRuntimeHeartbeatState, "pendente")) + "\n"
                 + checkLine("Último heartbeat", ageLabel) + "\n"
                 + checkLine("Jobs internos", emptyFallback(internalLightJobsState, "aguardando")) + "\n"
+                + checkLine("Fila", emptyFallback(internalLightJobsQueueSummary, "aguardando")) + "\n"
                 + checkLine("Último job", emptyFallback(internalLightJobsLastSummary, "nenhum")) + "\n"
+                + checkLine("Histórico", internalJobHistoryText()) + "\n"
                 + checkLine("Jobs reais", "Termux por enquanto")
                 + ((internalRuntimeLastError != null && !internalRuntimeLastError.trim().isEmpty()) ? "\n" + checkLine("Último erro APK", internalRuntimeLastError) : "");
 

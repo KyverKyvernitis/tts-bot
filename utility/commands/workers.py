@@ -456,13 +456,21 @@ def _core_worker_app_jobs_text(worker_id: str) -> str:
             record = item
             break
     pending = len(data.get("pending") or []) if isinstance(data.get("pending"), list) else 0
+    running = len(data.get("runningByJobId") or {}) if isinstance(data.get("runningByJobId"), dict) else 0
     if not isinstance(record, dict):
-        return f"jobs internos: {pending} pend" if pending else "jobs internos: aguardando"
+        queue_bits = []
+        if running:
+            queue_bits.append(f"{running} rodando")
+        if pending:
+            queue_bits.append(f"{pending} pend")
+        return "jobs internos: " + (" · ".join(queue_bits) if queue_bits else "aguardando")
     age = max(0.0, time.time() - float(record.get("receivedAt") or 0))
     typ = _shorten(record.get("type") or "job", limit=32)
     status = "ok" if record.get("ok") else "falhou"
     msg = _shorten(record.get("message") or record.get("error") or "", limit=60)
     pieces = [f"jobs internos: {typ} {status}", f"visto {_format_age(age)}"]
+    if running:
+        pieces.append(f"{running} rodando")
     if pending:
         pieces.append(f"{pending} pend")
     if msg:
@@ -488,6 +496,7 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
     fcm_state = _shorten(record.get("fcmState") or "push ?", limit=32)
     update_state = _shorten(record.get("updateState") or "atualização ?", limit=32)
     jobs_runtime = _shorten(record.get("jobsRuntime") or "termux", limit=24)
+    internal_queue = _shorten(record.get("internalJobsQueue") or "", limit=40)
     battery_parts: list[str] = []
     try:
         percent = int(record.get("batteryPercent") or -1)
@@ -515,7 +524,10 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
     except Exception:
         pass
     prefix = "online" if online else "visto " + _format_age(age)
-    pieces = [prefix, app_version, f"perfil {profile}", f"push {fcm_state}", battery, network, f"APK {update_state}", f"jobs: {jobs_runtime}", _core_worker_app_jobs_text(worker_id)]
+    pieces = [prefix, app_version, f"perfil {profile}", f"push {fcm_state}", battery, network, f"APK {update_state}", f"jobs: {jobs_runtime}"]
+    if internal_queue:
+        pieces.append(f"fila {internal_queue}")
+    pieces.append(_core_worker_app_jobs_text(worker_id))
     return " · ".join(str(x) for x in pieces if x)
 
 
