@@ -425,6 +425,32 @@ def _worker_runtime_label(worker: dict[str, Any] | None) -> str:
         return "Runtime interno preview"
     return raw or "desconhecido"
 
+def _core_worker_app_runtime_text(worker_id: str) -> str:
+    worker_id = str(worker_id or "").strip()
+    if not worker_id:
+        return "APK interno: aguardando vínculo"
+    path = _repo_root() / "data" / "core_worker_app_heartbeats.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        data = {}
+    latest = data.get("latestByWorkerId") if isinstance(data, dict) and isinstance(data.get("latestByWorkerId"), dict) else {}
+    record = latest.get(worker_id) if isinstance(latest, dict) else None
+    if not isinstance(record, dict):
+        return "APK interno: sem heartbeat direto"
+    try:
+        seen = float(record.get("receivedAt") or 0)
+    except Exception:
+        seen = 0.0
+    age = max(0.0, time.time() - seen) if seen else None
+    online = age is not None and age <= 180
+    app_version = _shorten(record.get("appVersion") or "APK", limit=20)
+    runtime_state = _shorten(record.get("internalRuntimeState") or record.get("state") or "runtime", limit=42)
+    jobs_runtime = _shorten(record.get("jobsRuntime") or "termux", limit=24)
+    prefix = "APK interno online" if online else "APK interno visto " + _format_age(age)
+    return f"{prefix} · {app_version} · {runtime_state} · jobs: {jobs_runtime}"
+
+
 def _profile_feature_values(profile: str) -> set[str]:
     values: set[str] = {"phone-worker"}
     roles = set(WORKER_ROLE_PROFILES.get(profile, WORKER_ROLE_PROFILES.get("midia", ())))
@@ -2122,6 +2148,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             push = _core_worker_push_status_text(str(worker.get("worker_id") or ""))
             push_label = push.replace("Push: ", "push ") if push else "push ?"
             lines.append(f"-# {ready} · visto {seen} · `{version}` · {_worker_runtime_label(worker)} · perfil {_worker_profile_label(worker)} · {_battery_text(worker)} · {_simple_network_text(worker)} · {push_label}")
+            lines.append(f"-# {_core_worker_app_runtime_text(str(worker.get('worker_id') or ''))}")
             queue_text = _queue_status_text(worker)
             if queue_text:
                 lines.append(f"-# Fila: {queue_text}")

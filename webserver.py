@@ -22,6 +22,7 @@ _health_provider = None
 _tts_audio_lock = threading.RLock()
 _core_worker_notification_lock = threading.RLock()
 _core_worker_fcm_tokens_lock = threading.RLock()
+_core_worker_app_heartbeat_lock = threading.RLock()
 _tts_audio_files: dict[str, tuple[str, float]] = {}
 
 
@@ -292,6 +293,89 @@ def _core_worker_fcm_public_summary(worker_id: str = "") -> dict:
         "lastError": _safe_short_text((last or {}).get("lastError"), 120),
         "lastAppVersion": _safe_short_text((last or {}).get("appVersion"), 48),
         "permission": _safe_short_text((last or {}).get("permission"), 40),
+    }
+
+
+def _core_worker_app_heartbeats_path() -> str:
+    return os.path.join(_repo_data_dir(), "core_worker_app_heartbeats.json")
+
+
+def _append_core_worker_app_heartbeat(payload: dict) -> dict:
+    now = int(time.time())
+    install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
+    worker_id = _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80)
+    if not install_id and not worker_id:
+        raise ValueError("installId ou workerId ausente")
+    status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+    runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else status.get("runtime") if isinstance(status.get("runtime"), dict) else {}
+    record = {
+        "receivedAt": now,
+        "installId": install_id,
+        "workerId": worker_id,
+        "deviceName": _safe_short_text(payload.get("deviceName") or payload.get("device_name"), 80),
+        "source": _safe_short_text(payload.get("source") or "core-worker-apk-internal-runtime", 64),
+        "state": _safe_short_text(payload.get("state") or "internal_heartbeat", 48),
+        "reason": _safe_short_text(payload.get("reason"), 64),
+        "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48),
+        "appVersionCode": int(payload.get("appVersionCode") or payload.get("app_version_code") or 0),
+        "profile": _safe_short_text(payload.get("profile") or payload.get("profileLabel") or payload.get("profile_label"), 48),
+        "runtimeMode": _safe_short_text(payload.get("runtime_mode") or runtime.get("mode") or "hybrid", 40),
+        "internalRuntime": _safe_short_text(payload.get("internal_runtime") or runtime.get("internal_runtime") or "apk-heartbeat", 48),
+        "internalRuntimeState": _safe_short_text(payload.get("internal_runtime_state") or runtime.get("internal_runtime_state"), 120),
+        "termuxWorkerOnline": bool(payload.get("termuxWorkerOnline") or payload.get("localAgentOnline") or status.get("local_agent_online")),
+        "jobsRuntime": _safe_short_text(payload.get("jobsRuntime") or runtime.get("jobs_runtime") or "termux", 40),
+        "fcmState": _safe_short_text(status.get("fcm_state") or payload.get("fcm_state"), 80),
+        "remoteAddr": _safe_short_text(request.remote_addr or "", 64),
+    }
+    path = _core_worker_app_heartbeats_path()
+    key = install_id or worker_id or "unknown"
+    with _core_worker_app_heartbeat_lock:
+        try:
+            data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        latest_by_install = data.get("latestByInstallId") if isinstance(data.get("latestByInstallId"), dict) else {}
+        latest_by_worker = data.get("latestByWorkerId") if isinstance(data.get("latestByWorkerId"), dict) else {}
+        events = data.get("events") if isinstance(data.get("events"), list) else []
+        latest_by_install[key] = record
+        if worker_id:
+            latest_by_worker[worker_id] = record
+        events.append(record)
+        events = events[-160:]
+        data = {"ok": True, "updatedAt": now, "latestByInstallId": latest_by_install, "latestByWorkerId": latest_by_worker, "events": events}
+        _atomic_write_json(path, data, mode=0o600)
+    return record
+
+
+def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str = "") -> dict:
+    path = _core_worker_app_heartbeats_path()
+    try:
+        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    record = None
+    if worker_id and isinstance(data.get("latestByWorkerId"), dict):
+        record = data.get("latestByWorkerId", {}).get(str(worker_id))
+    if record is None and install_id and isinstance(data.get("latestByInstallId"), dict):
+        record = data.get("latestByInstallId", {}).get(str(install_id))
+    if not isinstance(record, dict):
+        return {"online": False, "lastSeenAt": 0, "state": "unknown"}
+    seen = int(record.get("receivedAt") or 0)
+    online = bool(seen and time.time() - seen <= 180)
+    return {
+        "online": online,
+        "lastSeenAt": seen,
+        "state": _safe_short_text(record.get("state"), 48),
+        "appVersion": _safe_short_text(record.get("appVersion"), 48),
+        "runtimeMode": _safe_short_text(record.get("runtimeMode"), 40),
+        "internalRuntime": _safe_short_text(record.get("internalRuntime"), 48),
+        "internalRuntimeState": _safe_short_text(record.get("internalRuntimeState"), 120),
+        "termuxWorkerOnline": bool(record.get("termuxWorkerOnline")),
+        "jobsRuntime": _safe_short_text(record.get("jobsRuntime"), 40),
     }
 
 
@@ -863,6 +947,33 @@ def core_worker_app_fcm_token():
 def core_worker_app_fcm_summary():
     worker_id = str(request.args.get("worker_id") or "").strip()
     return jsonify({"ok": True, "summary": _core_worker_fcm_public_summary(worker_id)}), 200
+
+
+@app.post("/core-worker/app/heartbeat")
+def core_worker_app_heartbeat():
+    """Recebe heartbeat direto do APK, sem passar pelo Termux.
+
+    Este endpoint é apenas telemetria de migração: não autentica jobs e não
+    concede capacidade de execução. Jobs reais continuam no phone-worker/Termux.
+    """
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    try:
+        record = _append_core_worker_app_heartbeat(payload)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)[:180]}), 400
+    except Exception as exc:
+        app.logger.warning("core-worker app heartbeat ignored: %s", exc)
+        return jsonify({"ok": False, "accepted": True, "error": _safe_short_text(f"{type(exc).__name__}: {exc}", 180)}), 200
+    return jsonify({"ok": True, "runtime": record}), 200
+
+
+@app.get("/core-worker/app/runtime-summary")
+def core_worker_app_runtime_summary():
+    worker_id = str(request.args.get("worker_id") or "").strip()
+    install_id = str(request.args.get("install_id") or "").strip()
+    return jsonify({"ok": True, "summary": _core_worker_app_runtime_public_summary(worker_id, install_id)}), 200
 
 
 @app.post("/core-worker/app/notification")

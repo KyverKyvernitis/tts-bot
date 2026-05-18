@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.15";
+    private static final String APP_VERSION = "0.5.17";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -145,9 +145,13 @@ public class MainActivity extends Activity {
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";
     private volatile String localAgentProfile = "";
-    private volatile String runtimeMode = "termux";
+    private volatile String runtimeMode = "hybrid";
     private volatile String internalRuntimeState = "não preparado";
     private volatile String internalRuntimePath = "";
+    private volatile boolean internalRuntimeOnline = false;
+    private volatile String internalRuntimeHeartbeatState = "ainda não enviado";
+    private volatile String internalRuntimeLastError = "";
+    private volatile long internalRuntimeLastHeartbeatAt = 0L;
     private volatile String localAgentWorkerId = "";
     private volatile String localAgentMessage = "ainda não verificado";
     private volatile String localAgentSshdSummary = "";
@@ -176,7 +180,8 @@ public class MainActivity extends Activity {
         safeStartupTask(this::prepareInternalRuntimePreview);
         safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_create"));
         safeStartupTask(() -> reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")"));
-        safeStartupTask(() -> reportAppState("runtime_preview", "runtime interno preparado em modo preview; Termux continua como worker oficial"));
+        safeStartupTask(() -> reportAppState("runtime_internal_ready", "runtime interno preparado em modo híbrido; primeiro heartbeat direto ativo"));
+        safeStartupTask(() -> sendInternalRuntimeHeartbeat(false, "app_opened"));
         safeStartupTask(this::updatePermissionGate);
         refreshLocalStatus("Pronto. O app verifica automaticamente se este celular já está pareado.");
         safeStartupTask(() -> checkLocalAgent(false));
@@ -192,6 +197,7 @@ public class MainActivity extends Activity {
         safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_resume"));
         safeStartupTask(this::autoVerifySavedPairing);
         safeStartupTask(this::autoCheckForUpdate);
+        safeStartupTask(() -> sendInternalRuntimeHeartbeat(false, "activity_resume"));
         scheduleFcmTokenRegistration("activity_resume");
     }
 
@@ -885,6 +891,7 @@ public class MainActivity extends Activity {
             String prefix = localSynced
                     ? "Perfil aplicado: " + profileLabel(profile)
                     : "Perfil salvo no APK. Worker local offline; abra o Termux por enquanto para sincronizar.";
+            sendInternalRuntimeHeartbeat(false, "profile_apply");
             if (hasPairing()) {
                 sendHeartbeatInternal(true, prefix);
             } else {
@@ -897,6 +904,7 @@ public class MainActivity extends Activity {
         saveLocalFields(appliedProfile());
         runBusy("Atualizando status no painel...", () -> {
             updateLocalAgentStatus(false);
+            sendInternalRuntimeHeartbeat(false, "manual_sync");
             sendHeartbeatInternal(true);
         });
     }
@@ -907,7 +915,10 @@ public class MainActivity extends Activity {
 
     private void sendHeartbeatInternal(boolean showResult, String successPrefix) throws Exception {
         if (!updateLocalAgentStatus(true)) {
-            show("Worker local offline. Abra o Termux por enquanto para sincronizar.");
+            sendInternalRuntimeHeartbeat(showResult, "termux_offline_sync");
+            if (showResult) {
+                show("Termux worker offline. Runtime interno do APK sincronizado; jobs reais ainda precisam do Termux por enquanto.");
+            }
             return;
         }
         HttpResult result = request("POST", LOCAL_AGENT_HEARTBEAT_URL, new JSONObject(), null);
@@ -1396,24 +1407,28 @@ public class MainActivity extends Activity {
             if (!runtimeDir.exists() && !runtimeDir.mkdirs()) {
                 internalRuntimeState = "não preparado";
                 internalRuntimePath = runtimeDir.getAbsolutePath();
+                internalRuntimeOnline = false;
                 return;
             }
             File state = new File(runtimeDir, "runtime-state.json");
             JSONObject meta = new JSONObject();
             meta.put("ok", true);
-            meta.put("mode", "internal_preview");
-            meta.put("active", false);
+            meta.put("mode", "hybrid");
+            meta.put("active", true);
+            meta.put("internal_runtime", "apk-heartbeat");
             meta.put("apk_version", APP_VERSION);
             meta.put("version_code", BuildConfig.VERSION_CODE);
             meta.put("created_by", "core-worker-apk");
-            meta.put("summary", "Runtime interno preparado. Termux continua sendo o worker oficial nesta etapa.");
-            meta.put("next_step", "migrar health ping pequeno antes de mover jobs reais");
+            meta.put("summary", "Runtime interno ativo para heartbeat direto. Termux continua responsável por jobs reais nesta etapa.");
+            meta.put("migration_stage", "apk-heartbeat-no-jobs");
             writeTextFile(state, meta.toString());
-            internalRuntimeState = "preparado · preview";
+            internalRuntimeState = "preparado · heartbeat ativo";
             internalRuntimePath = runtimeDir.getAbsolutePath();
-            runtimeMode = "termux";
+            runtimeMode = "hybrid";
         } catch (Throwable exc) {
             internalRuntimeState = "falha ao preparar · " + exc.getClass().getSimpleName();
+            internalRuntimeOnline = false;
+            internalRuntimeLastError = shortThrowable(exc);
         }
         updateSystemChecklistText();
     }
@@ -1431,20 +1446,92 @@ public class MainActivity extends Activity {
 
     private JSONObject runtimeSnapshot() throws Exception {
         JSONObject runtime = new JSONObject();
-        runtime.put("mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "termux" : runtimeMode.trim());
-        runtime.put("current_worker", "termux-phone-worker");
-        runtime.put("internal_runtime", "preview");
+        runtime.put("mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "hybrid" : runtimeMode.trim());
+        runtime.put("current_worker", localAgentOnline ? "termux-phone-worker" : "apk-internal-heartbeat");
+        runtime.put("internal_runtime", "apk-heartbeat");
         runtime.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
+        runtime.put("internal_runtime_online", internalRuntimeOnline);
+        runtime.put("internal_runtime_heartbeat_state", internalRuntimeHeartbeatState == null ? "" : internalRuntimeHeartbeatState);
+        runtime.put("internal_runtime_last_heartbeat_at", internalRuntimeLastHeartbeatAt);
+        runtime.put("internal_runtime_last_error", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
         runtime.put("internal_runtime_path", internalRuntimePath == null ? "" : internalRuntimePath);
         runtime.put("termux_required_now", true);
-        runtime.put("migration_stage", "prepared-no-jobs");
-        runtime.put("summary", "Termux segue como worker oficial; APK já prepara espaço privado para runtime interno futuro.");
+        runtime.put("jobs_runtime", "termux");
+        runtime.put("migration_stage", "apk-heartbeat-no-jobs");
+        runtime.put("summary", "APK já envia heartbeat direto para a VPS; Termux continua responsável por jobs reais.");
         return runtime;
     }
 
     private String runtimeStatusLabel() {
         String state = internalRuntimeState == null || internalRuntimeState.trim().isEmpty() ? "não preparado" : internalRuntimeState.trim();
-        return "Termux atual · interno " + state;
+        String hb = internalRuntimeOnline ? "APK online" : "APK aguardando sync";
+        return "Híbrido · " + hb + " · " + state;
+    }
+
+    private void sendInternalRuntimeHeartbeat(boolean showResult, String reason) {
+        String serverUrl = normalizedServerUrl();
+        if (serverUrl.isEmpty()) {
+            internalRuntimeOnline = false;
+            internalRuntimeHeartbeatState = "VPS não configurada";
+            updateSystemChecklistText();
+            return;
+        }
+        try {
+            JSONObject payload = statusSnapshot();
+            payload.put("state", "internal_heartbeat");
+            payload.put("reason", reason == null ? "manual" : reason);
+            payload.put("source", "core-worker-apk-internal-runtime");
+            payload.put("runtime_mode", "hybrid");
+            payload.put("internal_runtime", "apk-heartbeat");
+            payload.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
+            payload.put("internal_runtime_path", internalRuntimePath == null ? "" : internalRuntimePath);
+            payload.put("workerId", emptyFallback(localAgentWorkerId, prefs.getString("worker_id", "")));
+            payload.put("installId", installId());
+            payload.put("deviceName", deviceNameInput == null ? defaultDeviceName() : deviceNameInput.getText().toString().trim());
+            payload.put("appVersion", APP_VERSION);
+            payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+            payload.put("profile", appliedProfile());
+            payload.put("profileLabel", profileLabel(appliedProfile()));
+            payload.put("localAgentOnline", localAgentOnline);
+            payload.put("termuxWorkerOnline", localAgentOnline);
+            payload.put("jobsRuntime", "termux");
+            HttpResult result = request("POST", serverUrl + "/core-worker/app/heartbeat", payload, null);
+            boolean accepted = false;
+            if (result.ok()) {
+                try {
+                    accepted = new JSONObject(result.body).optBoolean("ok", false);
+                } catch (Throwable ignored) {
+                    accepted = false;
+                }
+            }
+            if (result.ok() && accepted) {
+                internalRuntimeOnline = true;
+                internalRuntimeHeartbeatState = "online";
+                internalRuntimeLastError = "";
+                internalRuntimeLastHeartbeatAt = System.currentTimeMillis();
+                vpsState = "ok";
+                reportAppState("internal_runtime_heartbeat", "APK enviou heartbeat direto para a VPS");
+                if (showResult) {
+                    show("Runtime interno do APK sincronizado com a VPS.\nJobs reais ainda continuam no Termux por enquanto.");
+                }
+            } else {
+                internalRuntimeOnline = false;
+                internalRuntimeHeartbeatState = "falha HTTP " + result.status;
+                internalRuntimeLastError = compactResultBody(result.body);
+                if (showResult) {
+                    show("Runtime interno não confirmou heartbeat: HTTP " + result.status + "\n" + compactResultBody(result.body));
+                }
+            }
+        } catch (Throwable exc) {
+            internalRuntimeOnline = false;
+            internalRuntimeHeartbeatState = "falha";
+            internalRuntimeLastError = shortThrowable(exc);
+            if (showResult) {
+                show("Runtime interno não confirmou heartbeat: " + shortThrowable(exc));
+            }
+        }
+        updateSystemChecklistText();
+        showLocalAgentText();
     }
 
     private void reportFcmToken(String serverUrl, String token, String reason) {
@@ -1790,10 +1877,10 @@ public class MainActivity extends Activity {
         profileStatus.put("profile", profile);
         profileStatus.put("profile_label", profileLabel(profile));
         profileStatus.put("apk_scope", "onboarding_profile_only");
-        profileStatus.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "termux" : runtimeMode);
+        profileStatus.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "hybrid" : runtimeMode);
         profileStatus.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
         profileStatus.put("runtime", runtimeSnapshot());
-        payload.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "termux" : runtimeMode);
+        payload.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "hybrid" : runtimeMode);
         payload.put("status", profileStatus);
     }
 
@@ -1811,8 +1898,10 @@ public class MainActivity extends Activity {
         status.put("tailscale_installed", isPackageInstalled("com.tailscale.ipn"));
         status.put("fcm_state", fcmState);
         status.put("fcm_token_preview", fcmTokenPreview);
-        status.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "termux" : runtimeMode);
+        status.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "hybrid" : runtimeMode);
         status.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
+        status.put("internal_runtime_online", internalRuntimeOnline);
+        status.put("internal_runtime_heartbeat_state", internalRuntimeHeartbeatState == null ? "" : internalRuntimeHeartbeatState);
         status.put("runtime", runtimeSnapshot());
         if (localAgentOnline) {
             status.put("local_agent_version", localAgentVersion);
@@ -1963,6 +2052,7 @@ public class MainActivity extends Activity {
     private void checkLocalAgent(boolean userVisible) {
         runBusy(userVisible ? "Verificando este celular..." : "Verificando este celular...", () -> {
             boolean ok = updateLocalAgentStatus(true);
+            sendInternalRuntimeHeartbeat(false, userVisible ? "manual_check" : "background_check");
             updateSystemChecklistText();
             if (userVisible) {
                 if (ok) {
@@ -2085,11 +2175,13 @@ public class MainActivity extends Activity {
 
     private String localAgentLine() {
         String profile = appliedProfile();
+        String internal = internalRuntimeOnline ? "Runtime APK online" : "Runtime APK aguardando";
         if (!localAgentOnline) {
-            return "⚠️ Aguardando worker local\nAbra o Termux por enquanto para acordar este celular.";
+            return (internalRuntimeOnline ? "✅ APK conectado à VPS" : "⚠️ Aguardando worker local")
+                    + "\n" + internal + " · jobs ainda precisam do Termux.";
         }
         if (hasPairing()) {
-            return "✅ Pronto para trabalhar\n" + profileLabel(profile) + " · Push " + fcmCompactLabel() + " · APK " + updateChecklistLabel();
+            return "✅ Pronto para trabalhar\n" + profileLabel(profile) + " · Push " + fcmCompactLabel() + " · " + internal + " · APK " + updateChecklistLabel();
         }
         return "⚠️ Worker detectado\nConecte este celular à VPS principal.";
     }
@@ -2307,9 +2399,9 @@ public class MainActivity extends Activity {
         builder.append(checkLine("Fallback", "JobScheduler local ativo")).append("\n\n");
 
         builder.append("Runtime\n");
-        builder.append(checkLine("Modo atual", "Termux worker oficial")).append('\n');
-        builder.append(checkLine("Runtime interno", internalRuntimeState == null || internalRuntimeState.trim().isEmpty() ? "não preparado" : internalRuntimeState)).append('\n');
-        builder.append(checkLine("Migração", "preparada; jobs reais continuam no Termux")).append("\n\n");
+        builder.append(checkLine("Modo atual", runtimeStatusLabel())).append('\n');
+        builder.append(checkLine("Heartbeat APK", internalRuntimeOnline ? "online direto na VPS" : emptyFallback(internalRuntimeHeartbeatState, "pendente"))).append('\n');
+        builder.append(checkLine("Jobs reais", "continuam no Termux por enquanto")).append("\n\n");
 
         builder.append("Worker\n");
         builder.append(checkLine("Status", localAgentOnline ? "online" : "offline")).append('\n');

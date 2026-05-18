@@ -496,3 +496,13 @@ O app agora oferece o perfil **Turbo**, pensado para um celular forte e confiáv
 
 A VPS não depende desse perfil para funcionar. Se o celular estiver offline, o bot continua com fallback local.
 
+
+
+## Patch 58 — runtime interno com heartbeat direto
+
+- O APK passa para `0.5.17` / `versionCode 32`.
+- O runtime interno deixa de ser apenas preview e envia um heartbeat leve direto para a VPS em `/core-worker/app/heartbeat`.
+- Esse heartbeat não executa jobs e não substitui o Termux ainda; ele apenas prova que o APK consegue aparecer para a VPS sem passar pelo phone-worker.
+- Jobs reais, build APK, diagnósticos e tarefas pesadas continuam no Termux/phone-worker por enquanto.
+- A VPS continua sem build Android local: ela só orquestra, injeta arquivos locais no payload temporário e publica o APK recebido do phone worker.
+- `google-services.json`, service account e keystore continuam fora do GitHub e fora dos ZIPs públicos.
