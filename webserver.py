@@ -308,6 +308,10 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         raise ValueError("installId ou workerId ausente")
     status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
     runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else status.get("runtime") if isinstance(status.get("runtime"), dict) else {}
+    battery = payload.get("battery") if isinstance(payload.get("battery"), dict) else status.get("battery") if isinstance(status.get("battery"), dict) else {}
+    network = payload.get("network") if isinstance(payload.get("network"), dict) else status.get("network") if isinstance(status.get("network"), dict) else {}
+    update = payload.get("update") if isinstance(payload.get("update"), dict) else status.get("update") if isinstance(status.get("update"), dict) else {}
+    app_status = payload.get("app_status") if isinstance(payload.get("app_status"), dict) else status.get("app_status") if isinstance(status.get("app_status"), dict) else {}
     record = {
         "receivedAt": now,
         "installId": install_id,
@@ -325,6 +329,20 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         "termuxWorkerOnline": bool(payload.get("termuxWorkerOnline") or payload.get("localAgentOnline") or status.get("local_agent_online")),
         "jobsRuntime": _safe_short_text(payload.get("jobsRuntime") or runtime.get("jobs_runtime") or "termux", 40),
         "fcmState": _safe_short_text(status.get("fcm_state") or payload.get("fcm_state"), 80),
+        "batteryPercent": int(battery.get("percent") or battery.get("percentage") or -1) if isinstance(battery, dict) else -1,
+        "batteryTemperatureC": float(battery.get("temperature_c") or -1) if isinstance(battery, dict) else -1,
+        "batteryCharging": bool(battery.get("charging")) if isinstance(battery, dict) else False,
+        "networkType": _safe_short_text(network.get("type") if isinstance(network, dict) else "", 32),
+        "networkVpn": bool(network.get("vpn")) if isinstance(network, dict) else False,
+        "vpsPingMs": int(network.get("vps_ping_ms") or -1) if isinstance(network, dict) else -1,
+        "updateState": _safe_short_text(update.get("state") if isinstance(update, dict) else "", 80),
+        "updateAvailable": bool(update.get("available")) if isinstance(update, dict) else False,
+        "lastAppError": _safe_short_text(app_status.get("last_error") if isinstance(app_status, dict) else "", 160),
+        "ready": bool(app_status.get("ready")) if isinstance(app_status, dict) else False,
+        "battery": battery if isinstance(battery, dict) else {},
+        "network": network if isinstance(network, dict) else {},
+        "update": update if isinstance(update, dict) else {},
+        "appStatus": app_status if isinstance(app_status, dict) else {},
         "remoteAddr": _safe_short_text(request.remote_addr or "", 64),
     }
     path = _core_worker_app_heartbeats_path()
@@ -376,6 +394,17 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         "internalRuntimeState": _safe_short_text(record.get("internalRuntimeState"), 120),
         "termuxWorkerOnline": bool(record.get("termuxWorkerOnline")),
         "jobsRuntime": _safe_short_text(record.get("jobsRuntime"), 40),
+        "fcmState": _safe_short_text(record.get("fcmState"), 80),
+        "batteryPercent": int(record.get("batteryPercent") or -1),
+        "batteryTemperatureC": float(record.get("batteryTemperatureC") or -1),
+        "batteryCharging": bool(record.get("batteryCharging")),
+        "networkType": _safe_short_text(record.get("networkType"), 32),
+        "networkVpn": bool(record.get("networkVpn")),
+        "vpsPingMs": int(record.get("vpsPingMs") or -1),
+        "updateState": _safe_short_text(record.get("updateState"), 80),
+        "updateAvailable": bool(record.get("updateAvailable")),
+        "lastAppError": _safe_short_text(record.get("lastAppError"), 160),
+        "ready": bool(record.get("ready")),
     }
 
 

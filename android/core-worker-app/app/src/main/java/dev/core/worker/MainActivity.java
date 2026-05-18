@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.17";
+    private static final String APP_VERSION = "0.5.18";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -169,6 +169,8 @@ public class MainActivity extends Activity {
     private volatile String fcmState = "não verificado";
     private volatile String fcmTokenPreview = "";
     private volatile long fcmDisabledUntil = 0L;
+    private volatile String appStatusLastError = "";
+    private volatile long appStatusLastSentAt = 0L;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -180,7 +182,7 @@ public class MainActivity extends Activity {
         safeStartupTask(this::prepareInternalRuntimePreview);
         safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_create"));
         safeStartupTask(() -> reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")"));
-        safeStartupTask(() -> reportAppState("runtime_internal_ready", "runtime interno preparado em modo híbrido; primeiro heartbeat direto ativo"));
+        safeStartupTask(() -> reportAppState("runtime_internal_ready", "runtime interno preparado em modo híbrido; heartbeat/status direto ativo"));
         safeStartupTask(() -> sendInternalRuntimeHeartbeat(false, "app_opened"));
         safeStartupTask(this::updatePermissionGate);
         refreshLocalStatus("Pronto. O app verifica automaticamente se este celular já está pareado.");
@@ -280,7 +282,7 @@ public class MainActivity extends Activity {
         LinearLayout prepareCard = card();
         mainContent.addView(prepareCard);
         prepareCard.addView(sectionTitle("Status"));
-        prepareCard.addView(smallText("Visão rápida do aparelho."));
+        prepareCard.addView(smallText("Resumo do APK interno e do worker local."));
 
         localAgentText = smallText("Este celular ainda não foi verificado.");
         localAgentText.setTextColor(TEXT);
@@ -382,7 +384,7 @@ public class MainActivity extends Activity {
 
         LinearLayout updateCard = cardWithTopMargin(mainContent);
         updateCard.addView(sectionTitle("Atualizações"));
-        updateCard.addView(smallText("APK e avisos de atualização."));
+        updateCard.addView(smallText("APK publicado, push e fallback local."));
         updateText = smallText("APK " + APP_VERSION + " · ainda não verificado.");
         updateText.setTextColor(TEXT);
         updateText.setBackground(cardBackground(CARD_SOFT));
@@ -396,7 +398,7 @@ public class MainActivity extends Activity {
 
         LinearLayout technicalCard = cardWithTopMargin(mainContent);
         technicalCard.addView(sectionTitle("Detalhes técnicos"));
-        technicalCard.addView(smallText("Runtime, rede, logs e opções avançadas."));
+        technicalCard.addView(smallText("Status completo, rede, bateria, logs e opções avançadas."));
         technicalToggleButton = secondaryButton("Abrir detalhes técnicos");
         technicalToggleButton.setOnClickListener(v -> toggleTechnicalDetails());
         technicalCard.addView(technicalToggleButton);
@@ -1429,6 +1431,7 @@ public class MainActivity extends Activity {
             internalRuntimeState = "falha ao preparar · " + exc.getClass().getSimpleName();
             internalRuntimeOnline = false;
             internalRuntimeLastError = shortThrowable(exc);
+            appStatusLastError = internalRuntimeLastError;
         }
         updateSystemChecklistText();
     }
@@ -1495,6 +1498,10 @@ public class MainActivity extends Activity {
             payload.put("localAgentOnline", localAgentOnline);
             payload.put("termuxWorkerOnline", localAgentOnline);
             payload.put("jobsRuntime", "termux");
+            safePutPayload(payload, "battery", batterySnapshot());
+            safePutPayload(payload, "network", networkSnapshot(serverUrl));
+            safePutPayload(payload, "update", updateSnapshot());
+            safePutPayload(payload, "app_status", appStatusSnapshot());
             HttpResult result = request("POST", serverUrl + "/core-worker/app/heartbeat", payload, null);
             boolean accepted = false;
             if (result.ok()) {
@@ -1509,6 +1516,7 @@ public class MainActivity extends Activity {
                 internalRuntimeHeartbeatState = "online";
                 internalRuntimeLastError = "";
                 internalRuntimeLastHeartbeatAt = System.currentTimeMillis();
+                appStatusLastSentAt = internalRuntimeLastHeartbeatAt;
                 vpsState = "ok";
                 reportAppState("internal_runtime_heartbeat", "APK enviou heartbeat direto para a VPS");
                 if (showResult) {
@@ -1526,6 +1534,7 @@ public class MainActivity extends Activity {
             internalRuntimeOnline = false;
             internalRuntimeHeartbeatState = "falha";
             internalRuntimeLastError = shortThrowable(exc);
+            appStatusLastError = internalRuntimeLastError;
             if (showResult) {
                 show("Runtime interno não confirmou heartbeat: " + shortThrowable(exc));
             }
@@ -1601,6 +1610,10 @@ public class MainActivity extends Activity {
                 payload.put("versionCode", latestVersionCode);
                 payload.put("detail", detail == null ? "" : detail);
                 payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
+                safePutPayload(payload, "battery", batterySnapshot());
+                safePutPayload(payload, "network", networkSnapshot(serverUrl));
+                safePutPayload(payload, "update", updateSnapshot());
+                safePutPayload(payload, "app_status", appStatusSnapshot());
                 request("POST", serverUrl + "/core-worker/app/notification", payload, null);
             } catch (Throwable ignored) {
             }
@@ -1884,6 +1897,40 @@ public class MainActivity extends Activity {
         payload.put("status", profileStatus);
     }
 
+    private void safePutPayload(JSONObject target, String key, JSONObject value) {
+        try {
+            if (target != null && key != null && value != null) {
+                target.put(key, value);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private JSONObject updateSnapshot() throws Exception {
+        JSONObject update = new JSONObject();
+        update.put("installed_version", APP_VERSION);
+        update.put("installed_code", BuildConfig.VERSION_CODE);
+        update.put("latest_version", latestVersionName == null ? "" : latestVersionName);
+        update.put("latest_code", latestVersionCode);
+        update.put("available", latestUpdateAvailable);
+        update.put("state", updateChecklistLabel());
+        update.put("download_busy", updateDownloadBusy);
+        return update;
+    }
+
+    private JSONObject appStatusSnapshot() throws Exception {
+        JSONObject appStatus = new JSONObject();
+        appStatus.put("ready", hasPairing() && (internalRuntimeOnline || localAgentOnline));
+        appStatus.put("paired", hasPairing());
+        appStatus.put("profile", appliedProfile());
+        appStatus.put("profile_label", profileLabel(appliedProfile()));
+        appStatus.put("last_error", emptyFallback(appStatusLastError, internalRuntimeLastError));
+        appStatus.put("last_sent_at", appStatusLastSentAt);
+        appStatus.put("foreground", true);
+        appStatus.put("heartbeat_reason", emptyFallback(internalRuntimeHeartbeatState, "pendente"));
+        return appStatus;
+    }
+
     private JSONObject statusSnapshot() throws Exception {
         JSONObject status = new JSONObject();
         status.put("app", "foreground");
@@ -1902,7 +1949,12 @@ public class MainActivity extends Activity {
         status.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
         status.put("internal_runtime_online", internalRuntimeOnline);
         status.put("internal_runtime_heartbeat_state", internalRuntimeHeartbeatState == null ? "" : internalRuntimeHeartbeatState);
+        status.put("internal_runtime_last_error", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
         status.put("runtime", runtimeSnapshot());
+        safePutPayload(status, "battery", batterySnapshot());
+        safePutPayload(status, "network", networkSnapshot(normalizedServerUrl()));
+        safePutPayload(status, "update", updateSnapshot());
+        safePutPayload(status, "app_status", appStatusSnapshot());
         if (localAgentOnline) {
             status.put("local_agent_version", localAgentVersion);
             status.put("local_agent_profile", localAgentProfile);
@@ -2173,6 +2225,52 @@ public class MainActivity extends Activity {
         });
     }
 
+    private String quickBatteryLabel() {
+        try {
+            JSONObject battery = batterySnapshot();
+            if (!battery.optBoolean("available", false)) {
+                return "bateria ?";
+            }
+            String label = battery.optInt("percent", -1) + "%";
+            if (battery.has("temperature_c")) {
+                label += " · " + Math.round(battery.optDouble("temperature_c", 0)) + "°C";
+            }
+            if (battery.optBoolean("charging", false)) {
+                label += " · carregando";
+            }
+            return label;
+        } catch (Throwable ignored) {
+            return "bateria ?";
+        }
+    }
+
+    private String quickNetworkLabel() {
+        try {
+            ConnectivityManager connectivity = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            Network active = connectivity == null ? null : connectivity.getActiveNetwork();
+            NetworkCapabilities caps = active == null ? null : connectivity.getNetworkCapabilities(active);
+            if (caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                return "sem rede";
+            }
+            String label;
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                label = "Wi‑Fi";
+            } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                label = "móvel";
+            } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                label = "VPN";
+            } else {
+                label = "rede";
+            }
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) && !"VPN".equals(label)) {
+                label += "+VPN";
+            }
+            return label;
+        } catch (Throwable ignored) {
+            return "rede ?";
+        }
+    }
+
     private String localAgentLine() {
         String profile = appliedProfile();
         String internal = internalRuntimeOnline ? "Runtime APK online" : "Runtime APK aguardando";
@@ -2393,23 +2491,40 @@ public class MainActivity extends Activity {
     private String prepareChecklistText() {
         String server = normalizedServerUrl();
         StringBuilder builder = new StringBuilder();
-        builder.append("App\n");
+        JSONObject battery = null;
+        JSONObject network = null;
+        try { battery = batterySnapshot(); } catch (Throwable ignored) {}
+        try { network = networkSnapshot(server); } catch (Throwable ignored) {}
+
+        builder.append("App interno\n");
         builder.append(checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")")).append('\n');
         builder.append(checkLine("Push", fcmStatusLabel())).append('\n');
-        builder.append(checkLine("Fallback", "JobScheduler local ativo")).append("\n\n");
+        builder.append(checkLine("Perfil", profileLabel(appliedProfile()))).append('\n');
+        builder.append(checkLine("Atualizações", updateChecklistLabel())).append("\n\n");
+
+        builder.append("Aparelho\n");
+        builder.append(checkLine("Bateria", battery == null ? "desconhecida" : quickBatteryLabel())).append('\n');
+        builder.append(checkLine("Rede", network == null ? "desconhecida" : quickNetworkLabel())).append('\n');
+        builder.append(checkLine("Dispositivo", Build.MANUFACTURER + " " + Build.MODEL)).append("\n\n");
 
         builder.append("Runtime\n");
-        builder.append(checkLine("Modo atual", runtimeStatusLabel())).append('\n');
+        builder.append(checkLine("Modo", runtimeStatusLabel())).append('\n');
         builder.append(checkLine("Heartbeat APK", internalRuntimeOnline ? "online direto na VPS" : emptyFallback(internalRuntimeHeartbeatState, "pendente"))).append('\n');
-        builder.append(checkLine("Jobs reais", "continuam no Termux por enquanto")).append("\n\n");
+        if (internalRuntimeLastHeartbeatAt > 0L) {
+            long age = Math.max(0L, (System.currentTimeMillis() - internalRuntimeLastHeartbeatAt) / 1000L);
+            builder.append(checkLine("Último heartbeat", age < 60 ? "agora" : (age / 60L) + " min atrás")).append('\n');
+        }
+        if (internalRuntimeLastError != null && !internalRuntimeLastError.trim().isEmpty()) {
+            builder.append(checkLine("Último erro APK", internalRuntimeLastError)).append('\n');
+        }
+        builder.append(checkLine("Jobs reais", "Termux por enquanto")).append("\n\n");
 
-        builder.append("Worker\n");
+        builder.append("Termux worker\n");
         builder.append(checkLine("Status", localAgentOnline ? "online" : "offline")).append('\n');
-        builder.append(checkLine("Perfil", profileLabel(appliedProfile()))).append('\n');
         builder.append(checkLine("Jobs locais", localAgentJobsConfigured ? "ok" : "pendentes")).append('\n');
         builder.append(checkLine("SSHD", emptyFallback(localAgentSshdSummary, "não informado"))).append("\n\n");
 
-        builder.append("Rede e dependências atuais\n");
+        builder.append("Dependências atuais\n");
         builder.append(checkLine("VPS local", localAgentVpsConfigured ? "configurada" : "pendente")).append('\n');
         builder.append(checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "Tailscale externo ainda necessário")).append('\n');
         builder.append(checkLine("Termux", isPackageInstalled("com.termux") ? "instalado" : "precisa instalar")).append('\n');

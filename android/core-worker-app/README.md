@@ -1,5 +1,26 @@
 # Core Worker APK privado
 
+# Patch 59 — status interno completo do APK
+
+O Patch 59 aprofunda a migração iniciada no Patch 58. O APK continua em modo híbrido, mas agora envia status interno mais completo diretamente para a VPS, sem depender do Termux para essa telemetria.
+
+O heartbeat direto passa a incluir:
+
+- versão e código do APK;
+- perfil aplicado;
+- estado do FCM/push;
+- bateria e temperatura;
+- tipo de rede, VPN e ping TCP leve para a VPS quando possível;
+- estado de atualização;
+- último erro conhecido do runtime interno;
+- separação explícita entre APK interno e Termux worker.
+
+O painel `workers` passa a mostrar o APK interno separado do Termux worker. O Termux continua responsável por jobs reais, build e shell nesta etapa. O APK apenas prova que já consegue manter telemetria própria com a VPS.
+
+Também corrige o aviso do painel Discord `WorkersPanelView._refresh was never awaited`, evitando conflito com método interno privado do `discord.ui.LayoutView`.
+
+A VPS continua sem build Android pesado. O phone worker continua responsável por compilar e assinar APKs.
+
 # Patch 57 — assinatura compatível pelo phone worker
 
 O Patch 57 corrige o conflito de pacote do Android ao atualizar por cima:

@@ -425,10 +425,10 @@ def _worker_runtime_label(worker: dict[str, Any] | None) -> str:
         return "Runtime interno preview"
     return raw or "desconhecido"
 
-def _core_worker_app_runtime_text(worker_id: str) -> str:
+def _core_worker_app_runtime_record(worker_id: str) -> dict[str, Any] | None:
     worker_id = str(worker_id or "").strip()
     if not worker_id:
-        return "APK interno: aguardando vínculo"
+        return None
     path = _repo_root() / "data" / "core_worker_app_heartbeats.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -436,8 +436,16 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
         data = {}
     latest = data.get("latestByWorkerId") if isinstance(data, dict) and isinstance(data.get("latestByWorkerId"), dict) else {}
     record = latest.get(worker_id) if isinstance(latest, dict) else None
+    return record if isinstance(record, dict) else None
+
+
+def _core_worker_app_runtime_text(worker_id: str) -> str:
+    worker_id = str(worker_id or "").strip()
+    if not worker_id:
+        return "aguardando vínculo"
+    record = _core_worker_app_runtime_record(worker_id)
     if not isinstance(record, dict):
-        return "APK interno: sem heartbeat direto"
+        return "sem heartbeat direto"
     try:
         seen = float(record.get("receivedAt") or 0)
     except Exception:
@@ -445,10 +453,42 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
     age = max(0.0, time.time() - seen) if seen else None
     online = age is not None and age <= 180
     app_version = _shorten(record.get("appVersion") or "APK", limit=20)
-    runtime_state = _shorten(record.get("internalRuntimeState") or record.get("state") or "runtime", limit=42)
+    profile = _shorten(record.get("profile") or "perfil ?", limit=24)
+    fcm_state = _shorten(record.get("fcmState") or "push ?", limit=32)
+    update_state = _shorten(record.get("updateState") or "atualização ?", limit=32)
     jobs_runtime = _shorten(record.get("jobsRuntime") or "termux", limit=24)
-    prefix = "APK interno online" if online else "APK interno visto " + _format_age(age)
-    return f"{prefix} · {app_version} · {runtime_state} · jobs: {jobs_runtime}"
+    battery_parts: list[str] = []
+    try:
+        percent = int(record.get("batteryPercent") or -1)
+        if percent >= 0:
+            battery_parts.append(f"{percent}%")
+    except Exception:
+        pass
+    try:
+        temp = float(record.get("batteryTemperatureC") or -1)
+        if temp >= 0:
+            battery_parts.append(f"{round(temp)}°C")
+    except Exception:
+        pass
+    if record.get("batteryCharging"):
+        battery_parts.append("carregando")
+    battery = " · ".join(battery_parts) if battery_parts else "bateria ?"
+    network_type = _shorten(record.get("networkType") or "rede", limit=16)
+    network = network_type
+    if record.get("networkVpn") and "vpn" not in network.lower():
+        network += "+VPN"
+    try:
+        ping = int(record.get("vpsPingMs") or -1)
+        if ping >= 0:
+            network += f" · {ping}ms"
+    except Exception:
+        pass
+    prefix = "online" if online else "visto " + _format_age(age)
+    pieces = [prefix, app_version, f"perfil {profile}", f"push {fcm_state}", battery, network, f"APK {update_state}", f"jobs: {jobs_runtime}"]
+    last_error = _shorten(record.get("lastAppError"), limit=80)
+    if last_error:
+        pieces.append(f"último erro: {last_error}")
+    return " · ".join(str(x) for x in pieces if x)
 
 
 def _profile_feature_values(profile: str) -> set[str]:
@@ -2075,7 +2115,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             action_select.callback = self._select_action
 
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary)
-        refresh.callback = self._refresh
+        refresh.callback = self._refresh_panel
 
         pairing = discord.ui.Button(label="Parear worker", emoji="🔐", style=discord.ButtonStyle.success)
         pairing.callback = self._create_pairing
@@ -2147,8 +2187,10 @@ class WorkersPanelView(discord.ui.LayoutView):
                 lines.append(f"-# {stale_note}")
             push = _core_worker_push_status_text(str(worker.get("worker_id") or ""))
             push_label = push.replace("Push: ", "push ") if push else "push ?"
-            lines.append(f"-# {ready} · visto {seen} · `{version}` · {_worker_runtime_label(worker)} · perfil {_worker_profile_label(worker)} · {_battery_text(worker)} · {_simple_network_text(worker)} · {push_label}")
-            lines.append(f"-# {_core_worker_app_runtime_text(str(worker.get('worker_id') or ''))}")
+            lines.append(f"-# Termux worker: {ready} · visto {seen} · `{version}` · {_worker_runtime_label(worker)} · perfil {_worker_profile_label(worker)} · {_battery_text(worker)} · {_simple_network_text(worker)}")
+            lines.append(f"-# APK interno: {_core_worker_app_runtime_text(str(worker.get('worker_id') or ''))}")
+            if push_label:
+                lines.append(f"-# Push: {push_label.replace('push ', '')}")
             queue_text = _queue_status_text(worker)
             if queue_text:
                 lines.append(f"-# Fila: {queue_text}")
@@ -2294,7 +2336,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         with contextlib.suppress(Exception):
             await flow_message.edit(content=message[:1900], allowed_mentions=discord.AllowedMentions.none())
 
-    async def _refresh(self, interaction: discord.Interaction):
+    async def _refresh_panel(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=False)
         previous_note = self.snapshot.action_note
         self.snapshot = await self.cog._collect_workers_snapshot(action_note=previous_note)
