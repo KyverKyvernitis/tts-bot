@@ -1568,7 +1568,10 @@ def _automation_status_text() -> str:
         if apk:
             if apk.get("blocked_by_recent_failure") or (apk.get("ok") is False and not apk.get("pending")):
                 retry = apk.get("retry_after_seconds")
-                extra = f" · retry em {int(retry)}s" if retry else ""
+                if apk.get("permanent_failure"):
+                    extra = " · correção necessária"
+                else:
+                    extra = f" · retry em {int(retry)}s" if retry else ""
                 parts.append(f"APK: build falhou ({apk.get('versionName') or '?'}){extra}")
             else:
                 parts.append(f"APK: build pendente ({apk.get('versionName') or '?'})")
@@ -1592,7 +1595,8 @@ def _automation_status_text() -> str:
                 if apk.get("already_published"):
                     parts.append(f"APK: publicado {apk.get('versionName') or '?'}")
                 elif apk.get("blocked_by_recent_failure") or (apk.get("ok") is False and not apk.get("pending")):
-                    parts.append(f"APK: build falhou ({apk.get('versionName') or '?'})")
+                    suffix = " · correção necessária" if apk.get("permanent_failure") else ""
+                    parts.append(f"APK: build falhou ({apk.get('versionName') or '?'}){suffix}")
                 elif apk.get("job"):
                     parts.append(f"APK: build em andamento ({apk.get('versionName') or '?'})")
                 else:

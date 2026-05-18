@@ -2503,8 +2503,7 @@ public class MainActivity extends Activity {
         }
         String logTail = py.optString("logTail", "");
         if (logTail != null && !logTail.trim().isEmpty() && bedrockTerminalText != null) {
-            runOnUiThread(() -> bedrockTerminalText.setText("Core Bedrock Console
-" + sanitizeCommandOutput(logTail, 1800)));
+            runOnUiThread(() -> bedrockTerminalText.setText("Core Bedrock Console\n" + sanitizeCommandOutput(logTail, 1800)));
         }
         bedrockLastCheckAt = System.currentTimeMillis();
         updateSystemChecklistText();

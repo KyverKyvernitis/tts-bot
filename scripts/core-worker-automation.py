@@ -624,10 +624,56 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
         return {"ok": True, "target_version": target_version, "queued": [], "skipped": skipped[:16], "errors": [], "pending": False, "message": "todos os agents ativos já estão atualizados"}
     return {"ok": True, "target_version": target_version, "queued": queued, "skipped": skipped[:16], "errors": errors[:10], "pending": True}
 
+_APK_BUILD_PERMANENT_ERROR_RE = re.compile(
+    r"(compiledebugjavawithjavac|javac|unclosed string literal|cannot find symbol|"
+    r"manifest merger failed|processdebugmainmanifest|aapt|android resource linking failed|"
+    r"execution failed for task|coreworkerbedrockservice|mainactivity\.java)",
+    re.IGNORECASE,
+)
+
+
+def _apk_build_job_matches_source(job: dict[str, Any], version_name: str, source_fingerprint: str) -> bool:
+    short_fp = str(source_fingerprint or "")[:12]
+    haystacks: list[str] = []
+    for key in ("summary", "error"):
+        value = job.get(key)
+        if value:
+            haystacks.append(str(value))
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    for obj in (payload, result):
+        for key in ("versionName", "version_name", "sourceFingerprint", "source_fingerprint", "source_sha256"):
+            value = obj.get(key) if isinstance(obj, dict) else None
+            if value:
+                haystacks.append(str(value))
+    joined = " ".join(haystacks)
+    has_version = not version_name or version_name in joined
+    has_fp = not short_fp or short_fp in joined or str(source_fingerprint or "") in joined
+    return bool(has_version and has_fp)
+
+
+def _apk_build_failure_detail(job: dict[str, Any]) -> str:
+    pieces: list[str] = []
+    for key in ("summary", "error"):
+        value = job.get(key)
+        if value:
+            pieces.append(str(value))
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    for key in ("summary", "error", "stderr_tail", "stdout_tail", "tail", "message"):
+        value = result.get(key) if isinstance(result, dict) else None
+        if value:
+            pieces.append(str(value))
+    return "\n".join(pieces)
+
+
+def _apk_build_failure_is_permanent(job: dict[str, Any]) -> bool:
+    detail = _apk_build_failure_detail(job)
+    return bool(detail and _APK_BUILD_PERMANENT_ERROR_RE.search(detail))
+
+
 def _recent_failed_apk_build(version_name: str, source_fingerprint: str, *, cooldown_seconds: int | None = None) -> dict[str, Any]:
     cooldown = max(60, int(cooldown_seconds or int(os.getenv("CORE_WORKER_APK_BUILD_FAILURE_COOLDOWN_SECONDS", "1800"))))
     now = time.time()
-    short_fp = str(source_fingerprint or "")[:12]
     try:
         snapshot = _load_registry_snapshot()
         jobs = snapshot.get("jobs") if isinstance(snapshot.get("jobs"), list) else []
@@ -640,15 +686,17 @@ def _recent_failed_apk_build(version_name: str, source_fingerprint: str, *, cool
             continue
         if str(job.get("status") or "").lower() != "failed":
             continue
-        summary = str(job.get("summary") or "")
-        if version_name not in summary or (short_fp and short_fp not in summary):
+        if not _apk_build_job_matches_source(job, version_name, source_fingerprint):
             continue
         updated = float(job.get("updated_at") or job.get("finished_at") or job.get("created_at") or 0)
         if updated and now - updated < cooldown:
+            detail = _short(_apk_build_failure_detail(job), 240)
             return {
                 "job": job,
                 "cooldown_seconds": cooldown,
                 "retry_after_seconds": max(0, int(cooldown - (now - updated))),
+                "permanent": _apk_build_failure_is_permanent(job),
+                "detail": detail,
             }
     return {}
 
@@ -734,6 +782,8 @@ def queue_apk_build() -> dict[str, Any]:
             "last_failed_job_id": (failed_recent.get("job") or {}).get("job_id"),
             "retry_after_seconds": failed_recent.get("retry_after_seconds"),
             "updated_at": time.time(),
+            "permanent_failure": bool(failed_recent.get("permanent")),
+            "last_failure_detail": failed_recent.get("detail"),
             "message": "build do APK falhou recentemente; não vou repetir em loop automático",
         })
         pending["apk_build"] = item
