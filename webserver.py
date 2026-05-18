@@ -670,6 +670,11 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_linux_strategy_plan",
     "apk_linux_manifest_plan",
     "apk_minecraft_bedrock_assisted_install_plan",
+    "apk_minecraft_bedrock_prepare_files",
+    "apk_minecraft_bedrock_eula_status",
+    "apk_minecraft_bedrock_start_plan",
+    "apk_minecraft_bedrock_stop_plan",
+    "apk_minecraft_bedrock_logs_status",
 }
 
 CORE_WORKER_APP_SAFE_JOB_TYPES = (
@@ -735,6 +740,11 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_linux_strategy_plan": "estratégia Linux",
     "apk_linux_manifest_plan": "manifesto Linux",
     "apk_minecraft_bedrock_assisted_install_plan": "Bedrock assistido",
+    "apk_minecraft_bedrock_prepare_files": "Bedrock preparar arquivos",
+    "apk_minecraft_bedrock_eula_status": "Bedrock EULA status",
+    "apk_minecraft_bedrock_start_plan": "Bedrock plano start",
+    "apk_minecraft_bedrock_stop_plan": "Bedrock plano stop",
+    "apk_minecraft_bedrock_logs_status": "Bedrock logs status",
 }
 
 def _core_worker_app_normalize_job_type(job_type: object) -> str:
@@ -785,7 +795,7 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         profile = _safe_short_text(payload.get("profile"), 40).lower()
         if profile in {"leve", "midia", "media", "normal", "completo", "builder", "turbo", "bedrock"}:
             clean["profile"] = profile
-    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state", "apk_native_worker_status", "apk_native_boot_status", "apk_local_shell_probe", "apk_python_runtime_probe", "apk_python_health_check", "apk_python_runtime_info", "apk_python_status_bundle", "apk_python_storage_check", "apk_python_log_summary", "apk_python_network_diagnostic", "apk_python_runtime_files_check", "apk_linux_runtime_probe", "apk_linux_rootfs_probe", "apk_linux_box64_probe", "apk_linux_provisioner_probe", "apk_linux_prepare_directories", "apk_linux_generate_setup_plan", "apk_minecraft_bedrock_probe", "apk_minecraft_bedrock_status", "apk_minecraft_bedrock_requirements", "apk_minecraft_bedrock_install_plan", "apk_minecraft_bedrock_properties_template", "apk_runtime_foreground_probe", "apk_runtime_foreground_start", "apk_runtime_foreground_stop", "apk_linux_strategy_plan", "apk_linux_manifest_plan", "apk_minecraft_bedrock_assisted_install_plan"}:
+    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state", "apk_native_worker_status", "apk_native_boot_status", "apk_local_shell_probe", "apk_python_runtime_probe", "apk_python_health_check", "apk_python_runtime_info", "apk_python_status_bundle", "apk_python_storage_check", "apk_python_log_summary", "apk_python_network_diagnostic", "apk_python_runtime_files_check", "apk_linux_runtime_probe", "apk_linux_rootfs_probe", "apk_linux_box64_probe", "apk_linux_provisioner_probe", "apk_linux_prepare_directories", "apk_linux_generate_setup_plan", "apk_minecraft_bedrock_probe", "apk_minecraft_bedrock_status", "apk_minecraft_bedrock_requirements", "apk_minecraft_bedrock_install_plan", "apk_minecraft_bedrock_properties_template", "apk_runtime_foreground_probe", "apk_runtime_foreground_start", "apk_runtime_foreground_stop", "apk_linux_strategy_plan", "apk_linux_manifest_plan", "apk_minecraft_bedrock_assisted_install_plan", "apk_minecraft_bedrock_prepare_files", "apk_minecraft_bedrock_eula_status", "apk_minecraft_bedrock_start_plan", "apk_minecraft_bedrock_stop_plan", "apk_minecraft_bedrock_logs_status"}:
         detail = _safe_short_text(payload.get("detail") or payload.get("reason"), 80)
         if detail:
             clean["detail"] = detail

@@ -10,13 +10,24 @@ def run(context_json=None):
         focus = clean_text(ctx.get("focus") or "probe", 40)
         server = bedrock_dir / "bedrock_server"
         properties = bedrock_dir / "server.properties"
+        eula = bedrock_dir / "eula.txt"
         worlds = bedrock_dir / "worlds"
         logs = bedrock_dir / "logs"
-        ready = server.exists() and properties.exists()
+        scripts = core_linux_dir / "scripts"
+        eula_text = ""
+        try:
+            eula_text = eula.read_text(encoding="utf-8", errors="replace").lower().replace(" ", "") if eula.exists() else ""
+        except Exception:
+            eula_text = ""
+        eula_ok = "eula=true" in eula_text
+        scripts_ready = (scripts / "bedrock-start.plan.sh").exists() and (scripts / "bedrock-stop.plan.sh").exists()
+        ready = server.exists() and properties.exists() and eula_ok and scripts_ready
         markers = {
             "bedrockDir": bedrock_dir.exists(),
             "bedrockServer": server.exists(),
             "serverProperties": properties.exists(),
+            "eulaAccepted": eula_ok,
+            "scriptsReady": scripts_ready,
             "worldsDir": worlds.exists(),
             "logsDir": logs.exists(),
             "officialServerBundled": bool(ctx.get("officialServerBundled")),
@@ -25,14 +36,16 @@ def run(context_json=None):
         summary = "Bedrock Manager: não configurado"
         if bedrock_dir.exists() and not server.exists():
             summary = "Bedrock Manager: pasta pronta · servidor não instalado"
+        if server.exists() and properties.exists() and not eula_ok:
+            summary = "Bedrock Manager: servidor encontrado · EULA pendente"
         if ready:
-            summary = "Bedrock Manager: arquivos principais encontrados"
+            summary = "Bedrock Manager: pronto para start seguro"
         return ok_response(
             "bedrock_probe",
             summary,
             ok=bool(bedrock_dir.exists()),
             ready=ready,
-            state="ready" if ready else "not-configured",
+            state="ready-to-start" if ready else ("eula-pending" if server.exists() and properties.exists() and not eula_ok else "not-configured"),
             focus=focus,
             bedrockDir=safe_path(bedrock_dir),
             markers=markers,

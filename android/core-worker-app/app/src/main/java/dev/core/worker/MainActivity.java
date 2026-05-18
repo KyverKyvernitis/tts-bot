@@ -73,7 +73,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.31";
+    private static final String APP_VERSION = "0.5.32";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -125,6 +125,7 @@ public class MainActivity extends Activity {
     private TextView technicalDeviceText;
     private TextView technicalRuntimeText;
     private TextView technicalDiagnosticsText;
+    private TextView technicalBedrockText;
     private TextView technicalTermuxText;
     private TextView technicalDependenciesText;
     private TextView updateText;
@@ -467,6 +468,7 @@ public class MainActivity extends Activity {
         technicalDeviceText = technicalInfoBlock(technicalDetailsContent, "Aparelho");
         technicalRuntimeText = technicalInfoBlock(technicalDetailsContent, "Runtime");
         technicalDiagnosticsText = technicalInfoBlock(technicalDetailsContent, "Diagnósticos APK");
+        technicalBedrockText = technicalInfoBlock(technicalDetailsContent, "Servidor Minecraft Bedrock");
         technicalTermuxText = technicalInfoBlock(technicalDetailsContent, "Fallback Termux");
         technicalDependenciesText = technicalInfoBlock(technicalDetailsContent, "Migração sem Termux");
 
@@ -493,6 +495,18 @@ public class MainActivity extends Activity {
         Button foregroundStopButton = secondaryButton("Parar runtime persistente");
         foregroundStopButton.setOnClickListener(v -> stopForegroundRuntimeFromUi());
         technicalDetailsContent.addView(foregroundStopButton);
+
+        Button bedrockPrepareButton = secondaryButton("Preparar Bedrock");
+        bedrockPrepareButton.setOnClickListener(v -> prepareBedrockManagerFromUi());
+        technicalDetailsContent.addView(bedrockPrepareButton);
+
+        Button bedrockStatusButton = secondaryButton("Status Bedrock");
+        bedrockStatusButton.setOnClickListener(v -> refreshBedrockManagerFromUi());
+        technicalDetailsContent.addView(bedrockStatusButton);
+
+        Button bedrockEulaButton = dangerButton("Confirmar EULA Bedrock");
+        bedrockEulaButton.setOnClickListener(v -> confirmBedrockEulaFromUi());
+        technicalDetailsContent.addView(bedrockEulaButton);
 
         clearButton = dangerButton("Esquecer conexão local");
         clearButton.setBackground(makeButtonBackground(Color.rgb(91, 50, 57), BUTTON_DISABLED_BG));
@@ -1647,6 +1661,54 @@ public class MainActivity extends Activity {
         return out;
     }
 
+    private void prepareBedrockManagerFromUi() {
+        runBusy("Preparando arquivos do Bedrock Manager...", () -> {
+            JSONObject out = bedrockManagerSnapshot("prepare_properties", false);
+            reportAppState("bedrock_manager_prepare", out.optString("summary", "Bedrock Manager preparado"));
+            show(out.optString("summary", "Bedrock Manager preparado."));
+        });
+    }
+
+    private void refreshBedrockManagerFromUi() {
+        runBusy("Atualizando status do Bedrock Manager...", () -> {
+            JSONObject out = bedrockManagerSnapshot("status", false);
+            reportAppState("bedrock_manager_status", out.optString("summary", "Status Bedrock atualizado"));
+            show(out.optString("summary", "Status Bedrock atualizado."));
+        });
+    }
+
+    private void confirmBedrockEulaFromUi() {
+        new AlertDialog.Builder(this)
+                .setTitle("Confirmar EULA do Bedrock?")
+                .setMessage("Isso grava eula=true apenas no ambiente local do Core Worker. Confirme somente se você leu e aceita os termos do Minecraft/Microsoft para o Bedrock Dedicated Server. O APK ainda não baixa nem inicia o servidor automaticamente.")
+                .setPositiveButton("Aceito e gravar", (dialog, which) -> runBusy("Gravando confirmação local da EULA...", () -> {
+                    JSONObject out = bedrockManagerSnapshot("accept_eula", true);
+                    reportAppState("bedrock_eula_confirmed", out.optString("summary", "EULA Bedrock confirmada localmente"));
+                    show(out.optString("summary", "EULA Bedrock confirmada localmente."));
+                }))
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private JSONObject bedrockManagerSnapshot(String focus, boolean acceptEula) throws Exception {
+        prepareCoreLinuxRuntimeState();
+        JSONObject extra = new JSONObject();
+        extra.put("focus", focus == null ? "status" : focus);
+        extra.put("acceptEula", acceptEula);
+        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
+        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
+        extra.put("foregroundRuntimeActive", foregroundRuntimeActive);
+        extra.put("officialLinux", "Ubuntu Linux 22.04 LTS ou superior");
+        extra.put("officialRamGb", 4);
+        JSONObject py = runEmbeddedPythonJob("bedrock_manager", extra);
+        bedrockSummary = py.optString("summary", bedrockSummary);
+        bedrockState = py.optString("state", bedrockState);
+        bedrockReady = py.optBoolean("ready", bedrockReady);
+        bedrockLastCheckAt = System.currentTimeMillis();
+        updateSystemChecklistText();
+        return py;
+    }
+
     private void prepareNativeRuntimeState() {
         try {
             File runtimeDir = new File(getFilesDir(), "core-runtime");
@@ -2264,7 +2326,8 @@ public class MainActivity extends Activity {
                 || "bedrock_requirements".equals(script)
                 || "bedrock_probe".equals(script)
                 || "bedrock_install_plan".equals(script)
-                || "linux_assisted_install".equals(script);
+                || "linux_assisted_install".equals(script)
+                || "bedrock_manager".equals(script);
     }
 
 
@@ -2618,7 +2681,12 @@ public class MainActivity extends Activity {
                 .put("apk_runtime_foreground_stop")
                 .put("apk_linux_strategy_plan")
                 .put("apk_linux_manifest_plan")
-                .put("apk_minecraft_bedrock_assisted_install_plan");
+                .put("apk_minecraft_bedrock_assisted_install_plan")
+                .put("apk_minecraft_bedrock_prepare_files")
+                .put("apk_minecraft_bedrock_eula_status")
+                .put("apk_minecraft_bedrock_start_plan")
+                .put("apk_minecraft_bedrock_stop_plan")
+                .put("apk_minecraft_bedrock_logs_status");
     }
 
     private String summarizeLightJobs(JSONArray jobs, int okCount, int count) {
@@ -3185,6 +3253,28 @@ public class MainActivity extends Activity {
                 result.put("error", bedrock.optString("error", "Bedrock não configurado"));
             }
             result.put("message", bedrock.optBoolean("ok", false) ? "Bedrock Manager diagnosticado pelo APK" : "Bedrock Manager ainda não configurado");
+            return result;
+        }
+        if ("apk_minecraft_bedrock_prepare_files".equals(type)
+                || "apk_minecraft_bedrock_eula_status".equals(type)
+                || "apk_minecraft_bedrock_start_plan".equals(type)
+                || "apk_minecraft_bedrock_stop_plan".equals(type)
+                || "apk_minecraft_bedrock_logs_status".equals(type)) {
+            String focus = "status";
+            if ("apk_minecraft_bedrock_prepare_files".equals(type)) focus = "prepare_properties";
+            if ("apk_minecraft_bedrock_eula_status".equals(type)) focus = "eula_status";
+            if ("apk_minecraft_bedrock_start_plan".equals(type)) focus = "start_plan";
+            if ("apk_minecraft_bedrock_stop_plan".equals(type)) focus = "stop_plan";
+            if ("apk_minecraft_bedrock_logs_status".equals(type)) focus = "logs_status";
+            JSONObject manager = bedrockManagerSnapshot(focus, false);
+            safePutPayload(result, "bedrockManager", manager);
+            internalDiagnosticsSummary = manager.optString("summary", "Bedrock Manager atualizado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!manager.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", manager.optString("error", "Bedrock Manager pendente"));
+            }
+            result.put("message", manager.optString("summary", "Bedrock Manager atualizado sem baixar/iniciar servidor"));
             return result;
         }
         if ("apk_download_small".equals(type)) {
@@ -4656,8 +4746,9 @@ public class MainActivity extends Activity {
             if (technicalDeviceText != null) technicalDeviceText.setText(blocks[1]);
             if (technicalRuntimeText != null) technicalRuntimeText.setText(blocks[2]);
             if (technicalDiagnosticsText != null) technicalDiagnosticsText.setText(blocks[3]);
-            if (technicalTermuxText != null) technicalTermuxText.setText(blocks[4]);
-            if (technicalDependenciesText != null) technicalDependenciesText.setText(blocks[5]);
+            if (technicalBedrockText != null) technicalBedrockText.setText(blocks[4]);
+            if (technicalTermuxText != null) technicalTermuxText.setText(blocks[5]);
+            if (technicalDependenciesText != null) technicalDependenciesText.setText(blocks[6]);
             if (systemChecklistText != null) {
                 systemChecklistText.setText(prepareChecklistText());
             }
@@ -4720,6 +4811,15 @@ public class MainActivity extends Activity {
                 + checkLine("Atualizado", diagAge)
                 + ((internalRuntimeLastError != null && !internalRuntimeLastError.trim().isEmpty()) ? "\n" + checkLine("Último erro APK", internalRuntimeLastError) : "");
 
+        String bedrockBlock = "Servidor Minecraft Bedrock\n"
+                + checkLine("Estado", emptyFallback(bedrockSummary, "não instalado")) + "\n"
+                + checkLine("Manager", emptyFallback(bedrockState, "aguardando diagnóstico")) + "\n"
+                + checkLine("Pronto", bedrockReady ? "sim · aguardando runner" : "não · ambiente/servidor pendente") + "\n"
+                + checkLine("Propriedades", "server.properties preparado pelo APK") + "\n"
+                + checkLine("EULA", bedrockSummary != null && bedrockSummary.toLowerCase(Locale.ROOT).contains("eula") ? "verificar no status" : "não aceita automaticamente") + "\n"
+                + checkLine("Execução", "start/stop/logs preparados · servidor ainda não iniciado pelo APK") + "\n"
+                + checkLine("Segurança", "sem download automático · sem shell livre");
+
         String sshd = emptyFallback(localAgentSshdSummary, "não informado");
         if (sshd.toLowerCase(Locale.ROOT).contains("porta configurada não apareceu")) {
             sshd = "ativo · porta não detectada";
@@ -4742,7 +4842,7 @@ public class MainActivity extends Activity {
                 + checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "VPN externa ainda é etapa futura") + "\n"
                 + checkLine("VPS", hasPairing() ? "conexão direta salva" : "pareamento pendente");
 
-        return new String[]{appBlock, deviceBlock, runtimeBlock, diagnosticsBlock, termuxBlock, depsBlock};
+        return new String[]{appBlock, deviceBlock, runtimeBlock, diagnosticsBlock, bedrockBlock, termuxBlock, depsBlock};
     }
 
     private String prepareChecklistText() {
