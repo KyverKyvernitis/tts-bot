@@ -40,6 +40,7 @@ import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -77,7 +78,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.34";
+    private static final String APP_VERSION = "0.5.35";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -139,6 +140,13 @@ public class MainActivity extends Activity {
     private ViewPager2 pagePager;
     private Button corePageButton;
     private Button bedrockPageButton;
+    private LinearLayout bottomNavBar;
+    private Switch bedrockServerSwitch;
+    private TextView bedrockHeroStatusText;
+    private TextView bedrockReadinessText;
+    private TextView bedrockTerminalText;
+    private EditText bedrockCommandInput;
+    private boolean suppressBedrockSwitchEvents = false;
     private TextView permissionStatusText;
     private Button notificationPermissionButton;
     private Button installPermissionButton;
@@ -316,7 +324,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Deslize para alternar entre Worker e Bedrock.");
+        subtitle.setText("Use os ícones embaixo ou deslize para trocar de página.");
         subtitle.setTextColor(MUTED);
         subtitle.setTextSize(14);
         subtitle.setPadding(0, dp(5), 0, dp(12));
@@ -331,20 +339,6 @@ public class MainActivity extends Activity {
                 0,
                 1f
         ));
-
-        LinearLayout tabRow = new LinearLayout(this);
-        tabRow.setOrientation(LinearLayout.HORIZONTAL);
-        tabRow.setPadding(0, 0, 0, dp(8));
-        pageHost.addView(tabRow, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        ));
-        corePageButton = pageTabButton("Core Worker");
-        bedrockPageButton = pageTabButton("Bedrock");
-        tabRow.addView(corePageButton, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        LinearLayout.LayoutParams bedrockTabParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        bedrockTabParams.setMargins(dp(8), 0, 0, 0);
-        tabRow.addView(bedrockPageButton, bedrockTabParams);
 
         ScrollView coreScroll = pageScroll();
         LinearLayout coreContent = pageContent();
@@ -373,6 +367,35 @@ public class MainActivity extends Activity {
                 0,
                 1f
         ));
+
+        statusText = new TextView(this);
+        statusText.setTextColor(TEXT);
+        statusText.setTextSize(12);
+        statusText.setSingleLine(false);
+        statusText.setPadding(dp(12), dp(10), dp(12), dp(10));
+        statusText.setBackground(cardBackground(CARD));
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        statusParams.setMargins(0, dp(8), 0, dp(8));
+        root.addView(statusText, statusParams);
+
+        bottomNavBar = new LinearLayout(this);
+        bottomNavBar.setOrientation(LinearLayout.HORIZONTAL);
+        bottomNavBar.setGravity(Gravity.CENTER);
+        bottomNavBar.setPadding(dp(4), dp(6), dp(4), dp(4));
+        bottomNavBar.setBackground(cardBackground(Color.rgb(10, 16, 31)));
+        root.addView(bottomNavBar, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+        corePageButton = bottomNavButton("⌂\nCore");
+        bedrockPageButton = bottomNavButton("▣\nBedrock");
+        bottomNavBar.addView(corePageButton, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams bedrockNavParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        bedrockNavParams.setMargins(dp(8), 0, 0, 0);
+        bottomNavBar.addView(bedrockPageButton, bedrockNavParams);
         corePageButton.setOnClickListener(v -> pagePager.setCurrentItem(0, true));
         bedrockPageButton.setOnClickListener(v -> pagePager.setCurrentItem(1, true));
         updatePageTabs(0);
@@ -560,71 +583,101 @@ public class MainActivity extends Activity {
         clearButton.setOnClickListener(v -> confirmClearPairing());
         technicalDetailsContent.addView(clearButton);
 
-        LinearLayout bedrockHeaderCard = card();
-        bedrockContent.addView(bedrockHeaderCard);
-        bedrockHeaderCard.addView(sectionTitle("Servidor Minecraft Bedrock"));
-        bedrockHeaderCard.addView(smallText("Página dedicada ao servidor. Deslize de volta para o Core Worker quando quiser."));
-        technicalBedrockText = technicalInfoBlock(bedrockHeaderCard, "Estado Bedrock");
+        LinearLayout bedrockHeroCard = card();
+        bedrockContent.addView(bedrockHeroCard);
+        bedrockHeroCard.addView(sectionTitle("Minecraft Bedrock"));
+        bedrockHeroCard.addView(smallText("Servidor em página própria. Ações técnicas ficam escondidas; o uso principal é ligar, preparar e acompanhar."));
+        bedrockHeroStatusText = largeStatusText("Servidor não instalado");
+        bedrockHeroCard.addView(bedrockHeroStatusText);
 
-        LinearLayout bedrockRuntimeCard = cardWithTopMargin(bedrockContent);
-        bedrockRuntimeCard.addView(sectionTitle("Runtime assistido"));
-        bedrockRuntimeCard.addView(smallText("Start/stop/status/logs preparados para Foreground Service, sem shell livre."));
-
-        Button bedrockValidateButton = secondaryButton("Validar requisitos");
-        bedrockValidateButton.setOnClickListener(v -> bedrockWizardFromUi("validate_device", "Validação Bedrock solicitada."));
-        bedrockRuntimeCard.addView(bedrockValidateButton);
-
-        Button bedrockInstallerButton = secondaryButton("Instalador assistido");
-        bedrockInstallerButton.setOnClickListener(v -> bedrockWizardFromUi("prepare_environment", "Instalador Bedrock atualizado."));
-        bedrockRuntimeCard.addView(bedrockInstallerButton);
-
-        Button bedrockPrepareButton = secondaryButton("Preparar arquivos");
-        bedrockPrepareButton.setOnClickListener(v -> prepareBedrockManagerFromUi());
-        bedrockRuntimeCard.addView(bedrockPrepareButton);
-
-        Button bedrockManifestButton = secondaryButton("Manifesto de downloads");
-        bedrockManifestButton.setOnClickListener(v -> bedrockWizardFromUi("download_manifest", "Manifesto Bedrock preparado."));
-        bedrockRuntimeCard.addView(bedrockManifestButton);
-
-        Button bedrockStatusButton = secondaryButton("Status do servidor");
-        bedrockStatusButton.setOnClickListener(v -> refreshBedrockManagerFromUi());
-        bedrockRuntimeCard.addView(bedrockStatusButton);
-
-        Button bedrockPreflightButton = secondaryButton("Preflight final");
-        bedrockPreflightButton.setOnClickListener(v -> bedrockWizardFromUi("final_preflight", "Preflight Bedrock atualizado."));
-        bedrockRuntimeCard.addView(bedrockPreflightButton);
-
-        Button bedrockStartRuntimeButton = secondaryButton("Iniciar runtime Bedrock");
-        bedrockStartRuntimeButton.setOnClickListener(v -> confirmStartBedrockRuntimeFromUi());
-        bedrockRuntimeCard.addView(bedrockStartRuntimeButton);
-
-        Button bedrockStopRuntimeButton = secondaryButton("Parar runtime Bedrock");
-        bedrockStopRuntimeButton.setOnClickListener(v -> stopBedrockRuntimeFromUi());
-        bedrockRuntimeCard.addView(bedrockStopRuntimeButton);
-
-        Button bedrockLogsButton = secondaryButton("Logs do Bedrock");
-        bedrockLogsButton.setOnClickListener(v -> refreshBedrockRuntimeLogsFromUi());
-        bedrockRuntimeCard.addView(bedrockLogsButton);
-
-        Button bedrockEulaButton = dangerButton("Confirmar EULA Bedrock");
-        bedrockEulaButton.setOnClickListener(v -> confirmBedrockEulaFromUi());
-        bedrockRuntimeCard.addView(bedrockEulaButton);
-
-        LinearLayout bedrockSafetyCard = cardWithTopMargin(bedrockContent);
-        bedrockSafetyCard.addView(sectionTitle("Segurança"));
-        bedrockSafetyCard.addView(smallText("Nada é baixado automaticamente. EULA é local. Start fica bloqueado até ambiente, servidor e preflight estarem prontos."));
-
-        statusText = new TextView(this);
-        statusText.setTextColor(TEXT);
-        statusText.setTextSize(13);
-        statusText.setPadding(dp(14), dp(14), dp(14), dp(14));
-        statusText.setBackground(cardBackground(CARD));
-        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
+        LinearLayout switchRow = new LinearLayout(this);
+        switchRow.setOrientation(LinearLayout.HORIZONTAL);
+        switchRow.setGravity(Gravity.CENTER_VERTICAL);
+        switchRow.setPadding(dp(12), dp(10), dp(12), dp(10));
+        switchRow.setBackground(cardBackground(CARD_SOFT));
+        LinearLayout.LayoutParams switchRowParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        statusParams.setMargins(0, dp(10), 0, 0);
-        pageHost.addView(statusText, statusParams);
+        switchRowParams.setMargins(0, dp(10), 0, 0);
+        bedrockHeroCard.addView(switchRow, switchRowParams);
+
+        TextView switchLabel = new TextView(this);
+        switchLabel.setText("Servidor Bedrock");
+        switchLabel.setTextColor(TEXT);
+        switchLabel.setTextSize(16);
+        switchLabel.setTypeface(null, Typeface.BOLD);
+        switchRow.addView(switchLabel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        bedrockServerSwitch = new Switch(this);
+        bedrockServerSwitch.setText("");
+        bedrockServerSwitch.setTextColor(TEXT);
+        bedrockServerSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (suppressBedrockSwitchEvents) return;
+            handleBedrockSwitchChange(isChecked);
+        });
+        switchRow.addView(bedrockServerSwitch, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
+        LinearLayout readinessCard = cardWithTopMargin(bedrockContent);
+        readinessCard.addView(sectionTitle("Configuração"));
+        bedrockReadinessText = smallText("Toque em Testar servidor para ver pendências e próxima ação.");
+        bedrockReadinessText.setTextColor(TEXT);
+        bedrockReadinessText.setBackground(cardBackground(CARD_SOFT));
+        bedrockReadinessText.setPadding(dp(12), dp(10), dp(12), dp(10));
+        readinessCard.addView(bedrockReadinessText);
+
+        Button bedrockTestAllButton = primaryButton("Testar servidor");
+        bedrockTestAllButton.setOnClickListener(v -> testBedrockServerFromUi());
+        readinessCard.addView(bedrockTestAllButton);
+
+        Button bedrockPrepareServerButton = secondaryButton("Preparar servidor");
+        bedrockPrepareServerButton.setOnClickListener(v -> prepareBedrockServerFromUi());
+        readinessCard.addView(bedrockPrepareServerButton);
+
+        LinearLayout bedrockActionRow = new LinearLayout(this);
+        bedrockActionRow.setOrientation(LinearLayout.HORIZONTAL);
+        readinessCard.addView(bedrockActionRow);
+        Button bedrockFilesButton = compactButton("Arquivos");
+        bedrockFilesButton.setOnClickListener(v -> showBedrockFilesFromUi());
+        Button bedrockLogsButton = compactButton("Logs");
+        bedrockLogsButton.setOnClickListener(v -> refreshBedrockRuntimeLogsFromUi());
+        bedrockActionRow.addView(bedrockFilesButton, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams logsParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        logsParams.setMargins(dp(8), 0, 0, 0);
+        bedrockActionRow.addView(bedrockLogsButton, logsParams);
+
+        Button bedrockEulaButton = dangerButton("Confirmar EULA Bedrock");
+        bedrockEulaButton.setOnClickListener(v -> confirmBedrockEulaFromUi());
+        readinessCard.addView(bedrockEulaButton);
+
+        LinearLayout terminalCard = cardWithTopMargin(bedrockContent);
+        terminalCard.addView(sectionTitle("Terminal do servidor"));
+        terminalCard.addView(smallText("Console do Bedrock. Não é shell livre do Android."));
+        bedrockTerminalText = terminalText();
+        terminalCard.addView(bedrockTerminalText);
+
+        LinearLayout commandRow = new LinearLayout(this);
+        commandRow.setOrientation(LinearLayout.HORIZONTAL);
+        commandRow.setGravity(Gravity.CENTER_VERTICAL);
+        terminalCard.addView(commandRow, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+        bedrockCommandInput = input("help, list, stop...", "");
+        bedrockCommandInput.setSingleLine(true);
+        bedrockCommandInput.setTypeface(Typeface.MONOSPACE);
+        commandRow.addView(bedrockCommandInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button sendCommandButton = compactButton("Enviar");
+        sendCommandButton.setOnClickListener(v -> sendBedrockConsoleCommandFromUi());
+        LinearLayout.LayoutParams sendParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        sendParams.setMargins(dp(8), dp(7), 0, 0);
+        commandRow.addView(sendCommandButton, sendParams);
 
         setContentView(root);
     }
@@ -643,6 +696,56 @@ public class MainActivity extends Activity {
         return content;
     }
 
+    private Button bottomNavButton(String text) {
+        Button button = styledButton(text, Color.rgb(18, 27, 48), TEXT, dp(54));
+        button.setTextSize(12);
+        button.setGravity(Gravity.CENTER);
+        button.setPadding(dp(8), dp(6), dp(8), dp(6));
+        return button;
+    }
+
+    private Button compactButton(String text) {
+        Button button = styledButton(text, Color.rgb(35, 49, 82), TEXT, dp(36));
+        button.setTextSize(13);
+        return button;
+    }
+
+    private TextView largeStatusText(String value) {
+        TextView text = new TextView(this);
+        text.setText(value);
+        text.setTextColor(TEXT);
+        text.setTextSize(20);
+        text.setTypeface(null, Typeface.BOLD);
+        text.setPadding(dp(12), dp(12), dp(12), dp(12));
+        text.setBackground(cardBackground(Color.rgb(30, 48, 86)));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, dp(8), 0, 0);
+        text.setLayoutParams(params);
+        return text;
+    }
+
+    private TextView terminalText() {
+        TextView text = new TextView(this);
+        text.setTextColor(Color.rgb(195, 255, 205));
+        text.setTextSize(12);
+        text.setTypeface(Typeface.MONOSPACE);
+        text.setLineSpacing(dp(1), 1.0f);
+        text.setMinLines(5);
+        text.setText("Core Bedrock Console\n$ servidor desligado · prepare/inicie para enviar comandos");
+        text.setPadding(dp(12), dp(10), dp(12), dp(10));
+        text.setBackground(cardBackground(Color.rgb(4, 9, 16)));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, dp(8), 0, dp(8));
+        text.setLayoutParams(params);
+        return text;
+    }
+
     private Button pageTabButton(String text) {
         Button button = styledButton(text, Color.rgb(35, 49, 82), TEXT, dp(36));
         button.setTextSize(13);
@@ -657,11 +760,14 @@ public class MainActivity extends Activity {
 
     private void updatePageTabs(int position) {
         if (corePageButton != null) {
-            corePageButton.setBackground(makeButtonBackground(position == 0 ? Color.rgb(59, 92, 145) : Color.rgb(35, 49, 82), BUTTON_DISABLED_BG));
+            corePageButton.setBackground(makeButtonBackground(position == 0 ? Color.rgb(45, 75, 132) : Color.rgb(18, 27, 48), BUTTON_DISABLED_BG));
+            corePageButton.setTextColor(position == 0 ? TEXT : MUTED);
         }
         if (bedrockPageButton != null) {
-            bedrockPageButton.setBackground(makeButtonBackground(position == 1 ? Color.rgb(59, 92, 145) : Color.rgb(35, 49, 82), BUTTON_DISABLED_BG));
+            bedrockPageButton.setBackground(makeButtonBackground(position == 1 ? Color.rgb(45, 92, 76) : Color.rgb(18, 27, 48), BUTTON_DISABLED_BG));
+            bedrockPageButton.setTextColor(position == 1 ? TEXT : MUTED);
         }
+        refreshBedrockVisualState();
     }
 
     private static final class StaticPageAdapter extends RecyclerView.Adapter<StaticPageAdapter.PageHolder> {
@@ -1842,6 +1948,149 @@ public class MainActivity extends Activity {
         out.put("stopped", true);
         out.put("summary", "Runtime persistente parado; jobs curtos continuam por fetch manual/agendado");
         return out;
+    }
+
+    private void refreshBedrockVisualState() {
+        runOnUiThread(() -> {
+            boolean running = bedrockRuntimeServiceActive || (bedrockRuntimeState != null && bedrockRuntimeState.toLowerCase(Locale.ROOT).contains("ativo"));
+            boolean ready = bedrockReady || (bedrockSummary != null && bedrockSummary.toLowerCase(Locale.ROOT).contains("pronto"));
+            String status;
+            if (running) {
+                status = "Rodando";
+            } else if (ready) {
+                status = "Pronto para ligar";
+            } else if (bedrockSummary != null && bedrockSummary.toLowerCase(Locale.ROOT).contains("instalado")) {
+                status = "Instalado · configuração pendente";
+            } else {
+                status = "Não instalado";
+            }
+            if (bedrockHeroStatusText != null) {
+                bedrockHeroStatusText.setText(status);
+            }
+            if (bedrockReadinessText != null) {
+                StringBuilder builder = new StringBuilder();
+                builder.append(running ? "Servidor ativo. Use o terminal para comandos do console." : (ready ? "Servidor pronto. Use o switch para ligar." : "Servidor ainda precisa ser preparado."));
+                builder.append("\n");
+                builder.append("Estado: ").append(emptyFallback(bedrockSummary, "aguardando teste"));
+                builder.append("\n");
+                builder.append("Próxima ação: ").append(emptyFallback(bedrockInstallerNextAction, ready ? "ligar servidor" : "preparar servidor"));
+                bedrockReadinessText.setText(builder.toString());
+            }
+            if (bedrockServerSwitch != null) {
+                suppressBedrockSwitchEvents = true;
+                bedrockServerSwitch.setChecked(running);
+                bedrockServerSwitch.setEnabled(true);
+                bedrockServerSwitch.setText(running ? "ON" : "OFF");
+                suppressBedrockSwitchEvents = false;
+            }
+            if (bedrockTerminalText != null && (bedrockTerminalText.getText() == null || bedrockTerminalText.getText().toString().contains("servidor desligado"))) {
+                bedrockTerminalText.setText(running
+                        ? "Core Bedrock Console\n$ servidor conectado · digite comandos do Bedrock"
+                        : "Core Bedrock Console\n$ servidor desligado · prepare/inicie para enviar comandos");
+            }
+        });
+    }
+
+    private void handleBedrockSwitchChange(boolean isChecked) {
+        if (isChecked) {
+            if (!bedrockReady) {
+                suppressBedrockSwitchEvents = true;
+                if (bedrockServerSwitch != null) {
+                    bedrockServerSwitch.setChecked(false);
+                    bedrockServerSwitch.setText("OFF");
+                }
+                suppressBedrockSwitchEvents = false;
+                showBedrockPrepareDialog();
+                return;
+            }
+            confirmStartBedrockRuntimeFromSwitch();
+        } else if (bedrockRuntimeServiceActive) {
+            stopBedrockRuntimeFromUi();
+        }
+    }
+
+    private void showBedrockPrepareDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("Servidor ainda não está pronto")
+                .setMessage("Antes de ligar, o Core Worker precisa preparar ambiente, arquivos, EULA e preflight. Use Preparar servidor ou Testar servidor para ver pendências.")
+                .setPositiveButton("Preparar servidor", (dialog, which) -> prepareBedrockServerFromUi())
+                .setNegativeButton("Agora não", null)
+                .show();
+    }
+
+    private void confirmStartBedrockRuntimeFromSwitch() {
+        new AlertDialog.Builder(this)
+                .setTitle("Ligar servidor Bedrock?")
+                .setMessage("O app vai ativar o runtime Bedrock assistido com serviço visível. Se ainda faltar algo no ambiente, o start real continuará bloqueado com segurança.")
+                .setPositiveButton("Ligar", (dialog, which) -> startBedrockRuntimeFromUi())
+                .setNegativeButton("Cancelar", (dialog, which) -> refreshBedrockVisualState())
+                .show();
+    }
+
+    private void testBedrockServerFromUi() {
+        runBusy("Testando servidor Bedrock...", () -> {
+            JSONObject manager = bedrockManagerSnapshot("status", false);
+            JSONObject installer = bedrockInstallerWizardSnapshot("final_preflight");
+            JSONObject runtime = bedrockRuntimeSnapshot("status");
+            String summary = runtime.optString("summary", installer.optString("summary", manager.optString("summary", "Teste Bedrock concluído")));
+            reportAppState("bedrock_test_all", summary);
+            show(summary);
+            appendBedrockTerminal("test", summary);
+        });
+    }
+
+    private void prepareBedrockServerFromUi() {
+        runBusy("Preparando servidor Bedrock...", () -> {
+            JSONObject prepared = bedrockManagerSnapshot("prepare_properties", false);
+            JSONObject installer = bedrockInstallerWizardSnapshot("prepare_environment");
+            reportAppState("bedrock_prepare_server", installer.optString("summary", prepared.optString("summary", "Preparação Bedrock atualizada")));
+            show(installer.optString("summary", prepared.optString("summary", "Preparação Bedrock atualizada.")));
+            appendBedrockTerminal("prepare", installer.optString("summary", prepared.optString("summary", "Preparação atualizada")));
+        });
+    }
+
+    private void showBedrockFilesFromUi() {
+        File bedrockDir = new File(coreLinuxDir(), "bedrock");
+        String message = "Arquivos do servidor\n"
+                + "server.properties · eula.txt · logs · worlds · backups\n"
+                + bedrockDir.getAbsolutePath();
+        appendBedrockTerminal("files", "área de arquivos controlada: server.properties, eula.txt, logs, worlds, backups");
+        new AlertDialog.Builder(this)
+                .setTitle("Arquivos Bedrock")
+                .setMessage(message)
+                .setPositiveButton("OK", null)
+                .show();
+    }
+
+    private void sendBedrockConsoleCommandFromUi() {
+        String command = bedrockCommandInput == null ? "" : bedrockCommandInput.getText().toString().trim();
+        if (command.isEmpty()) {
+            refreshLocalStatus("Digite um comando do console Bedrock.");
+            return;
+        }
+        if (bedrockCommandInput != null) {
+            bedrockCommandInput.setText("");
+        }
+        if (!bedrockRuntimeServiceActive) {
+            appendBedrockTerminal(command, "servidor desligado · comando não enviado");
+            refreshLocalStatus("Servidor Bedrock desligado. Ligue o servidor antes de enviar comandos.");
+            return;
+        }
+        appendBedrockTerminal(command, "comando registrado no console visual; envio real será ligado ao runner Bedrock quando o ambiente estiver pronto");
+        reportAppState("bedrock_console_command_visual", "Comando Bedrock registrado no console visual: " + sanitizeCommandOutput(command, 120));
+    }
+
+    private void appendBedrockTerminal(String command, String response) {
+        runOnUiThread(() -> {
+            if (bedrockTerminalText == null) return;
+            String current = bedrockTerminalText.getText() == null ? "Core Bedrock Console" : bedrockTerminalText.getText().toString();
+            String line = "\n> " + sanitizeCommandOutput(command == null ? "" : command, 120) + "\n$ " + sanitizeCommandOutput(response == null ? "" : response, 260);
+            String next = current + line;
+            if (next.length() > 1800) {
+                next = "Core Bedrock Console\n... histórico anterior resumido ..." + next.substring(Math.max(0, next.length() - 1400));
+            }
+            bedrockTerminalText.setText(next);
+        });
     }
 
     private void prepareBedrockManagerFromUi() {
@@ -5145,6 +5394,7 @@ public class MainActivity extends Activity {
             if (systemChecklistText != null) {
                 systemChecklistText.setText(prepareChecklistText());
             }
+            refreshBedrockVisualState();
         });
     }
 
